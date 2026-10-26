@@ -29,11 +29,19 @@ it has ended or its stop mark is set, or has recorded its first understanding ve
 its omission and, where that version names any activation in ``continues``, the takeover
 stage's decision for it. It can then absorb nothing and offer to nothing.
 
+**What a reader holds** (:class:`HeldInput`, §7:12, §8:2). Every message on a place
+starts its own activation once its place's start wait has passed (§8:1), and while it
+waits it is no activation yet. A reader tells the coordinator of each input it holds in
+its start wait (:meth:`Matters.hold`), then of the activation it admitted it as, and
+lets it go once that activation has ended or nothing was taken in. So an act waits for a
+correction typed just before it, not only for one whose activation has already begun.
+
 **The coordinator** (:class:`Matters`) holds what crosses activations while they run:
 who absorbed whom and who took whose input, so the takeover stage follows them forward
-(§7:4); the waits before a takeover and before an act (§7:12-§7:16), each bounded by the
-waiting pass's deadline and fixed when it begins; the takeover step (§7:4-§7:8,
-§7:17-§7:24), in one synchronous step; and the take or decline of an offer (§7:21-§7:23).
+(§7:4); the inputs the readers hold in their start waits; the waits before a takeover
+and before an act (§7:12-§7:16), each bounded by the waiting pass's deadline and fixed
+when it begins; the takeover step (§7:4-§7:8, §7:17-§7:24), in one synchronous step;
+and the take or decline of an offer (§7:21-§7:23).
 Nothing here is persisted: the takeover decision is the working set's (§10:4), and the
 episode records only the :class:`~ai_assistant.core.types.JoinedInput` an absorption or
 a take appends (§10:7).
@@ -51,6 +59,7 @@ import structlog
 from ai_assistant.core.channel_validation import TASK_SCHEDULER, establishes_the_user
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     CapabilityEffect,
     ChannelIdentity,
     EpisodicMemory,
@@ -86,6 +95,7 @@ __all__ = [
     "STOP_ACTIVATION_CAPABILITY",
     "THE_USER",
     "Became",
+    "HeldInput",
     "InProgressEntry",
     "InputStanding",
     "Matters",
@@ -236,6 +246,15 @@ def _running(state: ActivationState) -> bool:
     return not state.ended and not state.stopped
 
 
+def _held_person(place: ChannelIdentity) -> str | None:
+    """The person an input held on ``place`` may be from: its kind's established author.
+
+    Today's kinds that establish an author establish the owner (ADR-0338 §2:2), as
+    :func:`~ai_assistant.orchestration.person_block.activation_person` reads them.
+    """
+    return OWNER_PERSON_ID if establishes_the_user(place.channel_type) else None
+
+
 def _same_matter(one: ActivationState, other: ActivationState) -> bool:
     """§7:5's third condition between two activations, the same person's (§5:3)."""
     if one.standing is None or other.standing is None:
@@ -280,6 +299,42 @@ def settled(state: ActivationState) -> bool:
         return False
     first = state.understanding[0]
     return not first.continues or first.version in state.takeovers
+
+
+@dataclass(eq=False, slots=True)
+class HeldInput:
+    """An input a reader holds in its place's start wait, until its activation ends (§7:12).
+
+    A reader takes it from :meth:`Matters.hold` when the start wait begins, says which
+    activation it admitted it as (:meth:`admitted`), and lets it go (:meth:`release`)
+    once that activation has ended, or once nothing was taken in. Every message of a
+    place whose kind establishes the user may be the user's own, so a held input is
+    waited for as that person's until its activation shows otherwise.
+
+    Attributes:
+        place: The place it was written in.
+        activation_id: The activation it was admitted as, once it was.
+        released: Whether the reader has let it go.
+    """
+
+    place: ChannelIdentity
+    activation_id: str | None = None
+    released: bool = False
+    _matters: Matters | None = field(default=None, repr=False)
+
+    def admitted(self, activation_id: str) -> None:
+        """The reader admitted it as ``activation_id``, whose own end now settles it."""
+        self.activation_id = activation_id
+        if self._matters is not None:
+            self._matters.changed()
+
+    def release(self) -> None:
+        """The reader lets it go: its activation has ended, or nothing was taken in."""
+        if self.released:
+            return
+        self.released = True
+        if self._matters is not None:
+            self._matters.let_go(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,6 +548,8 @@ class Matters:
         # input, kept while the chain they start may still reach a running activation.
         self._absorbed: dict[str, str] = {}
         self._handed: dict[str, str] = {}
+        # §7:12: each input a reader holds in its start wait, until it is let go.
+        self._held: list[HeldInput] = []
         self._changed = asyncio.Event()
 
     # --- what runs ---
@@ -526,6 +583,18 @@ class Matters:
         """Wake every wait: something it may be waiting for has changed."""
         self._changed.set()
         self._changed = asyncio.Event()
+
+    def hold(self, place: ChannelIdentity) -> HeldInput:
+        """A reader of ``place`` holds an input in its start wait (§7:12, §8:2)."""
+        held = HeldInput(place=place, _matters=self)
+        self._held.append(held)
+        self.changed()
+        return held
+
+    def let_go(self, held: HeldInput) -> None:
+        """``held`` is no longer held: every wait reads its release."""
+        self._held = [one for one in self._held if one is not held]
+        self.changed()
 
     def ended(self, state: ActivationState) -> None:
         """``state``'s activation has ended: what it was offered is declined (§7:24).
@@ -628,17 +697,64 @@ class Matters:
             and _may_share(one, state)
         ]
 
+    def _held_newer(self, state: ActivationState) -> list[HeldInput]:
+        """What an act of ``state``'s waits for of what the readers hold (§7:12).
+
+        Before it has committed, each input a reader of one of its person's places holds
+        in its start wait; after, each its own place's reader holds. One already admitted
+        as a running activation is that activation's, which :meth:`_newer` reads, and
+        ``state``'s own input is never among them.
+        """
+        if state.standing is None or state.standing.author is None:
+            # An input whose author is not established meets none (§7:5), so no newer
+            # input could absorb it or offer to it.
+            return []
+        person = person_of(state)
+        if person is None:
+            return []
+        running = {one.activation_id for one in self._states()}
+        return [
+            one
+            for one in self._held
+            if not one.released
+            and one.activation_id != state.activation_id
+            and one.activation_id not in running
+            and _held_person(one.place) == person
+            and (not state.committed or one.place == state.place)
+        ]
+
+    def _held_out(self, held: HeldInput, state: ActivationState) -> bool:
+        """Whether a wait of ``state``'s need wait for ``held`` no longer (§7:12).
+
+        It was let go, or the activation it was admitted as is waited out as any is.
+        """
+        if held.released:
+            return True
+        admitted = held.activation_id
+        if admitted is None:
+            return False
+        one = next((one for one in self._states() if one.activation_id == admitted), None)
+        return one is not None and _waited_out(one, state)
+
     async def before_act(self, state: ActivationState, deadline: float) -> bool:
         """§7:12-§7:13: wait for each newer input that could absorb or offer to ``state``.
 
-        What it waits for is what runs when the wait begins, and the wait is bounded by
-        ``deadline``.
+        Each newer activation of its standing, and each input a reader holds in its start
+        wait (:meth:`_held_newer`). What it waits for is what runs, and what is held, when
+        the wait begins, and the wait is bounded by ``deadline``.
 
         Returns:
             Whether each settled before the deadline.
         """
         waited = self._newer(state)
-        return await self._until(lambda: all(_waited_out(one, state) for one in waited), deadline)
+        held = self._held_newer(state)
+        return await self._until(
+            lambda: (
+                all(_waited_out(one, state) for one in waited)
+                and all(self._held_out(one, state) for one in held)
+            ),
+            deadline,
+        )
 
     async def before_takeover(self, state: ActivationState, deadline: float) -> bool:
         """§7:15-§7:16: wait once for each older activation's takeover decision.

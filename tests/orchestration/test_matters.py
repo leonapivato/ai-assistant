@@ -821,3 +821,95 @@ async def test_an_act_waits_for_a_newer_one_whose_pass_has_not_set_its_standing(
     newer.standing = input_standing(origin=InputOrigin.OUTSIDE, established=False)
     matters.changed()
     assert await asyncio.wait_for(waiting, 1), "a forward's standing is not this one's"
+
+
+# --- §7:12, §8:2: what the readers hold in their start waits ----------------------------
+
+
+async def test_an_act_waits_for_an_input_a_reader_holds_in_its_start_wait() -> None:
+    """§7:12, §1:5's case: before it commits, one held on any of its person's places;
+    after, only one held on its own place; each until it is let go."""
+    older = _running("a", _IDS[0], order=1)
+    matters = _matters([older])
+    loop = asyncio.get_running_loop()
+    elsewhere = matters.hold(_place("b"))
+    assert not await matters.before_act(older, loop.time() + 0.05), "it waited to the deadline"
+
+    older.committed = True
+    assert await matters.before_act(older, loop.time() + 0.05), "elsewhere, after it acted"
+    here = matters.hold(_place("a"))
+    assert not await matters.before_act(older, loop.time() + 0.05), "its own place, after"
+
+    waiting = asyncio.ensure_future(matters.before_act(older, loop.time() + 5))
+    await asyncio.sleep(0.01)
+    assert not waiting.done()
+    here.release()
+    assert await asyncio.wait_for(waiting, 1), "let go: nothing was taken in"
+    elsewhere.release()
+
+
+async def test_a_held_input_once_admitted_is_waited_for_until_its_activation_settles() -> None:
+    """§7:12: "each held input's activation once admitted", until it settles (§7:12)."""
+    older = _running("a", _IDS[0], order=1)
+    states = [older]
+    matters = _matters(states)
+    held = matters.hold(_place("a"))
+    waiting = asyncio.ensure_future(
+        matters.before_act(older, asyncio.get_running_loop().time() + 5)
+    )
+    await asyncio.sleep(0.01)
+    held.admitted(_IDS[1])
+    await asyncio.sleep(0.01)
+    assert not waiting.done(), "admitted, its activation not yet running"
+
+    newer = _running("a", _IDS[1], order=2)
+    states.append(newer)
+    matters.changed()
+    await asyncio.sleep(0.01)
+    assert not waiting.done(), "running, its understanding not yet recorded"
+    _understood(newer)
+    matters.changed()
+    assert await asyncio.wait_for(waiting, 1), "settled"
+    assert not held.released, "held until its activation ends, which the reader says"
+
+
+async def test_what_is_held_once_an_acts_wait_has_begun_is_not_waited_for() -> None:
+    """§7:12: what it waits for is what is held when the wait begins."""
+    older = _running("a", _IDS[0], order=1)
+    newer = _running("a", _IDS[1], order=2)
+    matters = _matters([older, newer])
+    waiting = asyncio.ensure_future(
+        matters.before_act(older, asyncio.get_running_loop().time() + 5)
+    )
+    await asyncio.sleep(0.01)
+    later = matters.hold(_place("a"))
+    _understood(newer)
+    matters.changed()
+    assert await asyncio.wait_for(waiting, 1), "it ended once the newer one settled"
+    assert not later.released
+
+
+async def test_no_act_waits_on_its_own_input_an_older_ones_or_one_no_person_wrote() -> None:
+    """§7:12: only a newer input of its person could absorb it or offer to it (§7:5)."""
+    earlier = _running("a", _IDS[1], order=1)
+    older = _running("a", _IDS[0], order=2)
+    matters = _matters([earlier, older])
+    _understood(earlier)
+    own = matters.hold(_place("a"))
+    own.admitted(_IDS[0])
+    before = matters.hold(_place("a"))
+    before.admitted(_IDS[1])
+    matters.hold(ChannelIdentity(channel_type="upcoming_event", instance_id="e-1"))
+    loop = asyncio.get_running_loop()
+    assert await matters.before_act(older, loop.time() + 0.05), "none of them is waited for"
+
+    forward = _running(
+        "b",
+        _IDS[2],
+        order=3,
+        standing=input_standing(origin=InputOrigin.OUTSIDE, established=False),
+    )
+    matters.hold(_place("b"))
+    assert await matters.before_act(forward, loop.time() + 0.05), (
+        "an input whose author is not established meets none, so it waits for none"
+    )

@@ -1,21 +1,23 @@
-"""The readers, through the engine, once joining by code is gone (ADR-0349 §1:4's step 2).
+"""The readers, through the engine: no place holds a message back (ADR-0349 §8).
 
 Each case drives whole passes over the phases, with the hub chat's reader or the line's
-over their fakes. Until the readers' own step (§1:4's step 3) the readers still hold a
-place's messages behind its running activation (ADR-0332 §2:3-§2:4), but no message
-joins one by code:
+over their fakes. Every message starts its own activation once its place's start wait
+has passed, whatever runs there (§8:1-§8:2), and the reader marks it taken in by that
+activation (§8:3):
 
-- a message on a place while its activation runs waits, and is taken in after it as an
-  activation of its own, which the running one never records;
+- a message on a place while its activation runs is taken in at once, by an activation
+  of its own, which the running one never records; on a place where running work has
+  acted, one that continues nothing never waits on it (§1:5's case);
 - ADR-0332 §1:4's first case on both places: a stop while understanding runs, then a
-  message, then the stage's end — the message waits, and is taken in when the stopped
-  activation ends (ADR-0295 §3:6);
-- the line's ``/stop`` stops its running activation, which writes nothing, and the line
-  answers by rule (ADR-0332 §8:4-§8:5);
-- the composing signal reaches the hub chat's reader (§5:9);
-- the per-place rule as the kinds still declare it (§2:3);
-- acting's and the takeover stage's deadlines, read again after their waits (ADR-0349
-  §7:13, §7:16).
+  message, which is taken in at once, its activation of its own (ADR-0295 §3:6);
+- an older activation's first act waits for a correction still held in its place's
+  start wait, whose activation absorbs it, so it dispatches nothing (§7:12, §1:5's case);
+- the line's ``/stop`` stops every activation running from its chat, each by the one
+  stop, and the line answers by rule once (§4:3, ADR-0332 §8:4-§8:5);
+- a conversation's state names every activation running from it (§4:4);
+- the composing signal reaches the hub chat's reader (ADR-0332 §5:9);
+- acting's and the takeover stage's deadlines, read again after their waits (§7:13,
+  §7:16).
 """
 
 from __future__ import annotations
@@ -48,7 +50,14 @@ from telegram_support import (
     stop_command,
     text,
 )
-from test_phases_matters import _Counting, _routed
+from test_phases_matters import (
+    _call,
+    _Counting,
+    _harness,
+    _Planner,
+    _routed,
+    _Understanding,
+)
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
 from ai_assistant.core.config import Settings
@@ -67,7 +76,6 @@ from ai_assistant.core.types import (
     TelegramIntakeKind,
     TranscriptMessage,
 )
-from ai_assistant.orchestration.channel_kinds import one_at_a_time
 from ai_assistant.orchestration.chat import (
     DEFAULT_CHAT_COMPOSING_CAP,
     DEFAULT_CHAT_COMPOSING_LAPSE,
@@ -78,7 +86,6 @@ from ai_assistant.orchestration.telegram import (
     DEFAULT_TELEGRAM_START_WAIT,
     NOTHING_RUNNING_LINE,
     STOPPED_LINE,
-    TELEGRAM,
     TelegramLineSeams,
     line_channel,
 )
@@ -100,6 +107,7 @@ if TYPE_CHECKING:
         Message,
         TelegramIntake,
     )
+    from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.phase_path import PhasePass
 
 #: The line's channel, keyed by its connection and its chat.
@@ -153,14 +161,40 @@ def _started_by(found: Sequence[EpisodicMemory], text: str) -> EpisodicMemory:
     return episode
 
 
+async def _taken_by(harness: Harness, conversation: str, position: int) -> str:
+    """The activation that took the message at ``position`` in, once one has."""
+    found: list[str] = []
+
+    async def marked() -> bool:
+        taken = await harness.conversation_store.taken_in(conversation, positions=[position])
+        found.extend(taken.values())
+        return bool(found)
+
+    await until(marked, what=f"the message at {position} to be taken in")
+    return found[0]
+
+
+def _state_of(harness: Harness, activation_id: str) -> ActivationState:
+    (state,) = [
+        one.state
+        for one in harness.engine._running
+        if one.state is not None and one.state.activation_id == activation_id
+    ]
+    return state
+
+
+async def _assistant(harness: Harness, conversation: str) -> list[str]:
+    return [one.text for one in await written_by_assistant(harness, conversation)]
+
+
 # --- the hub chat ----------------------------------------------------------------------
 
 
-async def test_a_message_written_while_it_runs_waits_and_starts_its_own_activation() -> None:
-    """ADR-0349 §1:4's step 2: no message joins by code; until step 3 the reader holds it.
+async def test_a_message_written_while_one_runs_starts_its_own_activation_at_once() -> None:
+    """§8:1, §8:3: taken in while the first runs, marked by an activation of its own.
 
-    The running activation records nothing taken in beside its trigger, and the message
-    is taken in after it ends, by an activation of its own.
+    The running activation records nothing taken in beside its trigger, and the state
+    names both while both run (§4:4).
     """
     completer = Gated()
     harness = phases_harness(completer)
@@ -169,24 +203,68 @@ async def test_a_message_written_while_it_runs_waits_and_starts_its_own_activati
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
     running = await working(harness, conversation)
 
-    await harness.engine.write_message(conversation, message=said("m-2", "for Saturday"))
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert await harness.conversation_store.taken_in(conversation, positions=[2]) == {}
+    second = await harness.engine.write_message(conversation, message=said("m-2", "for Saturday"))
+    assert second.position is not None
+    later = await _taken_by(harness, conversation, second.position)
+    assert later != running
+    digest = await harness.engine.conversation(conversation)
+    assert digest is not None
+    assert digest.state.working
+    assert set(digest.state.activation_ids) == {running, later}, "the state names both"
+    assert not completer.release.is_set(), "taken in while the first still runs"
+
     completer.release.set()
     found = await _frozen(harness, 2)
     await answered(harness, conversation, 2)
-
     first = _started_by(found, "book Riverside")
-    later = _started_by(found, "for Saturday")
     assert processing(first).activation_id == running
     assert processing(first).joined == ()
-    taken = await harness.conversation_store.taken_in(conversation, positions=[1, 2])
-    assert taken == {1: running, 2: processing(later).activation_id}
+    assert processing(_started_by(found, "for Saturday")).activation_id == later
 
 
-async def test_a_stop_while_understanding_runs_then_a_message_waits_and_is_taken_in_after() -> None:
-    """§1:4's first case on the hub chat: the stop holds nothing back (ADR-0295 §3:6)."""
+async def test_a_message_where_running_work_has_acted_starts_at_once_and_never_waits() -> None:
+    """§1:5's case: on its place, work that has acted runs, and a separate question is
+    answered while it does: it continues nothing, so it waits on nothing (§7:29)."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "search apartments", "what's the weather?"
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="Searching.",
+            calls=(
+                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+            ),
+        ),
+    )
+    planner.hold(older_text, from_round=2)
+    harness = _harness(understanding, planner)
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("a-1", older_text))
+    older = await working(harness, conversation)
+    await asyncio.wait_for(planner.hold(older_text)[0].wait(), SETTLE)
+    assert _state_of(harness, older).committed, "the older has acted"
+
+    receipt = await harness.engine.write_message(conversation, message=said("b-1", newer_text))
+    assert receipt.position is not None
+    newer = await _taken_by(harness, conversation, receipt.position)
+    (answered_first,) = await _frozen(harness, 1)
+    assert processing(answered_first).activation_id == newer, (
+        "the newer one ended while the older still ran: it never waited on it"
+    )
+    assert "Searching." in await _assistant(harness, conversation)
+    assert f"done: {newer_text}" in await _assistant(harness, conversation)
+    assert all("waiting_on" not in one for one in planner.requests[newer_text])
+    assert _state_of(harness, older).offers == {}, "nothing was offered to the older"
+
+    planner.hold(older_text)[1].set()
+    found = await _frozen(harness, 2)
+    assert processing(answered_first).joined == ()
+    assert _started_by(found, older_text) is not None
+
+
+async def test_a_stop_while_understanding_runs_then_a_message_starts_its_own_at_once() -> None:
+    """ADR-0332 §1:4's first case on the hub chat: the stop holds nothing back
+    (ADR-0295 §3:6), and neither does the place (§8:1)."""
     model = _GatedUnderstanding()
     harness = phases_harness(understanding=understanding_stage(model=model))
     conversation = await open_conversation(harness)
@@ -195,29 +273,106 @@ async def test_a_stop_while_understanding_runs_then_a_message_waits_and_is_taken
     running = await working(harness, conversation)
 
     assert await harness.engine.stop_activation(running) is ActivationStop.STOPPED
-    await harness.engine.write_message(conversation, message=said("m-2", "make it Saturday"))
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert await harness.conversation_store.taken_in(conversation, positions=[2]) == {}, (
-        "it joins nothing, and waits"
+    second = await harness.engine.write_message(
+        conversation, message=said("m-2", "make it Saturday")
     )
+    assert second.position is not None
+    later = await _taken_by(harness, conversation, second.position)
+    assert later != running
+    assert not model.release.is_set(), "taken in while the stopped one's stage still runs"
     model.release.set()
 
     found = await _frozen(harness, 2)
     await answered(harness, conversation, 1)
     first = _started_by(found, "book Riverside")
-    later = _started_by(found, "make it Saturday")
     stopped(first)
     assert processing(first).joined == ()
-    assert processing(later).activation_id != running
-    taken = await harness.conversation_store.taken_in(conversation, positions=[1, 2])
-    assert taken == {1: running, 2: processing(later).activation_id}
+    assert processing(_started_by(found, "make it Saturday")).activation_id == later
+
+
+async def test_an_act_waits_for_a_correction_still_held_in_its_places_start_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7:12, §1:5's case: the correction's activation absorbs the older, which then
+    dispatches nothing: Saturday is never booked."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "book Saturday", "actually Sunday, continues: Saturday"
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="Booked for Saturday.",
+            calls=(
+                _call(
+                    "c1",
+                    "remember",
+                    fact="Booked Saturday.",
+                    why="the booking",
+                    rests_on_input=True,
+                ),
+            ),
+        ),
+    )
+    planner.hold(older_text)
+    harness = _harness(understanding, planner, chat_start_wait=timedelta(milliseconds=200))
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("a-1", older_text))
+    await asyncio.wait_for(planner.hold(older_text)[0].wait(), SETTLE)
+    older = await working(harness, conversation)
+
+    # The correction's start wait holds until the case lets it end.
+    reader = harness.engine._chat_reader
+    assert reader is not None
+    over = asyncio.Event()
+
+    async def held(seconds: float) -> None:
+        del seconds
+        await over.wait()
+
+    monkeypatch.setattr(reader, "_sleep", held)
+    matters = harness.engine._matters
+    acting = matters.before_act
+    waits: list[str | None] = []
+
+    async def before_act(state: ActivationState, deadline: float) -> bool:
+        waits.append(state.activation_id)
+        return await acting(state, deadline)
+
+    monkeypatch.setattr(matters, "before_act", before_act)
+    receipt = await harness.engine.write_message(conversation, message=said("b-1", newer_text))
+    assert receipt.position is not None
+    planner.hold(older_text)[1].set()
+
+    async def waiting() -> bool:
+        return older in waits
+
+    await until(waiting, what="the older one's act to wait")
+    for _ in range(20):
+        await asyncio.sleep(0.001)
+    assert (
+        await harness.conversation_store.taken_in(conversation, positions=[receipt.position]) == {}
+    )
+    assert not _state_of(harness, older).committed, "it waits, and commits nothing"
+
+    over.set()
+    found = await _frozen(harness, 2)
+    newer = next(
+        processing(one).activation_id for one in found if processing(one).activation_id != older
+    )
+    stopped(_started_by(found, older_text))
+    record = processing(_started_by(found, newer_text))
+    assert record.activation_id == newer
+    assert [one.taken_over_from for one in record.joined] == [older]
+    assert "Booked for Saturday." not in await _assistant(harness, conversation)
+    effects = await harness.plans.activation_effects([older])
+    assert [one for one in effects if one.capability == "remember"] == [], (
+        "the older dispatched nothing"
+    )
 
 
 async def test_the_composing_signal_reaches_the_chats_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§5:9: the engine hands the signal to the reader, after the Writing check."""
+    """ADR-0332 §5:9: the engine hands the signal to the reader, after the Writing check."""
     harness = phases_harness()
     conversation = await open_conversation(harness)
     reader = harness.engine._chat_reader
@@ -232,7 +387,8 @@ async def test_the_composing_signal_reaches_the_chats_reader(
 
 
 def test_the_engines_waits_are_the_settings_defaults_and_held_to_their_bounds() -> None:
-    """§6:1-§6:4: the engine's own defaults are the settings', and a bad set is refused."""
+    """ADR-0332 §6:1-§6:4: the engine's own defaults are the settings', and a bad set is
+    refused."""
     fields = Settings.model_fields
     assert fields["chat_start_wait"].default == DEFAULT_CHAT_START_WAIT
     assert fields["chat_composing_lapse"].default == DEFAULT_CHAT_COMPOSING_LAPSE
@@ -259,35 +415,45 @@ def _line_harness(line: _Line, **knobs: Any) -> Harness:
     return phases_harness(telegram=line.seams, **knobs)
 
 
-async def _line_running(harness: Harness) -> str:
-    """The id of the activation the line's reader runs, once it has one."""
+async def _line_running(harness: Harness, count: int = 1) -> tuple[str, ...]:
+    """The activations the line's reader runs, once it runs ``count`` of them."""
     reader = harness.engine._telegram_reader
     assert reader is not None
-    found: list[str] = []
 
     async def shown() -> bool:
-        if reader.working is not None:
-            found.append(reader.working)
+        return len(reader.working) >= count
+
+    await until(shown, what=f"{count} line activation(s) to run")
+    return reader.working
+
+
+async def _taken_on_the_line(line: _Line, update_id: int) -> TelegramIntake:
+    """The intake record's entry for ``update_id``, once it is taken in."""
+    found: list[TelegramIntake] = []
+
+    async def taken() -> bool:
+        found.extend((await line.intake.recorded([update_id])).values())
         return bool(found)
 
-    await until(shown, what="the line's activation to run")
+    await until(taken, what=f"update {update_id} to be taken in")
     return found[0]
 
 
-async def test_a_message_on_the_line_while_it_runs_waits_and_starts_its_own() -> None:
-    """ADR-0349 §1:4's step 2 on the line: nothing joins, and the update waits in Telegram."""
+async def test_a_message_on_the_line_while_one_runs_starts_its_own_at_once() -> None:
+    """§8:1, §8:3 on the line: nothing joins and nothing waits in Telegram."""
     line = _Line()
     completer = Gated()
     harness = _line_harness(line, completer=completer)
     line.fake.hold(text(1, "book Riverside", message_id=40))
     await harness.engine.start()
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
-    running = await _line_running(harness)
+    (running,) = await _line_running(harness)
 
     line.fake.hold(text(2, "for Saturday", message_id=41))
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert 2 not in await line.intake.recorded([2]), "it waits, unmarked"
+    held = await _taken_on_the_line(line, 2)
+    assert held.kind is TelegramIntakeKind.TAKEN_IN
+    assert held.activation_id != running
+    assert not completer.release.is_set(), "taken in while the first still runs"
     completer.release.set()
     found = await _frozen(harness, 2)
     await harness.engine.aclose()
@@ -296,22 +462,19 @@ async def test_a_message_on_the_line_while_it_runs_waits_and_starts_its_own() ->
     later = _started_by(found, "for Saturday")
     assert processing(first).activation_id == running
     assert processing(first).joined == ()
-    held = (await line.intake.recorded([2]))[2]
-    assert (held.kind, held.activation_id) == (
-        TelegramIntakeKind.TAKEN_IN,
-        processing(later).activation_id,
-    )
+    assert processing(later).activation_id == held.activation_id
 
 
-async def test_a_stop_on_the_line_while_understanding_runs_then_a_message_waits() -> None:
-    """§1:4's first case on the line: the ``/stop``, a message, then the stage's end."""
+async def test_a_stop_on_the_line_while_understanding_runs_then_a_message_starts_its_own() -> None:
+    """ADR-0332 §1:4's first case on the line: the ``/stop``, then a message, taken in at
+    once while the stopped one's stage still runs."""
     line = _Line()
     model = _GatedUnderstanding()
     harness = _line_harness(line, understanding=understanding_stage(model=model))
     line.fake.hold(text(1, "book Riverside", message_id=40))
     await harness.engine.start()
     await asyncio.wait_for(model.entered.wait(), SETTLE)
-    running = await _line_running(harness)
+    (running,) = await _line_running(harness)
 
     line.fake.hold(stop_command(2))
     answered_as: list[TelegramIntake] = []
@@ -322,9 +485,9 @@ async def test_a_stop_on_the_line_while_understanding_runs_then_a_message_waits(
 
     await until(answered_stop, what="the stop to be answered")
     line.fake.hold(text(3, "make it Saturday", message_id=42))
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert 3 not in await line.intake.recorded([3]), "it joins nothing, and waits"
+    held = await _taken_on_the_line(line, 3)
+    assert held.activation_id != running
+    assert not model.release.is_set()
     model.release.set()
 
     found = await _frozen(harness, 2)
@@ -337,11 +500,40 @@ async def test_a_stop_on_the_line_while_understanding_runs_then_a_message_waits(
     assert processing(first).joined == ()
     assert line.sent()[0] == STOPPED_LINE, "the stopped activation wrote nothing"
     assert answered_as[0].kind is TelegramIntakeKind.ANSWERED
-    assert processing(later).activation_id != running
+    assert processing(later).activation_id == held.activation_id
+
+
+async def test_a_stop_on_the_line_stops_every_activation_running_from_its_chat() -> None:
+    """§4:3, §1:5: with two running, each is stopped by the one stop, answered once."""
+    line = _Line()
+    completer = Gated()
+    harness = _line_harness(line, completer=completer)
+    line.fake.hold(text(1, "book Riverside", message_id=40))
+    await harness.engine.start()
+    await _line_running(harness)
+    line.fake.hold(text(2, "and what's the weather?", message_id=41))
+    both = await _line_running(harness, 2)
+
+    line.fake.hold(stop_command(3))
+
+    async def answered_stop() -> bool:
+        return bool(line.sent())
+
+    await until(answered_stop, what="the stop to be answered")
+    held = await harness.plans.export()
+    assert set(both) <= set(held.stopped_activations), "each was stopped, its record written"
+    completer.release.set()
+    found = await _frozen(harness, 2)
+    await harness.engine.aclose()
+
+    assert {processing(one).activation_id for one in found} == set(both)
+    for one in found:
+        stopped(one)
+    assert line.sent() == [STOPPED_LINE], "answered once, and neither wrote anything"
 
 
 async def test_a_stop_on_the_line_with_nothing_running_stops_nothing() -> None:
-    """§8:5: answered "Nothing was running.", and no activation starts."""
+    """ADR-0332 §8:5: answered "Nothing was running.", and no activation starts."""
     line = _Line()
     harness = _line_harness(line)
     line.fake.hold(stop_command(1))
@@ -355,17 +547,6 @@ async def test_a_stop_on_the_line_with_nothing_running_stops_nothing() -> None:
 
     assert line.sent() == [NOTHING_RUNNING_LINE]
     assert await frozen(harness) == []
-
-
-# --- the per-place rule (§2:3) ----------------------------------------------------------
-
-
-def test_the_conversation_kind_and_the_line_run_one_activation_at_a_time() -> None:
-    """§2:3: as the kinds declare it; every other kind runs side by side (§2:2)."""
-    assert one_at_a_time("conversation")
-    assert TELEGRAM.one_at_a_time
-    assert one_at_a_time(TELEGRAM.channel_type)
-    assert not one_at_a_time("upcoming_event")
 
 
 #: How far ahead of acting's first line a case moves the pass's deadline.

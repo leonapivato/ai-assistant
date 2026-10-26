@@ -45,6 +45,8 @@ from ai_assistant.testing import FakeToolCallingCompleter
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
+    import pytest
+
     from ai_assistant.core.types import (
         ChannelInput,
         ChannelResult,
@@ -255,6 +257,26 @@ async def answered(harness: Harness, conversation: str, count: int) -> list[Tran
 
     await until(done, what=f"{count} assistant message(s)")
     return await written(harness, conversation)
+
+
+def hold_start_waits(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
+    """Hold every start wait the hub chat's reader sleeps in from here until it is set.
+
+    What a case writes meanwhile waits in one start wait (ADR-0332 §5:1), however long
+    the writing takes, so it is one input; a start wait that has already passed when its
+    read first looks sleeps not at all, so the harness's wait needs to outlast the call
+    that writes the first message.
+    """
+    reader = harness.engine._chat_reader
+    assert reader is not None
+    over = asyncio.Event()
+
+    async def held(seconds: float) -> None:
+        del seconds
+        await over.wait()
+
+    monkeypatch.setattr(reader, "_sleep", held)
+    return over
 
 
 async def idle(harness: Harness, conversation: str) -> None:

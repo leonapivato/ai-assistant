@@ -1,12 +1,11 @@
 """One matter, one activation, through the engine, over the phases (ADR-0349 §5-§7).
 
-Each case drives whole passes of the hub chat's activations with the phases wired, the
-readers as they stand before ADR-0349 §1:4's step 3: each conversation runs one
-activation at a time, so work on two places runs side by side, and a case that needs two
-activations on one place admits the second beside the first, as step 3's readers will
-(:func:`_beside`). Understanding's model is routed: it reads each input as meaning its
-own text, and names in ``continues`` every in-progress entry whose input holds a word
-the input lists after ``continues:``. Planning's model is routed by that meaning.
+Each case drives whole passes of the hub chat's activations with the phases wired. No
+place waits (§8:1): a message written on a conversation while an activation runs there
+starts its own (:func:`_beside`). Understanding's model is routed: it reads each input
+as meaning its own text, and names in ``continues`` every in-progress entry whose input
+holds a word the input lists after ``continues:``. Planning's model is routed by that
+meaning.
 
 - The newest absorbs older work of its standing that has not acted, on any place,
   bringing every input it holds and stopping it as a stop does, with no cascade (§7:4-
@@ -58,12 +57,10 @@ from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
     MessageAuthor,
-    NewMessage,
     OccurrenceState,
     ProposedCall,
     RoundResponse,
 )
-from ai_assistant.orchestration.chat import ChatInput
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing import FakeModelProvider, FakeToolCallingCompleter
 
@@ -221,39 +218,34 @@ async def _start(harness: Harness, text: str, *, message_id: str) -> tuple[str, 
 
 async def _beside(
     harness: Harness, conversation: str, text: str, *, message_id: str
-) -> tuple[str, asyncio.Future[bool]]:
-    """Admit an activation on ``conversation`` beside the one running there.
+) -> tuple[str, asyncio.Future[None]]:
+    """Write a message on ``conversation`` while an activation runs there.
 
-    As ADR-0349 §8:1's readers will, which every message starts its own activation on;
-    until §1:4's step 3 the hub chat's reader holds it back, so the case writes the
-    message into the chat space and admits it through the engine's own admission.
+    The hub chat's reader starts its own activation for it (ADR-0349 §8:1). The case
+    reads which by the bookkeeping, and is handed what ends once that one has frozen.
     """
-    store = harness.conversation_store
-    receipt = await store.append_message(
-        conversation,
-        NewMessage(author=MessageAuthor.USER, text=text, device_id="phone", message_id=message_id),
-    )
-    reader = harness.engine._chat_reader
-    assert reader is not None
-    waiting = tuple(
-        one
-        for one in await store.untaken_messages(conversation)
-        if one.position == receipt.position
-    )
-    window = await reader._window(conversation, waiting)
-    activation_id = harness.engine._chat_activation_id()
-    taken = ChatInput(
-        conversation_id=conversation,
-        activation_id=activation_id,
-        messages=waiting,
-        window=window,
-    )
-    return activation_id, asyncio.ensure_future(harness.engine._read_in(taken))
+    receipt = await harness.engine.write_message(conversation, message=said(message_id, text))
+    position = receipt.position
+    assert position is not None
+    found: list[str] = []
 
+    async def taken() -> bool:
+        marked = await harness.conversation_store.taken_in(conversation, positions=[position])
+        found.extend(marked.values())
+        return bool(found)
 
-def _side_by_side(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let a place run activations side by side, as ADR-0349 §8:1 has every place."""
-    monkeypatch.setattr(harness.engine, "_place_busy", lambda place, *, reader: False)
+    await until(taken, what="the message to start an activation of its own")
+    activation_id = found[0]
+
+    async def ended() -> None:
+        async def done() -> bool:
+            return any(
+                processing(one).activation_id == activation_id for one in await frozen(harness)
+            )
+
+        await until(done, what="its activation to end")
+
+    return activation_id, asyncio.ensure_future(ended())
 
 
 async def _frozen(harness: Harness, count: int) -> list[EpisodicMemory]:
@@ -673,7 +665,6 @@ async def _acted_on_one_place(
     Its rounds are bounded at six, so a round held back for an offer (§7:14) and the
     answer's round both fit before its reply.
     """
-    _side_by_side(harness, monkeypatch)
     phases = harness.engine._phases
     assert phases is not None
     monkeypatch.setattr(phases, "_round_limit", 6)

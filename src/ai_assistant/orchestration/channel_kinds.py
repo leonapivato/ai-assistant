@@ -24,19 +24,16 @@ as it always was. :func:`place_of` spells it, and :func:`users_place` reads from
 recorded place whether its kind establishes the user there, which is what authorizing
 reads of a question's place (ADR-0323 §4:8) without naming a channel (§4:5).
 
-**One activation at a time** (ADR-0332 §2:3). A kind declares whether each of its places
-runs one activation at a time: the hub chat's conversations and the line do. The
-declaration is :func:`one_at_a_time`'s register, keyed by channel type as ``core``'s is,
-so a kind not yet declared in code (the hub chat's) declares it too, and
-:attr:`ChannelKind.one_at_a_time` reads it rather than restating it. On such a place an
-activation is admitted only where none started from it is running, and an input that
-arrives meanwhile waits (§2:4); nothing joins by code (ADR-0349 §1:4's step 2), and
-ADR-0349 §8 retires the holding with the readers' own step.
+**No place waits** (ADR-0349 §8:1). No kind declares that its places run one activation
+at a time, or that an input waits for running work: every input on every place starts
+its own activation once its place's start wait has passed, so the declaration ADR-0332
+§2:3 gave the hub chat and the line is gone.
 
 **Whether a kind can confirm delivery** (ADR-0350 §8:12). A kind declares whether it can
 confirm, from its medium's own record, whether a message claimed into one of its places
-was sent, in the same shape as one at a time: :func:`confirms_delivery`'s register, keyed
-by channel type, which :attr:`ChannelKind.confirms_delivery` reads. The hub chat's
+was sent: :func:`confirms_delivery`'s register, keyed by channel type, so a kind not yet
+declared in code (the hub chat's) declares it too, and which
+:attr:`ChannelKind.confirms_delivery` reads. The hub chat's
 conversations can: the hub hosts each one's transcript, a message is sent once that
 transcript records it (ADR-0292 §7:4), and the transcript records with each of the
 assistant's messages the effect record it was claimed under (§12:9). The line cannot: the
@@ -65,7 +62,6 @@ __all__ = [
     "Reach",
     "WindowSource",
     "confirms_delivery",
-    "one_at_a_time",
     "place_channel",
     "place_of",
     "users_place",
@@ -73,10 +69,6 @@ __all__ = [
 
 #: What separates a place's channel type from its instance id.
 _PLACE_SEPARATOR: Final = ":"
-
-#: ADR-0332 §2:3: the channel types whose kind declares that each of its places runs one
-#: activation at a time. The hub chat's conversations and the Telegram line.
-_ONE_AT_A_TIME: Final = frozenset({"conversation", "telegram"})
 
 #: ADR-0350 §8:12: the channel types whose kind can confirm, from its medium's own record,
 #: whether a message claimed into one of its places was sent: the hub chat's alone.
@@ -195,11 +187,6 @@ class ChannelKind:
         return establishes_the_user(self.channel_type)
 
     @property
-    def one_at_a_time(self) -> bool:
-        """Whether each of the kind's places runs one activation at a time (ADR-0332 §2:3)."""
-        return self.channel_type in _ONE_AT_A_TIME
-
-    @property
     def confirms_delivery(self) -> bool:
         """Whether the kind can confirm a claimed message's delivery (ADR-0350 §8:12)."""
         return confirms_delivery(self.channel_type)
@@ -227,17 +214,6 @@ class ChannelKind:
         return input_origin(
             channel, takes_in_forward=takes_in_forward, carries_outside_mark=carries_outside_mark
         )
-
-
-def one_at_a_time(channel_type: str) -> bool:
-    """Whether the kind of ``channel_type`` runs one activation at a time per place.
-
-    ADR-0332 §2:3: the conversation kind and the line declare that they do, so on one of
-    their places an activation is admitted only where none started from it is running,
-    and an input arriving meanwhile waits (§2:4). Every other kind's activations run
-    side by side (§2:2).
-    """
-    return channel_type in _ONE_AT_A_TIME
 
 
 def confirms_delivery(channel_type: str) -> bool:
