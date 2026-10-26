@@ -4416,6 +4416,17 @@ class EpisodeProcessingRecord(BaseModel):
     ``schema_version`` does not move, as ``joined`` was added. Once written it keeps its
     value, as every field the admission write sets does (ADR-0286 §3).
 
+    ``taken_over_by`` is the activation that took this one's matter, where it ended
+    because it was absorbed (ADR-0349 §7:7) or its input was taken (§7:21): the one that
+    absorbed it, or the one that took its input (ADR-0352 §5:2). It is set only in the
+    revision that freezes the record (ADR-0352 §6:6), only where the record's reason is
+    ``stopped``, since a hand-over is ADR-0295's stop, and it never names the record's
+    own activation (§6:5). ``None`` everywhere else: a record that was not handed over,
+    one written before the field, and one a restart's close froze (ADR-0352 §5:2). It is
+    a field of the record, not a stage's result (ADR-0352 §9, as it adds to ADR-0286
+    §3:8). ``None`` by default, so a record written before the field validates unchanged
+    and ``schema_version`` does not move, as ``joined`` was added.
+
     ``schema_version`` is 11 because the record loses the old path's links, resume
     trigger and compose-stage degradation, and its stages their verdicts (ADR-0318
     §4, §5:3, §7:1; ADR-0309 §3:7): a version-10 record carries them and does not
@@ -4446,11 +4457,27 @@ class EpisodeProcessingRecord(BaseModel):
     recall_second_run: ActivationRecall | None = None
     joined: tuple[JoinedInput, ...] = ()
     stories_position: int | None = Field(default=None, strict=True, ge=0, lt=2**63)
+    taken_over_by: Identifier | None = None
 
     @property
     def is_open(self) -> bool:
         """Whether the record is open: its pass has not ended (ADR-0286 §1)."""
         return self.status is None
+
+    @model_validator(mode="after")
+    def _taken_over_by_another_once_stopped(self) -> Self:
+        # ADR-0352 §6:5: only a frozen record whose reason is ``stopped`` names the
+        # activation that took its matter, and it never names its own. A reason is set
+        # only on a frozen record (ADR-0286 §1), so the reason alone decides frozenness.
+        if self.taken_over_by is None:
+            return self
+        if self.reason is not ProcessingReason.STOPPED:
+            msg = "only a record frozen stopped names the activation that took its matter"
+            raise ValueError(msg)
+        if self.taken_over_by == self.activation_id:
+            msg = "a record never names its own activation as the one that took its matter"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _rounds_follow_each_other(self) -> Self:
