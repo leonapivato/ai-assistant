@@ -624,3 +624,51 @@ def test_a_take_in_a_later_round_lands_among_the_messages_it_came_between() -> N
         "and a garden",
         "and a lift",
     ]
+
+
+def test_a_take_follows_the_mediums_positions_where_the_clock_went_back() -> None:
+    """ADR-0349 §7:21: positions decide, as the medium holds them, before any time."""
+    from datetime import UTC, datetime  # noqa: PLC0415 — this case's clock alone
+
+    from ai_assistant.core.types import JoinedInput, RecordedInputMessage  # noqa: PLC0415
+    from ai_assistant.orchestration.planning import (  # noqa: PLC0415
+        PlaceAuthor,
+        PlaceItem,
+        PlaceWindow,
+    )
+
+    place = conversation_channel("c1")
+    original = PlaceItem(
+        author=PlaceAuthor.USER,
+        text="find two-bedroom flats",
+        at=datetime(2026, 10, 21, 9, 2, tzinfo=UTC),
+        is_input=True,
+        referent_id="message:1",
+    )
+    working = PhaseWorking(
+        activation_id="act",
+        place=PlaceWindow(takes_message=True, items=(original,)),
+        conversation_id="c1",
+        trigger_origin=None,
+        owner_records=True,
+        round_limit=2,
+    )
+    correction = JoinedInput(
+        joined_at=datetime(2026, 10, 21, 9, 3, tzinfo=UTC),
+        channel=place,
+        messages=(
+            RecordedInputMessage(
+                text="actually three bedrooms",
+                sent_at=datetime(2026, 10, 21, 9, 1, tzinfo=UTC),
+                position=2,
+            ),
+        ),
+        taken_over_from="offering",
+    )
+
+    working.take_joined((correction,), place, taken={"offering"})
+
+    assert [one.text for one in working.place.items] == [
+        "find two-bedroom flats",
+        "actually three bedrooms",
+    ]
