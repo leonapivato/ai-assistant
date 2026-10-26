@@ -40,7 +40,7 @@ import enum
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
@@ -70,6 +70,10 @@ from ai_assistant.core.types import (
     DataTier,
     DeviceAccess,
     DeviceRole,
+    DueAfterTasks,
+    DueAt,
+    DueNow,
+    DueOnRule,
     EpisodeProcessingRecord,
     EpisodicMemory,
     EvaluationTrace,
@@ -97,6 +101,8 @@ from ai_assistant.core.types import (
     ObservationWrite,
     ObserverCall,
     ObserverStep,
+    OccurrencePush,
+    OccurrenceState,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -122,6 +128,9 @@ from ai_assistant.core.types import (
     RememberCallPart,
     Reversibility,
     RiskLevel,
+    RuleDay,
+    RulePush,
+    ScheduledTaskAuthor,
     SecretName,
     SecretScope,
     SituationLabel,
@@ -138,6 +147,9 @@ from ai_assistant.core.types import (
     SuggestionKind,
     SupportDirection,
     SupportOrigin,
+    TaskRuleKind,
+    TaskSpawn,
+    TaskWriteAnswer,
     TelegramOutcome,
     ToolCost,
     ToolDefinition,
@@ -1099,8 +1111,132 @@ async def _write_plans(directory: Path, moment: Moment) -> None:
             ),
             expected_revision=0,
         )
+        await _write_scheduled_tasks(store, moment)
     finally:
         store.close()
+
+
+#: The activation that spawns every scheduled task below, which holds no stop record.
+_SPAWNER: Final = "act-upgrade-spawner"
+
+#: The limits the tasks below are written under: ADR-0350 §12:5's defaults.
+_CHAIN_LIMIT: Final = 10
+_PENDING_LIMIT: Final = 50
+
+
+async def _spawned(store: SqlitePlanStore, spawn: TaskSpawn, digest: str, moment: Moment) -> None:
+    """Write ``spawn`` as :data:`_SPAWNER`'s call to the spawn capability (ADR-0350 §3:3).
+
+    Raises:
+        RuntimeError: If the store does not write it, which is the writer's own failure.
+    """
+    written = await store.write_scheduled_task(
+        spawn,
+        ActivationEffect(
+            id=f"effect-{spawn.id}",
+            activation_id=_SPAWNER,
+            round="r1",
+            capability="spawn",
+            values_digest=digest * 64,
+            decision_id=f"d-{spawn.id}",
+            claimed_at=moment.ago(minutes=13),
+        ),
+        match=None,
+        chain_limit=_CHAIN_LIMIT,
+        pending_limit=_PENDING_LIMIT,
+    )
+    if written.answer is not TaskWriteAnswer.WRITTEN:
+        msg = f"the plan store did not write {spawn.id}: {written!r}"
+        raise RuntimeError(msg)
+
+
+def _task_spawn(task_id: str, moment: Moment, **parts: object) -> TaskSpawn:
+    """A spawn for the owner, set in the check's conversation, as the actuator states it."""
+    return TaskSpawn.model_validate(
+        {
+            "id": task_id,
+            "person": OWNER_PERSON_ID,
+            "author": ScheduledTaskAuthor.ASSISTANT,
+            "when": DueNow(),
+            "instruction": f"Do the step {task_id}.",
+            "set_in": _CHANNEL,
+            "set_at": moment.ago(minutes=13),
+            **parts,
+        }
+    )
+
+
+async def _write_scheduled_tasks(store: SqlitePlanStore, moment: Moment) -> None:
+    """ADR-0350 §12:3, ADR-0340 §9: a task of each when, through each state, and a cascade.
+
+    Every instant is handed in, as a caller computes it: the store computes none
+    (ADR-0340 §9:5), so a rule's instants need not fall on its days to be stored.
+
+    Raises:
+        RuntimeError: If the store does not write a task or push an occurrence.
+    """
+    # A one-off task due now, suggesting the line, pushed and settled done (§7:5-§7:6).
+    await _spawned(
+        store,
+        _task_spawn("task-upgrade-now", moment, places=(_LINE,), outside_content=True),
+        "b",
+        moment,
+    )
+    pushes = [await store.mark_occurrence_pushed("task-upgrade-now", 1, "act-upgrade-task-1")]
+    await store.settle_occurrence("act-upgrade-task-1", OccurrenceState.DONE)
+    # A one-off task due at an instant, still pending; and one waiting on it (§5:2, §5:4),
+    # pending with no instant due.
+    await _spawned(
+        store,
+        _task_spawn("task-upgrade-at", moment, when=DueAt(at=moment.now + timedelta(days=1))),
+        "c",
+        moment,
+    )
+    await _spawned(
+        store,
+        _task_spawn("task-upgrade-after", moment, when=DueAfterTasks(tasks=("task-upgrade-at",))),
+        "d",
+        moment,
+    )
+    # ADR-0340 §4: a task the person set on a weekly rule, missed twice and pushed late:
+    # its first occurrence and the one between skipped, the latest pushed, and its
+    # successor written pending, all in the push's one step (§4:6, §4:8, §9:3).
+    await _spawned(
+        store,
+        _task_spawn(
+            "task-upgrade-rule",
+            moment,
+            author=ScheduledTaskAuthor.PERSON,
+            when=DueOnRule(
+                repeats=TaskRuleKind.WEEKLY,
+                days=(RuleDay.TUESDAY, RuleDay.THURSDAY),
+                time_of_day=time(9, 30),
+                zone="America/New_York",
+                from_date=date(2026, 1, 5),
+                until_date=date(2099, 12, 31),
+            ),
+            first_due_at=moment.ago(days=3),
+        ),
+        "e",
+        moment,
+    )
+    pushes.append(
+        await store.mark_occurrence_pushed(
+            "task-upgrade-rule",
+            1,
+            "act-upgrade-task-2",
+            rule=RulePush(
+                skipped=(moment.ago(days=2),),
+                latest=moment.ago(days=1),
+                successor=moment.now + timedelta(days=1),
+            ),
+        )
+    )
+    if any(push is not OccurrencePush.PUSHED for push in pushes):
+        msg = f"the plan store did not push every occurrence: {pushes!r}"
+        raise RuntimeError(msg)
+    # §9:6: a stop command's cascade record, naming an activation outside every lineage.
+    await store.record_cascade("act-upgrade-cascade")
 
 
 async def _read_plans(directory: Path) -> Records:
@@ -1111,6 +1247,10 @@ async def _read_plans(directory: Path) -> Records:
             "stopped": to_json(exported.stopped_activations),
             **_keyed("effect", exported.activation_effects, _field("id")),
             "observations": to_json(exported.observations),
+            # ADR-0350 §12:3: keyed, so a base that predates them reads back no key and
+            # the head reads back none either; the shape does not move.
+            **_keyed("task", exported.scheduled_tasks, _field("id")),
+            **_keyed("cascade", exported.cascades, str),
         }
     finally:
         store.close()
