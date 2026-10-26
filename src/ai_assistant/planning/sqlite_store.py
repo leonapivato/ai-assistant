@@ -114,7 +114,8 @@ class _ClockFailedError(Exception):
     The upgrade past 17 reads the clock in the open's transaction (ADR-0352 §2:6), and
     the open translates an ``OSError`` or a ``sqlite3.Error`` into ``PlanningError``. A
     clock's own exception propagates unwrapped (ADR-0026 §2), so it rides inside this
-    one past those handlers and is raised again as itself once the connection is closed.
+    one past those handlers and is raised again as itself once the connection is closed,
+    outside every handler, so its cause and context are left as the clock left them.
 
     Attributes:
         failure: What the clock raised.
@@ -510,6 +511,9 @@ class SqlitePlanStore:
             # documents (#1933; the last of the nine stores that carried the hole).
             msg = f"failed to open the plan store at {self._path!r}: {exc}"
             raise PlanningError(msg) from exc
+        # The clock's own failure in the upgrade, raised again below once no handler is
+        # active, so its cause and context stay its own (ADR-0026 §2).
+        clock_failure: Exception | None = None
         try:
             # Restricted *before* the first statement, not after the schema is
             # created. SQLite copies the database file's mode onto every rollback
@@ -550,7 +554,7 @@ class SqlitePlanStore:
                     self._retire_cascades(conn)
         except _ClockFailedError as carried:
             conn.close()
-            raise carried.failure from carried.failure.__cause__
+            clock_failure = carried.failure
         except PlanningError:
             conn.close()  # never leak the connection when opening fails
             raise
@@ -564,6 +568,8 @@ class SqlitePlanStore:
             # is closed as on every other failure.
             conn.close()
             raise
+        if clock_failure is not None:
+            raise clock_failure
         return conn
 
     def _restrict_permissions(self) -> None:

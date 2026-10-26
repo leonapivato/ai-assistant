@@ -274,8 +274,34 @@ async def test_a_clock_failing_in_the_upgrade_rolls_it_back_and_closes_the_conne
 
     monkeypatch.undo()
     assert raised.value is failure
+    assert (failure.__cause__, failure.__context__) == (None, None)
     (conn,) = opened
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
     assert _label(legacy) == "17"
     assert _dump(legacy) == before
+
+
+async def test_a_clock_failure_keeps_its_own_chain(legacy: Path) -> None:
+    """ADR-0026 §2: what the clock raised while handling another error keeps that error.
+
+    A clock that fails while handling its device's error raises with the device's error
+    as its context. The open raises it as it is: neither its cause nor its context is
+    replaced by the store's own machinery.
+    """
+    device = OSError("device unavailable")
+
+    def failing() -> datetime:
+        try:
+            raise device
+        except OSError:
+            msg = "clock failed"
+            raise RuntimeError(msg)  # noqa: B904 — the implicit chain is what is tested
+
+    with pytest.raises(RuntimeError, match="clock failed") as raised:
+        SqlitePlanStore(path=legacy, now=failing)
+
+    assert raised.value.__context__ is device
+    assert raised.value.__cause__ is None
+    assert not raised.value.__suppress_context__
+    assert _label(legacy) == "17"
