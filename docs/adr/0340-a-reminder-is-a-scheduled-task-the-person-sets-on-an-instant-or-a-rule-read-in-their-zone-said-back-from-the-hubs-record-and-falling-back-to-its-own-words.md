@@ -172,12 +172,15 @@ refuses an instant earlier than now (ADR-0350 §4:5).
 > cascade (§7:5). No next occurrence is computed after either, and ADR-0350 §7:8 then
 > removes the task once nothing of it is live.
 
-> **Normative.** Where a rule's pending occurrence is due, the sensor takes its stored
-> instant unchanged, and computes from the rule each instant the rule yields after it, up to
-> now. Where that finds any, the occurrence missed more than one (ADR-0350 §8:10): in the step
-> that marks the latest pushed (ADR-0350 §7:5), the plan store records the pending one and
-> each other earlier one *skipped*, each with the instant it was due, as the sensor gave
-> them. Where it finds none, the pending occurrence itself is pushed.
+> **Normative.** Where a rule's pending occurrence that was never pushed is due, the sensor
+> takes its stored instant unchanged and computes from the rule each instant the rule yields
+> after it, up to now. Where it finds none, the pending occurrence is pushed. Where it finds
+> any, the rule missed more than one occurrence (ADR-0350 §8:10): in the step that marks the
+> latest pushed (ADR-0350 §7:5), the plan store records the pending one and each other
+> earlier one *skipped*, each with the instant it was due, as the sensor gave them. An
+> occurrence pushed again after a restart (ADR-0350 §8:5–§8:6) is pushed itself, its second
+> try and its pushes kept, and the rule reaches its successors after its outcome, by §4:6 and
+> then this clause.
 
 > **Normative.** A daylight-saving change reaches a rule's occurrences as §3:4 rules for a
 > local time.
@@ -358,7 +361,9 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > outcome and the next occurrence written in one step, with no instant at which the task has
 > nothing pending; a rule missed for three days, which pushes one late occurrence stating
 > that it skipped two; a pending occurrence due under the old zone, found after the person's
-> zone changed, which is still pushed; a restart days after a rule's pushed occurrence whose message is
+> zone changed, which is still pushed; a rule's occurrence pushed again after a restart days
+> later, once with no effect claimed and once as a second try, each pushed itself and
+> followed by the latest missed one; a restart days after a rule's pushed occurrence whose message is
 > confirmed done, which settles it and then pushes the latest missed one late; a skip of a
 > bounded rule's last occurrence, which is a cancel; "make it 9" on a rule whose from has
 > passed, which replaces it; the fixed line on the round limit, written into each suggested place
