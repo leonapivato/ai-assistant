@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"input\": {\"received_as\": \"the message the user just sent on telegram:tg/ivy\", \"text\": \"what's the weather going to be like in Lisbon next week?\"}, \"channel_window\": \"missing: no recent context accompanies this input on its channel\", \"episode_window\": \"not provided for input on this channel\", \"in_progress\": [{\"label\": \"R1\", \"place\": \"conversation:c-ivy\", \"input\": \"find me a hotel in Lisbon for the conference, near the venue\", \"has_acted\": false}]}",
+      "name": null
+    }
+  ]
+}

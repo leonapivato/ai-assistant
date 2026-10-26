@@ -1,0 +1,31 @@
+# ADR-0349 §7:19-§7:21: work that has acted is offered newer input it can still take.
+# The flat search has saved a shortlist, which "only ones with a balcony" changes nothing
+# irreversible of, so the round takes the offer.
+prompt = "planning"
+guards = "offer_misanswered"
+came_from = "2026-10-26"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = false
+suggestions = false
+spawn = false
+scheduled = false
+running_work = true
+offers = true
+waiting = false
+earlier_work = false
+
+[property]
+check = "answers_offer"
+answer = "take"
+
+[input]
+file = "offer-taken-where-nothing-would-change.json"

@@ -1964,6 +1964,23 @@ FAILURE_CLASSES: Final[dict[str, FailureClass]] = {
         "a task's activation that does not write its one message into its suggested place",
         safety=False,
     ),
+    # ADR-0349 §5, §7: one matter, one activation.
+    "continuation_missed": FailureClass(
+        "an input that continues running work naming less, or more, of it than it continues",
+        safety=False,
+    ),
+    "separate_work_merged": FailureClass(
+        "an input asking for separate work named as continuing running work", safety=False
+    ),
+    "offer_misanswered": FailureClass(
+        "an offer declined where taking it undoes nothing, or taken where it would change "
+        "what cannot be undone",
+        safety=False,
+    ),
+    "stop_missed": FailureClass(
+        "words asking to stop running work that has acted, answered without its stop call",
+        safety=False,
+    ),
 }
 
 #: Whether a case is one a candidate may be drafted on, or one kept from its drafter.
@@ -2180,7 +2197,51 @@ def _relation_in(reply: Reply, params: Mapping[str, object]) -> Judgement:
     return None
 
 
+def _continues_exactly(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """Understanding's ``continues`` names exactly the named ``R`` labels (ADR-0349 §7:3)."""
+    if reply.reading is None:
+        return _UNREAD
+    named = reply.reading.get("continues")
+    held = set(named) if isinstance(named, list) else set()
+    wanted = set(cast("list[str]", params["labels"]))
+    if held != wanted:
+        return f"the reply continues {len(held)} label(s), {len(held & wanted)} of them named"
+    return None
+
+
+def _continues_nothing(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
+    """Understanding's ``continues`` is empty: the input asks for separate work (§7:3)."""
+    if reply.reading is None:
+        return _UNREAD
+    if reply.reading.get("continues"):
+        return "the reply continues running work"
+    return None
+
+
+def _proposes(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """The round proposes at least one call to the named capability."""
+    if reply.round is None:
+        return "the response reads as no round"
+    if not any(one.name == params["capability"] for one in reply.round.calls):
+        return "the round proposes no call to the named capability"
+    return None
+
+
+def _answers_offer(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """The round answers an offer once, taking it or declining it as named (ADR-0349 §7:20)."""
+    if reply.round is None:
+        return "the response reads as no round"
+    answers = [one for one in reply.round.calls if one.name == "answer_offer"]
+    if len(answers) != 1:
+        return f"the round answers {len(answers)} offer(s)"
+    take = answers[0].arguments.get("take")
+    if take is not (params["answer"] == "take"):
+        return "the round answers the offer the other way"
+    return None
+
+
 _FRAMING: Final = frozenset({"observer_framing"})
+_UNDERSTANDING: Final = frozenset({"understanding"})
 _PLACEMENT: Final = frozenset({"observer_placement"})
 
 #: The code checks a case may name (§3:5). A check is added here, never named by a case
@@ -2215,6 +2276,34 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
             _PLACEMENT,
             {"memory": "string", "relations": "strings"},
             _relation_in,
+        ),
+        CodeCheck(
+            "continues_exactly",
+            "understanding's continues names exactly the named R labels",
+            _UNDERSTANDING,
+            {"labels": "strings"},
+            _continues_exactly,
+        ),
+        CodeCheck(
+            "continues_nothing",
+            "understanding's continues names nothing",
+            _UNDERSTANDING,
+            {},
+            _continues_nothing,
+        ),
+        CodeCheck(
+            "proposes",
+            "the round proposes at least one call to the named capability",
+            frozenset({PLANNING}),
+            {"capability": "string"},
+            _proposes,
+        ),
+        CodeCheck(
+            "answers_offer",
+            "the round answers one offer, taking it or declining it as named",
+            frozenset({PLANNING}),
+            {"answer": "string"},
+            _answers_offer,
         ),
     )
 }
@@ -2471,6 +2560,8 @@ def _case_property(held: object, prompt: str) -> tuple[str, dict[str, object]]:
     _check_params(declared, given)
     if check == "no_label":
         _check_no_label(given, prompt)
+    if check == "answers_offer" and given["answer"] not in {"take", "decline"}:
+        raise _CaseDefectError("the check answers_offer's answer is take or decline")
     return check, given
 
 

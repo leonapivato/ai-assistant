@@ -20,6 +20,10 @@ person = true
 suggestions = false
 spawn = false
 scheduled = false
+running_work = false
+offers = false
+waiting = false
+earlier_work = false
 
 [property]
 check = "asks_about"

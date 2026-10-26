@@ -1,0 +1,116 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"now\": \"2026-10-24T18:30:00+00:00\", \"time_zone\": \"UTC\", \"place\": {\"takes_message\": true, \"description\": \"the person's Telegram chat\"}, \"understanding\": {\"meaning\": \"Find two-bedroom flats to rent in Leith.\", \"ground\": \"stated\"}, \"offers\": [{\"offer\": \"E1\", \"input\": \"only ones with a balcony\", \"understood_as\": \"Only flats that have a balcony.\"}], \"place_window\": [{\"from\": \"the user\", \"at\": \"2026-10-24T18:27:00+00:00\", \"text\": \"find me two-bedroom flats to rent in Leith\"}, {\"from\": \"the assistant\", \"at\": \"2026-10-24T18:28:00+00:00\", \"text\": \"I'm looking for two-bedroom flats in Leith now.\"}], \"episode_window\": [], \"recalled\": [], \"capabilities\": [\"answer_offer\", \"book\", \"look_up_activation\", \"send_email\", \"stop_activation\"], \"rounds\": [{\"round\": 1, \"text\": \"I'm looking for two-bedroom flats in Leith now.\", \"text_was\": \"written into the place\", \"calls\": [{\"capability\": \"book\", \"arguments\": {\"what\": \"viewing list\"}, \"outcome\": \"done\", \"result\": {\"label\": \"R1\", \"value\": \"saved\"}}], \"notes\": \"Shortlist so far: three flats on Ferry Road, none viewed yet.\"}], \"evidence\": []}",
+      "name": null
+    }
+  ],
+  "tools": [
+    {
+      "name": "answer_offer",
+      "description": "Answer newer input offered to this work: take it, and it becomes part of this work; or decline it, with a short reason, and it is done after this work ends.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "offer": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The offer, by its E label."
+          },
+          "take": {
+            "type": "boolean",
+            "description": "Whether you take it."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "description": "Why you decline it, in a few words."
+          }
+        },
+        "required": [
+          "offer",
+          "take"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "book",
+      "description": "Book a table for a date.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string"
+          },
+          "deliberate_repeat": {
+            "type": "boolean",
+            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+          }
+        },
+        "required": [
+          "date"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "look_up_activation",
+      "description": "See what running work you were shown as running has found and done so far.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "activation": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The running work, by its E label."
+          }
+        },
+        "required": [
+          "activation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "send_email",
+      "description": "Send an email from the person's account.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string"
+          },
+          "deliberate_repeat": {
+            "type": "boolean",
+            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+          }
+        },
+        "required": [
+          "date"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stop_activation",
+      "description": "Stop running work you were shown as running, and what it set up to run later. Nothing new starts, and nothing it already did is undone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "activation": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The running work, by its E label."
+          }
+        },
+        "required": [
+          "activation"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
