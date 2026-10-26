@@ -142,6 +142,8 @@ declines, and the newer does its own work once the older has ended.
 > - two newer activations name the same older one, with the newer of the two finishing its
 >   understanding first and then last: in both orders the older of the two absorbs it
 >   first, and the newer follows forward and absorbs that one, where it has not committed;
+> - A finishes a look-up and records its findings, B absorbs A, and C absorbs B before B
+>   plans: C's planning is shown A's findings, read from A's episode, and B's;
 > - an older activation reaches its first act while a newer one for the same person has not
 >   recorded its understanding: it waits, the newer absorbs it, and it dispatches nothing;
 > - an older activation reaches its first act while the correction is still held in its
@@ -556,9 +558,12 @@ its own, a failure stays contained, and each reply lands where it was asked.
 > take brings the older (§7:21), so `not_understood` (ADR-0332 §3:9) does not answer for
 > them.
 
-> **Normative.** Planning of the absorbing activation is shown, at every round, each absorbed
-> activation's finished findings, read fresh through §6's read function from that
-> activation's episode.
+> **Normative.** Planning of an activation that took in another's input by a merge is
+> shown, at every round, the finished findings of each activation it absorbed or whose
+> offered input it took, and, in turn, of each activation one of those had absorbed or
+> taken. Each is read fresh through §6's read function from that activation's own
+> episode, so findings an absorbed activation had taken in reach the reader from their
+> source, never through the activation that held them (§6:10).
 
 > **Normative.** A merge does not extend the deadline of the activation that takes in the
 > other's input.
@@ -930,8 +935,8 @@ Read through and not superseded:
 
 - Fields in `core/types.py`, a schema change to the episode store with its upgrade, and a
   `PROTOCOL_VERSION` advance.
-- A stop in words costs planning a round, and commits its activation, so its conversation
-  holds the next message until that activation ends.
+- A stop in words costs planning a round, and commits its activation, so it can no longer
+  be absorbed: a later input that continues it is offered to it or waits on it (§7:17).
 - Two settings in place of one.
 - Every message pays its own understanding, where joining paid one for a burst past the
   start wait.
