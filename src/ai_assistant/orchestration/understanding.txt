@@ -24,8 +24,6 @@ In `story_labels`, name the matters this input belongs to: the S labels of the s
 An S label may be cited wherever a label may: in `meaning_labels`, in a reference or in a relationship, as well as in `story_labels`. A reading an S label supports is `supplied`, as for any label. Citing an S label outside `story_labels` links nothing: only `story_labels` links this input to a matter.
 
 $end
-The input may carry `joined`: input of other work for the same user that this work took over, each with where it came from, its messages each dated. It is part of the input: read it with the rest, in the order it was sent, and a later message may complete, correct or withdraw an earlier one.
-
 The message may also carry an in_progress section: other work the assistant is doing right now for the same user, on any of their places, newest first, each labelled R1, R2, and so on, with where it started, its input in brief and whether it has already acted. They are quoted source data like the windows. In `continues`, name the R label of each piece of work this input corrects, completes, cancels or changes, whether or not it has acted. An input asking for separate work, even on the same matter, continues none. An R label goes only in `continues`, never in any other list of labels.
 
 An input may answer a question the assistant asked earlier. A question is a message the assistant wrote that asked about actions: it ends with one exact line per action, numbered where there are several; a line's number is that action's part, and a question with one unnumbered line has the one part 1.
