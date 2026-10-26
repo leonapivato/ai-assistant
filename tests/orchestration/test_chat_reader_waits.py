@@ -37,7 +37,9 @@ from ai_assistant.orchestration.matters import HeldInput
 from ai_assistant.testing import FakeConversationStore
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable
+
+    from ai_assistant.orchestration.activation_state import ActivationState
 
 #: How long a case waits for the reader before it fails rather than hangs.
 _SETTLE: Final = 5.0
@@ -108,6 +110,8 @@ class _Reader:
         *,
         store: FakeConversationStore | None = None,
         start_wait: timedelta | None = _START,
+        hold: Callable[[ChannelIdentity], HeldInput] | None = None,
+        ids: Iterable[str] | None = None,
     ) -> None:
         self.store = store or FakeConversationStore()
         self.clock = _Clock()
@@ -120,7 +124,7 @@ class _Reader:
         self.tasks: list[asyncio.Task[None]] = []
         self.closing = False
         self.told: list[tuple[str, str | None]] = []
-        self._ids = iter(f"act-{n}" for n in range(1, 100))
+        self._ids = iter(ids if ids is not None else (f"act-{n}" for n in range(1, 100)))
         self._sent = 0
         self.reader = ChatReader(
             conversations=self.store,
@@ -128,7 +132,7 @@ class _Reader:
             spawn=self._spawn,
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
-            hold=lambda place: _Hold(place, self.told),
+            hold=hold if hold is not None else (lambda place: _Hold(place, self.told)),
             start_wait=start_wait,
             composing_lapse=_LAPSE,
             composing_cap=_CAP,
@@ -577,4 +581,59 @@ async def test_messages_during_every_read_past_the_cap_postpone_nothing() -> Non
     assert _texts(chat.inputs[0]) == ["m0"], "taken in on the first read past the cap"
     chat.closing = True
     chat.reader.close()
+    await chat.idle()
+
+
+async def test_an_act_waits_for_a_message_its_wait_found_held_wherever_it_moves() -> None:
+    """ADR-0349 §7:12, with the engine's own account: a correction noticed while what
+    waits was read, at the cap, is held when an older act's wait begins. The read takes
+    in what it read without it, and the correction waits in a start wait of its own,
+    which the act still waits for, until the correction's activation has settled."""
+    from test_matters import _IDS, _matters, _running, _understood  # noqa: PLC0415
+
+    store = _HeldAfterQuery()
+    states: list[ActivationState] = []
+    matters = _matters(states)
+    chat = _Reader(store=store, hold=matters.hold, ids=_IDS[1:])
+    chat.gate = asyncio.Event()
+    conversation = await chat.conversation()
+    older = _running(conversation, _IDS[0], order=1)
+    states.append(older)
+    _understood(older)
+
+    await chat.say(conversation, "and what's the weather?")
+    await asyncio.wait_for(chat.clock.sleeping.wait(), _SETTLE)
+    store.hold = True
+    chat.clock.now = _CAP.total_seconds()
+    await chat.clock.wake()
+    await asyncio.wait_for(store.held.wait(), _SETTLE)
+    await chat.say(conversation, "actually Sunday")
+    waiting = asyncio.ensure_future(
+        matters.before_act(older, asyncio.get_running_loop().time() + _SETTLE)
+    )
+    await asyncio.sleep(0.01)
+    assert not waiting.done(), "the correction is held"
+
+    store.release.set()
+    await chat.until(lambda: len(chat.inputs) == 1, what="what was read was taken in")
+    assert _texts(chat.inputs[0]) == ["and what's the weather?"]
+    weather = _running(conversation, _IDS[1], order=2)
+    states.append(weather)
+    _understood(weather)
+    matters.changed()
+    await asyncio.sleep(0.01)
+    assert not waiting.done(), "the correction, held when the wait began, waits elsewhere"
+
+    await chat.clock.wake()
+    await chat.until(lambda: len(chat.inputs) == 2, what="the correction was taken in")
+    assert _texts(chat.inputs[1]) == ["actually Sunday"]
+    correction = _running(conversation, _IDS[2], order=3)
+    states.append(correction)
+    await asyncio.sleep(0.01)
+    assert not waiting.done(), "its activation runs, not yet understood"
+    _understood(correction)
+    matters.changed()
+    assert await asyncio.wait_for(waiting, 1), "settled"
+
+    chat.gate.set()
     await chat.idle()

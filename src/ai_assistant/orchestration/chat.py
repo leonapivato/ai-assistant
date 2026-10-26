@@ -580,8 +580,12 @@ class ChatReader:
         if read.again:
             # Noticed while what waits was read, so possibly missed by it: the message
             # is read again, by a read of its own with a start wait of its own, which
-            # what this activation was handed is no part of.
+            # what this activation was handed is no part of. An act whose wait began
+            # while this read held the message waits for it there (ADR-0349 §7:12).
             self.notice(conversation_id)
+            successor = self._reading.get(conversation_id)
+            if read.held is not None and successor is not None and successor.held is not None:
+                read.held.moved_to(successor.held)
         try:
             window = await self._window(conversation_id, waiting)
             current = self._current.setdefault(conversation_id, [])
