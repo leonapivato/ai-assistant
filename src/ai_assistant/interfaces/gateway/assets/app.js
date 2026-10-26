@@ -3230,12 +3230,23 @@ function runningActivations() {
   return running;
 }
 
+// The running activations a press would send a stop for: each one with no stop of this
+// page's out for it and none landed on it, so a stop still out for one never holds back
+// a stop for another the state has named since.
+function stoppableActivations(running) {
+  return running.filter((id) => {
+    const one = chat.stop === null ? undefined : chat.stop.get(id);
+    return one === undefined || (!one.sending && one.answer !== "stopped");
+  });
+}
+
 // The control and what the stops answered. **Each answer is about one activation**, and
 // is kept while the state still names that one: once it ends, the state's own ending says
 // how (`CHAT_ENDINGS.stopped` for a stop that landed), and a later activation starts with
 // no answer beside it. Once every activation the state names has answered "stopped" the
 // control is withdrawn, every stop having landed; while any has no answer, or one that
-// wrote nothing, it stays, since the state still says working.
+// wrote nothing, it stays, since the state still says working. It is disabled only while
+// every one it would name has a stop out.
 function renderChatStop() {
   const running = runningActivations();
   if (chat.stop !== null) {
@@ -3249,7 +3260,7 @@ function renderChatStop() {
   const sending = sent.some((one) => one !== undefined && one.sending);
   const landed = sent.every((one) => one !== undefined && one.answer === "stopped");
   el("chat-stop-row").hidden = running.length === 0 || landed;
-  el("chat-stop").disabled = sending;
+  el("chat-stop").disabled = stoppableActivations(running).length === 0;
   let said = "";
   if (sending) {
     said = CHAT_STOPPING;
@@ -3275,19 +3286,14 @@ function renderChatStop() {
   slot.hidden = said === "";
 }
 
-// The owner pressing **Stop**: one request for each activation the state names that no
-// stop has yet landed on, each naming that one activation and all sent together
-// (ADR-0349 §4:3, ADR-0295 §1:1), and their answers said beside the control (ADR-0297
-// §5). Nothing is decided here — whether each was running, had ended or was never known
-// is the hub's answer — and nothing is retried: a refusal is on screen where `relay` put
-// it, and the control is offered again.
+// The owner pressing **Stop**: one request for each activation the state names that has
+// no stop out and none landed (`stoppableActivations`), each naming that one activation
+// and all sent together (ADR-0349 §4:3, ADR-0295 §1:1), and their answers said beside the
+// control (ADR-0297 §5). Nothing is decided here — whether each was running, had ended or
+// was never known is the hub's answer — and nothing is retried: a refusal is on screen
+// where `relay` put it, and the control is offered again.
 async function stopActivations() {
-  const running = runningActivations();
-  const held = (id) => (chat.stop === null ? undefined : chat.stop.get(id));
-  if (running.some((id) => held(id) !== undefined && held(id).sending)) {
-    return;
-  }
-  const named = running.filter((id) => held(id) === undefined || held(id).answer !== "stopped");
+  const named = stoppableActivations(runningActivations());
   if (named.length === 0) {
     return;
   }
