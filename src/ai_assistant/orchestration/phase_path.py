@@ -48,17 +48,25 @@ with its labels, to the activation's state and extends the open episode through 
 episode writer. A failed append is a capture failure, which the writer handles and
 which holds nothing back.
 
-**The commitment step** (ADR-0332 §3:5-§3:7). Before acting dispatches any call of a
-round that is not a pure read, or the round's message, it checks, in the same
-synchronous step as the stage's first line, for joined input the understanding the
-round was planned from does not cover, and where there is none marks the activation
-committed: after that no join is taken. Where there is some, the round is set aside —
-none of its calls runs and its message is not written, by any path, and acting's
-decision for it says so — and the rules start the activation over from understanding.
-Planning starts over for each understanding version (§3:12): each round records the
-version it was planned from, the rules count the latest version's rounds, and rounds of
-an earlier version stay in the record with their results. An input that joined on the
-activation's own place is shown to planning as an input item of the place.
+**The wait before an act, and the commitment step** (ADR-0349 §7:12-§7:14). Before
+acting dispatches any call of a round that is not a pure read, or the round's message,
+it waits for each newer input that could absorb the activation or offer to it, on any
+place before it has committed and on its own place after, bounded by the pass's
+deadline. Then, in one synchronous step with no await before the dispatch: where the
+stop mark is set, nothing of the round runs; where an offer is open that the round's
+planning was not shown, the round is held back — none of its calls runs and its message
+is not written, by any path, and acting's decision for it says so — and planning runs a
+round again, shown the offer; and otherwise the activation is marked committed.
+Planning starts over for each understanding version (ADR-0332 §3:12). An input a take
+brought on the activation's own place is shown to planning as an input item of the
+place (ADR-0349 §7:21).
+
+**The waits on an older activation** (ADR-0349 §7:25-§7:28). Planning holds them: while
+its offer is open it plans no round; where it then waits on work still running, its
+first round is a waiting round, offered only the stop call, and its next is planned once
+each activation it waits on has ended, the time waited moving its deadline later. Every
+round is shown the finished work of what it absorbed, took input from and waited on,
+read fresh (§7:10, §7:27), and an older's planning the offers open to it (§7:19).
 
 **The message** (ADR-0307 §3, ADR-0306 §5). The round's text is written into the
 input's place through the chat's writer, claimed first under an
@@ -311,12 +319,25 @@ from ai_assistant.orchestration.defects import ToleratedStageError, is_defect, l
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
-from ai_assistant.orchestration.joining import is_pure_read
 from ai_assistant.orchestration.lookups import (
     OLDER_NOTES_PAGE,
     READ_STORY_CAPABILITY,
     SEARCH_MEMORY_CAPABILITY,
     searched_ids,
+)
+from ai_assistant.orchestration.matter_calls import (
+    MATTER_CALLS,
+    MATTER_CAPABILITIES,
+    MATTER_LABEL_ARGUMENTS,
+    MatterCaller,
+    MatterCalls,
+    calling,
+)
+from ai_assistant.orchestration.matters import (
+    ANSWER_OFFER_CAPABILITY,
+    LOOK_UP_ACTIVATION_CAPABILITY,
+    STOP_ACTIVATION_CAPABILITY,
+    is_pure_read,
 )
 from ai_assistant.orchestration.outside_content import rests_on_outside_content
 from ai_assistant.orchestration.person_block import still_held
@@ -333,6 +354,8 @@ from ai_assistant.orchestration.planning import (
     CallOutcomeKind,
     DigestedEvidence,
     DigestItem,
+    OfferShown,
+    PeerShown,
     PlaceAuthor,
     PlaceItem,
     PlaceWindow,
@@ -343,6 +366,7 @@ from ai_assistant.orchestration.planning import (
     PlanningStory,
     RecordedCandidate,
     RefusedCall,
+    RunningShown,
 )
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.reliance import noted
@@ -372,6 +396,7 @@ if TYPE_CHECKING:
     from collections.abc import (
         Awaitable,
         Callable,
+        Collection,
         Coroutine,
         Iterator,
         Mapping,
@@ -416,6 +441,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.lookups import LookUps
+    from ai_assistant.orchestration.matters import Matters
     from ai_assistant.orchestration.person_block import PersonBlock, PersonBlocks
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_calls import StoryCalls
@@ -1495,6 +1521,9 @@ class _Round:
         written: Whether its message was recorded in the conversation (ADR-0317 §3:4).
         planned_from: The understanding version it was planned from, the latest when
             planning ran (ADR-0332 §3:12); ``None`` where none was recorded.
+        offers_shown: The offering activations whose offers its planning was shown
+            (ADR-0349 §7:19), which the commitment step reads (§7:14).
+        waiting: Whether it is a waiting round (§7:26).
     """
 
     planned: PlannedRound
@@ -1504,6 +1533,8 @@ class _Round:
     written: bool = False
     step: _Step | None = None
     planned_from: int | None = None
+    offers_shown: frozenset[str] = frozenset()
+    waiting: bool = False
 
 
 @dataclass
@@ -1666,6 +1697,18 @@ class PhaseWorking:
         # by the activation (§9:1).
         self.scheduling: Scheduling | None = None
         self.task_links: dict[str, str] | None = None
+        # ADR-0349 §7:28: how the waits on an older activation move the pass's deadline,
+        # which the engine hands in with the pass; ``None`` moves nothing.
+        self.move_deadline: Callable[[float], None] | None = None
+        # §7:26: whether its waiting round has been planned, and each activation it
+        # waited on, whose finished work every round after the wait is shown (§7:27).
+        self.waiting_round_planned = False
+        self.waited: tuple[str, ...] = ()
+        # §4:6, §6:1: each activation planning was shown as running, by id: in a list
+        # pull's running part, an offer or a wait; and what each call on running work
+        # came back with, by its result's id.
+        self.shown_running: set[str] = set()
+        self.peers: dict[str, PeerShown] = {}
 
     # --- what the rules read (PhaseFacts) ---
 
@@ -1752,6 +1795,19 @@ class PhaseWorking:
             one.name != TIDY_STORY_CAPABILITY for one in self._rounds[-1].planned.round.calls
         )
 
+    @property
+    def latest_brings_another(self) -> bool:
+        """The latest round brings another, whatever it called (ADR-0349 §7:14, §7:26).
+
+        A waiting round never ends the activation, and a round whose acts were held back
+        for an offer it was not shown is planned again (ADR-0315 §2:1-§2:3, as ADR-0349
+        §12 reads them).
+        """
+        if not self._rounds:
+            return False
+        latest = self._rounds[-1]
+        return latest.waiting or (latest.acted is not None and latest.acted.set_aside)
+
     # --- what the stages read and write ---
 
     @property
@@ -1766,24 +1822,41 @@ class PhaseWorking:
             raise RuntimeError(msg)
         return self._rounds[-1]
 
-    def planned(self, planned: PlannedRound) -> None:
+    def planned(
+        self,
+        planned: PlannedRound,
+        *,
+        offers_shown: frozenset[str] = frozenset(),
+        waiting: bool = False,
+    ) -> None:
         """Hold a round planning decided, and the labels it assigned.
 
-        The round is planned from the latest understanding version (ADR-0332 §3:12).
+        The round is planned from the latest understanding version (ADR-0332 §3:12),
+        shown ``offers_shown`` (ADR-0349 §7:19), and is a waiting round where
+        ``waiting`` says so (§7:26).
         """
         self.labels.add(planned.labels)
-        self._rounds.append(_Round(planned=planned, planned_from=self.version))
+        self._rounds.append(
+            _Round(
+                planned=planned,
+                planned_from=self.version,
+                offers_shown=offers_shown,
+                waiting=waiting,
+            )
+        )
 
     def overtaken(self) -> frozenset[str]:
         """The rounds new input overtook before they acted (ADR-0332 §3:7, §3:12-§3:13).
 
-        Each planned from an earlier understanding version than the latest: a join came
-        before it committed, so its message was never written and nothing it asked about
-        was shown, whether its round was set aside or never reached acting. Only a pure
-        read of it can have run.
+        Each planned from an earlier understanding version than the latest, and each
+        whose acts were held back for an offer it was not shown (ADR-0349 §7:14): its
+        message was never written and nothing it asked about was shown. Only a pure read
+        of it can have run.
         """
         return frozenset(
-            one.planned.round.id for one in self._rounds if one.planned_from != self.version
+            one.planned.round.id
+            for one in self._rounds
+            if one.planned_from != self.version or _held_back(one)
         )
 
     def understood(self, version: int) -> None:
@@ -1794,21 +1867,28 @@ class PhaseWorking:
         """
         self.version = version
 
-    def take_joined(self, joined: Sequence[JoinedInput], place: ChannelIdentity | None) -> None:
-        """Take the inputs that joined on the activation's own place into what planning sees.
+    def take_joined(
+        self,
+        joined: Sequence[JoinedInput],
+        place: ChannelIdentity | None,
+        *,
+        taken: Collection[str] = (),
+    ) -> None:
+        """Take the inputs an offer brought on the activation's place into what planning sees.
 
-        ADR-0332 §3:16, ADR-0292 §6:10: an input that joins is part of the activation's
-        input, so each of its messages is shown to planning as an input item of the
-        place, the user's, as the reader's own are; and a yes it carries is given when
-        its latest message was sent (ADR-0321 §4:6). An input a takeover brought came
-        from another place: it is not an item of this one, and reaches planning through
-        understanding's record alone. Each joined input is taken once.
+        ADR-0349 §7:21, ADR-0292 §6:10: an input this activation took from an offer
+        (one naming an activation in ``taken``) is part of its input, and arrived after
+        its window was read, so each of its messages is shown to planning as an input
+        item of the place, the user's, as the reader's own are; and a yes it carries is
+        given when its latest message was sent (ADR-0321 §4:6). An input an absorption
+        brought reaches planning through understanding's record, and its window already
+        holds what its own place showed of it. Each input is taken once.
         """
         fresh = list(joined[self._joined_taken :])
         self._joined_taken = len(joined)
         items: list[PlaceItem] = []
         for one in fresh:
-            if one.taken_over_from is not None or one.channel != place:
+            if one.taken_over_from not in taken or one.channel != place:
                 continue
             for message in one.messages:
                 items.append(
@@ -1838,9 +1918,9 @@ class PhaseWorking:
         none undelivered.
         """
         for one in reversed(self._rounds):
-            # ADR-0332 §3:12-§3:13: a round planned from an earlier version was overtaken
-            # by a join before it committed, so it wrote nothing that needed writing.
-            if one.planned_from != self.version:
+            # ADR-0332 §3:12-§3:13, ADR-0349 §7:14: a round planned from an earlier
+            # version, or held back for an offer, wrote nothing that needed writing.
+            if one.planned_from != self.version or _held_back(one):
                 continue
             if one.planned.message is not None:
                 return not one.written
@@ -1897,12 +1977,50 @@ class PhaseWorking:
                     if acted.result_id is not None
                 }
             )
+            decisions = (
+                {}
+                if one.authorization is None
+                else {
+                    verdict.call_id: verdict.decision_id
+                    for verdict in one.authorization.verdicts
+                    if verdict.decision_id is not None
+                }
+            )
             for outcome in call_outcomes(one.planned, one.authorization, one.acted):
                 capability = names.get(outcome.call_id)
                 if outcome.result_id is not None:
                     capability = ran.get(outcome.result_id, capability)
-                outcomes.append(self._looked_up(outcome, capability))
+                looked = self._looked_up(outcome, capability)
+                refused = self.peers.get(decisions.get(outcome.call_id) or "")
+                if refused is not None and looked.peer is None:
+                    # ADR-0349 §4:9: a stop refused, naming the absorber.
+                    looked = replace(looked, peer=refused)
+                outcomes.append(looked)
         return tuple(outcomes)
+
+    def _labelled(self, outcome: CallOutcome, result_id: str) -> CallOutcome:
+        """What a call on the Task Scheduler or on running work came back with, labelled.
+
+        ADR-0350 §4:6-§4:8: a spawn's, a cancel's or a list pull's tasks, activations
+        and places. ADR-0349 §4:11, §6:5-§6:6, §7:20: the peer view of the activation a
+        stop or a look-up named, or what an answer came to, held by its result's id.
+        """
+        listing = decode_listing(outcome.result)
+        if listing is not None:
+            return replace(outcome, result=None, tasks=listing)
+        peer = self.peers.get(result_id)
+        return outcome if peer is None else replace(outcome, result=None, peer=peer)
+
+    def running_shown(self) -> frozenset[str]:
+        """Each activation planning was shown as running (ADR-0349 §4:6, §6:1).
+
+        In a list pull's running part this activation made, an offer or a wait.
+        """
+        shown = set(self.shown_running)
+        for outcome in self.outcomes():
+            if outcome.tasks is not None and outcome.tasks.listed:
+                shown.update(one.activation_id for one in outcome.tasks.running)
+        return frozenset(shown)
 
     def _looked_up(self, outcome: CallOutcome, capability: str | None) -> CallOutcome:
         """``outcome``, carrying what its look-up found where it was one."""
@@ -1915,12 +2033,8 @@ class PhaseWorking:
         searched = self.searched.get(result_id)
         if searched is not None and capability == SEARCH_MEMORY_CAPABILITY:
             return replace(outcome, result=None, records=searched)
-        if capability in TASK_SCHEDULER_CAPABILITIES:
-            # ADR-0350 §4:6-§4:8: what a spawn, a cancel or a list pull came back with,
-            # shown under labels.
-            listing = decode_listing(outcome.result)
-            if listing is not None:
-                return replace(outcome, result=None, tasks=listing)
+        if capability in TASK_SCHEDULER_CAPABILITIES or capability in MATTER_CAPABILITIES:
+            return self._labelled(outcome, result_id)
         if capability == REMEMBER_CAPABILITY and is_candidate_result(outcome.result):
             # ADR-0329 §4:1, §4:4: a candidate's similar memories as fetched, or that its
             # lookup failed, which leaves it recorded.
@@ -2333,8 +2447,17 @@ def _delivered_round(effects: Sequence[ActivationEffect], pointer: AnsweredQuest
     return None
 
 
-#: Why a call a join set aside was not done (ADR-0332 §3:7), as planning reads it.
-_SET_ASIDE: Final = "not run: new input joined before this round acted, so it was set aside"
+#: Why a call of a round held back for an offer was not done (ADR-0349 §7:14), as
+#: planning reads it.
+_HELD_BACK: Final = (
+    "not run: newer input was offered to this work before this round acted, so the round "
+    "is planned again with the offer shown"
+)
+
+
+def _held_back(one: _Round) -> bool:
+    """Whether ``one``'s acts were held back for an offer it was not shown (§7:14)."""
+    return one.acted is not None and one.acted.set_aside
 
 
 def _commits(latest: _Round, decided: RoundAuthorization) -> bool:
@@ -2357,40 +2480,40 @@ def _commits(latest: _Round, decided: RoundAuthorization) -> bool:
     return message or any(not is_pure_read(one.call.request.tool) for one in decided.allowed)
 
 
-def _commitment(latest: _Round, decided: RoundAuthorization) -> ActedRound | None:
+def _commitment(
+    state: ActivationState, latest: _Round, decided: RoundAuthorization
+) -> ActedRound | None:
     """Acting's commitment step for the latest round, or ``None`` where it may run.
 
-    ADR-0332 §3:5-§3:7: before acting dispatches any call that is not a pure read, or the
-    round's message, it checks for joined input that the understanding the round was
-    planned from does not cover, and where there is none marks the activation committed
-    (:meth:`ActivationState.commit`), **in one synchronous step**: nothing here awaits,
-    and acting dispatches nothing before it returns. A round of pure reads alone commits
-    nothing and is not checked; a pass no channel admitted takes no join.
+    ADR-0349 §7:14, after the wait before an act and **in one synchronous step** with no
+    await between: where the stop mark is set, nothing of the round is dispatched and the
+    pass ends on the stop (ADR-0297 §4); where an offer is open to this activation that
+    this round's planning was not shown, made before the wait or during it, none of its
+    calls and not its message is dispatched, each allowed call is not done with the
+    reason, and planning runs a round again, shown the offer; and otherwise the
+    activation is marked committed, if it was not already
+    (:meth:`ActivationState.commit`).
 
     Returns:
         ``None`` where the round runs. Otherwise acting's decision for it, present and
-        dispatching nothing by any path: set aside by a join, each allowed call not done
-        with the reason (§3:7), or, where the stop mark is set, nothing at all, and the
-        pass ends on the stop (ADR-0297 §4).
+        dispatching nothing by any path.
     """
-    state = active_state()
-    if state is None or not _commits(latest, decided):
-        return None
-    found = state.commit(latest.planned_from)
-    if found is Commitment.COMMITTED:
-        return None
-    if found is Commitment.STOPPED:
+    if state.stopped:
         _log.info("phase_round_not_acted", stage="acting", reason="stopped")
         return ActedRound(round_id=decided.round_id)
-    _log.info("phase_round_set_aside", stage="acting", reason="joined")
-    return ActedRound(
-        round_id=decided.round_id,
-        calls=tuple(
-            ActedCall(call=one, outcome=ActedOutcome.NOT_DONE, reason=_SET_ASIDE)
-            for one in authorized_round(decided).calls
-        ),
-        set_aside=True,
-    )
+    if any(offering not in latest.offers_shown for offering in state.offers):
+        _log.info("phase_round_held_back", stage="acting", reason="offer")
+        return ActedRound(
+            round_id=decided.round_id,
+            calls=tuple(
+                ActedCall(call=one, outcome=ActedOutcome.NOT_DONE, reason=_HELD_BACK)
+                for one in authorized_round(decided).calls
+            ),
+            set_aside=True,
+        )
+    if state.commit() is Commitment.STOPPED:  # pragma: no cover — read just above
+        return ActedRound(round_id=decided.round_id)
+    return None
 
 
 def _working(given: PhasePass) -> PhaseWorking:
@@ -2783,6 +2906,8 @@ class PhasePath:
         self._person_calls: PersonModelCalls | None = None
         # ADR-0350 §4: the Task Scheduler's calls, attached only where it is wired.
         self._task_calls: ScheduledTaskCalls | None = None
+        # ADR-0349 §4-§7: what crosses the engine's activations, attached by the engine.
+        self._matters: Matters | None = None
         self._append: Callable[[], Awaitable[None]] | None = None
         self._spawn: Callable[[Coroutine[None, None, None]], None] = self._spawn_held
         self._closing: Callable[[], bool] = _never
@@ -2861,6 +2986,29 @@ class PhasePath:
         self._acting.add_own_records(dict.fromkeys(TASK_SCHEDULER_CAPABILITIES, calls))
         self._label_arguments.update(TASK_SCHEDULER_LABEL_ARGUMENTS)
         self._task_calls = calls
+
+    def attach_matters(self, matters: Matters) -> None:
+        """Offer planning its calls on running work, and hold the waits (ADR-0349 §4-§7).
+
+        The stop call, the findings look-up and the answer call are advertised among the
+        own records' declarations; acting runs each by one
+        :class:`~ai_assistant.orchestration.matter_calls.MatterCalls` over ``matters``; and
+        each names a running activation by its episode's ``E`` label (ADR-0307 §5:2).
+        Acting's wait before an act (§7:12) and planning's waits on an older activation
+        (§7:25-§7:26) read ``matters`` too.
+
+        Raises:
+            ValueError: If it is attached already, or a capability it declares is
+                advertised already.
+        """
+        if self._matters is not None:
+            msg = "the calls on running work are attached once"
+            raise ValueError(msg)
+        self._tools.add_own_records(MATTER_CALLS)
+        calls = MatterCalls(matters=matters)
+        self._acting.add_own_records(dict.fromkeys(MATTER_CAPABILITIES, calls))
+        self._label_arguments.update(MATTER_LABEL_ARGUMENTS)
+        self._matters = matters
 
     def conversation_target(self, conversation_id: str) -> PlaceTarget:
         """A conversation of the hub's chat as a place a message goes into, with its writer."""
@@ -3343,12 +3491,30 @@ class PhasePath:
         return min(bound, timedelta(seconds=left))
 
     async def _plan(self, given: PhasePass) -> None:
-        """One planning round, over everything the thin path gives it (ADR-0307 §6)."""
+        """One planning round, over everything the thin path gives it (ADR-0307 §6).
+
+        **The waits on an older activation come first** (ADR-0349 §7:25-§7:28): while
+        this activation's own offer is open, no round is planned; where, once it is not,
+        it waits on work still running, its first round is a waiting round, and its
+        next round is planned only once each activation it waits on has ended. The time
+        waited moves its deadline later. Where a take stopped it meanwhile, no round is
+        planned, and the pass ends on the stop.
+        """
         working = _working(given)
         fetched = given.understanding_fetch
-        if (joining := active_state()) is not None:
-            # ADR-0332 §3:16: what joined on this place is input planning is shown.
-            working.take_joined(joining.joined, joining.place)
+        state = active_state()
+        if state is not None:
+            await self._wait_on_older(state, working)
+            if state.stopped:
+                return
+            # ADR-0349 §7:21: what an offer it took brought is input planning is shown.
+            working.take_joined(
+                state.joined, state.place, taken={one.activation_id for one in state.took}
+            )
+        waiting = self._waiting(state, working)
+        offers = self._offers_open(state)
+        working.shown_running.update(one.activation_id for one in waiting)
+        working.shown_running.update(one.activation_id for one in offers)
         try:
             async with asyncio.timeout_at(given.deadline):
                 found = await self._found(given, working)
@@ -3364,6 +3530,8 @@ class PhasePath:
                 # ADR-0350 §5:8, §9:1: the place list built as it is shown, and the
                 # scheduled task each linked activation ran.
                 await self._scheduled(working)
+                # ADR-0349 §7:10, §7:27: what this one took over or waited on, read now.
+                earlier = await self._earlier_work(state, working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         outside = (
@@ -3390,7 +3558,10 @@ class PhasePath:
             labels=working.labels.labels,
             outcomes=outcomes,
             capabilities=await self._offered(
-                person=person is not None, scheduling=working.scheduling is not None
+                person=person is not None,
+                scheduling=working.scheduling is not None,
+                running=self._running_calls(state, working, offers=bool(offers)),
+                only=frozenset({STOP_ACTIVATION_CAPABILITY}) if waiting else None,
             ),
             label_arguments=self._label_arguments,
             evidence=tuple(working.evidence),
@@ -3402,6 +3573,10 @@ class PhasePath:
             person=person,
             places=None if working.scheduling is None else working.scheduling.places,
             speaks_by_label=working.scheduling is not None and working.scheduling.speaks_by_label,
+            offers=offers,
+            waiting=waiting,
+            declined=() if state is None else state.declined,
+            earlier_work=earlier,
         )
         # The round is recorded inside planning's call, so the recorder reads what it
         # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
@@ -3417,7 +3592,120 @@ class PhasePath:
         whole = self.shown_whole(working, planned.round)
         if whole is not planned.round:
             planned = replace(planned, round=whole)
-        working.planned(planned)
+        working.planned(
+            planned,
+            offers_shown=frozenset(one.activation_id for one in offers),
+            waiting=bool(waiting),
+        )
+        if waiting:
+            working.waiting_round_planned = True
+
+    async def _wait_on_older(self, state: ActivationState, working: PhaseWorking) -> None:
+        """ADR-0349 §7:25-§7:28: wait on an older activation before a round.
+
+        While this activation's offer is open; and, after its waiting round, until each
+        activation it waits on has ended.
+
+        The time waited does not count against the pass's deadline: it is moved later by
+        it (§7:28). Each older activation's own deadline and round limit bound the wait.
+        """
+        matters = self._matters
+        if matters is None:
+            return
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        if state.offered_to is not None:
+            await matters.offer_answered(state)
+        if working.waiting_round_planned and matters.waiting_on(state):
+            await matters.waited_ended(state)
+        if not matters.waiting_on(state):
+            # §7:27: from here on, every round is shown what it waited on.
+            working.waited = state.waits_on
+        waited = loop.time() - began
+        if waited > 0 and working.move_deadline is not None:
+            working.move_deadline(waited)
+
+    def _waiting(
+        self, state: ActivationState | None, working: PhaseWorking
+    ) -> tuple[RunningShown, ...]:
+        """Where this round is a waiting round, each activation it waits on (§7:26).
+
+        The first round of an activation that waits on work still running once its offer
+        is no longer open, each shown as an in-progress entry shows one.
+        """
+        matters = self._matters
+        if matters is None or state is None or working.waiting_round_planned:
+            return ()
+        shown: list[RunningShown] = []
+        for activation_id in matters.waiting_on(state):
+            entry = matters.entry(activation_id)
+            if entry is not None:
+                shown.append(
+                    RunningShown(
+                        activation_id=entry.activation_id,
+                        place=entry.channel,
+                        input=entry.input,
+                        acted=entry.acted,
+                        origin=entry.origin,
+                    )
+                )
+        return tuple(shown)
+
+    def _offers_open(self, state: ActivationState | None) -> tuple[OfferShown, ...]:
+        """Each offer open to this activation, as its planning is shown it (§7:19)."""
+        if self._matters is None or state is None:
+            return ()
+        shown: list[OfferShown] = []
+        for offer in state.offers.values():
+            entry = self._matters.entry(offer.offering)
+            given = None if entry is None else entry.input
+            shown.append(
+                OfferShown(activation_id=offer.offering, input=given, meaning=offer.meaning)
+            )
+        return tuple(shown)
+
+    async def _earlier_work(
+        self, state: ActivationState | None, working: PhaseWorking
+    ) -> tuple[PeerShown, ...]:
+        """The finished work of what this activation took over or waited on (§7:10, §7:27).
+
+        Each read fresh through the peer view from that activation's own episode, so
+        what an absorbed activation had taken in reaches the reader from its source.
+        """
+        matters = self._matters
+        if matters is None or state is None:
+            return ()
+        shown: list[PeerShown] = []
+        for activation_id in dict.fromkeys((*state.merged, *working.waited)):
+            view = await matters.peer(activation_id, owner_records=working.owner_records)
+            running = matters.state_of(activation_id)
+            shown.append(
+                PeerShown(
+                    activation_id=activation_id,
+                    view=view,
+                    ended=running is None or running.stopped,
+                )
+            )
+        return tuple(shown)
+
+    def _running_calls(
+        self, state: ActivationState | None, working: PhaseWorking, *, offers: bool
+    ) -> frozenset[str]:
+        """Which calls on running work this round is offered (§4:6, §6:1, §7:20).
+
+        The stop call where the input carries the user's authority, and the look-up,
+        each to an activation whose author its place establishes, the one viewer running
+        work is shown to; the answer call where an offer is open to it.
+        """
+        standing = None if state is None else state.standing
+        if standing is None or standing.author is None:
+            return frozenset()
+        names = {LOOK_UP_ACTIVATION_CAPABILITY}
+        if working.users_authority:
+            names.add(STOP_ACTIVATION_CAPABILITY)
+        if offers:
+            names.add(ANSWER_OFFER_CAPABILITY)
+        return frozenset(names)
 
     async def _person(self, working: PhaseWorking) -> PersonBlock | None:
         """The activation's person block for this round, less what memory no longer holds.
@@ -3506,7 +3794,12 @@ class PhasePath:
             )
 
     async def _offered(
-        self, *, person: bool = True, scheduling: bool = False
+        self,
+        *,
+        person: bool = True,
+        scheduling: bool = False,
+        running: frozenset[str] = frozenset(),
+        only: frozenset[str] | None = None,
     ) -> tuple[ToolDefinition, ...]:
         """The declarations this round offers planning (ADR-0306 §2:7), the clock apart.
 
@@ -3516,6 +3809,10 @@ class PhasePath:
         The person model's calls are offered where they are attached, a fixed list or
         none, and only to a round of an activation given a person block (``person``): an
         activation that is no person's has no profile or pins to change (ADR-0338 §2:3).
+
+        Of the calls on running work, only those in ``running`` are offered (ADR-0349
+        §4:6, §6:1, §7:20); and a waiting round is offered only what ``only`` names
+        (§7:26).
         """
         names = (
             await self._tools.capabilities() if self._capabilities is None else self._capabilities
@@ -3529,6 +3826,13 @@ class PhasePath:
             names = (*names, *sorted(TASK_SCHEDULER_CAPABILITIES - set(names)))
             if not scheduling:
                 names = tuple(name for name in names if name not in TASK_SCHEDULER_CAPABILITIES)
+        if self._matters is not None:
+            names = (*names, *sorted(MATTER_CAPABILITIES - set(names)))
+            names = tuple(
+                name for name in names if name not in MATTER_CAPABILITIES or name in running
+            )
+        if only is not None:
+            names = tuple(name for name in names if name in only)
         return await self._tools.offered([name for name in names if name not in _NOT_OFFERED])
 
     async def _worded(self, working: PhaseWorking) -> tuple[CallOutcome, ...]:
@@ -3887,27 +4191,24 @@ class PhasePath:
             raise RuntimeError(msg)
         step = working.step(self._now(), self._wait(given))
         try:
-            # ADR-0332 §3:18: a join taken whose marking has not landed is waited for,
-            # so the reader's bookkeeping holds what joined before anything acts on it.
-            # The wait is inside the pass's deadline (§3:14: a join does not extend
-            # it), and the deadline is read again after it with no await before the
-            # commitment step: a wait that crosses it dispatches nothing, and acting
-            # fails with its classified expiry (ADR-0280 §5).
             state = active_state()
-            if state is not None:
-                try:
-                    async with asyncio.timeout_at(given.deadline):
-                        await state.settled()
-                except TimeoutError:
-                    raise ModelTimeoutError(_ACTING_EXPIRED) from None
-            if given.deadline <= asyncio.get_running_loop().time():
-                raise ModelTimeoutError(_ACTING_EXPIRED)
-            # ADR-0332 §3:5-§3:7: the commitment step, before anything of the round is
-            # dispatched, in one synchronous step with no await before the dispatch.
-            withheld = _commitment(latest, decided)
-            if withheld is not None:
-                latest.acted = withheld
-                return
+            if state is not None and _commits(latest, decided):
+                # ADR-0349 §7:12-§7:13: before anything of the round that is not a pure
+                # read is dispatched, wait for each newer input that could absorb this
+                # activation or offer to it, inside the pass's deadline; a wait that
+                # reaches it dispatches nothing, and acting fails with its classified
+                # expiry (ADR-0280 §5:1).
+                if self._matters is not None and not await self._matters.before_act(
+                    state, given.deadline
+                ):
+                    raise ModelTimeoutError(_ACTING_EXPIRED)
+                if given.deadline <= asyncio.get_running_loop().time():
+                    raise ModelTimeoutError(_ACTING_EXPIRED)
+                # §7:14: the commitment step, with no await before the dispatch.
+                withheld = _commitment(state, latest, decided)
+                if withheld is not None:
+                    latest.acted = withheld
+                    return
             ran, wrote = await asyncio.gather(
                 self._calls(given, working, decided),
                 self._message(working, latest),
@@ -3955,12 +4256,16 @@ class PhasePath:
         if not rest:
             return ActedRound(round_id=decided.round_id)
         authorized = authorized_round(replace(decided, allowed=rest))
+        caller = self._caller(working)
         with (
             spawning(self._spawner(given, working)),
+            calling(caller),
             self._tools.holding(working.supplied, working.attributions),
         ):
             if self._look_ups is None:
-                return await self._acting.act(authorized, held=working.held)
+                acted = await self._acting.act(authorized, held=working.held)
+                self._peers(working, acted, caller)
+                return acted
             with self._look_ups.scope(
                 audience=given.supply, owner_records=working.owner_records
             ) as scope:
@@ -3973,7 +4278,38 @@ class PhasePath:
                         _story_records(PlanningStories(stories=tuple(scope.views.values())))
                     )
         self._pages(working, acted, scope.views)
+        self._peers(working, acted, caller)
         return acted
+
+    def _caller(self, working: PhaseWorking) -> MatterCaller | None:
+        """Who calls on running work in this round, read from the working set (§4:6)."""
+        state = active_state()
+        if self._matters is None or state is None:
+            return None
+        latest = working.latest
+        return MatterCaller(
+            state=state,
+            users_authority=working.users_authority,
+            owner_records=working.owner_records,
+            running=working.running_shown(),
+            waiting=frozenset(state.waits_on) if latest.waiting else None,
+        )
+
+    @staticmethod
+    def _peers(working: PhaseWorking, acted: ActedRound, caller: MatterCaller | None) -> None:
+        """Hold what each call on running work came back with, by its outcome (§4:11).
+
+        A done call's under its result's id, and a refused stop's naming its absorber
+        under its decision's id (§4:9).
+        """
+        if caller is None or not caller.shown:
+            return
+        for one in acted.calls:
+            shown = caller.shown.get(one.call.call.decision.id)
+            if shown is None:
+                continue
+            key = one.result_id if one.result_id is not None else one.call.call.decision.id
+            working.peers[key] = shown
 
     @staticmethod
     def _spawner(given: PhasePass, working: PhaseWorking) -> Spawner | None:

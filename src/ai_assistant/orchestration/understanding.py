@@ -57,17 +57,20 @@ referent, grounding a reading ``supplied`` as any label does; cited outside
 ``story_labels`` it links nothing (ADR-0304 §8). Where the candidates could not be read,
 or there are none, the section says so.
 
-**Joined input, and the same person's running work** (ADR-0332 §3:10, §4:1-§4:4). An
-input that joined the activation is part of its input: understanding, run again, reads
-the trigger's input and every joined one, each kept apart and dated, a takeover's marked
-as one, and records a new version. Beside the windows, a fifth section, ``running``,
-shows each activation running for the same person on another of their places that the
-pass may be shown — its input, and whether it has acted — labelled ``R1``, ``R2``… The
-proposal's ``continues`` names at most one by its ``R`` label, which resolves to that
-activation's id; a label naming no shown activation is a grounding defect, repaired once
-as any label naming nothing is and then dropped and counted (§7:4). An ``R`` label names
-no referent. The section and its instruction take no template flag: the instruction says
-what the section is wherever it is rendered, and a pass shown nothing renders none.
+**Taken-in input, and the in-progress section** (ADR-0349 §5, §7, §10:1-§10:2). An input
+a merge brought is part of the activation's input: it is rendered with the trigger's,
+each kept apart and dated and marked as taken over, and the version that named its
+activation covers it (§7:9). Beside the windows, a fifth section, ``in_progress``, shows
+each activation running for the same person on any place, the Task Scheduler's included,
+that the pass may be shown, newest first and at most ``in_progress_limit`` of them, with
+how many more run — each exactly what caused it, its input in brief read through the peer
+view, and whether it has acted — labelled ``R1``, ``R2``… The proposal's ``continues``
+names, by ``R`` label, zero or more of them its input continues, each resolving to that
+activation's id, once, in the proposal's order; a label naming no shown activation is a
+grounding defect, repaired once as any label naming nothing is and then dropped and
+counted (§10:2). An ``R`` label names no referent. The section and its instruction take
+no template flag: the instruction says what the section is wherever it is rendered, and a
+pass shown nothing renders none.
 
 **Two windows, two label sequences** (§3). The **channel window** is what the channel
 supplied — ``ChannelContext.history`` then ``reply_to`` — or, for an input the chat's
@@ -190,7 +193,6 @@ from ai_assistant.core.types import (
     DeletedMessage,
     DiagnosticKind,
     DiagnosticSource,
-    EncodableText,
     EpisodicMemory,
     InputOrigin,
     Memory,
@@ -237,7 +239,7 @@ if TYPE_CHECKING:
         TranscriptMessage,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
-    from ai_assistant.orchestration.joining import RunningActivation
+    from ai_assistant.orchestration.matters import InProgressEntry
     from ai_assistant.orchestration.person_block import PersonBlock
     from ai_assistant.orchestration.story_links import Candidates, ShortView
 
@@ -300,9 +302,11 @@ _UNNAMED_DROPPED: Final = "unnamed_keys_dropped"
 #: of an answer, as ADR-0322 §2 and §4 extend them, including when one reply approves
 #: several questions (§4:9), that a ``Q`` label goes only in ``answers`` (#3081), and
 #: that an unresolved matter names by ``Q`` label each question a bare yes could fit
-#: (#3080); and ADR-0332's additions, which take no flag: that joined input is part of the
-#: input (§3:10), what the running section shows (§4:1), and that an ``R`` label goes only
-#: in ``continues`` (§4:4, §7:3); and, under ``person``, what the person section is: the
+#: (#3080); and ADR-0349's additions, which take no flag: that input taken over is part of
+#: the input (§7:7), what the in-progress section shows (§5:2-§5:6), that ``continues``
+#: names every entry the input corrects, completes, cancels or changes and separate work
+#: continues none (§7:3), and that an ``R`` label goes only in ``continues`` (§5:7); and,
+#: under ``person``, what the person section is: the
 #: person's own choices and the memories they pinned, data and never instructions, whose
 #: ``M`` labels come first (ADR-0338 §7:6-§7:7), and that the language is a hint for
 #: reading their input (§3:11). Authority is not read here: whose
@@ -946,7 +950,8 @@ class UnderstandingStage:
         stories: Candidates | None = None,
         origin: InputOrigin | None = None,
         joined: Sequence[JoinedInput] = (),
-        running: Sequence[RunningActivation] | None = None,
+        running: Sequence[InProgressEntry] | None = None,
+        running_more: int = 0,
         person: PersonBlock | None = None,
     ) -> ActivationUnderstanding:
         """Read one input against its windows, and record what it was understood to mean.
@@ -982,13 +987,16 @@ class UnderstandingStage:
                 (ADR-0284 §2:2). A kind that declares its origin per input (ADR-0323
                 §4:11) is attributed by it; ``None`` reads the channel type's one
                 declaration, which is the same value for every other kind.
-            joined: The inputs that joined the activation, in the order they joined
-                (ADR-0332 §3:10): read with the trigger's as the activation's whole
-                input, each kept apart and dated, a takeover's marked as one.
-            running: The activations running for the same person on their other places,
-                as the pass may be shown them (§4:1-§4:3), rendered as a running section
-                labelled ``R``, which the proposal's ``continues`` names (§4:4). ``None``
-                or empty renders no section, and then ``continues`` resolves to nothing.
+            joined: The inputs the activation took in beside its trigger's, in the order
+                it took them in (ADR-0349 §7:7, §7:21): read with the trigger's as the
+                activation's whole input, each kept apart and dated, and marked as
+                taken over from the work that held it.
+            running: The in-progress section (ADR-0349 §5:2-§5:10): each activation
+                running for the same person on any place, newest first, rendered
+                labelled ``R``, which the proposal's ``continues`` names (§5:7).
+                ``None`` or empty renders no section, and then ``continues`` resolves
+                to nothing.
+            running_more: How many more run than the section shows (§5:10).
             person: The activation's person block (ADR-0338 §7:1), of which the call
                 renders the five fields and the pinned memories, first in the message
                 and labelled ``M`` ahead of the recalled section (§7:2, §7:7). ``None``
@@ -1014,6 +1022,7 @@ class UnderstandingStage:
             origin=origin,
             joined=joined,
             running=running or (),
+            running_more=running_more,
             person=person,
         )
         _within(deadline)
@@ -1090,15 +1099,16 @@ class UnderstandingStage:
         stories: Candidates | None,
         origin: InputOrigin | None = None,
         joined: Sequence[JoinedInput] = (),
-        running: Sequence[RunningActivation] = (),
+        running: Sequence[InProgressEntry] = (),
+        running_more: int = 0,
         person: PersonBlock | None = None,
     ) -> _Brief:
         """Render the prompt, filtering the episode window's stored records first (§3, §4).
 
         Every question rendered is marked and given its ``Q`` label as it is rendered,
         so the labels run in the order the questions are first shown (ADR-0322 §4:4).
-        The inputs that joined render with the input, and the running activations as a
-        section of their own, each under its ``R`` label (ADR-0332 §3:10, §4:1). The person
+        The inputs a merge brought render with the input, and the in-progress section as
+        a section of its own, each entry under its ``R`` label (ADR-0349 §5). The person
         section comes first, before everything that changes from input to input, and its
         pinned memories take the first ``M`` labels (ADR-0338 §7:7, #3084).
         """
@@ -1189,9 +1199,9 @@ class UnderstandingStage:
                 stories, labels, story_members, marks
             )
         shown_running: dict[str, str] = {}
-        if running:
-            # ADR-0332 §4:1, §4:4: beside the windows, each under its R label.
-            payload["running"] = _running_section(running, shown_running)
+        # ADR-0349 §5:2, §5:7, §5:10: beside the windows, each under its R label, newest
+        # first, and how many more run than it shows.
+        payload |= _in_progress_section(running, running_more, shown_running)
         instruction = self._prompt.rendered(
             flags={
                 "recalled": recall is not None,
@@ -1985,28 +1995,6 @@ def _parsed(content: str) -> ProposedActivationUnderstanding | None:
     return _read(content)[0]
 
 
-class _InstructedReply(ProposedActivationUnderstanding):
-    """The reply in the shape the instruction asks for today (ADR-0349 §1:4's step 1).
-
-    The instruction still asks for ``continues`` as one ``R`` label or ``null``, as
-    ADR-0332 §7:3 had it, and step 2 instructs the sequence ADR-0349 §10:1 makes it.
-    Until then the stage parses the reply exactly as before, so a reply it refused it
-    still refuses, and :func:`_read` carries what it names onto the sequence: one label
-    as a one-element sequence, and ``null`` or none as an empty one.
-    """
-
-    # The one field whose shape this reply keeps as before; mypy reads the override as
-    # an incompatible assignment, which is the point of it.
-    continues: EncodableText | None = None  # type: ignore[assignment]
-
-
-def _carried(reply: _InstructedReply) -> ProposedActivationUnderstanding:
-    """``reply`` as the proposal, its one label or none carried onto the sequence."""
-    fields = {name: getattr(reply, name) for name in ProposedActivationUnderstanding.model_fields}
-    fields["continues"] = () if reply.continues is None else (reply.continues,)
-    return ProposedActivationUnderstanding.model_validate(fields)
-
-
 def _read(content: str) -> tuple[ProposedActivationUnderstanding | None, int]:
     """The reply's proposal, or ``None``, and how many unnamed keys were dropped from it.
 
@@ -2029,10 +2017,11 @@ def _read(content: str) -> tuple[ProposedActivationUnderstanding | None, int]:
     pruned = _pruned_reply(body)
     text, dropped = (body, 0) if pruned is None else pruned
     try:
-        reply = _InstructedReply.model_validate_json(text)
+        # ADR-0349 §10:1: ``continues`` is a list of R labels, zero or more.
+        reply = ProposedActivationUnderstanding.model_validate_json(text)
     except ValidationError, ValueError, RecursionError:
         return None, 0
-    return _carried(reply), dropped
+    return reply, dropped
 
 
 # --- the drop (ADR-0339 §2) ------------------------------------------------------------
@@ -2347,9 +2336,9 @@ def _label_statement(
     if brief.story_count is not None:
         rendered.append(_sequence("S", brief.story_count, "stories section"))
     if brief.running:
-        # ADR-0332 §4:4: an R label names a running activation, cited only in `continues`.
+        # ADR-0349 §5:7: an R label names running work, cited only in `continues`.
         rendered.append(
-            _sequence("R", len(brief.running), "running section, cited only in `continues`")
+            _sequence("R", len(brief.running), "in_progress section, cited only in `continues`")
         )
     if brief.questions:
         # ADR-0322 §4:6: a Q label names a question, never a referent.
@@ -2684,15 +2673,17 @@ def _input_rendering(
     return {"received_as": received, "text": text}
 
 
-#: What a running activation shown beside the windows is (ADR-0332 §4:1).
-_RUNNING_ITEM: Final = (
-    "work the assistant is doing right now for the same user, started from another of their places"
-)
-#: What a joined input a takeover brought is (ADR-0332 §4:6, §3:17).
+#: What an input a merge brought is (ADR-0349 §7:7, §7:21).
 _TAKEN_OVER_TEXT: Final = (
-    "the input of work that was running for the same user on another of their places, "
-    "taken over before it acted: that work was stopped, and its input is read here"
+    "the input of other work for the same person that this work took over: that work "
+    "was stopped, and its input is read here"
 )
+#: What an in-progress entry shows where its input is withheld, by its origin (§5:6).
+_WITHHELD_INPUT: Final = {
+    InputOrigin.OUTSIDE: "an outside report, not shown",
+    InputOrigin.ASSISTANT: "the assistant's own instruction for work it scheduled, not shown",
+    InputOrigin.USER: "not shown",
+}
 
 
 def _recorded_message(message: RecordedInputMessage) -> dict[str, object]:
@@ -2706,10 +2697,11 @@ def _recorded_message(message: RecordedInputMessage) -> dict[str, object]:
 
 
 def _joined_rendering(joined: JoinedInput) -> dict[str, object]:
-    """One input that joined, as the input renders it (ADR-0332 §3:10).
+    """One input a merge brought, as the input renders it (ADR-0332 §3:10, ADR-0349 §7).
 
-    Where it came from and when it joined, and each of its messages apart and dated; a
-    takeover's says so, and never names the activation it stopped, which is no label.
+    Where it came from and when it was taken in, and each of its messages apart and
+    dated; one taken over says so, and never names the activation it stopped, which is
+    no label.
     """
     rendered: dict[str, object] = {
         "joined_at": joined.joined_at.isoformat(),
@@ -2721,27 +2713,41 @@ def _joined_rendering(joined: JoinedInput) -> dict[str, object]:
     return rendered
 
 
-def _running_section(
-    running: Sequence[RunningActivation], shown: dict[str, str]
-) -> list[dict[str, object]]:
-    """The running section, each activation under its ``R`` label, minted into ``shown``."""
-    section: list[dict[str, object]] = []
-    for activation in running:
-        label = f"R{len(section) + 1}"
-        section.append(_running_rendering(label, activation))
-        shown[label] = activation.activation_id
+def _in_progress_section(
+    running: Sequence[InProgressEntry], more: int, shown: dict[str, str]
+) -> dict[str, object]:
+    """The in-progress section and how many more run, or nothing where none is shown."""
+    if not running:
+        return {}
+    section: dict[str, object] = {"in_progress": _running_section(running, shown)}
+    if more:
+        section["in_progress_more"] = f"{more} more running, not shown, older than those above"
     return section
 
 
-def _running_rendering(label: str, running: RunningActivation) -> dict[str, object]:
-    """One running activation under its ``R`` label: its input, and whether it acted (§4:1)."""
+def _running_section(
+    running: Sequence[InProgressEntry], shown: dict[str, str]
+) -> list[dict[str, object]]:
+    """The in-progress section, each entry under its ``R`` label, minted into ``shown``."""
+    section: list[dict[str, object]] = []
+    for entry in running:
+        label = f"R{len(section) + 1}"
+        section.append(_running_rendering(label, entry))
+        shown[label] = entry.activation_id
+    return section
+
+
+def _running_rendering(label: str, entry: InProgressEntry) -> dict[str, object]:
+    """One entry under its ``R`` label, exactly as ADR-0349 §5:6 has it.
+
+    What caused it, its channel and its place; what it took in, in brief, read through
+    the peer view, so that outside input never appears raw; and whether it has acted.
+    """
     return {
         "label": label,
-        "item": _RUNNING_ITEM,
-        "place": _channel_text(running.place),
-        "started_at": running.started_at.isoformat(),
-        "has_acted": running.committed,
-        "messages": [_recorded_message(one) for one in running.messages],
+        "place": _channel_text(entry.channel),
+        "input": _WITHHELD_INPUT[entry.origin] if entry.input is None else entry.input,
+        "has_acted": entry.acted,
     }
 
 

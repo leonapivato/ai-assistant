@@ -1,45 +1,39 @@
-"""The hub chat's reader on its own: joining, the start wait and composing (ADR-0332).
+"""The hub chat's reader on its own: the start wait, composing, and holding (ADR-0332).
 
 Driven over the canonical conversation store with a stand-in for the engine's
-activation and for its join, and on a clock the case moves, so each case reads what
-the reader took in, what it handed the join, and how long it waited.
+activation, and on a clock the case moves, so each case reads what the reader took in
+and how long it waited.
 
 - Where nothing is running, the reader takes a conversation's waiting messages in once
   ``chat_start_wait`` has passed since the latest of them and no composing signal is
   live, and no later than ``chat_composing_cap`` after the first (§5:1-§5:2).
 - A composing signal stays live for ``chat_composing_lapse``, and only extends a start
   wait already running (§5:6-§5:8).
-- While an activation runs, a message noticed joins it where the join takes it, and is
-  marked taken in by the activation it joined (§3:3, §3:18); one that does not join
-  waits, and nothing after it joins (§3:3's fourth condition, §3:4).
+- While an activation runs, no message joins it by code (ADR-0349 §1:4's step 2): one
+  noticed waits, and everything waiting is taken in together once it ends, until the
+  readers' own step retires the holding (ADR-0349 §8).
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
-from ai_assistant.core.errors import ConversationStoreError
 from ai_assistant.core.types import (
     ChatDevice,
     DeviceAccess,
-    InputOrigin,
     MessageAuthor,
     NewMessage,
     TranscriptMessage,
 )
 from ai_assistant.orchestration.chat import ChatInput, ChatReader
-from ai_assistant.orchestration.conversations import conversation_channel
-from ai_assistant.orchestration.joining import THE_USER, JoinCheck
 from ai_assistant.testing import FakeConversationStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable, Sequence
-
-    from ai_assistant.orchestration.joining import JoiningInput, PendingJoin
+    from collections.abc import Callable, Coroutine
 
 #: How long a case waits for the reader before it fails rather than hangs.
 _SETTLE: Final = 5.0
@@ -85,20 +79,6 @@ class _Clock:
             await asyncio.sleep(0)
 
 
-class _Pending:
-    """A stand-in for a join taken pending its marking, recording what confirms it."""
-
-    def __init__(self, activation_id: str, confirmed: list[tuple[int, ...]]) -> None:
-        self.activation_id = activation_id
-        self._confirmed = confirmed
-
-    def confirm(self, positions: Iterable[int | None]) -> None:
-        self._confirmed.append(tuple(sorted(one for one in positions if one is not None)))
-
-    def withdraw(self) -> None:
-        self._confirmed.append(())
-
-
 class _Reader:
     """A chat reader over a fake store, its activation and its join stand-ins."""
 
@@ -114,13 +94,6 @@ class _Reader:
         self.taken_at: list[float] = []
         self.gate: asyncio.Event | None = None
         self.entered = asyncio.Event()
-        # What the join was handed and took pending its marking (`joins`), and the
-        # positions each was then confirmed with (`confirmed`): it takes what `answer`
-        # names, and answers *not yet* the first `not_yet` times.
-        self.joins: list[JoiningInput] = []
-        self.confirmed: list[tuple[int, ...]] = []
-        self.answer: str | None = None
-        self.not_yet = 0
         self.tasks: list[asyncio.Task[None]] = []
         self.closing = False
         self._ids = iter(f"act-{n}" for n in range(1, 100))
@@ -131,7 +104,6 @@ class _Reader:
             spawn=self._spawn,
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
-            join=self._join,
             start_wait=start_wait,
             composing_lapse=_LAPSE,
             composing_cap=_CAP,
@@ -141,15 +113,6 @@ class _Reader:
 
     def _spawn(self, read: Coroutine[None, None, None]) -> None:
         self.tasks.append(asyncio.ensure_future(read))
-
-    def _join(self, joining: JoiningInput) -> tuple[JoinCheck, PendingJoin | None]:
-        if self.not_yet:
-            self.not_yet -= 1
-            return JoinCheck.NOT_YET, None
-        if self.answer is None:
-            return JoinCheck.REFUSED, None
-        self.joins.append(joining)
-        return JoinCheck.JOINABLE, cast("PendingJoin", _Pending(self.answer, self.confirmed))
 
     async def _activate(self, taken: ChatInput) -> bool:
         self.inputs.append(taken)
@@ -338,7 +301,7 @@ def test_the_waits_are_held_to_their_bounds() -> None:
     build(_START, _LAPSE, _LAPSE)
 
 
-# --- joining (§3:3, §3:18) ---------------------------------------------------------------
+# --- holding behind running work (ADR-0332 §2:4, until ADR-0349 §1:4's step 3) ----------
 
 
 async def _running(chat: _Reader) -> str:
@@ -351,50 +314,16 @@ async def _running(chat: _Reader) -> str:
     return conversation
 
 
-async def test_a_message_written_while_one_runs_joins_it_and_is_marked_taken_in_by_it() -> None:
-    """§3:3, §3:18: handed to the join at once, with no start wait, and marked by it."""
+async def test_a_message_written_while_one_runs_waits_and_is_taken_in_after() -> None:
+    """ADR-0349 §1:4's step 2: nothing joins by code; what waits is taken in together."""
     chat = _Reader()
     conversation = await _running(chat)
-    chat.answer = "act-1"
-    slept = list(chat.clock.slept)
-
-    position = await chat.say(conversation, "actually Saturday")
-    await chat.until(lambda: bool(chat.joins), what="the join was asked")
-    await chat.marked(conversation, position)
-    assert await chat.store.taken_in(conversation, positions=[position]) == {position: "act-1"}, (
-        "marked taken in by the activation it joined"
-    )
-    await chat.until(lambda: chat.confirmed == [(position,)], what="the join was confirmed")
-    assert chat.clock.slept == slept, "a message while one runs waits for nothing (§5:5)"
-
-    (joining,) = chat.joins
-    assert joining.channel == conversation_channel(conversation)
-    assert [(one.text, one.position) for one in joining.messages] == [
-        ("actually Saturday", position)
-    ]
-    assert (joining.standing.author, joining.standing.users_authority) == (THE_USER, True)
-    assert joining.standing.origin is InputOrigin.USER
-
-    assert chat.gate is not None
-    chat.gate.set()
-    await chat.idle()
-    assert len(chat.inputs) == 1, "a joined message is never taken in again"
-
-
-async def test_a_message_that_does_not_join_waits_and_nothing_joins_past_it() -> None:
-    """§3:3's fourth condition, §3:4: once one waits, what follows waits with it."""
-    chat = _Reader()
-    conversation = await _running(chat)
-    await chat.say(conversation, "actually Saturday")
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert chat.joins == [], "refused: it waits"
-
-    chat.answer = "act-1"
+    first = await chat.say(conversation, "actually Saturday")
     await chat.say(conversation, "and at seven")
     for _ in range(20):
         await asyncio.sleep(0.001)
-    assert chat.joins == [], "nothing is handed to the join past what waits"
+    assert await chat.store.taken_in(conversation, positions=[first]) == {}, "it waits"
+    assert len(chat.inputs) == 1
 
     assert chat.gate is not None
     chat.gate.set()
@@ -404,94 +333,6 @@ async def test_a_message_that_does_not_join_waits_and_nothing_joins_past_it() ->
     assert chat.clock.slept == [_START.total_seconds()], (
         "taken in at once when the activation ended, with no second start wait"
     )
-
-
-class _MarkingFails(FakeConversationStore):
-    """A store whose second marking, the join's after the admission's, fails."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.marks = 0
-
-    async def take_in(
-        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
-    ) -> tuple[int, ...]:
-        self.marks += 1
-        if self.marks == 2:
-            msg = "the store is busy"
-            raise ConversationStoreError(msg)
-        return await super().take_in(
-            conversation_id, positions=positions, activation_id=activation_id
-        )
-
-
-async def test_a_join_whose_marking_failed_joins_nothing_and_is_taken_in_after() -> None:
-    """§3:18: the marking comes first, so a refused one leaves the message waiting."""
-    store = _MarkingFails()
-    chat = _Reader(store=store)
-    conversation = await _running(chat)
-    chat.answer = "act-1"
-    position = await chat.say(conversation, "actually Saturday")
-    await chat.until(lambda: store.marks >= 2, what="the join's marking was tried")
-    await chat.until(lambda: bool(chat.confirmed), what="the join was settled")
-    assert chat.confirmed == [()], "nothing the store does not hold taken in is joined"
-
-    assert chat.gate is not None
-    chat.gate.set()
-    await chat.until(lambda: len(chat.inputs) == 2, what="the message was taken in after")
-    await chat.idle()
-
-    assert _texts(chat.inputs[1]) == ["actually Saturday"]
-    assert await store.taken_in(conversation, positions=[position]) == {position: "act-2"}
-
-
-class _DeletedMidRead(FakeConversationStore):
-    """A store that deletes a message right after it read the waiting ones, once."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.delete: int | None = None
-
-    async def untaken_messages(
-        self, conversation_id: str, *, limit: int = 100
-    ) -> tuple[TranscriptMessage, ...]:
-        found = await super().untaken_messages(conversation_id, limit=limit)
-        if self.delete is not None and any(one.position == self.delete for one in found):
-            await self.delete_message(conversation_id, self.delete)
-            self.delete = None
-        return found
-
-
-async def test_a_message_deleted_while_the_join_read_it_joins_nothing() -> None:
-    """§3:18: only what the store marked joins; a deleted message never reaches planning."""
-    store = _DeletedMidRead()
-    chat = _Reader(store=store)
-    conversation = await _running(chat)
-    chat.answer = "act-1"
-    store.delete = 2
-    await chat.say(conversation, "cancel the order")
-    await chat.until(lambda: bool(chat.confirmed), what="the join was settled")
-    assert chat.confirmed == [()], "nothing marked, so nothing joined"
-
-    assert chat.gate is not None
-    chat.gate.set()
-    await chat.idle()
-    assert len(chat.inputs) == 1
-
-
-async def test_a_message_noticed_before_the_pass_begins_joins_once_it_has() -> None:
-    """§3:3: where the activation's standing is not yet set, the join is asked again."""
-    chat = _Reader()
-    conversation = await _running(chat)
-    chat.answer = "act-1"
-    chat.not_yet = 2
-    await chat.say(conversation, "for Saturday")
-    await chat.until(lambda: bool(chat.joins), what="the join, once the pass began")
-
-    assert chat.gate is not None
-    chat.gate.set()
-    await chat.idle()
-    assert len(chat.inputs) == 1, "it joined, rather than waiting for the end"
 
 
 class _HeldQuery(FakeConversationStore):

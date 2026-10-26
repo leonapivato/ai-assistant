@@ -131,6 +131,10 @@ def test_the_ten_prompts_carry_their_flags_and_values() -> None:
             "suggestions",
             "spawn",
             "scheduled",
+            "running_work",
+            "offers",
+            "waiting",
+            "earlier_work",
         }
     )
     assert PLANNING_PROMPT.values == frozenset(

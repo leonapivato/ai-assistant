@@ -61,22 +61,17 @@ if TYPE_CHECKING:
         ReplyCapability,
         StageEntry,
     )
-    from ai_assistant.orchestration.joining import InputStanding
+    from ai_assistant.orchestration.matters import InputStanding, Named, Offer
     from ai_assistant.orchestration.person_block import PersonBlock
 
 _log = structlog.get_logger(__name__)
 
 
 class Commitment(StrEnum):
-    """What acting's commitment step found before a round's first act (ADR-0332 §3:5)."""
+    """What acting's commitment step found before a round's act (ADR-0349 §7:14)."""
 
     COMMITTED = "committed"
-    """No joined input is left uncovered: the activation is committed, and the round
-    runs."""
-
-    SET_ASIDE = "set_aside"
-    """A join brought input the understanding the round was planned from does not cover:
-    the round runs nothing, by any path (§3:7)."""
+    """The activation is committed, if it was not already, and the round runs."""
 
     STOPPED = "stopped"
     """The stop mark is set: the round runs nothing, and the pass ends on the stop
@@ -205,30 +200,55 @@ class ActivationState:
     #: controller reads it before each evaluation of the rules and once each stage's
     #: result is in hand (§4), and a resume reads it before it composes.
     stopped: bool = field(default=False, init=False)
-    #: ADR-0332 §3:2: the committed mark, set by acting's commitment step (:meth:`commit`)
-    #: before its first call that is not a pure read, or the round's message, and by a
-    #: takeover of this activation (§4:6); never cleared. Once set, no join is taken.
+    #: ADR-0332 §3:2, ADR-0349 §3:5: the committed mark, set by acting's commitment step
+    #: (:meth:`commit`) before its first call that is not a pure read, or the round's
+    #: message, and by an absorption or a take of this activation (§7:7, §7:21); never
+    #: cleared. Once set, nothing absorbs it.
     committed: bool = field(default=False, init=False)
-    #: ADR-0332 §3:16-§3:17: the inputs that joined, in the order they joined, a
-    #: takeover's among them; recorded on the episode's ``joined``.
+    #: ADR-0349 §7:7, §7:21: the inputs it took in beside its trigger's, in the order it
+    #: took them in, each naming the activation it was absorbed from or whose offered
+    #: input it took; recorded on the episode's ``joined``.
     joined: tuple[JoinedInput, ...] = field(default=(), init=False)
-    #: ADR-0332 §3:6, §3:18: joins taken, in one step with their check, whose reader's
-    #: marking of their messages has not yet landed (:meth:`reserve`). Counted toward
-    #: ``join_limit``, they hold every route out of running (:meth:`settled`), and are no
-    #: part of the input, so no stage reads and no episode records them, until the
-    #: marking lands and confirms them, or fails and withdraws them.
-    _pending: list[JoinedInput] = field(default_factory=list, init=False, repr=False)
-    _settled: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
-    #: ADR-0332 §3:3: who wrote the trigger's input, as its place establishes it, and what
-    #: it carries; set when the pass begins, on a place that runs one activation at a
-    #: time. ``None`` until then, and on every other activation: nothing joins it, and it
-    #: neither sees nor is seen by another place's (§4:1-§4:3).
+    #: How many of :attr:`joined` a merge brought, each covered by the understanding
+    #: version that named it or the meaning its offer carried (§7:9).
+    merge_covered: int = field(default=0, init=False)
+    #: The order the engine admitted it in, by which "started before" is read (§7:5).
+    order: int = field(default=0, init=False)
+    #: ADR-0349 §7:5: who wrote the trigger's input, as its place establishes it, and what
+    #: it carries; set when the pass begins. ``None`` until then, and on an activation
+    #: whose kind establishes no author: it shares nothing (§5:3-§5:5).
     standing: InputStanding | None = None
     #: The trigger's messages, each kept apart and dated, as the pass took them in: what
-    #: §4:1 shows of its input and what a takeover brings (§4:6). The line records the
-    #: same on its trigger (ADR-0323 §5:4); the hub chat's trigger records none, so its
+    #: an absorption or a take brings (ADR-0349 §7:7, §7:21). The line records the same
+    #: on its trigger (ADR-0323 §5:4); the hub chat's trigger records none, so its
     #: messages are held here.
     input_messages: tuple[RecordedInputMessage, ...] = ()
+    #: ADR-0349 §7:7: the activation that absorbed this one, where one did.
+    absorbed_by: str | None = field(default=None, init=False)
+    #: §7:21: the older activation that took this one's offered input, where one did.
+    handed_to: str | None = field(default=None, init=False)
+    #: §7:10: each activation it absorbed or whose offered input it took, and in turn each
+    #: one those had, in the order they were taken in: whose findings planning is shown.
+    merged: tuple[str, ...] = field(default=(), init=False)
+    #: §7:25: each activation it waits on, reached under §7:17, in the order reached.
+    waits_on: tuple[str, ...] = field(default=(), init=False)
+    #: §7:20-§7:23: the older activation its own open offer is made to, while it is open.
+    offered_to: str | None = field(default=None, init=False)
+    #: §7:23: each decline of its offer, by the older that declined, with the reason.
+    declined: tuple[tuple[str, str], ...] = field(default=(), init=False)
+    #: §7:19: the offers open to this activation, by the offering activation, in the
+    #: order they were made.
+    offers: dict[str, Offer] = field(default_factory=dict, init=False, repr=False)
+    #: §7:22: the offers ever made to it that it did not take, open, declined or
+    #: withdrawn, each counted toward ``held_input_limit`` from when it was made.
+    offers_untaken: int = field(default=0, init=False)
+    #: ADR-0349 §10:4: the takeover decision for each understanding version that named an
+    #: activation in ``continues``: each one named and what became of it. The working
+    #: set's, never persisted.
+    takeovers: dict[int, list[Named]] = field(default_factory=dict, init=False, repr=False)
+    #: §10:4's last sentence: each take this activation made of an offer, recorded in its
+    #: decisions too.
+    took: list[Named] = field(default_factory=list, init=False, repr=False)
     #: ADR-0338 §7:1: the activation's person block, assembled once, before understanding,
     #: and read by every planning round, which writes back what §7:10 drops from it.
     #: ``None`` for an activation that is no person's, before assembly, or where no
@@ -289,152 +309,41 @@ class ActivationState:
     def place(self) -> ChannelIdentity | None:
         """The place the activation was started from, where its target names one.
 
-        The hub chat's conversation, the line's chat, an event's channel: what a join
-        on that place finds it by (ADR-0332 §3:3), and what §4:1 compares.
+        The hub chat's conversation, the line's chat, an event's channel, the schedule:
+        what caused it, and nothing more (ADR-0349 §2:1).
         """
         target = self.trigger.target
         return target if isinstance(target, ChannelIdentity) else None
 
     @property
     def inputs_held(self) -> int:
-        """How many inputs the activation holds: its trigger's, and each joined (§3:9)."""
+        """How many inputs it holds: its trigger's, and each a merge brought (ADR-0349 §9:2)."""
         return 1 + len(self.joined)
 
-    @property
-    def whole_input(self) -> tuple[RecordedInputMessage, ...]:
-        """The activation's whole input: its trigger's messages, then each joined one's.
+    def take_inputs(self, inputs: Sequence[JoinedInput], *, merged: Sequence[str]) -> None:
+        """Take in what a merge brings, in the step that stops the other (§7:7, §7:21).
 
-        What §4:1 shows of a running activation, and what a takeover brings (§4:6): an
-        input that joined is the activation's input, as its trigger is (§3).
+        Each of ``inputs`` names the activation it came from, and is covered by the
+        understanding version or the offer's meaning that brought it (§7:9), so no
+        understanding runs again for it. ``merged`` are the activations whose findings
+        planning is shown from here on (§7:10).
         """
-        return (*self.input_messages, *(one for joined in self.joined for one in joined.messages))
+        self.joined = (*self.joined, *inputs)
+        self.merge_covered += len(inputs)
+        self.merged = (*self.merged, *(one for one in merged if one not in self.merged))
 
-    def can_join(self, *, limit: int) -> bool:
-        """Whether a join may be taken now: running, uncommitted, unstopped, under ``limit``.
-
-        ADR-0332 §3:3, §3:6: the committed mark and the stop mark both unset, the
-        activation not ended, and fewer joins taken than ``join_limit``.
-        """
-        return (
-            not self.ended
-            and not self.stopped
-            and not self.committed
-            and len(self.joined) + len(self._pending) < limit
-        )
-
-    @property
-    def joining(self) -> bool:
-        """Whether a join taken is waiting for its marking to land (:meth:`reserve`)."""
-        return bool(self._pending)
-
-    def reserve(self, joined: JoinedInput, *, limit: int) -> bool:
-        """Take ``joined`` pending its reader's marking (ADR-0332 §3:6, §3:18).
-
-        The check is :meth:`join`'s, in **one synchronous step** with taking it, so a
-        join either lands before the commitment step or finds the activation committed.
-        It is no part of the input until :meth:`confirm`, and acting's commitment step
-        waits for it (:meth:`settled`): so the reader's marking lands before the
-        activation can act on what joined, as at admission, and a marking that fails
-        leaves nothing it could have acted on.
-
-        Returns:
-            Whether it was taken; ``False`` where nothing changed.
-        """
-        if not self.can_join(limit=limit):
-            return False
-        self._pending.append(joined)
-        self._settled.clear()
-        return True
-
-    def confirm(self, joined: JoinedInput, messages: tuple[RecordedInputMessage, ...]) -> None:
-        """The marking of a pending join landed: ``messages`` of it join (§3:16).
-
-        ``messages`` are those the reader's store marked, so one deleted or taken in
-        elsewhere meanwhile is not among them. Where none are, it is withdrawn.
-        """
-        self._pending.remove(joined)
-        if messages:
-            self.joined = (*self.joined, joined.model_copy(update={"messages": messages}))
-        if not self._pending:
-            self._settled.set()
-
-    def withdraw(self, joined: JoinedInput) -> None:
-        """The marking of a pending join failed: nothing of it joined, and it waits (§3:4)."""
-        self._pending.remove(joined)
-        if not self._pending:
-            self._settled.set()
-
-    async def settled(self) -> None:
-        """Wait until no join is pending its marking (ADR-0332 §3:16, §3:18).
-
-        **Every route out of running waits for this**: acting's commitment step, the
-        rules the controller reads once each stage ends, a takeover of this activation,
-        and the episode's freeze (:meth:`settled_through`). So a join taken is confirmed
-        or withdrawn before the activation commits, ends, is taken over or is frozen,
-        and the episode records every message the reader marked taken in by it. The
-        wait is the reader's one marking write, which a reader awaits to its end
-        (:func:`~ai_assistant.orchestration.joining.settle`). Acting's and a takeover's
-        waits are bounded by the pass's deadline too, since a join does not extend it
-        (§3:14).
-
-        Returns at once, without yielding, where none is.
-        """
-        while self._pending:
-            await self._settled.wait()
-
-    async def settled_through(self) -> asyncio.CancelledError | None:
-        """:meth:`settled`, holding a cancellation that arrives meanwhile (§3:16).
-
-        The freeze's wait: a shutdown's cancellation still reaches the freeze, which
-        then records the join the reader's marking confirmed. Returns at once, without
-        yielding, where no join is pending.
-
-        Returns:
-            The cancellation held, for the caller to raise once the episode is frozen;
-            ``None`` where none arrived.
-        """
-        cancelled: asyncio.CancelledError | None = None
-        while self._pending:
-            try:
-                await self._settled.wait()
-            except asyncio.CancelledError as exc:
-                cancelled = exc
-        return cancelled
-
-    def join(self, joined: JoinedInput, *, limit: int) -> bool:
-        """Take ``joined`` into the activation, where it may still join (ADR-0332 §3:6).
-
-        The check and the append are **one synchronous step with no await between
-        them**, on the hub's one event loop, as :meth:`stop` and :meth:`commit` are: so
-        a join either lands before the commitment step, which then finds it, or finds
-        the activation committed and is not taken.
-
-        Returns:
-            Whether it was taken; ``False`` where nothing changed.
-        """
-        if not self.can_join(limit=limit):
-            return False
-        self.joined = (*self.joined, joined)
-        return True
-
-    def commit(self, version: int | None) -> Commitment:
-        """Acting's commitment step, before a round's first act (ADR-0332 §3:5-§3:7).
+    def commit(self) -> Commitment:
+        """Acting's commitment step, before a round's act (ADR-0349 §7:14).
 
         One synchronous step with no await between the check and the mark: where the
-        stop mark is set, the round runs nothing; where the activation holds input that
-        ``version`` — the understanding the round was planned from — does not cover,
-        the round is set aside and nothing is marked; otherwise the activation is
-        marked committed, if it was not already. A round planned with no recorded
-        version is read as covering the trigger alone.
+        stop mark is set, the round runs nothing; otherwise the activation is marked
+        committed, if it was not already.
 
         Returns:
             What the step found.
         """
         if self.stopped:
             return Commitment.STOPPED
-        covered = 1 if version is None else self._covered.get(version, 1)
-        if not self.committed and self.inputs_held > covered:
-            return Commitment.SET_ASIDE
         self.committed = True
         return Commitment.COMMITTED
 

@@ -190,10 +190,10 @@ async def test_a_repeated_send_is_taken_in_once() -> None:
 async def test_a_backlog_past_one_marking_call_is_still_one_input() -> None:
     """§6:3: every waiting message is taken in together, whatever the store's bound.
 
-    With joining off (ADR-0332 §6:5), so every message written meanwhile waits.
+    Nothing joins by code (ADR-0349 §1:4's step 2): what is written meanwhile waits.
     """
     completer = Gated()
-    harness = phases_harness(completer, join_limit=0)
+    harness = phases_harness(completer)
     conversation = await open_conversation(harness)
     await harness.engine.write_message(conversation, message=said("m-0", "first"))
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
@@ -209,13 +209,11 @@ async def test_a_backlog_past_one_marking_call_is_still_one_input() -> None:
 async def test_a_reply_written_after_a_waiting_message_is_marked_as_after_it() -> None:
     """§6: the window shows that a message was written before the reply it follows.
 
-    With joining off (ADR-0332 §6:5), so the message written meanwhile waits.
+    Nothing joins by code (ADR-0349 §1:4's step 2): what is written meanwhile waits.
     """
     model = FakeModelProvider(STATED_PROPOSAL)
     completer = Gated()
-    harness = phases_harness(
-        completer, understanding=understanding_stage(model=model), join_limit=0
-    )
+    harness = phases_harness(completer, understanding=understanding_stage(model=model))
     conversation = await open_conversation(harness)
     await harness.engine.write_message(conversation, message=said("m-1", "first"))
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
@@ -329,10 +327,10 @@ async def test_a_message_deleted_before_it_is_marked_never_reaches_the_activatio
 async def test_messages_written_while_one_runs_wait_and_are_taken_in_as_one_input() -> None:
     """§6:2, §6:3: nothing is refused; what waited is one input when the first ends.
 
-    With joining off (ADR-0332 §6:5), so each message written meanwhile waits.
+    Nothing joins by code (ADR-0349 §1:4's step 2): what is written meanwhile waits.
     """
     completer = Gated()
-    harness = phases_harness(completer, join_limit=0)
+    harness = phases_harness(completer)
     conversation = await open_conversation(harness)
     await harness.engine.write_message(conversation, message=said("m-1", "first"))
     await asyncio.wait_for(completer.entered.wait(), SETTLE)

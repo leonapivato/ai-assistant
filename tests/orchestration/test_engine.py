@@ -72,7 +72,10 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration import engine as engine_module
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
-from ai_assistant.orchestration.joining import DEFAULT_JOIN_LIMIT
+from ai_assistant.orchestration.matters import (
+    DEFAULT_HELD_INPUT_LIMIT,
+    DEFAULT_IN_PROGRESS_LIMIT,
+)
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.orchestration.stories import DEFAULT_STORY_SUMMARY_VIEW_NOTES
@@ -322,9 +325,10 @@ class Harness:
         # ADR-0323's Telegram line, over its fakes. `None` is every other case's
         # deployment: no line, and nothing of it starts.
         telegram: TelegramLineSeams | None = None,
-        # ADR-0332 §6:5's `join_limit`, at the setting's own default unless a case
-        # varies it.
-        join_limit: int = DEFAULT_JOIN_LIMIT,
+        # ADR-0349 §9:2-§9:3's `held_input_limit` and `in_progress_limit`, at the
+        # settings' own defaults unless a case varies them.
+        held_input_limit: int = DEFAULT_HELD_INPUT_LIMIT,
+        in_progress_limit: int = DEFAULT_IN_PROGRESS_LIMIT,
         # ADR-0338 §7:1's person block. `None` is every other case's deployment, as
         # every hub's until a person-model store is wired: no block is assembled.
         person_blocks: PersonBlocks | None = None,
@@ -457,7 +461,8 @@ class Harness:
             phases=None if phases is None else phases(self),
             diagnostics=diagnostics,
             telegram=telegram,
-            join_limit=join_limit,
+            held_input_limit=held_input_limit,
+            in_progress_limit=in_progress_limit,
             person_blocks=person_blocks,
             chat_start_wait=chat_start_wait,
             task_scheduler=task_scheduler,

@@ -1,0 +1,982 @@
+"""One matter, one activation, through the engine, over the phases (ADR-0349 §5-§7).
+
+Each case drives whole passes of the hub chat's activations with the phases wired, the
+readers as they stand before ADR-0349 §1:4's step 3: each conversation runs one
+activation at a time, so work on two places runs side by side, and a case that needs two
+activations on one place admits the second beside the first, as step 3's readers will
+(:func:`_beside`). Understanding's model is routed: it reads each input as meaning its
+own text, and names in ``continues`` every in-progress entry whose input holds a word
+the input lists after ``continues:``. Planning's model is routed by that meaning.
+
+- The newest absorbs older work of its standing that has not acted, on any place,
+  bringing every input it holds and stopping it as a stop does, with no cascade (§7:4-
+  §7:8, §4:5); every activation one version names in one step, or none above
+  ``held_input_limit`` (§7:6); and two newer ones naming one older one decide oldest
+  first, whichever finishes its understanding first (§7:15).
+- An act waits for newer input that could absorb it, so the older dispatches nothing
+  once absorbed (§7:12-§7:14); and once it has acted it waits for nothing on another
+  place.
+- The absorber's planning is shown the findings of what it took over, read fresh from
+  their own episodes (§7:10).
+- Work that has acted on another place is waited on, with no offer: the waiting round
+  never ends the activation, the time waited moves its deadline, and the rounds after
+  it are shown the finished work (§7:17, §7:25-§7:28).
+- On one place, work that has acted is offered the newer input: a take ends the
+  offering activation silent and the older's reply covers both; a decline sends the
+  newer to its waiting round with the reason; an older that ends unanswered has
+  declined; and an offer made while the older plans holds its round back (§7:14,
+  §7:17-§7:24).
+- Planning's stop call stops committed work it was shown in the list pull's running
+  part, with the Task Manager's cascade, and its result shows what had finished; a
+  look-up shows what running work has found (§4:6-§4:11, §6:1-§6:6).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Final
+
+import pytest
+from phases_support import (
+    SETTLE,
+    Gated,
+    frozen,
+    open_conversation,
+    phases_harness,
+    processing,
+    said,
+    stopped,
+    until,
+    working,
+    written,
+)
+from task_support import seams
+
+from ai_assistant.core.types import (
+    ControllerRule,
+    ControllerStage,
+    MessageAuthor,
+    NewMessage,
+    OccurrenceState,
+    ProposedCall,
+    RoundResponse,
+)
+from ai_assistant.orchestration.chat import ChatInput
+from ai_assistant.orchestration.conversations import conversation_channel
+from ai_assistant.testing import FakeModelProvider, FakeToolCallingCompleter
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from test_engine import Harness
+
+    from ai_assistant.core.types import (
+        EpisodeProcessingRecord,
+        EpisodicMemory,
+        Message,
+        OfferedTool,
+    )
+
+#: What an input lists the words of the work it continues after.
+_CONTINUES: Final = "continues:"
+
+
+# --- the routed models ------------------------------------------------------------------
+
+
+class _Understanding(FakeModelProvider):
+    """Understanding's model, routed: each input means its own text, and continues work.
+
+    It names in ``continues`` each in-progress entry whose input holds a word the input
+    lists after :data:`_CONTINUES`. :meth:`hold` holds the reply to one input until
+    released, so a case decides the order understandings are recorded in.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(reply=self._reply)
+        self._gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
+        self.shown: dict[str, list[dict[str, Any]]] = {}
+
+    def hold(self, text: str) -> tuple[asyncio.Event, asyncio.Event]:
+        """The (entered, release) pair holding the reply to the input ``text``."""
+        return self._gates.setdefault(text, (asyncio.Event(), asyncio.Event()))
+
+    def _reply(self, messages: Sequence[Message]) -> str:
+        payload: dict[str, Any] = json.loads(messages[1].content)
+        text = str(payload["input"]["text"])
+        section = list(payload.get("in_progress") or ())
+        self.shown[text] = section
+        named: list[str] = []
+        if _CONTINUES in text:
+            words = [one.strip() for one in text.split(_CONTINUES, 1)[1].split(",")]
+            named = [
+                str(entry["label"])
+                for entry in section
+                if any(word and word in str(entry["input"]) for word in words)
+            ]
+        return json.dumps({"meaning": text, "meaning_ground": "stated", "continues": named})
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        text = str(json.loads(messages[1].content)["input"]["text"])
+        gate = self._gates.get(text)
+        if gate is not None:
+            gate[0].set()
+            await gate[1].wait()
+        return await super().complete(messages, model=model)
+
+
+type _Reply = RoundResponse | Callable[[dict[str, Any]], RoundResponse]
+
+
+class _Planner(FakeToolCallingCompleter):
+    """Planning's model, routed by what the round's understanding says the input means.
+
+    Each input's rounds are answered from its own script in turn, a callable answering
+    from the rendered request; past its script, a round writes ``done: <input>``. A held
+    input's rounds wait for its release.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._scripts: dict[str, list[_Reply]] = {}
+        self._gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
+        self._from: dict[str, int] = {}
+        self.requests: dict[str, list[dict[str, Any]]] = {}
+        self.offered: dict[str, list[list[str]]] = {}
+
+    def script(self, text: str, *replies: _Reply) -> None:
+        self._scripts.setdefault(text, []).extend(replies)
+
+    def hold(self, text: str, *, from_round: int = 1) -> tuple[asyncio.Event, asyncio.Event]:
+        """The (entered, release) pair holding ``text``'s rounds from ``from_round`` on."""
+        self._from.setdefault(text, from_round)
+        return self._gates.setdefault(text, (asyncio.Event(), asyncio.Event()))
+
+    async def respond(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        *,
+        model: str | None = None,
+    ) -> RoundResponse:
+        del model
+        request: dict[str, Any] = json.loads(messages[-1].content)
+        understanding = request.get("understanding")
+        key = str(understanding["meaning"]) if isinstance(understanding, dict) else ""
+        self.requests.setdefault(key, []).append(request)
+        self.offered.setdefault(key, []).append([one.name for one in tools])
+        gate = self._gates.get(key)
+        if gate is not None and len(self.requests[key]) >= self._from.get(key, 1):
+            gate[0].set()
+            await gate[1].wait()
+        script = self._scripts.get(key) or []
+        if not script:
+            return RoundResponse(text=f"done: {key}")
+        reply = script.pop(0)
+        return reply(request) if callable(reply) else reply
+
+
+def _call(call_id: str, name: str, **arguments: object) -> ProposedCall:
+    return ProposedCall(call_id=call_id, name=name, arguments=arguments)  # type: ignore[arg-type]  # JSON values
+
+
+class _Counting(Gated):
+    """:class:`Gated`, counting the planning calls waiting on :attr:`release`."""
+
+    def __init__(self, *responses: RoundResponse) -> None:
+        super().__init__(*responses)
+        self.calls_waiting = 0
+
+    async def respond(
+        self, messages: Any, tools: Any, *, model: str | None = None
+    ) -> RoundResponse:
+        self.calls_waiting += 1
+        return await super().respond(messages, tools, model=model)
+
+
+def _routed() -> FakeModelProvider:
+    """Understanding's model, routed as :class:`_Understanding` routes it."""
+    return _Understanding()
+
+
+def _harness(
+    understanding: _Understanding, planner: FakeToolCallingCompleter, **knobs: Any
+) -> Harness:
+    from understanding_support import understanding_stage  # noqa: PLC0415 — beside the harness
+
+    return phases_harness(planner, understanding=understanding_stage(model=understanding), **knobs)
+
+
+# --- driving the places -----------------------------------------------------------------
+
+
+async def _start(harness: Harness, text: str, *, message_id: str) -> tuple[str, str]:
+    """A conversation of its own, and the activation its message starts."""
+    conversation = (await harness.engine.start_conversation()).id
+    await harness.engine.write_message(conversation, message=said(message_id, text))
+    return conversation, await working(harness, conversation)
+
+
+async def _beside(
+    harness: Harness, conversation: str, text: str, *, message_id: str
+) -> tuple[str, asyncio.Future[bool]]:
+    """Admit an activation on ``conversation`` beside the one running there.
+
+    As ADR-0349 §8:1's readers will, which every message starts its own activation on;
+    until §1:4's step 3 the hub chat's reader holds it back, so the case writes the
+    message into the chat space and admits it through the engine's own admission.
+    """
+    store = harness.conversation_store
+    receipt = await store.append_message(
+        conversation,
+        NewMessage(author=MessageAuthor.USER, text=text, device_id="phone", message_id=message_id),
+    )
+    reader = harness.engine._chat_reader
+    assert reader is not None
+    waiting = tuple(
+        one
+        for one in await store.untaken_messages(conversation)
+        if one.position == receipt.position
+    )
+    window = await reader._window(conversation, waiting)
+    activation_id = harness.engine._chat_activation_id()
+    taken = ChatInput(
+        conversation_id=conversation,
+        activation_id=activation_id,
+        messages=waiting,
+        window=window,
+    )
+    return activation_id, asyncio.ensure_future(harness.engine._read_in(taken))
+
+
+def _side_by_side(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a place run activations side by side, as ADR-0349 §8:1 has every place."""
+    monkeypatch.setattr(harness.engine, "_place_busy", lambda place, *, reader: False)
+
+
+async def _frozen(harness: Harness, count: int) -> list[EpisodicMemory]:
+    async def done() -> bool:
+        return len(await frozen(harness)) >= count
+
+    await until(done, what=f"{count} frozen episode(s)")
+    return await frozen(harness)
+
+
+def _of(found: Sequence[EpisodicMemory], activation_id: str) -> EpisodeProcessingRecord:
+    (record,) = [processing(one) for one in found if processing(one).activation_id == activation_id]
+    return record
+
+
+def _episode(found: Sequence[EpisodicMemory], activation_id: str) -> EpisodicMemory:
+    (episode,) = [one for one in found if processing(one).activation_id == activation_id]
+    return episode
+
+
+def _ran(record: EpisodeProcessingRecord, stage: ControllerStage) -> list[ControllerRule]:
+    return [one.due for one in record.stages if one.stage is stage]
+
+
+async def _assistant(harness: Harness, conversation: str) -> list[str]:
+    return [
+        one.text
+        for one in await written(harness, conversation)
+        if one.author is MessageAuthor.ASSISTANT
+    ]
+
+
+async def _understood(harness: Harness, activation_id: str) -> None:
+    """Wait until ``activation_id`` has recorded its first understanding version."""
+
+    async def recorded() -> bool:
+        return any(
+            one.state is not None
+            and one.state.activation_id == activation_id
+            and bool(one.state.understanding)
+            for one in harness.engine._running
+        )
+
+    await until(recorded, what="the understanding to be recorded")
+
+
+def _label_of(request: dict[str, Any], key: str) -> str:
+    """The ``E`` label a request shows running work under, in its rounds or its sections."""
+    text = json.dumps(request)
+    for section in ("offers", "waiting_on"):
+        for one in request.get(section) or ():
+            return str(one.get("offer") or one["episode"])
+    for one in request.get("rounds") or ():
+        for call in one["calls"]:
+            value = call.get("result", {}).get("value", {})
+            for running in value.get("running") or ():
+                if isinstance(running, dict):
+                    return str(running["episode"])
+    msg = f"no running work shown for {key}: {text[:200]}"
+    raise AssertionError(msg)
+
+
+# --- §7:4-§7:8: the newest absorbs what it continues ---------------------------------
+
+
+async def test_the_newest_absorbs_older_work_that_has_not_acted_and_brings_its_input() -> None:
+    """§7:4-§7:8, §4:5: the older is stopped as a stop is; its input is the newer's."""
+    understanding, planner = _Understanding(), _Planner()
+    planner.hold("book Riverside")
+    harness = _harness(understanding, planner)
+    await open_conversation(harness)
+    first, older = await _start(harness, "book Riverside", message_id="a-1")
+    await asyncio.wait_for(planner.hold("book Riverside")[0].wait(), SETTLE)
+
+    second, newer = await _start(harness, "for two, continues: Riverside", message_id="b-1")
+    await _understood(harness, newer)
+    planner.hold("book Riverside")[1].set()
+    found = await _frozen(harness, 2)
+
+    stopped(_episode(found, older))
+    taker = _of(found, newer)
+    (joined,) = taker.joined
+    assert joined.taken_over_from == older
+    assert joined.channel == conversation_channel(first)
+    assert [one.text for one in joined.messages] == ["book Riverside"]
+    assert [(one.version, one.continues) for one in taker.understanding] == [(1, (older,))]
+    assert _ran(taker, ControllerStage.TAKEOVER) == [ControllerRule.TAKEOVER_UNDECIDED]
+    assert _ran(taker, ControllerStage.UNDERSTANDING) == [ControllerRule.NOT_UNDERSTOOD], (
+        "the version that named it covers what it brought (§7:9)"
+    )
+    held = await harness.plans.export()
+    assert older in held.stopped_activations
+    assert held.cascades == (), "an absorption's stop writes no cascade record (§4:5)"
+    assert await _assistant(harness, first) == [], "the older wrote nothing"
+    assert await _assistant(harness, second) == ["done: for two, continues: Riverside"]
+
+
+async def test_separate_work_continues_nothing_and_each_runs_on_its_own() -> None:
+    """§7:3: an input asking for separate work names nothing, and never waits."""
+    understanding, planner = _Understanding(), _Planner()
+    planner.hold("book Riverside")
+    harness = _harness(understanding, planner)
+    await open_conversation(harness)
+    first, older = await _start(harness, "book Riverside", message_id="a-1")
+    await asyncio.wait_for(planner.hold("book Riverside")[0].wait(), SETTLE)
+
+    second, newer = await _start(harness, "what's the weather there?", message_id="b-1")
+    found_weather = await _frozen(harness, 1)
+    planner.hold("book Riverside")[1].set()
+    found = await _frozen(harness, 2)
+
+    assert [processing(one).activation_id for one in found_weather] == [newer], (
+        "the weather answers first"
+    )
+    assert _of(found, newer).joined == ()
+    assert _of(found, older).joined == ()
+    assert await _assistant(harness, first) == ["done: book Riverside"]
+    assert await _assistant(harness, second) == ["done: what's the weather there?"]
+    # The in-progress section showed the running work, newest first, exactly as §5:6 has
+    # it, and planning was shown no section (§5:9).
+    (entry,) = understanding.shown["what's the weather there?"]
+    assert entry == {
+        "label": "R1",
+        "place": f"conversation:{first}",
+        "input": "book Riverside",
+        "has_acted": False,
+    }
+    assert "in_progress" not in planner.requests["what's the weather there?"][0]
+
+
+async def test_one_version_naming_two_absorbs_both_in_one_step() -> None:
+    """§7:4-§7:6: every activation the version names that qualifies, in one step."""
+    understanding, planner = _Understanding(), _Planner()
+    for text in ("book Riverside", "a table for two"):
+        planner.hold(text)
+    harness = _harness(understanding, planner)
+    await open_conversation(harness)
+    first, a = await _start(harness, "book Riverside", message_id="a-1")
+    second, b = await _start(harness, "a table for two", message_id="b-1")
+    for text in ("book Riverside", "a table for two"):
+        await asyncio.wait_for(planner.hold(text)[0].wait(), SETTLE)
+
+    third, c = await _start(harness, "at eight, continues: Riverside, table", message_id="c-1")
+    await _understood(harness, c)
+    for text in ("book Riverside", "a table for two"):
+        planner.hold(text)[1].set()
+    found = await _frozen(harness, 3)
+
+    for older in (a, b):
+        stopped(_episode(found, older))
+    taker = _of(found, c)
+    assert {(one.taken_over_from, one.channel) for one in taker.joined} == {
+        (a, conversation_channel(first)),
+        (b, conversation_channel(second)),
+    }
+    assert [len(one.continues) for one in taker.understanding] == [2]
+    assert _ran(taker, ControllerStage.TAKEOVER) == [ControllerRule.TAKEOVER_UNDECIDED]
+    assert await _assistant(harness, first) == []
+    assert await _assistant(harness, second) == []
+    assert len(await _assistant(harness, third)) == 1
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+async def test_an_absorption_above_held_input_limit_absorbs_none(limit: int) -> None:
+    """§7:6, §9:2, §1:5's case: at a limit of 1, and at one two absorptions exhaust."""
+    understanding, planner = _Understanding(), _Planner()
+    for text in ("book Riverside", "a table for two"):
+        planner.hold(text)
+    harness = _harness(understanding, planner, held_input_limit=limit)
+    await open_conversation(harness)
+    first, a = await _start(harness, "book Riverside", message_id="a-1")
+    second, b = await _start(harness, "a table for two", message_id="b-1")
+    for text in ("book Riverside", "a table for two"):
+        await asyncio.wait_for(planner.hold(text)[0].wait(), SETTLE)
+
+    _, c = await _start(harness, "at eight, continues: Riverside, table", message_id="c-1")
+    await _understood(harness, c)
+    for text in ("book Riverside", "a table for two"):
+        planner.hold(text)[1].set()
+    found = await _frozen(harness, 3)
+
+    assert _of(found, c).joined == ()
+    for older in (a, b):
+        assert _of(found, older).stages[-1].due is ControllerRule.NOTHING_DUE
+    assert len(await _assistant(harness, first)) == 1
+    assert len(await _assistant(harness, second)) == 1
+    stops = (await harness.plans.export()).stopped_activations
+    assert a not in stops
+    assert b not in stops
+
+
+@pytest.mark.parametrize("first_understood", ["middle", "newest"])
+async def test_two_newer_naming_one_older_decide_oldest_first_in_either_order(
+    first_understood: str,
+) -> None:
+    """§7:15, §1:5's first case: the older of the two absorbs first, the newer follows."""
+    understanding, planner = _Understanding(), _Planner()
+    planner.hold("book Riverside")
+    middle_text, newest_text = "for two, continues: Riverside", "at eight, continues: Riverside"
+    for text in (middle_text, newest_text):
+        understanding.hold(text)
+    harness = _harness(understanding, planner)
+    await open_conversation(harness)
+    first, older = await _start(harness, "book Riverside", message_id="a-1")
+    await asyncio.wait_for(planner.hold("book Riverside")[0].wait(), SETTLE)
+    _, middle = await _start(harness, middle_text, message_id="b-1")
+    third, newest = await _start(harness, newest_text, message_id="c-1")
+    for text in (middle_text, newest_text):
+        await asyncio.wait_for(understanding.hold(text)[0].wait(), SETTLE)
+
+    order = (
+        (newest_text, middle_text)
+        if first_understood == "newest"
+        else (
+            middle_text,
+            newest_text,
+        )
+    )
+    understanding.hold(order[0])[1].set()
+    for _ in range(30):
+        await asyncio.sleep(0.001)
+    understanding.hold(order[1])[1].set()
+    planner.hold("book Riverside")[1].set()
+    found = await _frozen(harness, 3)
+
+    stopped(_episode(found, older))
+    stopped(_episode(found, middle))
+    assert [one.taken_over_from for one in _of(found, middle).joined] == [older]
+    taker = _of(found, newest)
+    assert [one.taken_over_from for one in taker.joined] == [middle, middle], (
+        "it followed forward and absorbed the absorber, with every input it held"
+    )
+    assert await _assistant(harness, first) == []
+    assert len(await _assistant(harness, third)) == 1
+
+
+# --- §7:12-§7:14: every act waits for the newest ---------------------------------------
+
+
+async def test_an_older_one_reaching_its_first_act_waits_and_the_newer_absorbs_it() -> None:
+    """§7:12, §1:5's case: it dispatches nothing once the newer input absorbs it."""
+    understanding, planner = _Understanding(), _Planner()
+    newer_text = "actually Sunday, continues: Saturday"
+    understanding.hold(newer_text)
+    planner.hold("book Saturday")
+    harness = _harness(understanding, planner)
+    await open_conversation(harness)
+    first, older = await _start(harness, "book Saturday", message_id="a-1")
+    await asyncio.wait_for(planner.hold("book Saturday")[0].wait(), SETTLE)
+    second, newer = await _start(harness, newer_text, message_id="b-1")
+    await asyncio.wait_for(understanding.hold(newer_text)[0].wait(), SETTLE)
+
+    planner.hold("book Saturday")[1].set()
+    for _ in range(50):
+        await asyncio.sleep(0.001)
+    assert await _assistant(harness, first) == [], "its act waits for the newer understanding"
+    understanding.hold(newer_text)[1].set()
+    found = await _frozen(harness, 2)
+
+    stopped(_episode(found, older))
+    assert await harness.plans.activation_effects([older]) == (), "it dispatched nothing"
+    assert await _assistant(harness, first) == []
+    assert [one.taken_over_from for one in _of(found, newer).joined] == [older]
+    assert await _assistant(harness, second) == [f"done: {newer_text}"]
+
+
+async def test_an_activation_that_has_acted_waits_for_nothing_on_another_place() -> None:
+    """§7:12, §1:5's case: after it commits, only its own place's newer input is waited for."""
+    understanding, planner = _Understanding(), _Planner()
+    planner.script(
+        "book Riverside",
+        RoundResponse(
+            text="Looking.",
+            calls=(
+                _call(
+                    "c1", "remember", fact="Likes Riverside.", why="a taste", rests_on_input=True
+                ),
+            ),
+        ),
+    )
+    planner.hold("what's the weather there?")
+    harness = _harness(understanding, planner)
+    await open_conversation(harness)
+    first, older = await _start(harness, "book Riverside", message_id="a-1")
+
+    async def acted() -> bool:
+        return any(
+            one.state is not None and one.state.activation_id == older and one.state.committed
+            for one in harness.engine._running
+        )
+
+    await until(acted, what="the older to act")
+    understanding.hold("what's the weather there?")
+    await _start(harness, "what's the weather there?", message_id="b-1")
+    found = await _frozen(harness, 1)
+
+    assert [processing(one).activation_id for one in found] == [older], (
+        "its second act did not wait on the newer input elsewhere"
+    )
+    assert await _assistant(harness, first) == ["Looking.", "done: book Riverside"]
+    understanding.hold("what's the weather there?")[1].set()
+    planner.hold("what's the weather there?")[1].set()
+    await _frozen(harness, 2)
+
+
+async def test_the_absorbers_planning_is_shown_what_it_took_over_read_from_the_source() -> None:
+    """§7:10, §1:5's case: A's findings reach C through B, read fresh from A's own episode."""
+    understanding, planner = _Understanding(), _Planner()
+    planner.script(
+        "find a hotel",
+        RoundResponse(
+            calls=(_call("c1", "search_memory", query="hotels", looking_for="past stays"),),
+            notes="The Grand had a view last time.",
+        ),
+    )
+    planner.hold("find a hotel", from_round=2)
+    b_text, c_text = "near the station, continues: hotel", "under 200, continues: station"
+    planner.hold(b_text)
+    harness = _harness(understanding, planner, phases={"look_ups": True})
+    await open_conversation(harness)
+    _, a = await _start(harness, "find a hotel", message_id="a-1")
+    await until(_has(planner, "find a hotel", 2), what="A's look-up and its second round")
+    _, b = await _start(harness, b_text, message_id="b-1")
+    await asyncio.wait_for(planner.hold(b_text)[0].wait(), SETTLE)
+    _, c = await _start(harness, c_text, message_id="c-1")
+    found_c = await _frozen(harness, 1)
+    planner.hold(b_text)[1].set()
+    planner.hold("find a hotel")[1].set()
+    found = await _frozen(harness, 3)
+
+    assert [processing(one).activation_id for one in found_c] == [c]
+    (request,) = planner.requests[c_text]
+    shown = request["earlier_work"]
+    assert len(shown) == 2, "A's work and B's, each from its own episode"
+    notes = json.dumps(shown)
+    assert "The Grand had a view last time." in notes
+    stopped(_episode(found, a))
+    stopped(_episode(found, b))
+
+
+# --- §7:17, §7:25-§7:28: work that has acted elsewhere is waited on ---------------------
+
+
+async def test_input_continuing_work_that_acted_elsewhere_waits_on_it_with_no_offer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7:17, §7:25-§7:28, §1:5's case: a waiting round, the moved deadline, the work."""
+    understanding, planner = _Understanding(), _Planner()
+    planner.script(
+        "search apartments",
+        RoundResponse(
+            text="Searching.",
+            calls=(
+                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+            ),
+        ),
+    )
+    planner.hold("search apartments", from_round=2)
+    newer_text = "only two bedrooms, continues: apartments"
+    planner.script(newer_text, RoundResponse(text="I'll filter to two bedrooms once it ends."))
+    harness = _harness(understanding, planner)
+    await open_conversation(harness)
+    first, older = await _start(harness, "search apartments", message_id="a-1")
+    await until(_has(planner, "search apartments", 2), what="the older to act and plan again")
+    monkeypatch.setattr(harness.engine, "_chat_turn_budget", timedelta(seconds=0.3))
+    second, newer = await _start(harness, newer_text, message_id="b-1")
+
+    async def waiting_round_written() -> bool:
+        return "I'll filter to two bedrooms once it ends." in await _assistant(harness, second)
+
+    await until(waiting_round_written, what="the waiting round's message")
+    await asyncio.sleep(0.5)
+    assert len(planner.requests[newer_text]) == 1, "its next round waits for the older's end"
+    planner.hold("search apartments")[1].set()
+    found = await _frozen(harness, 2)
+
+    record = _of(found, newer)
+    assert record.joined == ()
+    assert record.status is not None
+    assert record.status.value == "completed", "the wait did not count against its deadline"
+    first_round, second_round = planner.requests[newer_text]
+    (waited,) = first_round["waiting_on"]
+    assert waited["has_acted"] is True
+    assert planner.offered[newer_text][0] == ["stop_activation"], "only the stop call"
+    assert "earlier_work" in second_round, "the rounds after the wait are shown its work"
+    assert older in json.dumps(second_round) or "episode" in json.dumps(
+        second_round["earlier_work"]
+    )
+    assert await _assistant(harness, first) == ["Searching.", "done: search apartments"]
+    assert await _assistant(harness, second) == [
+        "I'll filter to two bedrooms once it ends.",
+        f"done: {newer_text}",
+    ]
+
+
+def _has(planner: _Planner, text: str, count: int) -> Callable[[], Any]:
+    async def check() -> bool:
+        return len(planner.requests.get(text, ())) >= count
+
+    return check
+
+
+# --- §7:17-§7:24: on one place, work that has acted is offered the input -------------
+
+
+async def _acted_on_one_place(
+    harness: Harness, planner: _Planner, monkeypatch: pytest.MonkeyPatch, text: str
+) -> tuple[str, str]:
+    """An activation that has acted and is held in its second round, on a place of its own.
+
+    Its rounds are bounded at six, so a round held back for an offer (§7:14) and the
+    answer's round both fit before its reply.
+    """
+    _side_by_side(harness, monkeypatch)
+    phases = harness.engine._phases
+    assert phases is not None
+    monkeypatch.setattr(phases, "_round_limit", 6)
+    await open_conversation(harness)
+    conversation, older = await _start(harness, text, message_id="a-1")
+    await until(_has(planner, text, 2), what="the older to act and plan again")
+    return conversation, older
+
+
+async def test_an_offer_taken_ends_the_offering_one_silent_and_the_reply_covers_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7:17-§7:21, §1:5's case."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "search apartments", "only two bedrooms, continues: apartments"
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="Searching.",
+            calls=(
+                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+            ),
+        ),
+        # Planned before the offer, so held back (§7:14) and never written.
+        RoundResponse(text="Still searching."),
+        lambda request: RoundResponse(
+            calls=(_call("c2", "answer_offer", offer=_label_of(request, older_text), take=True),)
+        ),
+        RoundResponse(text="Two-bedroom flats: three found."),
+    )
+    planner.hold(older_text, from_round=2)
+    harness = _harness(understanding, planner)
+    conversation, older = await _acted_on_one_place(harness, planner, monkeypatch, older_text)
+    newer, task = await _beside(harness, conversation, newer_text, message_id="b-1")
+
+    async def offered() -> bool:
+        state = next(
+            (
+                one.state
+                for one in harness.engine._running
+                if one.state is not None and one.state.activation_id == older
+            ),
+            None,
+        )
+        return state is not None and bool(state.offers)
+
+    await until(offered, what="the offer to be made")
+    planner.hold(older_text)[1].set()
+    await task
+    found = await _frozen(harness, 2)
+
+    stopped(_episode(found, newer))
+    assert newer_text not in planner.requests, "while its offer was open it planned no round"
+    record = _of(found, older)
+    assert [one.taken_over_from for one in record.joined] == [newer]
+    assert await _assistant(harness, conversation) == [
+        "Searching.",
+        "Two-bedroom flats: three found.",
+    ], "the offering one wrote nothing, and the older's reply covers both"
+    assert "offers" not in planner.requests[older_text][1], "planned before the offer"
+    (shown,) = planner.requests[older_text][2]["offers"]
+    assert shown["understood_as"] == newer_text
+    assert shown["input"] == newer_text
+    assert "answer_offer" in planner.offered[older_text][2]
+
+
+async def test_an_offer_declined_sends_the_newer_one_to_wait_with_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7:22-§7:27, §1:5's case: the reason, the waiting round, then the older's work."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "book Saturday", "actually Sunday, continues: Saturday"
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="Booking.",
+            calls=(
+                _call(
+                    "c1", "remember", fact="Books Saturdays.", why="a habit", rests_on_input=True
+                ),
+            ),
+        ),
+        RoundResponse(text="Still booking."),
+        lambda request: RoundResponse(
+            calls=(
+                _call(
+                    "c2",
+                    "answer_offer",
+                    offer=_label_of(request, older_text),
+                    take=False,
+                    reason="already booked",
+                ),
+            )
+        ),
+    )
+    planner.hold(older_text, from_round=2)
+    harness = _harness(understanding, planner)
+    conversation, older = await _acted_on_one_place(harness, planner, monkeypatch, older_text)
+    newer, task = await _beside(harness, conversation, newer_text, message_id="b-1")
+
+    async def offered() -> bool:
+        state = next(
+            (
+                one.state
+                for one in harness.engine._running
+                if one.state is not None and one.state.activation_id == older
+            ),
+            None,
+        )
+        return state is not None and bool(state.offers)
+
+    await until(offered, what="the offer to be made")
+    planner.hold(older_text)[1].set()
+    await task
+    found = await _frozen(harness, 2)
+
+    rounds = planner.requests[newer_text]
+    (waited,) = rounds[0]["waiting_on"]
+    assert waited["declined_this_input"] == "already booked"
+    assert "earlier_work" in rounds[-1], "it plans from the older's finished work"
+    assert _of(found, newer).joined == ()
+    assert _of(found, older).joined == ()
+
+
+async def test_an_older_one_ending_without_answering_has_declined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7:24, §1:5's case: the offer is declined, and the newer plans once it has ended."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "book Saturday", "for two, continues: Saturday"
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="Booking.",
+            calls=(
+                _call(
+                    "c1", "remember", fact="Books Saturdays.", why="a habit", rests_on_input=True
+                ),
+            ),
+        ),
+        RoundResponse(text="Booked."),
+        RoundResponse(text="Booked."),
+    )
+    planner.hold(older_text, from_round=2)
+    harness = _harness(understanding, planner)
+    conversation, older = await _acted_on_one_place(harness, planner, monkeypatch, older_text)
+    newer, task = await _beside(harness, conversation, newer_text, message_id="b-1")
+
+    async def offered() -> bool:
+        state = next(
+            (
+                one.state
+                for one in harness.engine._running
+                if one.state is not None and one.state.activation_id == older
+            ),
+            None,
+        )
+        return state is not None and bool(state.offers)
+
+    await until(offered, what="the offer to be made")
+    # The older's round was planned before the offer, so it is held back and planned
+    # again, shown the offer (§7:14); its script answers nothing, so it ends unanswered.
+    planner.hold(older_text)[1].set()
+    await task
+    found = await _frozen(harness, 2)
+
+    assert _of(found, newer).joined == ()
+    assert any("earlier_work" in one for one in planner.requests[newer_text]), (
+        "it plans from the older's finished work"
+    )
+
+
+async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7:14, §1:5's case: the round's acts are held back and planning runs again."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "book Saturday", "make it Sunday, continues: Saturday"
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="Booking.",
+            calls=(
+                _call(
+                    "c1", "remember", fact="Books Saturdays.", why="a habit", rests_on_input=True
+                ),
+            ),
+        ),
+        RoundResponse(text="Booked for Saturday."),
+        lambda request: RoundResponse(
+            calls=(_call("c3", "answer_offer", offer=_label_of(request, older_text), take=True),)
+        ),
+        RoundResponse(text="Booked for Sunday instead."),
+    )
+    planner.hold(older_text, from_round=2)
+    harness = _harness(understanding, planner)
+    conversation, older = await _acted_on_one_place(harness, planner, monkeypatch, older_text)
+    newer, task = await _beside(harness, conversation, newer_text, message_id="b-1")
+
+    async def offered() -> bool:
+        state = next(
+            (
+                one.state
+                for one in harness.engine._running
+                if one.state is not None and one.state.activation_id == older
+            ),
+            None,
+        )
+        return state is not None and bool(state.offers)
+
+    await until(offered, what="the offer to be made")
+    planner.hold(older_text)[1].set()
+    await task
+    found = await _frozen(harness, 2)
+
+    assert await _assistant(harness, conversation) == ["Booking.", "Booked for Sunday instead."], (
+        "the round planned before the offer was held back, its message never written"
+    )
+    stopped(_episode(found, newer))
+    record = _of(found, older)
+    assert [one.taken_over_from for one in record.joined] == [newer]
+    assert "offers" not in planner.requests[older_text][1]
+    assert "offers" in planner.requests[older_text][2]
+
+
+# --- §4:6-§4:11, §6:1-§6:6: the stop call and the look-up --------------------------------
+
+
+async def test_the_stop_call_stops_committed_work_and_the_cascade_cancels_its_task() -> None:
+    """§4:6-§4:11, §1:5's case: shown in the list pull, stopped with ADR-0350 §9:6's cascade."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "remind me hourly to stretch", "never mind the reminders"
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="I'll remind you.",
+            calls=(_call("c1", "spawn", instruction="Remind them to stretch.", delay_minutes=60),),
+        ),
+    )
+    planner.hold(older_text, from_round=2)
+    planner.script(
+        newer_text,
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        lambda request: RoundResponse(
+            calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
+        ),
+        RoundResponse(text="Stopped."),
+    )
+    harness = _harness(understanding, planner, task_scheduler=seams())
+    await harness.engine.start()
+    await open_conversation(harness)
+    _, older = await _start(harness, older_text, message_id="a-1")
+    await until(_has(planner, older_text, 2), what="the spawn to run and its next round to wait")
+    _, newer = await _start(harness, newer_text, message_id="b-1")
+    (first,) = await _frozen(harness, 1)
+    assert processing(first).activation_id == newer
+    # A stop cuts off nothing in flight (ADR-0295 §2): the older's round finishes, and
+    # then its pass ends on the stop, writing nothing.
+    planner.hold(older_text)[1].set()
+    found = await _frozen(harness, 2)
+    stopped(_episode(found, older))
+
+    held = await harness.plans.export()
+    assert older in held.stopped_activations
+    assert older in held.cascades, "the Task Manager's stop writes its cascade record"
+    tasks = await harness.plans.spawned_tasks([older])
+    assert tasks
+    assert all(
+        one.state is OccurrenceState.CANCELLED for task in tasks for one in task.occurrences
+    ), "the cascade cancelled what it spawned"
+    result = planner.requests[newer_text][2]["rounds"][1]["calls"][0]["result"]["value"]
+    assert result["stopped_by_this_call"] is True
+    assert any("spawn" in one for one in result["did"]), "its result shows what had finished"
+    await harness.engine.aclose()
+
+
+async def test_a_look_up_shows_what_running_work_has_found_so_far() -> None:
+    """§6:1, §6:4-§6:6: by the label the list pull showed it under, a pure read."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "find a hotel", "what has the hotel search found?"
+    planner.script(
+        older_text,
+        RoundResponse(
+            calls=(_call("c1", "search_memory", query="hotels", looking_for="past stays"),),
+            notes="The Grand is 180 a night.",
+        ),
+    )
+    planner.hold(older_text, from_round=2)
+    planner.script(
+        newer_text,
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        lambda request: RoundResponse(
+            calls=(_call("c2", "look_up_activation", activation=_label_of(request, newer_text)),)
+        ),
+        RoundResponse(text="The Grand, at 180."),
+    )
+    harness = _harness(understanding, planner, task_scheduler=seams(), phases={"look_ups": True})
+    await harness.engine.start()
+    await open_conversation(harness)
+    _, older = await _start(harness, older_text, message_id="a-1")
+    await until(_has(planner, older_text, 2), what="the look-up to run and the next round wait")
+    _, newer = await _start(harness, newer_text, message_id="b-1")
+    found = await _frozen(harness, 1)
+
+    assert [processing(one).activation_id for one in found] == [newer]
+    result = planner.requests[newer_text][2]["rounds"][1]["calls"][0]["result"]["value"]
+    assert result["status"] == "running"
+    assert "The Grand is 180 a night." in json.dumps(result)
+    assert older not in (await harness.plans.export()).stopped_activations
+    planner.hold(older_text)[1].set()
+    await _frozen(harness, 2)
+    await harness.engine.aclose()

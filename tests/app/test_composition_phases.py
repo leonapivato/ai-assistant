@@ -35,6 +35,7 @@ from ai_assistant.orchestration.lookups import (
     LOOK_UP_LABEL_ARGUMENTS,
     LookUps,
 )
+from ai_assistant.orchestration.matter_calls import MATTER_CAPABILITIES, MATTER_LABEL_ARGUMENTS
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY, RELIANCE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.remembering import CANDIDATE_LABEL_ARGUMENTS
@@ -109,15 +110,18 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
         # ADR-0329 §3:1, §6:7: `remember` records a candidate, whose labels and the
         # reliance call's are filled like any other's.
         # ADR-0350 §4: and the Task Scheduler's, attached on every deployment, which name
-        # tasks and places by label.
+        # tasks and places by label; and ADR-0349 §4:6, §6:1, §7:20's calls on running
+        # work, attached by the engine, which name running work by its episode's label.
         assert phases._label_arguments == {
             **STORY_LABEL_ARGUMENTS,
             **LOOK_UP_LABEL_ARGUMENTS,
             **CANDIDATE_LABEL_ARGUMENTS,
             **RELIANCE_LABEL_ARGUMENTS,
             **TASK_SCHEDULER_LABEL_ARGUMENTS,
+            **MATTER_LABEL_ARGUMENTS,
         }
         assert phases._task_calls is not None
+        assert phases._matters is engine._matters
         # One look-ups runner behind every look-up, over the root's own memory store and
         # the story views' reads, whose scope the path opens around acting.
         look_ups = phases._look_ups
@@ -132,7 +136,11 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
         seam = phases._acting._own_records
         assert isinstance(seam, _Beside)
         assert set(seam._runners) == TASK_SCHEDULER_CAPABILITIES
-        runners = seam._beside._runners  # type: ignore[attr-defined]
+        # ADR-0349 §4:7, §6:4, §7:20: and the calls on running work beside those.
+        matters = seam._beside
+        assert isinstance(matters, _Beside)
+        assert set(matters._runners) == MATTER_CAPABILITIES
+        runners = matters._beside._runners  # type: ignore[attr-defined]
         held = {id(runners[name]): runners[name] for name in STORY_CALL_CAPABILITIES}
         (story_calls,) = held.values()
         assert isinstance(story_calls, StoryCalls)

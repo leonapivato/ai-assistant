@@ -1944,8 +1944,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 diagnostics=diagnostics,
             ),
             stage_record_limit=STAGE_RECORD_LIMIT,
-            # ADR-0332 §6:5: the most inputs one activation takes in after its trigger.
-            join_limit=settings.join_limit,
+            # ADR-0349 §9:2-§9:3: the most inputs one activation holds, its own with
+            # every one it absorbed or took, and the most entries understanding's
+            # in-progress section shows.
+            held_input_limit=settings.held_input_limit,
+            in_progress_limit=settings.in_progress_limit,
             # ADR-0289 §4's nine story methods read and write this store, and the
             # story summary view lists this many notes (ADR-0303 §10:2).
             stories=stories,
