@@ -831,6 +831,31 @@ async def test_a_stop_stops_every_activation_running_from_the_chat() -> None:
     assert line.sent() == [STOPPED_LINE], "answered once"
 
 
+async def test_one_stop_that_fails_leaves_the_others_to_be_made() -> None:
+    """ADR-0349 §4:3: each running one is stopped by a stop of its own."""
+    line = _Line()
+    first = await _running(line)
+    line.fake.hold(text(2, "and the weather?"))
+    await line.until(lambda: len(line.inputs) == 2, what="the second was taken in")
+    second = line.inputs[1].activation_id
+    stopping = line.reader._stop
+
+    async def failing(activation_id: str) -> bool:
+        if activation_id == first:
+            msg = "the stop could not be made"
+            raise RuntimeError(msg)
+        return await stopping(activation_id)
+
+    line.reader._stop = failing
+    line.fake.hold(stop_command(3))
+    await line.until(lambda: STOPPED_LINE in line.sent(), what="the stop was answered")
+    assert line.stops == [second], "the second was stopped all the same"
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.stop()
+
+
 async def test_the_engine_is_told_what_the_start_wait_holds_until_its_activation_ends() -> None:
     """ADR-0349 §7:12: held from the poll that began the wait, admitted, then let go."""
     line = _Line()
