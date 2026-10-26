@@ -708,10 +708,12 @@ class Matters:
     ) -> None:
         """§7:24: what an absorbed activation had reached is its absorber's now.
 
-        The activations it waited on, and its open offer, withdrawn and made again from
-        here, each reached in this step as one ``continues`` named would be.
+        Its open offer is withdrawn and made again from here, reached in this step as one
+        ``continues`` named would be, under §7:17 and §7:22. Every activation it waited
+        on, the one that declined its offer included, the absorber waits on as it was:
+        no offer is made to it again. One that has ended is waited for no longer, but
+        stays named, so what it finished is still shown, read fresh (§7:27).
         """
-        inherited = list(other.waits_on)
         to_id = other.offered_to
         if to_id is not None:
             to = self.state_of(to_id)
@@ -719,20 +721,21 @@ class Matters:
             if withdrawn is not None:
                 withdrawn.decision.became = Became.WITHDRAWN
             other.offered_to = None
-            inherited.append(to_id)
-        for older_id in dict.fromkeys(inherited):
-            older = self.state_of(older_id)
-            if older is None:
-                # §7:27: ended, so nothing is waited for, but what it finished is still
-                # the absorber's to be shown, read fresh from its own episode.
-                if older_id not in state.waits_on:
-                    state.waits_on = (*state.waits_on, older_id)
+            if to is None and to_id not in state.waits_on:
+                state.waits_on = (*state.waits_on, to_id)
+            elif to is not None and to is not state and not any(one is to for _, one in acted):
+                decision = Named(activation_id=to_id, reached=None, became=Became.OFFERED)
+                decisions.append(decision)
+                acted.append((decision, to))
+        for older_id in other.waits_on:
+            if older_id in {to_id, state.activation_id}:
                 continue
-            if older is state or any(one is older for _, one in acted):
-                continue
-            decision = Named(activation_id=older_id, reached=None, became=Became.WAITED_ON)
-            decisions.append(decision)
-            acted.append((decision, older))
+            if older_id not in state.waits_on:
+                state.waits_on = (*state.waits_on, older_id)
+            if self.state_of(older_id) is not None:
+                decisions.append(
+                    Named(activation_id=older_id, reached=None, became=Became.WAITED_ON)
+                )
 
     def _absorbing(
         self,
@@ -771,10 +774,18 @@ class Matters:
         *,
         at: datetime,
     ) -> None:
-        """Offer to, or wait on, what the step reached that has acted (§7:17-§7:22)."""
+        """Offer to, or wait on, what the step reached that has acted (§7:17-§7:22).
+
+        An offer is made to one activation alone: where the step reached more, or this
+        activation already waits on running work it took over from an absorbed one
+        (§7:24), a take by one would leave the other going on with no one to wait on it,
+        so it waits on each.
+        """
         if not acted:
             return
-        offering = len(acted) == 1
+        reached = {str(one.activation_id) for _, one in acted}
+        waiting = any(one not in reached for one in self.waiting_on(state))
+        offering = len(acted) == 1 and not waiting
         for decision, older in acted:
             older_id = str(older.activation_id)
             if (

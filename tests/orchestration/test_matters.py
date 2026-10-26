@@ -784,3 +784,24 @@ def test_an_absorber_keeps_what_the_absorbed_one_waited_on_once_it_has_ended() -
 
     assert absorber.waits_on == (_IDS[0],)
     assert matters.waiting_on(absorber) == (), "nothing to wait for: it has ended"
+
+
+def test_absorbing_one_whose_offer_was_declined_waits_with_no_new_offer() -> None:
+    """§7:24: only an open offer is made again; a declined one stays a wait."""
+    older = _running("a", _IDS[0], order=1)
+    older.committed = True
+    offering = _running("a", _IDS[1], order=2)
+    states = [older, offering]
+    matters = _matters(states)
+    matters.merge(offering, _understood(offering, _IDS[0]), at=_AT)
+    matters.answer(older, _IDS[1], take=False, reason="already booked")
+    absorber = _running("a", _IDS[2], order=3)
+    states.append(absorber)
+
+    decided, absorbed = matters.merge(absorber, _understood(absorber, _IDS[1]), at=_AT)
+
+    assert absorbed == [_IDS[1]]
+    assert [one.became for one in decided] == [Became.ABSORBED, Became.WAITED_ON]
+    assert older.offers == {}, "no offer is made to it again"
+    assert absorber.waits_on == (_IDS[0],)
+    assert older.offers_untaken == 1

@@ -26,6 +26,7 @@ earlier_work = false
 [property]
 check = "answers_offer"
 answer = "take"
+offer = "E1"
 
 [input]
 file = "offer-taken-where-nothing-would-change.json"
