@@ -13,6 +13,7 @@ from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+import structlog
 from phases_support import phases_harness, until
 from task_support import AT, CHAT, LINE, activation, message, pushed, seams, spawn_effect
 
@@ -74,6 +75,13 @@ class _Inputs:
 
 
 async def _harness(inputs: _Inputs, *, zone: str | None = NEW_YORK) -> Harness:
+    harness, _ = await _harness_with_people(inputs, zone=zone)
+    return harness
+
+
+async def _harness_with_people(
+    inputs: _Inputs, *, zone: str | None = NEW_YORK
+) -> tuple[Harness, FakePersonModelStore]:
     memory = FakeMemoryStore(now=lambda: AT)
     people = FakePersonModelStore(now=lambda: AT)
     if zone is not None:
@@ -91,7 +99,7 @@ async def _harness(inputs: _Inputs, *, zone: str | None = NEW_YORK) -> Harness:
         plans=FakePlanStore(now=lambda: AT),
         now=lambda: AT,
         person_blocks=PersonBlocks(store=people, memory=memory),
-    )
+    ), people
 
 
 async def _daily(plans: PlanStore, first: datetime) -> ScheduledTask:
@@ -167,6 +175,28 @@ async def test_a_rules_first_push_writes_its_successor_and_its_input_states_the_
     assert "due Wed 31 Dec 2025 18:59 (America/New_York)" in text
     assert "skipped" not in text
     assert "late" not in text
+
+
+async def test_a_push_whose_persons_zone_cannot_be_read_waits_and_is_pushed_after() -> None:
+    """§3:3, §4:6: nothing is pushed on a guessed zone; a later look pushes it in theirs."""
+    inputs = _Inputs()
+    harness, people = await _harness_with_people(inputs)
+    task = await _daily(harness.plans, AT - timedelta(minutes=1))
+    people.fail_next()
+    with structlog.testing.capture_logs() as captured:
+        await harness.engine.start()
+        try:
+            await _ran(harness, 1)
+            held = await _settled(harness, task.id, 1)
+        finally:
+            await harness.engine.aclose()
+
+    # The fault met the push's read of the zone, and nothing was pushed on it.
+    assert [one["event"] for one in captured].count("task_zone_unread") == 1
+    assert held.occurrences[0].pushes == 1
+    assert held.occurrences[1].due_at == datetime(2026, 1, 1, 13, 0, tzinfo=AT.tzinfo)
+    (text,) = inputs.inputs
+    assert "(America/New_York)" in text
 
 
 async def test_a_rule_missed_for_three_days_pushes_one_late_occurrence_that_skipped_two() -> None:

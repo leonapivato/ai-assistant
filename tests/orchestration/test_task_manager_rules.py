@@ -39,9 +39,11 @@ from ai_assistant.core.types import (
     ToolResult,
 )
 from ai_assistant.orchestration.acting import Unwritten
+from ai_assistant.orchestration.person_calls import NotDone
 from ai_assistant.orchestration.task_manager import ScheduledTaskCalls, TaskManager, spawn_when
 from ai_assistant.orchestration.task_rules import PersonZones, task_zone
 from ai_assistant.orchestration.task_scheduler import (
+    CANCEL_TASK,
     LIST_TASKS,
     SPAWN,
     Spawner,
@@ -476,6 +478,57 @@ async def test_the_task_managers_replace_refuses_a_rule_with_no_occurrence_left(
                 until_date=date(2026, 10, 23),
             ),
         )
+
+
+async def test_the_task_managers_replace_refuses_a_zone_that_does_not_resolve() -> None:
+    """§3:5, §4:3: never computed in the person's zone instead; the task stays pending."""
+    world = await _world()
+    one_off = (await _spawn(world, at="2026-10-23T20:00"), await _only_task(world))[1]
+
+    with pytest.raises(PlanningError, match="not an IANA zone name"):
+        await world.manager.replace(
+            one_off.id,
+            instruction="the bins",
+            when=DueOnRule(
+                repeats=TaskRuleKind.DAILY, time_of_day=time(7, 0), zone="Mars/Olympus_Mons"
+            ),
+        )
+
+    assert (await _only_task(world)).id == one_off.id
+
+
+# --- a person's zone that cannot be read (§3:3) ------------------------------------------
+
+
+async def test_a_spawn_whose_persons_zone_cannot_be_read_is_refused_writing_nothing() -> None:
+    """§3:3: a local time is never read in a guessed zone."""
+    people = await _people()
+    world = _World(people)
+    people.fail_next()
+
+    reason = _refused(await _spawn(world, at="2026-10-23T20:00"))
+
+    assert "zone could not be read" in reason
+    assert (await world.plans.export()).scheduled_tasks == ()
+
+
+async def test_a_cancel_or_list_whose_zone_cannot_be_read_does_nothing() -> None:
+    people = await _people()
+    world = _World(people)
+    _spawned(await _spawn(world, at="2026-10-23T20:00"))
+    task = await _only_task(world)
+
+    people.fail_next()
+    with spawning(_spawner()):
+        cancelled = await world.calls.run(_call(CANCEL_TASK, {"task": task.id}))
+    people.fail_next()
+    with spawning(_spawner()):
+        listed = await world.calls.run(_call(LIST_TASKS, {}))
+
+    assert isinstance(cancelled, NotDone)
+    assert "zone could not be read" in cancelled.reason
+    assert isinstance(listed, NotDone)
+    assert (await _only_task(world)).id == task.id
 
 
 # --- the read-back (§6:2) ----------------------------------------------------------------
