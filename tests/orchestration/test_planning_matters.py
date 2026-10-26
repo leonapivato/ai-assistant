@@ -12,6 +12,7 @@ applies.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -44,7 +45,13 @@ from ai_assistant.orchestration.planning import (
     PeerShown,
     RunningShown,
 )
-from ai_assistant.orchestration.task_scheduler import ActivationEntry, TaskListing
+from ai_assistant.orchestration.task_scheduler import (
+    ActivationEntry,
+    StartingEntry,
+    StillLive,
+    TaskEntry,
+    TaskListing,
+)
 
 _AT: Final = datetime(2026, 10, 21, 9, tzinfo=UTC)
 _LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="ref/42")
@@ -303,3 +310,111 @@ def test_a_running_entry_round_trips_its_acted_mark_and_origin() -> None:
     older = decode_listing({**encoded, "running": [{**legacy, "outside": True}]})
     assert older is not None
     assert (older.running[0].origin, older.running[0].acted) == (InputOrigin.OUTSIDE, False)
+
+
+def _stop_shown(set_up: StillLive) -> CallOutcome:
+    return CallOutcome(
+        "round:earlier",
+        "c1",
+        CallOutcomeKind.DONE,
+        result_id="result:1",
+        peer=PeerShown(activation_id=_A, view=_view(), ended=True, stopped=True, set_up=set_up),
+    )
+
+
+async def _set_up_shown(set_up: StillLive) -> Any:
+    earlier = _earlier(
+        calls=(ProposedCall(call_id="c1", name="stop_activation", arguments={"activation": "E1"}),)
+    )
+    stage, completer, _ = _stage(RoundResponse(text=""))
+    await stage.plan(_inputs(**_matters(rounds=(earlier,), outcomes=(_stop_shown(set_up),))))
+    (call,) = _sent(completer)["rounds"][0]["calls"]
+    return call["result"]["value"]["set_up_still_live"]
+
+
+async def test_a_stop_calls_result_lists_what_the_work_set_up_that_is_still_live() -> None:
+    """ADR-0352 §3:1, §3:3-§3:6: tasks by T label, running work by E, starting by T."""
+    task = TaskEntry(
+        task_id="task:reminder",
+        state="pending",
+        falls_due="Mon 26 Oct 2026 10:00 (UTC)",
+        instruction="check the project notes",
+        outside=False,
+        places=(),
+        parent=_A,
+        parent_text="spawned by the person's message in the person's Telegram chat",
+        author="person",
+    )
+    marked = replace(task, task_id="task:marked", instruction=None, outside=True)
+    running = ActivationEntry(
+        activation_id=_B,
+        started="",
+        place="the schedule",
+        status="running",
+        input=None,
+        outside=False,
+        origin=InputOrigin.ASSISTANT,
+    )
+    left = StillLive(
+        tasks=(task, marked),
+        more_tasks=2,
+        activations=(running, StartingEntry(task_id="task:gather")),
+        more_activations=1,
+    )
+
+    shown = await _set_up_shown(left)
+
+    reminder, withheld = shown["scheduled"]
+    assert reminder["label"].startswith("T")
+    assert reminder["falls_due"] == "Mon 26 Oct 2026 10:00 (UTC)"
+    assert reminder["carries"] == "check the project notes"
+    assert reminder["set_by"] == "person"
+    assert reminder["parent"]["is"].startswith("spawned by")
+    assert "outside" in withheld["carries"], "a marked task's text is withheld (§3:5)"
+    assert shown["more_scheduled_not_shown"] == 2
+    step, starting = shown["running"]
+    assert step["episode"].startswith("E")
+    assert "has_acted" in step
+    assert starting == {"scheduled_task": starting["scheduled_task"], "status": "starting"}
+    assert starting["scheduled_task"].startswith("T")
+    assert shown["more_running_not_shown"] == 1
+
+
+async def test_a_stop_calls_result_says_when_nothing_it_set_up_is_still_live() -> None:
+    """ADR-0352 §3:1: where there is none, the result says so."""
+    assert await _set_up_shown(StillLive()) == "nothing it set up is still live"
+
+
+async def test_a_stop_calls_result_says_when_what_it_set_up_could_not_be_read() -> None:
+    """The stop stands, and nothing is claimed of what it set up."""
+    shown = await _set_up_shown(StillLive(read=False))
+    assert "could not be read" in shown
+
+
+#: ADR-0352 §3:8's line, as the prompts front routed it (§3:10).
+_WORDS_COVER: Final = (
+    "Stop or cancel exactly what the person's words cover: each piece of running work and "
+    "each task they cover, by the labels you were shown, including those a stop's result "
+    "lists. Keep the rest, and where it is unclear what the words cover, ask which."
+)
+
+
+def _instruction(**flags: bool) -> str:
+    from ai_assistant.orchestration.planning import PLANNING_PROMPT  # noqa: PLC0415
+    from ai_assistant.testing.prompts import default_prompt  # noqa: PLC0415 — this case's
+
+    every = dict.fromkeys(PLANNING_PROMPT.flags, False) | flags
+    values = {
+        "approved_action_tool": "approved_action",
+        "note_reliance_capability": "note_reliance",
+        "needs_your_yes": "needs your yes",
+    }
+    return default_prompt(PLANNING_PROMPT).render(flags=every, values=values)
+
+
+def test_the_words_cover_line_renders_once_wherever_the_stop_is_offered() -> None:
+    """ADR-0352 §3:8: once, in a waiting round and in any other, and never without it."""
+    for waiting in (False, True):
+        assert _instruction(running_work=True, waiting=waiting).count(_WORDS_COVER) == 1
+    assert _WORDS_COVER not in _instruction(running_work=False)
+    assert _WORDS_COVER not in _instruction(running_work=False, waiting=True)

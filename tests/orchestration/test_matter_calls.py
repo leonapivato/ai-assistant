@@ -46,6 +46,7 @@ from ai_assistant.orchestration.matter_calls import (
 )
 from ai_assistant.orchestration.matters import Matters
 from ai_assistant.orchestration.person_calls import NotDone
+from ai_assistant.orchestration.task_scheduler import StillLive
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore
 
 if TYPE_CHECKING:
@@ -377,3 +378,92 @@ async def test_a_stop_whose_findings_cannot_be_read_is_still_done() -> None:
     assert answer.outcome is ToolOutcome.SUCCEEDED
     assert stops.stopped == [_A]
     assert isinstance(refused, NotDone), "a look-up is its read, so its failure is the call's"
+
+
+# --- what the stopped work set up (ADR-0352 §3:1-§3:2) -------------------------------
+
+
+class _SetUp:
+    """The engine's read of what a stopped activation set up, recording when it ran."""
+
+    def __init__(self, stops: _Stops) -> None:
+        self._stops = stops
+        self.asked: list[tuple[str, str, str | None, tuple[str, ...]]] = []
+
+    async def __call__(
+        self, activation_id: str, /, *, person: str, viewer: str | None, supply: object
+    ) -> StillLive:
+        del supply
+        self.asked.append((activation_id, person, viewer, tuple(self._stops.stopped)))
+        return StillLive(more_tasks=1)
+
+
+def _wired_with_set_up(
+    states: list[ActivationState],
+) -> tuple[MatterCalls, _Stops, _SetUp]:
+    stops = _Stops()
+    set_up = _SetUp(stops)
+    matters = Matters(
+        running=lambda: states,
+        plans=FakePlanStore(now=lambda: _AT),
+        memory=FakeMemoryStore(now=lambda: _AT),
+        stop=stops,
+        held_input_limit=4,
+        in_progress_limit=5,
+        set_up=set_up,
+    )
+    return MatterCalls(matters=matters), stops, set_up
+
+
+async def test_a_stop_calls_result_reads_what_the_work_set_up_once_it_is_stopped() -> None:
+    """ADR-0352 §3:1-§3:2: read after the stop's record, for the caller's person."""
+    older, asker = _running("a", _A, order=1), _running("b", _B, order=2)
+    calls, stops, set_up = _wired_with_set_up([older, asker])
+    caller = _caller(asker, running=frozenset({_A}))
+    with calling(caller):
+        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+    assert isinstance(answer, ToolResult)
+    ((named, person, viewer, stopped_then),) = set_up.asked
+    assert (named, viewer) == (_A, _B)
+    assert person
+    assert stopped_then == (_A,), "the read is made once the stop is written"
+    (shown,) = caller.shown.values()
+    assert shown.set_up == StillLive(more_tasks=1)
+    assert stops.stopped == [_A]
+
+
+async def test_a_stop_call_finding_the_work_ended_still_reads_what_it_set_up() -> None:
+    """ADR-0352 §3:1: or found it ended or stopped, the result lists the same."""
+    asker = _running("b", _B, order=2)
+    calls, stops, set_up = _wired_with_set_up([asker])
+    caller = _caller(asker, running=frozenset({_A}))
+    with calling(caller):
+        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+    assert isinstance(answer, ToolResult)
+    assert stops.stopped == []
+    ((named, _, _, _),) = set_up.asked
+    assert named == _A
+    (shown,) = caller.shown.values()
+    assert shown.stopped is False
+    assert shown.set_up is not None
+
+
+async def test_a_look_up_reads_nothing_of_what_the_work_set_up() -> None:
+    """ADR-0352 §3:1 is the stop call's result alone."""
+    older, asker = _running("a", _A, order=1), _running("b", _B, order=2)
+    calls, _, set_up = _wired_with_set_up([older, asker])
+    caller = _caller(asker, running=frozenset({_A}))
+    with calling(caller):
+        await calls.run(_call(LOOK_UP_ACTIVATION, activation=_episode(_A)))
+    assert set_up.asked == []
+    (shown,) = caller.shown.values()
+    assert shown.set_up is None
+
+
+def test_the_stop_calls_declaration_is_the_routed_text() -> None:
+    """ADR-0352 §3:9-§3:10: it stops that work alone, and its result lists what is live."""
+    assert STOP_ACTIVATION.description == (
+        "Stop running work you were shown as running, and that work alone. Nothing it "
+        "already did is undone, and what it set up stays. The result shows what it had "
+        "finished and what it set up that is still live."
+    )

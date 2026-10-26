@@ -419,7 +419,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``PeerEffect``, ``ProjectedText`` and ``ProjectedEvidence``, held for planning as
     ``PeerShown`` (§6:7-§6:10), is that activation's input, its meaning, its notes and
     evidence as projected, and its effects by capability or message: what the same
-    person's activations read and wrote, with no carrier.
+    person's activations read and wrote, with no carrier. For a stop call it also holds
+    what the stopped activation set up that is still live (ADR-0352 §3:1-§3:6),
+    ``StillLive``: the ``TaskEntry`` and ``ActivationEntry`` records the list pull already
+    carries, a ``StartingEntry`` that is a task's identifier alone, counts and a flag.
 
     **The audience** (ADR-0203, ADR-0204). ``UnboundedAudienceSupply`` and
     ``BoundedAudienceSupply`` filter what is rendered and are never rendered: a set of
@@ -522,6 +525,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ListedPlace",
         "TaskEntry",
         "TaskListing",
+        # ADR-0352 §3:1-§3:6: what a stopped activation set up, of the listing's records.
+        "StartingEntry",
+        "StillLive",
         "Placement",
         "PlannedCall",
         "PlannedRound",
