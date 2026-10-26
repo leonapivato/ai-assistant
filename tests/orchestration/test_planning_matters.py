@@ -38,6 +38,7 @@ from ai_assistant.orchestration.matter_calls import (
     MATTER_LABEL_ARGUMENTS,
     STOP_ACTIVATION,
 )
+from ai_assistant.orchestration.matters import NotAsAsked
 from ai_assistant.orchestration.planning import (
     CallOutcome,
     CallOutcomeKind,
@@ -270,6 +271,70 @@ async def test_a_stop_calls_result_and_a_refusal_naming_its_absorber() -> None:
     assert value["did"] == ["the tool remember ran"]
     assert absorbed["absorbed_by"].startswith("E")
     assert "absorbed" in absorbed["outcome"]
+
+
+def _answered(call_id: str, activation_id: str, **fields: Any) -> CallOutcome:
+    return CallOutcome(
+        "round:earlier",
+        call_id,
+        CallOutcomeKind.DONE,
+        result_id=f"result:{call_id}",
+        peer=PeerShown(activation_id=activation_id, **fields),
+    )
+
+
+async def test_an_answers_result_says_why_the_hub_settled_it_so() -> None:
+    """ADR-0349 §7:22-§7:23, ADR-0352 §4:2, #3471, #3477: a withdrawal and a refusal at
+    the limit each carry their reason, naming the offering work by its label and the
+    input it carried by its meaning; a take, and a decline planning chose, carry none."""
+    outcomes = (
+        _answered(
+            "c1",
+            _A,
+            answered="withdrawn",
+            not_as_asked=NotAsAsked.STOPPED,
+            meaning="Move the floss reminder to 10 PM.",
+        ),
+        _answered(
+            "c2",
+            _B,
+            answered="declined",
+            not_as_asked=NotAsAsked.AT_LIMIT,
+            meaning="Make it 9 PM.",
+        ),
+        _answered("c3", _A, answered="taken", meaning="Move it."),
+        _answered("c4", _B, answered="declined", meaning="Move it."),
+    )
+    earlier = _earlier(
+        calls=tuple(
+            ProposedCall(
+                call_id=f"c{index}",
+                name="answer_offer",
+                arguments={"offer": "E1", "take": index != 4},
+            )
+            for index in range(1, 5)
+        )
+    )
+    stage, completer, _ = _stage(RoundResponse(text=""))
+
+    await stage.plan(_inputs(**_matters(rounds=(earlier,), outcomes=outcomes)))
+
+    withdrawn, limited, taken, declined = (
+        one["result"]["value"] for one in _sent(completer)["rounds"][0]["calls"]
+    )
+    assert withdrawn["answer"] == "withdrawn"
+    label = withdrawn["episode"]
+    assert withdrawn["because"] == (
+        f"{label} was stopped before the answer, so the input it carried is no longer "
+        "asked for, and the work that input asked for is not to be done"
+    )
+    assert withdrawn["understood_as"] == "Move the floss reminder to 10 PM."
+    assert limited["answer"] == "declined"
+    assert "already holds as much input as it may" in limited["because"]
+    assert limited["because"].count(limited["episode"]) == 1, "it names the offering work"
+    assert limited["understood_as"] == "Make it 9 PM."
+    for one in (taken, declined):
+        assert set(one) == {"episode", "answer"}, "nothing the hub settled, so no reason"
 
 
 async def test_the_sections_appear_only_where_they_apply() -> None:

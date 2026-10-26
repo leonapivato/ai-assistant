@@ -20,7 +20,10 @@
   activation, or decline it with a short reason, naming it by the offering activation's
   label. Refused whole where the label names no offer open to it. Whether it came to
   what it asked is held for acting, which dispatches the rest of the round only where
-  every answer did (ADR-0352 §4).
+  every answer did (ADR-0352 §4), and, where it did not, why: the offering activation
+  stopped or ended, the take refused at ``held_input_limit``, or no offer open. A
+  withdrawal and a refusal at the limit are shown to planning beside the answer's result
+  (ADR-0349 §7:23).
 
 Each is declared as ADR-0350 §4:1 declares the cancel of a scheduled task: the
 assistant's own records, never leaving the hub, an outcome never unknown, safe to repeat,
@@ -65,6 +68,7 @@ from ai_assistant.orchestration.matters import (
     ANSWER_OFFER_CAPABILITY,
     LOOK_UP_ACTIVATION_CAPABILITY,
     STOP_ACTIVATION_CAPABILITY,
+    NotAsAsked,
     TakeAnswer,
 )
 from ai_assistant.orchestration.person_calls import NotDone
@@ -253,6 +257,9 @@ class MatterCaller:
         as_asked: Each answer call that came to what it asked, by its decision's id: a
             take to a take, or a decline to the decline (ADR-0352 §4:2-§4:3). An answer
             refused whole, withdrawn, or refused at ``held_input_limit`` is not here.
+        not_as_asked: Why each answer call that ran and did not come to what it asked
+            did not, by its decision's id, for acting's held-back reason (§4:2). An
+            answer whose arguments or records failed is in neither.
     """
 
     state: ActivationState
@@ -263,6 +270,7 @@ class MatterCaller:
     supply: TurnSupply | None = None
     shown: dict[str, PeerShown] = field(default_factory=dict)
     as_asked: set[str] = field(default_factory=set)
+    not_as_asked: dict[str, NotAsAsked] = field(default_factory=dict)
 
 
 _CALLING: Final[contextvars.ContextVar[MatterCaller | None]] = contextvars.ContextVar(
@@ -415,21 +423,37 @@ class MatterCalls:
             return NotDone(reason=_MALFORMED)
         if reason is not None and not isinstance(reason, str):
             return NotDone(reason=_MALFORMED)
-        answered, why = self._matters.answer(caller.state, named, take=take, reason=reason)
+        answer = self._matters.answer(caller.state, named, take=take, reason=reason)
+        answered, short = answer.came_to, answer.not_as_asked
         if answered is TakeAnswer.NO_OFFER:
             _log.info("matter_call_not_done", stage="acting", reason="no_offer")
+            caller.not_as_asked[decision] = NotAsAsked.NO_OFFER
             return NotDone(reason=_NO_OFFER)
-        _log.info("matter_answer", stage="acting", answered=answered.value)
-        if answered is (TakeAnswer.TAKEN if take else TakeAnswer.DECLINED):
+        _log.info(
+            "matter_answer",
+            stage="acting",
+            answered=answered.value,
+            not_as_asked=None if short is None else short.value,
+        )
+        if short is None:
             # ADR-0352 §4:3: settled as planning asked, so the rest of its round may run.
             caller.as_asked.add(decision)
+        else:
+            caller.not_as_asked[decision] = short
         if answered is TakeAnswer.TAKEN:
             # §7:21: after the step, as an absorption's is; awaited to its end.
             await self._matters.record_stop(named, deadline=None, stage="acting")
-        caller.shown[decision] = PeerShown(activation_id=named, answered=answered.value)
+        caller.shown[decision] = PeerShown(
+            activation_id=named,
+            answered=answered.value,
+            not_as_asked=short,
+            meaning=answer.meaning,
+        )
         output: dict[str, FrozenJson] = {"kind": "matter_answer", "answered": answered.value}
-        if why is not None:
-            output["reason"] = why
+        if answer.reason is not None:
+            output["reason"] = answer.reason
+        if short is not None:
+            output["not_as_asked"] = short.value
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=output)
 
     async def _show(

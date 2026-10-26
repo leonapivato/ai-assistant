@@ -337,6 +337,7 @@ from ai_assistant.orchestration.matters import (
     ANSWER_OFFER_CAPABILITY,
     LOOK_UP_ACTIVATION_CAPABILITY,
     STOP_ACTIVATION_CAPABILITY,
+    NotAsAsked,
     is_pure_read,
 )
 from ai_assistant.orchestration.outside_content import rests_on_outside_content
@@ -367,6 +368,7 @@ from ai_assistant.orchestration.planning import (
     RecordedCandidate,
     RefusedCall,
     RunningShown,
+    answer_fact,
 )
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.reliance import noted
@@ -2479,11 +2481,37 @@ _HELD_BACK: Final = (
     "is planned again with the offer shown"
 )
 #: Why a call of a round whose answer to an offer did not come to what it asked was not
-#: done (ADR-0352 §4:2), as planning reads it.
+#: done (ADR-0352 §4:2), as planning reads it: ``{facts}`` is what each such answer came
+#: to, by :func:`~ai_assistant.orchestration.planning.answer_fact`.
 _NOT_TAKEN: Final = (
-    "not run: this round's answer to an offer did not come to what it asked, so the offer "
-    "was not taken and the round is planned again with what the answer came to"
+    "not run: this round's answer to an offer did not come to what it asked, so the round "
+    "is planned again with what the answer came to: {facts}"
 )
+#: How a held-back call's reason names the work that offered the input, which carries no
+#: label: the answer's result beside it names that work by its ``E`` label.
+_OFFERING_WORK: Final = "the work that offered the input"
+
+
+def _not_taken(answering: _Answering, caller: MatterCaller | None) -> str:
+    """Why each held-back call of a round was not done: what its answers came to (§4:2).
+
+    One fact for each distinct way an answer of the round did not come to what it asked:
+    one refused before acting was not allowed, then each that ran says what it came to,
+    in the round's order, and one whose arguments or records failed was not done.
+    """
+    facts: list[NotAsAsked] = []
+    if answering.refused:
+        facts.append(NotAsAsked.NOT_ALLOWED)
+    for one in answering.first.allowed:
+        decision = one.call.decision.id
+        if caller is not None and decision in caller.as_asked:
+            continue
+        why = NotAsAsked.NOT_DONE if caller is None else caller.not_as_asked.get(decision)
+        facts.append(NotAsAsked.NOT_DONE if why is None else why)
+    shown = dict.fromkeys(facts or [NotAsAsked.NOT_DONE])
+    return _NOT_TAKEN.format(
+        facts="; ".join(answer_fact(why, offering=_OFFERING_WORK) for why in shown)
+    )
 
 
 def _position(item: PlaceItem) -> int | None:
@@ -4440,6 +4468,7 @@ class PhasePath:
             return ran, wrote
         _log.info("phase_round_held_back", stage="acting", reason="offer_not_taken")
         latest.not_taken = True
+        because = _not_taken(answering, caller)
         reads = tuple(one for one in answering.rest if is_pure_read(one.call.request.tool))
         read = (
             await self._calls(given, working, replace(decided, allowed=reads, message=None))
@@ -4450,7 +4479,7 @@ class PhasePath:
         held = ActedRound(
             round_id=decided.round_id,
             calls=tuple(
-                ActedCall(call=one, outcome=ActedOutcome.NOT_DONE, reason=_NOT_TAKEN)
+                ActedCall(call=one, outcome=ActedOutcome.NOT_DONE, reason=because)
                 for one in authorized_round(
                     replace(
                         decided,
