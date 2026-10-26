@@ -2953,6 +2953,28 @@ class PlanStoreContract:
         (occurrence,) = (await _held(store, "t1")).occurrences
         assert occurrence.state is OccurrenceState.CANCELLED
 
+    async def test_a_cascade_at_a_rules_push_again_cancels_its_successor_too(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §4:7: the cascade refuses every occurrence of the task, so the rule ends.
+
+        An occurrence pushed again after a restart is pending beside its successor; a
+        cascade found at its push ends both cancelled, so nothing of the rule holds a
+        pending slot or keeps the task once it has ended.
+        """
+        await _rule_written(store, "t1", spawner="act-0")
+        await store.mark_occurrence_pushed("t1", 1, "act-1", rule=RulePush(successor=_due(1)))
+        await store.settle_occurrence("act-1", OccurrenceState.PENDING)
+        await store.record_cascade("act-0")
+
+        answer = await store.mark_occurrence_pushed("t1", 1, "act-1b")
+
+        assert answer is OccurrencePush.CASCADE_CANCELLED
+        held = await _held(store, "t1")
+        assert [one.state for one in held.occurrences] == [OccurrenceState.CANCELLED] * 2
+        assert not held.pending
+        assert await store.remove_scheduled_task("t1")
+
     async def test_a_skip_while_a_rules_occurrence_runs_replaces_it(self, store: PlanStore) -> None:
         """ADR-0340 §5:1, §4:6: the pending next is there for a replace to reach.
 

@@ -3747,8 +3747,10 @@ class PlanStore(Protocol):
         whichever lands first wins. Where the task is not held, or the occurrence is not
         pending, it answers ``NOT_PENDING`` and writes nothing. Where an activation in
         the task's lineage carries a cascade record — the task's parent, or the parent
-        of any task above it — it ends the occurrence cancelled and answers
-        ``CASCADE_CANCELLED``, which for a rule ends it (ADR-0340 §4:7). Otherwise it
+        of any task above it — it ends the occurrence cancelled, with every other
+        pending occurrence of the task, and answers ``CASCADE_CANCELLED``: for a rule,
+        that is its successor too, beside an occurrence pushed again, and the rule ends
+        (ADR-0340 §4:7). Otherwise it
         marks the occurrence pushed to ``activation_id``, counting the push (§8:5), and
         answers ``PUSHED``.
 
