@@ -16,7 +16,9 @@
   ended since, its finished work, saying so.
 - **The answer call** (§7:20), :data:`ANSWER_OFFER`: take an offer open to this
   activation, or decline it with a short reason, naming it by the offering activation's
-  label. Refused whole where the label names no offer open to it.
+  label. Refused whole where the label names no offer open to it. Whether it came to
+  what it asked is held for acting, which dispatches the rest of the round only where
+  every answer did (ADR-0352 §4).
 
 Each is declared as ADR-0350 §4:1 declares the cancel of a scheduled task: the
 assistant's own records, never leaving the hub, an outcome never unknown, safe to repeat,
@@ -240,6 +242,9 @@ class MatterCaller:
             only ones its stop call may name (§7:26); ``None`` otherwise.
         shown: What each call came back with, by its decision's id, for the phases to
             show under its result.
+        as_asked: Each answer call that came to what it asked, by its decision's id: a
+            take to a take, or a decline to the decline (ADR-0352 §4:2-§4:3). An answer
+            refused whole, withdrawn, or refused at ``held_input_limit`` is not here.
     """
 
     state: ActivationState
@@ -248,6 +253,7 @@ class MatterCaller:
     running: frozenset[str]
     waiting: frozenset[str] | None = None
     shown: dict[str, PeerShown] = field(default_factory=dict)
+    as_asked: set[str] = field(default_factory=set)
 
 
 _CALLING: Final[contextvars.ContextVar[MatterCaller | None]] = contextvars.ContextVar(
@@ -405,6 +411,9 @@ class MatterCalls:
             _log.info("matter_call_not_done", stage="acting", reason="no_offer")
             return NotDone(reason=_NO_OFFER)
         _log.info("matter_answer", stage="acting", answered=answered.value)
+        if answered is (TakeAnswer.TAKEN if take else TakeAnswer.DECLINED):
+            # ADR-0352 §4:3: settled as planning asked, so the rest of its round may run.
+            caller.as_asked.add(decision)
         if answered is TakeAnswer.TAKEN:
             # §7:21: after the step, as an absorption's is; awaited to its end.
             await self._matters.record_stop(named, deadline=None, stage="acting")

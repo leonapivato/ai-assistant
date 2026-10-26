@@ -799,6 +799,10 @@ class PlanningInputs:
             so their message was never written and nothing they asked about was shown.
             Each stays in ``rounds``, its text shown as not written, and what it asked
             about is not taken as asked (ADR-0321 §2:2).
+        not_taken: The ids of earlier rounds whose acts were held back because an
+            answer of theirs to an offer did not come to what it asked (ADR-0352 §4:2).
+            Each is also in ``overtaken``, and its text is shown as not written for
+            that reason.
         person: The activation's person block, less what the memory store no longer
             holds (ADR-0338 §7:3, §7:10): its five fields, its whole kept-in-mind slot
             and the pending suggestions it admits, shown first in the request. ``None``
@@ -840,6 +844,7 @@ class PlanningInputs:
     approved: tuple[ApprovedAction, ...] = ()
     pending: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     overtaken: frozenset[str] = frozenset()
+    not_taken: frozenset[str] = frozenset()
     person: PersonBlock | None = None
     places: tuple[ListedPlace, ...] | None = None
     speaks_by_label: bool = False
@@ -1415,6 +1420,12 @@ _ALREADY_ASKED: Final = (
 #: before it acted, so it was never written and asked the user nothing.
 _OVERTAKEN: Final = (
     "not written: new input joined before this round acted, so the user never saw it"
+)
+#: A round held back because its answer to an offer did not come to what it asked
+#: (ADR-0352 §4:2): its message was never written.
+_NOT_TAKEN: Final = (
+    "not written: this round's answer to an offer did not come to what it asked, so the "
+    "user never saw it"
 )
 #: A call that needs the user but whose request was not handed on cannot be shown exactly,
 #: so it is never asked about (§2:5).
@@ -2309,7 +2320,9 @@ class _Request:
         shown: dict[str, object] = {"round": number}
         if one.text.strip():
             where = "written into the place" if self._inputs.place.takes_message else "kept"
-            if one.id in self._inputs.overtaken:
+            if one.id in self._inputs.not_taken:
+                where = _NOT_TAKEN
+            elif one.id in self._inputs.overtaken:
                 where = _OVERTAKEN
             shown["text"] = one.text
             shown["text_was"] = where

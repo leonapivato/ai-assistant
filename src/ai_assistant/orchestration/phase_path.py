@@ -1524,6 +1524,9 @@ class _Round:
         offers_shown: The offering activations whose offers its planning was shown
             (ADR-0349 §7:19), which the commitment step reads (§7:14).
         waiting: Whether it is a waiting round (§7:26).
+        not_taken: Whether its acts were held back because an answer of it did not come
+            to what it asked (ADR-0352 §4:2): only its answers and pure reads ran, and
+            its message was never written.
     """
 
     planned: PlannedRound
@@ -1535,6 +1538,7 @@ class _Round:
     planned_from: int | None = None
     offers_shown: frozenset[str] = frozenset()
     waiting: bool = False
+    not_taken: bool = False
 
 
 @dataclass
@@ -1848,16 +1852,25 @@ class PhaseWorking:
     def overtaken(self) -> frozenset[str]:
         """The rounds new input overtook before they acted (ADR-0332 §3:7, §3:12-§3:13).
 
-        Each planned from an earlier understanding version than the latest, and each
-        whose acts were held back for an offer it was not shown (ADR-0349 §7:14): its
+        Each planned from an earlier understanding version than the latest, each whose
+        acts were held back for an offer it was not shown (ADR-0349 §7:14), and each
+        whose answer to an offer did not come to what it asked (ADR-0352 §4:2): its
         message was never written and nothing it asked about was shown. Only a pure read
-        of it can have run.
+        of it, or its answer, can have run.
         """
         return frozenset(
             one.planned.round.id
             for one in self._rounds
             if one.planned_from != self.version or _held_back(one)
         )
+
+    def not_taken(self) -> frozenset[str]:
+        """The rounds held back because an answer of theirs was not taken (ADR-0352 §4:2).
+
+        Each is also among :meth:`overtaken`'s; planning shows its text as not written
+        for that reason.
+        """
+        return frozenset(one.planned.round.id for one in self._rounds if one.not_taken)
 
     def understood(self, version: int) -> None:
         """Hold the latest recorded understanding version, which planning starts over for.
@@ -1924,8 +1937,9 @@ class PhaseWorking:
         none undelivered.
         """
         for one in reversed(self._rounds):
-            # ADR-0332 §3:12-§3:13, ADR-0349 §7:14: a round planned from an earlier
-            # version, or held back for an offer, wrote nothing that needed writing.
+            # ADR-0332 §3:12-§3:13, ADR-0349 §7:14, ADR-0352 §4:2: a round planned from
+            # an earlier version, or held back for an offer or for an answer that did not
+            # come to what it asked, wrote nothing that needed writing.
             if one.planned_from != self.version or _held_back(one):
                 continue
             if one.planned.message is not None:
@@ -2459,6 +2473,12 @@ _HELD_BACK: Final = (
     "not run: newer input was offered to this work before this round acted, so the round "
     "is planned again with the offer shown"
 )
+#: Why a call of a round whose answer to an offer did not come to what it asked was not
+#: done (ADR-0352 §4:2), as planning reads it.
+_NOT_TAKEN: Final = (
+    "not run: this round's answer to an offer did not come to what it asked, so the offer "
+    "was not taken and the round is planned again with what the answer came to"
+)
 
 
 def _position(item: PlaceItem) -> int | None:
@@ -2505,8 +2525,64 @@ def _comes_after(before: PlaceItem, item: PlaceItem, at: datetime) -> bool:
 
 
 def _held_back(one: _Round) -> bool:
-    """Whether ``one``'s acts were held back for an offer it was not shown (§7:14)."""
-    return one.acted is not None and one.acted.set_aside
+    """Whether ``one``'s acts were held back, so its message was never written.
+
+    For an offer it was not shown (ADR-0349 §7:14), or because an answer of it did not
+    come to what it asked (ADR-0352 §4:2).
+    """
+    return one.not_taken or (one.acted is not None and one.acted.set_aside)
+
+
+@dataclass(frozen=True, slots=True)
+class _Answering:
+    """A round that answers an offer, split as acting dispatches it (ADR-0352 §4:1).
+
+    Attributes:
+        decided: Authorizing's decision for the whole round.
+        first: The same decision, its allowed answer calls alone and no message: what
+            is dispatched first, and alone.
+        rest: Every other allowed call, in the round's order.
+        refused: Whether an answer call of the round was not allowed, refused by
+            planning's own check or by authorizing, so it cannot come to what it asked
+            (§4:2).
+    """
+
+    decided: RoundAuthorization
+    first: RoundAuthorization
+    rest: tuple[AllowedCall, ...]
+    refused: bool
+
+
+def _answering(latest: _Round, decided: RoundAuthorization) -> _Answering | None:
+    """The round split for answering first, or ``None`` where it makes no answer call."""
+    asked = [
+        call.call_id for call in latest.planned.round.calls if call.name == ANSWER_OFFER_CAPABILITY
+    ]
+    if not asked:
+        return None
+    allowed = {one.call_id for one in decided.verdicts if one.verdict is Verdict.ALLOWED}
+
+    def answers(one: AllowedCall) -> bool:
+        return str(one.call.request.tool.capability) == ANSWER_OFFER_CAPABILITY
+
+    return _Answering(
+        decided=decided,
+        first=replace(
+            decided, allowed=tuple(one for one in decided.allowed if answers(one)), message=None
+        ),
+        rest=tuple(one for one in decided.allowed if not answers(one)),
+        refused=any(call_id not in allowed for call_id in asked),
+    )
+
+
+def _in_round_order(decided: RoundAuthorization, *parts: ActedRound) -> ActedRound:
+    """``parts``' calls as one acting decision, in the round's order (ADR-0306 §5)."""
+    order = {one.call.decision.id: index for index, one in enumerate(decided.allowed)}
+    calls = sorted(
+        (one for part in parts for one in part.calls),
+        key=lambda one: order.get(one.call.call.decision.id, len(order)),
+    )
+    return ActedRound(round_id=decided.round_id, calls=tuple(calls))
 
 
 def _commits(latest: _Round, decided: RoundAuthorization) -> bool:
@@ -3622,6 +3698,7 @@ class PhasePath:
             approved=() if waiting else approved,
             pending=pending,
             overtaken=working.overtaken(),
+            not_taken=working.not_taken(),
             person=person,
             places=None if working.scheduling is None else working.scheduling.places,
             speaks_by_label=working.scheduling is not None and working.scheduling.speaks_by_label,
@@ -4264,9 +4341,13 @@ class PhasePath:
             msg = "acting runs a round authorizing has decided (ADR-0309 §3)"
             raise RuntimeError(msg)
         step = working.step(self._now(), self._wait(given))
+        # ADR-0352 §4:1: a round that answers an offer dispatches its answers first and
+        # alone, so the wait and the commitment step below are made for them.
+        answering = _answering(latest, decided)
+        first = decided if answering is None else answering.first
         try:
             state = active_state()
-            if state is not None and _commits(latest, decided):
+            if state is not None and _commits(latest, first):
                 # ADR-0349 §7:12-§7:13: before anything of the round that is not a pure
                 # read is dispatched, wait for each newer input that could absorb this
                 # activation or offer to it, inside the pass's deadline; a wait that
@@ -4283,11 +4364,14 @@ class PhasePath:
                 if withheld is not None:
                     latest.acted = withheld
                     return
-            ran, wrote = await asyncio.gather(
-                self._calls(given, working, decided),
-                self._message(working, latest),
-                return_exceptions=True,
-            )
+            if answering is None:
+                ran, wrote = await asyncio.gather(
+                    self._calls(given, working, decided),
+                    self._message(working, latest),
+                    return_exceptions=True,
+                )
+            else:
+                ran, wrote = await self._answered_first(given, working, latest, answering)
         finally:
             step.held.put_nowait(None)
         if isinstance(ran, ActedRound):
@@ -4301,8 +4385,77 @@ class PhasePath:
             if isinstance(answer, BaseException):
                 raise answer
 
+    async def _answered_first(
+        self,
+        given: PhasePass,
+        working: PhaseWorking,
+        latest: _Round,
+        answering: _Answering,
+    ) -> tuple[ActedRound | BaseException, BaseException | None]:
+        """Run a round's answers first and alone, then the rest only where they settled.
+
+        ADR-0352 §4:1-§4:3: each answer call is awaited to its end before any other call
+        of the round that is not a pure read, or its message, is dispatched. Where every
+        answer came to what it asked, a take to a take or a decline to the decline, the
+        rest of the round is dispatched as any round's is. Otherwise, a take refused at
+        ``held_input_limit``, an offer withdrawn, an answer refused whole or one
+        authorizing did not allow, only the round's pure reads run: every other call is
+        not done with the reason, the message is not written, and planning runs a round
+        again shown what each answer came to (ADR-0315 §2:1), which counts toward the
+        round limit.
+
+        Returns:
+            What acting made of the round, and what the message's write raised, each an
+            exception where it raised, as the gather of an ordinary round returns them.
+        """
+        caller = self._caller(working)
+        answered = await self._calls(given, working, answering.first, caller=caller)
+        settled = not answering.refused and all(
+            one.call.decision.id in (() if caller is None else caller.as_asked)
+            for one in answering.first.allowed
+        )
+        decided = answering.decided
+        if settled:
+            ran, wrote = await asyncio.gather(
+                self._calls(given, working, replace(decided, allowed=answering.rest)),
+                self._message(working, latest),
+                return_exceptions=True,
+            )
+            if isinstance(ran, ActedRound):
+                ran = _in_round_order(decided, answered, ran)
+            return ran, wrote
+        _log.info("phase_round_held_back", stage="acting", reason="offer_not_taken")
+        latest.not_taken = True
+        reads = tuple(one for one in answering.rest if is_pure_read(one.call.request.tool))
+        read = (
+            await self._calls(given, working, replace(decided, allowed=reads, message=None))
+            if reads
+            else ActedRound(round_id=decided.round_id)
+        )
+        ran_ids = {one.call.decision.id for one in reads}
+        held = ActedRound(
+            round_id=decided.round_id,
+            calls=tuple(
+                ActedCall(call=one, outcome=ActedOutcome.NOT_DONE, reason=_NOT_TAKEN)
+                for one in authorized_round(
+                    replace(
+                        decided,
+                        allowed=tuple(
+                            one for one in answering.rest if one.call.decision.id not in ran_ids
+                        ),
+                    )
+                ).calls
+            ),
+        )
+        return _in_round_order(decided, answered, read, held), None
+
     async def _calls(
-        self, given: PhasePass, working: PhaseWorking, decided: RoundAuthorization
+        self,
+        given: PhasePass,
+        working: PhaseWorking,
+        decided: RoundAuthorization,
+        *,
+        caller: MatterCaller | None = None,
     ) -> ActedRound:
         """Run the round's allowed calls; its tidy-ups run on their own, unawaited.
 
@@ -4330,7 +4483,8 @@ class PhasePath:
         if not rest:
             return ActedRound(round_id=decided.round_id)
         authorized = authorized_round(replace(decided, allowed=rest))
-        caller = self._caller(working)
+        if caller is None:
+            caller = self._caller(working)
         with (
             spawning(self._spawner(given, working)),
             calling(caller),
