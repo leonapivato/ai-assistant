@@ -172,11 +172,12 @@ refuses an instant earlier than now (ADR-0350 §4:5).
 > cascade (§7:5). No next occurrence is computed after either, and ADR-0350 §7:8 then
 > removes the task once nothing of it is live.
 
-> **Normative.** Where the sensor finds a rule's pending occurrence missed (ADR-0350 §8:10),
-> it computes from the rule every instant the rule yields from the pending occurrence's
-> instant to now. In the step that marks the latest of them pushed (ADR-0350 §7:5), the plan
-> store records the pending occurrence and each other one *skipped*, each with the instant
-> it was due, as the sensor computed them.
+> **Normative.** Where a rule's pending occurrence is due, the sensor takes its stored
+> instant unchanged, and computes from the rule each instant the rule yields after it, up to
+> now. Where that finds any, the occurrence missed more than one (ADR-0350 §8:10): in the step
+> that marks the latest pushed (ADR-0350 §7:5), the plan store records the pending one and
+> each other earlier one *skipped*, each with the instant it was due, as the sensor gave
+> them. Where it finds none, the pending occurrence itself is pushed.
 
 > **Normative.** A daylight-saving change reaches a rule's occurrences as §3:4 rules for a
 > local time.
@@ -356,7 +357,8 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > occurrence is computed; a skip, whose replace's from is the day after; an occurrence's
 > outcome and the next occurrence written in one step, with no instant at which the task has
 > nothing pending; a rule missed for three days, which pushes one late occurrence stating
-> that it skipped two; a restart days after a rule's pushed occurrence whose message is
+> that it skipped two; a pending occurrence due under the old zone, found after the person's
+> zone changed, which is still pushed; a restart days after a rule's pushed occurrence whose message is
 > confirmed done, which settles it and then pushes the latest missed one late; a skip of a
 > bounded rule's last occurrence, which is a cancel; "make it 9" on a rule whose from has
 > passed, which replaces it; the fixed line on the round limit, written into each suggested place
