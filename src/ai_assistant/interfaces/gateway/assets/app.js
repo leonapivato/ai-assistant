@@ -2020,9 +2020,8 @@ const CHAT_DROPPED_NO_ROLE =
   "conversation it showed. Once the device is given a role, follow again.";
 
 // The current state (ADR-0293 §8), in words. "Working" is informational: the box stays
-// open, and a message written meanwhile waits for the assistant (§6:2).
-const CHAT_WORKING =
-  "The assistant is working on this… You can keep writing; what you send waits for it.";
+// open, and a message written meanwhile is taken up on its own (ADR-0349 §8:1).
+const CHAT_WORKING = "The assistant is working on this… You can keep writing.";
 const CHAT_ENDINGS = {
   done: "The assistant finished what you last asked here.",
   couldnt_finish: "The assistant couldn't finish what you last asked here.",
