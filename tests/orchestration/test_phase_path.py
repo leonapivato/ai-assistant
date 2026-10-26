@@ -581,3 +581,46 @@ def test_a_taken_offers_messages_join_the_place_window_in_the_order_sent() -> No
     assert all(one.is_input for one in working.place.items)
     working.take_joined((), place, taken={"offering"})
     assert len(working.place.items) == 2, "each input is taken once"
+
+
+def test_a_take_in_a_later_round_lands_among_the_messages_it_came_between() -> None:
+    """ADR-0349 §7:21: the window stays in the order sent, by time and then position."""
+    from datetime import UTC, datetime  # noqa: PLC0415 — this case's clock alone
+
+    from ai_assistant.core.types import JoinedInput, RecordedInputMessage  # noqa: PLC0415
+
+    at = datetime(2026, 10, 21, 9, tzinfo=UTC)
+    place = conversation_channel("c1")
+    working = PhaseWorking(
+        activation_id="act",
+        place=place_window(TranscriptWindow(conversation=place, messages=())),
+        conversation_id="c1",
+        trigger_origin=None,
+        owner_records=True,
+        round_limit=2,
+    )
+
+    def joined(*messages: tuple[str, int, int]) -> JoinedInput:
+        return JoinedInput(
+            joined_at=at,
+            channel=place,
+            messages=tuple(
+                RecordedInputMessage(text=text, sent_at=at.replace(minute=minute), position=n)
+                for text, minute, n in messages
+            ),
+            taken_over_from="offering",
+        )
+
+    first = joined(("actually three bedrooms", 2, 3))
+    later = joined(("make it two bedrooms", 1, 2))
+    tied = joined(("and a lift", 2, 5), ("and a garden", 2, 4))
+    working.take_joined((first,), place, taken={"offering"})
+    working.take_joined((first, later), place, taken={"offering"})
+    working.take_joined((first, later, tied), place, taken={"offering"})
+
+    assert [one.text for one in working.place.items] == [
+        "make it two bedrooms",
+        "actually three bedrooms",
+        "and a garden",
+        "and a lift",
+    ]

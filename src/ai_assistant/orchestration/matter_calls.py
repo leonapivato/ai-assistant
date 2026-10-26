@@ -221,6 +221,10 @@ _NO_OFFER: Final = "not done: that label names no offer open to this work"
 _MALFORMED: Final = "not done: the call's arguments are malformed"
 _STORE_FAULT: Final = "not done: the hub's records could not be read or written"
 _NOT_OFFERED: Final = "not done: this call is not offered to this activation"
+_STOP_UNRECORDED: Final = (
+    "not done in full: the work is stopped, but its stop could not be recorded, so what it "
+    "set up to run later may still run; asking again records it"
+)
 
 
 @dataclass(slots=True)
@@ -326,15 +330,29 @@ class MatterCalls:
             return refused
         assert named is not None  # noqa: S101 — a call naming nothing is refused above
         running = self._matters.state_of(named)
-        if running is None or running.stopped:
-            # §4:10: it has ended or been stopped since it was shown, so this call stops
-            # nothing, and its result says so.
-            _log.info("matter_stop", stage="acting", stopped="already")
+        if running is None:
+            # §4:10: it has ended since it was shown, so this call stops nothing, and its
+            # result says so.
+            _log.info("matter_stop", stage="acting", stopped="ended")
             await self._show(caller, decision, named, stopped=False)
             return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"kind": "matter_stop"})
-        stopped = await self._matters.stop(named)
+        # One stopped since it was shown is stopped again all the same, which stops
+        # nothing new but writes its stop and cascade records where an earlier stop's
+        # writes failed (ADR-0297 §3:7); its result says this call did not stop it.
+        already = running.stopped
+        try:
+            stopped = await self._matters.stop(named)
+        except PlanningError:
+            if not running.stopped:
+                raise
+            # §4:1, ADR-0297 §3:7: the mark is set and holds the activation, but its
+            # records are not written; asking again writes them.
+            _log.warning("matter_stop_unrecorded", stage="acting", reason="store_failed")
+            return NotDone(reason=_STOP_UNRECORDED)
         _log.info("matter_stop", stage="acting", stopped=stopped.value)
-        await self._show(caller, decision, named, stopped=stopped is ActivationStop.STOPPED)
+        await self._show(
+            caller, decision, named, stopped=stopped is ActivationStop.STOPPED and not already
+        )
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"kind": "matter_stop"})
 
     def _refused_stop(

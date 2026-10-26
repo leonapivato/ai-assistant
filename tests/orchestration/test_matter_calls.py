@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Final
 
 from test_matters import _running, _understood
 
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     ActionRequest,
     ActivationStop,
@@ -176,7 +176,7 @@ async def test_a_stop_call_naming_an_absorbed_activation_is_refused_and_names_it
 
 
 async def test_a_stop_call_naming_work_stopped_since_it_was_shown_stops_nothing() -> None:
-    """§4:10: its result says so, and the Task Manager's stop is not run again."""
+    """§4:10: its result says so; the stop is asked again, which writes any lost record."""
     older, asker = _running("a", _A, order=1), _running("b", _B, order=2)
     _, calls, stops, _ = _wired([older, asker])
     older.stop()
@@ -187,7 +187,32 @@ async def test_a_stop_call_naming_work_stopped_since_it_was_shown_stops_nothing(
     assert answer.outcome is ToolOutcome.SUCCEEDED
     (shown,) = caller.shown.values()
     assert (shown.stopped, shown.ended) == (False, True)
-    assert stops.stopped == []
+    assert stops.stopped == [_A], "ADR-0297 §3:7: a repeated stop retries the record"
+
+
+async def test_a_stop_whose_record_cannot_be_written_is_not_done_in_full_and_retried() -> None:
+    """ADR-0297 §3:7: the mark holds it; the call says so, and asking again writes it."""
+    older, asker = _running("a", _A, order=1), _running("b", _B, order=2)
+    attempts: list[str] = []
+
+    async def failing_once(activation_id: str) -> ActivationStop:
+        attempts.append(activation_id)
+        older.stop()
+        if len(attempts) == 1:
+            msg = "the plan store is unavailable"
+            raise PlanningError(msg)
+        return ActivationStop.STOPPED
+
+    matters, calls, _, _ = _wired([older, asker])
+    matters._stop = failing_once  # the Task Manager's stop, its first record write failing
+    caller = _caller(asker, running=frozenset({_A}))
+    with calling(caller):
+        first = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        again = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+    assert isinstance(first, NotDone)
+    assert "could not be recorded" in first.reason
+    assert isinstance(again, ToolResult)
+    assert attempts == [_A, _A], "the second call wrote what the first could not"
 
 
 async def test_a_stop_call_runs_the_task_managers_stop_and_shows_the_work() -> None:

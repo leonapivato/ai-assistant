@@ -805,3 +805,19 @@ def test_absorbing_one_whose_offer_was_declined_waits_with_no_new_offer() -> Non
     assert older.offers == {}, "no offer is made to it again"
     assert absorber.waits_on == (_IDS[0],)
     assert older.offers_untaken == 1
+
+
+async def test_an_act_waits_for_a_newer_one_whose_pass_has_not_set_its_standing() -> None:
+    """§7:12: admitted on a place that establishes its author, it may be of this standing,
+    so it is waited for until its standing shows it is not, or it settles."""
+    older = _running("a", _IDS[0], order=1)
+    newer = _running("b", _IDS[1], order=2, standing=None)
+    matters = _matters([older, newer])
+    loop = asyncio.get_running_loop()
+    assert not await matters.before_act(older, loop.time() + 0.05), "it waited to the deadline"
+
+    waiting = asyncio.ensure_future(matters.before_act(older, loop.time() + 5))
+    await asyncio.sleep(0.01)
+    newer.standing = input_standing(origin=InputOrigin.OUTSIDE, established=False)
+    matters.changed()
+    assert await asyncio.wait_for(waiting, 1), "a forward's standing is not this one's"
