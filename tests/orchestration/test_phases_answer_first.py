@@ -54,6 +54,13 @@ if TYPE_CHECKING:
 _NOT_TAKEN: Final = "did not come to what it asked"
 #: A decline's reason at ``held_input_limit`` (ADR-0349 §7:22).
 _LIMIT_REACHED: Final = "it already holds as much input as it may"
+#: What a refusal at the limit tells the older's planning, in part (#3471).
+_AT_LIMIT: Final = "this work already holds as much input as it may"
+#: What a withdrawal tells the older's planning, after the offering work's name (#3477).
+_WITHDRAWN: Final = (
+    " was stopped before the answer, so the input it carried is no longer asked for, and "
+    "the work that input asked for is not to be done"
+)
 
 
 def _state(harness: Harness, activation_id: str) -> ActivationState | None:
@@ -153,6 +160,14 @@ def _answers(shown: dict[str, Any]) -> list[str]:
     ]
 
 
+def _answer_values(shown: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        dict(one["result"]["value"])
+        for one in shown["calls"]
+        if one["capability"] == "answer_offer"
+    ]
+
+
 def _spawn_outcome(shown: dict[str, Any]) -> str:
     (spawn,) = [one for one in shown["calls"] if one["capability"] == "spawn"]
     return str(spawn.get("outcome"))
@@ -195,7 +210,11 @@ async def test_a_take_refused_at_the_limit_dispatches_no_spawn_and_no_message(
     assert _of(found, older).joined == (), "nothing was taken"
     shown = _round_shown(planner, older_text, 3)
     assert _answers(shown) == ["declined"]
+    (value,) = _answer_values(shown)
+    assert _AT_LIMIT in value["because"], "#3471: the next round is told why"
+    assert value["episode"] in value["because"], "naming the offering work by its label"
     assert _NOT_TAKEN in _spawn_outcome(shown)
+    assert _AT_LIMIT in _spawn_outcome(shown), "the held-back call says what it came to"
     assert _NOT_TAKEN in shown["text_was"]
     assert len(planner.requests[older_text]) == 4, "planning ran a round again"
     (waited,) = planner.requests[newer_text][0]["waiting_on"]
@@ -227,7 +246,14 @@ async def test_a_take_of_an_offer_withdrawn_dispatches_no_spawn_and_no_message(
     assert _of(found, older).joined == ()
     shown = _round_shown(planner, older_text, 3)
     assert _answers(shown) == ["withdrawn"]
+    (value,) = _answer_values(shown)
+    assert value["because"] == value["episode"] + _WITHDRAWN, (
+        "#3477: the next round is told the offering work was stopped, by its label, and "
+        "that the work its input asked for is not to be done"
+    )
+    assert value["understood_as"] == newer_text, "the stopped input is named"
     assert _NOT_TAKEN in _spawn_outcome(shown)
+    assert _WITHDRAWN in _spawn_outcome(shown), "the held-back call says what it came to"
     assert newer_text not in planner.requests, "the stopped input's work is not done"
     await harness.engine.aclose()
 
@@ -264,7 +290,9 @@ async def test_two_answers_one_taken_and_one_refused_dispatch_nothing_else(
     assert await harness.plans.spawned_tasks([older]) == ()
     shown = _round_shown(planner, older_text, 3)
     assert sorted(_answers(shown)) == ["declined", "taken"]
+    assert [("because" in one) for one in _answer_values(shown)].count(True) == 1
     assert _NOT_TAKEN in _spawn_outcome(shown)
+    assert _AT_LIMIT in _spawn_outcome(shown)
     assert "Changed it to 9 PM." not in await _assistant(harness, conversation)
     await harness.engine.aclose()
 
@@ -312,6 +340,7 @@ async def test_an_answer_naming_no_open_offer_dispatches_no_spawn(
     (answer,) = [one for one in shown["calls"] if one["capability"] == "answer_offer"]
     assert "names no offer open" in str(answer["outcome"])
     assert _NOT_TAKEN in _spawn_outcome(shown)
+    assert "names no offer open to this work" in _spawn_outcome(shown)
     assert "offers" in planner.requests[older_text][3], "the offer is still open to answer"
     await harness.engine.aclose()
 
@@ -351,6 +380,7 @@ async def test_an_answer_planning_refused_before_acting_dispatches_no_spawn(
     (answer,) = [one for one in shown["calls"] if one["capability"] == "answer_offer"]
     assert "result" not in answer, "it never ran"
     assert _NOT_TAKEN in _spawn_outcome(shown)
+    assert "it was not allowed, so it settled nothing" in _spawn_outcome(shown)
     assert _NOT_TAKEN in shown["text_was"]
     await harness.engine.aclose()
 

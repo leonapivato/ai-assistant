@@ -44,7 +44,7 @@ from ai_assistant.orchestration.matter_calls import (
     MatterCalls,
     calling,
 )
-from ai_assistant.orchestration.matters import Matters
+from ai_assistant.orchestration.matters import Matters, NotAsAsked
 from ai_assistant.orchestration.person_calls import NotDone
 from ai_assistant.orchestration.task_scheduler import StillLive
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore
@@ -324,21 +324,25 @@ async def test_a_decline_carries_its_reason() -> None:
 
 
 @pytest.mark.parametrize(
-    ("case", "take", "as_asked"),
+    ("case", "take", "why"),
     [
-        ("open", True, True),
-        ("open", False, True),
-        ("at_the_limit", True, False),
-        ("withdrawn", True, False),
-        ("withdrawn", False, False),
-        ("no_offer", True, False),
-        ("no_offer", False, False),
+        ("open", True, None),
+        ("open", False, None),
+        ("at_the_limit", True, NotAsAsked.AT_LIMIT),
+        ("withdrawn", True, NotAsAsked.STOPPED),
+        ("withdrawn", False, NotAsAsked.STOPPED),
+        ("no_offer", True, NotAsAsked.NO_OFFER),
+        ("no_offer", False, NotAsAsked.NO_OFFER),
     ],
 )
 async def test_an_answer_is_held_as_asked_only_where_it_came_to_what_it_asked(
-    case: str, *, take: bool, as_asked: bool
+    case: str, *, take: bool, why: NotAsAsked | None
 ) -> None:
-    """ADR-0352 §4:2-§4:3: a take to a take, a decline to the decline, and nothing else."""
+    """ADR-0352 §4:2-§4:3: a take to a take, a decline to the decline, and nothing else.
+
+    Each answer that did not is held with why, for acting's held-back reason, and one
+    that ran is shown to planning with it (ADR-0349 §7:23).
+    """
     older = _running("a", _A, order=1)
     older.committed = True
     newer = _running("a", _B, order=2)
@@ -355,7 +359,15 @@ async def test_an_answer_is_held_as_asked_only_where_it_came_to_what_it_asked(
         arguments["reason"] = "not this work's"
     with calling(caller):
         await calls.run(_call(ANSWER_OFFER, **arguments))
-    assert caller.as_asked == ({"decision:answer_offer"} if as_asked else set())
+    assert caller.as_asked == ({"decision:answer_offer"} if why is None else set())
+    assert caller.not_as_asked == ({} if why is None else {"decision:answer_offer": why})
+    shown = caller.shown.get("decision:answer_offer")
+    if case == "no_offer":
+        assert shown is None, "refused whole, so no result to show"
+    else:
+        assert shown is not None
+        assert shown.not_as_asked is why
+        assert shown.meaning == "reading 1"
 
 
 async def test_a_stop_whose_findings_cannot_be_read_is_still_done() -> None:

@@ -95,12 +95,14 @@ __all__ = [
     "PEER_VIEW_CHARS",
     "STOP_ACTIVATION_CAPABILITY",
     "THE_USER",
+    "Answered",
     "Became",
     "HeldInput",
     "InProgressEntry",
     "InputStanding",
     "Matters",
     "Named",
+    "NotAsAsked",
     "Offer",
     "SetUpRead",
     "TakeAnswer",
@@ -505,12 +507,15 @@ class Offer:
         meaning: The meaning its understanding version recorded, which covers them.
         decision: The entry in the offering activation's takeover decision that records
             what becomes of it.
+        state: The offering activation's own state, held so that an answer after it has
+            ended still reads whether it was stopped (ADR-0352 §4:2).
     """
 
     offering: str
     inputs: tuple[JoinedInput, ...]
     meaning: str
     decision: Named = field(repr=False)
+    state: ActivationState = field(repr=False, compare=False)
 
 
 class TakeAnswer(StrEnum):
@@ -520,6 +525,48 @@ class TakeAnswer(StrEnum):
     DECLINED = "declined"
     WITHDRAWN = "withdrawn"
     NO_OFFER = "no_offer"
+
+
+class NotAsAsked(StrEnum):
+    """Why an answer call did not come to what it asked (ADR-0352 §4:2).
+
+    Each is a fact planning is told, beside the answer's result and in the reason of each
+    call its round held back, so that the round planned again knows what the answer came
+    to (ADR-0349 §7:22-§7:23).
+    """
+
+    #: Withdrawn: the offering activation was stopped before the answer.
+    STOPPED = "offering_stopped"
+    #: Withdrawn: the offering activation ended, unstopped, before the answer.
+    ENDED = "offering_ended"
+    #: A take refused at ``held_input_limit``, which counts as a decline (§7:22).
+    AT_LIMIT = "held_input_limit"
+    #: The label names no offer open to the answering activation (§7:20).
+    NO_OFFER = "no_offer"
+    #: Refused before acting, by planning's own check or by authorizing.
+    NOT_ALLOWED = "not_allowed"
+    #: Not done for any other reason: its arguments, or the hub's records.
+    NOT_DONE = "not_done"
+
+
+@dataclass(frozen=True, slots=True)
+class Answered:
+    """What an answer to an offer came to (§7:20-§7:23).
+
+    Attributes:
+        came_to: The take, the decline, the withdrawal, or no offer at all.
+        reason: A decline's reason, as the offering activation's takeover decision
+            records it and its planning is shown it (§7:23); ``None`` otherwise.
+        not_as_asked: Why it did not come to what the answer asked, a take to a take or
+            a decline to the decline; ``None`` where it did (ADR-0352 §4:2-§4:3).
+        meaning: The meaning the offer carried, as its offering activation's
+            understanding recorded it (§7:19); ``None`` where no offer was open.
+    """
+
+    came_to: TakeAnswer
+    reason: str | None = None
+    not_as_asked: NotAsAsked | None = None
+    meaning: str | None = None
 
 
 #: A decline's reason where a take would hold more than ``held_input_limit`` (§7:22).
@@ -1010,6 +1057,7 @@ class Matters:
                         inputs=inputs,
                         meaning=str(understanding.meaning),
                         decision=decision,
+                        state=state,
                     )
                     older.offers_untaken += 1
                     state.offered_to = older_id
@@ -1028,7 +1076,7 @@ class Matters:
         *,
         take: bool,
         reason: str | None,
-    ) -> tuple[TakeAnswer, str | None]:
+    ) -> Answered:
         """Take or decline the offer ``offering_id`` made ``older``, in one step (§7:21).
 
         A take appends every offered input to the older, naming the offering activation,
@@ -1038,23 +1086,36 @@ class Matters:
         hold more than ``held_input_limit``, it is refused and counts as a decline.
 
         Returns:
-            What it came to, and, for a decline, its reason.
+            What it came to, with a decline's reason, and why it did not come to what
+            was asked, where it did not: a withdrawal says whether the offering
+            activation was stopped or ended (ADR-0352 §4:2).
         """
         offer = older.offers.pop(offering_id, None)
         if offer is None:
-            return TakeAnswer.NO_OFFER, None
+            return Answered(TakeAnswer.NO_OFFER, not_as_asked=NotAsAsked.NO_OFFER)
         offering = self.state_of(offering_id)
         if offering is None or not _running(offering):
             offer.decision.became = Became.WITHDRAWN
             self.changed()
-            return TakeAnswer.WITHDRAWN, None
+            # Read from the offering activation's own state, which holds its stop mark
+            # after it has ended, as a stop by the control most often has.
+            return Answered(
+                TakeAnswer.WITHDRAWN,
+                not_as_asked=NotAsAsked.STOPPED if offer.state.stopped else NotAsAsked.ENDED,
+                meaning=offer.meaning,
+            )
         if not take:
             declined = reason.strip() if reason and reason.strip() else "no reason given"
             self._declined(older, offer, declined)
-            return TakeAnswer.DECLINED, declined
+            return Answered(TakeAnswer.DECLINED, declined, meaning=offer.meaning)
         if older.inputs_held + len(offer.inputs) > self.held_input_limit:
             self._declined(older, offer, _LIMIT_REACHED)
-            return TakeAnswer.DECLINED, _LIMIT_REACHED
+            return Answered(
+                TakeAnswer.DECLINED,
+                _LIMIT_REACHED,
+                not_as_asked=NotAsAsked.AT_LIMIT,
+                meaning=offer.meaning,
+            )
         offering.stop()
         offering.committed = True
         offering.handed_to = older.activation_id
@@ -1065,7 +1126,7 @@ class Matters:
         offer.decision.became = Became.TAKEN
         older.took.append(Named(offering_id, None, Became.TAKEN))
         self.changed()
-        return TakeAnswer.TAKEN, None
+        return Answered(TakeAnswer.TAKEN, meaning=offer.meaning)
 
     def _declined(self, older: ActivationState, offer: Offer, reason: str) -> None:
         """Record a decline in the offering activation's decision; it now waits (§7:23)."""

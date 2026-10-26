@@ -61,9 +61,11 @@ from ai_assistant.orchestration.matters import (
     DEFAULT_HELD_INPUT_LIMIT,
     DEFAULT_IN_PROGRESS_LIMIT,
     THE_USER,
+    Answered,
     Became,
     InputStanding,
     Matters,
+    NotAsAsked,
     TakeAnswer,
     in_progress,
     input_standing,
@@ -582,9 +584,9 @@ def _offered(
 def test_a_take_hands_the_input_over_and_stops_the_offering_one() -> None:
     matters, older, newer = _offered()
 
-    answered, why = matters.answer(older, _IDS[1], take=True, reason=None)
+    answered = matters.answer(older, _IDS[1], take=True, reason=None)
 
-    assert (answered, why) == (TakeAnswer.TAKEN, None)
+    assert answered == Answered(TakeAnswer.TAKEN, meaning="reading 1")
     assert (newer.stopped, newer.committed) == (True, True)
     assert newer.handed_to == _IDS[0]
     assert [one.taken_over_from for one in older.joined] == [_IDS[1]]
@@ -599,8 +601,10 @@ def test_a_take_hands_the_input_over_and_stops_the_offering_one() -> None:
 
 def test_a_decline_records_its_reason_and_the_offering_one_waits() -> None:
     matters, older, newer = _offered()
-    answered, why = matters.answer(older, _IDS[1], take=False, reason="already booked")
-    assert (answered, why) == (TakeAnswer.DECLINED, "already booked")
+    answered = matters.answer(older, _IDS[1], take=False, reason="already booked")
+    assert answered == Answered(TakeAnswer.DECLINED, "already booked", meaning="reading 1"), (
+        "as asked, so no reason it fell short"
+    )
     assert newer.offered_to is None
     assert newer.declined == ((_IDS[0], "already booked"),)
     assert newer.waits_on == (_IDS[0],)
@@ -619,9 +623,10 @@ def test_a_take_above_the_limit_is_refused_as_a_decline() -> None:
         ),
         merged=(_IDS[3],),
     )
-    answered, why = matters.answer(older, _IDS[1], take=True, reason=None)
-    assert answered is TakeAnswer.DECLINED
-    assert why is not None
+    answered = matters.answer(older, _IDS[1], take=True, reason=None)
+    assert answered.came_to is TakeAnswer.DECLINED
+    assert answered.reason == "it already holds as much input as it may"
+    assert answered.not_as_asked is NotAsAsked.AT_LIMIT
     assert not newer.stopped
     assert newer.declined[0][0] == _IDS[0]
 
@@ -629,14 +634,51 @@ def test_a_take_above_the_limit_is_refused_as_a_decline() -> None:
 def test_an_offer_whose_offering_one_no_longer_runs_is_withdrawn() -> None:
     matters, older, newer = _offered()
     newer.stop()
-    answered, _ = matters.answer(older, _IDS[1], take=True, reason=None)
-    assert answered is TakeAnswer.WITHDRAWN
+    answered = matters.answer(older, _IDS[1], take=True, reason=None)
+    assert answered.came_to is TakeAnswer.WITHDRAWN
+    assert answered.not_as_asked is NotAsAsked.STOPPED
+    assert answered.meaning == "reading 1", "the input it carried is named"
     assert older.joined == ()
+
+
+def _offered_in() -> tuple[list[ActivationState], Matters, ActivationState, ActivationState]:
+    """As :func:`_offered`, with the list of what runs, for an activation to end."""
+    older = _running("a", _IDS[0], order=1)
+    older.committed = True
+    newer = _running("a", _IDS[1], order=2, text="only two bedrooms")
+    states = [older, newer]
+    matters = _matters(states)
+    matters.merge(newer, _understood(newer, _IDS[0]), at=_AT)
+    return states, matters, older, newer
+
+
+def test_a_withdrawal_reads_the_stop_after_the_offering_one_has_ended() -> None:
+    """ADR-0352 §4:2: a stop by the control most often ends it before the answer runs."""
+    states, matters, older, newer = _offered_in()
+    newer.stop()
+    states.remove(newer)  # it ends
+    answered = matters.answer(older, _IDS[1], take=True, reason=None)
+    assert (answered.came_to, answered.not_as_asked) == (
+        TakeAnswer.WITHDRAWN,
+        NotAsAsked.STOPPED,
+    )
+
+
+def test_a_withdrawal_whose_offering_one_ended_unstopped_says_it_ended() -> None:
+    states, matters, older, newer = _offered_in()
+    states.remove(newer)  # it ends, unstopped
+    answered = matters.answer(older, _IDS[1], take=False, reason="not this work's")
+    assert (answered.came_to, answered.not_as_asked) == (
+        TakeAnswer.WITHDRAWN,
+        NotAsAsked.ENDED,
+    )
 
 
 def test_an_answer_naming_no_open_offer_is_refused() -> None:
     matters, older, _ = _offered()
-    assert matters.answer(older, _IDS[2], take=True, reason=None)[0] is TakeAnswer.NO_OFFER
+    assert matters.answer(older, _IDS[2], take=True, reason=None) == Answered(
+        TakeAnswer.NO_OFFER, not_as_asked=NotAsAsked.NO_OFFER
+    )
 
 
 def test_an_older_that_ends_without_answering_has_declined() -> None:

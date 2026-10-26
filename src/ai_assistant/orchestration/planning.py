@@ -187,6 +187,7 @@ from ai_assistant.orchestration.channel_kinds import place_channel
 from ai_assistant.orchestration.matters import (
     LOOK_UP_ACTIVATION_CAPABILITY,
     STOP_ACTIVATION_CAPABILITY,
+    NotAsAsked,
 )
 from ai_assistant.orchestration.person_block import person_zone
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY
@@ -264,6 +265,7 @@ __all__ = [
     "RefusedCall",
     "RoundRecorder",
     "RunningShown",
+    "answer_fact",
     "exact_line",
     "offered_tools",
 ]
@@ -754,6 +756,10 @@ class PeerShown:
         absorbed_by: For a refused stop call, the activation that absorbed it (§4:9).
         answered: For an answer call, what it came to: ``taken``, ``declined`` or
             ``withdrawn``.
+        not_as_asked: For an answer call, why it did not come to what it asked, where
+            it did not (ADR-0352 §4:2); ``None`` otherwise.
+        meaning: For an answer call, the meaning the offer carried, as its offering
+            activation's understanding recorded it (ADR-0349 §7:19).
         set_up: For a stop call, what the activation set up that is still live below it
             (ADR-0352 §3:1-§3:6); ``None`` where nothing could have been set up, with no
             Task Scheduler wired.
@@ -765,7 +771,49 @@ class PeerShown:
     stopped: bool | None = None
     absorbed_by: str | None = None
     answered: str | None = None
+    not_as_asked: NotAsAsked | None = None
+    meaning: str | None = None
     set_up: StillLive | None = None
+
+
+#: What an answer that did not come to what it asked came to, as planning is told it
+#: beside the answer's result and in each call its round held back (ADR-0349 §7:22-§7:23,
+#: ADR-0352 §4:2). ``{offering}`` is the work that offered the input.
+_NOT_AS_ASKED: Final[Mapping[NotAsAsked, str]] = {
+    NotAsAsked.STOPPED: (
+        "{offering} was stopped before the answer, so the input it carried is no longer "
+        "asked for, and the work that input asked for is not to be done"
+    ),
+    NotAsAsked.ENDED: (
+        "{offering} ended before the answer, so the input it carried is no longer asked "
+        "for, and the work that input asked for is not to be done"
+    ),
+    NotAsAsked.AT_LIMIT: (
+        "the take was refused, since this work already holds as much input as it may, and "
+        "counts as a decline: {offering} waits for this work to end, and then does the work "
+        "of the input it carried itself"
+    ),
+    NotAsAsked.NO_OFFER: "the label it named names no offer open to this work",
+    NotAsAsked.NOT_ALLOWED: "it was not allowed, so it settled nothing",
+    NotAsAsked.NOT_DONE: "it was not done, so it settled nothing",
+}
+#: Which of them are shown beside an answer's result: what the hub settled, never a
+#: decline planning chose, which would only echo its own words back (#3471).
+_SHOWN_WITH_RESULT: Final = frozenset({NotAsAsked.STOPPED, NotAsAsked.ENDED, NotAsAsked.AT_LIMIT})
+
+
+def answer_fact(why: NotAsAsked, *, offering: str) -> str:
+    """What an answer that did not come to what it asked came to, in one clause.
+
+    Args:
+        why: Why it did not come to what it asked.
+        offering: How the work that offered the input is named: its ``E`` label beside
+            the answer's result, or in words in a held-back call's reason.
+
+    Returns:
+        The code-owned fact, naming the offering work by ``offering``.
+    """
+    return _NOT_AS_ASKED[why].format(offering=offering)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1809,13 +1857,19 @@ class _Request:
         shown under its label does (§6:13), and marked notes or evidence it shows mark
         this round's notes, as any outside content read does.
         """
-        shown: dict[str, object] = {
-            "episode": self._book.label(LabelKind.EPISODE, episode_address(one.activation_id))
-        }
+        label = self._book.label(LabelKind.EPISODE, episode_address(one.activation_id))
+        shown: dict[str, object] = {"episode": label}
         if one.stopped is not None:
             shown["stopped_by_this_call"] = one.stopped
         if one.answered is not None:
             shown["answer"] = one.answered
+            why = one.not_as_asked
+            if why is not None and why in _SHOWN_WITH_RESULT:
+                # ADR-0349 §7:23, ADR-0352 §4:2: why the hub settled it so, naming the
+                # offering work by its label, and the input it carried by its meaning.
+                shown["because"] = answer_fact(why, offering=label)
+                if one.meaning is not None:
+                    shown["understood_as"] = one.meaning
             return shown
         shown["status"] = "ended" if one.ended else "running"
         view = one.view
