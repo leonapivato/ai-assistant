@@ -28,9 +28,10 @@ def test_the_defaults_are_the_decisions_starting_values() -> None:
     assert settings.in_progress_limit == 5
 
 
-def test_join_limit_stays_until_step_two() -> None:
-    """§1:4's step 1: ``join_limit`` stays, at its value, until step 2 removes it."""
-    assert _settings().join_limit == 3
+def test_join_limit_is_gone_and_a_configuration_naming_it_still_loads() -> None:
+    """§9:1: ``Settings`` loses ``join_limit``; a name it no longer holds is ignored."""
+    assert "join_limit" not in Settings.model_fields
+    assert not hasattr(_settings(join_limit=0), "join_limit")
 
 
 @pytest.mark.parametrize("name", ["held_input_limit", "in_progress_limit"])

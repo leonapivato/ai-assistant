@@ -5,7 +5,8 @@ which the takeover stage, an offer and understanding's in-progress section read 
 §9:2-§9:3); the hub chat's start wait, composing lapse and cap reach its reader (ADR-0332
 §6:1-§6:3); and the line's start wait reaches its reader through the line's seams
 (§6:4). Each is set off its default, so a root that dropped one would hand the default
-and fail here. ``join_limit`` reaches nothing: joining by code is gone (ADR-0349 §9:1).
+and fail here. ``Settings`` holds no ``join_limit``: joining by code is gone (ADR-0349
+§9:1).
 """
 
 from __future__ import annotations
