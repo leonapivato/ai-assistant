@@ -105,7 +105,7 @@ class _Hold(HeldInput):
 class _Line:
     """A reader over the fakes, its activation a stand-in that takes the input in."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — the fakes, the writers' links, and the two bounds a case varies
         self,
         *,
         client: FakeTelegramBotClient | None = None,
@@ -116,6 +116,7 @@ class _Line:
         ]
         | None = None,
         poll_bound: timedelta = timedelta(seconds=2),
+        start_wait: timedelta = DEFAULT_TELEGRAM_START_WAIT,
     ) -> None:
         self.fake = client or FakeTelegramBotClient(chat_id=CHAT, first_message_id=900)
         self.intake = intake or FakeTelegramIntakeRecord()
@@ -128,6 +129,7 @@ class _Line:
             poll_wait=timedelta(0),
             poll_bound=poll_bound,
             send_bound=timedelta(seconds=1),
+            start_wait=start_wait,
         )
         self.rests: list[float] = []
         self.inputs: list[TelegramInput] = []
@@ -764,6 +766,32 @@ async def test_while_updates_handed_to_a_running_one_wait_unmarked_the_polls_are
     await line.until(lambda: line.fake.held == (), what="it was confirmed once marked")
     await line.stop()
     assert len(line.inputs) == 1
+
+
+async def test_a_start_wait_as_long_as_the_pace_is_not_cut_short_by_an_activations_end() -> None:
+    """ADR-0332 §5:3, ADR-0349 §8:2: only the pace ends with an activation; a start wait
+    of the same length runs its whole length."""
+    line = _Line(start_wait=RUNNING_POLL_PACE)
+    first = await _running(line)
+    line.pause = asyncio.Event()
+    mark = len(line.rests)
+    line.fake.hold(text(2, "and the weather?"))
+    await line.until(lambda: len(line.told) == 3, what="its start wait to begin")
+    await line.until(
+        lambda: RUNNING_POLL_PACE.total_seconds() in line.rests[mark:],
+        what="its start wait's rest, while the first runs",
+    )
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: first not in line.reader.working, what="the first to end")
+    for _ in range(20):
+        await asyncio.sleep(0.001)
+    assert len(line.inputs) == 1, "the start wait has not passed, so nothing is taken in"
+
+    line.pause.set()
+    await line.until(lambda: len(line.inputs) == 2, what="taken in once it passed")
+    await line.stop()
 
 
 async def test_a_stop_leaves_a_message_still_in_its_start_wait_to_start() -> None:

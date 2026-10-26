@@ -464,3 +464,62 @@ async def test_a_message_and_a_signal_during_the_read_of_what_waits_extend_the_w
     assert chat.taken_at == [pytest.approx(1.6 + _LAPSE.total_seconds())], (
         "held until the signal lapsed"
     )
+
+
+class _HeldAfterQuery(FakeConversationStore):
+    """A store whose next read of the waiting messages, once read, waits for release.
+
+    What it answers is what waited when it read, so a message written while it waits is
+    missing from that answer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hold = False
+        self.held = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def untaken_messages(
+        self, conversation_id: str, *, limit: int = 100
+    ) -> tuple[TranscriptMessage, ...]:
+        found = await super().untaken_messages(conversation_id, limit=limit)
+        if self.hold:
+            self.hold = False
+            self.held.set()
+            await self.release.wait()
+        return found
+
+
+async def test_a_message_noticed_while_what_waits_is_read_is_never_dropped() -> None:
+    """ADR-0349 §8:1: a read that may have missed a message reads again before it admits."""
+    store = _HeldAfterQuery()
+    chat = _Reader(store=store, start_wait=None)
+    conversation = await chat.conversation()
+    store.hold = True
+    await chat.say(conversation, "book Riverside")
+    await asyncio.wait_for(store.held.wait(), _SETTLE)
+    await chat.say(conversation, "for Saturday")
+    store.release.set()
+    await chat.idle()
+
+    assert [_texts(one) for one in chat.inputs] == [["book Riverside", "for Saturday"]]
+    assert await store.untaken_messages(conversation) == ()
+
+
+async def test_a_message_noticed_while_what_waits_is_read_at_the_cap_is_never_dropped() -> None:
+    """ADR-0332 §5:2: at the cap the wait's end no longer moves, and the read reads again."""
+    store = _HeldAfterQuery()
+    chat = _Reader(store=store)
+    conversation = await chat.conversation()
+    await chat.say(conversation, "book Riverside")
+    await asyncio.wait_for(chat.clock.sleeping.wait(), _SETTLE)
+    store.hold = True
+    chat.clock.now = _CAP.total_seconds()
+    await chat.clock.wake()
+    await asyncio.wait_for(store.held.wait(), _SETTLE)
+    await chat.say(conversation, "for Saturday")
+    store.release.set()
+    await chat.idle()
+
+    assert [_texts(one) for one in chat.inputs] == [["book Riverside", "for Saturday"]]
+    assert chat.taken_at == [pytest.approx(_CAP.total_seconds())]

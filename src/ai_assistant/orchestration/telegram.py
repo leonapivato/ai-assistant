@@ -857,6 +857,9 @@ class TelegramReader:
         # is admitted; then its activation's, until that ends.
         self._hold = hold
         self._held: HeldInput | None = None
+        # Whether the rest before the next poll is the pace (ADR-0332 §8:8), which an
+        # activation's end cuts short; set by the poll that chose it.
+        self._pacing = False
 
     @property
     def channel(self) -> ChannelIdentity:
@@ -901,6 +904,7 @@ class TelegramReader:
 
     async def _once(self) -> None:
         """One poll, what it returned dealt with, and the rest before the next."""
+        self._pacing = False
         try:
             outcome = await self._poll()
             if outcome.done:
@@ -922,11 +926,15 @@ class TelegramReader:
             await self._idly(self._rest(wait))
 
     async def _rest(self, wait: timedelta) -> None:
-        """Rest before the next poll; a pace while work runs ends with any of it (§8:8)."""
+        """Rest before the next poll; a pace while work runs ends with any of it (§8:8).
+
+        Only a pace (:attr:`_pacing`): a start wait, or a backoff, of the same length
+        runs to its end whatever ends meanwhile (ADR-0332 §5:3, ADR-0349 §8:2).
+        """
         running = [one.task for one in self._turns.values()]
         resting = asyncio.ensure_future(self._sleep(wait.total_seconds()))
         try:
-            if not running or wait != RUNNING_POLL_PACE:
+            if not running or not self._pacing:
                 await resting
             else:
                 await asyncio.wait((resting, *running), return_when=asyncio.FIRST_COMPLETED)
@@ -1011,6 +1019,7 @@ class TelegramReader:
         if begun:
             return self._start_wait
         if self._turns:
+            self._pacing = True
             return RUNNING_POLL_PACE
         return None if ran else POLL_BACKOFF
 

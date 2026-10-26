@@ -525,15 +525,14 @@ class ChatReader:
                 waiting = await self._conversations.untaken_messages(
                     conversation_id, limit=_WAITING_ALL
                 )
-                if self._wait_end(conversation_id) > self._clock():
+                if read.again or self._wait_end(conversation_id) > self._clock():
                     # A message noticed during those reads moved the wait's end, its cap
-                    # still the first message's (ADR-0332 §5:1-§5:2).
+                    # still the first message's (ADR-0332 §5:1-§5:2); and whether or not
+                    # it did, the read may have missed it, so it reads again.
                     continue
                 handed = self._handed.get(conversation_id, set())
                 waiting = tuple(one for one in waiting if one.position not in handed)
                 if not waiting:
-                    if read.again:
-                        continue
                     return
                 await self._admit(conversation_id, read, waiting)
                 return
