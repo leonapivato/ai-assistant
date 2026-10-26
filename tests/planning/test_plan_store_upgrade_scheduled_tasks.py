@@ -8,9 +8,10 @@ record, three effect records — a call finished, a message claimed with no outc
 call spending a question part — and one observation record.
 
 The head opens a copy and must upgrade it in place (ADR-0326 §4:1, ADR-0350 §12:4): add
-the empty ``scheduled_tasks`` and ``cascade_records`` tables, carry every record whole
-(§4:4), move the label forward from 15 (§4:5), and leave the file exactly as it found it
-where the open fails (§4:3). The upgraded file then holds a scheduled task like any other.
+the empty ``scheduled_tasks`` table, carry every record whole (§4:4), move the label
+forward from 15 (§4:5), and leave the file exactly as it found it where the open fails
+(§4:3). The ``cascade_records`` table label 16 added is never created on the way past 17
+(ADR-0352 §6:4). The upgraded file then holds a scheduled task like any other.
 """
 
 from __future__ import annotations
@@ -107,8 +108,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "17"
-    assert export.schema_version == 25
+    assert _label(legacy) == "18"
+    assert export.schema_version == 26
     assert export.stopped_activations == ("act-before-stopped",)
     effects = {one.id: one for one in export.activation_effects}
     assert list(effects) == ["effect-before-call", "effect-before-message", "effect-before-part"]
@@ -118,12 +119,10 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     assert export.observations == observations
     assert [one.episode for one in observations] == ["activation:act-before-1"]
     assert export.scheduled_tasks == ()
-    assert export.cascades == ()
-    # The step moves the label and adds the two empty tables, and rewrites no row.
+    # The steps move the label and add the one empty table, and rewrite no row.
     after = _dump(legacy)
-    assert set(after) == {*_TABLES_BEFORE, "scheduled_tasks", "cascade_records"}
+    assert set(after) == {*_TABLES_BEFORE, "scheduled_tasks"}
     assert after["scheduled_tasks"] == []
-    assert after["cascade_records"] == []
     assert {table: after[table] for table in before if table != "meta"} == {
         table: rows for table, rows in before.items() if table != "meta"
     }
@@ -175,7 +174,7 @@ async def test_the_upgraded_file_holds_a_scheduled_task_and_keeps_what_it_carrie
         assert [one.id for one in spent] == ["effect-before-part"]
     finally:
         reopened.close()
-    assert _label(legacy) == "17"
+    assert _label(legacy) == "18"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

@@ -1245,7 +1245,7 @@ def _task_spawn(task_id: str, moment: Moment, **parts: object) -> TaskSpawn:
 
 
 async def _write_scheduled_tasks(store: SqlitePlanStore, moment: Moment) -> None:
-    """ADR-0350 §12:3, ADR-0340 §9: a task of each when, through each state, and a cascade.
+    """ADR-0350 §12:3, ADR-0340 §9: a task of each when, through each state.
 
     Every instant is handed in, as a caller computes it: the store computes none
     (ADR-0340 §9:5), so a rule's instants need not fall on its days to be stored.
@@ -1313,8 +1313,6 @@ async def _write_scheduled_tasks(store: SqlitePlanStore, moment: Moment) -> None
     if any(push is not OccurrencePush.PUSHED for push in pushes):
         msg = f"the plan store did not push every occurrence: {pushes!r}"
         raise RuntimeError(msg)
-    # §9:6: a stop command's cascade record, naming an activation outside every lineage.
-    await store.record_cascade("act-upgrade-cascade")
 
 
 async def _read_plans(directory: Path) -> Records:
@@ -1328,10 +1326,23 @@ async def _read_plans(directory: Path) -> Records:
             # ADR-0350 §12:3: keyed, so a base that predates them reads back no key and
             # the head reads back none either; the shape does not move.
             **_keyed("task", exported.scheduled_tasks, _field("id")),
-            **_keyed("cascade", exported.cascades, str),
         }
     finally:
         store.close()
+
+
+def _plans_cascade_carry(records: Records) -> Records:
+    """What a plan store read back before ADR-0352 reads back after it (§2:6, §6:3-§6:4).
+
+    The upgrade from label 17 applies each cascade record's reach once and drops it, and
+    the export no longer carries ``cascades``, so no ``cascade/`` key is read back. The
+    base's writer names its one cascade record for an activation outside every lineage,
+    so the upgrade cancels no occurrence and writes no stop record, and every other
+    record reads back as it was. Were a base's cascade record to reach a task, the head
+    would read that task back changed and a stop record added, which this carry does not
+    say, so the check would fail rather than pass it unread.
+    """
+    return {key: value for key, value in records.items() if not key.startswith("cascade/")}
 
 
 def _plans_observations_carry(records: Records) -> Records:
@@ -1969,11 +1980,12 @@ STORES: Final[tuple[Store, ...]] = (
         ("plans.db",),
         _write_plans,
         _read_plans,
-        shape=4,
+        shape=5,
         carries={
             1: _plans_observations_carry,
             2: _plans_finding_carry,
             3: _plans_annotation_carry,
+            4: _plans_cascade_carry,
         },
     ),
     Store("conversations", ("conversations.db",), _write_conversations, _read_conversations),

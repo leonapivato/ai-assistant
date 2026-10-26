@@ -74,6 +74,7 @@ from ai_assistant.planning.scheduled_tasks import (
     checked_spawn_effect,
     checked_state,
     decide_cancel,
+    decide_cascade_retirement,
     decide_push,
     decide_removal,
     decide_settle,
@@ -183,13 +184,31 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: rather than at the first read. **A version 16 file is upgraded in place** (ADR-0326
 #: §4:1, ADR-0340 §9:4): every task it holds is one-off, which reads back as it was, and
 #: the step is the label alone.
-_SCHEMA_VERSION = 17
+#:
+#: **Version 18 is ADR-0352 §6:4's**: the store loses ``cascade_records``, since no stop
+#: writes a cascade record and no push is refused below one (§2:2-§2:3). **A version 17
+#: file is upgraded in place** (ADR-0326 §4:1), and its cascade records keep the reach
+#: they had when their stops were made (ADR-0352 §2:6): in the open's one transaction,
+#: every pending occurrence of a task whose lineage carries one ends *cancelled*, as the
+#: push step refused it before; the activation of every occurrence below one marked
+#: pushed, its outcome unwritten, gets a stop record, so ADR-0350 §8:1 ends it *stopped*
+#: at start; and then the table is dropped (:meth:`SqlitePlanStore._retire_cascades`).
+#: A build reading 17 would recreate the table and find it empty, so it must refuse a
+#: file at 18 (ADR-0326 §5:3).
+_SCHEMA_VERSION = 18
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
 #: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
 #: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
 #: ruling (§4:6).
-_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16)
+_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16, 17)
+
+#: The table ADR-0350 §12:3 gave the store for a stop command's cascade records, and the
+#: last label that holds it. A file at that label or below may hold it, and the open
+#: retires it (ADR-0352 §2:6, §6:4); at any later label it is a table this code does not
+#: create, refused as any other (:meth:`SqlitePlanStore._refuse_foreign_tables`).
+_RETIRED_CASCADES = "cascade_records"
+_LAST_CASCADE_LABEL = 17
 
 #: The ``meta`` key holding the last observation revision issued (ADR-0329 §16:9). It
 #: lives beside the records rather than being derived from them, because a revision is
@@ -240,8 +259,6 @@ _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS scheduled_tasks("
     "id TEXT PRIMARY KEY, person TEXT NOT NULL, parent TEXT NOT NULL, "
     "written_seq INTEGER NOT NULL, data TEXT NOT NULL)",
-    # ADR-0350 §9:6's cascade records, the activation id alone, as a stop record is.
-    "CREATE TABLE IF NOT EXISTS cascade_records(activation_id TEXT PRIMARY KEY)",
 )
 
 #: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
@@ -299,9 +316,6 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "written_seq": ("INTEGER", True),
         "data": ("TEXT", True),
     },
-    "cascade_records": {
-        "activation_id": ("TEXT", False),
-    },
 }
 
 #: The columns every read of a scheduled task selects, in the order
@@ -335,7 +349,6 @@ _RECORD_PRIMARY_KEY: dict[str, tuple[str, ...]] = {
     "activation_effects": ("id",),
     "observations": ("episode_id",),
     "scheduled_tasks": ("id",),
-    "cascade_records": ("activation_id",),
 }
 
 
@@ -509,10 +522,14 @@ class SqlitePlanStore:
                 # Refuse any other version *before* creating a record table, so a
                 # rejected open leaves no schema behind (the transaction rolls the
                 # meta table back too on the raise).
-                self._verify_or_init_meta(conn)
+                held = self._verify_or_init_meta(conn)
                 for statement in _RECORD_SCHEMA:
                     conn.execute(statement)
                 self._verify_record_tables(conn)
+                # ADR-0352 §2:6: the upgrade past 17 applies the cascade records' reach
+                # and drops them, on the tables just verified, in this transaction.
+                if held is not None and held <= _LAST_CASCADE_LABEL:
+                    self._retire_cascades(conn)
         except PlanningError:
             conn.close()  # never leak the connection when opening fails
             raise
@@ -559,7 +576,7 @@ class SqlitePlanStore:
             with contextlib.suppress(FileNotFoundError):
                 sidecar.chmod(_OWNER_ONLY)
 
-    def _verify_or_init_meta(self, conn: sqlite3.Connection) -> None:
+    def _verify_or_init_meta(self, conn: sqlite3.Connection) -> int | None:
         """Write the version on a fresh database, upgrade an older one, or refuse it.
 
         Runs inside the setup transaction, before any record table is created, read or
@@ -576,28 +593,33 @@ class SqlitePlanStore:
 
         The marker is read through :meth:`_read_meta`, so a store holding conflicting
         rows for it is refused rather than resolved by row order (issue #349). The
-        file's tables are checked first (:meth:`_refuse_foreign_tables`), so a missing
-        or rewritten marker cannot pass an older store off as a fresh or a current one.
+        file's tables are checked before anything is written or upgraded
+        (:meth:`_refuse_foreign_tables`), so a missing or rewritten marker cannot pass an
+        older store off as a fresh or a current one.
+
+        Returns:
+            The label the file held, where it was upgraded from it; ``None`` where it was
+            created now or opened at :data:`_SCHEMA_VERSION`.
 
         Raises:
             PlanningError: If the file holds a table this code does not create, the
                 schema version is neither this code's nor one it upgrades, or the
                 marker is ambiguous or unparseable.
         """
-        self._refuse_foreign_tables(conn)
         version = self._read_meta(conn, "schema_version")
-        if not version:
+        held = self._meta_int("schema_version", version[0]) if version else None
+        self._refuse_foreign_tables(conn, held)
+        if held is None:
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
                 (str(_SCHEMA_VERSION),),
             )
-            return
-        held = self._meta_int("schema_version", version[0])
+            return None
         if held == _SCHEMA_VERSION:
-            return
+            return None
         if held in _UPGRADABLE:
             self._upgrade(conn, held)
-            return
+            return held
         if held > _SCHEMA_VERSION:
             msg = (
                 f"the plan store at {self._path!r} has schema_version={held}, newer than "
@@ -637,20 +659,24 @@ class SqlitePlanStore:
         empty default, so every record reads back as it was with them empty, and the
         step is the label alone once more.
 
-        **15 → 16** (ADR-0350 §12:3): the store gains ``scheduled_tasks`` and
-        ``cascade_records``, which the open's ``CREATE TABLE IF NOT EXISTS`` creates,
-        empty, in this same transaction. No record changes, so the step is the label
-        alone.
+        **15 → 16** (ADR-0350 §12:3): the store gains ``scheduled_tasks``, which the
+        open's ``CREATE TABLE IF NOT EXISTS`` creates, empty, in this same transaction.
+        No record changes, so the step is the label alone. (``cascade_records``, which
+        16 also added, is never created for a file a step brings past 17.)
 
         **16 → 17** (ADR-0340 §9:3-§9:4): a task's when may be a rule, and a task with a
         rule holds more than one occurrence. Every task a file at 16 holds is one-off and
         reads back as it was, so no row is rewritten and the step is the label alone.
+
+        **17 → 18** (ADR-0352 §2:6, §6:4): the store loses ``cascade_records``. The step
+        moves the label here, and :meth:`_retire_cascades` applies the records' reach and
+        drops the table once the record tables are verified, in this same transaction.
         """
         for step in range(held, _SCHEMA_VERSION):
             conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))
 
-    def _refuse_foreign_tables(self, conn: sqlite3.Connection) -> None:
-        """Refuse a file holding a table this code does not create, whatever its label.
+    def _refuse_foreign_tables(self, conn: sqlite3.Connection, held: int | None) -> None:
+        """Refuse a file holding a table this code does not create, at the label it holds.
 
         The version marker is what tells a store written before the cutover from this
         one, but a marker is one row: deleted, a pre-cutover file reads as a database
@@ -662,12 +688,20 @@ class SqlitePlanStore:
         this code wrote holds ``meta`` and :data:`_RECORD_COLUMNS`' tables and nothing
         else, and any other table is refused before anything is written. Nothing in it
         is read or migrated (ADR-0309 §6). SQLite's own ``sqlite_`` tables are not the
-        file's records and are passed over.
+        file's records and are passed over. A file labelled
+        :data:`_LAST_CASCADE_LABEL` or below may also hold :data:`_RETIRED_CASCADES`,
+        which its upgrade retires (ADR-0352 §6:4); an unlabelled file or a later one may
+        not.
+
+        Args:
+            conn: The open's connection.
+            held: The label the file holds, or ``None`` where it holds none.
 
         Raises:
             PlanningError: If the file holds any other table.
         """
-        own = {"meta", *_RECORD_COLUMNS}
+        retired = {_RETIRED_CASCADES} if held is not None and held <= _LAST_CASCADE_LABEL else set()
+        own = {"meta", *_RECORD_COLUMNS, *retired}
         foreign = sorted(
             str(name)
             for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -683,6 +717,50 @@ class SqlitePlanStore:
             f"and clear (ADR-0004 §6), so it is refused as it stands"
         )
         raise PlanningError(msg)
+
+    def _retire_cascades(self, conn: sqlite3.Connection) -> None:
+        """Apply the reach of a file's cascade records once, then drop them (ADR-0352 §2:6).
+
+        Run in the open's transaction, after the record tables are verified, for a file
+        the open upgraded from :data:`_LAST_CASCADE_LABEL` or below. Every pending
+        occurrence of a task whose lineage carries a cascade record ends *cancelled*, as
+        ADR-0350 §7:5's push step refused it before; the activation of every occurrence
+        below one marked pushed, its outcome unwritten, gets a stop record, so ADR-0350
+        §8:1 ends it *stopped* at start and never pushes it again; and the table is
+        dropped. :func:`~ai_assistant.planning.scheduled_tasks.decide_cascade_retirement`
+        decides which. A file that never held the table, one upgraded from 15 or below,
+        has nothing to retire.
+
+        Each record is revalidated as the activation id it was written as, so a row an
+        outside writer blanked is refused as damage (ADR-0326 §5:1), and the open, with
+        every step it took, is rolled back (§4:3).
+
+        Raises:
+            PlanningError: If a cascade record or a scheduled task does not validate, or
+                the clock's reading is not a conforming one.
+        """
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = ?",
+            (_RETIRED_CASCADES,),
+        ).fetchone()
+        if present is None:
+            return
+        cascades = {
+            revalidated_activation_id(row[0])
+            for row in conn.execute(
+                f"SELECT activation_id FROM {_RETIRED_CASCADES}"  # noqa: S608 — only a constant is interpolated
+            ).fetchall()
+        }
+        schedule = self._schedule(conn, self._now())
+        stops = decide_cascade_retirement(schedule, cascades)
+        self._persist(conn, schedule)
+        for activation_id in stops:
+            conn.execute(
+                "INSERT INTO stopped_activations(activation_id) VALUES (?) "
+                "ON CONFLICT(activation_id) DO NOTHING",
+                (activation_id,),
+            )
+        conn.execute(f"DROP TABLE {_RETIRED_CASCADES}")
 
     def _verify_record_tables(self, conn: sqlite3.Connection) -> None:
         """Check each record table *is* the shape this store's guarantees rest on.
@@ -1312,11 +1390,7 @@ class SqlitePlanStore:
                 ).fetchall()
             )
         }
-        cascades = {
-            revalidated_activation_id(row[0])
-            for row in conn.execute("SELECT activation_id FROM cascade_records").fetchall()
-        }
-        return Schedule(tasks=tasks, cascades=cascades, now=now)
+        return Schedule(tasks=tasks, now=now)
 
     def _persist(self, conn: sqlite3.Connection, schedule: Schedule) -> None:
         """Write back the tasks a decision changed and delete those it removed."""
@@ -1470,7 +1544,7 @@ class SqlitePlanStore:
         return self._read_schedule("read a person's scheduled tasks").tasks
 
     async def spawned_tasks(self, activation_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
-        """Return the tasks whose parent is any of the named activations (§9:6).
+        """Return the tasks whose parent is any of the named activations (§12:3).
 
         Raises:
             PlanningError: If ``activation_ids`` is not a sequence of encodable
@@ -1500,7 +1574,7 @@ class SqlitePlanStore:
         return self._read_schedule("read a scheduled task's lineage").tasks
 
     async def live_below(self, task_id: str, /) -> bool:
-        """Whether anything below a task is pending, pushed or running (§7:8, §9:6).
+        """Whether anything below a task is pending, pushed or running (§7:8).
 
         Raises:
             PlanningError: If ``task_id`` is not an identifier, or the backend fails.
@@ -1531,7 +1605,7 @@ class SqlitePlanStore:
     async def mark_occurrence_pushed(
         self, task_id: str, number: int, activation_id: str, /, *, rule: RulePush | None = None
     ) -> OccurrencePush:
-        """Mark a pending occurrence pushed, with its cascade check, in one step (§7:5).
+        """Mark a pending occurrence pushed, in one step (§7:5, ADR-0352 §2:3).
 
         A rule's occurrence first pushed writes its successor, and any it skips, inside
         the same ``BEGIN IMMEDIATE`` transaction (ADR-0340 §4:6, §4:8, §9:3).
@@ -1653,25 +1727,6 @@ class SqlitePlanStore:
                 )
         return held
 
-    async def record_cascade(self, activation_id: str, /) -> None:
-        """Write a cascade record naming an activation, idempotently (§9:6).
-
-        Raises:
-            PlanningError: If ``activation_id`` is not an identifier, or the backend
-                fails.
-        """
-        named = revalidated_activation_id(activation_id)
-        async with self._lock:
-            await _run_to_completion(self._record_cascade_sync, named)
-
-    def _record_cascade_sync(self, activation_id: str) -> None:
-        with self._transaction(f"record a cascade below activation {activation_id!r}") as conn:
-            conn.execute(
-                "INSERT INTO cascade_records(activation_id) VALUES (?) "
-                "ON CONFLICT(activation_id) DO NOTHING",
-                (activation_id,),
-            )
-
     async def confirm_message_effect(
         self, effect_id: str, /, *, delivered: bool, position: int | None = None
     ) -> None:
@@ -1741,10 +1796,8 @@ class SqlitePlanStore:
             activation_effects=tuple(acted),
             # ADR-0329 §16:9: every observation record, by episode id.
             observations=tuple(observed),
-            # ADR-0350 §12:3: every scheduled task, in the order written, and every
-            # cascade record, in a deterministic order.
+            # ADR-0350 §12:3: every scheduled task, in the order written.
             scheduled_tasks=tuple(schedule.tasks.values()),
-            cascades=tuple(sorted(schedule.cascades)),
         )
 
     def _export_sync(
@@ -1800,9 +1853,8 @@ class SqlitePlanStore:
             # ADR-0329 §16:9: and every observation record. `meta`, which holds the
             # observation issuer, is untouched.
             removed += conn.execute("DELETE FROM observations").rowcount
-            # ADR-0350 §12:3: and every scheduled task and cascade record.
+            # ADR-0350 §12:3: and every scheduled task.
             removed += conn.execute("DELETE FROM scheduled_tasks").rowcount
-            removed += conn.execute("DELETE FROM cascade_records").rowcount
         return removed
 
     def close(self) -> None:

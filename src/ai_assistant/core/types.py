@@ -10198,8 +10198,9 @@ class OccurrenceState(StrEnum):
     Closed, **added to and never renamed**. ``pending`` until the sensor pushes it;
     ``pushed``, naming the activation it will be or was admitted under, until that
     activation's outcome is written; then one of the outcomes. ``cancelled`` ends a
-    pending occurrence (§9:5, §7:5's cascade), and ``skipped`` an earlier missed
-    occurrence of a rule (§8:10).
+    pending occurrence (§9:5, and ADR-0352 §2:6's upgrade below a cascade record a stop
+    wrote before that decision), and ``skipped`` an earlier missed occurrence of a rule
+    (§8:10).
     """
 
     PENDING = "pending"
@@ -10782,17 +10783,17 @@ class ScheduledTaskCancel(BaseModel):
 class OccurrencePush(StrEnum):
     """What the plan store answered the sensor marking an occurrence pushed (§7:5).
 
-    Closed, **added to and never renamed**. Only ``pushed`` lets the activation be
-    admitted; on either refusal nothing is pushed.
+    Closed, **added to and never renamed**, with one recorded exception: ADR-0352 §6:2
+    removed ``cascade_cancelled`` with the cascade record, since a push's answer is held
+    by no stored record and crosses no wire. Only ``pushed`` lets the activation be
+    admitted; on ``not_pending`` nothing is pushed, and nothing in a task's lineage
+    refuses a push (ADR-0352 §2:3).
     """
 
     PUSHED = "pushed"
     """The occurrence is marked pushed, naming the activation it will be admitted under."""
     NOT_PENDING = "not_pending"
     """The occurrence is no longer pending, or the task is no longer held."""
-    CASCADE_CANCELLED = "cascade_cancelled"
-    """An activation in its task's lineage carries a cascade record, so the occurrence
-    ended cancelled (§7:5, §9:6)."""
 
 
 class RulePush(BaseModel):
@@ -10867,7 +10868,14 @@ class ScheduledDue(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 25 because a scheduled task may hold a rule** (ADR-0340
+    **``schema_version`` is 26 because the document lost ``cascades``** (ADR-0352 §6:3):
+    no stop writes a cascade record any more, and the plan store's upgrade retires every
+    one a stop wrote before (§2:6), so the store holds none to carry. A reader of 25
+    expects a member this document no longer has. The closure rule is extended by
+    nothing, and the only constraint stated over ``scheduled_tasks`` is still that no
+    task id appears twice.
+
+    **It was 25 because a scheduled task may hold a rule** (ADR-0340
     §9:1, §9:3): a task's ``when`` may be a :class:`DueOnRule`, and a task with a rule
     holds more than one occurrence. No member is added, since both ride inside
     ``scheduled_tasks``, but a reader of 24 refuses the rule's kind and every task with
@@ -10947,12 +10955,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[25] = Field(
-        default=25,
+    schema_version: Literal[26] = Field(
+        default=26,
         description=(
-            "Shape of this export, pinned to exactly 25 (ADR-0039 §10, ADR-0340 §9:3): an "
+            "Shape of this export, pinned to exactly 26 (ADR-0039 §10, ADR-0352 §6:3): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[25]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[26]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -10988,30 +10996,20 @@ class PlanExport(BaseModel):
             "the order they were written (ADR-0350 §12:3)."
         ),
     )
-    cascades: tuple[Identifier, ...] = Field(
-        default=(),
-        description=(
-            "The activation ids a stop command's cascade record names (ADR-0350 §9:6). A "
-            "record carries the id alone."
-        ),
-    )
 
     @model_validator(mode="after")
-    def _a_scheduled_task_and_a_cascade_appear_once(self) -> PlanExport:
-        """Refuse a document carrying one task id or one cascade record twice (§12:3).
+    def _a_scheduled_task_appears_once(self) -> PlanExport:
+        """Refuse a document carrying one task id twice (ADR-0350 §12:3).
 
-        A store holds one task per id and one cascade record per activation, so a
-        duplicate states a record the store cannot hold.
+        A store holds one task per id, so a duplicate states a record the store cannot
+        hold.
 
         Raises:
-            ValueError: If a task id or a cascade's activation id appears more than once.
+            ValueError: If a task id appears more than once.
         """
         ids = [task.id for task in self.scheduled_tasks]
         if len(set(ids)) != len(ids):
             msg = "export contains duplicate scheduled task ids"
-            raise ValueError(msg)
-        if len(set(self.cascades)) != len(self.cascades):
-            msg = "export contains duplicate cascade records"
             raise ValueError(msg)
         return self
 

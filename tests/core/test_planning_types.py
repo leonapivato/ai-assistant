@@ -280,28 +280,27 @@ def test_a_scalar_output_with_a_lone_surrogate_is_rejected() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 25
+    assert export.schema_version == 26
     assert export.activation_effects == ()
     assert export.observations == ()
     assert export.scheduled_tasks == ()
-    assert export.cascades == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_twenty_five() -> None:
+def test_export_pins_the_schema_version_to_exactly_twenty_six() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[25]`` refuses an explicit ``24`` — a document whose scheduled tasks hold no
-    rule and one occurrence each (ADR-0340 §9:3) — and any other value, so the
-    advertised version cannot be mislabelled. The positive default is what a producer
-    gets for free; only the rejections pin it.
+    ``Literal[26]`` refuses an explicit ``25`` — a document that still carries
+    ``cascades`` (ADR-0352 §6:3) — and any other value, so the advertised version cannot
+    be mislabelled. The positive default is what a producer gets for free; only the
+    rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``24`` is
-    the shape this contract had one decision ago and ``26`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``25`` is
+    the shape this contract had one decision ago and ``27`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=25).schema_version == 25
-    for stale in (*range(1, 25), 26):
+    assert PlanExport(exported_at=_WHEN, schema_version=26).schema_version == 26
+    for stale in (*range(1, 26), 27):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)
 

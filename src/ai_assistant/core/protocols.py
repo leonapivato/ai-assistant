@@ -3262,9 +3262,11 @@ class PlanStore(Protocol):
     on the revision the writer read**, so two writers cannot both land a record
     computed from one state (ADR-0329 §16:6's backstop, in ADR-0219 §2's shape).
 
-    **Fifteen more hold the Task Scheduler's content** (ADR-0350 §12:3): the scheduled
-    tasks every spawn writes, with their occurrences, and a stop command's cascade
-    records. :meth:`write_scheduled_task` writes a task with its spawn's effect claim and
+    **Fourteen more hold the Task Scheduler's content** (ADR-0350 §12:3): the scheduled
+    tasks every spawn writes, with their occurrences. No stop writes a cascade record
+    and nothing refuses a push below a stopped activation (ADR-0352 §2:2-§2:3); a
+    stopped activation's spawns are refused on its stop record (ADR-0350 §3:3).
+    :meth:`write_scheduled_task` writes a task with its spawn's effect claim and
     the limits' checks in one step, cancelling a task it replaces in that step;
     :meth:`cancel_scheduled_task` cancels one; :meth:`scheduled_tasks`,
     :meth:`person_scheduled_tasks`, :meth:`spawned_tasks` and :meth:`scheduled_lineage`
@@ -3273,7 +3275,7 @@ class PlanStore(Protocol):
     due; :meth:`mark_occurrence_pushed` and :meth:`settle_occurrence` move an occurrence
     from pending to pushed to its outcome; :meth:`stop_pushed_activation` and
     :meth:`stopped_activations` write and read the stop record of a pushed id;
-    :meth:`record_cascade` writes a cascade record; :meth:`confirm_message_effect`
+    :meth:`confirm_message_effect`
     settles a message's record from its place's confirmation after a restart; and
     :meth:`remove_scheduled_task` removes a task once nothing of it or below it is live.
     Each write is one indivisible step, so a cancel and a push, or two spawns of one
@@ -3644,7 +3646,7 @@ class PlanStore(Protocol):
         Args:
             task_id: The task to cancel.
             person: The person the asking activation is for, or ``None`` for the Task
-                Manager's command and a stop's cascade (§9:6, §10:2).
+                Manager's command (§10:2).
             spawned_by: The asking activation, where its input does not carry the
                 person's authority, so it may cancel only a task it spawned; ``None``
                 otherwise.
@@ -3683,10 +3685,11 @@ class PlanStore(Protocol):
         ...
 
     async def spawned_tasks(self, activation_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
-        """Return the tasks whose parent is any of the named activations (§9:6, §12:3).
+        """Return the tasks whose parent is any of the named activations (§12:3).
 
-        In the order they were written. A stop's cascade walks down through these, from
-        the stopped activation to the tasks its descendants' occurrences spawned.
+        In the order they were written. A stop call's result walks down through these,
+        from the stopped activation to the tasks its descendants' occurrences spawned,
+        and reads only (ADR-0352 §3:2).
 
         Raises:
             PlanningError: If ``activation_ids`` is a bare string or not a sequence of
@@ -3713,7 +3716,7 @@ class PlanStore(Protocol):
         ...
 
     async def live_below(self, task_id: str, /) -> bool:
-        """Whether anything below a task is pending, pushed or running (§7:8, §9:6).
+        """Whether anything below a task is pending, pushed or running (§7:8).
 
         Below a task are the tasks its occurrences' activations spawned, and theirs in
         turn. An occurrence is pushed from its push until its outcome is written, which
@@ -3745,12 +3748,9 @@ class PlanStore(Protocol):
 
         **One indivisible step** (§7:5), so a cancel and a push are totally ordered and
         whichever lands first wins. Where the task is not held, or the occurrence is not
-        pending, it answers ``NOT_PENDING`` and writes nothing. Where an activation in
-        the task's lineage carries a cascade record — the task's parent, or the parent
-        of any task above it — it ends the occurrence cancelled, with every other
-        pending occurrence of the task, and answers ``CASCADE_CANCELLED``: for a rule,
-        that is its successor too, beside an occurrence pushed again, and the rule ends
-        (ADR-0340 §4:7). Otherwise it
+        pending, it answers ``NOT_PENDING`` and writes nothing. **Nothing in the task's
+        lineage refuses it** (ADR-0352 §2:3): a stop record on the task's parent, or on
+        the parent of any task above it, leaves the push as it is. Otherwise it
         marks the occurrence pushed to ``activation_id``, counting the push (§8:5), and
         answers ``PUSHED``.
 
@@ -3849,20 +3849,6 @@ class PlanStore(Protocol):
         """
         ...
 
-    async def record_cascade(self, activation_id: str, /) -> None:
-        """Write a stop command's cascade record naming an activation (ADR-0350 §9:6).
-
-        **Idempotent, carrying the id alone**, as a stop record is. From then on
-        :meth:`mark_occurrence_pushed` refuses every occurrence below it and ends it
-        cancelled (§7:5), whatever a restart or a failure leaves of the stop's walk. Only
-        :meth:`clear` removes one.
-
-        Raises:
-            PlanningError: If ``activation_id`` is not an identifier, or the backend
-                fails.
-        """
-        ...
-
     async def confirm_message_effect(
         self, effect_id: str, /, *, delivered: bool, position: int | None = None
     ) -> None:
@@ -3917,7 +3903,7 @@ class PlanStore(Protocol):
         ordered by episode id.
 
         **And the Task Scheduler's content** (ADR-0350 §12:3): every scheduled task it
-        holds, with its occurrences, in the order written, and every cascade record.
+        holds, with its occurrences, in the order written.
         """
         ...
 
@@ -3927,8 +3913,8 @@ class PlanStore(Protocol):
         **Every stop record goes with the rest** (ADR-0297 §1), and is counted among
         the records removed. **So does every observation record** (ADR-0329 §16:9),
         each counted once; the revision issuer is kept, so no revision is issued
-        twice. **So do every scheduled task and every cascade record** (ADR-0350
-        §12:3), each counted once.
+        twice. **So does every scheduled task** (ADR-0350 §12:3), each counted once;
+        no cascade record is held to count (ADR-0352 §6:3).
 
         Raises:
             PlanningError: If the backend fails.

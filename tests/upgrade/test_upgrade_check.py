@@ -161,15 +161,15 @@ def _occurrences(task: Json) -> list[tuple[Json, Json]]:
     return [(one["number"], one["state"]) for one in occurrences if isinstance(one, dict)]
 
 
-def test_the_plan_writer_writes_scheduled_tasks_a_rule_and_a_cascade(
+def test_the_plan_writer_writes_scheduled_tasks_and_a_rule(
     written: tuple[Path, Path],
 ) -> None:
     """ADR-0350 §12:3, ADR-0340 §9: so a later base writes them, and its head reads them.
 
     The base's copy of the writer is what the next pull request's check runs, so each
-    when, each occurrence state a push and a settle leave, the rule's skipped and
-    successor occurrences, and the cascade record are read back here, by this build,
-    from what it wrote.
+    when, each occurrence state a push and a settle leave, and the rule's skipped and
+    successor occurrences are read back here, by this build, from what it wrote. No
+    cascade record is written or read back (ADR-0352 §6:1, §6:3).
     """
     plans = _records(_snapshot(written[1]), "plans")
     tasks = {key: value for key, value in plans.items() if key.startswith("task/")}
@@ -202,8 +202,31 @@ def test_the_plan_writer_writes_scheduled_tasks_a_rule_and_a_cascade(
         "days": ["tuesday", "thursday"],
         "zone": "America/New_York",
     }.items() <= (rule.items())
-    assert plans["cascade/act-upgrade-cascade"] == "act-upgrade-cascade"
+    assert not [key for key in plans if key.startswith("cascade/")]
     assert all(f"effect/effect-{key.removeprefix('task/')}" in plans for key in tasks)
+
+
+def test_the_plan_stores_cascade_carry_is_what_its_upgrade_does(
+    written: tuple[Path, Path],
+) -> None:
+    """ADR-0352 §2:6, §6:3: the carry from shape 4 drops the cascade records, and only them.
+
+    The base before ADR-0352 writes what this build's writer writes and one cascade record
+    more, ``act-upgrade-cascade``, naming an activation outside every lineage; its
+    read-back is this build's with that one key added. The head's upgrade retires the
+    record with nothing below it to reach, so the carried read-back is this build's
+    exactly, and an uncarried one differs.
+    """
+    head = _records(_snapshot(written[1]), "plans")
+    base: Records = {**head, "cascade/act-upgrade-cascade": "act-upgrade-cascade"}
+    (plans,) = [one for one in STORES if one.name == "plans"]
+
+    carried = plans.carries[4](base)
+
+    assert plans.shape == 5
+    assert carried == head
+    assert upgrade_check.compare_records("plans", carried, head) == []
+    assert upgrade_check.compare_records("plans", base, head) != []
 
 
 def test_the_reads_leave_the_directory_as_they_found_it(
@@ -623,7 +646,7 @@ def test_the_plan_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
     carried = plans.carries[2](plans.carries[1](base))
     head = asyncio.run(plans.read(tmp_path))
 
-    assert plans.shape == 4
+    assert plans.shape == 5
     assert carried["observations"] == []
     assert upgrade_check.compare_records("plans", carried, head) == []
 

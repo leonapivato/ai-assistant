@@ -43,7 +43,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator
+    from collections.abc import Iterator
     from datetime import datetime
 
 _ID: Final[TypeAdapter[Identifier]] = TypeAdapter(Identifier)
@@ -61,14 +61,12 @@ class Schedule:
     Attributes:
         tasks: Every task the store holds, by id, in the order written. A decision
             replaces an entry rather than mutating the frozen record.
-        cascades: The activation ids a cascade record names (ADR-0350 §9:6).
         now: The store's clock, read once for the step: when an occurrence ends.
         changed: The ids of the tasks the step wrote, new or rewritten, in order.
         removed: The ids of the tasks the step removed.
     """
 
     tasks: dict[str, ScheduledTask]
-    cascades: Collection[str]
     now: datetime
     changed: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
@@ -287,16 +285,6 @@ def lineage(tasks: dict[str, ScheduledTask], activation_id: str) -> tuple[Schedu
     return tuple(reversed(chain))
 
 
-def _above(tasks: dict[str, ScheduledTask], task: ScheduledTask) -> tuple[ScheduledTask, ...]:
-    """``task`` and each task above it, from it upwards."""
-    found: list[ScheduledTask] = []
-    current: ScheduledTask | None = task
-    while current is not None and current not in found:
-        found.append(current)
-        current = task_of(tasks, current.parent)
-    return tuple(found)
-
-
 def below(tasks: dict[str, ScheduledTask], task: ScheduledTask) -> Iterator[ScheduledTask]:
     """Every task below ``task``: spawned by its occurrences' activations, or theirs."""
     seen = {task.id}
@@ -318,7 +306,7 @@ def _live(task: ScheduledTask) -> bool:
 
 
 def live_below(tasks: dict[str, ScheduledTask], task_id: str) -> bool:
-    """Whether a task below the named one is pending or pushed (§7:8, §9:6).
+    """Whether a task below the named one is pending or pushed (§7:8).
 
     A task the store does not hold has nothing below it.
     """
@@ -712,11 +700,11 @@ def decide_push(
     *,
     rule: RulePush | None = None,
 ) -> OccurrencePush:
-    """Decide and apply one push, with its cascade check (ADR-0350 §7:5).
+    """Decide and apply one push (ADR-0350 §7:5, ADR-0352 §2:3).
 
     For a rule's occurrence first pushed, ``rule`` gives its successor and any it skips,
-    written in the same step (ADR-0340 §4:6, §4:8, §9:3); a cascade's cancel writes
-    none of them, and so ends the rule (§4:7).
+    written in the same step (ADR-0340 §4:6, §4:8, §9:3). Nothing in the task's lineage
+    refuses it: a stop record on an activation above it leaves the push as it is.
 
     Raises:
         PlanningError: If the task holds no such occurrence, the occurrence is pending
@@ -745,13 +733,6 @@ def decide_push(
     fault = _rule_push_fault(task, occurrence, rule)
     if fault is not None:
         raise PlanningError(fault)
-    if any(one.parent in schedule.cascades for one in _above(schedule.tasks, task)):
-        # The cascade refuses every occurrence of the task, so each pending one ends
-        # cancelled now: a rule's successor beside an occurrence pushed again too, and
-        # the rule ends (ADR-0340 §4:7).
-        _cancel_pending(schedule, task)
-        _release(schedule)
-        return OccurrencePush.CASCADE_CANCELLED
     if rule is not None:
         _push_rule(schedule, task, occurrence, activation_id, rule)
         return OccurrencePush.PUSHED

@@ -299,7 +299,6 @@ async def test_a_take_writes_the_offering_activations_stop_record() -> None:
     assert answer.output == {"kind": "matter_answer", "answered": "taken"}
     held = await plans.export()
     assert _B in held.stopped_activations
-    assert held.cascades == ()
     assert stops.stopped == [], "the take's stop is internal, not the Task Manager's"
     (shown,) = caller.shown.values()
     assert shown.answered == "taken"

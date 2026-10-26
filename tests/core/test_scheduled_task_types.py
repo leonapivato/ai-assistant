@@ -21,6 +21,7 @@ from ai_assistant.core.types import (
     DueAt,
     DueNow,
     LabelKind,
+    OccurrencePush,
     OccurrenceState,
     PlanExport,
     PlanningLabel,
@@ -266,10 +267,20 @@ def test_a_round_names_the_place_its_message_goes_into_and_validates_without_it(
 # --- the export (§12:3) -----------------------------------------------------------------
 
 
-def test_the_export_refuses_a_task_or_a_cascade_record_twice() -> None:
+def test_the_export_refuses_a_task_twice() -> None:
     with pytest.raises(ValidationError, match="duplicate scheduled task"):
         PlanExport(exported_at=_AT, scheduled_tasks=(_task(), _task()))
-    with pytest.raises(ValidationError, match="duplicate cascade"):
-        PlanExport(exported_at=_AT, cascades=("a1", "a1"))
-    exported = PlanExport(exported_at=_AT, scheduled_tasks=(_task(),), cascades=("a1",))
+    exported = PlanExport(exported_at=_AT, scheduled_tasks=(_task(),))
     assert PlanExport.model_validate_json(exported.model_dump_json()) == exported
+
+
+def test_the_export_carries_no_cascade_record() -> None:
+    """ADR-0352 §6:3: ``cascades`` is gone, so a document carrying it is refused as extra."""
+    assert "cascades" not in PlanExport.model_fields
+    with pytest.raises(ValidationError, match="cascades"):
+        PlanExport.model_validate({"exported_at": _AT, "cascades": ["a1"]})
+
+
+def test_a_push_has_no_cascade_answer() -> None:
+    """ADR-0352 §6:2: ``OccurrencePush`` loses ``cascade_cancelled``, its recorded exception."""
+    assert {one.value for one in OccurrencePush} == {"pushed", "not_pending"}

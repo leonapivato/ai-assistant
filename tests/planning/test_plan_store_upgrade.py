@@ -102,7 +102,7 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "17"
+    assert _label(legacy) == "18"
     assert export.stopped_activations == ("act-legacy-stopped", "act-legacy-stopped-2")
     assert {one.id: one for one in export.activation_effects} == held_effects
     # Claim order is the order the previous release claimed them in.
@@ -170,7 +170,7 @@ async def test_the_upgraded_file_takes_observation_records_and_keeps_them(
         assert len((await reopened.export()).activation_effects) == 8
     finally:
         reopened.close()
-    assert _label(legacy) == "17"
+    assert _label(legacy) == "18"
 
 
 @pytest.mark.parametrize(

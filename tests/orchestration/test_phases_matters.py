@@ -364,7 +364,6 @@ async def test_the_newest_absorbs_older_work_that_has_not_acted_and_brings_its_i
     )
     held = await harness.plans.export()
     assert older in held.stopped_activations
-    assert held.cascades == (), "an absorption's stop writes no cascade record (§4:5)"
     assert await _assistant(harness, first) == [], "the older wrote nothing"
     assert await _assistant(harness, second) == ["done: for two, continues: Riverside"]
 
@@ -1002,7 +1001,6 @@ async def test_the_stop_call_stops_committed_work_and_its_task_stays_and_is_list
 
     held = await harness.plans.export()
     assert older in held.stopped_activations
-    assert held.cascades == (), "no stop writes a cascade record (ADR-0352 §2:2)"
     (task,) = await harness.plans.spawned_tasks([older])
     assert task.pending, "what the stopped work set up stays (ADR-0352 §2:4)"
     result = _stop_result(planner.requests[newer_text][2], 2)
@@ -1125,7 +1123,6 @@ async def test_a_stop_calls_result_lists_running_work_below_which_the_next_round
     stopped(_episode(found, running_step))
     held = await harness.plans.export()
     assert {older, running_step} <= set(held.stopped_activations)
-    assert held.cascades == ()
     await harness.engine.aclose()
 
 
@@ -1231,7 +1228,6 @@ async def test_a_stop_call_waits_and_a_newer_input_absorbs_the_stopping_one() ->
     assert [one.taken_over_from for one in _of(found, keeping).joined] == [stopping]
     held = await harness.plans.export()
     assert older not in held.stopped_activations, "nothing is stopped"
-    assert held.cascades == ()
     planner.hold(older_text)[1].set()
     await _frozen(harness, 3)
     await harness.engine.aclose()
