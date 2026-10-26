@@ -550,6 +550,41 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
     )
 
 
+def _taken_over_episode(moment: Moment) -> EpisodicMemory:
+    """An activation whose input was taken, frozen naming its taker (ADR-0352 §5:2, §6:5).
+
+    It froze *stopped*, its end entry the stop's, carrying ``taken_over_by``: the joined
+    episode's activation, which took its matter. A new record of its own, read back keyed
+    by its id, so no read-back shape moves and the memory store owes no carry: a base
+    that predates it reads back no such key, as #3440's records were added.
+    """
+    started, ended = moment.ago(minutes=9, seconds=30), moment.ago(minutes=8, seconds=50)
+    return EpisodicMemory(
+        id="mem-episode-taken-over",
+        content="The user asked for Saturday, which the booking took in.",
+        provenance=_provenance(moment),
+        occurred_at=ended,
+        processing_record=EpisodeProcessingRecord(
+            activation_id="act-upgrade-taken",
+            started_at=started,
+            ended_at=ended,
+            trigger=RecordedChannelTrigger(
+                target=_CHANNEL,
+                channel=_CHANNEL,
+                payload=RecordedTextInput(text="Actually, Saturday"),
+                context=ChannelContext(),
+                reply=None,
+                origin=InputOrigin.USER,
+            ),
+            status=ProcessingStatus.INTERRUPTED,
+            reason=ProcessingReason.STOPPED,
+            understanding_omitted=UnderstandingOmission.NOT_REACHED,
+            stages=(_stage(ControllerStage.END, ControllerRule.STOPPED, ended),),
+            taken_over_by="act-upgrade-2",
+        ),
+    )
+
+
 def _support(
     part: InputPart | RememberCallPart, origin: SupportOrigin, moment: Moment
 ) -> MemorySupport:
@@ -679,6 +714,7 @@ async def _write_memory(directory: Path, moment: Moment) -> None:
         )
         await store.add(episode)
         await store.add(_joined_episode(moment))
+        await store.add(_taken_over_episode(moment))
         await store.add(_pinned_memory(episode, moment))
         chunk = await store.walk_records(_WALK, limit=2)
         if chunk.position is not None:
