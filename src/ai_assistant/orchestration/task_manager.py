@@ -727,15 +727,21 @@ class TaskManager:
         shown, and a running one ``supply`` does not admit is not shown, as the list pull
         shows neither.
 
-        The person's zone is read first, so nothing awaited stands between the walk's
-        last read of the schedule and the reading of what runs (:meth:`_below`).
+        The person's zone is read first, and what runs below is read into entries in the
+        walk's own step (:meth:`_below`), so nothing awaited after it, the parents' read
+        included, can change what it shows as running or starting.
 
         Never raises but for a cancellation: where the tasks or the person's zone cannot
         be read, what it answers says it was not read.
         """
         try:
             zone = await self.zone_of(person)
-            below = await self._below(activation_id)
+            below = await self._below(
+                activation_id,
+                lambda tasks: self._live(
+                    tasks, viewer=viewer, person=person, supply=supply, zone=zone
+                ),
+            )
         except PlanningError, PersonModelStoreError:
             _log.warning("stop_set_up_unread", stage="acting", reason="store_failed")
             return StillLive(read=False)
@@ -744,24 +750,44 @@ class TaskManager:
         shown = pending[:bound]
         parents = await self.parents(shown)
         tasks = tuple(self.entry(one, zone, parent=parents.get(one.parent)) for one in shown)
-        from_task = {one: task.id for task in below.tasks for one in task.activations}
-        live = [one for one in below.running if one.activation_id in from_task]
+        return StillLive(
+            tasks=tasks,
+            more_tasks=len(pending) - len(shown),
+            activations=below.activations[:bound],
+            more_activations=max(0, len(below.activations) - bound),
+        )
+
+    def _live(
+        self,
+        tasks: Sequence[ScheduledTask],
+        *,
+        viewer: str | None,
+        person: str,
+        supply: TurnSupply | None,
+        zone: ZoneInfo,
+    ) -> tuple[ActivationEntry | StartingEntry, ...]:
+        """Each activation running or starting from ``tasks``, as it is now, oldest first.
+
+        Read in one synchronous step, into entries that nothing later changes: a running
+        one as the list pull's running part shows it, and one pushed and not yet admitted
+        as starting under its task (§3:4).
+        """
+        from_task = {one: task.id for task in tasks for one in task.activations}
+        live = [one for one in self._running() if one.activation_id in from_task]
         running = self._running_entries(live, asker=viewer, person=person, supply=supply, zone=zone)
         held = {one.activation_id for one in live if not one.ended}
         starting = [
             StartingEntry(task_id=task)
             for one, task in from_task.items()
-            if one not in held and one != viewer and one in below.starting
+            if one not in held and one != viewer and self._starting(one)
         ]
-        activations: list[ActivationEntry | StartingEntry] = [*reversed(running), *starting]
-        return StillLive(
-            tasks=tasks,
-            more_tasks=len(pending) - len(shown),
-            activations=tuple(activations[:bound]),
-            more_activations=max(0, len(activations) - bound),
-        )
+        return (*reversed(running), *starting)
 
-    async def _below(self, activation_id: str) -> _Below:
+    async def _below(
+        self,
+        activation_id: str,
+        live: Callable[[Sequence[ScheduledTask]], tuple[ActivationEntry | StartingEntry, ...]],
+    ) -> _Below:
         """Every task below ``activation_id``, in the order written, and what runs from them.
 
         The walk finds every activation below, level by level; the tasks they spawned
@@ -772,13 +798,13 @@ class TaskManager:
         **The schedule moves on while it is read** (§3:1-§3:2). Where that read shows an
         activation the walk had not reached, pushed since and perhaps ended after
         spawning a step of its own, the walk goes on from it. Once it shows none, what
-        runs and what is starting is read in one synchronous step, and the tasks are
-        read once more: where they are as they were, nothing below that read reached
-        spawned, started or ended between the schedule's read and what runs, so an
-        activation the reading of what runs no longer holds had ended with nothing more
-        below it. Where they moved, it all goes again. Every pass after the first is
-        caused by a write below the stopped activation, which the chain and pending
-        limits bound (ADR-0350 §9:7-§9:8), so it ends.
+        runs and what is starting is read by ``live`` in one synchronous step, and the
+        tasks are read once more: where they are as they were, nothing below that read
+        reached spawned, started or ended between the schedule's read and what runs, so
+        an activation ``live`` no longer found running had ended with nothing more below
+        it. Where they moved, it all goes again. Every pass after the first is caused by
+        a write below the stopped activation, which the chain and pending limits bound
+        (ADR-0350 §9:7-§9:8), so it ends.
 
         Raises:
             PlanningError: If the plan store cannot be read.
@@ -792,13 +818,10 @@ class TaskManager:
             frontier = _unwalked(ordered, walked)
             if frontier:
                 continue
-            running = tuple(self._running())
-            starting = frozenset(
-                one for task in ordered for one in task.activations if self._starting(one)
-            )
+            activations = live(ordered)
             again = await self._plans.spawned_tasks(walked)
             if _schedule_shape(again) == _schedule_shape(ordered):
-                return _Below(tasks=again, running=running, starting=starting)
+                return _Below(tasks=again, activations=activations)
             frontier = _unwalked(again, walked)
 
     async def parents(self, tasks: Sequence[ScheduledTask]) -> dict[str, TaskParent]:
@@ -1144,11 +1167,10 @@ class TaskManager:
 
 @dataclass(frozen=True, slots=True)
 class _Below:
-    """What :meth:`TaskManager._below` read: the tasks, and what ran and was starting."""
+    """What :meth:`TaskManager._below` read: the tasks, and what ran or was starting."""
 
     tasks: tuple[ScheduledTask, ...]
-    running: tuple[ActivationState, ...]
-    starting: frozenset[str]
+    activations: tuple[ActivationEntry | StartingEntry, ...]
 
 
 def _schedule_shape(tasks: Iterable[ScheduledTask]) -> tuple[object, ...]:
