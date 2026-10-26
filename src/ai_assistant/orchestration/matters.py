@@ -553,9 +553,24 @@ class Matters:
         )
 
     def entry(self, activation_id: str) -> InProgressEntry | None:
-        """``activation_id`` as an in-progress entry shows it, while it runs (§7:19, §7:26)."""
+        """``activation_id`` as an in-progress entry shows it, while it runs (§7:19, §7:26).
+
+        Where its episode was never written, its input is shown withheld: what is
+        waited on or offered is still shown, as nothing else of it can be read.
+        """
         state = self.state_of(activation_id)
-        return None if state is None else entry_of(state)
+        if state is None:
+            return None
+        entry = entry_of(state)
+        if entry is not None or state.place is None:
+            return entry
+        return InProgressEntry(
+            activation_id=activation_id,
+            channel=state.place,
+            input=None,
+            acted=state.committed,
+            origin=state.trigger.origin,
+        )
 
     # --- the waits (§7:12-§7:16) ---
 
@@ -646,6 +661,13 @@ class Matters:
         absorb: list[tuple[Named, ActivationState]] = []
         acted: list[tuple[Named, ActivationState]] = []
         seen: set[str] = set()
+        if not _running(state):
+            # ADR-0295 §2:1: a stopped activation starts nothing new, so it takes nothing in
+            # and offers nothing, whatever its version names.
+            return [
+                Named(activation_id=str(one), reached=None, became=Became.NOT_TAKEN)
+                for one in understanding.continues
+            ], []
         for named in understanding.continues:
             reached = self.forward(str(named))
             decision = Named(
@@ -700,7 +722,13 @@ class Matters:
             inherited.append(to_id)
         for older_id in dict.fromkeys(inherited):
             older = self.state_of(older_id)
-            if older is None or older is state or any(one is older for _, one in acted):
+            if older is None:
+                # §7:27: ended, so nothing is waited for, but what it finished is still
+                # the absorber's to be shown, read fresh from its own episode.
+                if older_id not in state.waits_on:
+                    state.waits_on = (*state.waits_on, older_id)
+                continue
+            if older is state or any(one is older for _, one in acted):
                 continue
             decision = Named(activation_id=older_id, reached=None, became=Became.WAITED_ON)
             decisions.append(decision)

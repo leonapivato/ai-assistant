@@ -1033,3 +1033,49 @@ async def test_a_stop_call_waits_and_a_newer_input_absorbs_the_stopping_one() ->
     planner.hold(older_text)[1].set()
     await _frozen(harness, 3)
     await harness.engine.aclose()
+
+
+async def test_a_waiting_round_is_shown_no_approved_action_and_the_round_after_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7:25-§7:26: the waiting round is offered the stop call alone, its yes withheld."""
+    from test_planning_asks import _approved as approved_action  # noqa: PLC0415 — one case's
+
+    understanding, planner = _Understanding(), _Planner()
+    planner.script(
+        "search apartments",
+        RoundResponse(
+            text="Searching.",
+            calls=(
+                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+            ),
+        ),
+    )
+    planner.hold("search apartments", from_round=2)
+    newer_text = "yes, and only two bedrooms, continues: apartments"
+    harness = _harness(understanding, planner)
+    phases = harness.engine._phases
+    assert phases is not None
+    approving = phases._approved
+
+    async def approved(given: Any, working: Any) -> Any:
+        found = await approving(given, working)
+        understood = given.understanding
+        if understood is not None and understood.meaning == newer_text:
+            return (approved_action(),)
+        return found
+
+    monkeypatch.setattr(phases, "_approved", approved)
+    await open_conversation(harness)
+    await _start(harness, "search apartments", message_id="a-1")
+    await until(_has(planner, "search apartments", 2), what="the older to act and plan again")
+    await _start(harness, newer_text, message_id="b-1")
+    await until(_has(planner, newer_text, 1), what="the waiting round")
+    planner.hold("search apartments")[1].set()
+    await _frozen(harness, 2)
+
+    waiting_round, after = planner.requests[newer_text][:2]
+    assert "waiting_on" in waiting_round
+    assert "approved_actions" not in waiting_round
+    assert planner.offered[newer_text][0] == ["stop_activation"]
+    assert "approved_actions" in after, "the round after the wait is shown the yes"

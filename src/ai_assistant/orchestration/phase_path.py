@@ -3567,7 +3567,10 @@ class PhasePath:
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
             stories=stories,
-            approved=approved,
+            # ADR-0349 §7:26: a waiting round is offered the stop call alone, so the
+            # actions the input's yes approved wait, with the rest of its work, for the
+            # rounds after the wait.
+            approved=() if waiting else approved,
             pending=pending,
             overtaken=working.overtaken(),
             person=person,

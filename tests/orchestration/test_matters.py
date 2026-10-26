@@ -747,3 +747,40 @@ def test_re_plans_for_offers_stop_once_the_limit_is_reached() -> None:
         older.offers.clear()  # each declined, or withdrawn, at once
     assert made == [Became.OFFERED, Became.OFFERED, Became.WAITED_ON]
     assert older.offers_untaken == 2
+
+
+def test_a_stopped_activation_takes_nothing_in_and_offers_nothing() -> None:
+    """ADR-0295 §2:1: stopped after its takeover wait began, its step does nothing."""
+    older = _running("a", _IDS[0], order=1)
+    acted = _running("a", _IDS[1], order=2)
+    acted.committed = True
+    taker = _running("a", _IDS[2], order=3)
+    matters = _matters([older, acted, taker])
+    taker.stop()
+
+    decided, absorbed = matters.merge(taker, _understood(taker, _IDS[0], _IDS[1]), at=_AT)
+
+    assert absorbed == []
+    assert [one.became for one in decided] == [Became.NOT_TAKEN, Became.NOT_TAKEN]
+    assert not older.stopped
+    assert acted.offers == {}
+    assert taker.joined == ()
+
+
+def test_an_absorber_keeps_what_the_absorbed_one_waited_on_once_it_has_ended() -> None:
+    """§7:24, §7:27: an ended wait target is not waited for, but its work is still shown."""
+    ended = _running("x", _IDS[0], order=1)
+    ended.committed = True
+    waiter = _running("a", _IDS[1], order=2)
+    states = [ended, waiter]
+    matters = _matters(states)
+    matters.merge(waiter, _understood(waiter, _IDS[0]), at=_AT)
+    assert waiter.waits_on == (_IDS[0],)
+    states.remove(ended)  # it ends
+    absorber = _running("b", _IDS[2], order=3)
+    states.append(absorber)
+
+    matters.merge(absorber, _understood(absorber, _IDS[1]), at=_AT)
+
+    assert absorber.waits_on == (_IDS[0],)
+    assert matters.waiting_on(absorber) == (), "nothing to wait for: it has ended"
