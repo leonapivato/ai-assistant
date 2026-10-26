@@ -1192,7 +1192,9 @@ class SqliteMemoryStore:
             ).fetchone()
             if held is None:
                 return None
-            decoded = self._decode(str(held[0]))
+            # The episode is read before ADR-0349 §10:6's upgrade, later in the chain,
+            # has carried its ``continues``: carried here first, so this build reads it.
+            decoded = self._decode_carried(str(held[0]))
             return decoded if isinstance(decoded, EpisodicMemory) else None
 
         chunk = conn.execute(
@@ -1259,6 +1261,8 @@ class SqliteMemoryStore:
         an activation becomes a one-element sequence, and one naming none an empty one
         (§10:6). The rewritten record is decoded whole before it is written, so nothing
         is dropped or cut (§4:4), and it is written as the store writes every record.
+        An earlier upgrade that reads an episode before this one has run reads it through
+        :meth:`_decode_carried`, carried the same way, so the chain holds (§4:5).
         Its ``revision`` and its vector are kept: the upgrade is no caller's write, and
         an episode's search text, which its vector embeds, does not move. An episode
         that records no ``continues``, as one written before ADR-0332, and every
@@ -1311,7 +1315,7 @@ class SqliteMemoryStore:
         if kind not in LEGACY_KINDS:
             conn.execute(
                 "UPDATE records SET band = ? WHERE rowid = ?",
-                (str(record_band(self._decode(data))), rowid),
+                (str(record_band(self._decode_carried(data))), rowid),
             )
             return
 
@@ -1965,6 +1969,28 @@ class SqliteMemoryStore:
                 (ADR-0026 §4).
         """
         return _to_micros(self._now())
+
+    @classmethod
+    def _decode_carried(cls, data: str) -> MemoryRecord:
+        """Decode a row an upgrade reads, its episode's ``continues`` carried first.
+
+        An upgrade earlier in the chain than ADR-0349 §10:6's may read a row that a build
+        before it wrote, whose understandings hold ``continues`` as one id or ``null``,
+        which this build's record refuses. Carried as §10:6's upgrade carries it, the row
+        decodes as it will once that upgrade has run, and every earlier upgrade reads
+        what the chain then holds (ADR-0326 §4:5). Nothing is written here.
+
+        Raises:
+            MemoryStoreError: If the row is not JSON, or does not decode once carried.
+        """
+        try:
+            stored = json.loads(data)
+        except ValueError as exc:
+            msg = f"stored memory could not be decoded: {exc}"
+            raise MemoryStoreError(msg) from exc
+        if isinstance(stored, dict) and continuing_episode(stored):
+            data = json.dumps(stored)
+        return cls._decode(data)
 
     @staticmethod
     def _decode(data: str) -> MemoryRecord:
