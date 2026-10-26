@@ -27,6 +27,7 @@ It logs stage and code-owned reason only (ADR-0275 §8).
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -97,16 +98,19 @@ def local_instant(local: datetime, zone: ZoneInfo) -> datetime:
     # A gap. ``fold=0`` reads it with the offset before the change, which lands after
     # the change; ``fold=1`` with the offset after it, which lands before. The change is
     # the first instant between them whose offset is no longer the earlier one.
-    low = wall.replace(tzinfo=zone, fold=1).astimezone(UTC)
-    high = first
-    offset = low.astimezone(zone).utcoffset()
-    while high - low > timedelta(seconds=1):
-        middle = (low + (high - low) / 2).replace(microsecond=0)
-        if middle.astimezone(zone).utcoffset() == offset:
+    # It is searched in whole seconds, since every change in the tz database falls on
+    # one, so each step narrows the bounds and the search ends.
+    before = wall.replace(tzinfo=zone, fold=1).astimezone(UTC)
+    offset = before.astimezone(zone).utcoffset()
+    low = math.floor(before.timestamp())
+    high = math.ceil(first.timestamp())
+    while high - low > 1:
+        middle = (low + high) // 2
+        if datetime.fromtimestamp(middle, tz=UTC).astimezone(zone).utcoffset() == offset:
             low = middle
         else:
             high = middle
-    return high
+    return datetime.fromtimestamp(high, tz=UTC)
 
 
 def _falls_on(rule: DueOnRule, day: date) -> bool:
@@ -232,10 +236,12 @@ class PersonZones:
     async def of(self, person: str) -> ZoneInfo:
         """``person``'s zone: their profile's where it sets one, and the hub's otherwise.
 
-        A store that cannot be read is logged, and the hub's zone governs, as it does for
-        planning's current time where the person block could not be read (ADR-0338 §3:6,
-        §7:1): so a local time planning stated from the time it was shown is read in the
-        zone it was shown in.
+        A store that cannot be read is no answer that the profile sets none, so nothing
+        is guessed: the read raises, and the caller writes or says nothing that rests on
+        the zone (ADR-0340 §3:3).
+
+        Raises:
+            PersonModelStoreError: If the person-model store cannot be read.
         """
         if self._people is None:
             return self._default
@@ -243,7 +249,7 @@ class PersonZones:
             model = await self._people.read(person)
         except PersonModelStoreError:
             _log.warning("task_zone_unread", stage="task_scheduler", reason="store_fault")
-            return self._default
+            raise
         zone = person_zone(None if model is None else model.profile, stage="task_scheduler")
         return self._default if zone is None else zone
 

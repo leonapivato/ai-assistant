@@ -48,7 +48,12 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from ai_assistant.core.errors import ConversationStoreError, MemoryStoreError, PlanningError
+from ai_assistant.core.errors import (
+    ConversationStoreError,
+    MemoryStoreError,
+    PersonModelStoreError,
+    PlanningError,
+)
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
@@ -200,6 +205,7 @@ _RULE_TIME: Final = "not done: a rule's time is a local time of day to the minut
 _OFF_THE_LIST: Final = "not done: it suggests a place that is not on this activation's place list"
 _MALFORMED: Final = "not done: the call's arguments are malformed"
 _STORE_FAULT: Final = "not done: the Task Scheduler could not be read or written"
+_ZONE_UNREAD: Final = "not done: the person's zone could not be read, so no time was read in it"
 
 
 def _brief(text: str) -> str:
@@ -837,8 +843,11 @@ class TaskManager:
         occurrence is computed in its own zone or the person's (ADR-0340 §4:5).
 
         Raises:
-            PlanningError: If the store fails, the task is not held, or a rule yields
-                no occurrence later than now (ADR-0340 §4:4).
+            PlanningError: If the store fails, the task is not held, a rule names a zone
+                ``zoneinfo`` does not resolve (ADR-0340 §3:5), or it yields no occurrence
+                later than now (§4:4). Nothing is written.
+            PersonModelStoreError: If the person's zone cannot be read, which a rule
+                naming none is computed in. Nothing is written.
         """
         held = await self._plans.scheduled_tasks([task_id])
         if not held:
@@ -847,10 +856,15 @@ class TaskManager:
         replaced = held[0]
         first = None
         if isinstance(when, DueOnRule):
-            named = None if when.zone is None else resolve_zone(when.zone)
-            first = first_occurrence(
-                when, named or await self.zone_of(replaced.person), now=self._now()
-            )
+            if when.zone is None:
+                zone = await self.zone_of(replaced.person)
+            else:
+                named = resolve_zone(when.zone)
+                if named is None:
+                    msg = "the rule names a zone that is not an IANA zone name (ADR-0340 §3:5)"
+                    raise PlanningError(msg)
+                zone = named
+            first = first_occurrence(when, zone, now=self._now())
             if first is None:
                 msg = "the rule yields no occurrence later than now (ADR-0340 §4:4)"
                 raise PlanningError(msg)
@@ -1035,6 +1049,8 @@ class ScheduledTaskCalls:
         except PlanningError, MemoryStoreError:
             _log.warning("task_call_not_done", stage="acting", reason="store_failed")
             return NotDone(reason=_STORE_FAULT)
+        except PersonModelStoreError:
+            return NotDone(reason=_ZONE_UNREAD)
         return NotDone(reason=_MALFORMED)
 
     async def _cancel(
@@ -1043,6 +1059,8 @@ class ScheduledTaskCalls:
         task_id = arguments.get(TASK_ARGUMENT)
         if not isinstance(task_id, str) or not task_id.strip():
             return NotDone(reason=_MALFORMED)
+        # Read before the cancel is written, so a zone that cannot be read leaves it unmade.
+        zone = await self._manager.zone_of(spawner.person)
         cancelled = await self._manager.cancel(
             task_id,
             person=spawner.person,
@@ -1052,9 +1070,20 @@ class ScheduledTaskCalls:
             reason = TaskRefusal.UNKNOWN_TASK if cancelled.reason is None else cancelled.reason
             _log.info("task_call_not_done", stage="acting", reason=reason.value)
             return NotDone(reason=_REFUSAL_TEXT[reason])
-        zone = await self._manager.zone_of(spawner.person)
         listing = TaskListing(cancelled=self._manager.entry(cancelled.task, zone))
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=encode_listing(listing))
+
+    async def _stated(
+        self, spawner: Spawner, arguments: Mapping[str, FrozenJson]
+    ) -> tuple[ZoneInfo, StatedWhen] | str:
+        """The person's zone and the spawn's when read in it, or why it is refused."""
+        try:
+            zone = await self._manager.zone_of(spawner.person)
+        except PersonModelStoreError:
+            # ADR-0340 §3:3: no zone is guessed, so nothing is read or written in one.
+            return _ZONE_UNREAD
+        stated = spawn_when(arguments, now=self._now(), zone=zone)
+        return stated if isinstance(stated, str) else (zone, stated)
 
     async def run_claiming(  # noqa: PLR0911 — each of §4:5's refusals is a return of its own
         self,
@@ -1081,10 +1110,10 @@ class ScheduledTaskCalls:
         instruction = arguments.get(INSTRUCTION_ARGUMENT)
         if not isinstance(instruction, str) or not instruction.strip():
             return Unwritten(reason=_MALFORMED)
-        zone = await self._manager.zone_of(spawner.person)
-        stated = spawn_when(arguments, now=self._now(), zone=zone)
-        if isinstance(stated, str):
-            return Unwritten(reason=stated)
+        read = await self._stated(spawner, arguments)
+        if isinstance(read, str):
+            return Unwritten(reason=read)
+        zone, stated = read
         places = _suggested(spawner, arguments)
         if isinstance(places, str):
             return Unwritten(reason=places)

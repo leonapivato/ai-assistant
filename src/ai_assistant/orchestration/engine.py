@@ -6919,7 +6919,9 @@ class Engine:
     async def _occurrence_push(self, due: DueOccurrence) -> _OccurrencePush:
         """What a push of ``due`` states, read before its pushed mark is written.
 
-        The person's zone, which its input is told in (ADR-0340 §6:1). For a rule's
+        The person's zone, which its input is told in (ADR-0340 §6:1); a person-model
+        store that cannot be read raises, before anything is written, so the sensor
+        tries the push again at a later look rather than guess a zone. For a rule's
         occurrence never pushed before, the instants the rule's arithmetic gives in the
         zone it is computed in now, its own or the person's (§4:3): its successor, and,
         where it missed more than one, the latest missed, pushed in its place, and those
@@ -6981,7 +6983,7 @@ class Engine:
         deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
         work = self._activation_task(
             ActivationScope(state),
-            lambda: self._task_turn(task, activation_id, deadline),
+            lambda: self._task_turn(task, activation_id, deadline, zone=push.zone),
             seam="task_scheduler",
             check_output=_unchecked,
             deadline=deadline,
@@ -7056,7 +7058,9 @@ class Engine:
             return
         self._spawn_read(manager.parent_ended(state.activation_id))
 
-    async def _task_turn(self, task: ScheduledTask, activation_id: str, deadline: float) -> None:
+    async def _task_turn(
+        self, task: ScheduledTask, activation_id: str, deadline: float, *, zone: ZoneInfo
+    ) -> None:
         """An activation a scheduled task started, planned by the phases (ADR-0350 §6).
 
         Its channel window is the schedule's place window, its task's lineage (§6:5),
@@ -7069,7 +7073,7 @@ class Engine:
         assert phases is not None  # noqa: S101 — the Task Scheduler is wired only beside them
         state = active_state()
         trigger = None if state is None else state.trigger
-        steps, linked = await self._lineage(task, activation_id)
+        steps, linked = await self._lineage(task, activation_id, zone)
         payload = None if trigger is None else trigger.payload
         text = payload.text if isinstance(payload, RecordedTextInput) else task.instruction
         resolved = ResolvedChannelInput(
@@ -7146,9 +7150,11 @@ class Engine:
         await phases.run(event, lambda: self._controlled(event, stages), state=state)
 
     async def _lineage(
-        self, task: ScheduledTask, activation_id: str
+        self, task: ScheduledTask, activation_id: str, zone: ZoneInfo
     ) -> tuple[tuple[LineageStep, ...], tuple[str, ...]]:
         """The schedule's window for ``activation_id``, and the episodes its input links to.
+
+        Its times are told in ``zone``, the person's as the push read it (ADR-0340 §6:1).
 
         The lineage is read from the tasks the Task Scheduler keeps (§6:5, §7:8); the
         links are its task's parent's episode and each waited-on task's (§6:5). A store
@@ -7190,7 +7196,6 @@ class Engine:
             for address, record in found.items()
             if isinstance(record, EpisodicMemory)
         }
-        zone = await self._task_zones.of(task.person)
         return lineage_steps(lineage, episodes, zone), tuple(
             one for one in linked if one in episodes
         )

@@ -205,3 +205,54 @@ async def test_a_window_item_a_tasks_activation_wrote_shows_its_task_label() -> 
     assert item["episode"].startswith("E")
     assert item["scheduled_task"].startswith("T")
     assert any(one.kind is LabelKind.SCHEDULED_TASK for one in planned.labels)
+
+
+def _rule_entry(**fields: Any) -> TaskEntry:
+    values: dict[str, Any] = {
+        "task_id": "task:bins",
+        "state": "pending",
+        "falls_due": "every weekday at 7:00 AM; next at Mon 26 Oct 2026 07:00 (UTC)",
+        "instruction": "remind them about the bins",
+        "outside": False,
+        "places": (),
+        "parent": "a-parent",
+        "parent_text": "spawned by the person's message in a conversation",
+        "author": "person",
+        "repeats": "every weekday at 7:00 AM",
+    }
+    values.update(fields)
+    return TaskEntry(**values)
+
+
+async def _shown(listing: TaskListing, call: str) -> dict[str, Any]:
+    """What planning's next round is shown of a call's ``listing``."""
+    outcome = CallOutcome(
+        "round:earlier", "c1", CallOutcomeKind.DONE, result_id="result:1", tasks=listing
+    )
+    stage, completer, _ = _stage(RoundResponse(text=""))
+    earlier = _earlier(calls=(ProposedCall(call_id="c1", name=call, arguments={}),))
+
+    await stage.plan(_inputs(**_scheduled(rounds=(earlier,), outcomes=(outcome,))))
+
+    (round_,) = _sent(completer)["rounds"]
+    shown: dict[str, Any] = round_["calls"][0]["result"]["value"]
+    return shown
+
+
+async def test_a_spawns_read_back_and_its_rules_words_reach_planning() -> None:
+    """ADR-0340 §6:2-§6:3, §8:2: the spawned task's read-back, said back from the record."""
+    said = "Every weekday at 7:00 AM; next: Monday 26 October, at 7:00 AM. It suggests no place."
+
+    shown = await _shown(TaskListing(spawned=_rule_entry(read_back=said)), "spawn")
+
+    assert shown["spawned"]["read_back"] == said
+    assert shown["spawned"]["repeats"] == "every weekday at 7:00 AM"
+
+
+async def test_a_listed_task_shows_its_rule_and_no_read_back() -> None:
+    """ADR-0340 §8:2: the list pull carries a rule's words; only a spawn says a task back."""
+    shown = await _shown(TaskListing(scheduled=(_rule_entry(),), listed=True), "list_tasks")
+
+    (task,) = shown["scheduled"]
+    assert task["repeats"] == "every weekday at 7:00 AM"
+    assert "read_back" not in task

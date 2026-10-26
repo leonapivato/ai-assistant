@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from ai_assistant.core.errors import PersonModelStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     DueOnRule,
@@ -64,6 +65,14 @@ def test_a_local_time_in_a_daylight_saving_gap_is_the_first_instant_after_it() -
     assert local_instant(_wall("2026-03-08T02:30"), NEW_YORK) == datetime(
         2026, 3, 8, 7, 0, tzinfo=UTC
     )
+
+
+@pytest.mark.parametrize(
+    "wall", ["2027-03-14T02:00:00.100000", "2027-03-14T02:59:59.999999", "2027-03-14T02:00:01"]
+)
+def test_a_fraction_of_a_second_inside_a_gap_resolves_to_the_change(wall: str) -> None:
+    """§3:4: the search narrows in whole seconds, so it ends wherever the gap is entered."""
+    assert local_instant(_wall(wall), NEW_YORK) == datetime(2027, 3, 14, 7, 0, tzinfo=UTC)
 
 
 def test_a_local_time_a_daylight_saving_change_repeats_is_the_earlier() -> None:
@@ -272,13 +281,13 @@ async def test_the_persons_zone_is_their_profiles_and_the_hubs_where_it_sets_non
     assert await PersonZones(default=UTC_ZONE).of(OWNER_PERSON_ID) == UTC_ZONE
 
 
-async def test_a_person_model_that_cannot_be_read_leaves_the_hubs_zone() -> None:
-    """As planning's current time does where the person block could not be read."""
-
+async def test_a_person_model_that_cannot_be_read_guesses_no_zone() -> None:
+    """§3:3: a fault is no answer that the profile sets none, so the read raises."""
     people = await _people("Asia/Tokyo")
     people.fail_next()
     zones = PersonZones(default=UTC_ZONE, people=people)
 
-    assert await zones.of(OWNER_PERSON_ID) == UTC_ZONE
+    with pytest.raises(PersonModelStoreError):
+        await zones.of(OWNER_PERSON_ID)
     # The next read, the store back, is the profile's.
     assert await zones.of(OWNER_PERSON_ID) == TOKYO
