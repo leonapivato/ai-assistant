@@ -294,11 +294,12 @@ def rule_text(rule: DueOnRule, *, today: date) -> str:
         rule: The rule.
         today: The local date it is said on, in the zone it is rendered in.
     """
-    repeats = {
-        TaskRuleKind.DAILY: "every day",
-        TaskRuleKind.WEEKDAYS: "every weekday",
-        TaskRuleKind.WEEKLY: f"every {_days_text(rule.days)}",
-    }[rule.repeats]
+    if rule.repeats is TaskRuleKind.WEEKLY:
+        repeats = f"every {_days_text(rule.days)}"
+    elif rule.repeats is TaskRuleKind.WEEKDAYS:
+        repeats = "every weekday"
+    else:
+        repeats = "every day"
     said = f"{repeats} at {clock_text(rule.time_of_day)}"
     if rule.zone is not None:
         said += f" {rule.zone} time"

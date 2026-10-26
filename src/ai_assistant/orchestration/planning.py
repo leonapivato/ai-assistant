@@ -1576,6 +1576,12 @@ class _Request:
             "state": entry.state,
             "falls_due": entry.falls_due,
         }
+        if entry.repeats is not None:
+            # ADR-0340 §8:2: a task with a rule shows its rule in words.
+            shown["repeats"] = entry.repeats
+        if entry.read_back is not None:
+            # ADR-0340 §6:2-§6:3: the task a spawn wrote, said back from the record.
+            shown["read_back"] = entry.read_back
         if entry.waits_on:
             shown["waits_on"] = [
                 self._book.label(LabelKind.SCHEDULED_TASK, one) for one in entry.waits_on

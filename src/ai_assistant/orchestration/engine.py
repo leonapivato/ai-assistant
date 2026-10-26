@@ -53,6 +53,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Final, TypeVar, cast
 from zoneinfo import ZoneInfo
 
@@ -96,6 +97,7 @@ from ai_assistant.core.types import (
     ControllerStage,
     ConversationSummary,
     DueAfterTasks,
+    DueOnRule,
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
@@ -262,11 +264,13 @@ from ai_assistant.orchestration.task_manager import (
     TaskManager,
     TaskSchedulerSeams,
 )
+from ai_assistant.orchestration.task_rules import PersonZones, rule_push, task_zone
 from ai_assistant.orchestration.task_scheduler import (
     SCHEDULE,
     SPAWNING_KINDS,
     LineageStep,
     ListedPlace,
+    lineage_occurrence,
     lineage_steps,
     task_input,
 )
@@ -336,6 +340,7 @@ if TYPE_CHECKING:
         ProfileField,
         RecordedInvocation,
         RequestingDevice,
+        RulePush,
         ScheduledTask,
         SecretValue,
         SourceGrant,
@@ -1473,6 +1478,27 @@ def _ruling_policy(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _OccurrencePush:
+    """What a push of one due occurrence states, read before its pushed mark (§7:5).
+
+    Attributes:
+        zone: The person's zone, which the occurrence's input is told in (ADR-0340 §6:1).
+        due_at: The instant the occurrence pushed was due: the pending one's, or, for a
+            rule that missed more than one, the latest missed (ADR-0340 §4:8).
+        second_try: Whether it is pushed again as a second try (ADR-0350 §8:6).
+        rule: For a rule's occurrence first pushed, what the plan store writes with the
+            mark (ADR-0340 §9:3); ``None`` for every other push.
+        skipped: How many occurrences the push records skipped (ADR-0340 §7:1).
+    """
+
+    zone: ZoneInfo
+    due_at: datetime | None
+    second_try: bool = False
+    rule: RulePush | None = None
+    skipped: int = 0
+
+
 class Engine:
     """The concrete façade an interface adapter drives (ADR-0042 §1).
 
@@ -2179,7 +2205,7 @@ class Engine:
         self._task_sensor: TaskSchedulerSensor | None = None
         self._place_lists: PlaceLists | None = None
         self._task_started = False
-        self._task_zone = ZoneInfo("UTC")
+        self._task_zones = PersonZones(default=ZoneInfo("UTC"))
         self._lateness_grace = timedelta(0)
         #: ADR-0350 §9:10: each id an occurrence is being pushed to and not yet admitted,
         #: with whether a stop named it meanwhile, which refuses its admission.
@@ -6668,7 +6694,13 @@ class Engine:
                 "only beside them (ADR-0350 §6, ADR-0309 §2:6)"
             )
             raise ConfigurationError(msg)
-        self._task_zone = ZoneInfo(seams.zone)
+        # ADR-0340 §3:3, §6:1: every scheduled task's times are read and rendered in the
+        # person's zone, their profile's where the person model sets one, and the hub's
+        # ``Settings.timezone`` otherwise.
+        blocks = self._person_blocks
+        self._task_zones = PersonZones(
+            default=ZoneInfo(seams.zone), people=None if blocks is None else blocks.store
+        )
         self._lateness_grace = seams.lateness_grace
         self._task_manager = TaskManager(
             plans=plans,
@@ -6679,7 +6711,7 @@ class Engine:
             stop_one=self._stop_one,
             wake=self._wake_sensor,
             limits=seams.limits,
-            zone=self._task_zone,
+            zones=self._task_zones,
             now=self._clock,
         )
         self._task_sensor = TaskSchedulerSensor(
@@ -6850,11 +6882,12 @@ class Engine:
         """
         if self._closing:
             return
+        push = await self._occurrence_push(due)
         activation_id = self._chat_activation_id()
         self._pushed[activation_id] = False
         try:
             answer = await self._plans.mark_occurrence_pushed(
-                due.task.id, due.number, activation_id
+                due.task.id, due.number, activation_id, rule=push.rule
             )
             if answer is not OccurrencePush.PUSHED:
                 self._pushed.pop(activation_id, None)
@@ -6873,7 +6906,7 @@ class Engine:
             await self._occurrence_settled(settled)
             return
         try:
-            self._admit_task(due, activation_id, pushed_at=pushed_at)
+            self._admit_task(due, activation_id, pushed_at=pushed_at, push=push)
         except RuntimeError:
             # The engine began closing: left pushed, the next start settles it (§8:5).
             self._pushed.pop(activation_id, None)
@@ -6883,7 +6916,41 @@ class Engine:
     def _is_closing(self) -> bool:
         return self._closing
 
-    def _admit_task(self, due: DueOccurrence, activation_id: str, *, pushed_at: datetime) -> None:
+    async def _occurrence_push(self, due: DueOccurrence) -> _OccurrencePush:
+        """What a push of ``due`` states, read before its pushed mark is written.
+
+        The person's zone, which its input is told in (ADR-0340 §6:1). For a rule's
+        occurrence never pushed before, the instants the rule's arithmetic gives in the
+        zone it is computed in now, its own or the person's (§4:3): its successor, and,
+        where it missed more than one, the latest missed, pushed in its place, and those
+        between, recorded skipped (§4:6, §4:8). A push again after a restart states none
+        (§4:8, ADR-0350 §8:5-§8:6).
+        """
+        task = due.task
+        occurrence = task.occurrence(due.number)
+        assert occurrence is not None  # noqa: S101 — the store gave this occurrence as due
+        zone = await self._task_zones.of(task.person)
+        when = task.when
+        if not isinstance(when, DueOnRule) or occurrence.activations or occurrence.due_at is None:
+            return _OccurrencePush(
+                zone=zone, due_at=occurrence.due_at, second_try=occurrence.second_try
+            )
+        stated = rule_push(when, occurrence.due_at, task_zone(task, zone), now=self._now())
+        if stated.latest is None:
+            return _OccurrencePush(zone=zone, due_at=occurrence.due_at, rule=stated)
+        # The pending occurrence and each one between it and the latest end skipped.
+        return _OccurrencePush(
+            zone=zone, due_at=stated.latest, rule=stated, skipped=len(stated.skipped) + 1
+        )
+
+    def _admit_task(
+        self,
+        due: DueOccurrence,
+        activation_id: str,
+        *,
+        pushed_at: datetime,
+        push: _OccurrencePush,
+    ) -> None:
         """Admit the activation an occurrence starts, in one synchronous step (ADR-0350 §6).
 
         Its input is the task's, stated by the hub (§6:2), on the schedule; its origin is
@@ -6892,11 +6959,17 @@ class Engine:
         and the chat's do, and its outcome is written on its occurrence once it ends.
         """
         task = due.task
-        occurrence = task.occurrence(due.number)
-        assert occurrence is not None  # noqa: S101 — the store pushed this occurrence
-        due_at = occurrence.due_at
+        due_at = push.due_at
         late = due_at is not None and pushed_at - due_at > self._lateness_grace
-        text = task_input(task, occurrence, self._task_zone, late_at=pushed_at if late else None)
+        text = task_input(
+            task,
+            due_at=due_at,
+            second_try=push.second_try,
+            zone=push.zone,
+            late_at=pushed_at if late else None,
+            skipped=push.skipped,
+            now=pushed_at,
+        )
         state = admit_channel(
             ChannelInput(target=SCHEDULE, payload=TextChannelPayload(text=text)),
             None,
@@ -7097,13 +7170,13 @@ class Engine:
             f"activation:{task.parent}",
             *(f"activation:{one.activations[-1]}" for one in waited if one.activations),
         )
+        # A step's activation is the one its occurrence was pushed to, which for a rule
+        # is the occurrence that spawned the step below it (ADR-0340 §4:10).
+        ran = (lineage_occurrence(each, below).activations for each, below in pairwise(lineage))
         addresses = sorted(
             {
                 f"activation:{one}"
-                for one in (
-                    lineage[0].parent,
-                    *(each.activations[-1] for each in lineage if each.activations),
-                )
+                for one in (lineage[0].parent, *(each[-1] for each in ran if each))
             }
             | set(linked)
         )
@@ -7117,7 +7190,8 @@ class Engine:
             for address, record in found.items()
             if isinstance(record, EpisodicMemory)
         }
-        return lineage_steps(lineage, episodes, self._task_zone), tuple(
+        zone = await self._task_zones.of(task.person)
+        return lineage_steps(lineage, episodes, zone), tuple(
             one for one in linked if one in episodes
         )
 

@@ -2038,7 +2038,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # ADR-0350 §7:1, §12:5: the Task Scheduler, on every deployment: its sensor
             # starts with the hub and stops with it, and its six settings bound it. A
             # restart settles the pushed occurrences of the hub's one person, the owner
-            # (ADR-0338 §2:2).
+            # (ADR-0338 §2:2). Its times are read and rendered in the person's zone: the
+            # engine reads their profile's from the person block's store wired below, and
+            # `zone` is `Settings.timezone`, where it sets none or the person model is
+            # off (ADR-0340 §3:3, §6:1).
             task_scheduler=TaskSchedulerSeams(
                 limits=TaskManagerLimits(
                     chain_limit=settings.task_scheduler_chain_limit,
