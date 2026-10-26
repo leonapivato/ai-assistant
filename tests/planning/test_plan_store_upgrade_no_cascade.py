@@ -27,6 +27,7 @@ where the open fails (§4:3).
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -233,14 +234,26 @@ async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> 
     assert _dump(legacy) == before
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("the clock is down"),
+        OSError("the clock's device is gone"),
+        sqlite3.OperationalError("the clock's own database is locked"),
+        asyncio.CancelledError(),
+    ],
+    ids=["runtime-error", "os-error", "sqlite-error", "cancelled"],
+)
 async def test_a_clock_failing_in_the_upgrade_rolls_it_back_and_closes_the_connection(
-    legacy: Path, monkeypatch: pytest.MonkeyPatch
+    legacy: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException
 ) -> None:
-    """§4:3: the clock's own failure propagates unwrapped, and leaves nothing open behind.
+    """§4:3, ADR-0026 §2: the clock's own failure propagates as itself, leaving nothing open.
 
     The upgrade reads the clock for the instant it ends an occurrence cancelled. Where
-    the injected clock raises, the open fails with that error, the file is as it was,
-    and the connection the open made is closed rather than leaked.
+    the injected clock raises, the open fails with exactly what it raised — never
+    relabelled ``PlanningError``, even where it is an ``OSError`` or a ``sqlite3.Error``,
+    which the open translates when its own I/O raises them — the file is as it was, and
+    the connection the open made is closed rather than leaked.
     """
     opened: list[sqlite3.Connection] = []
     connect = sqlite3.connect
@@ -251,16 +264,16 @@ async def test_a_clock_failing_in_the_upgrade_rolls_it_back_and_closes_the_conne
         return conn
 
     def failing() -> datetime:
-        msg = "the clock is down"
-        raise RuntimeError(msg)
+        raise failure
 
     before = _dump(legacy)
     monkeypatch.setattr(sqlite3, "connect", recording)
 
-    with pytest.raises(RuntimeError, match="the clock is down"):
+    with pytest.raises(type(failure)) as raised:
         SqlitePlanStore(path=legacy, now=failing)
 
     monkeypatch.undo()
+    assert raised.value is failure
     (conn,) = opened
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
