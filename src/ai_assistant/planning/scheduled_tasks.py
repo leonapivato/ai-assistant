@@ -759,12 +759,10 @@ def decide_push(
     if fault is not None:
         raise PlanningError(fault)
     if any(one.parent in schedule.cascades for one in _above(schedule.tasks, task)):
-        schedule.put(
-            _rebuilt(
-                task,
-                _occurrence(occurrence, state=OccurrenceState.CANCELLED, ended_at=schedule.now),
-            )
-        )
+        # The cascade refuses every occurrence of the task, so each pending one ends
+        # cancelled now: a rule's successor beside an occurrence pushed again too, and
+        # the rule ends (ADR-0340 §4:7).
+        _cancel_pending(schedule, task)
         _release(schedule)
         return OccurrencePush.CASCADE_CANCELLED
     if rule is not None:
