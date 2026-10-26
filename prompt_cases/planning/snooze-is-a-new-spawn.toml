@@ -18,6 +18,10 @@ person = false
 suggestions = false
 spawn = true
 scheduled = false
+running_work = false
+offers = false
+waiting = false
+earlier_work = false
 
 [property]
 check = "read"

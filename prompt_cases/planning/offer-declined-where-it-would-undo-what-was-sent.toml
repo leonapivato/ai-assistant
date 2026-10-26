@@ -1,0 +1,31 @@
+# ADR-0349 §7:19, §7:22-§7:23: the email accepting the lease has gone, and the offered
+# input asks to say the opposite, which would change what cannot be undone, so the round
+# declines the offer with a short reason, and the newer input is done once it ends.
+prompt = "planning"
+guards = "offer_misanswered"
+came_from = "2026-10-26"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = false
+suggestions = false
+spawn = false
+scheduled = false
+running_work = true
+offers = true
+waiting = false
+earlier_work = false
+
+[property]
+check = "answers_offer"
+answer = "decline"
+
+[input]
+file = "offer-declined-where-it-would-undo-what-was-sent.json"

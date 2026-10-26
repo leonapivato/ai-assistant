@@ -28,7 +28,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from ai_assistant.core.types import RoundResponse
+from ai_assistant.core.types import ProposedCall, RoundResponse
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _operator_recipes import load
@@ -60,6 +60,10 @@ PLANNING_FLAGS: Final = {
     "suggestions": False,
     "spawn": False,
     "scheduled": False,
+    "running_work": False,
+    "offers": False,
+    "waiting": False,
+    "earlier_work": False,
 }
 
 WEB_SEARCH: Final = {
@@ -500,6 +504,8 @@ def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) 
         "no_label": {"fields": ["meaning", "claim", "wording"], "labels": ["H"]},
         "frames_nothing": {},
         "relation_in": {"memory": "M1", "relations": ["contained"]},
+        "continues_exactly": {"labels": ["R1"]},
+        "continues_nothing": {},
     }
 
     for check in checks:
@@ -1037,3 +1043,51 @@ def test_the_command_line_prints_a_refusal(
 
     assert status == 1
     assert "prompt_replay: refused: 1 defects in the cases" in capsys.readouterr().out
+
+
+# --- ADR-0349 §7:3, §7:20, §4:6: the checks on running work -----------------------------
+
+
+def test_continues_exactly_reads_the_labels_as_the_stage_does() -> None:
+    """The reply names exactly the R labels the case names, in any order."""
+    params: dict[str, object] = {"labels": ["R1", "R2"]}
+    assert (
+        _judge("continues_exactly", params, "understanding", _meaning(continues=["R2", "R1"]))
+        is None
+    )
+    assert (
+        _judge("continues_exactly", params, "understanding", _meaning(continues=["R1"])) is not None
+    )
+    assert _judge("continues_exactly", params, "understanding", _meaning()) is not None
+    assert (
+        _judge("continues_exactly", params, "understanding", _meaning(continues="R1"))
+        == "the reply is not one its stage reads"
+    ), "the old shape, one label, is no reply the stage reads"
+
+
+def test_continues_nothing_passes_only_an_empty_list() -> None:
+    assert _judge("continues_nothing", {}, "understanding", _meaning(continues=[])) is None
+    assert _judge("continues_nothing", {}, "understanding", _meaning()) is None
+    assert _judge("continues_nothing", {}, "understanding", _meaning(continues=["R1"])) is not None
+
+
+def _calls(*calls: tuple[str, dict[str, object]]) -> RoundResponse:
+    return RoundResponse(
+        calls=tuple(
+            ProposedCall(call_id=f"c{n}", name=name, arguments=arguments)  # type: ignore[arg-type]  # JSON values
+            for n, (name, arguments) in enumerate(calls, 1)
+        )
+    )
+
+
+def test_proposes_and_answers_offer_read_the_rounds_calls() -> None:
+    stop = _calls(("stop_activation", {"activation": "E1"}))
+    assert _round("proposes", {"capability": "stop_activation"}, stop) is None
+    assert _round("proposes", {"capability": "stop_activation"}, _calls()) is not None
+    assert _round("proposes", {"capability": "stop_activation"}, None) is not None
+    take = _calls(("answer_offer", {"offer": "E1", "take": True}))
+    decline = _calls(("answer_offer", {"offer": "E1", "take": False, "reason": "sent"}))
+    assert _round("answers_offer", {"answer": "take"}, take) is None
+    assert _round("answers_offer", {"answer": "take"}, decline) is not None
+    assert _round("answers_offer", {"answer": "decline"}, decline) is None
+    assert _round("answers_offer", {"answer": "decline"}, _calls()) is not None

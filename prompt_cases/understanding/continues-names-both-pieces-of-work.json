@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"input\": {\"received_as\": \"the message the user just sent on telegram:tg/ivy\", \"text\": \"actually, move both of those to Sunday\"}, \"channel_window\": \"missing: no recent context accompanies this input on its channel\", \"episode_window\": \"not provided for input on this channel\", \"in_progress\": [{\"label\": \"R1\", \"place\": \"conversation:c-ivy\", \"input\": \"and get two theatre tickets for after dinner on Saturday\", \"has_acted\": false}, {\"label\": \"R2\", \"place\": \"telegram:tg/ivy\", \"input\": \"book a table for two at the Riverside Grill on Saturday at 7\", \"has_acted\": false}]}",
+      "name": null
+    }
+  ]
+}
