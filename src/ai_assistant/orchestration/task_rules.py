@@ -300,7 +300,8 @@ def computed_elsewhere(rule: DueOnRule, due_at: datetime, zone: ZoneInfo) -> boo
     when their zone changes keeps the instant it was computed in under the old one
     (ADR-0340 §4:3). Every instant this module computes in ``zone`` is the rule's local
     time on a date it falls on, read by :func:`local_instant`; one that is not was
-    computed elsewhere.
+    computed elsewhere. A daylight-saving gap moves a skipped local time forward to the
+    change, which may fall on the next local date, so the date before is read too.
 
     Args:
         rule: The rule.
@@ -310,9 +311,13 @@ def computed_elsewhere(rule: DueOnRule, due_at: datetime, zone: ZoneInfo) -> boo
     if rule.zone is not None:
         return False
     day = due_at.astimezone(zone).date()
-    if not _falls_on(rule, day):
-        return True
-    return local_instant(datetime.combine(day, rule.time_of_day), zone) != due_at
+    candidates = (day,) if day == date.min else (day, day - timedelta(days=1))
+    for candidate in candidates:
+        if _falls_on(rule, candidate) and (
+            local_instant(datetime.combine(candidate, rule.time_of_day), zone) == due_at
+        ):
+            return False
+    return True
 
 
 def rule_text(rule: DueOnRule, *, today: date, zone: ZoneInfo) -> str:

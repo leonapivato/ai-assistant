@@ -317,3 +317,19 @@ async def test_an_ended_step_says_where_its_messages_went_as_the_place_list_show
     ]
     assert silent["wrote_into"] == "wrote no message"
     assert "wrote_into" not in unread
+
+
+async def test_an_ended_step_whose_only_message_is_not_known_is_not_said_to_have_written_none() -> (
+    None
+):
+    """#3445, ADR-0306 §5:5: an outcome not known is no answer that nothing was written."""
+    listing = TaskListing(
+        recent=(_ended(wrote_into=(), may_have_written_into=("telegram:ref/42",)),),
+        listed=True,
+    )
+
+    shown = await _shown(listing, "list_tasks")
+
+    (unknown,) = shown["ended_lately"]
+    assert "wrote_into" not in unknown
+    assert unknown["may_have_written_into"] == [{"label": "L2", "is": "the person's Telegram chat"}]

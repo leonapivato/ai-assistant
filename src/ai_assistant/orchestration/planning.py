@@ -1714,7 +1714,9 @@ class _Request:
         """A running or ended activation, as the list pull shows it (ADR-0350 §4:6-§4:7).
 
         An ended one says where its messages went, each place as the place list shows
-        it, or that it wrote none (#3445), where its effect records were read.
+        it, and where one may have gone whose outcome is not known; that it wrote none
+        only where neither holds a place (#3445), and nothing where its effect records
+        were not read.
         """
         shown: dict[str, object] = {
             "episode": self._book.label(LabelKind.EPISODE, f"activation:{entry.activation_id}"),
@@ -1723,7 +1725,8 @@ class _Request:
             "status": entry.status,
             "input": _OUTSIDE if entry.outside or entry.input is None else entry.input,
         }
-        if entry.wrote_into is not None:
+        if entry.wrote_into is not None and (entry.wrote_into or not entry.may_have_written_into):
+            # A message whose outcome is not known is no answer that none was written.
             shown["wrote_into"] = [
                 self._listed_place(one) for one in entry.wrote_into
             ] or _WROTE_NO_MESSAGE
