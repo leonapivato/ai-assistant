@@ -297,6 +297,25 @@ def test_an_occurrence_a_daylight_saving_gap_moved_is_not_taken_for_another_zone
     assert not computed_elsewhere(rule, moved, NEW_YORK)
 
 
+@pytest.mark.parametrize(
+    "rule",
+    [
+        _rule(TaskRuleKind.DAILY, time(23, 30)),
+        _rule(TaskRuleKind.WEEKLY, time(23, 30), days=(RuleDay.SATURDAY,)),
+    ],
+)
+def test_a_gap_moving_an_occurrence_past_midnight_is_not_taken_for_another_zones(
+    rule: DueOnRule,
+) -> None:
+    """§3:4, §4:9: Nuuk's clocks skip 23:30 on 27 March 2027, so it falls on the 28th."""
+    nuuk = ZoneInfo("America/Nuuk")
+    moved = next_occurrence(rule, nuuk, on_or_after=date(2027, 3, 27))
+    assert moved is not None
+    assert moved.astimezone(nuuk).date() == date(2027, 3, 28)
+
+    assert not computed_elsewhere(rule, moved, nuuk)
+
+
 def test_a_weekly_occurrence_landing_on_another_day_in_the_new_zone_is_found() -> None:
     """§4:3: Tuesday's 1:00 AM in Lisbon is Monday evening in Los Angeles."""
     rule = _rule(TaskRuleKind.WEEKLY, time(1, 0), days=(RuleDay.TUESDAY,))

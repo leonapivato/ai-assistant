@@ -687,19 +687,15 @@ class TaskManager:
 
         A task's parent is the activation that spawned it, or on a replace the replaced
         task's, so where and when the task was set may describe the replacing spawn
-        instead. Each is read live from the engine where it runs, and from its frozen
-        episode otherwise: an open episode reaches no model (ADR-0286 §6:4). A parent
-        neither gives, or that came from no place, is left out, as is every one where the
-        episodes cannot be read, and its task is then described from where and when it
-        was set.
+        instead. Each is read only as its finished episode (ADR-0350 §6:6): no running
+        activation's state is read through the pointer, and an open episode reaches no
+        model (ADR-0286 §6:4). A parent still running, one whose episode is not held or
+        came from no place, and every one where the episodes cannot be read, is left
+        out, and its task is then described from where and when it was set, which is its
+        parent's own unless a replace wrote it.
         """
-        wanted = {one.parent for one in tasks}
         found: dict[str, TaskParent] = {}
-        for state in self._running():
-            one, channel = state.activation_id, state.trigger.channel
-            if one in wanted and channel is not None and state.started_at is not None:
-                found[one] = TaskParent(channel, state.started_at)
-        rest = sorted(wanted - found.keys())
+        rest = sorted({one.parent for one in tasks})
         if not rest:
             return found
         try:

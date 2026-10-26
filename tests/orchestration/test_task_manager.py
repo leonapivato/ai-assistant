@@ -576,6 +576,9 @@ async def test_an_ended_step_says_where_its_messages_went_or_that_it_wrote_none(
     await message(world.plans, unknown, CHAT, outcome=ToolOutcome.FAILED)
     await message(world.plans, unknown, LINE, outcome=ToolOutcome.INDETERMINATE)
     await message(world.plans, silent, CHAT, outcome=ToolOutcome.FAILED)
+    unfinished = activation()
+    await world.memory.add(schedule_episode(unfinished))
+    await message(world.plans, unfinished, CHAT)
 
     ended = {one.activation_id: one for one in (await _listing(world)).recent}
 
@@ -586,6 +589,11 @@ async def test_an_ended_step_says_where_its_messages_went_or_that_it_wrote_none(
         (line_place,),
     )
     assert (ended[silent].wrote_into, ended[silent].may_have_written_into) == ((), ())
+    chat_place = f"conversation:{CHAT.instance_id}"
+    assert (ended[unfinished].wrote_into, ended[unfinished].may_have_written_into) == (
+        (),
+        (chat_place,),
+    )
 
 
 async def test_where_ended_steps_spoke_is_left_unsaid_where_the_records_cannot_be_read() -> None:
@@ -627,3 +635,29 @@ def test_where_a_step_spoke_survives_the_listings_encoding_and_an_older_one_read
     assert decoded is not None
     (old,) = decoded.recent
     assert (old.wrote_into, old.may_have_written_into) == (None, ())
+
+
+async def test_a_parent_still_running_is_not_read_through_and_the_task_is_described_as_set() -> (
+    None
+):
+    """ADR-0350 §6:6: only a finished episode is read through a parent pointer."""
+    world = _World()
+    parent = activation()
+    frozen = conversation_episode(
+        CHAT.instance_id, f"activation:{parent}", occurred_at=AT - timedelta(days=2)
+    )
+    record = frozen.processing_record
+    assert record is not None
+    still_running = frozen.model_copy(
+        update={"processing_record": record.model_copy(update={"status": None, "reason": None})}
+    )
+    await world.memory.add(still_running)
+    await write_task(world.plans, parent, when=DueAt(at=AT + timedelta(hours=3)))
+
+    (listed,) = (await _listing(world)).scheduled
+
+    assert listed.parent == parent
+    assert listed.parent_text == (
+        "spawned by the person's message in a conversation in the hub's chat, "
+        "Thu 01 Jan 2026 00:00 (UTC)"
+    )
