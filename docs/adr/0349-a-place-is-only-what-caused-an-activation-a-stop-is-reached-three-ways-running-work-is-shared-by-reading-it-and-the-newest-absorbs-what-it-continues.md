@@ -116,8 +116,11 @@ declines, and the newer does its own work once the older has ended.
 >    `core/episode_encoding.py`; the `PROTOCOL_VERSION` advance with the wire surface and
 >    type closure; and the episode store's upgrade under ADR-0326 §4:1–§4:2 for §10:6's
 >    change. It also adapts, with no change in behaviour, each place in `orchestration` and
->    `interfaces` that builds or reads `ConversationState` to `activation_ids`, naming the
->    one activation each names today. `join_limit` stays until step 2.
+>    `interfaces` that builds or reads `ConversationState` or either understanding type's
+>    `continues`: `activation_ids` names the one activation the state names today, and
+>    `continues` holds at most the one label or activation it holds today, and is empty
+>    where it holds none, a continuation being a non-empty `continues`. `join_limit` stays
+>    until step 2.
 > 2. **`orchestration`, the activation:** understanding's `continues`; the in-progress
 >    section for understanding (§5); the findings look-up and its declaration,
 >    and the running part of ADR-0350's list pull (§6); planning's stop call, its
@@ -176,8 +179,9 @@ declines, and the newer does its own work once the older has ended.
 > - an input arriving during an act's wait is not waited for;
 > - an activation that has acted reaches an act while a newer input on another place runs:
 >   it does not wait;
-> - re-plans for offers stop once the older's held inputs and its open and declined offers
->   reach `held_input_limit`, with successive offers arriving while it answers;
+> - re-plans for offers stop once the older's held inputs and the offers made to it that it
+>   did not take reach `held_input_limit`, with successive offers arriving while it answers,
+>   and with an offer withdrawn and made again by an absorber while its answer is planned;
 > - an offer made while the older's round is being planned, before its act's wait begins:
 >   the round's acts are held back and planning runs again with the offer shown;
 > - a waiting round that writes only its message: the activation does not end, and plans
@@ -603,11 +607,12 @@ within one place (§7:18), so the wait reaches its own place alone.
 **It cannot be paused forever.** Three bounds hold however many activations keep coming.
 What an act waits for is fixed when the wait begins, so an input that arrives during the
 wait is not waited for. The wait is bounded by the pass's deadline (§7:13). And a re-plan
-happens only for an offer, and no offer is made to an activation whose held inputs and
-open and declined offers reach `held_input_limit` (§7:22). Each re-plan needs an offer the
-round was not shown, and each offer counts toward that limit from the moment it is made,
-whether it is then answered or not, so an activation re-plans for offers fewer than
-`held_input_limit` times. Past that, newer input waits on it instead (§7:25).
+happens only for an offer, and no offer is made to an activation whose held inputs and the
+offers made to it that it did not take reach `held_input_limit` (§7:22). Each re-plan needs
+an offer the round was not shown, and each offer counts toward that limit from the moment
+it is made, and keeps counting whether it is then declined, withdrawn or made again by an
+absorber, so an activation re-plans for offers fewer than `held_input_limit` times. Past
+that, newer input waits on it instead (§7:25).
 
 **Takeover decisions are made oldest first.** Two newer activations may continue the same
 older one, and the newest may finish its understanding first. Were it to absorb first, the
@@ -668,9 +673,9 @@ planning knows what it has done, so it is asked.
 
 > **Normative.** Where a take would bring the inputs the older holds above
 > `held_input_limit`, it is refused and counts as a decline, with that reason. No offer is
-> made to an older where the inputs it holds, with one for each offer to it that is open or
-> was declined, reach `held_input_limit`: this activation waits on it instead
-> (§7:25). Where the offering activation is no longer
+> made to an older where the inputs it holds, with one for each offer ever made to it that
+> it did not take, open, declined or withdrawn, reach `held_input_limit`: this activation
+> waits on it instead (§7:25). Where the offering activation is no longer
 > running with its stop mark unset, the offer is withdrawn and the take changes nothing.
 
 > **Normative.** A decline's reason is recorded in the offering activation's takeover
@@ -853,7 +858,7 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0332 | §2:3–§2:5, whole: every input on every place starts its own activation, and no kind runs one at a time or holds an input back for running work (§8:1); §3:3–§3:8, §3:15 and §3:18, whole: no input joins by code, and before its first act an activation waits once for newer input to be understood (§7:12–§7:14); §3:9, in the addition alone: a version covers the inputs its absorption brought, and a taken input is covered by the meaning its offer carried; §4:1–§4:4, whole: the in-progress section on every place, spawned activations included, and `continues` a sequence, narrowed so that separate work continues none; §4:6, whole: the newest absorbs, following forward, under the held-inputs limit; §4:8, for a named activation that has committed: it is offered this activation's input or waited on, and this activation does not simply go on (§7:17–§7:29); §5:1, §5:3 and §5:5, each in the addition alone: the start wait runs whether or not something runs on the place; §6:5, whole: `held_input_limit` replaces `join_limit`; §7:3 and §7:4, whole; §7:6, in the takeover decision's content; §8:4, in the addition alone: `/stop` stops every running activation started from the chat | §4:3, §5:2–§5:7, §7:3–§7:7, §7:9, §7:12–§7:29, §8:1–§8:3, §9:1–§9:2, §10:1–§10:4, §10:7–§10:9 |
+| ADR-0332 | §2:3–§2:5, whole: every input on every place starts its own activation, and no kind runs one at a time or holds an input back for running work (§8:1); §3:3–§3:8, §3:15 and §3:18, whole: no input joins by code, and before its first act an activation waits once for newer input to be understood (§7:12–§7:14); §3:9, in the addition alone: a version covers the inputs its absorption brought, and a taken input is covered by the meaning its offer carried; §4:1–§4:4, whole: the in-progress section on every place, spawned activations included, and `continues` a sequence, narrowed so that separate work continues none; §4:6, whole: the newest absorbs, following forward, under the held-inputs limit; §4:8, for a named activation that has committed: it is offered this activation's input or waited on, and this activation does not simply go on (§7:17–§7:29); §5:1, §5:3 and §5:5, each in the addition alone, and §5:4, whole: the start wait runs whether or not something runs on the place, and no input joins or waits behind running work; §6:5, whole: `held_input_limit` replaces `join_limit`; §7:3 and §7:4, whole; §7:6, in the takeover decision's content; §8:4, in the addition alone: `/stop` stops every running activation started from the chat | §4:3, §5:2–§5:7, §7:3–§7:7, §7:9, §7:12–§7:29, §8:1–§8:3, §9:1–§9:2, §10:1–§10:4, §10:7–§10:9 |
 | ADR-0315 | §2:1–§2:3, each in the addition alone: a waiting round never ends the activation, and the next round after it runs once each activation it waits on has ended; a round whose acts were held back for an offer it was not shown brings another round, whatever it called | §7:14, §7:26 |
 | ADR-0343 | §2:1–§4:3, whole: no join is taken by code, so none is pending, and no route waits for one | §7:12–§7:14, §8:3 |
 | ADR-0292 | §11:2, as ADR-0332 left it, in two parts: input that adds separate work to running work stops nothing; and after the older has committed, the newer's input is offered to it, and where it takes it the newer is stopped and the older carries on; §11:7, in the addition alone: running work is shown only where the place's kind declares it, and only for the activations it caused | §4:13–§4:14, §7:3, §7:17–§7:24 |
@@ -880,7 +885,7 @@ Read through and not superseded:
 | ADR-0303 §7 | Nothing: a place-window item links to the activation that took it in, an absorbed one included |
 | ADR-0284 §8:1, ADR-0308 §3:1, §5:5 | Nothing: recall's projection stays as they rule it, and the peer view is a second view of the same function, whose evidence carries its marks as recall's does |
 | ADR-0303 §3:2, ADR-0306 §4:4–§4:6 | Nothing: an activation a share shows planning is an episode shown under a label, and an outside one counts in the reader's record as any does (§6:13) |
-| ADR-0332 §2:1–§2:2, §2:6, §3:1–§3:2, §3:10–§3:14, §3:16–§3:17, §4:7, §5:2, §5:4, §5:6–§5:11, §6:1–§6:4, §6:6, §7:1–§7:2, §7:5, §7:7–§7:10, the rest of §8 | Nothing in their words: an absorption's and a take's inputs are recorded as `JoinedInput`s naming their activation, an absorbed or handed-over activation is stopped as a taken-over one was, a take extends no deadline (§3:14, §7:11), and the waits and `/stop` stand |
+| ADR-0332 §2:1–§2:2, §2:6, §3:1–§3:2, §3:10–§3:14, §3:16–§3:17, §4:7, §5:2, §5:6–§5:11, §6:1–§6:4, §6:6, §7:1–§7:2, §7:5, §7:7–§7:10, the rest of §8 | Nothing in their words: an absorption's and a take's inputs are recorded as `JoinedInput`s naming their activation, an absorbed or handed-over activation is stopped as a taken-over one was, a take extends no deadline (§3:14, §7:11), and the waits and `/stop` stand |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
 > dated header note of ADR-0286, ADR-0292, ADR-0295, ADR-0307, ADR-0315, ADR-0332,
