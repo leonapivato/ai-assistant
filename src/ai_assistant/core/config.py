@@ -4430,6 +4430,27 @@ class Settings(BaseSettings):
             "joining off, and takeover with it."
         ),
     )
+    # ADR-0349 §9:2-§9:3's two bounds, each at least one. ``join_limit`` stays beside
+    # them until §1:4's step 2 removes joining by code with it (§9:1); until then
+    # nothing reads these two.
+    held_input_limit: _IntegerSetting = Field(
+        default=4,
+        ge=1,
+        lt=2**31,
+        description=(
+            "The most inputs one activation holds: its own, with every one it absorbed "
+            "or took (ADR-0349 §9:2). 1 turns absorbing and taking off."
+        ),
+    )
+    in_progress_limit: _IntegerSetting = Field(
+        default=5,
+        ge=1,
+        lt=2**31,
+        description=(
+            "The most entries understanding's in-progress section shows, newest first "
+            "(ADR-0349 §5:10, §9:3)."
+        ),
+    )
 
     # --- The Task Scheduler (ADR-0350 §12:5) -------------------------------
     # Six defaults that #2589 may tune without a decision. None is off: the Task

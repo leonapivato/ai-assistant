@@ -984,6 +984,11 @@ def test_every_integer_setting_is_discovered() -> None:
         # again: ``join_limit=True`` is one join while it reads as joining on. Zero is
         # admitted and turns joining and takeover off.
         "join_limit",
+        # ADR-0349 §9:2-§9:3's two bounds, each at least one, and the ``bool`` argument
+        # again: ``held_input_limit=True`` is one input, which turns absorbing off while
+        # it reads as on, and ``in_progress_limit=True`` a section of one entry.
+        "held_input_limit",
+        "in_progress_limit",
         # ADR-0337 §8:3's daily budget of the hub's follow-up calls, and the ``bool``
         # argument again: ``follow_up_daily_calls=True`` is one follow-up a day while it
         # reads as the follow-up on. Zero is admitted and asks none.
