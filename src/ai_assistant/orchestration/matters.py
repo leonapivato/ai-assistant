@@ -311,20 +311,32 @@ class HeldInput:
     place whose kind establishes the user may be the user's own, so a held input is
     waited for as that person's until its activation shows otherwise.
 
+    A message noticed while the reader read what waits may be missing from what it took
+    in, and then waits in a start wait of its own: the reader says where it moved
+    (:meth:`moved_to`), so a wait that began while it was held here waits for it there.
+
     Attributes:
         place: The place it was written in.
         activation_id: The activation it was admitted as, once it was.
         released: Whether the reader has let it go.
+        then: The held input a message held here may have moved to, where one did.
     """
 
     place: ChannelIdentity
     activation_id: str | None = None
     released: bool = False
+    then: HeldInput | None = None
     _matters: Matters | None = field(default=None, repr=False)
 
     def admitted(self, activation_id: str) -> None:
         """The reader admitted it as ``activation_id``, whose own end now settles it."""
         self.activation_id = activation_id
+        if self._matters is not None:
+            self._matters.changed()
+
+    def moved_to(self, successor: HeldInput) -> None:
+        """A message held here may now be held by ``successor``, which is waited for too."""
+        self.then = successor
         if self._matters is not None:
             self._matters.changed()
 
@@ -726,8 +738,21 @@ class Matters:
     def _held_out(self, held: HeldInput, state: ActivationState) -> bool:
         """Whether a wait of ``state``'s need wait for ``held`` no longer (§7:12).
 
-        It was let go, or the activation it was admitted as is waited out as any is.
+        It was let go, or the activation it was admitted as is waited out as any is; and
+        so is each held input a message held by it moved to (:meth:`HeldInput.moved_to`),
+        since that message was held when the wait began.
         """
+        at: HeldInput | None = held
+        seen: set[int] = set()
+        while at is not None and id(at) not in seen:
+            seen.add(id(at))
+            if not self._one_held_out(at, state):
+                return False
+            at = at.then
+        return True
+
+    def _one_held_out(self, held: HeldInput, state: ActivationState) -> bool:
+        """Whether ``held`` itself is let go, or its activation is waited out."""
         if held.released:
             return True
         admitted = held.activation_id

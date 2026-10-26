@@ -856,6 +856,30 @@ async def test_one_stop_that_fails_leaves_the_others_to_be_made() -> None:
     await line.stop()
 
 
+async def test_a_stop_none_of_whose_stops_can_be_made_answers_neither_fixed_line() -> None:
+    """ADR-0332 §8:5: something ran, so it is not "Nothing was running.", and nothing was
+    stopped, so it is not "Stopped.": it fails as a stop that cannot be made does."""
+    line = _Line()
+    await _running(line)
+
+    async def failing(activation_id: str) -> bool:
+        del activation_id
+        msg = "the stop could not be made"
+        raise RuntimeError(msg)
+
+    line.reader._stop = failing
+    line.fake.hold(stop_command(2))
+    await _until_held(line, 2)
+    rests = len(line.rests)
+    await line.until(lambda: len(line.rests) > rests + 3, what="the reader went on")
+
+    assert line.sent() == [], "neither fixed line"
+    assert line.stops == []
+    assert line.gate is not None
+    line.gate.set()
+    await line.stop()
+
+
 async def test_the_engine_is_told_what_the_start_wait_holds_until_its_activation_ends() -> None:
     """ADR-0349 §7:12: held from the poll that began the wait, admitted, then let go."""
     line = _Line()
