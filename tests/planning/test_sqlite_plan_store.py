@@ -674,8 +674,8 @@ async def test_a_fresh_file_is_labelled_version_16_and_holds_only_its_five_table
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
 
-    assert sqlite_store._SCHEMA_VERSION == 16
-    assert _meta(path, "schema_version") == "16"
+    assert sqlite_store._SCHEMA_VERSION == 17
+    assert _meta(path, "schema_version") == "17"
     assert _tables(path) == {"meta", *_RECORD_TABLES}
 
 

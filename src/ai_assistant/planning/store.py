@@ -54,6 +54,7 @@ from ai_assistant.planning.scheduled_tasks import (
     checked_number,
     checked_optional_id,
     checked_person,
+    checked_rule_push,
     checked_spawn,
     checked_spawn_effect,
     checked_state,
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
         OccurrencePush,
         OccurrenceState,
         QuestionPart,
+        RulePush,
         ScheduledDue,
         ScheduledTask,
         ScheduledTaskCancel,
@@ -427,19 +429,24 @@ class InMemoryPlanStore:
         return due(self._tasks, checked_instant(at)).model_copy(deep=True)
 
     async def mark_occurrence_pushed(
-        self, task_id: str, number: int, activation_id: str, /
+        self, task_id: str, number: int, activation_id: str, /, *, rule: RulePush | None = None
     ) -> OccurrencePush:
         """Mark a pending occurrence pushed, with its cascade check, in one step (§7:5).
 
+        A rule's occurrence first pushed writes its successor, and any it skips, in
+        the same step (ADR-0340 §4:6, §4:8, §9:3).
+
         Raises:
             PlanningError: If an argument is not valid, the task holds no such
-                occurrence, or the activation was already pushed to.
+                occurrence, the activation was already pushed to, or ``rule`` does not
+                fit the push.
         """
         named = checked_id(task_id, "scheduled task")
         which = checked_number(number)
         pushed = checked_id(activation_id, "activation")
+        instants = checked_rule_push(rule)
         schedule = self._schedule()
-        answer = decide_push(schedule, named, which, pushed)
+        answer = decide_push(schedule, named, which, pushed, rule=instants)
         self._tasks = schedule.tasks
         return answer
 
