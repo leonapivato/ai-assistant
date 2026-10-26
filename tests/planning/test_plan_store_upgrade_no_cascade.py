@@ -231,3 +231,38 @@ async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> 
 
     assert _label(legacy) == "17"
     assert _dump(legacy) == before
+
+
+async def test_a_clock_failing_in_the_upgrade_rolls_it_back_and_closes_the_connection(
+    legacy: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§4:3: the clock's own failure propagates unwrapped, and leaves nothing open behind.
+
+    The upgrade reads the clock for the instant it ends an occurrence cancelled. Where
+    the injected clock raises, the open fails with that error, the file is as it was,
+    and the connection the open made is closed rather than leaked.
+    """
+    opened: list[sqlite3.Connection] = []
+    connect = sqlite3.connect
+
+    def recording(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn: sqlite3.Connection = connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    def failing() -> datetime:
+        msg = "the clock is down"
+        raise RuntimeError(msg)
+
+    before = _dump(legacy)
+    monkeypatch.setattr(sqlite3, "connect", recording)
+
+    with pytest.raises(RuntimeError, match="the clock is down"):
+        SqlitePlanStore(path=legacy, now=failing)
+
+    monkeypatch.undo()
+    (conn,) = opened
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+    assert _label(legacy) == "17"
+    assert _dump(legacy) == before
