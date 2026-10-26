@@ -169,7 +169,7 @@ from ai_assistant.orchestration.activation_state import (
 from ai_assistant.orchestration.activation_writer import capture_loss
 from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
-from ai_assistant.orchestration.channel_kinds import one_at_a_time, place_of
+from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.channels import (
     UNCAPTURED,
     ChannelProjection,
@@ -2167,6 +2167,9 @@ class Engine:
                 # ADR-0332 §5: a message where nothing runs waits a moment first.
                 # ADR-0350 §9:1: a message a task's activation wrote links to it too.
                 writers=self._task_writers,
+                # ADR-0349 §7:12: what the reader holds in a start wait, an older
+                # activation's act waits for.
+                hold=self._matters.hold,
                 start_wait=chat_start_wait,
                 composing_lapse=chat_composing_lapse,
                 composing_cap=chat_composing_cap,
@@ -2215,7 +2218,8 @@ class Engine:
                 writer=self._telegram_writer,
                 memory=memory,
                 activate=self._line_read_in,
-                # ADR-0332 §8: the line's `/stop` stops what runs from its chat.
+                # ADR-0332 §8, ADR-0349 §4:3: the line's `/stop` stops each activation
+                # running from its chat, each by the one stop.
                 stop=self._stop_line,
                 closing=lambda: self._closing,
                 mint=self._chat_activation_id,
@@ -2224,6 +2228,9 @@ class Engine:
                 written=self._phases.written_in,
                 # ADR-0350 §9:1: and so do the messages a task's activation wrote here.
                 elsewhere=self._schedule_episodes,
+                # ADR-0349 §7:12: what the reader holds in a start wait, an older
+                # activation's act waits for.
+                hold=self._matters.hold,
             )
         # ADR-0350 §7, §10: the Task Scheduler's sensor and its Task Manager, wired only
         # beside the phases, which plan every activation a task starts.
@@ -4550,7 +4557,7 @@ class Engine:
 
         Each running activation started from a conversation, oldest first, by its id
         — ``None`` for one whose id the factory failed to mint (ADR-0297 §5) — and
-        the activation the chat's reader has an input in for, which shows "working…"
+        each activation the chat's reader has an input in for, which shows "working…"
         until the message answering it is written, after its own run has ended. Read
         by :meth:`conversation` and by the change stream (ADR-0296 §4:9).
         """
@@ -4558,13 +4565,14 @@ class Engine:
         for one in self._running:
             if one.state is not None and one.state.conversation_id is not None:
                 running.setdefault(one.state.conversation_id, []).append(one.state.activation_id)
-        if self._chat_reader is not None:
-            for conversation_id, (_, reading) in self._chat_reader.activity().items():
-                if reading is None:
+        if (reader := self._chat_reader) is not None:
+            # ADR-0349 §8:1: several activations may run from one conversation.
+            for conversation_id in reader.activity():
+                reading = reader.running(conversation_id)
+                if not reading:
                     continue
                 held = running.setdefault(conversation_id, [])
-                if reading not in held:
-                    held.append(reading)
+                held.extend(one for one in reading if one not in held)
         return {conversation_id: tuple(held) for conversation_id, held in running.items()}
 
     def _count_end(self, scope: ActivationScope) -> None:
@@ -6267,8 +6275,8 @@ class Engine:
 
         Returns:
             Whether the activation marked anything taken in; ``False`` too where the
-            engine was already closing, or an activation started from the conversation
-            still runs (ADR-0332 §2:3), and nothing was admitted.
+            engine was already closing, and nothing was admitted. Whatever else runs,
+            on this conversation or any other, it is admitted (ADR-0349 §8:1).
 
         Raises:
             CancelledError: If the activation, or this read, was cancelled.
@@ -6276,7 +6284,7 @@ class Engine:
         reader = self._chat_reader
         assert reader is not None  # noqa: S101 — only the reader calls this
         place = ChannelIdentity(channel_type="conversation", instance_id=taken.conversation_id)
-        if self._closing or self._place_busy(place, reader="chat"):
+        if self._closing:
             return False
         accepted = ChannelInput(target=place, payload=TextChannelPayload(text=taken.text))
         state = admit_channel(
@@ -6341,24 +6349,10 @@ class Engine:
         # finish* message included (ADR-0307 §3), so nothing is written here.
         return True
 
-    def _place_busy(self, place: ChannelIdentity, *, reader: str) -> bool:
-        """Whether an activation started from ``place`` runs, so none is admitted there.
-
-        ADR-0332 §2:3: on a place whose kind runs one activation at a time, an activation
-        is admitted only where none started from it is running. The place's reader keeps
-        one read, so this never answers ``True`` for it; where it does, the input is not
-        admitted and waits, and the defect is logged.
-        """
-        busy = one_at_a_time(place.channel_type) and any(
-            one.state is not None and one.state.place == place and not one.state.ended
-            for one in self._running
-        )
-        if busy:
-            _log.error(f"{reader}_input_not_admitted", stage=f"{reader}_reader", reason="busy")
-        return busy
-
     async def _stop_line(self, activation_id: str) -> bool:
-        """Stop the line's running activation for its ``/stop`` (ADR-0332 §8:4).
+        """Stop one activation running from the line's chat, for its ``/stop`` (ADR-0332 §8:4).
+
+        The reader calls it for each one running (ADR-0349 §4:3).
 
         As :meth:`stop_activation` stops one (ADR-0295, ADR-0297): the mark, then the
         stop record. A record that cannot be written leaves the mark set (ADR-0297 §3:7),
@@ -6398,8 +6392,8 @@ class Engine:
 
         Returns:
             Whether the activation marked anything taken in; ``False`` too where the
-            engine was already closing, or an activation started from the line's chat
-            still runs (ADR-0332 §2:3), and nothing was admitted.
+            engine was already closing, and nothing was admitted. Whatever else runs,
+            on the line's chat or any other place, it is admitted (ADR-0349 §8:1).
 
         Raises:
             CancelledError: If the activation, or this read, was cancelled.
@@ -6408,7 +6402,7 @@ class Engine:
         writer = self._telegram_writer
         assert reader is not None  # noqa: S101 — only the line's reader calls this
         assert writer is not None  # noqa: S101 — wired with the reader
-        if self._closing or self._place_busy(taken.channel, reader="telegram"):
+        if self._closing:
             return False
         accepted = ChannelInput(target=taken.channel, payload=TextChannelPayload(text=taken.text))
         state = admit_channel(

@@ -230,7 +230,8 @@ async def conversation_state(
     ``running`` is the activation id of every activation this process is running
     that was started from the conversation, oldest first — ``None`` for one whose id
     the factory failed to mint, which shows "working…" with no id (ADR-0297 §5) —
-    and the newest id known is the one a stop names (ADR-0295 §1:2). It is held in
+    and every id known is named, each one the stop control stops (ADR-0349 §4:3-§4:4,
+    §8:1: several may run from one conversation at once). It is held in
     process, so an activation whose episode was forgotten or whose capture failed
     still shows, and **an open episode is never read as running**: one a failed
     capture's compensation could not delete stays open until a restart closes it
@@ -256,11 +257,11 @@ async def conversation_state(
     known = [one for one in held if one is not None]
     ended = await memory.channel_episodes(channel, limit=1)
     last = ended.entries[-1].record if ended.entries else None
-    # ADR-0349 §1:4's step 1: the state names the one activation it named before, the
-    # newest id known, until the readers start an activation for every message (§4:4).
+    # ADR-0349 §4:4, §10:3: every running activation started from it whose id is known,
+    # since every message starts its own (§8:1).
     return ConversationState(
         working=bool(held),
-        activation_ids=(known[-1],) if known else (),
+        activation_ids=tuple(dict.fromkeys(known)),
         last_ended=activation_ending(last) if isinstance(last, EpisodicMemory) else None,
     )
 

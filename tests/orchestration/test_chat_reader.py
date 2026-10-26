@@ -4,10 +4,10 @@ A message written into a conversation is recorded and answered *received* by the
 that wrote it; the chat's reader then takes it in as a push, the activation it starts
 runs as a typed turn over the conversation's recent transcript, and the phases write
 its messages into the conversation the input came from — or the fixed *couldn't finish*
-message where the pass could not finish. One activation runs per conversation at a time:
-what is written meanwhile waits and is taken in together, as one input, when it ends. A
-restart takes in what was never taken in, never what an interrupted activation took in,
-and writes nothing.
+message where the pass could not finish. No conversation waits (ADR-0349 §8:1): what is
+written while an activation runs starts its own once its start wait has passed, what
+arrived inside one start wait taken in together, as one input. A restart takes in what
+was never taken in, never what an interrupted activation took in, and writes nothing.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
-from phases_support import phases_harness
+from phases_support import hold_start_waits, phases_harness
 from test_engine import AT, Harness
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
@@ -53,6 +53,8 @@ from ai_assistant.testing import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    import pytest
 
     from ai_assistant.core.types import Message, OfferedTool
     from ai_assistant.orchestration.understanding import TranscriptWindow
@@ -228,26 +230,35 @@ async def test_a_repeated_send_is_taken_in_once() -> None:
     assert len(await _episodes(harness.memory)) == 1
 
 
-# --- one activation at a time per conversation (§6:2, §6:3, ADR-0332 §2:4) -----------
+# --- no conversation waits (ADR-0349 §8:1-§8:2) --------------------------------------
 
 
-async def test_messages_written_while_one_runs_wait_and_are_taken_in_as_one_input() -> None:
-    """§6:2, §6:3: nothing is refused; what waited is one input when the first ends.
-
-    Nothing joins by code (ADR-0349 §1:4's step 2): what is written meanwhile waits.
-    """
+async def test_messages_written_while_one_runs_start_their_own_activation_as_one_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0349 §8:1: nothing is refused or held back; what arrived inside one start wait
+    is one input (ADR-0332 §5:1), taken in while the first still runs."""
     composer = _GatedModel()
-    harness = _harness(composer=composer)
+    harness = _harness(composer=composer, chat_start_wait=timedelta(milliseconds=200))
     conversation = await _conversation(harness)
     await harness.engine.write_message(conversation, message=_said("m-1", "first"))
     await asyncio.wait_for(composer.entered.wait(), _SETTLE)
+    over = hold_start_waits(harness, monkeypatch)
     second = await harness.engine.write_message(conversation, message=_said("m-2", "second"))
     third = await harness.engine.write_message(conversation, message=_said("m-3", "third"))
     assert (second.position, third.position) == (2, 3)
+    over.set()
+
+    async def both_taken() -> bool:
+        marked = await harness.conversation_store.taken_in(conversation, positions=[2, 3])
+        return len(marked) == 2
+
+    await _until(both_taken, what="the waiting messages to be taken in")
     state = await harness.engine.conversation(conversation)
     assert state is not None
     assert state.state.working
-    assert len(await _episodes(harness.memory)) == 1
+    assert len(state.state.activation_ids) == 2, "both run, and the state names both"
+    assert not composer.gate.is_set(), "taken in while the first still runs"
     composer.gate.set()
     written = await _answered(harness, conversation, 2)
     assert [(one.position, one.author) for one in written] == [
@@ -264,7 +275,7 @@ async def test_messages_written_while_one_runs_wait_and_are_taken_in_as_one_inpu
 
 
 async def test_two_conversations_run_side_by_side() -> None:
-    """The interim is per conversation: another conversation's message is not held."""
+    """ADR-0349 §8:1: each conversation's activations run beside every other's."""
     composer = _GatedModel()
     harness = _harness(composer=composer)
     first = await _conversation(harness)
@@ -308,19 +319,34 @@ async def test_the_window_is_the_recent_transcript_each_message_keeping_its_auth
     assert all("written_after_the_input_began" not in item for item in window)
 
 
-async def test_a_reply_written_after_a_waiting_message_is_marked_as_after_it() -> None:
+async def test_a_reply_written_during_a_messages_start_wait_is_marked_as_after_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """§6: the window shows that a message was written before the reply it follows.
 
-    Nothing joins by code (ADR-0349 §1:4's step 2): what is written meanwhile waits.
+    The reply lands while the message waits out its start wait (ADR-0349 §8:2).
     """
     model = FakeModelProvider(STATED_PROPOSAL)
     composer = _GatedModel()
-    harness = _harness(composer=composer, understanding=understanding_stage(model=model))
+    harness = _harness(
+        composer=composer,
+        understanding=understanding_stage(model=model),
+        chat_start_wait=timedelta(milliseconds=200),
+    )
     conversation = await _conversation(harness)
     await harness.engine.write_message(conversation, message=_said("m-1", "first"))
     await asyncio.wait_for(composer.entered.wait(), _SETTLE)
+    over = hold_start_waits(harness, monkeypatch)
+    # The engine is not told of this start wait, so the first one's act does not wait
+    # for it (ADR-0349 §7:12) and its reply lands inside it, as a reply from work that
+    # waits on nothing here would: the window is the case, not the waits.
+    reader = harness.engine._chat_reader
+    assert reader is not None
+    monkeypatch.setattr(reader, "_hold", None)
     await harness.engine.write_message(conversation, message=_said("m-2", "meanwhile"))
     composer.gate.set()
+    await _answered(harness, conversation, 1)
+    over.set()
     await _answered(harness, conversation, 2)
     payload = json.loads(model.calls[-1].messages[1].content)
     assert payload["input"]["text"] == "meanwhile"
@@ -516,18 +542,20 @@ async def test_a_shutdown_while_marking_leaves_an_interrupted_activation() -> No
     assert await store.untaken_messages(conversation) == ()
 
 
-async def test_a_backlog_past_one_marking_call_is_still_one_input() -> None:
-    """§6:3: every waiting message is taken in together, whatever the store's bound.
-
-    Nothing joins by code (ADR-0349 §1:4's step 2): what is written meanwhile waits.
-    """
+async def test_a_backlog_past_one_marking_call_is_still_one_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0332 §5:1: every message waiting in one start wait is taken in together,
+    whatever the store's bound, beside the activation already running (ADR-0349 §8:1)."""
     composer = _GatedModel()
-    harness = _harness(composer=composer)
+    harness = _harness(composer=composer, chat_start_wait=timedelta(milliseconds=200))
     conversation = await _conversation(harness)
     await harness.engine.write_message(conversation, message=_said("m-0", "first"))
     await asyncio.wait_for(composer.entered.wait(), _SETTLE)
+    over = hold_start_waits(harness, monkeypatch)
     for n in range(1, 1002):
         await harness.engine.write_message(conversation, message=_said(f"m-{n}", f"w{n}"))
+    over.set()
     composer.gate.set()
     await _answered(harness, conversation, 2)
     inputs = sorted((_input_of(one) for one in await _episodes(harness.memory)), key=len)

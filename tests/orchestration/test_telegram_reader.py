@@ -4,11 +4,12 @@ Driven with a stand-in for the engine's activation, which takes the input in as 
 engine's does, so each case reads what the reader brought in and what it told
 Telegram. What comes in is a text message or a forward from the configured account in
 its private chat with the bot (§5:1); anything else is ignored and recorded nowhere
-(§5:2), and a non-text message is answered by rule (§5:3). One activation runs at a
-time, taken in once the start wait has passed (ADR-0332 §5:3), and the reader keeps
-polling, paced, while it runs (ADR-0332 §8:7-§8:8, amending §5:7): no message joins it
-by code (ADR-0349 §1:4's step 2), so one that arrives waits. A bare ``/stop`` with its
-entity stops what runs and is answered by rule (ADR-0332 §8). An update is confirmed
+(§5:2), and a non-text message is answered by rule (§5:3). Every input starts its own
+activation once its start wait has passed (ADR-0332 §5:3), whatever runs (ADR-0349
+§8:1-§8:2), and the reader keeps polling, paced, while anything runs (ADR-0332
+§8:7-§8:8, amending §5:7). What the start wait holds the engine is told of (ADR-0349
+§7:12). A bare ``/stop`` with its entity stops every activation running from the chat
+and is answered by rule once (ADR-0332 §8, ADR-0349 §4:3). An update is confirmed
 only once dealt with (§5:6), and one taken in or answered once is never taken in or
 answered again (§5:9). After a restart the
 activation it cut off gets the one fixed message (§6:10). The window is the line's
@@ -54,6 +55,7 @@ from ai_assistant.core.types import (
     TelegramQuotedMessage,
     TelegramUpdate,
 )
+from ai_assistant.orchestration.matters import HeldInput
 from ai_assistant.orchestration.telegram import (
     DEFAULT_TELEGRAM_START_WAIT,
     INTERRUPTED_LINE,
@@ -81,6 +83,23 @@ from ai_assistant.testing.telegram import GET_UPDATES, SEND_MESSAGE
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+
+class _Hold(HeldInput):
+    """A held input recording what the reader told of it, in order."""
+
+    def __init__(self, place: ChannelIdentity, told: list[tuple[str, str | None]]) -> None:
+        super().__init__(place=place)
+        self._told = told
+        told.append(("held", None))
+
+    def admitted(self, activation_id: str) -> None:
+        super().admitted(activation_id)
+        self._told.append(("admitted", activation_id))
+
+    def release(self) -> None:
+        super().release()
+        self._told.append(("released", self.activation_id))
 
 
 class _Line:
@@ -115,10 +134,16 @@ class _Line:
         self.marked: list[tuple[int, ...]] = []
         self.held_then: list[dict[int, TelegramIntake]] = []
         self.gate: asyncio.Event | None = None
+        # Where set, each activation marks its input only once it is.
+        self.marking: asyncio.Event | None = None
+        # Where set, the reader's rests last until it is.
+        self.pause: asyncio.Event | None = None
         self.entered = asyncio.Event()
         self.closing = False
         # ADR-0332 §8: what the reader handed the stop, which stops what runs.
         self.stops: list[str] = []
+        # ADR-0349 §7:12: what the reader told of the input its start wait held.
+        self.told: list[tuple[str, str | None]] = []
         self._ids = iter(f"act-{n}" for n in range(1, 100))
         self.reader = TelegramReader(
             seams=self.seams,
@@ -135,12 +160,15 @@ class _Line:
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
             written=written,
+            hold=lambda place: _Hold(place, self.told),
             sleep=self._rest,
         )
         self.task: asyncio.Task[None] | None = None
 
     async def _rest(self, seconds: float) -> None:
         self.rests.append(seconds)
+        if self.pause is not None:
+            await self.pause.wait()
         await asyncio.sleep(0.001)
 
     async def _stop(self, activation_id: str) -> bool:
@@ -150,6 +178,8 @@ class _Line:
     async def _activate(self, taken: TelegramInput) -> bool:
         self.inputs.append(taken)
         marked: list[int] = []
+        if self.marking is not None:
+            await self.marking.wait()
         await self.reader.take_in(taken, into=marked)
         self.marked.append(tuple(marked))
         self.held_then.append(dict(await self.intake.recorded(taken.update_ids)))
@@ -282,38 +312,35 @@ async def test_a_forward_is_taken_in_with_its_original_sender_claimed() -> None:
     assert [one.author for one in taken.window.input_messages] == [MessageAuthor.USER] * 2
 
 
-# --- one activation at a time (§5:4-§5:7, ADR-0332 §2:4, §8:7-§8:8) ---------------------
+# --- no place waits (ADR-0349 §8:1-§8:2, ADR-0332 §8:7-§8:8) ----------------------------
 
 
-async def test_polling_goes_on_while_one_runs_and_what_waited_comes_in_together() -> None:
-    """ADR-0332 §8:7-§8:8, amending §5:7: the reader polls, paced, while it runs."""
+async def test_what_arrives_while_one_runs_starts_its_own_after_its_start_wait() -> None:
+    """ADR-0349 §8:1-§8:2: its own start wait, then its own activation, beside the first."""
     line = _Line()
     line.gate = asyncio.Event()
     line.fake.hold(text(1, "first"))
     line.start()
     await asyncio.wait_for(line.entered.wait(), SETTLE)
-    polls = len(line.polls())
 
     line.fake.hold(text(2, "second", minute=1), text(3, "third", minute=2))
-    await line.until(lambda: len(line.polls()) > polls + 2, what="the reader kept polling")
-    assert line.reader.working == line.inputs[0].activation_id
-    assert RUNNING_POLL_PACE.total_seconds() in line.rests, "paced, never in a loop"
-    assert {one.update_id for one in line.fake.held} == {2, 3}, "left waiting, unconfirmed"
-
-    line.gate.set()
-    await line.until(lambda: len(line.inputs) == 2, what="what waited was taken in")
-    await line.stop()
-
-    assert line.rests.count(DEFAULT_TELEGRAM_START_WAIT.total_seconds()) == 1, (
-        "what waited while it ran is taken in at once, with no second start wait"
+    await line.until(lambda: len(line.inputs) == 2, what="the second was taken in")
+    assert not line.gate.is_set(), "while the first still runs"
+    assert line.reader.working == tuple(one.activation_id for one in line.inputs)
+    assert line.rests.count(DEFAULT_TELEGRAM_START_WAIT.total_seconds()) == 2, (
+        "a start wait of its own"
     )
 
     later = line.inputs[1]
-    assert later.text == "second\n\nthird", "taken in together, as one input"
+    assert later.text == "second\n\nthird", "what arrived inside one start wait is one input"
     assert [one.sent_at for one in later.recorded] == [
         AT + timedelta(minutes=1),
         AT + timedelta(minutes=2),
     ], "each message keeps its own time (§5:4)"
+    line.gate.set()
+    await line.until(lambda: line.fake.held == (), what="everything was confirmed")
+    await line.stop()
+    assert line.reader.working == ()
 
 
 async def test_an_input_its_activation_did_not_take_in_is_not_confirmed() -> None:
@@ -713,44 +740,93 @@ async def _until_held(line: _Line, update_id: int) -> TelegramIntake:
     return held
 
 
-async def test_a_message_sent_while_one_runs_waits_and_the_polls_are_paced() -> None:
-    """ADR-0349 §1:4's step 2, §8:8: nothing joins by code, and the polls are paced."""
+async def test_while_updates_handed_to_a_running_one_wait_unmarked_the_polls_are_paced() -> None:
+    """ADR-0332 §8:8: an update handed and not yet marked comes back in every poll."""
     line = _Line()
-    await _running(line)
-    line.fake.hold(text(2, "actually Saturday"))
-    line.fake.hold(text(3, "and at seven"))
+    line.marking = asyncio.Event()
+    line.gate = asyncio.Event()
+    line.fake.hold(text(1, "book Riverside"))
+    line.start()
+    await line.until(lambda: len(line.inputs) == 1, what="the first was admitted")
     rests = len(line.rests)
     polls = len(line.polls())
     await line.until(lambda: len(line.rests) > rests + 5, what="the reader went on polling")
 
-    assert await _held(line, 2) is None, "it waits, unmarked"
+    assert len(line.inputs) == 1, "what a running one was handed is never taken in again"
+    assert await _held(line, 1) is None, "not yet marked"
     typing = TYPING_RENEWAL.total_seconds()  # the writer's, which rests on the same sleep
     paced = [one for one in line.rests[rests:] if one != typing]
     assert set(paced) == {RUNNING_POLL_PACE.total_seconds()}
     assert len(line.polls()) - polls <= len(paced) + 1, "a rest before every poll"
 
-    assert line.gate is not None
+    line.marking.set()
     line.gate.set()
-    await line.until(lambda: len(line.inputs) == 2, what="what waited was taken in")
+    await line.until(lambda: line.fake.held == (), what="it was confirmed once marked")
     await line.stop()
-    assert line.inputs[1].text == "actually Saturday\n\nand at seven"
+    assert len(line.inputs) == 1
 
 
-async def test_a_stop_behind_a_waiting_message_still_stops() -> None:
-    """§8:4: a message that waits never keeps a stop in the page from acting."""
+async def test_a_stop_leaves_a_message_still_in_its_start_wait_to_start() -> None:
+    """ADR-0349 §4:3: it stops what runs; an input not yet taken in is not running."""
     line = _Line()
     running = await _running(line)
     line.fake.hold(text(2, "actually Saturday"), stop_command(3))
 
     await line.until(lambda: STOPPED_LINE in line.sent(), what="the stop was answered")
     assert line.stops == [running]
-    assert await _held(line, 2) is None, "it waits"
+    await line.until(lambda: len(line.inputs) == 2, what="the message was taken in")
+    assert line.inputs[1].update_ids == (2,)
+    assert line.stops == [running], "and it was not stopped"
 
     assert line.gate is not None
     line.gate.set()
-    await line.until(lambda: len(line.inputs) == 2, what="the correction was taken in after")
     await line.stop()
-    assert line.inputs[1].update_ids == (2,)
+
+
+async def test_a_stop_stops_every_activation_running_from_the_chat() -> None:
+    """ADR-0349 §4:3, §1:5: each by the one stop, and "Stopped." once."""
+    line = _Line()
+    first = await _running(line)
+    line.fake.hold(text(2, "and the weather?"))
+    await line.until(lambda: len(line.inputs) == 2, what="the second was taken in")
+    second = line.inputs[1].activation_id
+
+    line.fake.hold(stop_command(3))
+    await line.until(lambda: STOPPED_LINE in line.sent(), what="the stop was answered")
+    assert line.stops == [first, second], "each running one, oldest first"
+    assert line.sent() == [STOPPED_LINE]
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: line.fake.held == (), what="everything was confirmed")
+    await line.stop()
+    assert line.sent() == [STOPPED_LINE], "answered once"
+
+
+async def test_the_engine_is_told_what_the_start_wait_holds_until_its_activation_ends() -> None:
+    """ADR-0349 §7:12: held from the poll that began the wait, admitted, then let go."""
+    line = _Line()
+    first = await _running(line)
+    assert line.told == [("held", None), ("admitted", first)], "held while it runs"
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: line.told[-1] == ("released", first), what="it was let go")
+    await line.stop()
+
+
+async def test_a_start_wait_the_close_cuts_off_lets_its_hold_go() -> None:
+    """ADR-0349 §7:12: nothing it held will be taken in, so the engine is told so."""
+    line = _Line()
+    line.pause = asyncio.Event()
+    line.fake.hold(text(1, "hi"))
+    line.start()
+    await line.until(lambda: bool(line.told), what="the start wait to begin")
+    line.closing = True
+    await line.stop()
+
+    assert line.inputs == []
+    assert line.told == [("held", None), ("released", None)]
 
 
 # --- the line's /stop (ADR-0332 §8) -----------------------------------------------------
@@ -827,26 +903,27 @@ def test_only_a_bare_marked_unforwarded_stop_is_one() -> None:
 
 
 async def test_a_stop_behind_a_full_page_waits_and_is_acted_on_when_a_poll_returns_it() -> None:
-    """§1:4, §8:4: past one page of waiting updates, it waits with them."""
+    """§1:4, §8:4: past one page of updates not yet confirmed, it waits with them.
+
+    The page is its own activation's input (ADR-0349 §8:1), left unconfirmed until that
+    activation marks it; then a poll returns the stop, which stops both (§4:3).
+    """
     line = _Line()
     first = await _running(line)
+    line.marking = asyncio.Event()
     line.fake.hold(*(text(n, f"m{n}") for n in range(2, 102)), stop_command(102))
-    rests = len(line.rests)
-    await line.until(lambda: len(line.rests) > rests + 3, what="the reader went on polling")
+    await line.until(lambda: len(line.inputs) == 2, what="the page was taken in")
+    polls = len(line.polls())
+    await line.until(lambda: len(line.polls()) > polls + 3, what="the reader went on polling")
     assert line.stops == [], "a full page waits in front of it, so no poll returned it"
     assert line.sent() == []
 
-    released = line.gate
-    assert released is not None
-    line.gate = asyncio.Event()
-    released.set()
-    await line.until(lambda: len(line.inputs) == 2, what="the page was taken in")
-    await line.until(lambda: bool(line.stops), what="a poll returned the stop")
+    line.marking.set()
     await line.until(lambda: STOPPED_LINE in line.sent(), what="the stop was answered")
-
     second = line.inputs[1].activation_id
     assert second != first
-    assert line.stops == [second], "it stops what runs when a poll first returns it"
+    assert line.stops == [first, second], "it stops what runs when a poll first returns it"
     assert len(line.inputs[1].updates) == 100
+    assert line.gate is not None
     line.gate.set()
     await line.stop()

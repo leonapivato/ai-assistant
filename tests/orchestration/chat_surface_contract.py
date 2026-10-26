@@ -778,15 +778,15 @@ class ChatReaderContract:
         assert await chat.untaken_messages(conversation) == ()
         assert await _input_of(chat_reader_surface.memory, taken[1]) == "hello"
 
-    async def test_messages_written_while_it_runs_wait_and_are_taken_in_together(
+    async def test_a_message_written_while_one_runs_is_taken_in_at_once_by_its_own(
         self, chat_reader_surface: ChatReaderSubject
     ) -> None:
-        """§6:2, §6:3, §8:2: one activation at a time; what waited is one input after it.
+        """ADR-0349 §8:1, §8:3: no conversation holds a message back.
 
         The first activation is held at its marking, so it is running — "working…",
-        with its id — while two more messages are written. Each lands at once, and
-        when it ends the two are taken in together by one second activation: two
-        replies, not three.
+        with its id — while a second message is written. It lands at once, and is
+        taken in while the first still runs, by an activation of its own: two replies,
+        one for each.
         """
         engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
         conversation = await _started(engine, _PHONE)
@@ -797,32 +797,38 @@ class ChatReaderContract:
                 await entered.wait()
             running = await _working(engine, conversation)
             second = await engine.write_message(conversation, message=said(_PHONE, "m-2", "second"))
-            third = await engine.write_message(conversation, message=said(_PHONE, "m-3", "third"))
-            assert (second.position, third.position) == (2, 3), "never refused, never held"
-            assert await _working(engine, conversation) == running
+            assert second.position == 2, "never refused"
+
+            async def taken_in() -> bool:
+                return bool(await chat.taken_in(conversation, positions=[2]))
+
+            await _until(taken_in, what="the second message to be taken in")
+            later = (await chat.taken_in(conversation, positions=[2]))[2]
+            assert later != running, "an activation of its own"
+            digest = await engine.conversation(conversation)
+            assert digest is not None
+            assert digest.state.working
+            assert running in digest.state.activation_ids, "the first still runs"
+            assert not release.is_set(), "taken in while the first still runs"
         finally:
             release.set()
         written = await _answered(engine, conversation, 2)
         assert [one.author for one in written] == [
             MessageAuthor.USER,
             MessageAuthor.USER,
-            MessageAuthor.USER,
             MessageAuthor.ASSISTANT,
             MessageAuthor.ASSISTANT,
         ]
-        taken = await chat.taken_in(conversation, positions=[1, 2, 3])
-        assert taken[1] == running
-        assert taken[2] == taken[3] != running, "what waited is one input"
-        together = await _input_of(chat_reader_surface.memory, taken[2])
-        assert "second" in together
-        assert "third" in together
+        taken = await chat.taken_in(conversation, positions=[1, 2])
+        assert taken == {1: running, 2: later}
+        assert await _input_of(chat_reader_surface.memory, later) == "second"
         assert await chat.untaken_messages(conversation) == ()
 
     async def test_the_state_names_the_running_activation_once_and_none_once_it_ends(
         self, chat_reader_surface: ChatReaderSubject
     ) -> None:
-        """ADR-0349 §10:3, §1:4's step 1: ``activation_ids`` names the one activation the
-        state named before, the one that took the message in, and nothing once it ended."""
+        """ADR-0349 §4:4, §10:3: with one running, ``activation_ids`` names it, the one
+        that took the message in, once, and nothing once it ended."""
         engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
         conversation = await _started(engine, _PHONE)
         entered, release = _held_take_in(chat)

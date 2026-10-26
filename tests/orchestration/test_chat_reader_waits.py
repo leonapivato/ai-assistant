@@ -1,17 +1,19 @@
-"""The hub chat's reader on its own: the start wait, composing, and holding (ADR-0332).
+"""The hub chat's reader on its own: the start wait, composing, and holding nothing back.
 
 Driven over the canonical conversation store with a stand-in for the engine's
 activation, and on a clock the case moves, so each case reads what the reader took in
 and how long it waited.
 
-- Where nothing is running, the reader takes a conversation's waiting messages in once
-  ``chat_start_wait`` has passed since the latest of them and no composing signal is
-  live, and no later than ``chat_composing_cap`` after the first (§5:1-§5:2).
+- The reader takes a conversation's waiting messages in once ``chat_start_wait`` has
+  passed since the latest of them and no composing signal is live, and no later than
+  ``chat_composing_cap`` after the first (ADR-0332 §5:1-§5:2), whatever runs there
+  (ADR-0349 §8:2).
 - A composing signal stays live for ``chat_composing_lapse``, and only extends a start
-  wait already running (§5:6-§5:8).
-- While an activation runs, no message joins it by code (ADR-0349 §1:4's step 2): one
-  noticed waits, and everything waiting is taken in together once it ends, until the
-  readers' own step retires the holding (ADR-0349 §8).
+  wait already running (ADR-0332 §5:6-§5:8).
+- While an activation runs, a message noticed starts its own start wait and its own
+  activation, which never takes in what the running one was handed (ADR-0349 §8:1).
+- What a start wait holds the engine is told of, until its activation ends or nothing is
+  taken in (ADR-0349 §7:12).
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 from ai_assistant.core.types import (
+    ChannelIdentity,
     ChatDevice,
     DeviceAccess,
     MessageAuthor,
@@ -30,6 +33,7 @@ from ai_assistant.core.types import (
     TranscriptMessage,
 )
 from ai_assistant.orchestration.chat import ChatInput, ChatReader
+from ai_assistant.orchestration.matters import HeldInput
 from ai_assistant.testing import FakeConversationStore
 
 if TYPE_CHECKING:
@@ -79,8 +83,25 @@ class _Clock:
             await asyncio.sleep(0)
 
 
+class _Hold(HeldInput):
+    """A held input recording what the reader told of it, in order."""
+
+    def __init__(self, place: ChannelIdentity, told: list[tuple[str, str | None]]) -> None:
+        super().__init__(place=place)
+        self._told = told
+        told.append(("held", place.instance_id))
+
+    def admitted(self, activation_id: str) -> None:
+        super().admitted(activation_id)
+        self._told.append(("admitted", activation_id))
+
+    def release(self) -> None:
+        super().release()
+        self._told.append(("released", self.activation_id))
+
+
 class _Reader:
-    """A chat reader over a fake store, its activation and its join stand-ins."""
+    """A chat reader over a fake store, its activation, and what it tells of its holds."""
 
     def __init__(
         self,
@@ -93,9 +114,12 @@ class _Reader:
         self.inputs: list[ChatInput] = []
         self.taken_at: list[float] = []
         self.gate: asyncio.Event | None = None
+        # Where set, each activation marks its input only once it is.
+        self.marking: asyncio.Event | None = None
         self.entered = asyncio.Event()
         self.tasks: list[asyncio.Task[None]] = []
         self.closing = False
+        self.told: list[tuple[str, str | None]] = []
         self._ids = iter(f"act-{n}" for n in range(1, 100))
         self._sent = 0
         self.reader = ChatReader(
@@ -104,6 +128,7 @@ class _Reader:
             spawn=self._spawn,
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
+            hold=lambda place: _Hold(place, self.told),
             start_wait=start_wait,
             composing_lapse=_LAPSE,
             composing_cap=_CAP,
@@ -118,6 +143,8 @@ class _Reader:
         self.inputs.append(taken)
         self.taken_at.append(self.clock.now)
         marked: list[int] = []
+        if self.marking is not None:
+            await self.marking.wait()
         await self.reader.take_in(taken, into=marked)
         self.entered.set()
         if self.gate is not None:
@@ -301,7 +328,7 @@ def test_the_waits_are_held_to_their_bounds() -> None:
     build(_START, _LAPSE, _LAPSE)
 
 
-# --- holding behind running work (ADR-0332 §2:4, until ADR-0349 §1:4's step 3) ----------
+# --- holding nothing back for running work (ADR-0349 §8:1-§8:2) -----------------------
 
 
 async def _running(chat: _Reader) -> str:
@@ -314,25 +341,86 @@ async def _running(chat: _Reader) -> str:
     return conversation
 
 
-async def test_a_message_written_while_one_runs_waits_and_is_taken_in_after() -> None:
-    """ADR-0349 §1:4's step 2: nothing joins by code; what waits is taken in together."""
+async def test_a_message_written_while_one_runs_starts_its_own_after_its_start_wait() -> None:
+    """§8:1-§8:2: its own start wait runs, then its own activation, beside the first."""
     chat = _Reader()
     conversation = await _running(chat)
     first = await chat.say(conversation, "actually Saturday")
     await chat.say(conversation, "and at seven")
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert await chat.store.taken_in(conversation, positions=[first]) == {}, "it waits"
-    assert len(chat.inputs) == 1
+    await asyncio.wait_for(chat.clock.sleeping.wait(), _SETTLE)
+    assert len(chat.inputs) == 1, "nothing is taken in before its start wait has passed"
+    assert await chat.store.taken_in(conversation, positions=[first]) == {}
 
+    await chat.clock.wake()
+    await chat.until(lambda: len(chat.inputs) == 2, what="the second was taken in")
+    assert chat.gate is not None
+    assert not chat.gate.is_set(), "while the first still runs"
+    assert _texts(chat.inputs[1]) == ["actually Saturday", "and at seven"], (
+        "what arrived inside one start wait is one input"
+    )
+    assert chat.inputs[1].activation_id != chat.inputs[0].activation_id
+    assert chat.reader.running(conversation) == ("act-1", "act-2")
+    assert chat.reader.working(conversation) == "act-2"
+    assert chat.clock.slept == [_START.total_seconds()] * 2, "a start wait of its own"
+
+    chat.gate.set()
+    await chat.idle()
+    assert chat.reader.running(conversation) == ()
+
+
+async def test_what_a_running_activation_was_handed_is_never_taken_in_again() -> None:
+    """§6:6: marked or not yet, a message handed to an activation is its alone."""
+    chat = _Reader()
+    chat.marking = asyncio.Event()
+    conversation = await chat.conversation()
+    first = await chat.say(conversation, "book Riverside")
+    await chat.clock.wake()
+    await chat.until(lambda: len(chat.inputs) == 1, what="the first was admitted")
+    assert await chat.store.taken_in(conversation, positions=[first]) == {}, "not yet marked"
+
+    await chat.say(conversation, "for Saturday")
+    await chat.clock.wake()
+    await chat.until(lambda: len(chat.inputs) == 2, what="the second was admitted")
+    chat.marking.set()
+    await chat.idle()
+
+    assert [_texts(one) for one in chat.inputs] == [["book Riverside"], ["for Saturday"]]
+
+
+async def test_the_engine_is_told_what_a_start_wait_holds_until_its_activation_ends() -> None:
+    """ADR-0349 §7:12: held from the first notice, admitted, let go once it has ended."""
+    chat = _Reader()
+    conversation = await _running(chat)
+    assert chat.told == [("held", conversation), ("admitted", "act-1")], (
+        "still held while its activation runs"
+    )
+    await chat.say(conversation, "for Saturday")
+    assert chat.told[-1] == ("held", conversation), "held from its notice, whatever runs"
+
+    await chat.clock.wake()
+    await chat.until(lambda: len(chat.inputs) == 2, what="the second was taken in")
     assert chat.gate is not None
     chat.gate.set()
-    await chat.until(lambda: len(chat.inputs) == 2, what="what waited was taken in")
     await chat.idle()
-    assert _texts(chat.inputs[1]) == ["actually Saturday", "and at seven"]
-    assert chat.clock.slept == [_START.total_seconds()], (
-        "taken in at once when the activation ended, with no second start wait"
-    )
+    assert sorted(chat.told[2:]) == [
+        ("admitted", "act-2"),
+        ("held", conversation),
+        ("released", "act-1"),
+        ("released", "act-2"),
+    ]
+
+
+async def test_a_start_wait_that_takes_nothing_in_lets_its_hold_go() -> None:
+    """ADR-0349 §7:12: a close, or nothing left waiting, releases what was held."""
+    chat = _Reader()
+    conversation = await chat.conversation()
+    await chat.say(conversation, "hi")
+    await asyncio.wait_for(chat.clock.sleeping.wait(), _SETTLE)
+    chat.closing = True
+    chat.reader.close()
+    await chat.idle()
+
+    assert chat.told == [("held", conversation), ("released", None)]
 
 
 class _HeldQuery(FakeConversationStore):
