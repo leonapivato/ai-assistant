@@ -37,7 +37,7 @@ from ai_assistant.orchestration.matters import HeldInput
 from ai_assistant.testing import FakeConversationStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
 #: How long a case waits for the reader before it fails rather than hangs.
 _SETTLE: Final = 5.0
@@ -491,7 +491,7 @@ class _HeldAfterQuery(FakeConversationStore):
 
 
 async def test_a_message_noticed_while_what_waits_is_read_is_never_dropped() -> None:
-    """ADR-0349 §8:1: a read that may have missed a message reads again before it admits."""
+    """ADR-0349 §8:1: what the read may have missed starts a read of its own."""
     store = _HeldAfterQuery()
     chat = _Reader(store=store, start_wait=None)
     conversation = await chat.conversation()
@@ -500,14 +500,16 @@ async def test_a_message_noticed_while_what_waits_is_read_is_never_dropped() -> 
     await asyncio.wait_for(store.held.wait(), _SETTLE)
     await chat.say(conversation, "for Saturday")
     store.release.set()
+    await chat.until(lambda: len(chat.inputs) == 2, what="the missed message was taken in")
     await chat.idle()
 
-    assert [_texts(one) for one in chat.inputs] == [["book Riverside", "for Saturday"]]
+    assert [_texts(one) for one in chat.inputs] == [["book Riverside"], ["for Saturday"]]
     assert await store.untaken_messages(conversation) == ()
 
 
 async def test_a_message_noticed_while_what_waits_is_read_at_the_cap_is_never_dropped() -> None:
-    """ADR-0332 §5:2: at the cap the wait's end no longer moves, and the read reads again."""
+    """ADR-0332 §5:2: at the cap what was read is taken in, and what it may have missed
+    waits out a start wait of its own."""
     store = _HeldAfterQuery()
     chat = _Reader(store=store)
     conversation = await chat.conversation()
@@ -519,7 +521,60 @@ async def test_a_message_noticed_while_what_waits_is_read_at_the_cap_is_never_dr
     await asyncio.wait_for(store.held.wait(), _SETTLE)
     await chat.say(conversation, "for Saturday")
     store.release.set()
-    await chat.idle()
+    await chat.until(lambda: len(chat.inputs) == 1, what="the first was taken in")
+    assert _texts(chat.inputs[0]) == ["book Riverside"]
+    assert chat.taken_at == [pytest.approx(_CAP.total_seconds())], "at the cap"
 
-    assert [_texts(one) for one in chat.inputs] == [["book Riverside", "for Saturday"]]
-    assert chat.taken_at == [pytest.approx(_CAP.total_seconds())]
+    await chat.clock.wake()
+    await chat.until(lambda: len(chat.inputs) == 2, what="the missed message was taken in")
+    await chat.idle()
+    assert _texts(chat.inputs[1]) == ["for Saturday"]
+    assert chat.taken_at[1] == pytest.approx(_CAP.total_seconds() + _START.total_seconds())
+
+
+class _RacingQuery(FakeConversationStore):
+    """A store that runs :attr:`during` inside each of its next ``times`` reads of what waits.
+
+    Each read answers what waited when it began, so what :attr:`during` writes is missing
+    from that answer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.during: Callable[[], Awaitable[None]] | None = None
+        self.times = 0
+
+    async def untaken_messages(
+        self, conversation_id: str, *, limit: int = 100
+    ) -> tuple[TranscriptMessage, ...]:
+        found = await super().untaken_messages(conversation_id, limit=limit)
+        if self.during is not None and self.times > 0:
+            self.times -= 1
+            await self.during()
+        return found
+
+
+async def test_messages_during_every_read_past_the_cap_postpone_nothing() -> None:
+    """ADR-0332 §5:2: a message noticed during every read still leaves the cap the end."""
+    store = _RacingQuery()
+    chat = _Reader(store=store)
+    conversation = await chat.conversation()
+    await chat.say(conversation, "m0")
+    await asyncio.wait_for(chat.clock.sleeping.wait(), _SETTLE)
+    written = 0
+
+    async def racing() -> None:
+        nonlocal written
+        written += 1
+        await chat.say(conversation, f"m{written}")
+
+    store.during = racing
+    store.times = 5
+    chat.clock.now = _CAP.total_seconds() + 12
+    await chat.clock.wake()
+    await chat.until(lambda: bool(chat.inputs), what="the first read past the cap to admit")
+
+    assert _texts(chat.inputs[0]) == ["m0"], "taken in on the first read past the cap"
+    chat.closing = True
+    chat.reader.close()
+    await chat.idle()
