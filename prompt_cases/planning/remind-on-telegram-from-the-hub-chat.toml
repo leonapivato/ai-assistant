@@ -21,7 +21,7 @@ scheduled = false
 
 [property]
 check = "read"
-read = """The round proposes a spawn to remind them to call their mum about Sunday, falling due at 20:00 London time today (an instant with its offset, such as 2026-06-13T20:00:00+01:00), whose places name L2, the Telegram chat. It does not suggest only L1, the hub chat's conversation."""
+read = """The round proposes a spawn to remind them to call their mum about Sunday, falling due at 20:00 London time today (a local time with no offset, 2026-06-13T20:00, or the same instant with its offset), whose places name L2, the Telegram chat. It does not suggest only L1, the hub chat's conversation."""
 
 [input]
 file = "remind-on-telegram-from-the-hub-chat.json"

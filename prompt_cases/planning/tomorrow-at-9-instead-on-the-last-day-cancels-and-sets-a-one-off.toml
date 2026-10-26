@@ -1,0 +1,26 @@
+# "tomorrow at 9 instead" for a daily task whose until is tomorrow is its cancel and a
+# one-off task at 09:00 tomorrow, in one round (ADR-0340 §5:1-§5:2, §10:5).
+prompt = "planning"
+guards = "skip_misread"
+came_from = "2026-10-25"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = false
+suggestions = false
+spawn = true
+scheduled = false
+
+[property]
+check = "read"
+read = """The round proposes a cancel_task naming T1, the daily reminder about the vitamin whose until is tomorrow, and one spawn with no rule and no replaces, about the vitamin, whose at is 2026-11-11T09:00. It proposes no spawn replacing T1."""
+
+[input]
+file = "tomorrow-at-9-instead-on-the-last-day-cancels-and-sets-a-one-off.json"

@@ -1,0 +1,26 @@
+# "done" right after a task's message is no call: that occurrence has ended
+# (ADR-0340 §5:5, §10:5).
+prompt = "planning"
+guards = "done_misread"
+came_from = "2026-10-25"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = false
+suggestions = false
+spawn = true
+scheduled = false
+
+[property]
+check = "read"
+read = """The round proposes no cancel_task and no spawn call. It may write a short message."""
+
+[input]
+file = "done-after-the-message-is-no-call.json"

@@ -36,7 +36,7 @@
     },
     {
       "name": "spawn",
-      "description": "Set up work that runs later or separately: a scheduled task, which starts an activation of its own when it falls due, reading what it carries. Give at most one of at, delay_minutes and after; with none it falls due now.",
+      "description": "Set up work that runs later or separately: a scheduled task, which starts an activation of its own when it falls due, reading what it carries. Give at most one of at, delay_minutes, after and rule; with none it falls due now.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -49,7 +49,7 @@
           "at": {
             "type": "string",
             "minLength": 1,
-            "description": "When it falls due: an ISO 8601 instant with its UTC offset, such as 2026-10-25T20:00:00-04:00."
+            "description": "When it falls due: an ISO 8601 local date and time with no offset, such as 2026-10-25T20:00, read in the person's zone, or in zone; or an instant with its UTC offset, such as 2026-10-25T20:00:00-04:00."
           },
           "delay_minutes": {
             "type": "number",
@@ -77,6 +77,63 @@
             "type": "string",
             "minLength": 1,
             "description": "A pending task this one replaces, by T label."
+          },
+          "rule": {
+            "type": "object",
+            "description": "When it falls due, again and again: a rule, at a local time of day in the person's zone, or in zone. Only for a task the person asked for.",
+            "properties": {
+              "repeats": {
+                "type": "string",
+                "enum": [
+                  "daily",
+                  "weekdays",
+                  "weekly"
+                ],
+                "description": "Every day, Monday to Friday, or weekly on days."
+              },
+              "days": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday",
+                    "saturday",
+                    "sunday"
+                  ]
+                },
+                "minItems": 1,
+                "description": "The days of the week a weekly rule falls on."
+              },
+              "time": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The local time of day, 24-hour, such as 07:00."
+              },
+              "from": {
+                "type": "string",
+                "minLength": 1,
+                "description": "A local date, such as 2026-10-27, before which none falls."
+              },
+              "until": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The last local date one may fall on, such as 2026-11-30."
+              }
+            },
+            "required": [
+              "repeats",
+              "time"
+            ],
+            "additionalProperties": false
+          },
+          "zone": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The IANA zone at or rule is read in, such as Europe/Lisbon, only where the person named one."
           },
           "deliberate_repeat": {
             "type": "boolean",

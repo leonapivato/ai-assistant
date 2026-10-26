@@ -1,0 +1,26 @@
+# A reminder's activation writes one message into its suggested place (ADR-0340 §7,
+# ADR-0350 §6:7, ADR-0340 §10:5).
+prompt = "planning"
+guards = "reminder_unsaid"
+came_from = "2026-10-25"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = false
+suggestions = false
+spawn = true
+scheduled = true
+
+[property]
+check = "read"
+read = """The round writes one message that begins "L1: " and reminds the person to call their mother. It proposes no call."""
+
+[input]
+file = "a-reminders-activation-writes-one-message-where-suggested.json"

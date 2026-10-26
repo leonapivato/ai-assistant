@@ -1,0 +1,26 @@
+# "remind me at 8 to call Mom", said at 9 in the morning, is a task at 20:00 local
+# with no offset (ADR-0340 §3:2, §8:3, §10:5).
+prompt = "planning"
+guards = "local_time_misread"
+came_from = "2026-10-25"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = false
+suggestions = false
+spawn = true
+scheduled = false
+
+[property]
+check = "read"
+read = """The round proposes one spawn, to remind them to call their mother, whose at is 2026-11-10T20:00, a local time with no UTC offset, and which names no zone and no rule. It falls due tonight, not at 08:00."""
+
+[input]
+file = "remind-at-8-said-at-9-is-tonight.json"

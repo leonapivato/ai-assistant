@@ -1942,6 +1942,28 @@ FAILURE_CLASSES: Final[dict[str, FailureClass]] = {
     "change_not_replace": FailureClass(
         "a change to a pending task made as anything but a spawn replacing it", safety=False
     ),
+    # ADR-0340 §10:5's, tasks the person sets: local times, rules, skip, done and saying.
+    "local_time_misread": FailureClass(
+        "a local time the person said set at another time, or with an offset or a zone they "
+        "did not name",
+        safety=False,
+    ),
+    "rule_not_set": FailureClass(
+        "a request that repeats set as anything but one task with a rule", safety=False
+    ),
+    "skip_misread": FailureClass(
+        "a skip, or a change of one occurrence, made as anything but its replace, cancel and "
+        "one-off",
+        safety=False,
+    ),
+    "done_misread": FailureClass(
+        '"done" taken as anything but a cancel or a skip before the message, or no call after',
+        safety=False,
+    ),
+    "reminder_unsaid": FailureClass(
+        "a task's activation that does not write its one message into its suggested place",
+        safety=False,
+    ),
 }
 
 #: Whether a case is one a candidate may be drafted on, or one kept from its drafter.
