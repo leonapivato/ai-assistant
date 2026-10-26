@@ -6897,7 +6897,8 @@ class Engine:
         The id the activation will be admitted under is minted and held here before the
         pushed mark is written, so a stop naming it meanwhile is noted; the mark is
         written in one store step that refuses where the occurrence is no longer pending
-        or its lineage carries a cascade record. Admission then refuses an id carrying a
+        or its lineage carries a cascade record, which no stop writes since ADR-0352
+        §2:2 and the plan store's upgrade retires (§2:6). Admission then refuses an id carrying a
         stop record (§9:10), read with nothing awaited between that check and the
         admission, so nothing starts that a stop named.
         """
