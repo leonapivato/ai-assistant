@@ -69,6 +69,7 @@ from ai_assistant.planning.scheduled_tasks import (
     checked_number,
     checked_optional_id,
     checked_person,
+    checked_rule_push,
     checked_spawn,
     checked_spawn_effect,
     checked_state,
@@ -96,6 +97,7 @@ if TYPE_CHECKING:
         OccurrencePush,
         OccurrenceState,
         QuestionPart,
+        RulePush,
         ScheduledDue,
         ScheduledTaskCancel,
         TaskSpawn,
@@ -173,13 +175,21 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: one transaction, every stop, effect and observation record is carried as it stands
 #: (§4:4), and the step is the label alone. A build reading 15 refuses a file at 16, whose
 #: tables it would leave outside export and clear (ADR-0326 §5:3).
-_SCHEMA_VERSION = 16
+#:
+#: **Version 17 is ADR-0340 §9's**: a scheduled task may hold a rule as its when, and a
+#: task with a rule holds more than one occurrence. No column changes, since the task is
+#: its blob, but a build reading 16 refuses a rule's kind and a task with more than one
+#: occurrence, so it must refuse a file that may hold them at the open (ADR-0326 §5:3)
+#: rather than at the first read. **A version 16 file is upgraded in place** (ADR-0326
+#: §4:1, ADR-0340 §9:4): every task it holds is one-off, which reads back as it was, and
+#: the step is the label alone.
+_SCHEMA_VERSION = 17
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
 #: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
 #: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
 #: ruling (§4:6).
-_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15)
+_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16)
 
 #: The ``meta`` key holding the last observation revision issued (ADR-0329 §16:9). It
 #: lives beside the records rather than being derived from them, because a revision is
@@ -631,6 +641,10 @@ class SqlitePlanStore:
         ``cascade_records``, which the open's ``CREATE TABLE IF NOT EXISTS`` creates,
         empty, in this same transaction. No record changes, so the step is the label
         alone.
+
+        **16 → 17** (ADR-0340 §9:3-§9:4): a task's when may be a rule, and a task with a
+        rule holds more than one occurrence. Every task a file at 16 holds is one-off and
+        reads back as it was, so no row is rewritten and the step is the label alone.
         """
         for step in range(held, _SCHEMA_VERSION):
             conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))
@@ -1515,29 +1529,39 @@ class SqlitePlanStore:
         return self._read_schedule("read the scheduled occurrences due").tasks
 
     async def mark_occurrence_pushed(
-        self, task_id: str, number: int, activation_id: str, /
+        self, task_id: str, number: int, activation_id: str, /, *, rule: RulePush | None = None
     ) -> OccurrencePush:
         """Mark a pending occurrence pushed, with its cascade check, in one step (§7:5).
 
+        A rule's occurrence first pushed writes its successor, and any it skips, inside
+        the same ``BEGIN IMMEDIATE`` transaction (ADR-0340 §4:6, §4:8, §9:3).
+
         Raises:
             PlanningError: If an argument is not valid, the task holds no such
-                occurrence, the activation was already pushed to, or the backend fails.
+                occurrence, the activation was already pushed to, ``rule`` does not fit
+                the push, or the backend fails.
         """
         named = checked_id(task_id, "scheduled task")
         which = checked_number(number)
         pushed = checked_id(activation_id, "activation")
+        instants = checked_rule_push(rule)
         now = self._now()
         async with self._lock:
             return await _run_to_completion(
-                self._mark_occurrence_pushed_sync, named, which, pushed, now
+                self._mark_occurrence_pushed_sync, named, which, pushed, instants, now
             )
 
     def _mark_occurrence_pushed_sync(
-        self, task_id: str, number: int, activation_id: str, now: datetime
+        self,
+        task_id: str,
+        number: int,
+        activation_id: str,
+        rule: RulePush | None,
+        now: datetime,
     ) -> OccurrencePush:
         with self._transaction(f"push occurrence {number} of {task_id!r}") as conn:
             schedule = self._schedule(conn, now)
-            answer = decide_push(schedule, task_id, number, activation_id)
+            answer = decide_push(schedule, task_id, number, activation_id, rule=rule)
             self._persist(conn, schedule)
         return answer
 

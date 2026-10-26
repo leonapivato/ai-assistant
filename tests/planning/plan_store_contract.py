@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     DueAfterTasks,
     DueAt,
     DueNow,
+    DueOnRule,
     EvidenceItemPart,
     FindingOutcome,
     FindingUnwritten,
@@ -55,10 +56,13 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     QuestionPart,
+    RuleDay,
+    RulePush,
     ScheduledTask,
     ScheduledTaskAuthor,
     ScheduledTaskWrite,
     TaskRefusal,
+    TaskRuleKind,
     TaskSpawn,
     TaskWriteAnswer,
     ToolOutcome,
@@ -487,16 +491,22 @@ def _spawn(  # noqa: PLR0913 — every part a case below varies
     task_id: str,
     *,
     person: str = _PERSON,
-    when: DueNow | DueAt | DueAfterTasks | None = None,
+    when: DueNow | DueAt | DueAfterTasks | DueOnRule | None = None,
     places: tuple[ChannelIdentity, ...] = (),
     replaces: str | None = None,
     outside: bool = False,
+    author: ScheduledTaskAuthor = ScheduledTaskAuthor.ASSISTANT,
+    first_due_at: datetime | None = None,
 ) -> TaskSpawn:
-    """A spawn as the actuator states it (ADR-0350 §3:6), due now unless told otherwise."""
+    """A spawn as the actuator states it (ADR-0350 §3:6), due now unless told otherwise.
+
+    A rule's spawn carries the instant of its first occurrence, as its caller computed
+    it (ADR-0340 §9:1).
+    """
     return TaskSpawn(
         id=task_id,
         person=person,
-        author=ScheduledTaskAuthor.ASSISTANT,
+        author=author,
         when=when or DueNow(),
         places=places,
         instruction=f"do the step {task_id}",
@@ -504,6 +514,31 @@ def _spawn(  # noqa: PLR0913 — every part a case below varies
         set_at=_WHEN,
         outside_content=outside,
         replaces=replaces,
+        first_due_at=first_due_at,
+    )
+
+
+#: A daily rule at 07:00 in the person's zone, and the instants a caller computed for
+#: its occurrences: the store computes none (ADR-0340 §9:5), so a case hands them in.
+_DAILY = DueOnRule(repeats=TaskRuleKind.DAILY, time_of_day=time(7, 0))
+_DAY = timedelta(days=1)
+_FIRST = _WHEN + timedelta(hours=7)
+
+
+def _due(day: int) -> datetime:
+    """The instant a daily rule's occurrence falls due on day ``day``, from the first."""
+    return _FIRST + day * _DAY
+
+
+async def _rule_written(store: PlanStore, task_id: str, **write: Any) -> ScheduledTask:
+    """Write a task the person set on a daily rule, first due at :data:`_FIRST`."""
+    return await _written(
+        store,
+        task_id,
+        when=write.pop("when", _DAILY),
+        author=ScheduledTaskAuthor.PERSON,
+        first_due_at=write.pop("first_due_at", _FIRST),
+        **write,
     )
 
 
@@ -989,7 +1024,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 24
+        assert export.schema_version == 25
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -1616,7 +1651,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 24
+        assert export.schema_version == 25
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -1863,7 +1898,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 24
+        assert export.schema_version == 25
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -2604,7 +2639,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 24
+        assert exported.schema_version == 25
         assert [one.id for one in exported.scheduled_tasks] == ["t2", "t1"]
         assert exported.cascades == ("act-9",)
         assert removed == 5
@@ -2621,6 +2656,365 @@ class PlanStoreContract:
 
         assert (await _held(store, "t1")).instruction == "do the step t1"
         assert (await _held(store, "t1")).person == _PERSON
+
+    # --- ADR-0340: a rule ---------------------------------------------------
+
+    async def test_a_rules_first_occurrence_is_written_with_the_task_and_its_effect(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §4:5, §9:3: at the instant its spawn carries, in the write's one step.
+
+        The store computes no instant (§9:5): the occurrence falls due where the caller
+        said, and the rule is stored whole.
+        """
+        rule = DueOnRule(
+            repeats=TaskRuleKind.WEEKLY,
+            days=(RuleDay.TUESDAY, RuleDay.THURSDAY),
+            time_of_day=time(9, 30),
+            zone="America/New_York",
+            from_date=date(2026, 1, 5),
+            until_date=date(2026, 3, 31),
+        )
+        task = await _rule_written(store, "t1", when=rule, first_due_at=_due(5), places=(_LINE,))
+
+        assert task.when == rule
+        assert task.author is ScheduledTaskAuthor.PERSON
+        (occurrence,) = task.occurrences
+        assert (occurrence.number, occurrence.state) == (1, OccurrenceState.PENDING)
+        assert occurrence.due_at == _due(5)
+        assert await _held(store, "t1") == task
+        (effect,) = await store.activation_effects(["act-1"])
+        assert (effect.id, effect.outcome) == ("spawn-t1", None)
+        assert (await store.due_occurrences(_WHEN)).next_due_at == _due(5)
+
+    async def test_a_stopped_spawner_writes_no_rule_and_no_first_occurrence(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §9:3, ADR-0350 §3:3: the first occurrence is the write's, so a refusal is."""
+        await store.record_stop("act-1")
+
+        with pytest.raises(ClaimStopped):
+            await _rule_written(store, "t1")
+
+        assert await store.scheduled_tasks(["t1"]) == ()
+        assert await store.activation_effects(["act-1"]) == ()
+
+    @pytest.mark.parametrize(
+        ("when", "first"),
+        [(_DAILY, None), (DueNow(), _FIRST), (DueAt(at=_FIRST), _FIRST)],
+        ids=["a-rule-with-no-first-instant", "now-with-one", "an-instant-with-one"],
+    )
+    async def test_a_spawn_whose_first_instant_does_not_fit_its_when_is_the_callers_error(
+        self, store: PlanStore, when: Any, first: datetime | None
+    ) -> None:
+        """ADR-0340 §9:3: refused as a ``PlanningError``, no ``TaskRefusal``, writing nothing.
+
+        The spawn's own validation refuses it, so a caller can build one only past it.
+        """
+        spawn = TaskSpawn.model_construct(
+            **{
+                **_spawn("t1", author=ScheduledTaskAuthor.PERSON).__dict__,
+                "when": when,
+                "first_due_at": first,
+            }
+        )
+
+        with pytest.raises(PlanningError):
+            await store.write_scheduled_task(
+                spawn,
+                _spawn_effect("spawn-t1"),
+                match=None,
+                chain_limit=_CHAIN_LIMIT,
+                pending_limit=_PENDING_LIMIT,
+            )
+
+        assert await store.scheduled_tasks(["t1"]) == ()
+        assert await store.activation_effects(["act-1"]) == ()
+
+    async def test_a_rule_on_a_task_the_assistant_sets_is_refused_as_not_done(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §4:1, §9:2: only a task the person set holds a rule; nothing is written.
+
+        The spawning activation's input did not carry the person's authority, so the
+        task's author would be the assistant.
+        """
+        answer = await _write(store, "t1", when=_DAILY, first_due_at=_FIRST)
+
+        assert answer.answer is TaskWriteAnswer.REFUSED
+        assert answer.reason is TaskRefusal.ASSISTANTS_RULE
+        assert await store.scheduled_tasks(["t1"]) == ()
+        assert await store.activation_effects(["act-1"]) == ()
+
+    async def test_a_wait_never_names_a_task_with_a_rule(self, store: PlanStore) -> None:
+        """ADR-0350 §5:4: a wait names one-off tasks alone, and a rule's is not one."""
+        await _rule_written(store, "t-rule")
+        await _written(store, "t-once")
+
+        refused = await _write(store, "t1", when=DueAfterTasks(tasks=("t-once", "t-rule")))
+
+        assert refused.reason is TaskRefusal.INVALID_WAIT
+        assert await store.scheduled_tasks(["t1"]) == ()
+
+    async def test_a_rules_first_push_writes_its_successor_in_the_same_step(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §4:6: no instant before the rule ends at which it has nothing pending.
+
+        Each first push writes the next occurrence pending, at the instant the caller
+        gave; an outcome writes none; and the push of the occurrence that falls on the
+        until writes none, so the rule ends and the task is then removed (§4:7, ADR-0350
+        §7:8).
+        """
+        task = await _rule_written(store, "t1", spawner="act-0")
+        assert task.pending
+
+        answer = await store.mark_occurrence_pushed(
+            "t1", 1, "act-1", rule=RulePush(successor=_due(1))
+        )
+
+        assert answer is OccurrencePush.PUSHED
+        held = await _held(store, "t1")
+        assert [(one.number, one.state, one.due_at) for one in held.occurrences] == [
+            (1, OccurrenceState.PUSHED, _FIRST),
+            (2, OccurrenceState.PENDING, _due(1)),
+        ]
+        assert held.occurrences[0].pushed_to == "act-1"
+        assert (await store.due_occurrences(_FIRST)).next_due_at == _due(1)
+        settled = await store.settle_occurrence("act-1", OccurrenceState.DONE)
+        assert len(settled.occurrences) == 2
+        assert settled.pending
+
+        await store.mark_occurrence_pushed("t1", 2, "act-2", rule=RulePush(successor=_due(2)))
+        assert (await _held(store, "t1")).pending
+        await store.mark_occurrence_pushed("t1", 3, "act-3", rule=RulePush(successor=None))
+        last = await _held(store, "t1")
+        assert [one.number for one in last.occurrences] == [1, 2, 3]
+        assert not last.pending
+        assert not await store.remove_scheduled_task("t1")
+        await store.settle_occurrence("act-2", OccurrenceState.DONE)
+        await store.settle_occurrence("act-3", OccurrenceState.COULDNT_FINISH)
+
+        ended = await _held(store, "t1")
+        assert len(ended.occurrences) == 3
+        assert ended.ended
+        assert await store.remove_scheduled_task("t1")
+
+    async def test_a_missed_rule_records_what_it_skipped_and_pushes_the_latest(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §4:8: missed for three days, one late occurrence is pushed, two skipped.
+
+        The pending occurrence keeps its instant and ends skipped; the one between ends
+        skipped at the instant the sensor gave; the latest is pushed; and its successor
+        is written pending, all in the one step. Numbers run on and are never reused
+        (§4:10).
+        """
+        await _rule_written(store, "t1")
+
+        answer = await store.mark_occurrence_pushed(
+            "t1",
+            1,
+            "act-late",
+            rule=RulePush(skipped=(_due(1),), latest=_due(2), successor=_due(3)),
+        )
+
+        assert answer is OccurrencePush.PUSHED
+        held = await _held(store, "t1")
+        assert [(one.number, one.state, one.due_at) for one in held.occurrences] == [
+            (1, OccurrenceState.SKIPPED, _FIRST),
+            (2, OccurrenceState.SKIPPED, _due(1)),
+            (3, OccurrenceState.PUSHED, _due(2)),
+            (4, OccurrenceState.PENDING, _due(3)),
+        ]
+        assert held.occurrences[2].activations == ("act-late",)
+        assert all(one.ended_at is not None for one in held.occurrences[:2])
+        assert all(not one.activations for one in held.occurrences[:2])
+        assert (await store.scheduled_lineage("act-late"))[-1] == held
+
+    async def test_a_missed_rule_whose_latest_is_its_last_writes_no_successor(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §4:7-§4:8: where the successor would fall after its until, none is written."""
+        await _rule_written(store, "t1")
+
+        await store.mark_occurrence_pushed(
+            "t1", 1, "act-late", rule=RulePush(latest=_due(1), successor=None)
+        )
+
+        held = await _held(store, "t1")
+        assert [one.state for one in held.occurrences] == [
+            OccurrenceState.SKIPPED,
+            OccurrenceState.PUSHED,
+        ]
+        assert not held.pending
+
+    async def test_a_push_again_writes_no_next_occurrence_and_the_successor_is_pushed_beside(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §4:6, §4:8, §9:3: pushed again after a restart, an occurrence is itself.
+
+        Its pushes and its second try are kept, it takes no rule's instants, and the
+        successor its first push wrote stays pending, whose own first push writes the
+        next. While it waits to be pushed again the rule counts two pending (§4:4's
+        note on ADR-0350 §9:8).
+        """
+        await _rule_written(store, "t1")
+        await store.mark_occurrence_pushed("t1", 1, "act-1", rule=RulePush(successor=_due(1)))
+        again = await store.settle_occurrence("act-1", OccurrenceState.PENDING, second_try=True)
+
+        assert [one.state for one in again.occurrences] == [OccurrenceState.PENDING] * 2
+        assert len(again.occurrences) == 2
+        with pytest.raises(PlanningError):
+            await store.mark_occurrence_pushed("t1", 1, "act-1b", rule=RulePush(successor=_due(2)))
+        assert await store.mark_occurrence_pushed("t1", 1, "act-1b") is OccurrencePush.PUSHED
+        await store.mark_occurrence_pushed("t1", 2, "act-2", rule=RulePush(successor=_due(2)))
+
+        held = await _held(store, "t1")
+        assert [(one.number, one.state) for one in held.occurrences] == [
+            (1, OccurrenceState.PUSHED),
+            (2, OccurrenceState.PUSHED),
+            (3, OccurrenceState.PENDING),
+        ]
+        assert held.occurrences[0].activations == ("act-1", "act-1b")
+        assert held.occurrences[0].second_try
+
+    async def test_a_rules_first_push_states_its_instants_and_no_other_push_does(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §9:3: each mismatch is the caller's error, and nothing is written.
+
+        A rule's occurrence never pushed takes its successor's instant, or none where
+        the rule has ended; a task with no rule takes none; and the instants given fall
+        after the pending one's.
+        """
+        await _rule_written(store, "t-rule")
+        await _written(store, "t-once")
+        before = await store.export()
+
+        with pytest.raises(PlanningError):
+            await store.mark_occurrence_pushed("t-rule", 1, "act-1")
+        with pytest.raises(PlanningError):
+            await store.mark_occurrence_pushed(
+                "t-once", 1, "act-2", rule=RulePush(successor=_due(1))
+            )
+        with pytest.raises(PlanningError):
+            await store.mark_occurrence_pushed(
+                "t-rule", 1, "act-3", rule=RulePush(successor=_FIRST)
+            )
+        with pytest.raises(PlanningError):
+            await store.mark_occurrence_pushed(
+                "t-rule", 1, "act-4", rule=RulePush(latest=_FIRST, successor=_due(1))
+            )
+        with pytest.raises(PlanningError):
+            await store.mark_occurrence_pushed(
+                "t-rule",
+                1,
+                "act-5",
+                rule={"successor": _due(1)},  # type: ignore[arg-type]  # the store's own check
+            )
+
+        after = await store.export()
+        assert after.scheduled_tasks == before.scheduled_tasks
+
+    async def test_a_cancel_while_a_rules_occurrence_runs_cancels_the_next_and_ends_it(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §4:7, §9:3: the pending one ends cancelled and nothing is computed after.
+
+        The running occurrence runs on, and its outcome writes no next one.
+        """
+        await _rule_written(store, "t1")
+        await store.mark_occurrence_pushed("t1", 1, "act-1", rule=RulePush(successor=_due(1)))
+
+        cancelled = await store.cancel_scheduled_task("t1", person=_PERSON)
+
+        assert cancelled.task is not None
+        assert [one.state for one in cancelled.task.occurrences] == [
+            OccurrenceState.PUSHED,
+            OccurrenceState.CANCELLED,
+        ]
+        assert await store.mark_occurrence_pushed("t1", 2, "act-2") is OccurrencePush.NOT_PENDING
+        settled = await store.settle_occurrence("act-1", OccurrenceState.DONE)
+        assert len(settled.occurrences) == 2
+        assert settled.ended
+        assert (await store.cancel_scheduled_task("t1")).reason is TaskRefusal.NOTHING_PENDING
+
+    async def test_a_cascade_at_a_rules_first_push_ends_it(self, store: PlanStore) -> None:
+        """ADR-0340 §4:7, ADR-0350 §7:5: cancelled by the cascade, with no successor written."""
+        await _rule_written(store, "t1", spawner="act-0")
+        await store.record_cascade("act-0")
+
+        answer = await store.mark_occurrence_pushed(
+            "t1", 1, "act-1", rule=RulePush(skipped=(_due(1),), latest=_due(2), successor=_due(3))
+        )
+
+        assert answer is OccurrencePush.CASCADE_CANCELLED
+        (occurrence,) = (await _held(store, "t1")).occurrences
+        assert occurrence.state is OccurrenceState.CANCELLED
+
+    async def test_a_skip_while_a_rules_occurrence_runs_replaces_it(self, store: PlanStore) -> None:
+        """ADR-0340 §5:1, §4:6: the pending next is there for a replace to reach.
+
+        The replace, the same rule from the day after the skipped occurrence's, cancels
+        the old task's pending one and writes the new one with its first occurrence, in
+        one step, taking the old task's parent and places (ADR-0350 §9:4). The from is
+        the caller's to compute, as the first instant is.
+        """
+        await _rule_written(store, "t1", spawner="act-0", places=(_LINE,))
+        await store.mark_occurrence_pushed("t1", 1, "act-1", rule=RulePush(successor=_due(1)))
+        skip = _DAILY.model_copy(update={"from_date": date(2026, 1, 3)})
+
+        replaced = await _rule_written(
+            store,
+            "t2",
+            spawner="act-chat",
+            when=skip,
+            first_due_at=_due(2),
+            replaces="t1",
+            replace_any=True,
+        )
+
+        old = await _held(store, "t1")
+        assert [one.state for one in old.occurrences] == [
+            OccurrenceState.PUSHED,
+            OccurrenceState.CANCELLED,
+        ]
+        assert replaced.when == skip
+        assert (replaced.parent, replaced.places) == ("act-0", (_LINE,))
+        (first,) = replaced.occurrences
+        assert (first.state, first.due_at) == (OccurrenceState.PENDING, _due(2))
+
+    async def test_a_rule_counts_its_pending_occurrences_toward_the_limit(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §4's note on ADR-0350 §9:8: one pending, or two while one is pushed again."""
+        await _rule_written(store, "t1")
+        await store.mark_occurrence_pushed("t1", 1, "act-1", rule=RulePush(successor=_due(1)))
+        assert (await _write(store, "t2", pending_limit=2)).answer is TaskWriteAnswer.WRITTEN
+        await store.settle_occurrence("act-1", OccurrenceState.PENDING)
+
+        refused = await _write(store, "t3", pending_limit=3)
+
+        assert refused.reason is TaskRefusal.PENDING_LIMIT
+
+    async def test_the_export_carries_a_rule_whole_and_clear_erases_it(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0340 §9:3: every occurrence, in order, at ``schema_version`` 25."""
+        await _rule_written(store, "t1")
+        await store.mark_occurrence_pushed(
+            "t1", 1, "act-1", rule=RulePush(skipped=(_due(1),), latest=_due(2), successor=_due(3))
+        )
+        held = await _held(store, "t1")
+
+        exported = await store.export()
+        await store.clear()
+
+        assert exported.schema_version == 25
+        assert exported.scheduled_tasks == (held,)
+        assert len(exported.scheduled_tasks[0].occurrences) == 4
+        assert (await store.export()).scheduled_tasks == ()
 
     # --- cancellation (ADR-0060) -------------------------------------------
 

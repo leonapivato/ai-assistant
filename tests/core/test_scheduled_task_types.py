@@ -163,7 +163,7 @@ def test_a_task_round_trips_and_reads_its_ending_from_its_occurrence() -> None:
                     ScheduledOccurrence(number=2, due_at=_AT),
                 )
             },
-            "at most 1",
+            "a task with no rule holds one occurrence",
         ),
         ({"places": (_LINE, _LINE)}, "each place once"),
         ({"when": DueAfterTasks(tasks=("t1",))}, "never waits on itself"),
@@ -185,12 +185,6 @@ def test_a_wait_names_each_task_once_and_at_least_one() -> None:
         DueAfterTasks(tasks=())
     with pytest.raises(ValidationError, match="each task it names once"):
         DueAfterTasks(tasks=("t1", "t1"))
-
-
-def test_a_rule_is_no_when_under_this_decision() -> None:
-    """§5:3: until the rules decision lands, no task holds one."""
-    with pytest.raises(ValidationError):
-        _task(when={"kind": "rule", "rule": "daily"})
 
 
 # --- the spawn and what the store answers ---------------------------------------------

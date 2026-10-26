@@ -202,6 +202,7 @@ if TYPE_CHECKING:
         RecordChunk,
         RecordedInvocation,
         RoundResponse,
+        RulePush,
         ScheduledDue,
         ScheduledTask,
         ScheduledTaskCancel,
@@ -3279,6 +3280,15 @@ class PlanStore(Protocol):
     round, are totally ordered (§7:5, §9:9). The Task Scheduler is a medium the hub
     hosts, and none of it is the assistant's memory (§2:3, §4:2).
 
+    **A task the person set may hold a rule** (ADR-0340 §4, §9:3), and then holds more
+    than one occurrence over its life. :meth:`write_scheduled_task` writes its first
+    occurrence at the instant its spawn carries; :meth:`mark_occurrence_pushed`, at an
+    occurrence's first push, writes the next one at the instant the caller gives, with
+    any it records skipped, in the step that marks it pushed, so a rule holds a pending
+    occurrence until it ends; and :meth:`cancel_scheduled_task` ends it. **The store
+    computes no instant** (§9:5): the rule's arithmetic is its callers' one function,
+    and the store writes what they computed.
+
     **The stop record lives here and in no other store** (ADR-0297 §1, §2, §6):
     :meth:`record_stop` writes a record naming one activation, and an effect claim
     naming that activation is then refused with
@@ -3555,31 +3565,37 @@ class PlanStore(Protocol):
            ``ALREADY_DONE``. Each writes nothing.
         2. **The task id.** Where the store already holds a task under ``spawn.id``, it
            raises ``PlanningError`` and writes nothing.
-        3. **The replace** (§9:4), where ``spawn.replaces`` names a task. It is refused
+        3. **The rule's author** (ADR-0340 §4:1, §9:2): a spawn whose when is a rule and
+           whose author is not the person is refused as not done, ``assistants_rule``.
+        4. **The replace** (§9:4), where ``spawn.replaces`` names a task. It is refused
            as not done where the store holds no such task, where it is for another
            person than ``spawn.person``, where ``replace_any`` is false and the spawning
            activation did not spawn it (§4:4), or where nothing of it is pending.
-        4. **The wait** (§5:4), where ``spawn.when`` waits on named tasks: each must be
-           a task the store holds for ``spawn.person``. And a replace never moves a task
+        5. **The wait** (§5:4), where ``spawn.when`` waits on named tasks: each must be
+           a one-off task the store holds for ``spawn.person``, never one with a rule.
+           And a replace never moves a task
            past its wait (§9:4): where the replaced task waits on tasks not all ended,
            the spawn must wait on each of them that has not. Either refusal is
            ``invalid_wait``.
-        5. **The chain limit** (§9:7): the task's chain length, ``1`` where its parent
+        6. **The chain limit** (§9:7): the task's chain length, ``1`` where its parent
            was not started by the Task Scheduler and one more than that activation's
            task's otherwise, may not exceed ``chain_limit``.
-        6. **The pending limit** (§9:8): the person's pending occurrences, counted after
+        7. **The pending limit** (§9:8): the person's pending occurrences, counted after
            the replace's cancel, with the new task's, may not exceed ``pending_limit``.
-        7. Otherwise it cancels the replaced task's pending occurrences as
+        8. Otherwise it cancels the replaced task's pending occurrences as
            :meth:`cancel_scheduled_task` does, writes the task, and writes ``effect`` as
            a claim, with no outcome, which acting then finishes (ADR-0306 §5:5).
 
         **The store authors what the spawn does not state.** The task's parent is the
         spawning activation, or the replaced task's parent on a replace, which also
         gives it the replaced task's suggested places in place of the spawn's, and so
-        its chain length (§9:4). Its one occurrence is pending, due at ``spawn.set_at``
-        for a task due now, at its instant for one due at an instant, and, for one
-        waiting on named tasks, at the instant the last of them ended where all have,
-        and otherwise once they all have (§5:4).
+        its chain length (§9:4). Its first occurrence is pending, due at
+        ``spawn.set_at`` for a task due now, at its instant for one due at an instant,
+        for one waiting on named tasks, at the instant the last of them ended where all
+        have, and otherwise once they all have (§5:4); and for a rule at
+        ``spawn.first_due_at``, the instant its caller computed (ADR-0340 §4:5, §9:3),
+        written in this same step with the task and the effect claim. The store
+        computes no instant of a rule's.
 
         Args:
             spawn: What the spawn states.
@@ -3603,7 +3619,9 @@ class PlanStore(Protocol):
             PlanningError: If the spawn or the effect is not valid, the effect is not a
                 call or carries an outcome, a limit is not a positive integer, the store
                 already holds the effect's id or the task's, or the backend fails.
-                Nothing is written.
+                Nothing is written. A spawn of a rule carrying no first instant, and a
+                spawn of any other when carrying one, is not valid: each is the
+                caller's error, and no ``TaskRefusal`` (ADR-0340 §9:3).
         """
         ...
 
@@ -3617,6 +3635,11 @@ class PlanStore(Protocol):
         given and the task is for another, where ``spawned_by`` is given and that
         activation did not spawn it (§4:4), or where nothing of it is pending. A task
         waiting on the cancelled one falls due once all it waits on have ended (§5:4).
+
+        **A cancel ends a rule** (ADR-0340 §4:7): its pending occurrence ends cancelled,
+        and no next occurrence is written after it. An occurrence of it still running
+        runs on, and its outcome writes no next one either (§4:6). So a cancel while
+        an occurrence runs cancels the next and ends the rule.
 
         Args:
             task_id: The task to cancel.
@@ -3716,7 +3739,7 @@ class PlanStore(Protocol):
         ...
 
     async def mark_occurrence_pushed(
-        self, task_id: str, number: int, activation_id: str, /
+        self, task_id: str, number: int, activation_id: str, /, *, rule: RulePush | None = None
     ) -> OccurrencePush:
         """Mark a pending occurrence pushed, naming its activation, before it is admitted.
 
@@ -3725,13 +3748,38 @@ class PlanStore(Protocol):
         pending, it answers ``NOT_PENDING`` and writes nothing. Where an activation in
         the task's lineage carries a cascade record — the task's parent, or the parent
         of any task above it — it ends the occurrence cancelled and answers
-        ``CASCADE_CANCELLED``. Otherwise it marks the occurrence pushed to
-        ``activation_id``, counting the push (§8:5), and answers ``PUSHED``.
+        ``CASCADE_CANCELLED``, which for a rule ends it (ADR-0340 §4:7). Otherwise it
+        marks the occurrence pushed to ``activation_id``, counting the push (§8:5), and
+        answers ``PUSHED``.
+
+        **An occurrence of a rule first pushed** (ADR-0340 §4:6, §4:8, §9:3) takes
+        ``rule``, the instants its caller computed, and the store writes them in this
+        same step. Where ``rule.latest`` is ``None``, the pending occurrence is pushed.
+        Otherwise the rule missed more than one: the pending occurrence ends *skipped*,
+        keeping its instant; an occurrence is recorded *skipped* at each of
+        ``rule.skipped``; and one at ``rule.latest`` is the one pushed to
+        ``activation_id``. Either way, the occurrence pushed is followed by one pending
+        at ``rule.successor``, or by none where that is ``None``, the rule having ended.
+        Each new occurrence takes the next number. So a rule holds a pending occurrence
+        at every instant until it ends. **A push again after a restart** (ADR-0350
+        §8:5-§8:6), of an occurrence pushed before, takes and writes no next
+        occurrence, and nor does an occurrence of a task with no rule.
+
+        Args:
+            task_id: The task.
+            number: The pending occurrence to push.
+            activation_id: The activation it will be admitted under.
+            rule: For a rule's occurrence never pushed before, the instants of its
+                successor and of any it skips; ``None`` for every other push.
 
         Raises:
             PlanningError: If an id is not an identifier, ``number`` is not a positive
                 integer, the task holds no such occurrence, an occurrence the store holds
-                was already pushed to ``activation_id``, or the backend fails.
+                was already pushed to ``activation_id``, ``rule`` is not a ``RulePush``,
+                a rule's pending occurrence never pushed comes with no ``rule``, a push
+                again or a task with no rule comes with one, the instants ``rule`` gives
+                are not each later than the pending occurrence's, or the backend fails.
+                Nothing is written.
         """
         ...
 
@@ -3747,6 +3795,10 @@ class PlanStore(Protocol):
         again after a restart (§8:5), as a **second try** where ``second_try`` is set
         (§8:6). An occurrence that is a second try is never pushed again, and nor is
         one whose activation carries a stop record (§8:1).
+
+        **It writes no next occurrence**, for a rule either (ADR-0340 §4:6): a rule's
+        next was written when the occurrence was first pushed, and an occurrence pushed
+        again keeps that next one pending beside it (§4:8).
 
         Args:
             activation_id: The activation the occurrence was pushed to.

@@ -21,7 +21,7 @@ import re
 import string
 import unicodedata
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum, StrEnum
 from hashlib import sha256
@@ -10232,9 +10232,127 @@ class DueAfterTasks(BaseModel):
         return self
 
 
-#: A scheduled task's when (ADR-0350 §5:1). A **rule** is not among them: until the
-#: decision on its vocabulary lands, no task holds one (§5:3).
-TaskWhen = Annotated[DueNow | DueAt | DueAfterTasks, Field(discriminator="kind")]
+class TaskRuleKind(StrEnum):
+    """What a rule repeats on, in version 1 (ADR-0340 §4:2).
+
+    Closed, **added to and never renamed**: monthly rules, "the first Monday" and times
+    relative to an event are each a later decision's (§11).
+    """
+
+    DAILY = "daily"
+    """Every day."""
+    WEEKDAYS = "weekdays"
+    """Monday to Friday."""
+    WEEKLY = "weekly"
+    """On a set of one or more days of the week, the rule's ``days``."""
+
+
+class RuleDay(StrEnum):
+    """A day of the week a weekly rule falls on (ADR-0340 §4:2).
+
+    Closed and complete, in the order of the week, Monday first, as ``date.weekday()``
+    counts it.
+    """
+
+    MONDAY = "monday"
+    TUESDAY = "tuesday"
+    WEDNESDAY = "wednesday"
+    THURSDAY = "thursday"
+    FRIDAY = "friday"
+    SATURDAY = "saturday"
+    SUNDAY = "sunday"
+
+
+#: The bound, in characters, on the IANA zone name a rule may hold. The longest name in
+#: the tz database is about thirty characters; the bound is the ceiling a hand-built
+#: value meets.
+RULE_ZONE_MAX_CHARS: Final = 64
+
+
+class DueOnRule(BaseModel):
+    """A task's when: a rule, at a local time of day (ADR-0340 §4, §9:1).
+
+    ``repeats`` is the rule's kind, and ``days`` the days of the week a weekly rule
+    falls on, in the order of the week, each once, and empty for any other kind.
+    ``time_of_day`` is the local time each occurrence falls at, to the minute. ``zone``
+    is the IANA zone the rule names, in which every occurrence is computed, or ``None``
+    for a rule that follows the person's current zone (§4:3). ``from_date`` is the local
+    date before which no occurrence falls, and ``until_date`` the last local date on
+    which one may (§4:4).
+
+    **Only a task the person set holds one** (§4:1): :class:`ScheduledTask` refuses a
+    rule whose author is the assistant, and the plan store refuses such a spawn as not
+    done (§9:2). **No instant is computed here, or by the plan store** (§9:5): the
+    rule's arithmetic is one function its callers share, and the store writes the
+    instants they give it. So ``zone`` is checked for its shape alone, never resolved
+    through ``zoneinfo``: a stored record must read back on a host whose tz database
+    lacks a name, and refusing an unknown name is the spawn's (§3:5).
+
+    Raises:
+        ValueError: If a weekly rule names no day, another kind names any, a day is named
+            twice, the local time is not a naive time to the minute, or the until is
+            earlier than the from.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["rule"] = "rule"
+    repeats: TaskRuleKind
+    days: tuple[RuleDay, ...] = ()
+    time_of_day: time
+    zone: NonBlankEncodableText | None = Field(default=None, max_length=RULE_ZONE_MAX_CHARS)
+    from_date: date | None = None
+    until_date: date | None = None
+
+    @field_validator("days")
+    @classmethod
+    def _in_week_order(cls, days: tuple[RuleDay, ...]) -> tuple[RuleDay, ...]:
+        if len(set(days)) != len(days):
+            msg = "a weekly rule names each day once (ADR-0340 §4:2)"
+            raise ValueError(msg)
+        week = tuple(RuleDay)
+        return tuple(sorted(days, key=week.index))
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        fault = _rule_fault(self)
+        if fault is not None:
+            raise ValueError(fault)
+        return self
+
+
+def _rule_fault(rule: DueOnRule) -> str | None:
+    """Which of :class:`DueOnRule`'s rules ``rule`` breaks, if any."""
+    clock = rule.time_of_day
+    clauses = (
+        (
+            rule.repeats is TaskRuleKind.WEEKLY and not rule.days,
+            "a weekly rule falls on one or more days of the week (ADR-0340 §4:2)",
+        ),
+        (
+            rule.repeats is not TaskRuleKind.WEEKLY and bool(rule.days),
+            "only a weekly rule names days of the week (ADR-0340 §4:2)",
+        ),
+        (
+            clock.tzinfo is not None,
+            "a rule's time of day is a local time, with no zone of its own (ADR-0340 §4:2)",
+        ),
+        (
+            clock.second != 0 or clock.microsecond != 0,
+            "a rule's time of day is to the minute (ADR-0340 §4:2)",
+        ),
+        (
+            rule.from_date is not None
+            and rule.until_date is not None
+            and rule.until_date < rule.from_date,
+            "a rule's until is never earlier than its from (ADR-0340 §4:4)",
+        ),
+    )
+    return next((fault for broken, fault in clauses if broken), None)
+
+
+#: A scheduled task's when (ADR-0350 §5:1, ADR-0340 §4): now, an instant, a hub event,
+#: or a rule, which only a task the person set holds (ADR-0340 §4:1).
+TaskWhen = Annotated[DueNow | DueAt | DueAfterTasks | DueOnRule, Field(discriminator="kind")]
 
 
 class ScheduledOccurrence(BaseModel):
@@ -10328,14 +10446,24 @@ class ScheduledTask(BaseModel):
     and its occurrences, numbered from one. **It carries no authority**, whoever set it
     (§3:9).
 
-    A task is one-off: a rule, which would give it further occurrences, is a later
-    decision's (§5:3). A task due now or at an instant falls due when its when says,
-    and one waiting on named tasks once they have all ended.
+    A task with no rule is one-off, holding one occurrence: due now or at an instant,
+    it falls due when its when says, and waiting on named tasks, once they have all
+    ended. **A task with a rule holds more than one occurrence over its life**
+    (ADR-0340 §4:6, §4:10), numbered from one and never renumbered: the plan store
+    writes the first when the task is written, and each next one, its successor, in
+    the step that first marks the one before it pushed, with any it records skipped.
+    Each falls due at an instant the caller computed (§9:5), later than the one before
+    it. Only the last may be pending and never yet pushed, so a rule holds that one
+    pending until it ends (§4:6-§4:7); one pushed again after a restart is pending
+    too, beside it (§4:8). Only a task the person set holds a rule (§4:1).
 
     Raises:
-        ValueError: If its occurrences are not numbered from one in order, it is not
-            one-off, it suggests a place twice, it waits on itself, or an occurrence's
-            due instant disagrees with its when.
+        ValueError: If its occurrences are not numbered from one in order, it has no
+            rule and holds more than one, it suggests a place twice, it waits on
+            itself, an occurrence's due instant disagrees with its when, or it holds a
+            rule that its author is not the person's, an occurrence with no instant or
+            out of order, or an occurrence never pushed and still pending that is not
+            its last.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -10350,7 +10478,7 @@ class ScheduledTask(BaseModel):
     set_at: UtcInstant
     outside_content: bool = False
     chain_length: int = Field(strict=True, ge=1, lt=_SCHEDULE_INT_BOUND)
-    occurrences: tuple[ScheduledOccurrence, ...] = Field(min_length=1, max_length=1)
+    occurrences: tuple[ScheduledOccurrence, ...] = Field(min_length=1)
 
     @property
     def pending(self) -> bool:
@@ -10411,6 +10539,47 @@ def _scheduled_task_fault(task: ScheduledTask) -> str | None:
             isinstance(when, DueAt) and due != {when.at},
             "a task due at an instant falls due at it (ADR-0350 §5:2)",
         ),
+        (
+            not isinstance(when, DueOnRule) and len(task.occurrences) != 1,
+            "a task with no rule holds one occurrence (ADR-0350 §3:6, ADR-0340 §4:6)",
+        ),
+    )
+    found = next((fault for broken, fault in clauses if broken), None)
+    if found is None and isinstance(when, DueOnRule):
+        return _rule_task_fault(task)
+    return found
+
+
+def _rule_task_fault(task: ScheduledTask) -> str | None:
+    """Which of the rules of a task with a rule ``task`` breaks, if any (ADR-0340 §4)."""
+    instants = [one.due_at for one in task.occurrences]
+    fresh = [
+        one.number
+        for one in task.occurrences
+        if one.state is OccurrenceState.PENDING and not one.activations
+    ]
+    clauses = (
+        (
+            task.author is not ScheduledTaskAuthor.PERSON,
+            "only a task the person set holds a rule (ADR-0340 §4:1)",
+        ),
+        (
+            any(at is None for at in instants),
+            "every occurrence of a rule falls due at an instant (ADR-0340 §4:5-§4:6)",
+        ),
+        (
+            any(
+                earlier is not None and later is not None and later <= earlier
+                for earlier, later in pairwise(instants)
+            ),
+            "a rule's occurrences fall due in order, each later than the one before it "
+            "(ADR-0340 §4:6)",
+        ),
+        (
+            fresh not in ([], [len(task.occurrences)]),
+            "a rule holds at most one occurrence never pushed and still pending, its last "
+            "(ADR-0340 §4:6)",
+        ),
     )
     return next((fault for broken, fault in clauses if broken), None)
 
@@ -10424,8 +10593,14 @@ class TaskSpawn(BaseModel):
     a replace; its suggested places too, on a replace (§9:4); its chain length (§9:7);
     and its occurrence. ``replaces`` names the pending task it replaces, or ``None``.
 
+    ``first_due_at`` is, for a rule, the instant of its first occurrence, as the caller
+    computed it in the person's zone (ADR-0340 §4:5, §9:1, §9:5), and ``None`` for any
+    other when: the plan store computes no instant. Whether the spawn's author may set a
+    rule is the store's to refuse, as not done (§4:1, §9:2), so it is not refused here.
+
     Raises:
-        ValueError: If it suggests a place twice, waits on itself, or replaces itself.
+        ValueError: If it suggests a place twice, waits on itself, replaces itself, or
+            carries a first instant where its when is not a rule, or none where it is.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -10439,9 +10614,16 @@ class TaskSpawn(BaseModel):
     set_at: UtcInstant
     outside_content: bool = False
     replaces: Identifier | None = None
+    first_due_at: UtcInstant | None = None
 
     @model_validator(mode="after")
     def _well_formed(self) -> Self:
+        if isinstance(self.when, DueOnRule) != (self.first_due_at is not None):
+            msg = (
+                "a spawn carries the instant of its first occurrence for a rule, and for no "
+                "other when (ADR-0340 §9:1)"
+            )
+            raise ValueError(msg)
         if len(set(self.places)) != len(self.places):
             msg = "a task suggests each place once (ADR-0350 §5:5)"
             raise ValueError(msg)
@@ -10477,6 +10659,9 @@ class TaskRefusal(StrEnum):
     """Its chain length would exceed the chain limit (§9:7)."""
     PENDING_LIMIT = "pending_limit"
     """It would take the person's pending occurrences past the pending limit (§9:8)."""
+    ASSISTANTS_RULE = "assistants_rule"
+    """Its when is a rule and its author is the assistant, not the person: only a task
+    the person set holds a rule (ADR-0340 §4:1, §9:2)."""
 
 
 class TaskWriteAnswer(StrEnum):
@@ -10557,6 +10742,48 @@ class OccurrencePush(StrEnum):
     ended cancelled (§7:5, §9:6)."""
 
 
+class RulePush(BaseModel):
+    """What the sensor states when it first pushes an occurrence of a rule (ADR-0340 §9:3).
+
+    The instants are the caller's, computed by the rule's arithmetic in the zone the
+    rule is computed in (§9:5); the plan store writes them as given.
+
+    ``successor`` is the instant of the next occurrence, the successor of the one pushed
+    (§4:6), or ``None`` where it would fall after the rule's until, so the rule has ended
+    (§4:7). It has no default: a caller states it either way.
+
+    Where the pending occurrence was missed more than once (§4:8), ``latest`` is the
+    instant of the latest missed occurrence, the one pushed in its place, and
+    ``skipped`` the instants of each missed one between them, in order. The store then
+    records the pending occurrence and each of those *skipped* and the latest pushed, in
+    the one step. Both are empty where the pending occurrence is itself pushed.
+
+    Raises:
+        ValueError: If it names skipped instants with no latest, or its instants are not
+            in order: the skipped ones, then the latest, then the successor.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    successor: UtcInstant | None
+    skipped: tuple[UtcInstant, ...] = Field(default=(), validate_default=True)
+    latest: UtcInstant | None = None
+
+    @model_validator(mode="after")
+    def _in_order(self) -> Self:
+        if self.skipped and self.latest is None:
+            msg = "the occurrences a missed rule skips are followed by the one it pushes (§4:8)"
+            raise ValueError(msg)
+        instants = [
+            *self.skipped,
+            *((self.latest,) if self.latest is not None else ()),
+            *((self.successor,) if self.successor is not None else ()),
+        ]
+        if any(later <= earlier for earlier, later in pairwise(instants)):
+            msg = "a rule's occurrences fall due in order, each later than the one before it"
+            raise ValueError(msg)
+        return self
+
+
 class DueOccurrence(BaseModel):
     """One pending occurrence due at the instant the sensor asked about (§7:3)."""
 
@@ -10587,7 +10814,14 @@ class ScheduledDue(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 24 because the document gained the Task Scheduler's
+    **``schema_version`` is 25 because a scheduled task may hold a rule** (ADR-0340
+    §9:1, §9:3): a task's ``when`` may be a :class:`DueOnRule`, and a task with a rule
+    holds more than one occurrence. No member is added, since both ride inside
+    ``scheduled_tasks``, but a reader of 24 refuses the rule's kind and every task with
+    more than one occurrence, so the label moves. The closure rule is extended by
+    nothing.
+
+    **It was 24 because the document gained the Task Scheduler's
     content** (ADR-0350 §12:3): ``scheduled_tasks``, each with its occurrences, in the
     order they were written, and ``cascades``, the activation ids a stop command's cascade
     record names (§9:6). A task names its parent, the tasks it waits for and the
@@ -10660,12 +10894,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[24] = Field(
-        default=24,
+    schema_version: Literal[25] = Field(
+        default=25,
         description=(
-            "Shape of this export, pinned to exactly 24 (ADR-0039 §10, ADR-0350 §12:3): an "
+            "Shape of this export, pinned to exactly 25 (ADR-0039 §10, ADR-0340 §9:3): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[24]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[25]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."

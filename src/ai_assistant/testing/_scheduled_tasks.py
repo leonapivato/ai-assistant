@@ -23,13 +23,16 @@ from ai_assistant.core.types import (
     DueAt,
     DueNow,
     DueOccurrence,
+    DueOnRule,
     Identifier,
     NonBlankEncodableText,
     OccurrencePush,
     OccurrenceState,
+    RulePush,
     ScheduledDue,
     ScheduledOccurrence,
     ScheduledTask,
+    ScheduledTaskAuthor,
     ScheduledTaskCancel,
     ScheduledTaskWrite,
     TaskRefusal,
@@ -171,6 +174,24 @@ def checked_spawn(spawn: object) -> TaskSpawn:
         return TaskSpawn.model_validate(spawn.model_dump())
     except ValidationError as exc:
         msg = f"the spawn to write does not validate: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def checked_rule_push(value: object) -> RulePush | None:
+    """Return the store's own copy of a push's rule instants, or refuse them (ADR-0340 §9:3).
+
+    Raises:
+        PlanningError: If it is neither ``None`` nor a valid ``RulePush``.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, RulePush):
+        msg = f"a rule's push states its instants as a RulePush, not {type(value).__name__}"
+        raise PlanningError(msg)
+    try:
+        return RulePush.model_validate(value.model_dump())
+    except ValidationError as exc:
+        msg = f"the rule's push does not validate: {exc}"
         raise PlanningError(msg) from exc
 
 
@@ -451,7 +472,8 @@ def _wait_allowed(
 ) -> bool:
     """Whether the spawn's wait is one §5:4 and §9:4 allow.
 
-    Every task it waits on is held and is for its person (§5:4). And a replace never moves
+    Every task it waits on is held, is for its person and is one-off, never one with a
+    rule (§5:4, "it may name only one-off tasks"). And a replace never moves
     a task past its wait (§9:4, "a task waiting on named tasks is replaced only with a
     valid wait"; §5:4, "what it waits for never changes"): where the replaced task waits
     on tasks not all ended, the replacement waits too, on each of them that has not.
@@ -467,7 +489,10 @@ def _wait_allowed(
     if not isinstance(when, DueAfterTasks):
         return True
     return all(
-        (task := tasks.get(one)) is not None and task.person == spawn.person for one in when.tasks
+        (task := tasks.get(one)) is not None
+        and task.person == spawn.person
+        and not isinstance(task.when, DueOnRule)
+        for one in when.tasks
     )
 
 
@@ -483,8 +508,11 @@ def decide_task_write(  # noqa: PLR0913 — the schedule, the spawn and its spaw
     """Decide and apply one spawn's write, after its effect claim was decided (§3:3).
 
     The claim's own refusals are the caller's, decided first in the same step; this
-    takes the replace (§9:4), the wait (§5:4) and the two limits (§9:7-§9:8) in that
-    order, and on a refusal changes nothing.
+    takes the rule's author (ADR-0340 §4:1, §9:2), the replace (§9:4), the wait (§5:4)
+    and the two limits (§9:7-§9:8) in that order, and on a refusal changes nothing. A
+    rule's first occurrence is written at the instant the spawn carries (ADR-0340 §4:5,
+    §9:3), which the spawn's own validation requires for a rule and refuses for any
+    other when; the store computes no instant (§9:5).
 
     Args:
         schedule: The schedule the step read.
@@ -504,6 +532,8 @@ def decide_task_write(  # noqa: PLR0913 — the schedule, the spawn and its spaw
     if spawn.id in tasks:
         msg = f"the plan store already holds scheduled task {spawn.id} (ADR-0350 §3:3)"
         raise PlanningError(msg)
+    if isinstance(spawn.when, DueOnRule) and spawn.author is not ScheduledTaskAuthor.PERSON:
+        return _refused(TaskRefusal.ASSISTANTS_RULE)
     replaced = None if spawn.replaces is None else tasks.get(spawn.replaces)
     if spawn.replaces is not None:
         refusal = _replace_refusal(replaced, spawn, spawner, replace_any=replace_any)
@@ -536,6 +566,8 @@ def decide_task_write(  # noqa: PLR0913 — the schedule, the spawn and its spaw
         if isinstance(when, DueNow)
         else when.at
         if isinstance(when, DueAt)
+        else spawn.first_due_at
+        if isinstance(when, DueOnRule)
         else _waits_ended(tasks, when)
     )
     try:
@@ -579,14 +611,118 @@ def decide_cancel(
     return ScheduledTaskCancel(task=schedule.tasks[task_id])
 
 
+def _rule_push_fault(
+    task: ScheduledTask, occurrence: ScheduledOccurrence, rule: RulePush | None
+) -> str | None:
+    """Why a push's rule instants do not fit the pending occurrence, if they do not.
+
+    A rule's occurrence never pushed takes them, and every other push takes none
+    (ADR-0340 §9:3); the first instant they give is later than the pending one's.
+    """
+    first = isinstance(task.when, DueOnRule) and not occurrence.activations
+    if first and rule is None:
+        return (
+            f"occurrence {occurrence.number} of rule {task.id} is first pushed with its "
+            f"successor's instant, or none where the rule has ended (ADR-0340 §9:3)"
+        )
+    if not first and rule is not None:
+        return (
+            f"occurrence {occurrence.number} of {task.id} is pushed again or has no rule, so "
+            f"its push writes no next occurrence (ADR-0340 §9:3)"
+        )
+    if rule is None:
+        return None
+    given = [*rule.skipped, rule.latest, rule.successor]
+    later = next((one for one in given if one is not None), None)
+    if later is not None and occurrence.due_at is not None and later <= occurrence.due_at:
+        return (
+            f"a rule's next occurrences fall due after occurrence {occurrence.number} of "
+            f"{task.id} (ADR-0340 §4:6)"
+        )
+    return None
+
+
+def _with_occurrences(
+    task: ScheduledTask, occurrences: tuple[ScheduledOccurrence, ...]
+) -> ScheduledTask:
+    """``task`` holding ``occurrences``, revalidated."""
+    try:
+        return ScheduledTask.model_validate({**task.model_dump(), "occurrences": occurrences})
+    except ValidationError as exc:
+        msg = f"scheduled task {task.id} would no longer validate: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _new_occurrence(number: int, due_at: datetime, **state: Any) -> ScheduledOccurrence:
+    """A new occurrence of a rule, numbered ``number``, at an instant its caller gave."""
+    try:
+        return ScheduledOccurrence(number=number, due_at=due_at, **state)
+    except ValidationError as exc:
+        msg = f"the rule's occurrence {number} would not validate: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _push_rule(
+    schedule: Schedule,
+    task: ScheduledTask,
+    occurrence: ScheduledOccurrence,
+    activation_id: str,
+    rule: RulePush,
+) -> None:
+    """Push a rule's occurrence first pushed, and write what follows it (ADR-0340 §4:6-§4:8).
+
+    Where it was missed more than once, the pending occurrence and each one between it
+    and the latest end skipped, each with the instant it was due, and the latest is the
+    one pushed. The successor, where the rule has not ended, is written pending last.
+    Every new occurrence takes the next number, and none is ever renumbered (§4:10).
+    """
+    held = list(task.occurrences)
+    number = len(held)
+    if rule.latest is None:
+        held[occurrence.number - 1] = _occurrence(
+            occurrence, state=OccurrenceState.PUSHED, activations=(activation_id,)
+        )
+    else:
+        held[occurrence.number - 1] = _occurrence(
+            occurrence, state=OccurrenceState.SKIPPED, ended_at=schedule.now
+        )
+        for instant in rule.skipped:
+            number += 1
+            held.append(
+                _new_occurrence(
+                    number, instant, state=OccurrenceState.SKIPPED, ended_at=schedule.now
+                )
+            )
+        number += 1
+        held.append(
+            _new_occurrence(
+                number, rule.latest, state=OccurrenceState.PUSHED, activations=(activation_id,)
+            )
+        )
+    if rule.successor is not None:
+        held.append(_new_occurrence(number + 1, rule.successor))
+    schedule.put(_with_occurrences(task, tuple(held)))
+
+
 def decide_push(
-    schedule: Schedule, task_id: str, number: int, activation_id: str
+    schedule: Schedule,
+    task_id: str,
+    number: int,
+    activation_id: str,
+    *,
+    rule: RulePush | None = None,
 ) -> OccurrencePush:
     """Decide and apply one push, with its cascade check (ADR-0350 §7:5).
 
+    For a rule's occurrence first pushed, ``rule`` gives its successor and any it skips,
+    written in the same step (ADR-0340 §4:6, §4:8, §9:3); a cascade's cancel writes
+    none of them, and so ends the rule (§4:7).
+
     Raises:
         PlanningError: If the task holds no such occurrence, the occurrence is pending
-            but not yet due, or an occurrence was already pushed to ``activation_id``.
+            but not yet due, an occurrence was already pushed to ``activation_id``, or
+            ``rule`` does not fit the push: given for a task with no rule or a push
+            again, missing for a rule's first push, or no later than the pending one.
     """
     if task_of(schedule.tasks, activation_id) is not None:
         msg = f"an occurrence was already pushed to activation {activation_id} (ADR-0350 §7:5)"
@@ -594,6 +730,9 @@ def decide_push(
     task = schedule.tasks.get(task_id)
     if task is None:
         return OccurrencePush.NOT_PENDING
+    if rule is not None and not isinstance(task.when, DueOnRule):
+        msg = f"scheduled task {task_id} has no rule, so its push writes no next occurrence"
+        raise PlanningError(msg)
     occurrence = task.occurrence(number)
     if occurrence is None:
         msg = f"scheduled task {task_id} holds no occurrence {number}"
@@ -603,6 +742,9 @@ def decide_push(
     if occurrence.due_at is None:
         msg = f"occurrence {number} of scheduled task {task_id} waits on tasks not yet ended"
         raise PlanningError(msg)
+    fault = _rule_push_fault(task, occurrence, rule)
+    if fault is not None:
+        raise PlanningError(fault)
     if any(one.parent in schedule.cascades for one in _above(schedule.tasks, task)):
         schedule.put(
             _rebuilt(
@@ -612,6 +754,9 @@ def decide_push(
         )
         _release(schedule)
         return OccurrencePush.CASCADE_CANCELLED
+    if rule is not None:
+        _push_rule(schedule, task, occurrence, activation_id, rule)
+        return OccurrencePush.PUSHED
     schedule.put(
         _rebuilt(
             task,
