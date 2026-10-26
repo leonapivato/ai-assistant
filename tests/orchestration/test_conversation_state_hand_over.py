@@ -177,3 +177,19 @@ async def test_many_taken_over_episodes_are_read_past_in_wider_pages() -> None:
         *handed,
     )
     assert ending is ActivationEnding.COULDNT_FINISH
+
+
+async def test_an_ending_past_the_newest_reads_bound_is_still_kept() -> None:
+    """§5:3: past a thousand hand-overs, the older episodes are read on, newest first."""
+    handed = [
+        _stopped(_HERE, f"handed-{one}", minutes=10 + one, taken_over_by=f"taker-{one}")
+        for one in range(1001)
+    ]
+    takers = [_done(_THERE, f"taker-{one}", minutes=10 + one) for one in range(1001)]
+    ending = await _ending(
+        _done(_HERE, "older", minutes=0),
+        _failed(_HERE, "before", minutes=1),
+        *handed,
+        *takers,
+    )
+    assert ending is ActivationEnding.COULDNT_FINISH

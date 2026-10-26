@@ -273,7 +273,8 @@ async def conversation_state(
 
 
 #: How much wider each read of a conversation's newest ended episodes is than the last,
-#: while every one read was taken over, up to the read's own bound.
+#: while every one read was taken over, up to the read's own bound; past it, the older
+#: episodes are enumerated and read in pages of the same bound.
 _ENDING_WIDER: Final = 4
 _ENDING_BOUND: Final = 1000
 
@@ -284,8 +285,12 @@ async def _shown_ending(memory: MemoryStore, channel: ChannelIdentity) -> Activa
     Its newest ended episode, read newest first, passing over each whose activation's
     matter was taken over and whose taker, followed forward, is not this conversation's
     own and ended. Where the taker is, it is the taker's ending. ``None`` where nothing
-    the conversation started has ended that is not passed over, among the newest the
-    read's bound reaches.
+    the conversation started has ended that is not passed over.
+
+    The newest are read in widening pages, so the common case reads one episode. Where
+    every one of the newest the read's bound reaches was passed over, the older ones are
+    enumerated and read newest first, so no ending the conversation showed before is
+    lost however many hand-overs came after it.
 
     Raises:
         MemoryStoreError: If the episodes cannot be read.
@@ -294,16 +299,72 @@ async def _shown_ending(memory: MemoryStore, channel: ChannelIdentity) -> Activa
     while True:
         page = await memory.channel_episodes(channel, limit=limit)
         for entry in reversed(page.entries):
-            record = entry.record
-            processing = record.processing_record
-            if processing is None or processing.taken_over_by is None:
-                return activation_ending(record)
-            taker = await _last_taker(memory, processing.taken_over_by)
-            if taker is not None and started_from(taker, channel) is not None:
-                return activation_ending(taker)
-        if len(page.entries) < limit or limit >= _ENDING_BOUND:
+            shown, ending = await _judged(memory, entry.record, channel)
+            if shown:
+                return ending
+        if len(page.entries) < limit:
             return None
+        if limit >= _ENDING_BOUND:
+            return await _older_ending(memory, channel, below=page.entries[0].number)
         limit = min(limit * _ENDING_WIDER, _ENDING_BOUND)
+
+
+async def _older_ending(
+    memory: MemoryStore, channel: ChannelIdentity, *, below: int
+) -> ActivationEnding | None:
+    """:func:`_shown_ending` over the episodes numbered below ``below``, newest first.
+
+    Enumerated with ``channel_episode_ids``, which reads every record held on the
+    channel, and read with ``get_many``, which keeps only what is live, as
+    ``channel_episodes`` does; an open episode is passed over, as that read never
+    reads one.
+
+    Raises:
+        MemoryStoreError: If the episodes cannot be read.
+    """
+    older: list[str] = []
+    after: int | None = None
+    while held := await memory.channel_episode_ids(channel, after=after, limit=_ENDING_BOUND):
+        older.extend(one.episode_id for one in held if one.number < below)
+        if held[-1].number >= below:
+            break
+        after = held[-1].number
+    for end in range(len(older), 0, -_ENDING_BOUND):
+        named = older[max(0, end - _ENDING_BOUND) : end]
+        read = await memory.get_many(named)
+        for episode_id in reversed(named):
+            record = read.get(episode_id)
+            if (
+                not isinstance(record, EpisodicMemory)
+                or record.processing_record is None
+                or record.processing_record.is_open
+            ):
+                continue
+            shown, ending = await _judged(memory, record, channel)
+            if shown:
+                return ending
+    return None
+
+
+async def _judged(
+    memory: MemoryStore, record: EpisodicMemory, channel: ChannelIdentity
+) -> tuple[bool, ActivationEnding | None]:
+    """Whether the state shows an ending for ``record``, an ended episode, and which.
+
+    Its own, where its matter was not taken over; the taker's, followed forward, where
+    that one was started from ``channel`` and has ended; and none, passing it over,
+    otherwise (ADR-0352 §5:3).
+
+    Raises:
+        MemoryStoreError: If an episode cannot be read.
+    """
+    processing = record.processing_record
+    if processing is None or processing.taken_over_by is None:
+        return True, activation_ending(record)
+    taker = await _last_taker(memory, processing.taken_over_by)
+    if taker is not None and started_from(taker, channel) is not None:
+        return True, activation_ending(taker)
+    return False, None
 
 
 async def _last_taker(memory: MemoryStore, taker: str) -> EpisodicMemory | None:

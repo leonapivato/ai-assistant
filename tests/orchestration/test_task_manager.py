@@ -234,6 +234,22 @@ async def test_each_part_shows_at_most_the_listing_bound_and_counts_the_rest() -
     assert left.more_tasks == 1
 
 
+async def test_tasks_across_levels_are_listed_in_the_order_written() -> None:
+    """§3:6: a grandchild written before a later direct spawn is listed first."""
+    world = _World(limits=TaskManagerLimits(chain_limit=10, pending_limit=50, listing_bound=1))
+    step = activation()
+    child = await write_task(world.plans, step)
+    ran = await pushed(world.plans, child)
+    grandchild = await write_task(world.plans, ran, when=DueAt(at=AT + timedelta(days=1)))
+    await world.plans.settle_occurrence(ran, OccurrenceState.DONE)
+    later = await write_task(world.plans, step, when=DueAt(at=AT + timedelta(days=2)))
+
+    left = await _still_live(world, step)
+
+    assert [one.task_id for one in left.tasks] == [grandchild.id]
+    assert left.more_tasks == 1, f"{later.id} is counted, past the bound"
+
+
 async def test_a_marked_task_is_shown_with_its_text_withheld() -> None:
     """§3:5: a task carrying the outside-content mark shows its mark and no text."""
     world = _World()

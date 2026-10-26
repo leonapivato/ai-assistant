@@ -758,14 +758,19 @@ class TaskManager:
             more_activations=max(0, len(activations) - bound),
         )
 
-    async def _below(self, activation_id: str) -> list[ScheduledTask]:
+    async def _below(self, activation_id: str) -> tuple[ScheduledTask, ...]:
         """Every task below ``activation_id``, in the order written, each once (§3:2).
+
+        The walk finds every activation below, level by level; the tasks they spawned
+        are then read in one read over all of them, which gives the store's order of
+        writing across levels (§3:6): a child step's task written before a later direct
+        spawn of the stopped activation is listed first.
 
         Raises:
             PlanningError: If the plan store cannot be read.
         """
-        found: dict[str, ScheduledTask] = {}
-        walked = {activation_id}
+        found: set[str] = set()
+        walked = [activation_id]
         frontier = [activation_id]
         while frontier:
             below = await self._plans.spawned_tasks(frontier)
@@ -773,12 +778,14 @@ class TaskManager:
             for task in below:
                 if task.id in found:
                     continue
-                found[task.id] = task
+                found.add(task.id)
                 for one in task.activations:
                     if one not in walked:
-                        walked.add(one)
+                        walked.append(one)
                         frontier.append(one)
-        return list(found.values())
+        if not found:
+            return ()
+        return await self._plans.spawned_tasks(walked)
 
     async def parents(self, tasks: Sequence[ScheduledTask]) -> dict[str, TaskParent]:
         """Where and when each of ``tasks``' parents started, from the record (§4:6, §9:4).
