@@ -1,6 +1,6 @@
 # 98. Ingested content is data, never instruction — and the blast radius is bounded by construction
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0351 (§1:2's *never by inspecting the text*, in the addition alone: understanding's relay mark)
 - Date: 2026-08-03
 - **Note (2026-08-03): ratified, and §7's tally of its own over-reaches was
   corrected in place at that moment.** `Proposed` → `Accepted`, in the separate
@@ -84,6 +84,7 @@
   mechanism ADR-0093 §4 forbids, and its citation of ADR-0088 for evidence
   discipline is a mis-citation. The threat #668 describes is real and understated;
   two of the three routes it names are not the routes that carry it.
+- Partially superseded: 2026-10-25 by ADR-0351 — §1:2's *decided by recorded origin, never by inspecting the text*, in the addition alone: understanding may mark an input of the person's own as carrying words its sender did not write themselves, such as a pasted email. That reading is recorded with the episode, only lowers, and makes the input outside, with no authority and its supports held by unknown; it never makes anything the person's own (ADR-0351 §5:6–§5:8, §6:5, §7:6). Every other clause stands. This replacement takes effect on ratification of ADR-0351. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
