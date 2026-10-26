@@ -2107,7 +2107,7 @@ class _ChatView:
             if (
                 previous is None
                 or not previous.working
-                or previous.activation_id != state.activation_id
+                or previous.activation_ids != state.activation_ids
             ):
                 _print("[dim]The assistant is working… you can keep writing.[/]")
                 _print_stop_hint(state)
@@ -2913,9 +2913,11 @@ def _print_stop_hint(state: ConversationState) -> None:
     ADR-0297 §5's residual of a failed id factory, and offering a command it would only
     refuse would be worse than silence.
     """
-    if state.activation_id is None:
+    # ADR-0349 §1:4's step 1: the state names at most the one activation it named before;
+    # stopping every one it names is step 4's (§4:3).
+    if not state.activation_ids:
         return
-    _print(f"[dim]To stop it: assistant stop {_safe(state.activation_id)}[/]")
+    _print(f"[dim]To stop it: assistant stop {_safe(state.activation_ids[-1])}[/]")
 
 
 def _print_chat_hint(conversation_id: str) -> None:

@@ -335,11 +335,14 @@ async def test_a_running_activation_whose_episode_was_forgotten_still_shows_work
     try:
         before = await composed.engine.conversation(first.conversation_id)
         assert before is not None
-        assert (before.state.working, before.state.activation_id) == (True, turn.activation_id)
+        assert (before.state.working, before.state.activation_ids) == (
+            True,
+            (turn.activation_id,),
+        )
         assert await composed.engine.forget(turn.address) is True
         during = await composed.engine.conversation(first.conversation_id)
         assert during is not None
-        assert (during.state.working, during.state.activation_id) == (True, turn.activation_id)
+        assert (during.state.working, during.state.activation_ids) == (True, (turn.activation_id,))
     finally:
         release.set()
     await composed.idle(first.conversation_id)

@@ -5,7 +5,8 @@ shares: :func:`episode_content`, its search text (§7), and :func:`project_episo
 a model is shown of it (§8). ADR-0286 adds :func:`episode_extends`, the one test of
 whether a revision of an open episode only extends the stored one (§3). ADR-0322 adds
 the question's mark to the projection (§4:3), and :func:`question_marks`, which pairs
-each mark with the round it was read from.
+each mark with the round it was read from. ADR-0349 §6:7 extends the projection with
+the peer view, another activation's own work as every share reads it.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import binascii
 import json
 import re
 from hashlib import sha256
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, overload
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
@@ -30,6 +31,9 @@ from ai_assistant.core.types import (
     EpisodeSummary,
     EpisodicMemory,
     InputOrigin,
+    PeerEffect,
+    PeerNotes,
+    PeerView,
     ProcessingStatus,
     ProjectedEvidence,
     ProjectedRound,
@@ -37,18 +41,32 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
+    ToolOutcome,
     rests_on_recorded_external_content,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from ai_assistant.core.types import ActivationDigest, PlanningRound
+    from ai_assistant.core.types import (
+        ActivationDigest,
+        ActivationEffect,
+        EpisodeProcessingRecord,
+        JoinedInput,
+        PlanningRound,
+    )
 
 _MAX_PAGE = 100
 _MAX_CHUNK = 65536
 
 _TEXT: TypeAdapter[str] = TypeAdapter(EncodableText)
+
+#: What separates the messages of one held input in a peer view's text of it, as the
+#: readers separate the messages they take in as one input.
+_MESSAGE_SEPARATOR: Final = "\n\n"
+
+#: The effect outcomes a peer view shows: done, and unknown (ADR-0349 §6:9).
+_SHOWN_OUTCOMES: Final = frozenset({ToolOutcome.SUCCEEDED, ToolOutcome.INDETERMINATE})
 
 
 def canonical_json(value: BaseModel) -> str:
@@ -226,6 +244,7 @@ def episode_content(record: EpisodicMemory) -> str:
 # --- the episode a model is shown (ADR-0284 §8) --------------------------------
 
 
+@overload
 def project_episode(
     record: EpisodicMemory,
     *,
@@ -233,7 +252,28 @@ def project_episode(
     admit_outside_input: bool = False,
     owner_records: bool = False,
     candidates: Sequence[str] = (),
-) -> EpisodeProjection:
+) -> EpisodeProjection: ...
+
+
+@overload
+def project_episode(
+    record: EpisodicMemory,
+    *,
+    excerpt_chars: int,
+    owner_records: bool = False,
+    effects: Sequence[ActivationEffect],
+) -> PeerView: ...
+
+
+def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349 §6:7)
+    record: EpisodicMemory,
+    *,
+    excerpt_chars: int,
+    admit_outside_input: bool = False,
+    owner_records: bool = False,
+    candidates: Sequence[str] = (),
+    effects: Sequence[ActivationEffect] | None = None,
+) -> EpisodeProjection | PeerView:
     """Project an episode onto what a model is shown of it (ADR-0284 §8:1-§8:2).
 
     Every model-facing rendering of a stored episode reads the episode through this
@@ -273,29 +313,55 @@ def project_episode(
     processing record shows its ``content`` as its input instead (§8:2), the one path on
     which a model is shown ``content``. No stage verdict is shown (ADR-0318 §3:1).
 
+    **The peer view** (ADR-0349 §6:7-§6:10) is the second view, returned where
+    ``effects`` is given: another activation's own work, read by every share, and
+    computed from two records alone, the activation's episode as stored, open or
+    frozen, and its effect records, which orchestration reads from the plan store and
+    hands in (§6:8). Of the episode it shows only what its stages appended when they
+    ended, which is all a stored record holds, and of the effects only those whose
+    outcome is written and is done or unknown. Its input is shown as this projection
+    shows it with ``admit_outside_input`` false, cut to ``excerpt_chars``, and so is
+    every input the activation holds beside it. Its latest meaning is shown, which a
+    reader renders as provisional; its rounds' notes and its evidence under
+    ``owner_records``, as here; and each effect shown as :class:`PeerEffect` says. A
+    round's message is shown only through a message effect done or unknown, never from
+    the round itself, so a message not yet sent is never shown (§6:8). Nothing else of
+    the episode is: no recall, story link, failed call, draft, approval, call value or
+    result (§6:10).
+
     Args:
         record: The stored episode, exactly as held.
         excerpt_chars: The bound, in characters, on the input, the response,
             each round's message and notes, and each evidence item.
-        admit_outside_input: Whether an ``outside`` input's text is shown.
+        admit_outside_input: Whether an ``outside`` input's text is shown. Never set
+            for the peer view.
         owner_records: Whether a record placed for the owner alone may be shown to
             this reader, which decides the episode notes and the evidence.
         candidates: The facts of the episode's pending candidates, in the order its
-            rounds record them, or none.
+            rounds record them, or none. None for the peer view.
+        effects: The activation's effect records, finished or not, in claim order, as
+            the plan store returns them: given, the peer view is returned.
 
     Returns:
-        The projection.
+        The projection, or the peer view where ``effects`` is given.
 
     Raises:
-        ValueError: If ``excerpt_chars`` is not an integer of at least 1, the
-            episode is open: an open episode is never a model input (ADR-0286 §6),
-            so a reader that feeds a model passes over it before it projects; or
-            ``candidates`` are given for an episode with no processing record, which
-            records no round.
+        ValueError: If ``excerpt_chars`` is not an integer of at least 1; for the
+            projection, if the episode is open: an open episode is never a model
+            input there (ADR-0286 §6), so a reader that feeds a model passes over it
+            before it projects; or ``candidates`` are given for an episode with no
+            processing record, which records no round; for the peer view, if the
+            episode has no processing record, ``admit_outside_input`` or
+            ``candidates`` are given, or an effect is another activation's.
     """
     if type(excerpt_chars) is not int or excerpt_chars < 1:
         msg = "the episode excerpt bound must be an integer of at least 1"
         raise ValueError(msg)
+    if effects is not None:
+        if admit_outside_input or candidates:
+            msg = "a peer view admits no outside input and carries no candidate (ADR-0349 §6:9)"
+            raise ValueError(msg)
+        return _peer_view(record, effects, excerpt_chars, owner_records=owner_records)
     if record.processing_record is not None and record.processing_record.is_open:
         msg = "an open episode is never a model input (ADR-0286 §6)"
         raise ValueError(msg)
@@ -335,6 +401,81 @@ def project_episode(
             ProjectedText(text=fact[:excerpt_chars], full_chars=len(fact)) for fact in candidates
         ),
     )
+
+
+def _peer_view(
+    record: EpisodicMemory,
+    effects: Sequence[ActivationEffect],
+    bound: int,
+    *,
+    owner_records: bool,
+) -> PeerView:
+    """Another activation's own work, from its episode as stored and its effects (§6:8)."""
+    processing = record.processing_record
+    if processing is None:
+        msg = "a peer view reads an activation's episode, which has a processing record"
+        raise ValueError(msg)
+    trigger = processing.trigger
+    shown = trigger.origin is InputOrigin.USER
+    latest = processing.understanding[-1] if processing.understanding else None
+    notes = (
+        tuple(
+            PeerNotes(notes=projected, marked=one.notes_marked)
+            for one in processing.rounds
+            if (projected := _projected(one.notes, bound)) is not None
+        )
+        if owner_records
+        else ()
+    )
+    return PeerView(
+        channel=trigger.channel,
+        origin=trigger.origin,
+        input=_projected(_input_text(trigger), bound) if shown else None,
+        joined=tuple(_joined_text(one, bound) for one in processing.joined) if shown else (),
+        meaning=None if latest is None else latest.meaning,
+        notes=notes,
+        evidence=_projected_evidence(processing.digests, bound) if owner_records else (),
+        did=_peer_effects(processing, effects, bound),
+        status=processing.status,
+        reason=processing.reason,
+        derived_from_external=rests_on_recorded_external_content(record.provenance),
+    )
+
+
+def _joined_text(joined: JoinedInput, bound: int) -> ProjectedText:
+    """One held input's text: its messages, apart, as the readers take them in as one."""
+    text = _MESSAGE_SEPARATOR.join(one.text for one in joined.messages)
+    return ProjectedText(text=text[:bound], full_chars=len(text))
+
+
+def _peer_effects(
+    processing: EpisodeProcessingRecord, effects: Sequence[ActivationEffect], bound: int
+) -> tuple[PeerEffect, ...]:
+    """Each effect done or unknown, in claim order, as §6:9 shows it.
+
+    Raises:
+        ValueError: If an effect is another activation's.
+    """
+    rounds = {one.id: one for one in processing.rounds}
+    shown: list[PeerEffect] = []
+    for effect in effects:
+        if effect.activation_id != processing.activation_id:
+            msg = "a peer view shows the effects of the activation it reads alone"
+            raise ValueError(msg)
+        outcome = effect.outcome
+        if outcome is None or outcome not in _SHOWN_OUTCOMES:
+            continue
+        if effect.is_call:
+            shown.append(PeerEffect(outcome=outcome, capability=effect.capability))
+        elif effect.round is None:
+            shown.append(PeerEffect(outcome=outcome, couldnt_finish=True))
+        else:
+            planned = rounds.get(effect.round)
+            message = (
+                _projected(planned.text, bound) if planned and _shows_message(planned) else None
+            )
+            shown.append(PeerEffect(outcome=outcome, message=message))
+    return tuple(shown)
 
 
 def _projected_rounds(

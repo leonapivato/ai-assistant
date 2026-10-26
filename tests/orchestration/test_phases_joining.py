@@ -433,7 +433,7 @@ async def test_a_takeover_stops_the_uncommitted_work_and_brings_its_input_in() -
     assert joined.taken_over_from == older
     assert joined.channel == conversation_channel(first)
     assert [one.text for one in joined.messages] == ["book Riverside"]
-    assert [(one.version, one.continues) for one in taken.understanding] == [(1, older), (2, None)]
+    assert [(one.version, one.continues) for one in taken.understanding] == [(1, (older,)), (2, ())]
     assert (ControllerStage.TAKEOVER, ControllerRule.TAKEOVER_UNDECIDED, StageOutcome.DONE) in [
         (one.stage, one.due, one.outcome) for one in taken.stages
     ]
@@ -480,9 +480,9 @@ async def test_two_takeovers_in_one_pass_one_per_understanding_version() -> None
         (b, conversation_channel(second)),
     ]
     assert [(one.version, one.continues) for one in taker.understanding] == [
-        (1, a),
-        (2, b),
-        (3, None),
+        (1, (a,)),
+        (2, (b,)),
+        (3, ()),
     ]
     assert _ran(taker, ControllerStage.TAKEOVER) == [ControllerRule.TAKEOVER_UNDECIDED] * 2
     assert await _assistant(harness, first) == []
@@ -508,7 +508,7 @@ async def test_a_takeover_is_refused_at_a_join_limit_of_zero() -> None:
     refused = _record_of(found, newer)
     assert refused.joined == ()
     # The version that named it is the only one: nothing joined, nothing to read again.
-    assert [(one.version, one.continues) for one in refused.understanding] == [(1, older)]
+    assert [(one.version, one.continues) for one in refused.understanding] == [(1, (older,))]
     assert _ran(refused, ControllerStage.TAKEOVER) == [ControllerRule.TAKEOVER_UNDECIDED]
     assert older not in (await harness.plans.export()).stopped_activations
 
@@ -532,7 +532,7 @@ async def test_a_takeover_is_refused_once_the_join_limit_is_exhausted() -> None:
     assert await _assistant(harness, first) == []
     taker = _record_of(found, c)
     assert [one.taken_over_from for one in taker.joined] == [a]
-    assert [(one.version, one.continues) for one in taker.understanding] == [(1, a), (2, b)]
+    assert [(one.version, one.continues) for one in taker.understanding] == [(1, (a,)), (2, (b,))]
     assert _ran(taker, ControllerStage.TAKEOVER) == [ControllerRule.TAKEOVER_UNDECIDED] * 2
     assert b not in (await harness.plans.export()).stopped_activations
 
@@ -546,7 +546,7 @@ async def test_episodes_record_nothing_joined_where_nothing_joins() -> None:
     record = processing(episode)
     assert record.joined == ()
     assert _ran(record, ControllerStage.TAKEOVER) == []
-    assert [one.continues for one in record.understanding] == [None]
+    assert [one.continues for one in record.understanding] == [()]
     assert len(await episodes(harness.memory)) == 1
 
 

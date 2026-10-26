@@ -1858,6 +1858,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     and the new members as unknown (ADR-0124 §9:2). **The method set does not move and
     stays at 69**: ``AssistantEngine`` gains no member (§10:6).
 
+    **119 is ADR-0349 §10:5, on wire-carried core types alone.** The processing record on
+    ``EpisodicMemory`` holds understanding versions whose ``continues`` becomes a
+    sequence, and a ``joined`` that may name one activation on several inputs; and
+    ``ConversationState`` trades ``activation_id`` for ``activation_ids``. A peer at 118
+    refuses the sequence where it reads one id and the new field as extra (ADR-0124
+    §9:2). **The method set does not move and stays at 69**: no ``Protocol`` changes.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1866,7 +1873,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (69, 118), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (69, 119), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

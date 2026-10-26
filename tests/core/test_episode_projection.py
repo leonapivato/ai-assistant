@@ -420,7 +420,7 @@ def test_origin_and_derived_from_external_are_independent() -> None:
 @pytest.mark.parametrize("bound", [0, -1, True, 1.5])
 def test_the_excerpt_bound_is_a_positive_integer(bound: object) -> None:
     with pytest.raises(ValueError, match="excerpt bound"):
-        project_episode(_recordless(), excerpt_chars=bound)  # type: ignore[arg-type]
+        project_episode(_recordless(), excerpt_chars=bound)  # type: ignore[call-overload]
 
 
 def test_the_projection_never_carries_the_search_text_of_a_recorded_episode() -> None:

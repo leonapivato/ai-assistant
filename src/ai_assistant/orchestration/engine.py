@@ -1011,7 +1011,7 @@ class _ActivationPass:
         understanding = self.understanding
         return (
             understanding is not None
-            and understanding.continues is not None
+            and bool(understanding.continues)
             and understanding.version not in self.takeovers
         )
 
@@ -7988,7 +7988,9 @@ class Engine:
         """
         understanding = working.understanding
         assert understanding is not None  # noqa: S101 — the rule makes the stage due only once a version is recorded
-        named = understanding.continues
+        # ADR-0349 §1:4's step 1: ``continues`` holds at most the one activation it held
+        # before, and the stage reads it as it did; step 2 decides for every one named.
+        named = next(iter(understanding.continues), None)
         state = active_state()
         await self._takeover_settled(named, state, working)
         # No await between the settle's end and the check: one synchronous step (§4:6).

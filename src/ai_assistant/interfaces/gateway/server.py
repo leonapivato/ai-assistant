@@ -5106,9 +5106,11 @@ def _state_view(state: ConversationState) -> dict[str, Any]:
     conversation runs (§8:2), and how the last one ended (§8:3, with ADR-0295 §3:4's
     *stopped*). The page renders it beside the transcript and never into it (§8:1).
     """
+    # ADR-0349 §1:4's step 1: the page still reads the one id the state named before, so
+    # the view relays it under its own key; the page's stop for every one is step 4's.
     return {
         "working": state.working,
-        "activation_id": state.activation_id,
+        "activation_id": state.activation_ids[-1] if state.activation_ids else None,
         "last_ended": None if state.last_ended is None else state.last_ended.value,
     }
 

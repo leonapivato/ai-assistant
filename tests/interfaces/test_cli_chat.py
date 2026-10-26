@@ -957,7 +957,7 @@ class _Working(FakeAssistantEngine):
 
 async def test_working_and_how_it_ended_are_shown_as_they_change(output: StringIO) -> None:
     """§8:2, §8:3: working…, then how it ended — each change shown once, as pushed."""
-    working = ConversationState(working=True, activation_id="a-1")
+    working = ConversationState(working=True, activation_ids=("a-1",))
     done = ConversationState(last_ended=ActivationEnding.DONE)
     engine = _Scripted()
     conversation = await _started(engine, HUB)
@@ -989,7 +989,7 @@ async def test_a_stream_reopened_inside_the_client_is_caught_up_on(output: Strin
     An activation that ended while the stream was quiet is no change the reopened
     stream pushes, so the roles it opens with are what has the conversation read again.
     """
-    working = ConversationState(working=True, activation_id="a-1")
+    working = ConversationState(working=True, activation_ids=("a-1",))
     done = ConversationState(last_ended=ActivationEnding.DONE)
     engine = _Scripted(states=())
     conversation = await _started(engine, HUB)
@@ -1034,7 +1034,7 @@ def test_working_names_the_activation_a_stop_would_name(output: StringIO) -> Non
     """ADR-0297 §5:7, §5:8: the id is the current state's, shown beside "working…"."""
     view = cli._ChatView("c-1", device_id="hub", cursor=0)
 
-    view.show_state(ConversationState(working=True, activation_id="a-1"))
+    view.show_state(ConversationState(working=True, activation_ids=("a-1",)))
 
     rendered = _flat(output.getvalue())
     assert "The assistant is working" in rendered
@@ -1054,9 +1054,9 @@ def test_a_new_activation_while_working_names_its_own_id(output: StringIO) -> No
     """One ended and the next began between two reads: the id shown is the running one's."""
     view = cli._ChatView("c-1", device_id="hub", cursor=0)
 
-    view.show_state(ConversationState(working=True, activation_id="a-1"))
-    view.show_state(ConversationState(working=True, activation_id="a-1"))
-    view.show_state(ConversationState(working=True, activation_id="a-2"))
+    view.show_state(ConversationState(working=True, activation_ids=("a-1",)))
+    view.show_state(ConversationState(working=True, activation_ids=("a-1",)))
+    view.show_state(ConversationState(working=True, activation_ids=("a-2",)))
 
     rendered = _flat(output.getvalue())
     assert rendered.count("assistant stop a-1") == 1

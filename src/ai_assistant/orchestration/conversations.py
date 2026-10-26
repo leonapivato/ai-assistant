@@ -256,9 +256,11 @@ async def conversation_state(
     known = [one for one in held if one is not None]
     ended = await memory.channel_episodes(channel, limit=1)
     last = ended.entries[-1].record if ended.entries else None
+    # ADR-0349 §1:4's step 1: the state names the one activation it named before, the
+    # newest id known, until the readers start an activation for every message (§4:4).
     return ConversationState(
         working=bool(held),
-        activation_id=known[-1] if known else None,
+        activation_ids=(known[-1],) if known else (),
         last_ended=activation_ending(last) if isinstance(last, EpisodicMemory) else None,
     )
 
@@ -462,7 +464,7 @@ def check_devices_fit(
             recorded_turns=_WIDEST_NUMBER,
             state=ConversationState(
                 working=True,
-                activation_id=_PROBE_CONVERSATION,
+                activation_ids=(_PROBE_CONVERSATION,),
                 last_ended=ActivationEnding.COULDNT_FINISH,
             ),
             devices=held,

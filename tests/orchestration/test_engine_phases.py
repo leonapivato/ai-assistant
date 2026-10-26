@@ -961,8 +961,8 @@ async def test_a_stop_mid_task_ends_after_the_current_round_and_writes_nothing_m
     await asyncio.wait_for(completer.entered.wait(), _SETTLE)
     state = await harness.engine.conversation(conversation)
     assert state is not None
-    assert state.state.activation_id is not None
-    assert await harness.engine.stop_activation(state.state.activation_id) is (
+    assert state.state.activation_ids
+    assert await harness.engine.stop_activation(state.state.activation_ids[-1]) is (
         ActivationStop.STOPPED
     )
     completer.gate.set()

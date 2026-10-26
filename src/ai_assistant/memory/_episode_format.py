@@ -1,7 +1,7 @@
 """Fresh-state memory format boundary for ADR-0275 §12.
 
 Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286, 0307, 0308 and 0315; since then,
-each store's own label by ADRs 0328, 0332, 0338, 0345 and 0350.
+each store's own label by ADRs 0328, 0332, 0338, 0345, 0349 and 0350.
 """
 
 from __future__ import annotations
@@ -78,14 +78,24 @@ PINNED_RECORD_FORMAT: Final[int] = 15
 #: §5:3).
 PLACED_RECORD_FORMAT: Final[int] = 16
 
-#: The memory store's own label, the one this build writes. It advances to 17 for
-#: ADR-0350's episode record: ``PlanningRound`` gains ``place`` (§12:8) and
-#: ``InputOrigin`` the member ``assistant`` (§12:7), a field of a ``core`` model the
-#: store serialises in every episode and a member of a closed enumeration a stored
-#: episode names (ADR-0326 §2:3). A file at 16 is upgraded in place by the label alone,
-#: since a record written at 16 validates unchanged, and an older build, which serves 12
-#: to 16, refuses a file at 17, whose episodes it would not read (ADR-0326 §5:3, #3429).
-MEMORY_RECORD_FORMAT: Final[int] = 17
+#: The memory store's label for ADR-0350's episode record. It advances to 17:
+#: ``PlanningRound`` gains ``place`` (§12:8) and ``InputOrigin`` the member
+#: ``assistant`` (§12:7), a field of a ``core`` model the store serialises in every
+#: episode and a member of a closed enumeration a stored episode names (ADR-0326 §2:3). A
+#: file at 16 is upgraded in place by the label alone, since a record written at 16
+#: validates unchanged, and an older build, which serves 12 to 16, refuses a file at 17,
+#: whose episodes it would not read (ADR-0326 §5:3, #3429).
+SCHEDULED_RECORD_FORMAT: Final[int] = 17
+
+#: The memory store's own label, the one this build writes. It advances to 18 for
+#: ADR-0349 §10:6's episode record: each understanding's ``continues`` becomes a
+#: sequence of the activations it continues (§10:2), the shape of a value the store
+#: serialises in every episode (ADR-0326 §2:3). A file at 17 is upgraded in place: each
+#: episode whose understandings record ``continues`` is rewritten, one naming an
+#: activation as a one-element sequence and one naming none as an empty one, and an
+#: older build, which serves 12 to 17, refuses a file at 18, whose episodes it would not
+#: read (ADR-0326 §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 18
 
 #: The memory store's labels a build opens: its own, and each it upgrades from, in
 #: order (ADR-0326 §4:5, §5:1).
@@ -96,6 +106,7 @@ MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
         JOINED_RECORD_FORMAT,
         PINNED_RECORD_FORMAT,
         PLACED_RECORD_FORMAT,
+        SCHEDULED_RECORD_FORMAT,
         MEMORY_RECORD_FORMAT,
     }
 )

@@ -29,10 +29,12 @@ from typing import Any
 
 import pytest
 import sqlite_vec
+from memory_continuing_carry import carried, continues_recorded
 
 from ai_assistant.core.errors import IncompatibleStateError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
+    EpisodicMemory,
     Memory,
     MemoryRecord,
     MemoryWriterName,
@@ -203,6 +205,14 @@ async def test_every_record_reads_back_with_nothing_dropped(legacy: Path) -> Non
     for record_id, (kind, data, revision, band) in before.items():
         assert after[record_id][2] == revision
         assert after[record_id][3] == band
+        if kind != "memory" and continues_recorded(data):
+            # ADR-0349 §10:6: the chain ends in carrying ``continues`` onto a sequence.
+            # Rewritten as the store writes a record, so it may spell out fields added
+            # since at their defaults: it reads back as the carried record does.
+            assert EpisodicMemory.model_validate_json(after[record_id][1]) == (
+                EpisodicMemory.model_validate_json(json.dumps(carried(json.loads(data))))
+            )
+            continue
         if kind != "memory":
             assert after[record_id] == (kind, data, revision, band)
             continue

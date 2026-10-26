@@ -166,10 +166,44 @@ def test_no_takeover_names_the_activation_itself() -> None:
         _open(joined=(_joined(taken_over_from="activation"),))
 
 
+def test_an_absorbed_activations_inputs_stand_side_by_side() -> None:
+    """ADR-0349 §7:7, §10:7: an absorption appends every input the other holds, each
+    naming it, in one step, so two inputs naming one activation stand side by side."""
+    record = _open(
+        joined=(
+            _joined(taken_over_from="act-2"),
+            _joined("and four people", channel=_LINE, taken_over_from="act-2"),
+        )
+    )
+    assert [one.taken_over_from for one in record.joined] == ["act-2", "act-2"]
+
+
 def test_no_activation_is_taken_over_twice() -> None:
-    """§4:6: a taken-over activation is stopped, so it is taken over once."""
-    with pytest.raises(ValidationError, match="at most once"):
-        _open(joined=(_joined(taken_over_from="act-2"), _joined(taken_over_from="act-2")))
+    """ADR-0349 §7:7, §7:21: an absorbed or handed-over activation is stopped, so its
+    inputs come in one step: two runs naming one activation are refused."""
+    with pytest.raises(ValidationError, match="in one step, at most once"):
+        _open(
+            joined=(
+                _joined(taken_over_from="act-2"),
+                _joined("and four people"),
+                _joined(taken_over_from="act-2"),
+            )
+        )
+    with pytest.raises(ValidationError, match="in one step, at most once"):
+        _open(
+            joined=(
+                _joined(taken_over_from="act-2"),
+                _joined(taken_over_from="act-3"),
+                _joined(taken_over_from="act-2"),
+            )
+        )
+
+
+def test_no_run_names_the_activation_itself() -> None:
+    """ADR-0332 §4:6 stands: no input is taken from the activation that holds it, even
+    beside inputs taken from another."""
+    with pytest.raises(ValidationError, match="its own activation"):
+        _open(joined=(_joined(taken_over_from="act-2"), _joined(taken_over_from="activation")))
 
 
 def test_two_joins_on_the_place_need_no_takeover() -> None:

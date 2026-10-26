@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from memory_continuing_carry import carried, continues_recorded
 
 from ai_assistant.core.errors import IncompatibleStateError
 from ai_assistant.core.types import (
@@ -140,14 +141,26 @@ def test_the_fixture_is_what_the_previous_release_wrote() -> None:
 
 
 async def test_the_file_is_upgraded_in_place_by_its_label_alone(legacy: Path) -> None:
-    """ADR-0326 §4:1, §4:4: the label advances and no stored byte of a record moves."""
+    """ADR-0326 §4:1, §4:4: the label advances and no stored byte of a record moves.
+
+    The chain goes on to ADR-0349 §10:6's upgrade, which rewrites each episode whose
+    understandings record ``continues``: such a row keeps its kind, its revision and its
+    band, and its record moves only as that carry says; every other row is byte for
+    byte what it was.
+    """
     before = _raw_rows(legacy)
 
     exported = await _exported(legacy)
 
     assert _label(legacy) == MEMORY_RECORD_FORMAT
     assert set(exported) == _IDS
-    assert _raw_rows(legacy) == before
+    after = _raw_rows(legacy)
+    for record_id, row in before.items():
+        if continues_recorded(row[1]):
+            assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
+            _holds(json.loads(after[record_id][1]), carried(json.loads(row[1])))
+        else:
+            assert after[record_id] == row
 
 
 async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:
@@ -159,7 +172,8 @@ async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:
     for record_id, (_, data, revision, _) in before.items():
         record = exported[record_id]
         assert record.revision == revision
-        stored: dict[str, Any] = json.loads(data)
+        # ADR-0349 §10:6: the chain ends in carrying ``continues`` onto a sequence.
+        stored: dict[str, Any] = carried(json.loads(data))
         stored.pop("revision", None)
         _holds(record.model_dump(mode="json", exclude={"revision"}), stored)
     planned = exported["mem-episode-planned"]

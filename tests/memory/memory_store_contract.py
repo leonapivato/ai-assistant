@@ -67,6 +67,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     EvidenceItem,
     InputOrigin,
+    JoinedInput,
     LabelKind,
     Memory,
     MemoryKind,
@@ -96,6 +97,7 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RecordedChannelTrigger,
+    RecordedInputMessage,
     RecordedTextInput,
     SituationLabel,
     StageEntry,
@@ -1577,6 +1579,58 @@ class MemoryStoreContract:
         assert got.processing_record is not None
         assert got.processing_record.understanding[0].story_links == links
         assert got.processing_record.stages == entries
+
+    async def test_what_an_understanding_continues_and_the_inputs_it_took_survive_the_round_trip(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0349 §10:2, §10:7: the shapes one matter, one activation gives the record.
+
+        An understanding version continuing two activations, in an order that is not
+        sorted because the proposal's order is kept, beside one continuing none; and two
+        inputs taken from one activation side by side, after one joined on the place, as
+        an absorption appends every input the other held.
+        """
+        merged = _activation_episode("merged")
+        assert merged.processing_record is not None
+        place = ChannelIdentity(channel_type="conversation", instance_id="c-1")
+        line = ChannelIdentity(channel_type="telegram", instance_id="line")
+        versions = tuple(
+            ActivationUnderstanding(
+                version=number,
+                recorded_at=_OCCURRED,
+                producer=UnderstandingProducer.INTERPRETATION,
+                meaning="make both bookings Sunday",
+                meaning_ground=UnderstandingGround.STATED,
+                continues=continues,
+            )
+            for number, continues in ((1, ()), (2, ("act-web", "act-line")))
+        )
+        joined = tuple(
+            JoinedInput(
+                joined_at=_OCCURRED,
+                channel=channel,
+                messages=(RecordedInputMessage(text=text, sent_at=_OCCURRED),),
+                taken_over_from=taken,
+            )
+            for channel, text, taken in (
+                (place, "and for four", None),
+                (place, "actually Sunday", "act-web"),
+                (line, "at seven", "act-web"),
+            )
+        )
+        record = merged.processing_record.model_copy(
+            update={"understanding": versions, "understanding_omitted": None, "joined": joined}
+        )
+        await store.add(merged.model_copy(update={"processing_record": record}))
+
+        got = await store.get("merged")
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert [one.continues for one in got.processing_record.understanding] == [
+            (),
+            ("act-web", "act-line"),
+        ]
+        assert got.processing_record.joined == joined
 
     async def test_a_processing_records_stage_record_survives_the_round_trip(
         self, store: MemoryStore

@@ -85,9 +85,9 @@ async def _working(harness: Harness, conversation_id: str) -> str:
 
     async def shown() -> bool:
         digest = await harness.engine.conversation(conversation_id)
-        if digest is None or digest.state.activation_id is None:
+        if digest is None or not digest.state.activation_ids:
             return False
-        found.append(digest.state.activation_id)
+        found.append(digest.state.activation_ids[-1])
         return True
 
     await chat_until(shown, what="the running activation's id")

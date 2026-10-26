@@ -476,12 +476,14 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
 
     Its processing record carries ``joined``, an understanding version that
     ``continues`` another activation, and the takeover's stage and rule, so a later
-    build's upgrade check reads back each shape ADR-0332 §7 adds to the record.
+    build's upgrade check reads back each shape ADR-0332 §7 adds to the record; and, as
+    ADR-0349 §10:2 and §10:7 shape them, a version continuing two activations and two
+    inputs taken from one activation side by side.
     """
     started, ended = moment.ago(minutes=9), moment.ago(minutes=8)
     joined_at = moment.ago(minutes=8, seconds=50)
 
-    def understood(version: int, *, continues: str | None = None) -> ActivationUnderstanding:
+    def understood(version: int, *, continues: tuple[str, ...] = ()) -> ActivationUnderstanding:
         return ActivationUnderstanding(
             version=version,
             recorded_at=joined_at,
@@ -510,7 +512,11 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
-            understanding=(understood(1), understood(2, continues="act-upgrade-line")),
+            understanding=(
+                understood(1),
+                understood(2, continues=("act-upgrade-line",)),
+                understood(3, continues=("act-upgrade-line", "act-upgrade-web")),
+            ),
             stages=(
                 _stage(ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD, started),
                 _stage(ControllerStage.TAKEOVER, ControllerRule.TAKEOVER_UNDECIDED, joined_at),
@@ -529,6 +535,14 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
                     messages=(
                         RecordedInputMessage(text="for four", sent_at=joined_at, position=12),
                     ),
+                    taken_over_from="act-upgrade-line",
+                ),
+                # ADR-0349 §7:7: an absorbed activation brings every input it holds, each
+                # naming it, so this one's second input stands beside its first.
+                JoinedInput(
+                    joined_at=joined_at,
+                    channel=_CHANNEL,
+                    messages=(RecordedInputMessage(text="at seven", sent_at=joined_at),),
                     taken_over_from="act-upgrade-line",
                 ),
             ),
@@ -783,6 +797,34 @@ def _memory_placed_carry(records: Records) -> Records:
         ]
         memory["marks"] = []
         carried[key] = memory
+    return carried
+
+
+def _memory_continuing_carry(records: Records) -> Records:
+    """What a memory store read back before ADR-0349 reads back after it (§10:6).
+
+    Each episode's understanding versions read back ``continues`` as a sequence: one
+    that named an activation as a one-element sequence of it, and one that named none as
+    an empty sequence. Nothing else in the episode, no memory, the walk and the nearest
+    hits move: an episode's search text, which its vector embeds, is not its
+    understanding's ``continues``.
+    """
+    carried: Records = {}
+    for key, value in records.items():
+        processing = value.get("processing_record") if isinstance(value, dict) else None
+        versions = processing.get("understanding") if isinstance(processing, dict) else None
+        if not isinstance(value, dict) or not isinstance(versions, list):
+            carried[key] = value
+            continue
+        understanding: list[Json] = []
+        for version in versions:
+            if isinstance(version, dict) and "continues" in version:
+                held = version["continues"]
+                named: Json = [] if held is None else [held] if isinstance(held, str) else held
+                version = version | {"continues": named}  # noqa: PLW2901 — the carried version
+            understanding.append(version)
+        assert isinstance(processing, dict)  # noqa: S101  # read above, with its versions
+        carried[key] = value | {"processing_record": processing | {"understanding": understanding}}
     return carried
 
 
@@ -1874,8 +1916,8 @@ STORES: Final[tuple[Store, ...]] = (
         ("memory.db",),
         _write_memory,
         _read_memory,
-        shape=3,
-        carries={1: _memory_record_carry, 2: _memory_placed_carry},
+        shape=4,
+        carries={1: _memory_record_carry, 2: _memory_placed_carry, 3: _memory_continuing_carry},
     ),
     Store(
         "stories",
