@@ -210,12 +210,12 @@ def test_a_proposal_carries_labels_and_no_identity() -> None:
         # ADR-0321 §3:1, ADR-0322 §2:1: the proposed answer pointers, each naming its
         # question by its Q label.
         "answers",
-        # ADR-0332 §7:3: the R label of a running activation this input continues.
+        # ADR-0349 §10:1: the R labels of the running activations this input continues.
         "continues",
     }
     assert proposal.story_labels == ()
     assert proposal.answers == ()
-    assert proposal.continues is None
+    assert proposal.continues == ()
     assert proposal.references[0].labels == ("H1", "P2")
     for forbidden in ("version", "recorded_at", "producer", "id"):
         with pytest.raises(ValidationError):
@@ -308,7 +308,7 @@ def test_a_recorded_understanding_carries_no_label() -> None:
         "story_links",
         # ADR-0321 §3:1, ADR-0322 §2:1: the recorded answer pointers, resolved to ids.
         "answers",
-        # ADR-0332 §7:4: the running activation the continues label resolved to.
+        # ADR-0349 §10:2: the running activations the continues labels resolved to.
         "continues",
     }
     for model in (
@@ -322,27 +322,42 @@ def test_a_recorded_understanding_carries_no_label() -> None:
         assert "story_labels" not in model.model_fields
 
 
-def test_continues_is_unset_by_default_and_names_an_activation() -> None:
-    """ADR-0332 §7:3, §7:4: a label on the proposal, an activation id on the record.
+def test_continues_is_empty_by_default_and_names_activations() -> None:
+    """ADR-0349 §10:1, §10:2: labels on the proposal, activation ids on the record.
 
-    A record written before the field validates unchanged, and the proposal's label is
-    carried unjudged: a label resolving to no shown activation is the stage's to drop.
+    A record written before the field validates unchanged, and the proposal's labels are
+    carried unjudged: a label resolving to no shown activation is the stage's to drop,
+    and so is one named twice. The record names each activation once, in order.
     """
-    assert _understanding().continues is None
-    assert _understanding(continues="act-on-the-phone").continues == "act-on-the-phone"
+    assert _understanding().continues == ()
+    assert _understanding(continues=("act-on-the-phone",)).continues == ("act-on-the-phone",)
+    assert _understanding(continues=("act-2", "act-1")).continues == ("act-2", "act-1")
     with pytest.raises(ValidationError):
-        _understanding(continues="   ")
+        _understanding(continues=("   ",))
+    with pytest.raises(ValidationError, match="each activation it continues once"):
+        _understanding(continues=("act-1", "act-1"))
     proposal = ProposedActivationUnderstanding(
         meaning="and Saturday too",
         meaning_ground=UnderstandingGround.STATED,
-        continues="R1",
+        continues=("R1", "R2"),
     )
-    assert proposal.continues == "R1"
-    assert (
-        ProposedActivationUnderstanding(
-            meaning="x", meaning_ground=UnderstandingGround.STATED, continues="not a label"
-        ).continues
-        == "not a label"
+    assert proposal.continues == ("R1", "R2")
+    assert ProposedActivationUnderstanding(
+        meaning="x",
+        meaning_ground=UnderstandingGround.STATED,
+        continues=("not a label", "R1", "R1"),
+    ).continues == ("not a label", "R1", "R1")
+
+
+def test_continues_is_a_sequence_on_the_wire() -> None:
+    """ADR-0349 §10:2: one id or ``null``, as a build before it stored, is no longer read;
+    the memory store's upgrade carries a stored one (§10:6)."""
+    older = _understanding().model_dump(mode="json")
+    for held in ("act-1", None):
+        with pytest.raises(ValidationError):
+            ActivationUnderstanding.model_validate(older | {"continues": held})
+    assert ActivationUnderstanding.model_validate(older | {"continues": ["act-1"]}).continues == (
+        "act-1",
     )
 
 

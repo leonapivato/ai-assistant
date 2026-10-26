@@ -368,7 +368,7 @@ async def test_a_state_is_pushed_only_to_a_device_that_reads_the_conversation() 
     chat = FakeConversationStore()
     shown = await _chat(chat, _PHONE, _PEN)
     engine = _Engine()
-    engine.states[shown] = ConversationState(working=True, activation_id="a-1")
+    engine.states[shown] = ConversationState(working=True, activation_ids=("a-1",))
     states: dict[str, list[CurrentState]] = {"phone": [], "pen": []}
 
     async def follow(device: RequestingDevice) -> None:
@@ -419,7 +419,7 @@ async def test_a_stream_opens_with_each_read_conversations_state_before_any_chan
     await _chat(chat, _PEN)  # one the phone does not read
     engine = _Engine()
     engine.states[first] = ConversationState(last_ended=ActivationEnding.DONE)
-    engine.states[second] = ConversationState(working=True, activation_id="a-1")
+    engine.states[second] = ConversationState(working=True, activation_ids=("a-1",))
     engine.activity = {second: Activity(turns=1, running=("a-1",))}
 
     async with _Following(_stream(chat, engine).follow(PHONE, after=0)) as following:
@@ -451,7 +451,7 @@ async def test_a_state_that_changed_before_the_stream_opened_is_still_sent() -> 
     chat = FakeConversationStore()
     conversation = await _chat(chat, _PHONE)
     engine = _Engine()
-    engine.states[conversation] = ConversationState(working=True, activation_id="a-1")
+    engine.states[conversation] = ConversationState(working=True, activation_ids=("a-1",))
     engine.activity = {conversation: Activity(turns=1, running=("a-1",))}
     # 1. The device reads the state and gets "working…" — then 2. the activation ends.
     read = await engine.state_of(conversation, ("a-1",))
@@ -461,7 +461,7 @@ async def test_a_state_that_changed_before_the_stream_opened_is_still_sent() -> 
     # 3. The stream opens, its first reading the ended activation.
     sent = await _opening(_stream(chat, engine), PHONE)
 
-    assert read == ConversationState(working=True, activation_id="a-1")
+    assert read == ConversationState(working=True, activation_ids=("a-1",))
     assert [one.state for one in sent if one.state is not None] == [
         CurrentState(
             conversation_id=conversation, state=ConversationState(last_ended=ActivationEnding.DONE)

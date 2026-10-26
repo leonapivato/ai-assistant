@@ -190,6 +190,7 @@ from ai_assistant.core.types import (
     DeletedMessage,
     DiagnosticKind,
     DiagnosticSource,
+    EncodableText,
     EpisodicMemory,
     InputOrigin,
     Memory,
@@ -1337,10 +1338,10 @@ class UnderstandingStage:
                 stray=dropped,
             )
         unresolved = [label for label in _labels_of(proposal) if label not in brief.labels]
-        if proposal.continues is not None and proposal.continues not in brief.running:
-            # ADR-0332 §7:4: a grounding defect, repaired once as any label naming
-            # nothing is (ADR-0276 §6), and then dropped and counted, never a parse failure.
-            unresolved.append(proposal.continues)
+        # ADR-0349 §10:2: each label naming no shown activation is a grounding defect,
+        # repaired once as any label naming nothing is (ADR-0276 §6), and then dropped
+        # and counted, never a parse failure.
+        unresolved.extend(label for label in proposal.continues if label not in brief.running)
         unnamed = _unnamed_supplied(proposal)
         # ADR-0300 §6:8: a story label naming nothing a link can be made to is a label
         # defect, and takes part in the one repair completion — except one naming a
@@ -1984,6 +1985,28 @@ def _parsed(content: str) -> ProposedActivationUnderstanding | None:
     return _read(content)[0]
 
 
+class _InstructedReply(ProposedActivationUnderstanding):
+    """The reply in the shape the instruction asks for today (ADR-0349 §1:4's step 1).
+
+    The instruction still asks for ``continues`` as one ``R`` label or ``null``, as
+    ADR-0332 §7:3 had it, and step 2 instructs the sequence ADR-0349 §10:1 makes it.
+    Until then the stage parses the reply exactly as before, so a reply it refused it
+    still refuses, and :func:`_read` carries what it names onto the sequence: one label
+    as a one-element sequence, and ``null`` or none as an empty one.
+    """
+
+    # The one field whose shape this reply keeps as before; mypy reads the override as
+    # an incompatible assignment, which is the point of it.
+    continues: EncodableText | None = None  # type: ignore[assignment]
+
+
+def _carried(reply: _InstructedReply) -> ProposedActivationUnderstanding:
+    """``reply`` as the proposal, its one label or none carried onto the sequence."""
+    fields = {name: getattr(reply, name) for name in ProposedActivationUnderstanding.model_fields}
+    fields["continues"] = () if reply.continues is None else (reply.continues,)
+    return ProposedActivationUnderstanding.model_validate(fields)
+
+
 def _read(content: str) -> tuple[ProposedActivationUnderstanding | None, int]:
     """The reply's proposal, or ``None``, and how many unnamed keys were dropped from it.
 
@@ -2006,10 +2029,10 @@ def _read(content: str) -> tuple[ProposedActivationUnderstanding | None, int]:
     pruned = _pruned_reply(body)
     text, dropped = (body, 0) if pruned is None else pruned
     try:
-        proposal = ProposedActivationUnderstanding.model_validate_json(text)
+        reply = _InstructedReply.model_validate_json(text)
     except ValidationError, ValueError, RecursionError:
         return None, 0
-    return proposal, dropped
+    return _carried(reply), dropped
 
 
 # --- the drop (ADR-0339 §2) ------------------------------------------------------------
@@ -2413,9 +2436,9 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
 ) -> ActivationUnderstanding:
     """Resolve every label into a referent, dropping and counting what resolves to nothing.
 
-    ``continues`` resolves, by its ``R`` label, to the running activation the call
-    showed under it (ADR-0332 §7:4); a label naming no shown activation is dropped and
-    counted as a grounding defect, and the record continues none.
+    ``continues`` resolves, by each ``R`` label, to the running activation the call
+    showed under it, in the proposal's order and each once (ADR-0349 §10:2); a label
+    naming no shown activation is dropped and counted as a grounding defect.
 
     No dropped or absent label becomes a grounded claim: a referent is recorded only for
     a label that resolved, and ``supplied`` survives only on an element still naming a
@@ -2477,11 +2500,15 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
         *proposal.unresolved,
         *(UnresolvedMatter(matter=why, why_it_matters=_NOT_APPROVED) for why in whys),
     )
-    continues = None
-    if proposal.continues is not None:
-        continues = (running or {}).get(proposal.continues)
-        if continues is None:
+    # ADR-0349 §10:2: in the proposal's order, each activation once, and each label that
+    # resolves to no shown activation dropped and counted.
+    continues: dict[str, None] = {}
+    for label in proposal.continues:
+        named = (running or {}).get(label)
+        if named is None:
             resolution.dropped += 1
+            continue
+        continues.setdefault(named)
     return ActivationUnderstanding(
         version=version,
         recorded_at=recorded_at,
@@ -2495,7 +2522,7 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
         grounding_dropped=resolution.dropped,
         story_links=tuple(links),
         answers=answers,
-        continues=continues,
+        continues=tuple(continues),
     )
 
 

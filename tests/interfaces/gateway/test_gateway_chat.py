@@ -685,7 +685,7 @@ async def test_the_digest_carries_the_current_state(harness: Harness) -> None:
             update={
                 "state": ConversationState(
                     working=True,
-                    activation_id="a-7",
+                    activation_ids=("a-7",),
                     last_ended=ActivationEnding.INTERRUPTED,
                 )
             }

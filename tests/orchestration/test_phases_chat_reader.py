@@ -242,13 +242,13 @@ async def test_the_state_is_working_until_the_reply_is_written_then_done() -> No
     assert running is not None
     assert running.state.working
     taken = await harness.conversation_store.taken_in(conversation, positions=[1])
-    assert running.state.activation_id == taken[1]
+    assert running.state.activation_ids == (taken[1],)
     completer.release.set()
     await answered(harness, conversation, 1)
     ended = await harness.engine.conversation(conversation)
     assert ended is not None
     assert not ended.state.working
-    assert ended.state.activation_id is None
+    assert ended.state.activation_ids == ()
     assert ended.state.last_ended is ActivationEnding.DONE
 
 

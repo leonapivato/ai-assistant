@@ -28,6 +28,7 @@ from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
     SuppliedWindow,
     UnderstandingStage,
+    _parsed,
 )
 from ai_assistant.testing import FakeModelProvider, default_prompt
 
@@ -160,7 +161,7 @@ async def test_running_work_renders_under_r_labels_and_continues_resolves_to_it(
     assert section[1]["messages"] == [{"sent_at": _AT.isoformat(), "text": "on Saturday"}]
     # No id reaches the model: a label resolves to it here.
     assert _SATURDAY not in model.calls[0].messages[1].content
-    assert understood.continues == _SATURDAY
+    assert understood.continues == (_SATURDAY,)
     assert understood.grounding_dropped == 0
     assert len(model.calls) == 1
     # The instruction says what the section is, and where an R label goes.
@@ -179,14 +180,14 @@ async def test_a_continues_naming_no_shown_activation_is_repaired_once_then_drop
     statement = model.calls[1].messages[-1].content
     assert '"R3"' in statement
     assert "R1 (the running section, cited only in `continues`)" in statement
-    assert understood.continues is None
+    assert understood.continues == ()
     assert understood.grounding_dropped == 1
 
 
 async def test_a_continues_repaired_onto_a_shown_label_resolves() -> None:
     model = FakeModelProvider.scripted(_proposal(continues="H1"), _proposal(continues="R1"))
     understood = await _understand(model, running=(_running(_RIVERSIDE, "book Riverside"),))
-    assert understood.continues == _RIVERSIDE
+    assert understood.continues == (_RIVERSIDE,)
     assert understood.grounding_dropped == 0
 
 
@@ -194,13 +195,33 @@ async def test_with_nothing_shown_a_continues_resolves_to_nothing() -> None:
     model = FakeModelProvider.scripted(_proposal(continues="R1"), _proposal(continues="R1"))
     understood = await _understand(model, running=())
     assert "running" not in _payload(model)
-    assert understood.continues is None
+    assert understood.continues == ()
     assert understood.grounding_dropped == 1
 
 
 async def test_a_reply_continuing_nothing_records_none() -> None:
     model = FakeModelProvider(_proposal(continues=None))
     understood = await _understand(model, running=(_running(_RIVERSIDE, "book Riverside"),))
-    assert understood.continues is None
+    assert understood.continues == ()
     assert understood.grounding_dropped == 0
     assert len(model.calls) == 1
+
+
+async def test_a_reply_that_omits_continues_records_none() -> None:
+    """ADR-0349 §10:1: an absent ``continues`` reads as the empty sequence, as before."""
+    model = FakeModelProvider(_proposal())
+    understood = await _understand(model, running=(_running(_RIVERSIDE, "book Riverside"),))
+    assert understood.continues == ()
+    assert len(model.calls) == 1
+
+
+def test_the_reply_is_read_in_the_shape_the_instruction_asks_for() -> None:
+    """ADR-0349 §1:4's step 1: the instruction still asks for one ``R`` label or ``null``,
+    so the stage reads that shape as before and carries it onto the sequence, and a
+    reply the stage refused before, an array in ``continues`` among them, it refuses."""
+    named, none = _parsed(_proposal(continues="R1")), _parsed(_proposal(continues=None))
+    assert named is not None
+    assert none is not None
+    assert (named.continues, none.continues) == (("R1",), ())
+    assert _parsed(_proposal(continues=["R1"])) is None
+    assert _parsed(_proposal(continues=7)) is None

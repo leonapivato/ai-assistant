@@ -115,7 +115,7 @@ async def test_stop_names_the_running_activation_and_is_gone_once_it_ends(
         stop = drive.page.locator("#chat-stop")
         await expect(stop).to_be_hidden()
 
-        scripted.state = ConversationState(working=True, activation_id=_ACTIVATION)
+        scripted.state = ConversationState(working=True, activation_ids=(_ACTIVATION,))
         await expect(stop).to_be_visible(timeout=_FOLLOWED)
         assert await drive.page.evaluate(
             "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
@@ -163,7 +163,7 @@ async def test_an_answer_that_wrote_nothing_says_so_and_leaves_the_control(
     async with driving(gateway_browser, tmp_path) as drive:
         scripted = await _open(drive)
         scripted.answer = member
-        scripted.state = ConversationState(working=True, activation_id=_ACTIVATION)
+        scripted.state = ConversationState(working=True, activation_ids=(_ACTIVATION,))
         stop = drive.page.locator("#chat-stop")
         await expect(stop).to_be_visible(timeout=_FOLLOWED)
 
@@ -180,13 +180,13 @@ async def test_a_later_activation_starts_with_no_answer_beside_it(
     """The answer is about one activation: the next one is offered the control afresh."""
     async with driving(gateway_browser, tmp_path) as drive:
         scripted = await _open(drive)
-        scripted.state = ConversationState(working=True, activation_id=_ACTIVATION)
+        scripted.state = ConversationState(working=True, activation_ids=(_ACTIVATION,))
         stop = drive.page.locator("#chat-stop")
         await expect(stop).to_be_visible(timeout=_FOLLOWED)
         await stop.click()
         await expect(stop).to_be_hidden()
 
-        scripted.state = ConversationState(working=True, activation_id=_NEXT)
+        scripted.state = ConversationState(working=True, activation_ids=(_NEXT,))
 
         await expect(stop).to_be_visible(timeout=_FOLLOWED)
         await expect(drive.page.locator("#chat-stop-said")).to_be_hidden()

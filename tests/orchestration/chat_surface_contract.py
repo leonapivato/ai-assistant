@@ -709,9 +709,9 @@ async def _working(engine: AssistantEngine, conversation_id: str) -> str:
 
     async def shown() -> bool:
         digest = await engine.conversation(conversation_id)
-        if digest is None or not digest.state.working or digest.state.activation_id is None:
+        if digest is None or not digest.state.working or not digest.state.activation_ids:
             return False
-        found.append(digest.state.activation_id)
+        found.append(digest.state.activation_ids[-1])
         return True
 
     await _until(shown, what="the running activation's id")
@@ -818,6 +818,30 @@ class ChatReaderContract:
         assert "third" in together
         assert await chat.untaken_messages(conversation) == ()
 
+    async def test_the_state_names_the_running_activation_once_and_none_once_it_ends(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """ADR-0349 §10:3, §1:4's step 1: ``activation_ids`` names the one activation the
+        state named before, the one that took the message in, and nothing once it ended."""
+        engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
+        conversation = await _started(engine, _PHONE)
+        entered, release = _held_take_in(chat)
+        await engine.write_message(conversation, message=said(_PHONE, "m-1", "first"))
+        try:
+            async with asyncio.timeout(_SETTLE):
+                await entered.wait()
+            running = await _working(engine, conversation)
+            digest = await engine.conversation(conversation)
+            assert digest is not None
+            assert digest.state.activation_ids == (running,)
+        finally:
+            release.set()
+        await _answered(engine, conversation, 1)
+        ended = await engine.conversation(conversation)
+        assert ended is not None
+        assert ended.state.activation_ids == ()
+        assert (await chat.taken_in(conversation, positions=[1]))[1] == running
+
     async def test_following_pushes_the_current_state_as_it_changes(
         self, chat_reader_surface: ChatReaderSubject
     ) -> None:
@@ -845,7 +869,7 @@ class ChatReaderContract:
 
         assert running.conversation_id == conversation
         assert running.state.working
-        assert running.state.activation_id is not None
+        assert running.state.activation_ids
         assert ended.conversation_id == conversation
         assert ended.state == ConversationState(last_ended=ActivationEnding.DONE)
 

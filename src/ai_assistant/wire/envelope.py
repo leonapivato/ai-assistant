@@ -2710,7 +2710,17 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     labels. A peer at 117 refuses the new field as extra and the new members as
 #:     unknown (ADR-0124 §9:2). The method set does not move: ``AssistantEngine`` gains no
 #:     member (§10:6), and ``PlanExport`` and the scheduled task cross no frame.
-PROTOCOL_VERSION: Final[int] = 118
+#: 119: ADR-0349 §10:5 advances the version once for step 1 of one matter, one activation
+#:     (§1:4), on these grounds: the wire-carried ``EpisodicMemory.processing_record``
+#:     holds each understanding version's ``continues``, which becomes a sequence of
+#:     activations in place of one or none (§10:2), and its ``joined`` may name one
+#:     activation on several inputs, side by side (§10:7); and ``ConversationState``,
+#:     carried by the conversation reads and the change stream, loses ``activation_id``
+#:     and gains ``activation_ids`` (§10:3). A peer at 118 refuses the sequence where it
+#:     reads one id, the new field as extra and the repeated name, and a hub at 119
+#:     refuses one id where it reads a sequence (ADR-0124 §9:2). The method set does not
+#:     move, and the peer view crosses no frame.
+PROTOCOL_VERSION: Final[int] = 119
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

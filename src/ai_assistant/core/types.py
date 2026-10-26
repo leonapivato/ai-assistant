@@ -3596,11 +3596,12 @@ class ProposedActivationUnderstanding(BaseModel):
     a reading and grants nothing; two naming one question are the stage's to drop
     (ADR-0322 §2:7), so this type does not refuse them.
 
-    ``continues`` (ADR-0332 §4:4, §7:3) is the label of one running activation shown
-    beside the window that this input continues: completes, corrects or adds to. Its
-    label is of the kind ``R`` that ADR-0332 adds to ADR-0276 §3:3's scheme. ``None``
-    where the input continues none. A label that resolves to no shown activation is a
-    grounding defect the stage drops (§7:4), so this type validates nothing about it.
+    ``continues`` (ADR-0349 §7:3, §10:1) are the labels of the running activations shown
+    to understanding whose work this input continues: corrects, completes, cancels or
+    changes. Each is of the kind ``R`` that ADR-0332 §7:3 adds to ADR-0276 §3:3's
+    scheme. Empty where the input continues none. A label that resolves to no shown
+    activation is a grounding defect the stage drops (ADR-0349 §10:2), and one named
+    twice is the stage's to resolve once, so this type validates nothing about them.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3612,7 +3613,7 @@ class ProposedActivationUnderstanding(BaseModel):
     unresolved: tuple[UnresolvedMatter, ...] = ()
     story_labels: tuple[EncodableText, ...] = ()
     answers: tuple[ProposedAnswer, ...] = ()
-    continues: EncodableText | None = None
+    continues: tuple[EncodableText, ...] = ()
 
 
 #: ADR-0276 §2: an excerpt is a bounded prefix of the referent's rendered text.
@@ -3685,13 +3686,19 @@ class ActivationUnderstanding(BaseModel):
     question. Like every other field here they grant no authority: authorizing checks
     each against the records (ADR-0321 §4:4, ADR-0322 §3:1).
 
-    ``continues`` (ADR-0332 §7:4) is the activation the proposal's ``continues`` label
-    resolved to: a running activation on another of the same person's places that this
-    input continues, which the takeover stage reads (§4:5, §4:6). ``None`` where the
-    proposal named none, or named a label that resolved to no shown activation, which
-    the stage drops as a grounding defect (ADR-0276 §6). Like ``answers``, it grants
-    nothing: the takeover stage checks it against the running activation (§4:6). A
-    record written before the field validates unchanged.
+    ``continues`` (ADR-0349 §10:2) are the activations the proposal's ``continues``
+    labels resolved to, in the proposal's order and each once: the running activations
+    this input continues, which the takeover stage reads (§7:4). Empty where the
+    proposal named none, or named only labels that resolved to no shown activation,
+    which the stage drops as grounding defects (ADR-0276 §6). Like ``answers``, it
+    grants nothing: the takeover stage checks each against the running activation
+    (ADR-0349 §7:5). A record written before ADR-0332 added the field validates
+    unchanged; one a build before ADR-0349 wrote, naming one activation or none, is
+    carried to a one-element or an empty sequence by the memory store's upgrade
+    (§10:6).
+
+    Raises:
+        ValueError: If ``continues`` names one activation twice.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3707,7 +3714,14 @@ class ActivationUnderstanding(BaseModel):
     grounding_dropped: int = Field(default=0, strict=True, ge=0, lt=2**31)
     story_links: tuple[StoryMember, ...] = ()
     answers: tuple[AnsweredQuestion, ...] = ()
-    continues: Identifier | None = None
+    continues: tuple[Identifier, ...] = ()
+
+    @model_validator(mode="after")
+    def _continues_each_once(self) -> Self:
+        if len(set(self.continues)) != len(self.continues):
+            msg = "an understanding names each activation it continues once (ADR-0349 §10:2)"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _no_story_link_twice(self) -> Self:
@@ -3775,9 +3789,9 @@ class ControllerStage(StrEnum):
     """Outside text read for planning as marked evidence, beside acting (ADR-0308 §4:5,
     ADR-0309 §3:3)."""
     TAKEOVER = "takeover"
-    """Take over the running activation the latest understanding says this input
-    continues, where it has not committed, or record that it was not taken (ADR-0332
-    §4:5, §4:6). At most once per understanding version."""
+    """Decide for the running activations the latest understanding says this input
+    continues, and record what became of each (ADR-0332 §4:5, ADR-0349 §7:4, §10:9). At
+    most once per understanding version."""
 
 
 class ControllerRule(StrEnum):
@@ -3838,8 +3852,8 @@ class ControllerRule(StrEnum):
     outside, and there is no recall digest (ADR-0308 §4:5, ADR-0309 §3):
     ``digesting`` is due, for recall's digest."""
     TAKEOVER_UNDECIDED = "takeover_undecided"
-    """The latest understanding names a running activation it continues, and there is
-    no takeover decision for that version (ADR-0332 §4:5): ``takeover`` is due. Its row
+    """The latest understanding names any activation in ``continues``, and there is no
+    takeover decision for that version (ADR-0349 §10:8): ``takeover`` is due. Its row
     sits immediately after ``story_links_unrecorded``. It makes a stage due, so it is not
     among the ending rules."""
 
@@ -4340,8 +4354,11 @@ class JoinedInput(BaseModel):
 
     ``joined_at`` is when it joined; ``channel`` the place it came from; ``messages`` its
     messages, each kept apart and dated, as a trigger's are (ADR-0323 §5:4); and
-    ``taken_over_from`` the activation a takeover stopped to bring it (§4:6), or ``None``
-    for a join on the activation's own place (§3:16, §3:17).
+    ``taken_over_from`` the activation that brought it: the one it was absorbed from, or
+    the offering activation whose input was taken (ADR-0349 §10:7), or ``None`` for a
+    join on the activation's own place (ADR-0332 §3:16, §3:17). An absorption or a take
+    appends every input the other activation holds, each naming it, so several may name
+    one activation, side by side (ADR-0349 §7:7, §7:21).
 
     Raises:
         ValueError: If it carries no message.
@@ -4382,9 +4399,11 @@ class EpisodeProcessingRecord(BaseModel):
     in the order they joined (ADR-0332 §3:16, §3:17). Appended to as the episode is
     extended, and empty by default, so a record written before the field validates
     unchanged and ``schema_version`` does not move. It is a field of the record, not a
-    stage's result (ADR-0286 §3:8, as ADR-0332 §10 adds to it). No takeover names the
-    activation itself, and none names one activation twice: a taken-over activation is
-    stopped, so it is taken over once.
+    stage's result (ADR-0286 §3:8, as ADR-0332 §10 adds to it). No input names the
+    activation itself as the one it was taken from. The inputs that name one activation
+    are appended in the one step that stopped it (ADR-0349 §7:7, §7:21), so they stand
+    side by side: an absorbed or handed-over activation is stopped, and brings its
+    inputs once.
 
     ``stories_position`` is the story store's position when the activation was admitted
     (:meth:`~ai_assistant.core.protocols.StoryStore.position`), recorded by the admission
@@ -4449,14 +4468,21 @@ class EpisodeProcessingRecord(BaseModel):
 
     @model_validator(mode="after")
     def _takeovers_name_others_once(self) -> Self:
-        # ADR-0332 §4:6: a takeover stops another activation, so it never names this one,
-        # and a stopped activation is taken over once.
-        taken = [one.taken_over_from for one in self.joined if one.taken_over_from is not None]
-        if self.activation_id in taken:
+        # ADR-0332 §4:6: a takeover stops another activation, so it never names this one.
+        # ADR-0349 §7:7, §7:21: an absorption or a take appends every input the other
+        # holds in one step, each naming it, and the other is then stopped, so the inputs
+        # naming one activation form one run and no activation is taken from twice.
+        runs = [
+            source
+            for index, source in enumerate(one.taken_over_from for one in self.joined)
+            if source is not None
+            and (index == 0 or self.joined[index - 1].taken_over_from != source)
+        ]
+        if self.activation_id in runs:
             msg = "a joined input is never taken over from its own activation"
             raise ValueError(msg)
-        if len(set(taken)) != len(taken):
-            msg = "a processing record takes each activation over at most once"
+        if len(set(runs)) != len(runs):
+            msg = "a processing record takes each activation's inputs in one step, at most once"
             raise ValueError(msg)
         return self
 
@@ -11976,9 +12002,10 @@ class ConversationState(BaseModel):
     other:
 
     * **working** — an activation started from the conversation is running (§8:2).
-      It is informational: the user's input stays open (§6:2). ``activation_id`` names
-      that activation where its id is known, which is what a stop control beside
-      "working…" names (ADR-0295 §1:2); it is absent while nothing runs.
+      It is informational: the user's input stays open (§6:2). ``activation_ids`` names
+      every running activation started from the conversation whose id is known, each
+      once, which is what a stop control beside "working…" stops (ADR-0349 §4:3-§4:4,
+      §10:3); it is empty unless the state is working.
     * **last_ended** — how the last activation started from the conversation that has
       ended, ended (§8:3, as ADR-0295 §3:4 adds *stopped*), or ``None`` where none has.
 
@@ -11988,15 +12015,19 @@ class ConversationState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     working: bool = Field(default=False, strict=True)
-    activation_id: Identifier | None = Field(
-        default=None, description="The running activation, where one runs and its id is known."
+    activation_ids: tuple[Identifier, ...] = Field(
+        default=(),
+        description="Every running activation started from the conversation whose id is known.",
     )
     last_ended: ActivationEnding | None = None
 
     @model_validator(mode="after")
-    def _an_activation_only_while_working(self) -> Self:
-        if self.activation_id is not None and not self.working:
-            msg = "a conversation's state names a running activation only while working"
+    def _activations_only_while_working(self) -> Self:
+        if self.activation_ids and not self.working:
+            msg = "a conversation's state names running activations only while working"
+            raise ValueError(msg)
+        if len(set(self.activation_ids)) != len(self.activation_ids):
+            msg = "a conversation's state names each running activation once"
             raise ValueError(msg)
         return self
 
@@ -16645,6 +16676,141 @@ class ActivationEffect(BaseModel):
             raise ValueError(msg)
         if self.position is not None and self.outcome is not ToolOutcome.SUCCEEDED:
             msg = "only a message done carries a position"
+            raise ValueError(msg)
+        return self
+
+
+# --- the peer view: another activation's work, as a reader is shown it (ADR-0349 §6) -
+# The second view of `project_episode` (§6:7), computed from an activation's episode as
+# stored and its effect records alone (§6:8). Never stored, and crosses no wire.
+
+#: ADR-0349 §6:9: the fixed line a peer view's reader renders for the *couldn't finish*
+#: message, the effect whose record names no round (ADR-0307 §10). It is fixed so that
+#: nothing the failed activation wrote is shown in its place.
+PEER_COULDNT_FINISH_LINE: Final[str] = "It could not finish."
+
+
+class PeerNotes(BaseModel):
+    """One round's episode notes, as a peer view shows them (ADR-0349 §6:9, ADR-0307 §4).
+
+    Attributes:
+        notes: The notes, cut to the view's excerpt bound.
+        marked: Whether they rest on outside content (ADR-0307 §4:3), the mark they
+            carry wherever they are read.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    notes: ProjectedText
+    marked: bool = False
+
+
+class PeerEffect(BaseModel):
+    """One effect another activation made, as a peer view shows it (ADR-0349 §6:9).
+
+    Only an effect whose outcome is written and is done or unknown is shown (§6:8,
+    §6:10), with that outcome, and as exactly one of three things: a call, by its
+    capability alone, never its values or its result; a message, by the message of the
+    round its record names; or the *couldn't finish* message, whose record names no
+    round, which a reader renders as :data:`PEER_COULDNT_FINISH_LINE`.
+
+    Attributes:
+        outcome: Done (``succeeded``) or unknown (``indeterminate``).
+        capability: For a call, the capability called.
+        message: For a message, its round's text cut to the view's excerpt bound;
+            ``None`` where the episode as stored holds no round of that id, or the
+            round wrote no text.
+        couldnt_finish: Whether this is the *couldn't finish* message.
+
+    Raises:
+        ValueError: If its outcome is not done or unknown, or it is more than one of
+            the three.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outcome: ToolOutcome
+    capability: VisibleIdentifier | None = None
+    message: ProjectedText | None = None
+    couldnt_finish: bool = False
+
+    @model_validator(mode="after")
+    def _done_or_unknown_and_one_thing(self) -> Self:
+        if self.outcome is ToolOutcome.FAILED:
+            msg = "a peer view shows no effect that was not done (ADR-0349 §6:10)"
+            raise ValueError(msg)
+        if self.capability is not None and (self.message is not None or self.couldnt_finish):
+            msg = "a call is shown by its capability alone"
+            raise ValueError(msg)
+        if self.couldnt_finish and self.message is not None:
+            msg = "the couldn't finish message is shown as its fixed line alone"
+            raise ValueError(msg)
+        return self
+
+
+class PeerView(BaseModel):
+    """Another activation's own work, as a reader is shown it (ADR-0349 §6:7-§6:10).
+
+    The view :func:`~ai_assistant.core.episode_encoding.project_episode` computes when
+    it is handed the activation's effect records: of its episode as stored, open or
+    frozen, only what its stages appended when they ended, and of its effect records only
+    those whose outcome is written (§6:8). It shows **what it took in**, its input and
+    every input it holds beside it, withheld where they are not the user's own (§6:9,
+    ADR-0284 §8:1); **what it is doing**, its latest understanding's meaning, which a
+    reader renders as provisional (ADR-0276 §4:6); **what it found**, its rounds' episode
+    notes and its digests' evidence, each with its mark, where the reader may be shown a
+    record placed for the owner alone (ADR-0307 §4:4, ADR-0308 §5:6); and **what it
+    did**, its effects done or unknown.
+
+    It never carries a round's message other than through a message effect done or
+    unknown, nor recall's results, story links, a failed call, a draft, an approval, a
+    call's values or results, or anything the activation read from another (§6:10). It
+    is never stored and crosses no wire.
+
+    Beside the work, it carries the facts a reader needs to render and count it: the
+    trigger's ``channel``, what caused the activation (§5:6); its ``origin`` and
+    ``derived_from_external``, by which an outside episode shown counts in the reader's
+    record of what it read (§6:13, ADR-0284 §8:4); and its ``status`` and ``reason``,
+    ``None`` while it runs, by which a reader says that it has ended (§4:10, §6:6).
+
+    Attributes:
+        channel: The channel its trigger names, where one is recorded.
+        origin: Who its trigger's input came from.
+        input: Its trigger's input text, cut to the excerpt bound, where ``origin`` is
+            ``user``; ``None`` otherwise.
+        joined: The text of each input it holds beside its trigger's, in the order it
+            took them in, each cut to the excerpt bound, under the same condition;
+            empty otherwise.
+        meaning: Its latest understanding's meaning, where one is recorded.
+        notes: Its rounds' episode notes, in round order, where the reader may be
+            shown them.
+        evidence: Its digests' evidence, in the order they were recorded, where the
+            reader may be shown it.
+        did: Its effects done or unknown, in the order they were claimed.
+        status: How it ended, or ``None`` while it runs.
+        reason: Why, present exactly with ``status``.
+        derived_from_external: Whether its processing read material resting on
+            recorded external content (ADR-0106 §2).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    channel: ChannelIdentity | None = None
+    origin: InputOrigin
+    input: ProjectedText | None = None
+    joined: tuple[ProjectedText, ...] = ()
+    meaning: NonBlankEncodableText | None = None
+    notes: tuple[PeerNotes, ...] = ()
+    evidence: tuple[ProjectedEvidence, ...] = ()
+    did: tuple[PeerEffect, ...] = ()
+    status: ProcessingStatus | None = None
+    reason: ProcessingReason | None = None
+    derived_from_external: bool = False
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        if (self.status is None) != (self.reason is None):
+            msg = "a peer view carries a status exactly with its reason"
+            raise ValueError(msg)
+        if self.origin is not InputOrigin.USER and (self.input is not None or self.joined):
+            msg = "a peer view shows input only where it is the user's own (ADR-0349 §6:9)"
             raise ValueError(msg)
         return self
 
