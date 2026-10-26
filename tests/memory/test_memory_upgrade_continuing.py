@@ -31,6 +31,7 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 from ai_assistant.core.types import (
     ActivationUnderstanding,
     EpisodicMemory,
+    Memory,
     MemoryRecord,
     UnderstandingGround,
     UnderstandingProducer,
@@ -290,6 +291,44 @@ def test_an_episode_that_cannot_be_upgraded_leaves_the_file_as_it_was(legacy: Pa
         _open(legacy)
 
     assert (_label(legacy), _raw_rows(legacy)) == before
+
+
+async def test_an_earlier_upgrade_reads_an_episode_that_records_continues(tmp_path: Path) -> None:
+    """ADR-0326 §4:5: the chain holds where an earlier upgrade reads such an episode.
+
+    ADR-0345 §13's upgrade, earlier in the chain, reads the episode a memory's support
+    points at to give the support its holder. Over a copy of the file the release before
+    ADR-0345 wrote (label 15), one memory's support is pointed at the episode whose
+    understandings hold ``continues`` as ``null`` and as an id: the store opens it,
+    the support gains its holder from that episode, and the episode is carried.
+    """
+    path = tmp_path / "memory.db"
+    shutil.copyfile(_FIXTURE.parent / "memory-before-adr-0345.db", path)
+    with sqlite3.connect(path) as conn:
+        (data,) = conn.execute("SELECT data FROM records WHERE id = ?", ("mem-said",)).fetchone()
+        # The support and the operations citing it point at the episode together.
+        pointed = str(data).replace('"mem-episode-activation"', '"mem-episode-joined"')
+        assert pointed != data
+        conn.execute("UPDATE records SET data = ? WHERE id = ?", (pointed, "mem-said"))
+        (joined,) = conn.execute(
+            "SELECT data FROM records WHERE id = ?", ("mem-episode-joined",)
+        ).fetchone()
+    assert _held(joined) == [None, "act-upgrade-line"]
+
+    exported = await _exported(path)
+
+    assert _label(path) == MEMORY_RECORD_FORMAT
+    said = exported["mem-said"]
+    assert isinstance(said, Memory)
+    assert said.supports[0].points_at.model_dump()["episode"] == "mem-episode-joined"
+    assert said.supports[0].holder is not None
+    episode = exported["mem-episode-joined"]
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.processing_record is not None
+    assert [one.continues for one in episode.processing_record.understanding] == [
+        (),
+        ("act-upgrade-line",),
+    ]
 
 
 async def test_an_older_build_refuses_the_upgraded_file(legacy: Path) -> None:
