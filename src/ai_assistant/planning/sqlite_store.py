@@ -537,6 +537,12 @@ class SqlitePlanStore:
             conn.close()
             msg = f"failed to initialise the plan store at {self._path!r}: {exc}"
             raise PlanningError(msg) from exc
+        except BaseException:
+            # The upgrade past 17 reads the injected clock (ADR-0352 §2:6), whose own
+            # failure propagates unwrapped (`checked_clock`); the open is rolled back
+            # all the same, and its connection is closed as on every other failure.
+            conn.close()
+            raise
         return conn
 
     def _restrict_permissions(self) -> None:
