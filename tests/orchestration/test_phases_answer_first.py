@@ -316,6 +316,94 @@ async def test_an_answer_naming_no_open_offer_dispatches_no_spawn(
     await harness.engine.aclose()
 
 
+async def test_an_answer_planning_refused_before_acting_dispatches_no_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§4:2: an answer that never reached acting came to no take, so nothing else runs.
+
+    It names a label the round was never shown, which planning refuses whole (ADR-0307
+    §5:3), so the round's allowed calls hold no answer at all.
+    """
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "remind me about vitamins at 9:30", "make it 9pm, continues: vitamins"
+    _older_script(
+        planner,
+        older_text,
+        RoundResponse(
+            text="Changed it to 9 PM.",
+            calls=(
+                _call("a1", "answer_offer", offer="E99", take=True),
+                _call("s1", "spawn", instruction="Remind them at 9 PM.", delay_minutes=60),
+            ),
+        ),
+    )
+    harness = await _started(understanding, planner)
+    conversation, older = await _acted_on_one_place(harness, planner, monkeypatch, older_text)
+    _, newer_done = await _beside(harness, conversation, newer_text, message_id="b-1")
+    await _offered(harness, older)
+    planner.hold(older_text)[1].set()
+    await newer_done
+    await _frozen(harness, 2)
+
+    assert await harness.plans.spawned_tasks([older]) == ()
+    assert "Changed it to 9 PM." not in await _assistant(harness, conversation)
+    shown = _round_shown(planner, older_text, 3)
+    (answer,) = [one for one in shown["calls"] if one["capability"] == "answer_offer"]
+    assert "result" not in answer, "it never ran"
+    assert _NOT_TAKEN in _spawn_outcome(shown)
+    assert _NOT_TAKEN in shown["text_was"]
+    await harness.engine.aclose()
+
+
+async def test_a_stop_landing_while_the_answer_runs_dispatches_nothing_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0295 §2:1, ADR-0349 §7:14: the take lands, then the stop, then nothing starts.
+
+    The take's stop record is held until the older is stopped, so the round's spawn and
+    message would be dispatched after the stop were the stop mark not read again. Every
+    spawn the round attempts is recorded, so one the store would refuse on the stop
+    record still shows.
+    """
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "remind me about vitamins at 9:30", "make it 9pm, continues: vitamins"
+    _older_script(planner, older_text, _answer_and_spawn(("9pm", True)))
+    harness = await _started(understanding, planner)
+    conversation, older = await _acted_on_one_place(harness, planner, monkeypatch, older_text)
+    newer, newer_done = await _beside(harness, conversation, newer_text, message_id="b-1")
+    await _offered(harness, older)
+
+    attempted: list[str] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    write, record_stop = harness.plans.write_scheduled_task, harness.plans.record_stop
+
+    async def spawn_probe(*args: Any, **kwargs: Any) -> Any:
+        attempted.append("spawn")
+        return await write(*args, **kwargs)
+
+    async def stop_probe(activation_id: str, /) -> None:
+        if activation_id == newer:
+            entered.set()
+            await release.wait()
+        await record_stop(activation_id)
+
+    monkeypatch.setattr(harness.plans, "write_scheduled_task", spawn_probe)
+    monkeypatch.setattr(harness.plans, "record_stop", stop_probe)
+    planner.hold(older_text)[1].set()
+    await asyncio.wait_for(entered.wait(), SETTLE)
+    await harness.engine.stop_activation(older)
+    release.set()
+    await newer_done
+    found = await _frozen(harness, 2)
+
+    assert attempted == [], "nothing of the round was dispatched after the stop"
+    assert "Changed it to 9 PM." not in await _assistant(harness, conversation)
+    assert [one.taken_over_from for one in _of(found, older).joined] == [newer], (
+        "what the answer did happened"
+    )
+    await harness.engine.aclose()
+
+
 # --- §4:3: every answer came to what it asked, so the rest runs --------------------------
 
 

@@ -4402,7 +4402,9 @@ class PhasePath:
         authorizing did not allow, only the round's pure reads run: every other call is
         not done with the reason, the message is not written, and planning runs a round
         again shown what each answer came to (ADR-0315 §2:1), which counts toward the
-        round limit.
+        round limit. Where the activation was stopped while its answers ran, nothing more
+        of the round is dispatched, as the commitment step dispatches nothing of a
+        stopped one's round (ADR-0349 §7:14).
 
         Returns:
             What acting made of the round, and what the message's write raised, each an
@@ -4410,6 +4412,13 @@ class PhasePath:
         """
         caller = self._caller(working)
         answered = await self._calls(given, working, answering.first, caller=caller)
+        state = active_state()
+        if state is not None and state.stopped:
+            # ADR-0295 §2:1, ADR-0349 §7:14: a stop that landed while the answers ran
+            # starts nothing new, so nothing more of the round is dispatched, and the pass
+            # ends on the stop; what the answers did happened.
+            _log.info("phase_round_not_acted", stage="acting", reason="stopped")
+            return answered, None
         settled = not answering.refused and all(
             one.call.decision.id in (() if caller is None else caller.as_asked)
             for one in answering.first.allowed
