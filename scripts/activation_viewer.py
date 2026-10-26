@@ -365,6 +365,17 @@ def input_of(body: object) -> str | None:
     Returns:
         The input's text, or ``None``.
     """
+    document = _user_document(body)
+    if document is None:
+        return None
+    received = document.get("input")
+    if isinstance(received, str):
+        return received
+    return _text(_mapping(received).get("text"))
+
+
+def _user_document(body: object) -> Mapping[str, object] | None:
+    """A rendered request's last user message, read as the JSON object it carries."""
     for message in reversed(_sequence(_mapping(body).get("messages"))):
         shown = _mapping(message)
         content = _text(shown.get("content"))
@@ -374,10 +385,64 @@ def input_of(body: object) -> str | None:
             document = json.loads(content)
         except _UNPARSABLE:
             return None
-        received = _mapping(document).get("input")
-        if isinstance(received, str):
-            return received
-        return _text(_mapping(received).get("text"))
+        return _mapping(document)
+    return None
+
+
+def arrival_of(lines: Sequence[Line]) -> dict[str, object] | None:
+    """The activation's input as it arrived, read from the first request that shows it.
+
+    The record keeps no entry of its own for the input, so this is read back from what a
+    model was given: understanding's ``input``, or else the item of planning's place
+    window marked as the input. The rendering is a hint (ADR-0316 §5:2): where neither is
+    found, nothing is.
+
+    Args:
+        lines: The activation's complete lines.
+
+    Returns:
+        The input's text, where it came from and its messages with their instants, and
+        which request it was read from; or ``None``.
+    """
+    for line in lines:
+        if not isinstance(line, Entry) or line.kind != "given":
+            continue
+        document = _user_document(line.body)
+        if document is None:
+            continue
+        if line.source == "understanding":
+            received = _mapping(document.get("input"))
+            text = _text(received.get("text"))
+            if text is None:
+                continue
+            messages = [
+                {
+                    "position": shown.get("position"),
+                    "at": _ms(instant(shown.get("written_at"))),
+                    "text": _text(shown.get("text")),
+                }
+                for shown in map(_mapping, _sequence(received.get("messages")))
+            ]
+            return {
+                "from": "understanding",
+                "line": line.line,
+                "text": text,
+                "received_as": _text(received.get("received_as")),
+                "messages": messages,
+            }
+        if line.source == "planning":
+            for item in map(_mapping, _sequence(document.get("place_window"))):
+                text = _text(item.get("text"))
+                if item.get("is_the_input") is True and text is not None:
+                    return {
+                        "from": "planning",
+                        "line": line.line,
+                        "text": text,
+                        "received_as": _text(_mapping(document.get("place")).get("description")),
+                        "messages": [
+                            {"position": 1, "at": _ms(instant(item.get("at"))), "text": text}
+                        ],
+                    }
     return None
 
 
@@ -825,6 +890,7 @@ class _Timeline:
         return {
             "id": activation_id,
             "summary": summary,
+            "arrival": arrival_of(self.lines),
             "start": summary["start"],
             "end": summary["end"],
             "lanes": [{"key": one, "known": True} for one in LANES]
@@ -2234,6 +2300,7 @@ def _read_call(source: str, given: Entry | None, returned: Entry | None) -> dict
         "at": None if anchor is None else _ms(anchor.at),
         "took": None if given is None or returned is None else _ms(returned.at - given.at),
         "about": {},
+        "prompt": None if given is None else prompt_of(given.body),
         "told": None,
         "input": None,
         "tools": None,
@@ -2255,6 +2322,29 @@ def _read_call(source: str, given: Entry | None, returned: Entry | None) -> dict
     else:
         view["did"] = _did(source, returned.body)
     return view
+
+
+def prompt_of(body: object) -> dict[str, object] | None:
+    """The prompt a given entry names (ADR-0334 §8:2): its name, version, origin and flags on.
+
+    Args:
+        body: A given entry's body.
+
+    Returns:
+        The prompt's name, version and origin, and the flags it was rendered with that
+        were on; or ``None`` where the entry names no prompt.
+    """
+    named = _mapping(_mapping(body).get("prompt"))
+    version = _text(named.get("version"))
+    if version is None:
+        return None
+    flags = _mapping(named.get("flags"))
+    return {
+        "name": _text(named.get("name")),
+        "version": version,
+        "origin": _text(named.get("origin")),
+        "flags_on": sorted(key for key, value in flags.items() if value is True),
+    }
 
 
 def _notes(view: Mapping[str, object]) -> list[str]:
@@ -2725,6 +2815,10 @@ PAGE: Final = """<!doctype html>
       <div class="meta" id="d-meta"></div>
       <div class="badges" id="d-badges"></div>
       <p class="note own-absent" id="d-own-absent" hidden></p>
+      <div class="card" id="arrival-card" hidden>
+        <div class="card-title">Input</div>
+        <div id="arrival"></div>
+      </div>
       <div class="card" id="timeline-card">
         <div class="card-title">Timeline</div>
         <div class="timeline" id="timeline"></div>
@@ -2882,6 +2976,8 @@ h1.input.none { color: var(--muted); font-style: italic; }
   cursor: default;
 }
 details.card > summary { cursor: pointer; margin-bottom: 0; }
+.arrival-message { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 6px; }
+.arrival-message .m { color: var(--muted); font-size: 12px; }
 details.card[open] > summary { margin-bottom: 8px; }
 .timeline { position: relative; }
 .tl-axis, .tl-lane { display: grid; grid-template-columns: 110px 1fr; align-items: center; }
@@ -3503,12 +3599,32 @@ SCRIPT: Final = r"""
     clear(badges);
     badgesFor(s, badges);
     state.drawnOpen = isOpen(s);
+    renderArrival();
     if (own) {
       renderTimeline();
       renderRounds();
       renderEntries();
     }
     renderLearningLane();
+  }
+
+  // The input as it arrived, read back from the first request that shows it: the record
+  // keeps no entry of its own for it.
+  function renderArrival() {
+    const a = state.detail.arrival;
+    const root = $("arrival");
+    clear(root);
+    $("arrival-card").hidden = !a;
+    if (!a) return;
+    const read = a.from === "understanding" ? "understanding's input" : "planning's place window";
+    kv(root, [["where", a.received_as], ["read from", read + ", line " + a.line]]);
+    for (const m of a.messages || []) {
+      const row = el("div", "arrival-message");
+      const at = clock(m.at, true);
+      row.appendChild(el("div", "m", m.position === null ? at : "#" + m.position + " · " + at));
+      row.appendChild(el("div", "part-text", m.text === null ? DASH : m.text));
+      root.appendChild(row);
+    }
   }
 
   // --- the timeline ------------------------------------------------------------------
@@ -4211,6 +4327,13 @@ SCRIPT: Final = r"""
     where.push(v.returned === null ? "no returned entry" : "returned line " + v.returned);
     if (v.took !== null && v.took !== undefined) where.push("took " + duration(v.took));
     head.appendChild(el("div", "m", where.join(" \u00b7 ")));
+    if (v.prompt) {
+      const p = v.prompt;
+      const origin = p.origin ? " (" + p.origin + ")" : "";
+      const said = ["prompt " + (p.name || "") + " " + p.version + origin];
+      if (p.flags_on && p.flags_on.length) said.push("flags on: " + p.flags_on.join(", "));
+      head.appendChild(el("div", "m", said.join(" \u00b7 ")));
+    }
     holder.appendChild(head);
     if (v.about && (v.about.question || v.about.result)) {
       kv(holder, [["question", v.about.question], ["result", v.about.result]]);

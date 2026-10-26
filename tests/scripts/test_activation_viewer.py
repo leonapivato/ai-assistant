@@ -1077,3 +1077,89 @@ def test_a_diff_whose_changed_middle_is_too_long_is_not_drawn() -> None:
 
 def test_a_token_estimate_is_characters_over_four_rounded_up() -> None:
     assert [viewer.estimate(chars) for chars in (0, 1, 4, 5, 10_700)] == [0, 1, 1, 2, 2_675]
+
+
+def _rendered(document: object, **body: object) -> dict[str, object]:
+    return {
+        "messages": [
+            {"role": "system", "content": "instruction", "name": None},
+            {"role": "user", "content": json.dumps(document), "name": None},
+        ],
+        **body,
+    }
+
+
+def test_the_input_is_read_back_from_understandings_request() -> None:
+    received = {
+        "received_as": "the message the user just sent on conversation:c1",
+        "text": "What's on today? And the weather",
+        "messages": [
+            {"position": 1, "written_at": iso(1_000), "text": "What's on today?"},
+            {"position": 2, "written_at": iso(2_000), "text": "And the weather"},
+        ],
+    }
+    lines: list[Any] = [
+        viewer.Entry(0, "controller", "step", 1.0, "", step("windows", "due", 0, 1)),
+        viewer.Entry(1, "understanding", "given", 2.0, "", _rendered({"input": received})),
+    ]
+    assert viewer.timeline("a", lines)["arrival"] == {
+        "from": "understanding",
+        "line": 1,
+        "text": "What's on today? And the weather",
+        "received_as": "the message the user just sent on conversation:c1",
+        "messages": [
+            {"position": 1, "at": at(1_000).timestamp() * 1000, "text": "What's on today?"},
+            {"position": 2, "at": at(2_000).timestamp() * 1000, "text": "And the weather"},
+        ],
+    }
+
+
+def test_without_understanding_the_input_is_planning_place_windows_marked_item() -> None:
+    document = {
+        "place": {"description": "The hub's chat."},
+        "place_window": [
+            {"from": "the assistant", "at": iso(500), "text": "Earlier."},
+            {"from": "the user", "at": iso(1_000), "is_the_input": True, "text": "Remind me at 6"},
+        ],
+    }
+    lines: list[Any] = [viewer.Entry(0, "planning", "given", 2.0, "", _rendered(document))]
+    arrival = viewer.timeline("a", lines)["arrival"]
+    assert (arrival["from"], arrival["line"], arrival["text"]) == ("planning", 0, "Remind me at 6")
+    assert arrival["received_as"] == "The hub's chat."
+    assert [one["text"] for one in arrival["messages"]] == ["Remind me at 6"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"messages": "odd"},
+        _rendered(["not", "an", "object"]),
+        _rendered({"input": {"text": 3}}),
+    ],
+)
+def test_a_record_whose_requests_show_no_input_shows_none(body: Any) -> None:
+    lines: list[Any] = [viewer.Entry(0, "understanding", "given", 1.0, "", body)]
+    assert viewer.timeline("a", lines)["arrival"] is None
+
+
+def test_a_calls_view_names_the_prompt_version_origin_and_flags_on() -> None:
+    prompt = {
+        "name": "planning",
+        "version": "f1bb64c0d5e2",
+        "origin": "override",
+        "flags": {"spawn": True, "waiting": False, "person": True},
+    }
+    given = viewer.Entry(0, "planning", "given", 1.0, "", _rendered({}, prompt=prompt))
+    view = viewer.model_call([given], 0)
+    assert view is not None
+    assert view["prompt"] == {
+        "name": "planning",
+        "version": "f1bb64c0d5e2",
+        "origin": "override",
+        "flags_on": ["person", "spawn"],
+    }
+    unnamed = viewer.Entry(0, "planning", "given", 1.0, "", _rendered({}))
+    named_nothing = viewer.model_call([unnamed], 0)
+    assert named_nothing is not None
+    assert named_nothing["prompt"] is None
