@@ -1176,7 +1176,15 @@ class TelegramReader:
         running = [one.activation_id for one in self._turns.values() if not one.task.done()]
         stopped = False
         for activation_id in running:
-            stopped = await self._stop(activation_id) or stopped
+            try:
+                stopped = await self._stop(activation_id) or stopped
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # one stop that fails leaves the others to be made
+                if is_defect(exc):
+                    log_defect("telegram_stop_failed", exc, stage="reader", activation_id=None)
+                else:
+                    _log.warning("telegram_stop_failed", stage="reader", reason="failed")
         _log.info("telegram_stop_command", stage="reader", stopped=stopped, running=len(running))
         claims: list[str] = [first]
 
