@@ -139,11 +139,17 @@ and not yet admitted writes its stop record for that id, and nothing starts.
 > after its until, or when its pending occurrence ends *cancelled* by a cancel, a replace's
 > included (ADR-0350 §9:4–§9:5). No stop ends a rule.
 
-> **Normative.** The plan store's upgrade that retires the cascade record (§6:4) first ends
-> *cancelled*, in one step, every occurrence still pending whose task's lineage carries a
-> cascade record, as ADR-0350 §7:5 refused it before this decision, and then removes every
-> cascade record. So a stop made before this decision keeps the reach it had when it was
-> made.
+> **Normative.** The plan store's upgrade that retires the cascade record (§6:4), in one
+> step, first ends *cancelled* every occurrence still pending whose task's lineage carries a
+> cascade record, as ADR-0350 §7:5 refused it before this decision; writes a stop record
+> (ADR-0297) for the activation of every occurrence marked pushed whose task's lineage
+> carries one and whose outcome is not written; and then removes every cascade record. So a
+> stop made before this decision keeps the reach it had when it was made.
+
+A pushed occurrence is not left to the push step: at start ADR-0350 §8:1 settles it, and
+§8:5 or §8:6 would push it again, where the push step's lineage check used to cancel it.
+With its activation's stop record written, §8:1 ends it *stopped* and never pushes it again,
+as the old walk's stop of that activation would have.
 
 The takeover's stop and a merge's stop (ADR-0295 §5:1, ADR-0349 §4:5) never cascaded, so
 nothing changes for them.
@@ -306,8 +312,8 @@ that was running when it took the matter, and it ends.
 > `PlanStore.clear` counts no cascade record.
 
 > **Normative.** The SQLite plan store ships ADR-0326 §4:1–§4:2's upgrade and its test in
-> the change that removes the cascade record. The upgrade makes §2:6's cancels and drops
-> `cascade_records` in one transaction.
+> the change that removes the cascade record. The upgrade makes §2:6's cancels and stop records
+> and drops `cascade_records` in one transaction.
 
 > **Normative.** `EpisodeProcessingRecord` gains `taken_over_by: Identifier | None = None`,
 > §5:2's record, defaulted so that a record written before it validates unchanged and its
@@ -378,7 +384,10 @@ that was running when it took the matter, and it ends.
 
 > **Normative.** Step 4's tests include: the upgrade over a store holding a cascade record
 > with a pending occurrence below it, which ends that occurrence *cancelled* and leaves no
-> cascade record; and a push of an occurrence whose task's parent carries a stop record,
+> cascade record; the same store with an occurrence below it marked pushed and its outcome
+> unwritten, as a crash before the walk stopped it leaves one, whose activation the upgrade
+> gives a stop record, so that ADR-0350 §8:1 at start ends it *stopped* and never pushes it
+> again; and a push of an occurrence whose task's parent carries a stop record,
 > which is pushed.
 
 ### 8. What this decision does not decide
@@ -496,7 +505,7 @@ Read through and not superseded:
   is one planning can judge from the words, and code cannot.
 - **Keep the push step's refusal below a cascade record** for records already written.
   Rejected: it would keep a record kind, a member and a refusal for a handful of rows. The
-  upgrade applies the old refusal once and retires the records (§2:6), so no stop made before
+  upgrade applies the old refusal once, stops what was pushed below them, and retires the records (§2:6), so no stop made before
   this decision changes its reach.
 - **List only the tasks the stopped activation spawned itself.** Rejected: a step that ended
   after spawning its own next one leaves that one live below the stopped activation, and a
