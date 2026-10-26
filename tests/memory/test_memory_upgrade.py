@@ -92,7 +92,7 @@ def _with_later_defaults(stored: dict[str, Any]) -> dict[str, Any]:
     record = stored.get("processing_record")
     if record is None:
         return stored
-    added: dict[str, Any] = {"joined": [], "stories_position": None}
+    added: dict[str, Any] = {"joined": [], "stories_position": None, "taken_over_by": None}
     return {**stored, "processing_record": added | record}
 
 

@@ -5928,6 +5928,85 @@ class MemoryStoreContract:
         assert _unstamped_or_none(await store.get("episode")) == recorded
 
     @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_the_freezing_revision_records_who_took_the_matter(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """ADR-0352 §5:2, §6:5, §6:6: a handed-over activation's record names its taker.
+
+        The revision that freezes an open episode ``stopped`` names the activation that
+        absorbed it or took its input, and the frozen record reads back with it, by id
+        and on its conversation's read. Once frozen it keeps that name: a revision
+        naming another, or nobody, is refused and writes nothing.
+        """
+        opened = _open_episode("episode", channel=_CONVERSATION_A)
+        await store.add(opened)
+        stopped = {
+            "status": ProcessingStatus.INTERRUPTED,
+            "reason": ProcessingReason.STOPPED,
+            "ended_at": _OCCURRED,
+            "understanding_omitted": UnderstandingOmission.NOT_REACHED,
+            "stages": ended_pass(_OCCURRED, ControllerRule.STOPPED),
+        }
+        frozen = _revised(
+            opened,
+            processing={**stopped, "taken_over_by": "act-taker"},
+            content=_ANY,
+            placement=Placement(),
+        )
+
+        await _replace(store, frozen, door)
+
+        got = await store.get("episode")
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert got.processing_record.taken_over_by == "act-taker"
+        assert _unstamped_or_none(got) == frozen
+        page = await store.channel_episodes(_CONVERSATION_A, limit=1)
+        assert [entry.record for entry in page.entries] == [got]
+
+        for other in ("act-other", None):
+            renamed = _revised(frozen, processing={"taken_over_by": other})
+            with pytest.raises(MemoryStoreError):
+                await _replace(store, renamed, door, companion=door != "add")
+            assert await store.get("companion") is None
+            assert _unstamped_or_none(await store.get("episode")) == frozen
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_a_record_frozen_naming_nobody_never_gains_a_taker(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """ADR-0352 §6:6: only the freezing revision sets it, as a restart's close sets none.
+
+        An episode frozen ``stopped`` naming nobody, as a stop that was no hand-over, or a
+        record written before the field, leaves it, and a later revision naming a taker
+        is refused and writes nothing.
+        """
+        frozen = _revised(
+            _open_episode("episode", channel=_CONVERSATION_A),
+            processing={
+                "status": ProcessingStatus.INTERRUPTED,
+                "reason": ProcessingReason.STOPPED,
+                "ended_at": _OCCURRED,
+                "understanding_omitted": UnderstandingOmission.NOT_REACHED,
+                "stages": ended_pass(_OCCURRED, ControllerRule.STOPPED),
+            },
+            content=_ANY,
+            placement=Placement(),
+        )
+        await store.add(frozen)
+
+        named = _revised(frozen, processing={"taken_over_by": "act-taker"})
+        with pytest.raises(MemoryStoreError):
+            await _replace(store, named, door, companion=door != "add")
+
+        assert await store.get("companion") is None
+        got = await store.get("episode")
+        assert _unstamped_or_none(got) == frozen
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert got.processing_record.taken_over_by is None
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
     async def test_the_guard_admits_a_placement_only_change_to_a_frozen_episode(
         self, store: MemoryStore, door: str
     ) -> None:

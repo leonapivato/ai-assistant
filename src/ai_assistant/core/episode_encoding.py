@@ -585,7 +585,8 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
       §10 adds to ADR-0286 §3:3);
     - in the one revision that freezes it, ``status``, ``reason``, ``ended_at`` and
       ``understanding_omitted``, with the end entry the record's own validators then
-      require last.
+      require last, and ``taken_over_by`` (ADR-0352 §6:6, as it adds to ADR-0286 §3:3),
+      which takes a value in no other revision.
 
     A field that carries a value keeps it.
 
@@ -657,6 +658,10 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
             "reason": after.reason,
             "ended_at": after.ended_at,
             "understanding_omitted": after.understanding_omitted,
+            # ADR-0352 §6:6: only the freezing revision names who took the matter. The
+            # stored record is open, so it names none (§6:5), and an open revision keeps
+            # that none.
+            "taken_over_by": before.taken_over_by if after.is_open else after.taken_over_by,
         }
     )
     return settled == after

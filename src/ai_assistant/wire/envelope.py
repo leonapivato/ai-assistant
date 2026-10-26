@@ -2720,7 +2720,14 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     reads one id, the new field as extra and the repeated name, and a hub at 119
 #:     refuses one id where it reads a sequence (ADR-0124 §9:2). The method set does not
 #:     move, and the peer view crosses no frame.
-PROTOCOL_VERSION: Final[int] = 119
+#: 120: ADR-0352 §6:7 advances the version once for step 1 of the deliberate stop (§7:1),
+#:     on this ground: the wire-carried ``EpisodicMemory.processing_record`` gains
+#:     ``taken_over_by``, the activation that took a handed-over activation's matter
+#:     (§5:2, §6:5). Every record a hub at 120 sends carries the field, ``null`` where
+#:     nothing was handed over, and a peer at 119 refuses it as extra (ADR-0124 §9:2).
+#:     The method set does not move: no ``Protocol`` gains a member, and
+#:     ``ConversationState`` keeps its shape (§6:8).
+PROTOCOL_VERSION: Final[int] = 120
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
