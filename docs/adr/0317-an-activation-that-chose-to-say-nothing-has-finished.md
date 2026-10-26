@@ -1,6 +1,6 @@
 # 317. An activation that chose to say nothing has finished
 
-- Status: Partially superseded by ADR-0340 (§3:1's fixed *couldn't finish* message, for a reminder's activation: the reminder's fixed line in its place, followed by the same listing of effects)
+- Status: Partially superseded by ADR-0340 (§3:1's fixed *couldn't finish* message, for a reminder's activation: the reminder's fixed line in its place, followed by the same listing of effects, into the line's chat where none of its suggested places is left)
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): how an activation started from a conversation ends when planning chose to write nothing, and where the *couldn't finish* message is written ([#2943](https://github.com/leonapivato/ai-assistant/issues/2943)).
 - Authorization: the owner ruled this decision's content on 2026-10-13 in #2943, option A: silence is a normal ending. The dispatcher assigned 0317 and authorized ratifying it once its reviews are green.
@@ -12,7 +12,7 @@
   [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md)
   (§3:7, in the addition alone: a stage's failure that ends the activation also writes *couldn't finish*, whatever
   earlier rounds wrote).
-- Partially superseded: 2026-10-25 by ADR-0340 — §3:1's fixed *couldn't finish* message, for the activation a reminder's occurrence starts: the reminder's fixed line, `Reminder:` and the reminder's instruction, is written in its place, followed by the same listing of effects, into each of the reminder's suggested places on its place list (ADR-0340 §7:4–§7:5). Every other clause stands. This replacement takes effect on ratification of ADR-0340. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-25 by ADR-0340 — §3:1's fixed *couldn't finish* message, for the activation a reminder's occurrence starts: the reminder's fixed line, `Reminder:` and the reminder's instruction, is written in its place, followed by the same listing of effects, into each of the reminder's suggested places on its place list, or into the line's chat on that list where none of them is left (ADR-0340 §7:4–§7:5). Every other clause stands. This replacement takes effect on ratification of ADR-0340. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

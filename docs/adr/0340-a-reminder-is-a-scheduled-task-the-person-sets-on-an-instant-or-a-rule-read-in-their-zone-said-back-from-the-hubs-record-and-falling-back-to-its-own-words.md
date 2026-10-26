@@ -4,7 +4,7 @@
 - Date: 2026-10-25
 - Scope: the reminder layer on the Task Scheduler. It covers what makes a scheduled task a reminder (§2), one-off times and local times (§3), the rule and its vocabulary (§4), skipping, changing and the plain words (§5), the read-back and the renderings (§6), a reminder coming due and its fixed line (§7), the capability surface and planning's instruction (§8), the code it binds (§9) and its delivery (§10). It is the reminders decision that [ADR-0350](0350-every-spawn-is-a-scheduled-task-written-into-the-task-scheduler-whose-sensor-starts-it-when-it-comes-due-and-the-task-manager-is-the-one-way-in-from-outside.md) §5:2, §5:3, §9:4 and §11:1 name. It rewrites the draft of 2026-10-21, which built reminders on a clock channel of their own, keeping what ADR-0350 §11 lists. §11 names what is not decided here.
 - Dependency: [ADR-0350](0350-every-spawn-is-a-scheduled-task-written-into-the-task-scheduler-whose-sensor-starts-it-when-it-comes-due-and-the-task-manager-is-the-one-way-in-from-outside.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md), [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), [ADR-0317](0317-an-activation-that-chose-to-say-nothing-has-finished.md) and [ADR-0337](0337-a-prompt-change-is-judged-on-a-regression-suite-with-repeated-samples-each-recorded-call-is-asked-what-it-had-to-guess-and-a-candidate-is-promoted-after-three-clean-days.md), as their status lines leave them.
-- Authorization: the coordinator walked proposal [#3271](https://github.com/leonapivato/ai-assistant/pull/3271) on 2026-10-21, and the owner's walk of ADR-0350 from 2026-10-21 to 2026-10-25 replaced its channel with the Task Scheduler and listed what this rewrite keeps and drops (ADR-0350 §11). The owner ruled on 2026-10-25 that nothing is cancelled when a place is gone. The dispatcher assigned 0340. Ratification is the owner's, after their review.
+- Authorization: the coordinator walked proposal [#3271](https://github.com/leonapivato/ai-assistant/pull/3271) on 2026-10-21, and the owner's walk of ADR-0350 from 2026-10-21 to 2026-10-25 replaced its channel with the Task Scheduler and listed what this rewrite keeps and drops (ADR-0350 §11). The owner ruled on 2026-10-25 that nothing is cancelled when a place is gone. The owner reviewed this rewrite on 2026-10-25 and ruled four changes: every scheduled task's times render in the person's zone (§6:1); skipping a one-off reminder is a cancel (§5:1), "usually it's just replacing it the next day unless it's already scheduled for the next day, which is just a cancel"; the fixed line falls back to the line (§7:4); and quiet hours are no rule here, "nothing mechanical… it's something in the person model" (§7:3). The dispatcher assigned 0340. Ratification is the owner's, after their review.
 - Milestone: [15, Task Scheduler: reminders and work that runs later](https://github.com/leonapivato/ai-assistant/milestone/15).
 - **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `core/types.py`'s scheduled task gains its reminder mark and a rule as a when, and holds more than one occurrence where it has a rule (§9:1). `TaskRefusal` gains this decision's refusals (§9:2). `PlanStore`'s members that settle, push and cancel an occurrence take a rule's next occurrence, its skipped ones and its end (§9:3). No capability is added (§8:1), and `Settings` gains no field.
 - **Partially supersedes**, in the clauses §12's first table names: ADR-0307, ADR-0317, ADR-0338 and ADR-0350.
@@ -32,8 +32,9 @@ that time, and take "done", "snooze 10 minutes" and "skip tomorrow's" in its str
   unknown gets one second try (§8:6), each stated in the input with no wording required.
   Snoozing is a new spawn (§9:3), "make it 9" a replace (§9:4), and there is no change
   capability. Nothing is cancelled when a place is gone (§5:9). Where its activation cannot
-  finish, the fixed *couldn't finish* goes into each suggested place on its place list
-  (§6:7).
+  finish, the fixed *couldn't finish* goes into each suggested place on its place list, "or
+  nowhere where its task suggests none" (§6:7). The line's chat is on every task
+  activation's place list where the line is connected (§5:11).
 - ADR-0338 §3:6: "Where a person's zone is set, it is the zone of every time code reads for
   that person: planning's current time (ADR-0307 §6:1) and the quiet windows (ADR-0130
   §6:4). Where it is empty, or the activation is no person's, those reads use
@@ -48,16 +49,18 @@ that time, and take "done", "snooze 10 minutes" and "skip tomorrow's" in its str
   `ScheduledTask.occurrences` holds exactly one occurrence (`max_length=1`).
 - `SPAWN` in `orchestration/task_scheduler.py` takes `instruction`, `at` ("an ISO 8601
   instant with its UTC offset"), `delay_minutes`, `after`, `places` and `replaces`.
-- The Task Scheduler's renderings (`when_text`, `task_input`, `lineage_steps`) take one zone,
-  which the composition root wires as `settings.timezone` (`TaskSchedulerSeams(zone=...)` in
-  `app/composition.py`), not the person's profile zone that `person_zone` in
-  `orchestration/person_block.py` reads.
+- The Task Scheduler's renderings (`when_text`, `task_input`, `lineage_steps`) and the Task
+  Manager's local times take one zone, which the composition root wires as
+  `settings.timezone` (`TaskSchedulerSeams(zone=...)` in `app/composition.py`), not the
+  person's profile zone that `person_zone` in `orchestration/person_block.py` reads. That
+  falls short of ADR-0338 §3:6 for every scheduled task, a reminder or not
+  ([#3434](https://github.com/leonapivato/ai-assistant/issues/3434)).
 - `PhasePath._couldnt_finish` in `orchestration/phase_path.py` writes `COULDNT_FINISH`, with
   the listing of effects, into each suggested place of a task's activation.
 
 **Why it needs a decision.** The four points ADR-0350 left open are decisions. The owner's
-ruling that a reminder's fallback is its own words changes ADR-0350 §6:7's *couldn't
-finish* line for reminders, and the rule changes `core`.
+ruling that a reminder's fallback is its own words, falling back to the line, changes ADR-0350
+§6:7's *couldn't finish* line for reminders, and the rule changes `core`.
 
 ## Decision
 
@@ -65,8 +68,10 @@ We will make a reminder a scheduled task the person set, marked as a reminder, w
 instruction is what they are to be reminded of. Its when is a fixed instant, or a daily,
 weekday or weekly rule at a local time that follows the person's current zone. The spawn's
 result says it back from the stored record, in the person's zone, with the places it will
-speak in. "Done", "snooze" and "skip tomorrow's" are ADR-0350's cancel and spawn. Where its
-activation cannot finish, its suggested places get the reminder's own words as a fixed line.
+speak in. Every scheduled task's times are rendered in the person's zone. "Done", "snooze"
+and "skip tomorrow's" are ADR-0350's cancel and spawn. Where its activation cannot finish,
+its suggested places get the reminder's own words as a fixed line, and the line's chat gets
+it where none of them is left.
 
 ### 1. Status, scope and delivery
 
@@ -205,9 +210,10 @@ it stays in the Task Scheduler until it ends.
 > **Normative.** **Skipping** a rule's next occurrence, "skip tomorrow's", is a spawn
 > replacing the reminder (ADR-0350 §9:4) with the same rule, whose from is the local date
 > after the skipped occurrence's. Where the rule yields nothing after the skipped one before
-> its until, skipping it is a cancel (ADR-0350 §9:5).
+> its until, skipping it is a cancel (ADR-0350 §9:5). Skipping a one-off reminder is a
+> cancel (ADR-0350 §9:5).
 
-> **Normative.** Only a rule's next occurrence can be skipped. Changing one occurrence of a
+> **Normative.** Of a rule, only its next occurrence can be skipped. Changing one occurrence of a
 > rule, "tomorrow at 9 instead", is skipping it and a one-off reminder for the new time,
 > two spawns in one round.
 
@@ -225,7 +231,8 @@ it stays in the Task Scheduler until it ends.
 > **Normative.** "Cancel the bins one" is a cancel (ADR-0350 §9:5), which for a rule ends it
 > (§4:7).
 
-Skipping is a replace, not a cancel of one occurrence alone, for three reasons. A cancel then
+A one-off has one occurrence, so skipping it leaves nothing set, and that is a cancel. Skipping a
+rule's occurrence is a replace, not a cancel of one occurrence alone, for three reasons. A cancel then
 keeps one meaning, the whole reminder, and ADR-0350 §9:5 and the cancel's arguments are
 untouched. The replace's result is a read-back of the whole new schedule ("every day at 8:00
 PM, from Thursday 23 October"), so the person hears what is now set. And a rule holds one
@@ -235,10 +242,10 @@ and a new reminder.
 
 ### 6. The read-back, and the renderings
 
-> **Normative.** Every rendering of a reminder's times, in a spawn's result (ADR-0350 §4:8),
-> the list pull (§4:6), its activation's input (§6:2) and the schedule's window (§6:5), is in
-> the person's zone, or, for a rule naming a zone, in that zone, which the rendering then
-> names.
+> **Normative.** Every rendering of a scheduled task's times, a reminder's or not, is in the
+> person's zone (§3:3): in a spawn's result (ADR-0350 §4:8), the list pull (§4:6), its
+> activation's input (§6:2), the schedule's window (§6:5) and the Task Manager's queries
+> (§10:2). A rule naming a zone is rendered in that zone, and the rendering names it.
 
 > **Normative.** The **read-back** is the hub's rendering in a spawn's result of a reminder
 > it wrote, from the stored record. It gives the next occurrence's weekday, date and local
@@ -266,8 +273,9 @@ and a new reminder.
 > **Normative.** Where a reminder's activation does not finish, in the cases ADR-0317 §3:2–
 > §3:4 name, its **fixed line** is written in place of *couldn't finish*: `Reminder:` and the
 > reminder's instruction ("Reminder: call Mom"), followed by the listing of effects ADR-0317
-> §3:1 gives where there is any. It goes into each suggested place on its place list, and
-> nowhere where none is left (ADR-0350 §6:7).
+> §3:1 gives where there is any. It goes into each suggested place on its place list. Where
+> none of its suggested places is left on that list, it goes into the line's chat where the
+> line is on it (ADR-0350 §5:11), and nowhere only where the list is empty.
 
 > **Normative.** The fixed line is claimed and written as *couldn't finish* is, and the
 > episode freezes as ADR-0317 §3:5 classifies an activation that did not finish.
@@ -275,8 +283,12 @@ and a new reminder.
 A model writes the reminder in words that fit (ADR-0350 §6:10), and the facts it rests on,
 late or a second try, are the hub's. Where no model can, because the model is down or the
 round limit ended it, the person still gets what they asked to be reminded of rather than "I
-couldn't finish this." A stop and a restart write nothing (ADR-0317 §3:6), and a restart is
-settled by ADR-0350 §8. Quiet hours are not decided here (§11): the asked time wins.
+couldn't finish this." A model-written reminder can already fall back to the line, which is on
+every task activation's list (ADR-0350 §5's prose), so the fixed line does too: a reminder set
+in the hub chat, whose conversation was later deleted, with the model down at its time, still
+says "Reminder: call Mom" on the line. A stop and a restart write nothing (ADR-0317 §3:6), and
+a restart is settled by ADR-0350 §8. Quiet hours are not decided here (§11): the asked time
+wins.
 
 ### 8. The capability surface
 
@@ -342,7 +354,9 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
    canonical fake and the SQLite plan store in `planning/` with its upgrade.
 2. **R2, reminders in `orchestration/`:** spawn's arguments (§8:1) and their refusals (§3:5,
    §4:4), local times (§3), the rule's arithmetic (§9:5) and the sensor's use of it (§4:5–§4:8),
-   the renderings in the person's zone (§6), the reminder's input (§7:1), the fixed line
+   every scheduled task's renderings in the person's zone, the Task Manager's included, which
+   closes [#3434](https://github.com/leonapivato/ai-assistant/issues/3434) (§6:1), the read-back
+   (§6:2), the reminder's input (§7:1), the fixed line
    (§7:4–§7:5), the list pull's fields (§8:2), planning's instruction (§8:3) and the
    composition wiring in `app/`.
 
@@ -360,7 +374,9 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > a rule; the person's zone changed while a rule's occurrence is pending, which keeps that
 > instant and computes the next in the new zone; a rule naming a zone, which a change of the
 > person's zone does not move; a profile zone that differs from `Settings.timezone`, which a
-> local time, a rule and every rendering follow; a cancel of a rule, after which no
+> local time, a rule and every rendering follow; a task that is not a reminder, rendered in a
+> profile zone that differs from `Settings.timezone`, in its spawn's result, the list pull,
+> its activation's input, the schedule's window and the Task Manager's queries; a cancel of a rule, after which no
 > occurrence is computed; a skip, whose replace's from is the day after; an occurrence's
 > outcome and the next occurrence written in one step, with no instant at which the task has
 > nothing pending; a rule missed for three days, which pushes one late occurrence stating
@@ -371,8 +387,9 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > confirmed done, which settles it and then pushes the latest missed one late; a skip of a
 > bounded rule's last occurrence, which is a cancel; "make it 9" on a rule whose from has
 > passed, which replaces it; the fixed line on the round limit, written into each suggested place
-> on the list with the effects listed, and written nowhere where every suggested place is
-> gone; a stop and a restart, which write no fixed line; and each refusal of §2:2, §2:4,
+> on the list with the effects listed; the fixed line where every suggested place is gone and
+> the line is connected, written into the line's chat; the fixed line where the place list is
+> empty, written nowhere; a stop and a restart, which write no fixed line; and each refusal of §2:2, §2:4,
 > §2:5, §3:5, §4:1 and §4:4.
 
 > **Normative.** R2 adds synthetic prompt cases (ADR-0337 §3) for at least: "remind me at 8 to
@@ -380,7 +397,8 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > the same said at 7 in the morning, at 08:00; "every weekday at 7, the bins", which is a
 > weekdays rule; "I already took it" before a one-off reminder shown by its label falls
 > due, which is its cancel; "skip tomorrow's" for a daily reminder, which is a replace from
-> the day after tomorrow; "snooze 10 minutes" right after a reminder's message, which is a
+> the day after tomorrow; "skip it" for a one-off reminder shown by its label, which is its
+> cancel; "snooze 10 minutes" right after a reminder's message, which is a
 > one-off reminder ten minutes from now with the same instruction; "done" right after a
 > reminder's message, which is no call; "make it 9" for a daily reminder not yet said, which
 > replaces it with the same rule at the new time; and a reminder's activation, which writes
@@ -408,10 +426,10 @@ Superseded in part. Every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0307 | §3:7's fixed *couldn't finish* message, for a reminder's activation: its fixed line in place of it | §7:4–§7:5 |
-| ADR-0317 | §3:1's fixed *couldn't finish* message, for a reminder's activation: its fixed line in place of it, followed by the same listing of effects, into its suggested places on its list | §7:4–§7:5 |
-| ADR-0338 | §3:6, in the addition alone: a reminder's local times, its rule's occurrences and the renderings of its times are read in the person's zone | §3:2–§3:3, §4:3, §6:1 |
-| ADR-0350 | §3:6, §4:1 and §12:1, in the addition alone: a task's reminder mark, which a spawn states, and a rule as a when with more than one occurrence; §6:2, in the addition alone: a reminder's input also states that it is one and its rule; §4:5, in the addition alone: a spawn is also refused on §2's, §3:5's and §4's grounds; §5:2, in the addition alone: a spawn may state a local date and time with no offset, read in a named zone or the person's; §6:7's *couldn't finish*, for a reminder's activation: its fixed line; §7:7, for a task with a rule: its next occurrence is written with the ended one's outcome in one step, and none after its until or a cancel; §12:3, in the addition alone: the members §9:3 changes | §2, §3:2, §3:5, §4, §7:1, §7:4, §8:1, §9:1–§9:3 |
+| ADR-0307 | §3:7's fixed *couldn't finish* message, for a reminder's activation: its fixed line in place of it, into its suggested places on its list, or into the line's chat where none of them is left | §7:4–§7:5 |
+| ADR-0317 | §3:1's fixed *couldn't finish* message, for a reminder's activation: its fixed line in place of it, followed by the same listing of effects, into its suggested places on its list, or into the line's chat where none of them is left | §7:4–§7:5 |
+| ADR-0338 | §3:6, for a zone a spawn names: a local time the spawn states is read in that zone, and a rule naming a zone is computed and rendered in it, not in the person's zone | §3:2, §4:3, §6:1 |
+| ADR-0350 | §3:6, §4:1 and §12:1, in the addition alone: a task's reminder mark, which a spawn states, and a rule as a when with more than one occurrence; §6:2, in the addition alone: a reminder's input also states that it is one and its rule; §4:5, in the addition alone: a spawn is also refused on §2's, §3:5's and §4's grounds; §5:2, in the addition alone: a spawn may state a local date and time with no offset, read in a named zone or the person's; §6:7's *couldn't finish*, for a reminder's activation: its fixed line, which goes into the line's chat on its list where none of its suggested places is left, in place of §6:7's "nowhere"; §7:7, for a task with a rule: its next occurrence is written with the ended one's outcome in one step, and none after its until or a cancel; §12:3, in the addition alone: the members §9:3 changes | §2, §3:2, §3:5, §4, §7:1, §7:4, §8:1, §9:1–§9:3 |
 
 Read through and not superseded:
 
@@ -419,10 +437,11 @@ Read through and not superseded:
 | --- | --- |
 | ADR-0350 §5:3, §9:4's last sentence, §11:1 and §14's reminders row | Nothing: this is the decision they name, and it builds no channel, store or sensor of its own |
 | ADR-0350 §3:9, ADR-0292 §5:5–§5:6 | Nothing: a reminder is set only from input carrying the person's authority, and informs and authorizes nothing |
-| ADR-0350 §5:5–§5:6, §5:8–§5:9, §6:7 | Nothing beyond §2:4's one place: no place is suggested by default, a reminder speaks only on its place list, and nothing is cancelled when a place is gone |
+| ADR-0350 §5:5–§5:6, §5:8–§5:9, §6:7 beyond its *couldn't finish* | Nothing beyond §2:4's one place: no place is suggested by default, a reminder speaks only on its place list, and nothing is cancelled when a place is gone |
+| ADR-0338 §3:6, beyond a zone a spawn names | Nothing: a local time stated with no zone, a rule's occurrences and every rendering of a scheduled task's times are times code reads for the person the task is for, so they are in that person's zone (§3:3, §6:1); TS2's renderings in `Settings.timezone` fall short of it ([#3434](https://github.com/leonapivato/ai-assistant/issues/3434)), and R2 brings them to it |
 | ADR-0350 §6:3 | Nothing: a reminder's instruction is the creator's instruction as planning wrote it |
 | ADR-0350 §8:6, §8:9–§8:10 | Nothing: a reminder's second try and lateness are those clauses, and §4:8 finds the latest missed occurrence for §8:10 |
-| ADR-0350 §9:3–§9:5, §4:4 | Nothing: snooze is a new spawn, a change and a skip are replaces, a cancel ends what is pending, each under §4:4's authority |
+| ADR-0350 §9:3–§9:5, §4:4 | Nothing: snooze is a new spawn, a change and a rule's skip are replaces, a one-off's skip is a cancel, a cancel ends what is pending, each under §4:4's authority |
 | ADR-0350 §9:8 | Nothing: a rule holds one pending occurrence, which counts once |
 | ADR-0306 §5:9 | Nothing: the backstop refuses the same reminder twice in one matter unless planning marks it deliberate |
 | ADR-0317 §3:5–§3:6 | Nothing: an activation that writes the fixed line did not finish, and a stop or a restart writes nothing |
@@ -444,12 +463,13 @@ Read through and not superseded:
 | "Remind me on Telegram at 8", on the hub chat | It suggests the line's chat, and the read-back says "on Telegram" |
 | "Every weekday at 7, the bins" | A weekdays rule at 07:00 in the person's zone (§4) |
 | The person flies to Lisbon | A one-off keeps its instant; a rule follows from its next occurrence (§3:1, §4:3) |
-| "Skip tomorrow's" | A replace from the day after, said back whole (§5:1) |
+| "Skip tomorrow's" | For a rule, a replace from the day after, said back whole; for a one-off, a cancel (§5:1) |
 | "I already took it", before 8 | A cancel of the one-off, or a skip of the rule's (§5:5) |
 | "Snooze 10 minutes", after it is said | A new one-off reminder (§5:4) |
 | The model is down at 8 | "Reminder: call Mom" in its suggested places (§7:4) |
 | The hub was down at 8 | Said once, the input stating it is late (ADR-0350 §8:9) |
 | The conversation it was set in is deleted | Nothing is cancelled; it speaks on the line where the line is connected, or writes nothing (ADR-0350 §5:9) |
+| The conversation it was set in is deleted, and the model is down at 8 | "Reminder: call Mom" on the line where the line is connected, or nothing (§7:4) |
 
 **What it costs.**
 
@@ -460,14 +480,14 @@ Read through and not superseded:
   (§4:10). Pruning old ones would cut their messages' links to the task, which ADR-0350
   §9:1 keeps, so it waits for a decision that supersedes that clause, if the size ever
   matters.
-- **Only a rule's next occurrence can be skipped**, and "tomorrow at 9 instead" is two
+- **Of a rule, only the next occurrence can be skipped**, and "tomorrow at 9 instead" is two
   spawns (§5:2).
 - **A reminder must name a place**, so a reminder set where none can be suggested is
   refused (§2:4).
 - **Machinery and records.** A change to the `PlanStore` triad with an upgrade, a rule type,
   three spawn arguments, the rule's arithmetic in one function, the fixed line, and header
   records on four ADRs. TS2's renderings move from `Settings.timezone` to the person's zone
-  for reminders (§6:1).
+  for every scheduled task (§6:1), which closes #3434.
 
 **The cut, for the dispatcher.** §10's two lanes: R1 is the contract change with the SQLite
 plan store, under ADR-0137 §2:1, and R2 every consumer, briefed against the merged
