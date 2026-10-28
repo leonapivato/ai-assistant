@@ -2590,8 +2590,15 @@ LABEL_CHARS: Final = 200
 #: How deep a request's JSON is searched for the labels it shows.
 LABEL_DEPTH: Final = 8
 
-#: The keys understanding's reading carries (ADR-0276 §2); any other is named as other.
-_READING_KEYS: Final = frozenset(
+#: The keys understanding's reply carries (ADR-0353 §9:1); any other is named as other.
+_REPLY_KEYS: Final = frozenset(
+    {"understanding", "cites", "unclear", "belongs_to", "meant_for", "relayed"}
+)
+
+#: The keys of a reply written before ADR-0353, in the shape ADR-0276 §2 gave it; any
+#: other is named as other. The record is never upgraded (ADR-0326 §8:1), so a reply
+#: recorded then is shown in that shape (ADR-0353 §14:10).
+_EARLIER_READING_KEYS: Final = frozenset(
     {
         "meaning",
         "meaning_ground",
@@ -2604,6 +2611,10 @@ _READING_KEYS: Final = frozenset(
         "continues",
     }
 )
+
+#: The earlier shape's keys that the reply's shape does not share: a reply holding one of
+#: them and no ``understanding`` was written in the earlier shape.
+_EARLIER_ONLY_KEYS: Final = _EARLIER_READING_KEYS - {"continues"}
 
 #: The keys whose text stands for a labelled item, the first that is text.
 _LABEL_TEXT_KEYS: Final = (
@@ -2940,18 +2951,23 @@ def _recalled_shown(
 
 
 def reading_of(reply: str) -> dict[str, object] | None:
-    """Understanding's reply read as its reading (ADR-0276 §2), field by field.
+    """Understanding's reply read field by field, in the shape it was written in.
 
     One enclosing Markdown code fence is set aside first, as the stage sets it aside. Each
-    field is a hint (ADR-0316 §5:2): one of another shape is left out.
+    field is a hint (ADR-0316 §5:2): one of another shape is left out. A reply holding
+    ``understanding``, or none of the earlier shape's own keys, is read in the reply's
+    shape (ADR-0353 §9:1); any other in the earlier shape (ADR-0276 §2), since the record
+    keeps what was written and is never upgraded (ADR-0353 §14:10). ``shape`` says which.
 
     Args:
         reply: The reply's text, as the returned entry keeps it.
 
     Returns:
-        Its meaning and ground, references, relationships, unresolved matters, answers,
-        story links and the work it continues, and the keys it holds beside them; or
-        ``None`` where the reply is no JSON object.
+        In the reply's shape: its understanding, what it cites, each unclear point with its
+        readings, what it belongs to, what it is meant for and its relay mark. In the
+        earlier shape: its meaning and ground, references, relationships, unresolved
+        matters, answers, story links and the work it continues. Either with the keys it
+        holds beside them; or ``None`` where the reply is no JSON object.
     """
     body = reply.strip()
     if body.startswith("```") and body.endswith("```") and len(body) >= 6:  # noqa: PLR2004 — two fences
@@ -2962,7 +2978,23 @@ def reading_of(reply: str) -> dict[str, object] | None:
     value = _object_in(body)
     if value is None:
         return None
+    if "understanding" in value or not _EARLIER_ONLY_KEYS & value.keys():
+        relayed = value.get("relayed")
+        return {
+            "shape": "reply",
+            "understanding": _text(value.get("understanding")),
+            "cites": _strings(value.get("cites")),
+            "unclear": [
+                {"gap": _text(one.get("gap")), "readings": _strings(one.get("readings"))}
+                for one in map(_mapping, _sequence(value.get("unclear")))
+            ],
+            "belongs_to": _strings(value.get("belongs_to")),
+            "meant_for": _strings(value.get("meant_for")),
+            "relayed": relayed if isinstance(relayed, bool) else None,
+            "other": sorted(key for key in value if key not in _REPLY_KEYS),
+        }
     return {
+        "shape": "earlier",
         "meaning": _text(value.get("meaning")),
         "ground": _text(value.get("meaning_ground")),
         "meaning_labels": _strings(value.get("meaning_labels")),
@@ -2995,11 +3027,17 @@ def reading_of(reply: str) -> dict[str, object] | None:
             for one in map(_mapping, _sequence(value.get("answers")))
         ],
         "continues": _strings(value.get("continues")),
-        "other": sorted(key for key in value if key not in _READING_KEYS),
+        "other": sorted(key for key in value if key not in _EARLIER_READING_KEYS),
     }
 
 
 def _labels_used(reading: Mapping[str, object]) -> set[str]:
+    if reading.get("shape") == "reply":
+        return {
+            *_strings(reading.get("cites")),
+            *_strings(reading.get("belongs_to")),
+            *_strings(reading.get("meant_for")),
+        }
     used = set(_strings(reading.get("meaning_labels")))
     used |= set(_strings(reading.get("story_labels"))) | set(_strings(reading.get("continues")))
     for key in ("references", "relationships"):
@@ -5227,6 +5265,34 @@ SCRIPT: Final = r"""
       return;
     }
     const known = s.labels || {};
+    const listed = (title, rows, draw) => {
+      const box = sec(root, title);
+      if (!rows.length) box.appendChild(el("p", "note", "none"));
+      for (const row of rows) draw(walkItem(box), row);
+    };
+    if (r.shape === "reply") {
+      // ADR-0353 §9:1: the reply's six keys, as it was written.
+      const understood = sec(root, "Understanding");
+      understood.appendChild(el("div", "said",
+        r.understanding === null ? DASH : r.understanding));
+      kv(understood, [["relayed", r.relayed === null ? null : (r.relayed ? "yes" : "no")]]);
+      if (r.cites.length) {
+        understood.appendChild(el("div", "m", "cites"));
+        labelsInto(understood, r.cites, known);
+      }
+      listed("Unclear", r.unclear, (box, one) => {
+        box.appendChild(el("div", "said", one.gap || DASH));
+        for (const reading of one.readings) box.appendChild(el("div", "m", "reading: " + reading));
+      });
+      listed("Belongs to", r.belongs_to, (box, one) => labelsInto(box, [one], known));
+      listed("Meant for", r.meant_for, (box, one) => labelsInto(box, [one], known));
+      if (r.other.length) {
+        root.appendChild(el("p", "note", "Keys the reply does not name: " + r.other.join(", ")));
+      }
+      return;
+    }
+    root.appendChild(el("p", "note", "Written in the reply\u2019s earlier shape, before "
+      + "ADR-0353; shown as it was written."));
     const meaning = sec(root, "Meaning");
     meaning.appendChild(el("div", "said", r.meaning === null ? DASH : r.meaning));
     kv(meaning, [["ground", r.ground ? words(r.ground) : null]]);
@@ -5234,11 +5300,6 @@ SCRIPT: Final = r"""
       meaning.appendChild(el("div", "m", "rests on"));
       labelsInto(meaning, r.meaning_labels, known);
     }
-    const listed = (title, rows, draw) => {
-      const box = sec(root, title);
-      if (!rows.length) box.appendChild(el("p", "note", "none"));
-      for (const row of rows) draw(walkItem(box), row);
-    };
     listed("References", r.references, (box, one) => {
       box.appendChild(el("div", "said", "“" + (one.phrase || DASH) + "”"));
       labelsInto(box, one.labels, known);

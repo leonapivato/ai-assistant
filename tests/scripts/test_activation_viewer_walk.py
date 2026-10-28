@@ -156,8 +156,11 @@ def test_a_request_showing_fewer_items_than_were_kept_is_not_joined(
 
 
 def test_understanding_reads_as_its_fields_with_its_labels_text(record: Path) -> None:
+    """ADR-0353 §14:10: a reply recorded before ADR-0353 is read in the shape it was
+    written in, since the diagnostic record is never upgraded."""
     step = _step(_walk(record, WALKED), "Understanding")
     reading = step["reading"]
+    assert reading["shape"] == "earlier"
     assert reading["meaning"] == READING["meaning"]
     assert reading["ground"] == "stated"
     assert reading["references"] == [{"phrase": "the Lisbon flight", "labels": ["M1"]}]
@@ -170,6 +173,100 @@ def test_understanding_reads_as_its_fields_with_its_labels_text(record: Path) ->
     links = step["links"]
     assert links[0]["label"] == "The call, readable"
     assert links[0]["call"] == links[0]["lines"][0]
+
+
+#: A reply in ADR-0353 §9:1's shape: its six keys, and one it does not name.
+_REPLY: dict[str, Any] = {
+    "understanding": "Book the Lisbon flight and tell Ana it is booked.",
+    "cites": ["M1", "R1"],
+    "unclear": [
+        {"gap": "which date in May", "readings": ["the 3rd", "the 10th"]},
+        {"gap": "which Ana", "readings": ["the user's sister"]},
+    ],
+    "belongs_to": ["S1"],
+    "meant_for": ["R1"],
+    "relayed": False,
+    "extra": 1,
+}
+
+
+def test_a_reply_in_its_six_keys_reads_in_that_shape() -> None:
+    """ADR-0353 §14:10, §9:1: a reply written in the reply's shape is shown in it."""
+    assert viewer.reading_of("```json\n" + json.dumps(_REPLY) + "\n```") == {
+        "shape": "reply",
+        "understanding": _REPLY["understanding"],
+        "cites": ["M1", "R1"],
+        "unclear": [
+            {"gap": "which date in May", "readings": ["the 3rd", "the 10th"]},
+            {"gap": "which Ana", "readings": ["the user's sister"]},
+        ],
+        "belongs_to": ["S1"],
+        "meant_for": ["R1"],
+        "relayed": False,
+        "other": ["extra"],
+    }
+    odd = viewer.reading_of(
+        '{"understanding": 3, "unclear": [{"gap": 1, "readings": ["a", 2]}], "relayed": "no"}'
+    )
+    assert odd is not None
+    assert (odd["understanding"], odd["unclear"], odd["relayed"]) == (
+        None,
+        [{"gap": None, "readings": ["a"]}],
+        None,
+    )
+    # An object with neither shape's own keys is read in the reply's shape.
+    assert viewer.reading_of('{"continues": ["R1"]}') == {
+        "shape": "reply",
+        "understanding": None,
+        "cites": [],
+        "unclear": [],
+        "belongs_to": [],
+        "meant_for": [],
+        "relayed": None,
+        "other": ["continues"],
+    }
+
+
+def test_a_reply_in_its_six_keys_names_its_labels_text(record: Path) -> None:
+    understanding = {
+        "messages": [
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "recalled": [{"label": "M1", "fact": "Ana is the user's sister."}],
+                        "stories": [{"label": "S1", "summary": "Trip to Lisbon"}],
+                        "in_progress": [{"label": "R1", "input": "book the flight"}],
+                    }
+                ),
+            }
+        ]
+    }
+    _lines(
+        record,
+        "replied",
+        [
+            {
+                "source": "understanding",
+                "kind": "given",
+                "recorded_at": iso(20),
+                "body": understanding,
+            },
+            {
+                "source": "understanding",
+                "kind": "returned",
+                "recorded_at": iso(30),
+                "body": {"reply": json.dumps(_REPLY)},
+            },
+        ],
+    )
+    step = _step(_walk(record, "replied"), "Understanding")
+    assert step["reading"]["shape"] == "reply"
+    assert step["labels"] == {
+        "M1": "Ana is the user's sister.",
+        "S1": "Trip to Lisbon",
+        "R1": "book the flight",
+    }
 
 
 def test_a_reply_that_is_no_json_object_is_shown_as_written() -> None:
