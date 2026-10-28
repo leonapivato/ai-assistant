@@ -526,8 +526,8 @@ class PydanticAIProvider:
                 is malformed, ``shape``'s schema cannot be closed, or the model is a
                 fallback model, wrapped or not (§4:4). A failure resolving the model
                 or of the exchange with the provider is narrowed to the most specific
-                subclass, as :meth:`complete`'s are. A response whose text no record
-                can hold is a :class:`~ai_assistant.core.errors.ModelResponseError`.
+                subclass, as :meth:`complete`'s are. Nothing is raised once a
+                response has come back (§2:5).
         """
         history = _awaiting_a_reply(messages, caller="complete_structured()")
         schema = reply_schema(shape)

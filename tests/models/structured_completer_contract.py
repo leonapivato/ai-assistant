@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import pytest
 from model_provider_contract import ConversationLog, FirstAwaitGate
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, Json, JsonValue
 
 from ai_assistant.core.errors import ModelError, ModelUnavailableError
 from ai_assistant.core.protocols import StructuredCompleter
@@ -103,6 +103,14 @@ class _NestedOpenValue(BaseModel):
     inner: _InnerOpen
 
 
+class _ConstrainedOpenValue(BaseModel):
+    payload: Any = Field(min_length=1)
+
+
+class _MappingInJson(BaseModel):
+    payload: Json[dict[str, int]]
+
+
 #: The shapes §2:3 refuses before any model is contacted.
 UNCLOSABLE_SHAPES = [
     pytest.param(_Mapping, id="mapping"),
@@ -110,6 +118,8 @@ UNCLOSABLE_SHAPES = [
     pytest.param(_OpenValue, id="open-json-value"),
     pytest.param(_AnyValue, id="any"),
     pytest.param(_NestedOpenValue, id="nested-open-value"),
+    pytest.param(_ConstrainedOpenValue, id="constrained-open-value"),
+    pytest.param(_MappingInJson, id="mapping-inside-a-json-string"),
     pytest.param(dict, id="not-a-model"),
 ]
 

@@ -24,7 +24,9 @@ its text parts joined in order, a thinking part being no part of it, and it is t
 first of ``refused``, ``cut``, ``empty`` and ``invalid`` that applies, in that order,
 or else the shape's value, read by :func:`~ai_assistant.core.reply_shapes.read_reply`.
 A response carrying a call, where none was offered, is ``invalid``. The exchange beside
-it holds what §5:3 names and nothing derived from the value.
+it holds what §5:3 names and nothing derived from the value. Nothing that came back is
+raised (§2:5): text no record can hold, a lone surrogate code point, is recorded with
+U+FFFD in its place, and the response is still read as it came.
 """
 
 from __future__ import annotations
@@ -32,14 +34,13 @@ from __future__ import annotations
 import copy
 from typing import TYPE_CHECKING, Final
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from pydantic_ai.messages import BaseToolCallPart, TextPart
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.output import OutputObjectDefinition
 
-from ai_assistant.core.errors import ModelResponseError
 from ai_assistant.core.reply_shapes import read_reply
 from ai_assistant.core.types import (
     ReplyExchange,
@@ -139,35 +140,29 @@ def structured_reply[T: BaseModel](
             does not.
 
     Returns:
-        The shape's value or a returned failure, with the exchange beside it.
-
-    Raises:
-        ModelResponseError: If what the response carries cannot be written down: a
-            reply, a refusal or a model name holding a surrogate code point, which no
-            record of the exchange could hold.
+        The shape's value or a returned failure, with the exchange beside it. Nothing
+        is raised: every response that came back is returned (§2:5).
     """
     reply = "".join(part.content for part in response.parts if isinstance(part, TextPart))
     details: Mapping[str, object] = response.provider_details or {}
-    try:
-        exchange = ReplyExchange(
-            reply=reply,
-            model=answered_by(response, model),
-            mode=mode,
-            finish_reason=response.finish_reason,
-            refusal=_stated(details.get("refusal")),
-            refusal_category=_stated(details.get("refusal_category")),
-            usage=ReplyUsage(
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-                cache_read_tokens=response.usage.cache_read_tokens,
-                cache_write_tokens=response.usage.cache_write_tokens,
-            ),
-            shape=shape.__name__,
-            shape_version=version,
-        )
-    except ValidationError as exc:
-        msg = "the model's response carries text no record of the exchange can hold"
-        raise ModelResponseError(msg) from exc
+    exchange = ReplyExchange(
+        reply=writable(reply),
+        model=writable(answered_by(response, model)),
+        mode=mode,
+        finish_reason=_stated(response.finish_reason),
+        refusal=_stated(details.get("refusal")),
+        refusal_category=_stated(details.get("refusal_category")),
+        usage=ReplyUsage(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cache_read_tokens=response.usage.cache_read_tokens,
+            cache_write_tokens=response.usage.cache_write_tokens,
+        ),
+        shape=shape.__name__,
+        shape_version=version,
+    )
+    # Read off the response as it came, never off the record of it: a refusal is
+    # refused and a reply read as the model wrote it, whatever the record had to change.
     read = _read(response, shape, reply)
     if isinstance(read, ReplyFailure):
         return StructuredReply(failure=read, exchange=exchange)
@@ -199,8 +194,25 @@ def _read[T: BaseModel](response: ModelResponse, shape: type[T], reply: str) -> 
     return read
 
 
+def writable(text: str) -> str:
+    """``text`` as a record can hold it: each surrogate code point replaced by U+FFFD.
+
+    A vendor's JSON may decode to a ``str`` holding a lone surrogate, which has no
+    UTF-8 encoding and which no record of the exchange can hold (``EncodableText``).
+    Replacing it keeps the response returnable, as §2:5 requires of every response
+    that came back, and leaves every other character as the provider sent it.
+    """
+    if text.isascii():
+        return text
+    return "".join("�" if _SURROGATES[0] <= ord(c) <= _SURROGATES[1] else c for c in text)
+
+
+#: The surrogate code points: U+D800 to U+DFFF.
+_SURROGATES: Final = (0xD800, 0xDFFF)
+
+
 def _stated(value: object) -> str | None:
-    """A refusal's statement or category as text, or ``None`` where none was given."""
+    """A response's statement, as text a record can hold, or ``None`` where none was given."""
     if value is None:
         return None
-    return value if isinstance(value, str) else str(value)
+    return writable(value if isinstance(value, str) else str(value))
