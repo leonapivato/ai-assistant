@@ -110,6 +110,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
     from datetime import datetime, timedelta
 
+    from pydantic import BaseModel
+
     from ai_assistant.core.types import (
         ActionRequest,
         ActivationEffect,
@@ -240,6 +242,7 @@ if TYPE_CHECKING:
         StorySummaryView,
         StoryView,
         StoryViewPage,
+        StructuredReply,
         TaskSpawn,
         TelegramCallRecord,
         TelegramIntake,
@@ -324,6 +327,76 @@ class ModelProvider(Protocol):
                 reproduces identically on every attempt from every route
                 (ADR-0066 §3). An implementation is free to raise a subclass
                 carrying that disposition.
+        """
+        ...
+
+
+@runtime_checkable
+class StructuredCompleter(Protocol):
+    """A completion whose reply is asked for, and read, as a shape (ADR-0354 §2).
+
+    A **sibling** of :class:`ModelProvider`, not a widening of it, on the ground
+    ADR-0143 §1 and ADR-0307 §10 established: a member on a structural,
+    ``@runtime_checkable`` Protocol would silently unsatisfy every existing
+    implementation at once. Nothing is added to ``ModelProvider`` or
+    :class:`ToolCallingCompleter`, this Protocol inherits from neither, and an object
+    may implement it with either or both (§2:1).
+
+    A **shape** is a pydantic model class its consumer defines (§3:1). The schema sent
+    for it, its version and the rule its reply is read by are
+    :mod:`ai_assistant.core.reply_shapes`'s, so every implementation, the canonical
+    fake and the regression suite agree on all three (§3:5). Nothing outside
+    ``models/`` names pydantic-ai or a provider SDK to make or read a structured call
+    (§2:6).
+
+    How :meth:`complete_structured` observes the conversation it is handed is governed
+    by this module's input-observation clause (ADR-0065, §2:4).
+    """
+
+    async def complete_structured[T: BaseModel](
+        self,
+        messages: Sequence[Message],
+        shape: type[T],
+        *,
+        model: str | None = None,
+    ) -> StructuredReply[T]:
+        """Ask for the next assistant reply as ``shape``, and read it as ``shape``.
+
+        ``messages`` is held to :meth:`ModelProvider.complete`'s precondition (ADR-0066
+        §1), read as that docstring states it, and carries no ``Role.TOOL`` turn.
+        ``shape`` is a pydantic model class whose schema can be closed: every object
+        in it names its properties, none gives its further keys a schema of their
+        own, and no position in it admits any JSON value (§2:3).
+
+        **Every response that comes back is returned** (§2:5), as the shape's value or
+        as a returned failure (§5:2): ``refused`` where the provider declined,
+        ``cut`` where the response stopped at its output ceiling, ``empty`` where the
+        reply holds nothing but whitespace once its fence is removed, and ``invalid``
+        where it does not validate as the shape or the response carries a call, the
+        first of the four that applies. A returned failure is never raised, retried
+        or routed (§5:4). The exchange beside it holds the reply as the model wrote
+        it, the model that answered, the mode, the finish reason, a refusal's
+        statement and category, the usage, and the shape's name and version (§5:3).
+
+        Args:
+            messages: Conversation history, oldest first. Non-empty, not ending on a
+                ``Role.ASSISTANT`` turn, and carrying no ``Role.TOOL`` turn.
+            shape: The pydantic model class the reply is asked for and read as.
+            model: Optional ``"provider:model"`` override; falls back to the
+                configured default when ``None``.
+
+        Returns:
+            The shape's value or a returned failure, with the exchange beside it.
+
+        Raises:
+            ModelError: Only where no response came back to read (§2:5). If
+                ``messages`` is empty, ends on a ``Role.ASSISTANT`` turn or carries a
+                ``Role.TOOL`` turn, or ``shape``'s schema cannot be closed, before
+                any model is contacted and with ADR-0066 §3's disposition: neither
+                ``retryable`` nor ``routable``. Also raised where the exchange with
+                the provider fails or a deadline expires (§6:3), narrowed to the most
+                specific subclass as :meth:`ModelProvider.complete`'s failures are
+                (ADR-0063).
         """
         ...
 
