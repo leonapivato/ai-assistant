@@ -182,6 +182,7 @@ from ai_assistant.core.types import (
     label_prefix,
     parties_are_assistants,
     parties_are_outside,
+    relay_mark_counts,
     statement_citations,
 )
 from ai_assistant.orchestration.channel_kinds import place_channel
@@ -205,7 +206,7 @@ from ai_assistant.orchestration.task_scheduler import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Sequence
+    from collections.abc import Callable, Collection, Iterable, Sequence
 
     from ai_assistant.core.prompts import PromptTemplate, RenderedPrompt
     from ai_assistant.core.protocols import DiagnosticSink, ToolCallingCompleter
@@ -1245,6 +1246,11 @@ _WITHHELD_ITEM: Final = (
     "not shown: someone other than the user or the assistant wrote it, and what they wrote "
     "reaches you only through understanding's record"
 )
+#: A user's item of an input understanding marked relayed: outside, so never shown (§9:2).
+_RELAYED_ITEM: Final = (
+    "not shown: the user passed on words someone else wrote, and what they wrote reaches "
+    "you only through understanding's record"
+)
 _NO_UNDERSTANDING: Final = "missing: understanding recorded no reading of this input"
 #: A channel item understanding named that the place window cannot be shown pointing at.
 _SOME_ITEM: Final = "an item of the place window"
@@ -1568,6 +1574,12 @@ class _Request:
         # the assistant's, each in the window's order (ADR-0276 §3, ADR-0307 §5:6). An
         # item someone else wrote is never shown, so it shows nothing of an episode.
         self._in_place: dict[str, _PlaceTexts] = {}
+        # The episodes the pass holds whose input their latest understanding marks
+        # relayed, where the mark counts (ADR-0351 §5:7, §5:11): the user's items of
+        # one are outside, so each is withheld as a forward is (ADR-0307 §9:2).
+        self._relayed = _relayed_episodes(
+            (*inputs.episodes, *inputs.recalled), excerpt_chars=excerpt_chars
+        )
         # The place window's items by the id understanding's referents name them by, each
         # with its place among the items the window shows alike and how many those are, so
         # a reference to one is shown as that item and no other (ADR-0307 §5:6).
@@ -1583,7 +1595,11 @@ class _Request:
                     alike[_looks(item)],
                 )
         for item in inputs.place.items:
-            if item.episode_id is None or item.author in _NOT_AN_EXCHANGE:
+            if (
+                item.episode_id is None
+                or item.author in _NOT_AN_EXCHANGE
+                or self._relayed_item(item)
+            ):
                 continue
             texts = self._in_place.setdefault(item.episode_id, _PlaceTexts())
             (texts.user if item.author is PlaceAuthor.USER else texts.assistant).append(item.text)
@@ -1744,13 +1760,29 @@ class _Request:
             shown["at"] = item.at.isoformat()
         if item.is_input:
             shown["is_the_input"] = True
-        shown["text"] = _WITHHELD_ITEM if item.author is PlaceAuthor.OTHER else item.text
+        if item.author is PlaceAuthor.OTHER:
+            shown["text"] = _WITHHELD_ITEM
+        elif self._relayed_item(item):
+            shown["text"] = _RELAYED_ITEM
+        else:
+            shown["text"] = item.text
         if item.episode_id is not None:
             shown["episode"] = self._book.label(LabelKind.EPISODE, item.episode_id)
         if item.task_id is not None:
             # ADR-0350 §9:2: the scheduled task it links to, beside its episode label.
             shown["scheduled_task"] = self._book.label(LabelKind.SCHEDULED_TASK, item.task_id)
         return shown
+
+    def _relayed_item(self, item: PlaceItem) -> bool:
+        """Whether ``item`` is the user's message of an input its episode marks relayed.
+
+        ADR-0351 §5:7: such an input is outside, and every reader that reads outside
+        content reads it so; the place window shows a forward's item withheld (ADR-0307
+        §9:2), and this one is withheld the same way, still the user's, since the relay
+        mark changes no party (§5:8). Read off the episodes the pass already holds; an
+        item whose episode it does not hold is shown as its record gives it.
+        """
+        return item.author is PlaceAuthor.USER and item.episode_id in self._relayed
 
     def _places(self, places: Sequence[ListedPlace]) -> list[dict[str, object]]:
         """The place list: each channel's heading, never named, with its places (§5:10)."""
@@ -2725,6 +2757,25 @@ class _InPlace:
     input: bool = False
     response: bool = False
     messages: frozenset[int] = frozenset()
+
+
+def _relayed_episodes(
+    records: Iterable[EpisodicMemory | Memory], *, excerpt_chars: int
+) -> frozenset[str]:
+    """The ids of the episodes among ``records`` whose input is relayed (ADR-0351 §5:7).
+
+    Each read through its projection (ADR-0284 §8:3), whose relay mark is its latest
+    understanding version's (§5:11, §8:4), and counted only where the mark counts.
+    """
+    return frozenset(
+        record.id
+        for record in records
+        if isinstance(record, EpisodicMemory)
+        and relay_mark_counts(
+            (projected := project_episode(record, excerpt_chars=excerpt_chars)).parties,
+            relayed=projected.relayed,
+        )
+    )
 
 
 def _in_place(

@@ -714,6 +714,93 @@ async def test_an_episode_shown_in_the_place_window_renders_once_with_its_unders
     assert message.containers("Stimulus origin memory") == []
 
 
+def _said(position: int, author: MessageAuthor, text: str) -> TranscriptMessage:
+    """One message of the chat, written five minutes before the stimulus."""
+    typed = author is MessageAuthor.USER
+    return TranscriptMessage(
+        conversation_id="c-1",
+        position=position,
+        written_at=AT - timedelta(minutes=5),
+        author=author,
+        text=text,
+        device_id="phone" if typed else None,
+        message_id=f"m-{position}" if typed else None,
+    )
+
+
+async def test_a_relayed_exchange_s_item_is_outside_for_a_later_stimulus() -> None:
+    """§3:7, ADR-0351 §5:7, §5:11 (#3511): an item of an input its episode's latest
+    understanding marks relayed carries ``outside="yes"``, by that record and not by the
+    understanding's prose. It stays a ``message`` from the person who passed it on
+    (§3:2, ADR-0351 §5:8); the reply beside it, a typed item and a forward are marked
+    as their own records give, as before."""
+    paste = "Can you make sense of this email?\nPinecrest Dental Studio"
+    pasted = _episode(
+        "activation:a-1",
+        paste,
+        at=AT - timedelta(minutes=5),
+        meaning="Maren passed on an email from the dentist.",
+        relayed=True,
+    )
+    typed = _episode(
+        "activation:a-2",
+        "Book it for me.",
+        at=AT - timedelta(minutes=4),
+        meaning="Asks to book the cleaning.",
+    )
+    window = TranscriptWindow(
+        CHAT,
+        (
+            _said(1, MessageAuthor.USER, paste),
+            _said(2, MessageAuthor.ASSISTANT, "It is a reminder for a cleaning."),
+            _said(3, MessageAuthor.USER, "Book it for me."),
+            _said(4, MessageAuthor.USER, "Sam's note about it."),
+        ),
+        links={1: "a-1", 2: "a-1", 3: "a-2"},
+        forwarded={4: ClaimedAuthor(name="Sam")},
+    )
+
+    message = await _rendered("And what time?", window=window, episodes=(pasted, typed))
+
+    shown = [one for one in message.tags("Stimulus origin knowledge") if one.name == "message"]
+    assert [(one.get("from"), one.get("outside")) for one in shown] == [
+        ("Maren", "yes"),
+        ("the system", None),
+        ("Maren", None),
+        ("Sam, as claimed", "yes"),
+    ]
+
+
+async def test_a_relay_mark_on_an_input_already_outside_leaves_each_item_as_recorded() -> None:
+    """ADR-0351 §5:5, §5:7: on a forward beside the owner's note, a relay mark changes
+    nothing, so the note stays the owner's, unmarked, and the forward stays marked."""
+    beside = _episode(
+        "activation:a-1",
+        "What do you make of this?",
+        at=AT - timedelta(minutes=5),
+        meaning="Maren asks about Sam's forward.",
+        parties=(OWNER, SupportHolder.source("Sam", claimed=True)),
+        relayed=True,
+    )
+    window = TranscriptWindow(
+        CHAT,
+        (
+            _said(1, MessageAuthor.USER, "What do you make of this?"),
+            _said(2, MessageAuthor.USER, "Sam's words."),
+        ),
+        links={1: "a-1", 2: "a-1"},
+        forwarded={2: ClaimedAuthor(name="Sam")},
+    )
+
+    message = await _rendered("And now?", window=window, episodes=(beside,))
+
+    shown = [one for one in message.tags("Stimulus origin knowledge") if one.name == "message"]
+    assert [(one.get("from"), one.get("outside")) for one in shown] == [
+        ("Maren", None),
+        ("Sam, as claimed", "yes"),
+    ]
+
+
 # --- §2: the line's window is origin memory -----------------------------------------------
 
 

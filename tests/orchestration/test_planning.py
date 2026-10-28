@@ -962,6 +962,63 @@ async def test_an_item_someone_else_wrote_shows_nothing_of_an_episode() -> None:
     assert shown["input"] == "the words they wrote"
 
 
+def _relayed(record: EpisodicMemory) -> EpisodicMemory:
+    """``record``, its input marked relayed by its one understanding version (ADR-0351 §5:6)."""
+    processing = record.processing_record
+    assert processing is not None
+    understood = ActivationUnderstanding(
+        version=1,
+        recorded_at=processing.started_at,
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="The user passed on an email from the dentist.",
+        relayed=True,
+    )
+    return record.model_copy(
+        update={
+            "processing_record": processing.model_copy(
+                update={"understanding": (understood,), "understanding_omitted": None}
+            )
+        }
+    )
+
+
+async def test_a_relayed_exchange_s_item_is_withheld_as_a_forward_is() -> None:
+    """ADR-0351 §5:7, ADR-0307 §9:2 (#3511): the user's item of an input its episode marks
+    relayed is outside, so its words are never shown; the reply beside it, a typed
+    item and a forward are shown as before, and the episode still withholds its input."""
+    pasted = _relayed(_episode("activation:old", text="Pinecrest Dental: your cleaning is due."))
+    typed = _episode("activation:typed", text="Book the cleaning for me.")
+    place = _exchange(
+        _linked(PlaceAuthor.USER, "Pinecrest Dental: your cleaning is due."),
+        _linked(PlaceAuthor.ASSISTANT, "Booked a table earlier."),
+        _linked(PlaceAuthor.USER, "Book the cleaning for me.", "activation:typed"),
+        PlaceItem(PlaceAuthor.OTHER, "a forward's words"),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=place, episodes=(pasted, typed)))
+    sent = _sent(completer)
+    assert [(one["from"], one["text"]) for one in sent["place_window"]] == [
+        (
+            "the user",
+            "not shown: the user passed on words someone else wrote, and what they wrote "
+            "reaches you only through understanding's record",
+        ),
+        ("the assistant", "Booked a table earlier."),
+        ("the user", "Book the cleaning for me."),
+        (
+            "someone else",
+            "not shown: someone other than the user or the assistant wrote it, and what they "
+            "wrote reaches you only through understanding's record",
+        ),
+        ("the user", "and tomorrow?"),
+    ]
+    pasted_shown, typed_shown = sent["episode_window"]
+    assert pasted_shown["input"] == "an outside report, not shown"
+    assert pasted_shown["response"] == _IN_PLACE
+    assert typed_shown["input"] == _IN_PLACE
+    assert "Pinecrest" not in completer.last_call.messages[1].content
+
+
 async def test_a_shown_exchange_s_notes_still_follow_the_readers_audience() -> None:
     """ADR-0307 §6:4, ADR-0312 §4: withheld notes stay absent, with nothing said."""
     stage, completer, _ = _stage()
