@@ -15,6 +15,7 @@ from typing import Final
 
 import pytest
 from story_support import AT, activation, episode, memory_of
+from structured_support import structured
 from test_engine import Harness
 
 from ai_assistant.core.errors import ConfigurationError
@@ -47,7 +48,7 @@ def _pass(
     model: FakeModelProvider, stories: FakeStoryStore, memory: FakeMemoryStore
 ) -> MattersPass:
     return MattersPass(
-        model=model,
+        model=structured(model),
         stories=stories,
         memory=memory,
         excerpt_chars=1000,

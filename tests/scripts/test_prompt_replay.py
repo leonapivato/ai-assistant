@@ -33,7 +33,16 @@ from ai_assistant.core.types import Message, ProposedActivationUnderstanding, Re
 from ai_assistant.models import PydanticAIProvider, RetryingProvider
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import planning
+from ai_assistant.orchestration.digesting import DigestReply
+from ai_assistant.orchestration.matters_pass import MattersPassReply
+from ai_assistant.orchestration.observer.replies import (
+    FramingReplyShape,
+    PersonScoutReplyShape,
+    PlacementReplyShape,
+    ScoutReplyShape,
+)
 from ai_assistant.orchestration.observer.stage import RunOutcome
+from ai_assistant.orchestration.story_tidy_up import TidyUpReply
 from ai_assistant.service.lock import InstanceLock
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -1216,6 +1225,195 @@ def test_a_recorded_shape_the_package_holds_none_of_fails_that_call_naming_the_d
     failure = only["body"]["failure"]
     assert "the recorded reply shape is none the package holds" in failure["message"]
     assert model.systems == []
+
+
+# --- ADR-0354 §9:8: the digest's and the observer's structured calls ------------------------
+
+
+def _with_shapes(tmp_path: Path, shapes: dict[str, tuple[str, str]]) -> Path:
+    """A copy whose given entries record a ``reply_shape``, by source (§7:1).
+
+    ``shapes`` maps a source to the shape's name and version its given entries record.
+    """
+    live = write_live(tmp_path)
+    for path in (live / "diagnostics").glob("*.jsonl"):
+        written = []
+        for line in path.read_text().splitlines():
+            entry = json.loads(line)
+            held = shapes.get(entry["source"])
+            if held is not None and entry["kind"] == "given":
+                entry["body"]["reply_shape"] = {"name": held[0], "version": held[1]}
+            written.append(json.dumps(entry, separators=(",", ":")))
+        path.write_text("".join(one + "\n" for one in written))
+    copy = tmp_path / "copy"
+    replay_tool.copy_data_dir(live, copy, retention=timedelta(days=1), now=now)
+    return copy
+
+
+def test_a_digest_and_an_observer_call_recorded_before_the_move_replay_plain_marked_so(
+    tmp_path: Path,
+) -> None:
+    """§9:8, §8:7: a recording with no ``reply_shape`` is sent as it was made, and marked."""
+    copy = make_copy(tmp_path)
+
+    _replay(copy, Model(), candidates=("recorded",), sources=frozenset({"digesting", "observer"}))
+
+    bodies = [one["body"] for each in _results(copy).values() for one in each]
+    # The digest part, and the scout's one call written under each of two activations.
+    assert len(bodies) == 3
+    assert all(one["sent_plain"] is True for one in bodies)
+    assert all("structured" not in one for one in bodies)
+
+
+@pytest.mark.parametrize(
+    ("source", "shape"),
+    [
+        ("digesting", DigestReply),
+        ("observer", ScoutReplyShape),
+        ("observer", PersonScoutReplyShape),
+    ],
+)
+def test_a_recorded_structured_digest_or_observer_call_replays_with_its_shape(
+    tmp_path: Path, source: str, shape: type[Any]
+) -> None:
+    """§9:8, §8:7: sent with the package's shape of the recorded name, its version marked."""
+    copy = _with_shapes(tmp_path, {source: (shape.__name__, reply_shape_version(shape))})
+    model = Model(reply=json.dumps({"evidence": []} if source == "digesting" else {}))
+
+    _replay(copy, model, candidates=("recorded",), sources=frozenset({source}))
+
+    bodies = [one["body"] for each in _results(copy).values() for one in each]
+    assert bodies
+    for body in bodies:
+        assert body["structured"]["shape"] == shape.__name__
+        assert body["structured"]["failure"] is None
+        assert body["shape_version_differs"] is False
+        assert "sent_plain" not in body
+
+
+def test_every_moved_consumers_shape_is_one_a_recording_can_name() -> None:
+    """§8:7, §9:8: each shape a moved stage records is found by its recorded name."""
+    for shape in (
+        DigestReply,
+        ScoutReplyShape,
+        PersonScoutReplyShape,
+        FramingReplyShape,
+        PlacementReplyShape,
+        MattersPassReply,
+        TidyUpReply,
+    ):
+        assert replay_tool.REPLY_SHAPES_BY_NAME[shape.__name__] is shape
+
+
+def test_a_suite_case_is_sent_with_the_shape_its_stage_sends_under_its_flags() -> None:
+    """§8:6, §9:8: the scout's person shape under its person flag, and its plain one else."""
+    shape = replay_tool.structured_shape
+
+    assert shape("observer_scout", {"person": True}) is PersonScoutReplyShape
+    assert shape("observer_scout", {"person": False}) is ScoutReplyShape
+    assert shape("observer_framing", {"person": True}) is FramingReplyShape
+    assert shape("observer_placement", {}) is PlacementReplyShape
+    assert shape("digesting", {}) is DigestReply
+    assert shape("planning", {}) is None
+
+
+@pytest.mark.parametrize(
+    ("prompt", "shape"),
+    [
+        ("observer_scout", ScoutReplyShape),
+        ("observer_framing", FramingReplyShape),
+        ("observer_placement", PlacementReplyShape),
+    ],
+)
+def test_the_observers_suite_reader_and_its_stage_read_one_reply_alike(
+    prompt: str, shape: type[Any]
+) -> None:
+    """§9:8, §8:6: the suite reads an observer reply by the one rule, as the stage does."""
+    findings = {"findings": [{"claim": "x", "rests_on": ["P1"]}]}
+    replies = [
+        json.dumps(findings),
+        "```json\n" + json.dumps(findings) + "\n```",
+        "Here it is: " + json.dumps(findings),
+        json.dumps({"memories": [], "nothing": "One choice is no habit."}),
+        json.dumps({"relations": [{"memory": "M1", "relation": "independent"}]}),
+        "",
+    ]
+    for reply in replies:
+        read = read_reply(shape, reply)
+        stage = None if isinstance(read, ReplyFailure) else read.model_dump(mode="json")
+        assert replay_tool.completion_reply(prompt, reply).reading == stage
+
+
+def test_a_counted_provider_counts_a_structured_call_on_any_route_and_refuses_past_its_bound() -> (
+    None
+):
+    """F2's gap, closed: a structured call naming its route is counted on the one meter."""
+    meter = replay_tool.CallMeter(2, "the bound is reached")
+    provider = replay_tool.CountedProvider("test", meter)
+    messages = [Message(role=Role.USER, content="x")]
+
+    asyncio.run(provider.complete_structured(messages, DigestReply))
+    asyncio.run(provider.complete_structured(messages, DigestReply, model="test"))
+    with pytest.raises(ModelError, match="the bound is reached"):
+        asyncio.run(provider.complete_structured(messages, DigestReply, model="test"))
+    with pytest.raises(ModelError, match="the bound is reached"):
+        asyncio.run(provider.complete_structured(messages, DigestReply))
+
+    assert (meter.made, meter.refused) == (2, 2)
+
+
+def test_a_rerun_counts_the_observers_and_the_reconcilers_structured_calls(
+    tmp_path: Path,
+) -> None:
+    """§8:2-§8:4: every provider the composition builds counts its structured calls too.
+
+    The observer's routes ask with no ``model=``, and the reconciler names its route on
+    every call: each is a ``PydanticAIProvider`` the composition builds, so each counts.
+    """
+    copy = make_copy(tmp_path)
+    requests: list[int] = []
+    failures: list[str] = []
+
+    def answer(messages: list[Any], info: Any) -> Any:
+        del messages, info
+        requests.append(1)
+        return ModelResponse(parts=[TextPart('{"evidence": []}')])
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.route = RetryingProvider(
+                replay_tool.composition.PydanticAIProvider(FunctionModel(answer)),
+                policy=RetryPolicy(max_attempts=3, backoff_base_seconds=0.001),
+                sleep=_no_wait,
+            )
+
+        async def observe_episodes(self) -> RunOutcome:
+            messages = [Message(role=Role.USER, content="x")]
+            await self.route.complete_structured(messages, DigestReply)
+            for route in ("test", None):
+                try:
+                    await self.route.complete_structured(messages, DigestReply, model=route)
+                except ModelError as exc:
+                    failures.append(type(exc).__name__)
+            return RunOutcome(processed=1)
+
+        async def aclose(self) -> None:
+            return None
+
+    reports: list[str] = []
+    asyncio.run(
+        replay_tool.rerun(
+            replay_tool.RerunOptions(copy=copy, model="anthropic:claude-test", bound=2),
+            report=reports.append,
+            build=lambda _: _Engine(),
+            check_model=lambda _: None,
+            now=now,
+        )
+    )
+
+    assert len(requests) == 1
+    assert failures == ["ModelError"]
+    assert "2 model calls made (bound 2); 1 refused" in reports
 
 
 def test_the_suites_reader_and_the_stage_read_one_reply_alike() -> None:

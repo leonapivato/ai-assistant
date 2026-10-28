@@ -36,14 +36,16 @@ it sends any and sends none past its bound, 100 unless ``--bound`` says otherwis
 (§6:1). ``--samples N`` sends each call N times for each candidate, one line for each
 sample, naming it (ADR-0337 §5:4); every sample counts against the bound.
 
-**Understanding's calls are structured** (ADR-0354 §8:6-§8:8). A recorded understanding
-call whose given entry carries ``reply_shape`` is sent as a structured call with the
+**Structured calls** (ADR-0354 §8:6-§8:8, §9:8). Understanding's, a digest part's and the
+observer's scout, framing and placement calls ask for their reply as a shape. A recorded
+call of one whose given entry carries ``reply_shape`` is sent as a structured call with the
 package's shape of that name, and its result is marked where the recorded version differs
 from the package's; one recorded before the move, with no ``reply_shape``, is sent as it
 was made, a plain completion, and marked as sent plain. A recorded shape the package
-holds no shape for fails that call, naming the defect. A suite case of understanding is
-sent as a structured call with the shape, and its reply read by ``core``'s one reading
-rule (ADR-0354 §3:4), as the stage reads it.
+holds no shape for fails that call, naming the defect. A suite case of such a prompt is
+sent as a structured call with the shape its stage sends, the scout's under its person
+flag, and its reply read by ``core``'s one reading rule (ADR-0354 §3:4), as the stage
+reads it.
 
 ``--follow-up`` on ``replay`` or ``suite`` asks the follow-up question after every
 response the run records (ADR-0337 §7): the call's request exactly as that sample sent
@@ -143,10 +145,16 @@ from ai_assistant.models import (
 )
 from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT, follow_up_round
 from ai_assistant.models.tool_calling import ROUND_TOOL
-from ai_assistant.orchestration.observer.framing import FramingReply
-from ai_assistant.orchestration.observer.placement import PlacementReply
-from ai_assistant.orchestration.observer.replies import parsed
-from ai_assistant.orchestration.observer.scout import ScoutReply
+from ai_assistant.orchestration.digesting import DigestReply
+from ai_assistant.orchestration.matters_pass import MattersPassReply
+from ai_assistant.orchestration.observer.prompts import PERSON_FLAG
+from ai_assistant.orchestration.observer.replies import (
+    FramingReplyShape,
+    PersonScoutReplyShape,
+    PlacementReplyShape,
+    ScoutReplyShape,
+)
+from ai_assistant.orchestration.story_tidy_up import TidyUpReply
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 
@@ -192,16 +200,37 @@ SOURCES: Final = ("understanding", "planning", "digesting", "observer")
 
 #: The prompts whose stage asks for its reply as a shape, by prompt (ADR-0354 §8, §9:8):
 #: a suite case of one is sent as a structured call, and a recorded call of one written
-#: before the move is marked as sent plain.
+#: before the move is marked as sent plain. The scout sends another shape under its person
+#: flag (:data:`PERSON_SHAPES`).
 STRUCTURED: Final[dict[str, type[BaseModel]]] = {
     "understanding": ProposedActivationUnderstanding,
+    "digesting": DigestReply,
+    "observer_scout": ScoutReplyShape,
+    "observer_framing": FramingReplyShape,
+    "observer_placement": PlacementReplyShape,
+    "matters_pass": MattersPassReply,
+    "story_tidy_up": TidyUpReply,
+}
+
+#: The shape a prompt's stage sends instead where the call is given a person's fields
+#: (ADR-0338 §9:1), by prompt.
+PERSON_SHAPES: Final[dict[str, type[BaseModel]]] = {
+    "observer_scout": PersonScoutReplyShape,
 }
 
 #: The package's shapes, by the class name a given entry's ``reply_shape`` records
 #: (ADR-0354 §7:1, §8:7).
 REPLY_SHAPES_BY_NAME: Final[dict[str, type[BaseModel]]] = {
-    shape.__name__: shape for shape in STRUCTURED.values()
+    shape.__name__: shape for shape in (*STRUCTURED.values(), *PERSON_SHAPES.values())
 }
+
+
+def structured_shape(prompt: str, flags: Mapping[str, bool]) -> type[BaseModel] | None:
+    """The shape ``prompt``'s stage sends under ``flags``, or ``None`` for a plain one."""
+    if flags.get(PERSON_FLAG) and prompt in PERSON_SHAPES:
+        return PERSON_SHAPES[prompt]
+    return STRUCTURED.get(prompt)
+
 
 #: The observer's steps that make a model call (ADR-0333 §2:2, ADR-0346 §10:1). The
 #: retired commit step's calls are still read from an older record, and replay only where
@@ -2208,9 +2237,9 @@ def _read_as(shape: type[BaseModel]) -> Callable[[str], BaseModel | None]:
 
 REPLY_READERS: Final[dict[str, Callable[[str], BaseModel | None]]] = {
     "understanding": _read_as(ProposedActivationUnderstanding),
-    "observer_scout": lambda content: parsed(content, ScoutReply),
-    "observer_framing": lambda content: parsed(content, FramingReply),
-    "observer_placement": lambda content: parsed(content, PlacementReply),
+    "observer_scout": _read_as(ScoutReplyShape),
+    "observer_framing": _read_as(FramingReplyShape),
+    "observer_placement": _read_as(PlacementReplyShape),
 }
 
 #: The shape each reader reads a reply as, whose text fields a case's ``no_label`` may
@@ -2218,9 +2247,9 @@ REPLY_READERS: Final[dict[str, Callable[[str], BaseModel | None]]] = {
 #: reading nothing, and passing.
 REPLY_SHAPES: Final[dict[str, type[BaseModel]]] = {
     "understanding": ProposedActivationUnderstanding,
-    "observer_scout": ScoutReply,
-    "observer_framing": FramingReply,
-    "observer_placement": PlacementReply,
+    "observer_scout": ScoutReplyShape,
+    "observer_framing": FramingReplyShape,
+    "observer_placement": PlacementReplyShape,
 }
 
 
@@ -3263,7 +3292,7 @@ async def _suite_outcome(call: SuiteCall, caller: Caller) -> tuple[dict[str, obj
                 call.messages, call.case.tools, response, call.question
             )
             return {"reply": text}, completion_reply(call.case.prompt, text)
-        shape = STRUCTURED.get(call.case.prompt)
+        shape = structured_shape(call.case.prompt, call.case.flags)
         if shape is not None and call.case.tools is None and followed is None:
             # ADR-0354 §8:6: sent as the stage sends it, and scored on the value the seam
             # read by the one rule; a returned failure, ``cut`` or ``refused`` included

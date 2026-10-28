@@ -411,9 +411,9 @@ if TYPE_CHECKING:
         DiagnosticSink,
         Forecaster,
         MemoryStore,
-        ModelProvider,
         PlanStore,
         StoryStore,
+        StructuredCompleter,
         ToolCallingCompleter,
         ToolInvoker,
         ToolRegistry,
@@ -2927,7 +2927,7 @@ class PhasePath:
         self,
         *,
         completer: ToolCallingCompleter,
-        provider: ModelProvider,
+        provider: StructuredCompleter,
         authorizing: AuthorizingStage,
         acting: ActingStage,
         tools: PhaseTools,
@@ -2957,7 +2957,8 @@ class PhasePath:
 
         Args:
             completer: The native tool-calling seam planning's rounds go through.
-            provider: The model seam a digest's calls go through (ADR-0308 §4:10).
+            provider: The structured seam a digest's calls go through (ADR-0308 §4:10,
+                ADR-0354 §9:1).
             authorizing: The authorizing stage, built over :class:`PhaseTools`.
             acting: The acting stage, its invoker :class:`PhaseTools`.
             tools: The thin path's registry and invoker.

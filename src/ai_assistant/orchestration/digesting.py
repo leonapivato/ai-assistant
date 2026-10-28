@@ -2,7 +2,7 @@
 
 One orchestration-local phase module (ADR-0309 §2:2), of the kind
 :class:`~ai_assistant.orchestration.planning.PlanningStage` is. It holds an injected
-``ModelProvider``, a seam onto the episode writer, the part size the composition root
+``StructuredCompleter``, a seam onto the episode writer, the part size the composition root
 sets and a clock, and it is **not a Protocol**. Each :meth:`DigestingStage.digest_result`
 digests one result acting held (ADR-0308 §6:1) against the question the call was asked
 with, and :meth:`DigestingStage.digest_recall` digests recall's outside memory records
@@ -10,9 +10,11 @@ against the latest understanding's meaning (§4:4); each records its digest with
 episode.
 
 **One digest, no tools** (§4:1, §4:10). A result's outside records are read together in
-one plain completion, ``ModelProvider.complete`` with no ``model=`` override, and the
-reply is parsed as one JSON object. The digest answers the call's *looking for* and
-nothing else (§4:3), and remembers nothing between calls (§4:16).
+one structured call, ``StructuredCompleter.complete_structured`` with :class:`DigestReply`
+and no ``model=`` override, its value the parsed object (ADR-0354 §9:1). The reply is
+read by ``core``'s one rule (ADR-0354 §3:4) and by nothing else here. The digest
+answers the call's *looking for* and nothing else (§4:3), and remembers nothing between
+calls (§4:16).
 
 **Quoted source data, under labels local to the call** (§4:7 to §4:8). The records reach
 the model in one JSON object, each attributed as outside content by the hub and never by
@@ -32,9 +34,12 @@ run in parallel and their evidence is joined in part order. The digest has answe
 only when every part has.
 
 **Failure** (§4:11 to §4:13). A digest fails when a call raises, a reply does not parse,
-or the deadline bounding it passes first; a failed digest records no evidence, and
-planning is told it could not read the result. The stage is failure-tolerant: it
-returns the failure rather than raising it. Planning is never given the raw content.
+or the deadline bounding it passes first. A returned ``invalid``, ``empty`` or ``cut`` is a
+reply that does not parse, and a returned ``refused`` fails it as a raised
+``ModelContentFilterError`` does, as a call that raised (ADR-0354 §9:2). A failed
+digest records no evidence, and planning is told it could not read the result. The stage
+is failure-tolerant: it returns the failure rather than raising it. Planning is never
+given the raw content.
 
 **Recall's digest** (§4:4). Recall's outside memory records, from both runs, go into
 one digest once the second run has decided. The digest fetches them by id under
@@ -64,19 +69,21 @@ follow-up's question.
 that fails is a capture failure: it is logged and holds nothing back.
 
 **It logs stage and code-owned reason only**, never the question, the records or the
-reply (ADR-0275 §8). A reply carrying keys its shape does not name is read without them,
-and the stage logs how many it dropped, never which (#3246).
+reply (ADR-0275 §8).
 
 **What it gives the diagnostic record** (ADR-0314 §4), through the sink the composition
 root hands it where the record is on: each part's rendered prompt before its call, with
-the template it was rendered from (ADR-0334 §8:2), and once the call returns or fails,
-its reply, the items dropped because their source is not one of the call's labels, or
-the failure; and where a digest fails, the reason it failed.
+the template it was rendered from (ADR-0334 §8:2) and the reply's shape and version
+(ADR-0354 §7:1), and once the call returns or fails, its reply with what came back with it
+and the returned failure's kind where there is one (§7:2), the items dropped because their
+source is not one of the call's labels, or the failure; and where a digest fails, the
+reason it failed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -84,12 +91,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 import structlog
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.diagnostics import failure_body, write_diagnostic
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.prompts import PromptDeclaration
+from ai_assistant.core.reply_shapes import reply_shape_version
 from ai_assistant.core.types import (
     ActivationDigest,
     DiagnosticKind,
@@ -100,17 +108,17 @@ from ai_assistant.core.types import (
     Message,
     NonBlankEncodableText,
     PlanningLabel,
+    ReplyFailure,
     Role,
     label_prefix,
 )
-from ai_assistant.orchestration.reply_keys import stray_keys
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
 
     from ai_assistant.core.prompts import PromptTemplate
-    from ai_assistant.core.protocols import DiagnosticSink, ModelProvider
-    from ai_assistant.core.types import Memory
+    from ai_assistant.core.protocols import DiagnosticSink, StructuredCompleter
+    from ai_assistant.core.types import Memory, StructuredReply
     from ai_assistant.orchestration.held_results import HeldResult
 
 __all__ = [
@@ -118,6 +126,7 @@ __all__ = [
     "ActivationLabels",
     "DigestFailure",
     "DigestRecorder",
+    "DigestReply",
     "Digested",
     "DigestingStage",
 ]
@@ -371,13 +380,13 @@ class _ProposedItem(BaseModel):
     source: str
 
 
-class _Proposed(BaseModel):
-    """The completion's one JSON object; anything else does not parse (§4:11).
+class DigestReply(BaseModel):
+    """The digest's reply shape (ADR-0354 §9:1): its prompt's one object, of evidence items.
 
-    A key this shape, or the item shape in it, does not name is dropped and counted
-    (#3246), as the observer's reply drops one: every field it names is validated as
-    before, so a reply missing a required field, or carrying a value of the wrong kind,
-    still does not parse.
+    Its field names are the ones the prompt asks for, and the schema sent for it carries
+    nothing else (§3:2). A reply missing a field, or carrying a value of the wrong kind,
+    does not validate, and does not parse (§4:11). An empty list of evidence is a valid
+    answer (§4:8).
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
@@ -408,27 +417,39 @@ def _failure_reason(failures: Sequence[_PartFailed]) -> DigestFailure:
     return next(reason for reason in _REASON_ORDER if reason in reasons)
 
 
-def _parsed(content: str) -> _Proposed | None:
-    """The reply as one object, or ``None``: never a partial one.
+@functools.cache
+def _reply_shape() -> dict[str, str]:
+    """The given entry's ``reply_shape``: the shape's name and version (ADR-0354 §7:1)."""
+    return {"name": DigestReply.__name__, "version": reply_shape_version(DigestReply)}
 
-    One enclosing Markdown code fence is removed first, as the understanding stage and
-    the tidy-up remove it: a deterministic normalization of a wrapper, not a repair.
+
+def _exchange_of(
+    reply: StructuredReply[DigestReply],
+) -> dict[str, str | dict[str, int] | None]:
+    """What a part's returned entry keeps of a structured call (ADR-0354 §7:2).
+
+    The reply as the model wrote it, the model that answered, the mode, the finish reason,
+    a refusal's statement and category, the usage, and the returned failure's kind where
+    there is one.
     """
-    body = content.strip()
-    if body.startswith("```") and body.endswith("```") and len(body) >= 6:  # noqa: PLR2004 — two fences
-        body = body[3:-3]
-        newline = body.find("\n")
-        if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
-            body = body[newline + 1 :]
-    try:
-        proposed = _Proposed.model_validate_json(body)
-    except ValidationError, ValueError, RecursionError:
-        return None
-    stray = stray_keys(body, proposed)
-    if stray:
-        # #3246: a key the reply's shape does not name, dropped and counted, never named.
-        _log.info("digest_stray_keys", stage="digesting", stray=stray)
-    return proposed
+    exchange = reply.exchange
+    held: dict[str, str | dict[str, int] | None] = {
+        "reply": exchange.reply,
+        "model": exchange.model,
+        "mode": exchange.mode.value,
+        "finish_reason": exchange.finish_reason,
+        "refusal": exchange.refusal,
+        "refusal_category": exchange.refusal_category,
+        "usage": {
+            "input_tokens": exchange.usage.input_tokens,
+            "output_tokens": exchange.usage.output_tokens,
+            "cache_read_tokens": exchange.usage.cache_read_tokens,
+            "cache_write_tokens": exchange.usage.cache_write_tokens,
+        },
+    }
+    if reply.failure is not None:
+        held["failure"] = reply.failure.value
+    return held
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,6 +458,25 @@ class _Kept:
 
     text: str
     record: _Record
+
+
+def _kept(
+    proposed: DigestReply, local: Mapping[str, _Record]
+) -> tuple[list[_Kept], tuple[dict[str, str], ...]]:
+    """The items a part kept, each beside the record its local label named, and those dropped.
+
+    §4:14: an item naming a source the call did not show is dropped.
+    """
+    kept: list[_Kept] = []
+    dropped: list[dict[str, str]] = []
+    for item in proposed.evidence:
+        record = local.get(item.source)
+        if record is None:
+            _log.info("digest_item_dropped", stage="digesting", reason="unknown_label")
+            dropped.append({"source": item.source, "text": item.text})
+            continue
+        kept.append(_Kept(text=item.text, record=record))
+    return kept, tuple(dropped)
 
 
 # --- the stage ---------------------------------------------------------------------------
@@ -457,7 +497,7 @@ class DigestingStage:
     def __init__(  # noqa: PLR0913 — the two seams, the part size, the prompt, the clock and the record
         self,
         *,
-        provider: ModelProvider,
+        provider: StructuredCompleter,
         recorder: DigestRecorder,
         part_chars: int,
         prompt: PromptTemplate,
@@ -467,7 +507,7 @@ class DigestingStage:
         """Wire the stage to its seams, and to the part size the composition root sets.
 
         Args:
-            provider: The model seam a digest's calls go through.
+            provider: The structured seam a digest's calls go through (ADR-0354 §9:1).
             recorder: The seam that appends a digest to the episode.
             part_chars: ``DIGEST_PART_CHARS``, the most characters of records one call
                 reads (§4:9); its value is #2589's.
@@ -790,8 +830,8 @@ class DigestingStage:
 
         Raises:
             _PartFailed: If the deadline has passed before the call is made; the call
-                raised, ``CancelledError`` included where nothing cancelled this part;
-                or the reply does not parse.
+                raised, ``CancelledError`` included where nothing cancelled this part,
+                or the provider refused it; or the reply does not parse.
         """
         names: dict[_Record, str] = {}
         shown: list[dict[str, object]] = []
@@ -822,10 +862,11 @@ class DigestingStage:
                 **about,
                 "messages": [one.model_dump(mode="json") for one in messages],
                 "prompt": instruction.provenance(),
+                "reply_shape": _reply_shape(),
             },
         )
         try:
-            reply = await self._provider.complete(messages)
+            reply = await self._provider.complete_structured(messages, DigestReply)
         except asyncio.CancelledError:
             task = asyncio.current_task()
             if task is not None and task.cancelling():
@@ -835,22 +876,18 @@ class DigestingStage:
         except Exception as exc:  # §4:11: a call that raises fails the digest, whatever it raised
             await self._part_failed(exc, about)
             raise _PartFailed("raised") from exc
-        proposed = _parsed(reply.content)
+        proposed = reply.value
         if proposed is None:
-            await self._part_returned(reply.content, about, dropped=(), parsed=False)
+            # ADR-0354 §9:2, §7:2: the returned entry first, then the failure path: a
+            # refusal where a raised one lands, any other kind where a reply that does not
+            # parse does.
+            await self._part_returned(reply, about, dropped=())
+            if reply.failure is ReplyFailure.REFUSED:
+                _log.info("digest_part_refused", stage="digesting", reason=reply.failure.value)
+                raise _PartFailed("raised")
             raise _PartFailed("unparsable")
-        local = {name: record for record, name in names.items()}
-        kept: list[_Kept] = []
-        dropped: list[dict[str, str]] = []
-        for item in proposed.evidence:
-            record = local.get(item.source)
-            if record is None:
-                # §4:14: an item naming a source the call did not show is dropped.
-                _log.info("digest_item_dropped", stage="digesting", reason="unknown_label")
-                dropped.append({"source": item.source, "text": item.text})
-                continue
-            kept.append(_Kept(text=item.text, record=record))
-        await self._part_returned(reply.content, about, dropped=tuple(dropped), parsed=True)
+        kept, dropped = _kept(proposed, {name: record for record, name in names.items()})
+        await self._part_returned(reply, about, dropped=dropped)
         return kept
 
     async def _part_failed(self, error: BaseException, about: Mapping[str, object]) -> None:
@@ -864,19 +901,15 @@ class DigestingStage:
 
     async def _part_returned(
         self,
-        reply: str,
+        reply: StructuredReply[DigestReply],
         about: Mapping[str, object],
         *,
         dropped: tuple[dict[str, str], ...],
-        parsed: bool,
     ) -> None:
-        """Write a part's reply and the items dropped from it (ADR-0314 §4)."""
+        """Write a part's reply, what came with it, and the items dropped from it (§4)."""
 
         def body() -> dict[str, object]:
-            returned: dict[str, object] = {**about, "reply": reply, "dropped": list(dropped)}
-            if not parsed:
-                returned["failure"] = "unparsable"
-            return returned
+            return {**about, **_exchange_of(reply), "dropped": list(dropped)}
 
         await write_diagnostic(
             self._diagnostics, DiagnosticSource.DIGESTING, DiagnosticKind.RETURNED, body

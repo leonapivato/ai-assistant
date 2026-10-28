@@ -1,205 +1,161 @@
-"""How the observer reads a model's reply as one object of a shape (ADR-0329 §16:4).
+"""The observer's reply shapes: each step's reply as a closed shape (ADR-0354 §9:1, §9:7).
 
-Every step's reply is read here, the scout's, framing's and placement's alike. A reply
-that does not parse is no proposal, never a partial one: the attempt fails and is retried
-(§16:4). A key the reply's shape does not name is dropped rather than refusing the reply:
-every field it does name is validated as before, so a reply missing a required field, or
-carrying a value of the wrong kind, still fails whole. A model's stray key, such as a
-``"command": null`` beside a finding's own, is no reason to discard its findings.
+Every step's call, the scout's, framing's and placement's alike, is one structured call
+with the shape this module gives it, and its reply is read by ``core``'s one rule alone
+(ADR-0354 §3:4): nothing here reads a reply's text. A reply the rule refuses is no
+proposal, never a partial one: the attempt fails and is retried (ADR-0329 §16:4).
 
-A reply with prose around its object is read for that object, not refused for the prose:
-the whole reply first, then a fenced block, then the last object standing on its own in
-the text. Each is validated exactly as a bare reply is. An object found in the text is
-taken only where it names a field of the shape, so a stray ``{}`` or an unrelated object
-in the prose is never read as an empty answer; and no container, an object or an array, is
-ever looked inside, nor a fence opened within one, so a nested piece of a malformed answer
-is never read as the answer. A fence only marks a block as a candidate: it never cuts the
-search, so a container left open inside a block still holds what follows the block.
+**Today's types, restated.** Each shape is a subclass of the type the step's reader reads,
+:class:`~ai_assistant.orchestration.observer.scout.ScoutReply`,
+:class:`~ai_assistant.orchestration.observer.scout.PersonScoutReply`,
+:class:`~ai_assistant.orchestration.observer.framing.FramingReply` or
+:class:`~ai_assistant.orchestration.observer.placement.PlacementReply`, so a value is that
+type and goes to its reader as it is, and the reader runs the checks it runs today. Six of
+their fields hold an open value, any JSON at all, whose schema admits anything and could not
+be closed (§2:3): the scout's ``narrowing`` and, under the person flag, ``restates`` and
+``suggestions``; framing's ``style`` and ``pin``; and placement's ``answers``. Each shape
+restates them as named properties, the ones the step's prompt describes (§9:7), so the
+schema sent is closed at every depth. The field still holds what the reply wrote, as
+today, so a reader that sets one malformed entry aside, or reads a narrowing failing
+closed, does so as before.
 """
 
 from __future__ import annotations
 
-import json
-import re
-from typing import Final
+from typing import TYPE_CHECKING, Annotated, Final
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, WithJsonSchema
 
-__all__ = ["parsed"]
+from ai_assistant.core.types import ProfileField
+from ai_assistant.orchestration.observer.framing import FramingReply, _FramedMemory
+from ai_assistant.orchestration.observer.placement import PlacementReply
+from ai_assistant.orchestration.observer.scout import (
+    PersonScoutReply,
+    ScoutReply,
+    _PersonProposedFinding,
+    _ProposedFinding,
+)
+
+if TYPE_CHECKING:
+    from pydantic.json_schema import JsonSchemaValue
+
+__all__ = [
+    "FramingReplyShape",
+    "PersonScoutReplyShape",
+    "PlacementReplyShape",
+    "ScoutReplyShape",
+]
 
 
-#: A fence opening a block, its tag group 1. It is matched only where the walk stands in
-#: the reply's prose, outside any container, so never within a JSON string. Its tag is one
-#: word, so no bracket of the reply is ever taken for part of a tag.
-_OPENING: Final = re.compile(r"```[ \t]*([\w.+-]*)[ \t]*\n")
-
-#: The fence closing a block, alone on its line: a JSON string holds no raw newline, so
-#: backticks inside a fenced object's string never close its block.
-_CLOSING: Final = re.compile(r"^[ \t]*```[ \t]*$", re.MULTILINE)
-
-#: The tags a block offered as the reply carries: none, or ``json``.
-_JSON_TAGS: Final = frozenset({"", "json", "JSON"})
+# --- what the prompts describe for each open value ------------------------------------
 
 
-def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
-    """A reply as one object of ``shape``, or ``None``: never a partial one.
+class _Narrowing(BaseModel):
+    """A finding's narrowing as the scout's prompt writes it: ``{"reach", "note"}``."""
 
-    The whole reply is read first, with one enclosing Markdown code fence removed, as the
-    understanding stage and the tidy-up remove it: a deterministic normalization of a
-    wrapper, not a repair. Where the whole reply is not that object, because the model
-    wrote prose around it, the object is looked for in the text: a fenced block, the last
-    that validates; else an object standing on its own in the text, the last that
-    validates. An object found in the text counts only where it names a field of
-    ``shape``, and nothing inside a container, an object or an array, is a candidate.
+    model_config = ConfigDict(frozen=True)
+    reach: str
+    note: str
 
-    Args:
-        content: The model's reply.
-        shape: The model the reply must validate as.
 
-    Returns:
-        The object, or ``None`` where neither the reply nor any object in it validates.
+class _Setting(BaseModel):
+    """A setting a finding only restates, as the scout's prompt writes it (ADR-0338 §9:3)."""
+
+    model_config = ConfigDict(frozen=True)
+    field: ProfileField
+    value: str
+
+
+class _Suggestion(BaseModel):
+    """A field suggestion as the scout's prompt writes it (ADR-0338 §9:2)."""
+
+    model_config = ConfigDict(frozen=True)
+    field: ProfileField
+    value: str
+    part: str
+
+
+class _Answer(BaseModel):
+    """The open question a new memory answers, as placement's prompt writes it (§6:2)."""
+
+    model_config = ConfigDict(frozen=True)
+    memory: str
+    question: str
+
+
+def _restated(form: object) -> WithJsonSchema:
+    """The schema of ``form``, every reference inlined, standing in for an open value's.
+
+    The value is validated as it is today, any JSON; only the schema sent is this one, which
+    :func:`~ai_assistant.core.reply_shapes.reply_schema` closes and strips of text (§3:2).
     """
-    body = content.strip()
-    if body.startswith("```") and body.endswith("```") and len(body) >= 6:  # noqa: PLR2004 — two fences
-        body = body[3:-3]
-        newline = body.find("\n")
-        if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
-            body = body[newline + 1 :]
-    whole = _validated(body, shape)
-    if whole is not None:
-        return whole
-    # A JSON value holds no raw carriage return, so line endings are one kind for the search.
-    fenced, objects = _candidates(re.sub(r"\r\n?", "\n", content))
-    for candidate in (*reversed(fenced), *reversed(objects)):
-        if not _names_a_field(candidate, shape):
-            continue
-        found = _validated(candidate, shape)
-        if found is not None:
-            return found
-    return None
+    schema = TypeAdapter(form).json_schema()
+    definitions = schema.pop("$defs", {})
+
+    def inlined(value: JsonSchemaValue | list[object] | object) -> object:
+        if isinstance(value, dict):
+            reference = value.get("$ref")
+            if isinstance(reference, str) and reference.startswith("#/$defs/"):
+                return inlined(definitions[reference.removeprefix("#/$defs/")])
+            return {key: inlined(held) for key, held in value.items()}
+        if isinstance(value, list):
+            return [inlined(held) for held in value]
+        return value
+
+    restated = inlined(schema)
+    assert isinstance(restated, dict)  # noqa: S101 — a type's schema is an object
+    return WithJsonSchema(restated)
 
 
-def _validated[T: BaseModel](text: str, shape: type[T]) -> T | None:
-    """``text`` validated as ``shape``, or ``None``: the one validation every reading uses."""
-    try:
-        return shape.model_validate_json(text)
-    except ValidationError, ValueError, RecursionError:
-        return None
+#: The scout's ``narrowing``: one object or null (ADR-0346 §4:2).
+_NARROWING: Final = _restated(_Narrowing | None)
+#: The scout's ``restates``, under the person flag: one setting or null (ADR-0338 §9:3).
+_RESTATES: Final = _restated(_Setting | None)
+#: The scout's ``suggestions``, under the person flag: a list of them, or null (§9:2).
+_SUGGESTIONS: Final = _restated(tuple[_Suggestion, ...] | None)
+#: Framing's ``style`` and ``pin``, under the person flag: true, false or null (§9:4-§9:5).
+_JUDGED: Final = _restated(bool | None)
+#: Placement's ``answers``: one object naming a memory and its question, or null (§6:2).
+_ANSWERS: Final = _restated(_Answer | None)
 
 
-def _names_a_field(text: str, shape: type[BaseModel]) -> bool:
-    """Whether ``text`` is a JSON object carrying a key ``shape`` names."""
-    try:
-        value = json.loads(text)
-    except ValueError, RecursionError:
-        return False
-    if not isinstance(value, dict):
-        return False
-    named = set(shape.model_fields)
-    named.update(f.alias for f in shape.model_fields.values() if f.alias is not None)
-    return not named.isdisjoint(value)
+# --- the shapes ---------------------------------------------------------------------
 
 
-def _candidates(text: str) -> tuple[list[str], list[str]]:
-    """The fenced blocks' bodies and the top-level JSON objects in ``text``, each in order.
-
-    One walk finds both, so they share one rule: nothing inside a container, an object or
-    an array, is a candidate, and neither is a fence opened inside one. Each ``{`` or
-    ``[`` the walk meets starts a container. One that decodes is passed whole, an object
-    kept as a candidate and an array's members never; one that does not decode is skipped
-    as far as its brackets balance. A container whose brackets never balance ends the
-    walk, since everything after it may be inside it.
-
-    A fence the walk meets outside any container opens a block, which runs to its closing
-    fence, alone on its line, or where none closes it to the end. A block untagged or
-    tagged ``json`` offers its body as a candidate. A fence changes nothing else: the walk
-    goes on through the block as through any other text, a container opened in it still
-    open past its closing fence, and steps over that closing fence rather than taking it
-    for an opening one.
-    """
-    decoder = json.JSONDecoder()
-    fenced: list[str] = []
-    objects: list[str] = []
-    closings: dict[int, int] = {}
-    index = 0
-    while index < len(text):
-        if index in closings:
-            index = closings[index]
-            continue
-        opening = _OPENING.match(text, index)
-        if opening is not None:
-            closing = _CLOSING.search(text, opening.end())
-            if closing is not None:
-                closings[closing.start()] = closing.end()
-            if opening.group(1).strip() in _JSON_TAGS:
-                fenced.append(
-                    text[opening.end() : len(text) if closing is None else closing.start()]
-                )
-            index = opening.end()
-            continue
-        if text[index] not in "{[":
-            index += 1
-            continue
-        end = _past_container(decoder, text, index, objects)
-        if end is None:
-            break
-        index = end
-    return fenced, objects
+class _ScoutFinding(_ProposedFinding):
+    narrowing: Annotated[JsonValue, _NARROWING] = None
 
 
-def _past_container(
-    decoder: json.JSONDecoder, text: str, start: int, objects: list[str]
-) -> int | None:
-    """The index past the container at ``start``, keeping it in ``objects`` if an object.
+class ScoutReplyShape(ScoutReply):
+    """The scout's reply shape (ADR-0346 §4), its ``narrowing`` restated (§9:7)."""
 
-    One that decodes is passed whole, an array's members never kept; one that does not is
-    skipped as far as its brackets balance. ``None`` where they never balance.
-    """
-    try:
-        value, end = decoder.raw_decode(text, start)
-    except ValueError, RecursionError:
-        return _balanced_end(text, start)
-    if isinstance(value, dict):
-        objects.append(text[start:end])
-    return end
+    findings: tuple[_ScoutFinding, ...] = ()
 
 
-#: Each closing bracket, and the opening one it closes.
-_OPENS: Final = {"}": "{", "]": "["}
+class _PersonScoutFinding(_PersonProposedFinding):
+    narrowing: Annotated[JsonValue, _NARROWING] = None
+    restates: Annotated[JsonValue, _RESTATES] = None
 
 
-def _balanced_end(text: str, start: int) -> int | None:
-    """The index just past the bracket closing the one at ``start``, or ``None``.
+class PersonScoutReplyShape(PersonScoutReply):
+    """The scout's reply shape under the person flag (ADR-0338 §9:1-§9:3), restated (§9:7)."""
 
-    Brackets inside a JSON string, with its backslash escapes, are not counted. A closing
-    bracket of the wrong kind is no balance: ``None``, as for one never closed.
-    """
-    stack: list[str] = []
-    index = start
-    while index < len(text):
-        char = text[index]
-        if char == '"':
-            index = _past_string(text, index)
-            continue
-        if char in "{[":
-            stack.append(char)
-        elif char in _OPENS:
-            if not stack or stack.pop() != _OPENS[char]:
-                return None
-            if not stack:
-                return index + 1
-        index += 1
-    return None
+    findings: tuple[_PersonScoutFinding, ...] = ()
+    suggestions: Annotated[JsonValue, _SUGGESTIONS] = None
 
 
-def _past_string(text: str, start: int) -> int:
-    """The index just past the JSON string opening at ``start``; the end where none closes."""
-    index = start + 1
-    while index < len(text):
-        if text[index] == "\\":
-            index += 2
-        elif text[index] == '"':
-            return index + 1
-        else:
-            index += 1
-    return len(text)
+class _FramedMemoryShape(_FramedMemory):
+    style: Annotated[JsonValue, _JUDGED] = None
+    pin: Annotated[JsonValue, _JUDGED] = None
+
+
+class FramingReplyShape(FramingReply):
+    """Framing's reply shape (ADR-0346 §5:2), its ``style`` and ``pin`` restated (§9:7)."""
+
+    memories: tuple[_FramedMemoryShape, ...] = ()
+
+
+class PlacementReplyShape(PlacementReply):
+    """Placement's reply shape (ADR-0346 §6:2), its ``answers`` restated (§9:7)."""
+
+    answers: Annotated[JsonValue, _ANSWERS] = None

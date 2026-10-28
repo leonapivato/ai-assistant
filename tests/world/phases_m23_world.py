@@ -60,6 +60,7 @@ from m23_harness import (
     _Records,
     plant,
 )
+from structured_support import structured
 from understanding_support import TextAsStructured
 
 from ai_assistant.core.types import (
@@ -330,7 +331,7 @@ def build_phases_world(
     phases = PhasePath(
         planning_prompt=default_prompt(PLANNING_PROMPT),
         completer=planner,
-        provider=digests,
+        provider=structured(digests),
         authorizing=AuthorizingStage(
             registry=tools,
             policy=gate,

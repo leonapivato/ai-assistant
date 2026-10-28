@@ -12,7 +12,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+from pydantic import BaseModel
+from structured_support import structured
+
 from ai_assistant.core.episode_encoding import episode_content
+from ai_assistant.core.reply_shapes import read_reply
 from ai_assistant.core.types import (
     ActionRequest,
     ActivationDigest,
@@ -73,7 +77,7 @@ from ai_assistant.testing.parties import line_input, parties_for
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.protocols import DiagnosticSink, PersonModelStore
+    from ai_assistant.core.protocols import DiagnosticSink, PersonModelStore, StructuredCompleter
     from ai_assistant.core.types import (
         ActivationRecall,
         ActivationUnderstanding,
@@ -409,8 +413,8 @@ class Harness:
     def observer(
         self,
         *,
-        scout: FakeModelProvider | None = None,
-        commit: FakeModelProvider | None = None,
+        scout: FakeModelProvider | StructuredCompleter | None = None,
+        commit: FakeModelProvider | StructuredCompleter | None = None,
         window: int = WINDOW,
         diagnostics: DiagnosticSink | None = None,
         person_model: PersonModelStore | None = None,
@@ -422,8 +426,8 @@ class Harness:
         (ADR-0338 §9:8); none by default, as on every hub where it is off.
         """
         return Observer(
-            scout=scout or FakeModelProvider.scripted(),
-            commit=commit or FakeModelProvider.scripted(),
+            scout=structured(scout or FakeModelProvider.scripted()),
+            commit=structured(commit or FakeModelProvider.scripted()),
             memory=self.memory,
             writes=self.writes,
             plans=self.plans,
@@ -438,3 +442,12 @@ class Harness:
             diagnostics=diagnostics,
             person_model=person_model,
         )
+
+
+def read_as[T: BaseModel](reply: str, shape: type[T]) -> T | None:
+    """``reply`` read as ``shape`` by ``core``'s one rule, as the stage reads it (§3:4).
+
+    ``None`` where the rule returns a failure: the reply is no proposal.
+    """
+    read = read_reply(shape, reply)
+    return read if isinstance(read, shape) else None

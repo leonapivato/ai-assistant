@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from observer_support import AT, LABELS, Minter, address, episode, framed, framing
+from observer_support import AT, LABELS, Minter, address, episode, framed, framing, read_as
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -29,14 +29,13 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.observer.framing import (
     Framing,
-    FramingReply,
     FramingView,
 )
 from ai_assistant.orchestration.observer.framing import (
     framed as framed_by_code,
 )
 from ai_assistant.orchestration.observer.reading import ReadPart
-from ai_assistant.orchestration.observer.replies import parsed
+from ai_assistant.orchestration.observer.replies import FramingReplyShape
 
 _SWIM = "can't do Friday evening, that's my swim"
 _RUN = "out for my Tuesday morning run, back by 8"
@@ -95,7 +94,7 @@ def _view(*parts: ReadPart) -> FramingView:
 
 
 def _framed(view: FramingView, reply: str, *, person: bool = False) -> Framing:
-    read = parsed(reply, FramingReply)
+    read = read_as(reply, FramingReplyShape)
     assert read is not None
     return framed_by_code(read, view, now=AT, mint=Minter(), labels=LABELS, person=person)
 
@@ -337,10 +336,10 @@ def test_an_end_already_past_when_framed_is_kept_as_history() -> None:
 
 def test_a_reply_neither_framing_nor_saying_why_not_does_not_parse() -> None:
     """ADR-0346 §5:6: nothing is kept only with a reason; anything else is retried."""
-    assert parsed("{}", FramingReply) is None
-    assert parsed('{"error": "could not frame"}', FramingReply) is None
-    assert parsed('{"memories": [], "nothing": "  "}', FramingReply) is None
-    reason = parsed('{"memories": [], "nothing": "One choice is no habit."}', FramingReply)
+    assert read_as("{}", FramingReplyShape) is None
+    assert read_as('{"error": "could not frame"}', FramingReplyShape) is None
+    assert read_as('{"memories": [], "nothing": "  "}', FramingReplyShape) is None
+    reason = read_as('{"memories": [], "nothing": "One choice is no habit."}', FramingReplyShape)
     assert reason is not None
     assert reason.nothing == "One choice is no habit."
 

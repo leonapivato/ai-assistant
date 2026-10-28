@@ -30,6 +30,7 @@ from observer_support import (
 
 from ai_assistant.core.diagnostics import DIAGNOSTIC_NOT_WRITTEN
 from ai_assistant.core.errors import PlanningError
+from ai_assistant.core.reply_shapes import reply_shape_version
 from ai_assistant.core.types import (
     DiagnosticEntry,
     DiagnosticKind,
@@ -41,6 +42,8 @@ from ai_assistant.core.types import (
     ObservationState,
     ObserverStep,
     Provenance,
+    ReplyFailure,
+    ReplyUsage,
     Role,
 )
 from ai_assistant.core.types import Message as MessageType
@@ -49,8 +52,14 @@ from ai_assistant.orchestration.observer.prompts import (
     OBSERVER_FRAMING_PROMPT,
     OBSERVER_SCOUT_PROMPT,
 )
+from ai_assistant.orchestration.observer.replies import FramingReplyShape, ScoutReplyShape
 from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider, default_prompt
 from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.structured import (
+    DEFAULT_STRUCTURED_MODEL,
+    FakeStructuredCompleter,
+    ScriptedReply,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -194,13 +203,64 @@ async def test_a_calls_entries_hold_its_request_and_its_reply() -> None:
     (decided,) = commit.calls
     messages = _body(commit_given)["messages"]
     assert messages == [one.model_dump(mode="json") for one in decided.messages]
+    # ADR-0354 §7:1: each structured call names the shape it asks for, and its version.
+    assert _body(given)["reply_shape"] == {
+        "name": "ScoutReplyShape",
+        "version": reply_shape_version(ScoutReplyShape),
+    }
+    assert _body(commit_given)["reply_shape"] == {
+        "name": "FramingReplyShape",
+        "version": reply_shape_version(FramingReplyShape),
+    }
+    # §7:2: the reply as written, and what came back with it.
     assert _body(commit_returned) == {
         "episode": address("one"),
         "attempt_started_at": AT.isoformat(),
         "stage": "framing",
         "finding": "f1",
         "reply": _create(),
+        "model": DEFAULT_STRUCTURED_MODEL,
+        "mode": "native",
+        "finish_reason": "stop",
+        "refusal": None,
+        "refusal_category": None,
+        "usage": ReplyUsage().model_dump(mode="json"),
     }
+
+
+async def test_a_calls_returned_entry_keeps_the_usage_and_a_returned_failure() -> None:
+    """ADR-0354 §7:2, §12:7: usage and the model that answered; a failure's kind, first."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    usage = ReplyUsage(input_tokens=1200, output_tokens=80, cache_read_tokens=1000)
+    scout = FakeStructuredCompleter.scripted(
+        ScriptedReply(text=_scout("P1"), usage=usage, model="anthropic:claude-sonnet-5-5")
+    )
+    commit = FakeStructuredCompleter.scripted(
+        ScriptedReply(text=_create(), failure=ReplyFailure.CUT)
+    )
+    observer = harness.observer(scout=scout, commit=commit, diagnostics=sink)
+
+    await observer.run()
+
+    returned = [_body(one) for one in sink.recorded if one.kind is DiagnosticKind.RETURNED]
+    scouted, framed = (
+        next(one for one in returned if one.get("stage") == stage) for stage in ("scout", "framing")
+    )
+    assert (scouted["model"], scouted["usage"]) == (
+        "anthropic:claude-sonnet-5-5",
+        usage.model_dump(mode="json"),
+    )
+    assert "failure" not in scouted
+    # The entry is written before the failure is acted on: the attempt fails unparsed.
+    assert (framed["failure"], framed["finish_reason"], framed["reply"]) == (
+        "cut",
+        "length",
+        _create(),
+    )
+    ended = [_body(one) for one in sink.recorded if _body(one).get("stage") == "end"]
+    assert [one["failure"]["class"] for one in ended] == ["unparsed"]
 
 
 async def test_the_findings_entry_holds_each_claim_its_parts_and_the_dropped_count() -> None:

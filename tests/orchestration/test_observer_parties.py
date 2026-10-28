@@ -11,7 +11,18 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Final
 
-from observer_support import AT, LABELS, Harness, Minter, address, episode, framed, framing, said
+from observer_support import (
+    AT,
+    LABELS,
+    Harness,
+    Minter,
+    address,
+    episode,
+    framed,
+    framing,
+    read_as,
+    said,
+)
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -27,10 +38,10 @@ from ai_assistant.core.types import (
     SupportOrigin,
     stamped_support,
 )
-from ai_assistant.orchestration.observer.framing import FramingReply, FramingView
+from ai_assistant.orchestration.observer.framing import FramingView
 from ai_assistant.orchestration.observer.framing import framed as framed_by_code
 from ai_assistant.orchestration.observer.reading import EpisodeReader, Reading
-from ai_assistant.orchestration.observer.replies import parsed
+from ai_assistant.orchestration.observer.replies import FramingReplyShape
 
 _OWNER: Final = SupportHolder.person(OWNER_PERSON_ID)
 _LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="conn-1/42")
@@ -79,12 +90,12 @@ async def test_your_note_beside_a_forward_is_proposed_as_yours_and_the_forward_a
         leaving=leaving,
         parts=(own, forward),
     )
-    reply = parsed(
+    reply = read_as(
         framing(
             framed("The user is moving to Porto in May.", own.handle),
             framed("Ana is moving to Porto.", forward.handle, subjects=("Ana",)),
         ),
-        FramingReply,
+        FramingReplyShape,
     )
     assert reply is not None
     result = framed_by_code(reply, view, now=AT, mint=Minter(), labels=LABELS)

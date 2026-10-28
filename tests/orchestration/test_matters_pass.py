@@ -12,15 +12,19 @@ import asyncio
 import json
 from datetime import timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from story_support import AT, EVENTS, activation, episode, memory_of, story
 from structlog.testing import capture_logs
+from structured_support import structured
 
+from ai_assistant.core.errors import ModelContentFilterError
+from ai_assistant.core.reply_shapes import reply_schema
 from ai_assistant.core.types import (
     ActivationUnderstanding,
     Message,
+    ReplyFailure,
     Role,
     StoryActor,
     StoryChange,
@@ -36,9 +40,15 @@ from ai_assistant.core.types import (
     UnclearPoint,
     UnderstandingProducer,
 )
-from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT, MattersPass
+from ai_assistant.orchestration import matters_pass
+from ai_assistant.orchestration.matters_pass import (
+    MATTERS_PASS_PROMPT,
+    MattersPass,
+    MattersPassReply,
+)
 from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt, prompt_from
+from ai_assistant.testing.structured import FakeStructuredCompleter, ScriptedReply
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -80,7 +90,7 @@ def _pass(  # noqa: PLR0913 — one knob per bound a case varies
     budget: timedelta = _BUDGET,
 ) -> MattersPass:
     return MattersPass(
-        model=model,
+        model=structured(model),
         stories=stories,
         memory=memory,
         excerpt_chars=1000,
@@ -246,7 +256,7 @@ async def test_the_system_message_is_what_the_template_renders() -> None:
     stories, memory, _trip, _other = await _pair()
     model = FakeModelProvider(_LEAVE)
     matters = MattersPass(
-        model=model,
+        model=structured(model),
         stories=stories,
         memory=memory,
         excerpt_chars=1000,
@@ -270,7 +280,7 @@ async def test_the_pass_refuses_another_prompts_template() -> None:
 
     with pytest.raises(ValueError, match="matters_pass prompt"):
         MattersPass(
-            model=FakeModelProvider(_LEAVE),
+            model=structured(FakeModelProvider(_LEAVE)),
             stories=stories,
             memory=await memory_of(),
             excerpt_chars=1000,
@@ -730,11 +740,11 @@ async def test_a_reply_that_fails_to_parse_or_a_check_writes_nothing(reply: str)
     assert await _log(stories, trip) == before
 
 
-# --- the reply's decision (#2775) and what a refusal logs (#2778) ----------------------
+# --- the reply's decision (ADR-0354 §9:1-§9:3) and what a refusal logs (#2778) ----------
 
 _SPLIT: Final = json.dumps({"decision": "split", "story": "S1", "episodes": ["E2"]})
 _REASONING: Final = "S1 holds a camping trip and, in E2, the dentist: two matters."
-_UNFINISHED: Final = "the reply's decision follows a brace or bracket opening no whole JSON value"
+_INVALID: Final = "the reply is invalid"
 
 
 async def _split_flag() -> tuple[FakeStoryStore, MemoryStore, str]:
@@ -750,58 +760,44 @@ async def _split_flag() -> tuple[FakeStoryStore, MemoryStore, str]:
 @pytest.mark.parametrize(
     "reply",
     [
-        f"{_REASONING}\n\n{_SPLIT}",
-        f"{_REASONING}\n```json\n{_SPLIT}\n```",
-        f"{_REASONING} So, as I said: {_SPLIT}\n\n{_SPLIT}",
-        f'The flag reads {{"kind": "two_matters"}} on ["S1"], one story.\n{_SPLIT}',
+        _SPLIT,
         f"```json\n{_SPLIT}\n```",
-        f"{_REASONING} On reflection, {_SPLIT}",
-        f"For S1, {_SPLIT}",
-        f'It says "two matters", {_SPLIT}',
+        # A kind's own field set to null stands, and another kind's carries nothing.
+        json.dumps(
+            {"decision": "split", "story": "S1", "episodes": ["E2"], "to": None, "into": None}
+        ),
+        # A key no kind names is no field of the shape, and is read past (§10:2).
+        json.dumps({"decision": "split", "story": "S1", "episodes": ["E2"], "why_zz": "two"}),
     ],
-    ids=[
-        "prose-first",
-        "prose-then-fence",
-        "repeated",
-        "whole-values-first",
-        "fenced",
-        "after-a-comma-in-prose",
-        "after-a-label-and-a-comma",
-        "after-a-quotation-and-a-comma",
-    ],
+    ids=["bare", "fenced", "another-kinds-null", "unnamed-key"],
 )
-async def test_a_decision_after_prose_is_taken(reply: str) -> None:
+async def test_a_decision_is_the_reply_read_by_the_one_rule(reply: str) -> None:
+    """ADR-0354 §3:4, §9:3: one enclosing fence removed, then the shape, then its kind."""
     stories, memory, trip = await _split_flag()
 
-    report = await _pass(FakeModelProvider(reply), stories, memory).run()
+    with capture_logs() as logs:
+        report = await _pass(FakeModelProvider(reply), stories, memory).run()
 
     assert (report.decided, report.refused) == (1, 0)
     assert await _members(stories, trip) == ["a-1"]
+    assert "why_zz" not in str(logs)
+    assert not [entry for entry in logs if "stray" in entry["event"]]
 
 
 @pytest.mark.parametrize(
     ("reply", "failed", "problem"),
     [
-        (_REASONING, "parse", "the reply holds no decision"),
+        # §10: the pass no longer looks for a decision in prose, so each is invalid.
+        (_REASONING, "parse", _INVALID),
+        (f"{_REASONING}\n\n{_SPLIT}", "parse", _INVALID),
+        (f"{_REASONING}\n```json\n{_SPLIT}\n```", "parse", _INVALID),
+        (f"{_SPLIT}\nWait, I need to reconsider: they are one matter.", "parse", _INVALID),
+        (f"Either {_SPLIT} or, better, {_LEAVE}", "parse", _INVALID),
+        (f'{{"candidate": {_SPLIT}', "parse", _INVALID),
+        ("", "parse", "the reply is empty"),
+        (json.dumps({"decision": "rename", "story": "S1"}), "parse", _INVALID),
         (
-            f"{_SPLIT}\nWait, I need to reconsider: they are one matter.",
-            "parse",
-            "the reply goes on after its decision",
-        ),
-        (f"{_REASONING}\n{_SPLIT} That is all.", "parse", "the reply goes on after its decision"),
-        (
-            f"Either {_SPLIT} or, better, {_LEAVE}",
-            "parse",
-            "the reply holds two different decisions",
-        ),
-        (f'{{"candidate": {_SPLIT}', "parse", _UNFINISHED),
-        (f"[{_SPLIT}", "parse", _UNFINISHED),
-        (f'{_REASONING}\n```json\n["one", {_SPLIT}', "parse", _UNFINISHED),
-        (f"[null {_SPLIT}", "parse", _UNFINISHED),
-        (f'{{"note": "a ] and a }}", {_SPLIT}', "parse", _UNFINISHED),
-        (f"{_REASONING} E2 [in S1] differs.\n{_SPLIT}", "parse", _UNFINISHED),
-        (
-            f"{_REASONING}\n" + json.dumps({"decision": "merge", "story": "S1", "into": "S1"}),
+            json.dumps({"decision": "merge", "story": "S1", "into": "S1"}),
             "check",
             "a merge names one story on both sides",
         ),
@@ -813,23 +809,39 @@ async def test_a_decision_after_prose_is_taken(reply: str) -> None:
         (
             json.dumps({"decision": "split", "story": "S1", "episodes": ["E2"], "to": "S2"}),
             "parse",
-            "the reply holds no decision",
+            "the reply's decision carries another decision's field",
+        ),
+        (
+            json.dumps({"decision": "leave", "notes": []}),
+            "parse",
+            "the reply's decision carries another decision's field",
+        ),
+        (
+            json.dumps({"decision": "split", "story": "S1"}),
+            "parse",
+            "the reply's decision is not of its kind's shape",
+        ),
+        (
+            json.dumps({"decision": "group", "stories": ["S1"]}),
+            "parse",
+            "the reply's decision is not of its kind's shape",
         ),
     ],
     ids=[
-        "no-decision",
+        "prose-alone",
+        "prose-first",
+        "prose-then-fence",
         "reconsiders",
-        "goes-on",
         "two-decisions",
         "cut-off-object",
-        "cut-off-array",
-        "cut-off-array-element",
-        "malformed-array",
-        "closers-in-a-cut-off-string",
-        "bracket-in-prose",
+        "empty",
+        "no-such-kind",
         "merge-itself",
         "unshown",
         "another-decisions-field",
+        "another-decisions-empty-field",
+        "its-kind-lacks-a-field",
+        "group-without-under",
     ],
 )
 async def test_a_refused_reply_writes_nothing_and_logs_why_without_its_text(
@@ -859,72 +871,75 @@ async def test_a_refused_reply_writes_nothing_and_logs_why_without_its_text(
         assert text not in str(logs)
 
 
-_STRAY_SPLIT: Final = json.dumps(
-    {"decision": "split", "story": "S1", "episodes": ["E2"], "why_zz": "two", "command": None}
-)
-
-
-@pytest.mark.parametrize(
-    ("reply", "stray"),
-    [
-        (_STRAY_SPLIT, 2),
-        (f"{_REASONING}\n\n{_STRAY_SPLIT}", 2),
-        (f"```json\n{_STRAY_SPLIT}\n```", 2),
-        # Two objects are one decision whatever keys each dropped; the first's are counted.
-        (f"{_REASONING} So: {_STRAY_SPLIT}\n\n{_SPLIT}", 2),
-        (f"{_REASONING} So: {_SPLIT}\n\n{_STRAY_SPLIT}", 0),
-    ],
-    ids=["whole", "after-prose", "fenced", "repeated-stray-first", "repeated-stray-second"],
-)
-async def test_a_stray_key_is_dropped_and_counted_and_the_decision_taken(
-    reply: str, stray: int
-) -> None:
-    """#3246: a key a decision's shape does not name is dropped, counted, and never logged."""
-    stories, memory, trip = await _split_flag()
-
-    with capture_logs() as logs:
-        report = await _pass(FakeModelProvider(reply), stories, memory).run()
-
-    assert (report.decided, report.refused) == (1, 0)
-    assert await _members(stories, trip) == ["a-1"]
-    counted = [entry for entry in logs if entry["event"] == "matters_pass_stray_keys"]
-    expected = {
-        "event": "matters_pass_stray_keys",
-        "log_level": "info",
-        "stage": "matters_pass",
-        "flag": "two_matters",
-        "stray": stray,
-    }
-    assert counted == ([expected] if stray else [])
-    for name in ("why_zz", "command"):
-        assert name not in str(logs)
-
-
-async def test_a_leave_with_a_stray_key_is_recorded() -> None:
-    stories, memory, trip = await _split_flag()
-    reply = json.dumps({"decision": "leave", "because": "they are one matter"})
-
-    report = await _pass(FakeModelProvider(reply), stories, memory).run()
-
-    assert (report.decided, report.refused) == (1, 0)
-    assert await _members(stories, trip) == ["a-1", "a-2"]
-
-
-async def test_a_stray_key_is_counted_where_a_check_then_refuses_the_decision() -> None:
+async def test_a_cut_reply_is_one_that_fails_to_parse_whatever_its_text() -> None:
+    """ADR-0354 §9:2: ``cut`` lands where a reply that does not parse lands."""
     stories, memory, trip = await _split_flag()
     before = await _log(stories, trip)
-    reply = json.dumps({"decision": "merge", "story": "S1", "into": "S1", "why_zz": "same"})
+    model = FakeStructuredCompleter(ScriptedReply(text=_SPLIT, failure=ReplyFailure.CUT))
 
     with capture_logs() as logs:
-        report = await _pass(FakeModelProvider(reply), stories, memory).run()
+        report = await _pass(model, stories, memory).run()
 
     assert (report.refused, report.decided) == (1, 0)
     assert await _log(stories, trip) == before
-    assert [entry["event"] for entry in logs if entry["event"].startswith("matters_pass_")] == [
-        "matters_pass_stray_keys",
-        "matters_pass_refused",
+    assert [entry["problem"] for entry in logs if entry["event"] == "matters_pass_refused"] == [
+        "the reply is cut"
     ]
-    assert "why_zz" not in str(logs)
+
+
+async def test_a_refusal_is_raised_where_a_providers_refusal_was_and_writes_nothing() -> None:
+    """ADR-0354 §9:2: a returned ``refused`` lands where a raised one did: the run's end."""
+    stories, memory, trip = await _split_flag()
+    before = await _log(stories, trip)
+    model = FakeStructuredCompleter(
+        ScriptedReply(text=_SPLIT, failure=ReplyFailure.REFUSED, refusal="no")
+    )
+
+    with pytest.raises(ModelContentFilterError):
+        await _pass(model, stories, memory).run()
+
+    assert await _log(stories, trip) == before
+
+
+async def test_the_completion_asks_for_the_passs_own_shape_and_no_route() -> None:
+    """ADR-0354 §9:1, §6:2: one structured call, its shape the pass's, no ``model=``."""
+    stories, memory, _trip = await _split_flag()
+    model = FakeStructuredCompleter(_SPLIT)
+
+    await _pass(model, stories, memory).run()
+
+    assert [(one.shape, one.model) for one in model.calls] == [(MattersPassReply, None)]
+
+
+def test_the_shape_is_closed_and_names_the_prompts_fields() -> None:
+    """ADR-0354 §2:3, §3:2, §9:3: one closed object, ``decision`` naming the kind."""
+    schema = reply_schema(MattersPassReply)
+
+    assert schema["additionalProperties"] is False
+    assert set(cast("dict[str, object]", schema["properties"])) == {
+        "decision",
+        "story",
+        "into",
+        "episodes",
+        "notes",
+        "from",
+        "to",
+        "stories",
+        "under",
+    }
+    assert cast("dict[str, dict[str, object]]", schema["properties"])["decision"]["enum"] == [
+        "leave",
+        "merge",
+        "split",
+        "move",
+        "group",
+    ]
+
+
+def test_the_text_json_reader_is_gone() -> None:
+    """ADR-0354 §10:1: no second reading of the reply's text stays beside the one rule."""
+    for name in ("_parsed", "_unfenced", "_openers", "_decision", "_DECODER", "_OPENER"):
+        assert not hasattr(matters_pass, name)
 
 
 async def test_a_flag_whose_reply_failed_goes_behind_flags_that_have_not() -> None:
@@ -1216,7 +1231,7 @@ def test_its_bounds_are_positive(bounds: dict[str, Any]) -> None:
     } | bounds
     with pytest.raises(ValueError, match="positive"):
         MattersPass(
-            model=FakeModelProvider(),
+            model=structured(FakeModelProvider()),
             stories=_stories(),
             memory=None,  # type: ignore[arg-type]  # never reached: the bound refuses first
             prompt=default_prompt(MATTERS_PASS_PROMPT),

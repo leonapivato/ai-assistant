@@ -1,7 +1,7 @@
 """The tidy-up: one completion rewrites a story's summary whole (ADR-0303 §5).
 
 An operation on the assistant's own records, orchestration-local and not a Protocol
-(ADR-0300 §5:1): :class:`StoryTidyUp` holds an injected ``ModelProvider``,
+(ADR-0300 §5:1): :class:`StoryTidyUp` holds an injected ``StructuredCompleter``,
 ``StoryStore`` and ``MemoryStore``, and ``core/protocols.py`` gains nothing for it. A
 model call is processing (ADR-0292 §12:4); what it writes is the assistant's own
 records.
@@ -62,9 +62,12 @@ reads at start and hands the operation, and this module keeps no copy of its tex
 the start's log line names (§8:3).
 
 **The hub's checks** (§5:6), by rule, before writing: the reply parses, every flag
-names what it may, and the lines fit the cap. An output that fails is refused whole,
-writes nothing and makes no second completion (ADR-0300 §5:8); the store's
-``over_cap`` stays the backstop.
+names what it may, and the lines fit the cap. The completion is one structured call with
+:class:`TidyUpReply`, read by ``core``'s one rule alone (ADR-0354 §3:4, §9:1): a returned
+``invalid``, ``empty`` or ``cut`` is a reply that does not parse, and a returned
+``refused`` fails the run as a raised ``ModelContentFilterError`` does (§9:2). An
+output that fails is refused whole, writes nothing and makes no second completion
+(ADR-0300 §5:8); the store's ``over_cap`` stays the backstop.
 
 **The summary's mark comes from records, never from the model** (§3:4): it is set where
 the run read a marked note, an outside episode — its trigger's ``origin`` is
@@ -105,7 +108,12 @@ import structlog
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ai_assistant.core.episode_encoding import project_episode
-from ai_assistant.core.errors import MemoryStoreError, ModelError, StoryStoreError
+from ai_assistant.core.errors import (
+    MemoryStoreError,
+    ModelContentFilterError,
+    ModelError,
+    StoryStoreError,
+)
 from ai_assistant.core.prompts import PromptDeclaration
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
@@ -115,6 +123,7 @@ from ai_assistant.core.types import (
     InputOrigin,
     MemoryKind,
     Message,
+    ReplyFailure,
     Role,
     StoryFlag,
     StoryFlagKind,
@@ -125,7 +134,6 @@ from ai_assistant.core.types import (
     StorySummaryLine,
 )
 from ai_assistant.orchestration.episode_reads import is_open_episode, without_open_episodes
-from ai_assistant.orchestration.reply_keys import stray_keys
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_flags import (
     StoryRecords,
@@ -140,7 +148,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.prompts import PromptTemplate
-    from ai_assistant.core.protocols import MemoryStore, ModelProvider, StoryStore
+    from ai_assistant.core.protocols import MemoryStore, StoryStore, StructuredCompleter
     from ai_assistant.core.types import (
         EpisodeProjection,
         StoryNote,
@@ -150,7 +158,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.story_flags import RecordedDecision
 
-__all__ = ["STORY_TIDY_UP_PROMPT", "StoryTidyUp", "TidyUpOutcome", "TidyUpResult"]
+__all__ = ["STORY_TIDY_UP_PROMPT", "StoryTidyUp", "TidyUpOutcome", "TidyUpReply", "TidyUpResult"]
 
 _log = structlog.get_logger(__name__)
 
@@ -274,41 +282,17 @@ class _ProposedFlag(BaseModel):
     story: str | None = None
 
 
-class _Proposed(BaseModel):
-    """The completion's one JSON object: its lines and its flags, and nothing else (§5:2).
+class TidyUpReply(BaseModel):
+    """The tidy-up's reply shape (ADR-0354 §9:1): its lines and its flags, and nothing else.
 
-    Nothing else is taken from it: a key this shape, or the flag shape in it, does not
-    name is dropped and counted (#3246), as the observer's reply drops one. Every field
-    it names is validated as before, so a reply missing its lines, or carrying a value
-    of the wrong kind, still does not parse and is refused whole (§5:6).
+    Its field names are the ones the prompt asks for (§5:2), and the schema sent for it
+    carries nothing else (ADR-0354 §3:2). A reply missing its lines, or carrying a value
+    of the wrong kind, does not parse and is refused whole (§5:6).
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
     lines: tuple[str, ...]
     flags: tuple[_ProposedFlag, ...] = ()
-
-
-def _parsed(content: str) -> _Proposed | None:
-    """The reply as one proposal, or ``None``: never a partial one.
-
-    One enclosing Markdown code fence is removed first, as the understanding stage
-    removes it: a deterministic normalization of a wrapper, not a repair.
-    """
-    body = content.strip()
-    if body.startswith("```") and body.endswith("```") and len(body) >= 6:  # noqa: PLR2004 — two fences
-        body = body[3:-3]
-        newline = body.find("\n")
-        if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
-            body = body[newline + 1 :]
-    try:
-        proposed = _Proposed.model_validate_json(body)
-    except ValidationError, ValueError, RecursionError:
-        return None
-    stray = stray_keys(body, proposed)
-    if stray:
-        # #3246: a key the reply's shape does not name, dropped and counted, never named.
-        _log.info("story_tidy_up_stray_keys", stage="tidy_up", stray=stray)
-    return proposed
 
 
 # --- what one run read ---------------------------------------------------------------
@@ -522,7 +506,7 @@ class StoryTidyUp:
     def __init__(  # noqa: PLR0913 — the three injected seams, the four bounds, recall's threshold and the prompt
         self,
         *,
-        model: ModelProvider,
+        model: StructuredCompleter,
         stories: StoryStore,
         memory: MemoryStore,
         excerpt_chars: int,
@@ -535,7 +519,8 @@ class StoryTidyUp:
         """Wire the operation to its seams and its bounds.
 
         Args:
-            model: The provider its one completion is made through.
+            model: The structured seam its one completion is made through (ADR-0354
+                §9:1).
             stories: The story store it reads and writes.
             memory: The store its pending episodes are fetched from, and the one its
                 lookalike search searches (ADR-0303 §5:7).
@@ -627,13 +612,18 @@ class StoryTidyUp:
             return TidyUpOutcome(TidyUpResult.OUTSIDE_ONLY)
         reading = await self._reading(story_id, state, episodes, linked)
         # §5:2: exactly one completion, and no second whatever it answers.
-        reply = await self._model.complete(
+        reply = await self._model.complete_structured(
             [
                 Message(role=Role.SYSTEM, content=self._prompt.render(values=_TIDY_UP_VALUES)),
                 Message(role=Role.USER, content=json.dumps(reading.payload(), ensure_ascii=True)),
-            ]
+            ],
+            TidyUpReply,
         )
-        proposal = _parsed(reply.content)
+        if reply.failure is ReplyFailure.REFUSED:
+            # ADR-0354 §9:2: where a raised refusal lands, a failed run (§5:11).
+            msg = "the provider refused the tidy-up's completion (ADR-0354 §9:2)"
+            raise ModelContentFilterError(msg)
+        proposal = reply.value
         if proposal is None:
             return TidyUpOutcome(TidyUpResult.REFUSED, problem="the reply did not parse")
         try:
@@ -892,7 +882,7 @@ class StoryTidyUp:
 # --- the hub's checks (§5:6) ---------------------------------------------------------
 
 
-def _checked(proposal: _Proposed, reading: _Reading) -> StorySummaryDraft:
+def _checked(proposal: TidyUpReply, reading: _Reading) -> StorySummaryDraft:
     """The proposal as a summary draft, every §5:6 check passed and its mark from records.
 
     Raises:
@@ -929,7 +919,7 @@ def _line(text: str) -> StorySummaryLine:
         raise _Refused(msg) from exc
 
 
-def _flags(proposal: _Proposed, reading: _Reading) -> tuple[StoryFlag, ...]:
+def _flags(proposal: TidyUpReply, reading: _Reading) -> tuple[StoryFlag, ...]:
     """ADR-0303 §8:3's flags, a ``like_another`` naming one of the other stories shown.
 
     Raises:

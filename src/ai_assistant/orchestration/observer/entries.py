@@ -34,7 +34,7 @@ the observer's own included (§4:1).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -61,6 +61,7 @@ if TYPE_CHECKING:
         ObservationFinding,
         ObservationState,
         ObserverStep,
+        StructuredReply,
     )
 
 __all__ = ["Diagnosed", "ObserverEntries"]
@@ -124,7 +125,7 @@ class ObserverEntries:
         self._sink = sink
         self._now = now
 
-    async def given(
+    async def given(  # noqa: PLR0913 — the targets, the step, the request and three keys
         self,
         targets: Sequence[Diagnosed],
         step: ObserverStep,
@@ -132,6 +133,7 @@ class ObserverEntries:
         *,
         prompt: RenderedPrompt,
         finding: ObservationFinding | None = None,
+        reply_shape: Mapping[str, str] | None = None,
     ) -> None:
         """A call's given entry, under each activation its episodes name (§2:2, §2:9).
 
@@ -142,6 +144,8 @@ class ObserverEntries:
             prompt: Its system message's instruction, whose template and flags the
                 entry names (ADR-0334 §8:2, ADR-0335 §9:1).
             finding: The finding a framing or a placement call decides.
+            reply_shape: The name and version of the shape a structured call asks for
+                (ADR-0354 §7:1).
         """
 
         def body() -> dict[str, object]:
@@ -150,13 +154,15 @@ class ObserverEntries:
                 "messages": [one.model_dump(mode="json") for one in messages],
                 "prompt": prompt.provenance(),
             }
+            if reply_shape is not None:
+                built["reply_shape"] = dict(reply_shape)
             if finding is not None:
                 built["finding"] = _finding(finding)
             return built
 
         await self._each(targets, DiagnosticKind.GIVEN, body)
 
-    async def returned(
+    async def returned(  # noqa: PLR0913 — the targets, the step and what came back
         self,
         targets: Sequence[Diagnosed],
         step: ObserverStep,
@@ -164,8 +170,14 @@ class ObserverEntries:
         reply: str | None = None,
         failure: BaseException | None = None,
         finding: str | None = None,
+        structured: StructuredReply[Any] | None = None,
     ) -> None:
         """A call's returned entry: the reply as text, or the failure (§2:2).
+
+        A structured call's entry keeps its reply as the model wrote it and what came back
+        with it: the model that answered, the mode, the finish reason, a refusal's
+        statement and category, the usage, and the returned failure's kind where there
+        is one (ADR-0354 §7:2).
 
         Args:
             targets: The attempts the call read for.
@@ -173,6 +185,7 @@ class ObserverEntries:
             reply: The model's reply, where it returned.
             failure: How it failed, where it did.
             finding: The id of the finding a framing or a placement call decided.
+            structured: What a structured call returned, where it returned.
         """
 
         def body() -> dict[str, object]:
@@ -181,6 +194,8 @@ class ObserverEntries:
                 built["finding"] = finding
             if failure is not None:
                 built["failure"] = failure_body(failure)
+            elif structured is not None:
+                built.update(_exchange_of(structured))
             else:
                 built["reply"] = reply
             return built
@@ -330,3 +345,20 @@ def _finding(finding: ObservationFinding) -> dict[str, object]:
         if finding.annotations is None
         else finding.annotations.model_dump(mode="json"),
     }
+
+
+def _exchange_of(reply: StructuredReply[Any]) -> dict[str, object]:
+    """What a structured call's returned entry keeps of it (ADR-0354 §7:2)."""
+    exchange = reply.exchange
+    held: dict[str, object] = {
+        "reply": exchange.reply,
+        "model": exchange.model,
+        "mode": exchange.mode.value,
+        "finish_reason": exchange.finish_reason,
+        "refusal": exchange.refusal,
+        "refusal_category": exchange.refusal_category,
+        "usage": exchange.usage.model_dump(mode="json"),
+    }
+    if reply.failure is not None:
+        held["failure"] = reply.failure.value
+    return held

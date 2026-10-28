@@ -1,7 +1,7 @@
 """The matters pass: each flag decided once, and the decision recorded (ADR-0300 §9:3, ADR-0302 §5).
 
 An operation on the assistant's own records, orchestration-local and not a Protocol,
-of the tidy-up's kind: :class:`MattersPass` holds an injected ``ModelProvider``,
+of the tidy-up's kind: :class:`MattersPass` holds an injected ``StructuredCompleter``,
 ``StoryStore`` and ``MemoryStore``. Its changes are background maintenance, not
 actions under ADR-0292 §12:1-§12:2, in the scope ADR-0300's header gives, and it
 writes every one through the store with the actor ``matters_pass``.
@@ -62,12 +62,15 @@ The reply names what it was shown by label, and the labels are the run's: each i
 mapped back to the story, the activation or the note this run read, so a decision about
 anything it was not shown cannot be written.
 
-**The reply's decision** is the one JSON object in it of a decision's shape. Prose
-before it is passed over; a reply holding no such object, two that differ, one after a
-brace or bracket that opens no whole JSON value, or anything but a closing code fence
-after the last of them is no decision, because a decision is never taken out of an
-unfinished value, and what follows a decision may be the model changing its mind,
-which the pass does not read prose to tell.
+**The reply's decision** is one structured call's value, of :class:`MattersPassReply`,
+read by ``core``'s one rule alone (ADR-0354 §3:4, §9:1). The shape is one closed object,
+the prompt's: ``decision`` names the kind, and every kind's fields are optional in it
+(§9:3). After the parse, the fields the reply set are read as that kind's shape, so a
+decision missing a field its kind needs, or carrying another kind's field, is no
+decision; another kind's field set to null carries nothing, and is passed over. A
+returned ``invalid``, ``empty`` or ``cut`` is a reply that fails to parse, and a returned
+``refused`` is raised as ``ModelContentFilterError``, where a provider's refusal raised
+before (§9:2).
 
 **A refusal** (§5:6, ADR-0303 §8:6). Where the store refuses the chosen change for a
 reason other than ``unknown_flag`` or ``already_decided``, the stories stay as they are
@@ -88,16 +91,13 @@ the phases' decision gives episodes notes (#2723), which binds no lane before th
 
 **It logs code-owned text only**: its counts, and for each refused completion whether
 the parse or a check refused it and the code-owned problem, never a story id, a line,
-a note, an episode's content or the reply's own text (ADR-0275 §8). A reply carrying
-keys its decision's shape does not name is read without them, and the pass logs how
-many it dropped, never which (#3246).
+a note, an episode's content or the reply's own text (ADR-0275 §8).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Final, Literal
@@ -106,12 +106,14 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from ai_assistant.core.episode_encoding import project_episode
+from ai_assistant.core.errors import ModelContentFilterError
 from ai_assistant.core.prompts import PromptDeclaration
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     EpisodicMemory,
     InputOrigin,
     Message,
+    ReplyFailure,
     Role,
     StoryActor,
     StoryDecision,
@@ -122,7 +124,7 @@ from ai_assistant.core.types import (
     StoryRefusalReason,
 )
 from ai_assistant.orchestration.episode_reads import is_open_episode
-from ai_assistant.orchestration.reply_keys import shape_keys, stray_keys
+from ai_assistant.orchestration.reply_keys import shape_keys
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_flags import (
     StoryRecords,
@@ -133,11 +135,11 @@ from ai_assistant.orchestration.story_flags import (
 from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import timedelta
 
     from ai_assistant.core.prompts import PromptTemplate
-    from ai_assistant.core.protocols import MemoryStore, ModelProvider, StoryStore
+    from ai_assistant.core.protocols import MemoryStore, StoryStore, StructuredCompleter
     from ai_assistant.core.types import (
         EpisodeProjection,
         StoryEntry,
@@ -150,7 +152,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.story_flags import RaisedFlag, RecordedDecision
 
-__all__ = ["MATTERS_PASS_PROMPT", "MattersPass", "MattersPassReport"]
+__all__ = ["MATTERS_PASS_PROMPT", "MattersPass", "MattersPassReply", "MattersPassReport"]
 
 _log = structlog.get_logger(__name__)
 
@@ -336,25 +338,41 @@ class _Group(BaseModel):
     under: str | None
 
 
-#: A decision's shapes drop a key they do not name, counted and never named (#3246), as the
-#: observer's reply drops one: every field a shape names is validated as before, so a
-#: decision missing a required field, or carrying a value of the wrong kind, is none.
+#: A decision's shapes, each the fields its kind reads (ADR-0300 §9:3, ADR-0304 §9). A
+#: reply's decision is read as one of them after the parse; a key a shape does not name is
+#: another kind's, and is judged before it is (:func:`_decided`).
 _Proposed = Annotated[_Leave | _Merge | _Split | _Move | _Group, Field(discriminator="decision")]
 _PROPOSED: Final[TypeAdapter[_Leave | _Merge | _Split | _Move | _Group]] = TypeAdapter(_Proposed)
 
-#: Every key some decision's shape names. One a decision carries that its own shape does
-#: not name is another decision's field, such as a split naming a story to move ``to`` or
-#: a merge naming notes (ADR-0303 §6:3): an object mixing two decisions is no decision,
-#: as before, rather than one with the field dropped, so a dropped key never turns one
-#: decision into another.
-_DECISION_KEYS: Final = frozenset[str]().union(
-    *(shape_keys(shape) for shape in (_Leave, _Merge, _Split, _Move, _Group))
-)
+#: Each kind's shape, by the ``decision`` that names it.
+_KINDS: Final[Mapping[str, type[BaseModel]]] = {
+    "leave": _Leave,
+    "merge": _Merge,
+    "split": _Split,
+    "move": _Move,
+    "group": _Group,
+}
 
 
-_DECODER: Final = json.JSONDecoder()
-_FENCE: Final = "```"
-_OPENER: Final = re.compile(r"[\[{]")
+class MattersPassReply(BaseModel):
+    """The matters pass's reply shape (ADR-0354 §9:1, §9:3): one closed object, the prompt's.
+
+    ``decision`` names the kind, and each kind's fields are optional here, under the
+    names the prompt asks for: the kinds are told apart by ``decision``, and each kind's
+    fields are read as its own shape after the parse (:func:`_decided`). The schema sent
+    for it names these fields and no other, and carries no text (§3:2).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    decision: Literal["leave", "merge", "split", "move", "group"]
+    story: str | None = None
+    into: str | None = None
+    episodes: tuple[str, ...] | None = None
+    notes: tuple[str, ...] | None = None
+    source: str | None = Field(default=None, alias="from")
+    to: str | None = None
+    stories: tuple[str, ...] | None = None
+    under: str | None = None
 
 
 class _Refused(Exception):  # noqa: N818 — a control-flow signal inside the checks, never raised out
@@ -365,115 +383,35 @@ class _Unparsed(_Refused):
     """The reply holds no one decision, carrying why: code-owned text, never the reply's."""
 
 
-def _decision(text: str) -> _Leave | _Merge | _Split | _Move | _Group | None:
-    """The decision ``text`` is, or ``None`` where it is none.
+def _decided(reply: MattersPassReply) -> _Leave | _Merge | _Split | _Move | _Group:
+    """The decision ``reply`` states, read as its kind's shape: never one of two kinds.
 
-    An object carrying another decision's field is none, as it was before #3246 dropped
-    a key no decision names.
-    """
-    try:
-        decision = _PROPOSED.validate_json(text)
-    except ValidationError, ValueError, RecursionError:
-        return None
-    try:
-        carried = _DECODER.decode(text)
-    except ValueError, RecursionError:  # pragma: no cover — ``text`` validated as a decision
-        return None
-    if isinstance(carried, dict) and (_DECISION_KEYS & carried.keys()) - shape_keys(type(decision)):
-        return None
-    return decision
-
-
-def _openers(body: str) -> Iterator[tuple[int, int | None]]:
-    """Each brace or bracket in ``body`` outside a JSON value read whole, left to right.
-
-    Each comes with where the JSON value it opens ends, or ``None`` where it opens no
-    whole value: an unfinished one, a malformed one, or prose. A value read whole is
-    skipped, so nothing inside it is ever taken for a value of its own.
-    """
-    found = _OPENER.search(body)
-    while found is not None:
-        start = found.start()
-        try:
-            _, end = _DECODER.raw_decode(body, start)
-        except ValueError, RecursionError:
-            yield start, None
-            found = _OPENER.search(body, start + 1)
-            continue
-        yield start, end
-        found = _OPENER.search(body, end)
-
-
-def _unfenced(content: str) -> str:
-    """``content`` stripped, and without one Markdown code fence enclosing all of it."""
-    body = content.strip()
-    if body.startswith(_FENCE) and body.endswith(_FENCE) and len(body) >= 2 * len(_FENCE):
-        body = body[len(_FENCE) : -len(_FENCE)]
-        newline = body.find("\n")
-        if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
-            body = body[newline + 1 :]
-    return body
-
-
-def _parsed(content: str) -> tuple[_Leave | _Merge | _Split | _Move | _Group, int]:
-    """The reply's one decision and the keys it dropped: never a partial one, nor one of two.
-
-    One enclosing Markdown code fence is removed first, as the tidy-up removes it: a
-    deterministic normalization of a wrapper, not a repair. A reply that is then one
-    decision object is that decision. Otherwise the decision is the one JSON object of a
-    decision's shape the reply holds, with prose before it passed over (#2775): the
-    model reasons before deciding, often enough that a reply refused for it is a
-    decision lost. Prose is never read, so it decides nothing either way:
-
-    - every object of a decision's shape must be the same decision, so a reply that
-      weighs one decision and gives another is not taken as either;
-    - nothing but whitespace and a closing code fence may follow the last of them, so
-      a reply that goes on after its decision, which may be the model changing its
-      mind, is not taken as the decision it went on from;
-    - no brace or bracket opening no whole JSON value may come before one, so a
-      decision is never taken out of a value the reply left unfinished or malformed,
-      which is where it would otherwise sit (a whole value is passed over, decision
-      and all). A bracket in prose before it refuses it too, the cheaper of the two
-      errors.
-
-    Two objects are the same decision whatever keys each dropped, and the keys counted
-    are the first one's.
+    The fields the reply set are read as the shape of the kind its ``decision`` names.
+    One that kind's shape does not name is another kind's, such as a split naming a story
+    to move ``to`` or a merge naming notes (ADR-0303 §6:3), and makes the reply no
+    decision, as an object mixing two decisions always has been, so a field is never
+    dropped to turn one decision into another. Another kind's field set to null carries
+    nothing of that kind and is passed over: a provider that writes every property it
+    was sent writes null in the fields a kind does not read.
 
     Raises:
-        _Unparsed: If the reply holds no one decision, saying which way.
+        _Unparsed: If the reply carries another kind's field, or its kind's shape refuses
+            what it set.
     """
-    body = _unfenced(content)
-    whole = _decision(body)
-    if whole is not None:
-        return whole, stray_keys(body, whole)
-    found: list[_Leave | _Merge | _Split | _Move | _Group] = []
-    first = ""
-    after = 0
-    unfinished = False
-    for start, end in _openers(body):
-        if end is None:
-            unfinished = True
-            continue
-        decision = _decision(body[start:end]) if body[start] == "{" else None
-        if decision is None:
-            continue
-        if unfinished:
-            msg = "the reply's decision follows a brace or bracket opening no whole JSON value"
-            raise _Unparsed(msg)
-        if not found:
-            first = body[start:end]
-        found.append(decision)
-        after = end
-    if not found:
-        msg = "the reply holds no decision"
+    own = shape_keys(_KINDS[reply.decision])
+    carried = {
+        key: value
+        for key, value in reply.model_dump(mode="json", by_alias=True, exclude_unset=True).items()
+        if key in own or value is not None
+    }
+    if carried.keys() - own:
+        msg = "the reply's decision carries another decision's field"
         raise _Unparsed(msg)
-    if any(decision != found[0] for decision in found[1:]):
-        msg = "the reply holds two different decisions"
-        raise _Unparsed(msg)
-    if body[after:].strip() not in {"", _FENCE}:
-        msg = "the reply goes on after its decision"
-        raise _Unparsed(msg)
-    return found[0], stray_keys(first, found[0])
+    try:
+        return _PROPOSED.validate_python(carried)
+    except ValidationError:
+        msg = "the reply's decision is not of its kind's shape"
+        raise _Unparsed(msg) from None
 
 
 # --- what one flag's run read --------------------------------------------------------
@@ -817,7 +755,7 @@ class MattersPass:
     def __init__(  # noqa: PLR0913 — the three injected seams, the six bounds and the prompt
         self,
         *,
-        model: ModelProvider,
+        model: StructuredCompleter,
         stories: StoryStore,
         memory: MemoryStore,
         excerpt_chars: int,
@@ -831,7 +769,8 @@ class MattersPass:
         """Wire the pass to its seams and its bounds.
 
         Args:
-            model: The provider each flag's one completion is made through.
+            model: The structured seam each flag's one completion is made through
+                (ADR-0354 §9:1).
             stories: The story store it reads and writes.
             memory: The store the episodes it shows are read from.
             excerpt_chars: The bound, in characters, on each episode's input and reply.
@@ -972,24 +911,22 @@ class MattersPass:
         reading = await self._reading(run.records, flag, concerned)
         if reading is None:
             return _Result.RACED, ()
-        reply = await self._model.complete(
+        reply = await self._model.complete_structured(
             [
                 Message(role=Role.SYSTEM, content=self._prompt.render()),
                 Message(role=Role.USER, content=json.dumps(reading.payload(), ensure_ascii=True)),
-            ]
+            ],
+            MattersPassReply,
         )
+        if reply.failure is ReplyFailure.REFUSED:
+            # ADR-0354 §9:2: where a provider's raised refusal lands, the run's end.
+            msg = "the provider refused the matters pass's completion (ADR-0354 §9:2)"
+            raise ModelContentFilterError(msg)
         try:
-            proposed, stray = _parsed(reply.content)
-            if stray:
-                # #3246: a key the reply's shape does not name, dropped and counted, never
-                # named; logged before the checks, so a refused decision's count is too.
-                _log.info(
-                    "matters_pass_stray_keys",
-                    stage="matters_pass",
-                    flag=_kind(flag.name),
-                    stray=stray,
-                )
-            choice = _checked(proposed, reading)
+            if reply.value is None:
+                msg = f"the reply is {reply.failure}"
+                raise _Unparsed(msg)
+            choice = _checked(_decided(reply.value), reading)
         except _Refused as refused:
             # Code-owned text only: which of the parse or a check refused the reply,
             # and why, never the reply's own words or anything it was shown (#2778).
