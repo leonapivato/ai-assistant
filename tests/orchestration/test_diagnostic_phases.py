@@ -144,7 +144,7 @@ async def test_recall_s_second_run_writes_each_cue_with_its_kinds() -> None:
     with diagnosed_activation(_ACTIVATION, clock=_now):
         await stage.recall_again(
             "the dentist",
-            ("Friday",),
+            ("which Friday",),
             audience=_AUDIENCE,
             deadline=math.inf,
             passed_over=frozenset(),
@@ -156,7 +156,7 @@ async def test_recall_s_second_run_writes_each_cue_with_its_kinds() -> None:
         "run": "second",
         "cues": [
             {"text": "the dentist", "kinds": [RecallCue.UNDERSTOOD_MEANING.value]},
-            {"text": "Friday", "kinds": [RecallCue.UNDERSTOOD_PHRASE.value]},
+            {"text": "which Friday", "kinds": [RecallCue.UNDERSTOOD_GAP.value]},
         ],
     }
     assert _body(sink.of(DiagnosticSource.RECALL, DiagnosticKind.RETURNED)[0])["outcome"] == (

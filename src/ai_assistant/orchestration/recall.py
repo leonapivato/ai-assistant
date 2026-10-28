@@ -44,13 +44,13 @@ other error escapes. The controller that applies §5's continuation is step 3's.
 
 **The second run** (ADR-0308 §2). :meth:`RecallStage.recall_again` is the same stage
 run again once understanding has recorded, for planning alone. Its cues are the latest
-understanding's ``meaning`` and the ``phrase`` of each of its ``references``, each
-distinct text searched on its own with the band searches above (§2:2). Each cue keeps
+understanding's ``meaning`` and the ``gap`` of each of its unclear points (ADR-0353
+§14:3), each distinct text searched on its own with the band searches above (§2:2). Each cue keeps
 records under the same threshold and per-cue limit, passing over what the windows hold
 and every record the first run kept, each search asking for the limit plus the number
 passed over (§2:3). The cues' records are then kept up to a cap on the total, in band
 order: every cue's ``ASSERTED`` records first, then ``ATTESTED``, then ``DERIVED``, and
-within a band the meaning's before each phrase's, in the order understanding recorded
+within a band the meaning's before each gap's, in the order understanding recorded
 them. A record more than one cue kept is kept once, its ``found_by`` naming each kind of
 cue that kept it (§2:4). The audience rule, the stories of what it keeps, the budget and
 the failure tolerance are the first run's (§2:6-§2:7).
@@ -123,8 +123,10 @@ _BANDS: Final = (BeliefBand.ASSERTED, BeliefBand.ATTESTED, BeliefBand.DERIVED)
 #: The first run's one cue (§3).
 _CUES: Final = (RecallCue.ACTIVATION_INPUT,)
 
-#: The second run's kinds of cue, in the order ``found_by`` names them (ADR-0308 §2:2).
-_SECOND_RUN_CUES: Final = (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE)
+#: The second run's kinds of cue, in the order ``found_by`` names them (ADR-0308 §2:2,
+#: ADR-0353 §14:3): ``understood_phrase`` cues nothing now, a version having no
+#: references, and stays a member only for the recall records that name it (§14:4).
+_SECOND_RUN_CUES: Final = (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_GAP)
 
 type RecalledRecord = EpisodicMemory | Memory
 
@@ -263,7 +265,7 @@ class RecallStage:
     async def recall_again(  # noqa: PLR0913 — the two kinds of cue, the audience, the deadline, what is passed over and the cap
         self,
         meaning: str,
-        phrases: Sequence[str],
+        gaps: Sequence[str],
         *,
         audience: TurnSupply,
         deadline: float,
@@ -274,8 +276,8 @@ class RecallStage:
 
         Args:
             meaning: The latest understanding's ``meaning``.
-            phrases: The ``phrase`` of each of its ``references``, in the order
-                understanding recorded them, whether or not each resolved.
+            gaps: The ``gap`` of each of its unclear points, in the order understanding
+                recorded them (ADR-0353 §14:3).
             audience: The pass's audience posture, as for the first run (§2:6).
             deadline: The pass's deadline on the running loop's clock, which caps
                 recall's budget, computed as the first run's is (§2:7).
@@ -298,12 +300,12 @@ class RecallStage:
             msg = "the second run's cap must be between 1 and RECALLED_ITEMS_MAX (ADR-0308 §2:5)"
             raise ValueError(msg)
         # Each distinct text is one cue, searched once; a text both the meaning and a
-        # phrase is found by both kinds, at the meaning's place in the order (§2:2).
+        # gap is found by both kinds, at the meaning's place in the order (§2:2).
         cues: dict[str, list[RecallCue]] = {meaning: [RecallCue.UNDERSTOOD_MEANING]}
-        for phrase in phrases:
-            kinds = cues.setdefault(phrase, [])
-            if RecallCue.UNDERSTOOD_PHRASE not in kinds:
-                kinds.append(RecallCue.UNDERSTOOD_PHRASE)
+        for gap in gaps:
+            kinds = cues.setdefault(gap, [])
+            if RecallCue.UNDERSTOOD_GAP not in kinds:
+                kinds.append(RecallCue.UNDERSTOOD_GAP)
         searched = tuple(
             kind for kind in _SECOND_RUN_CUES if any(kind in kinds for kinds in cues.values())
         )
@@ -542,7 +544,7 @@ def _capped(
     """The second run's records, kept up to ``cap`` in band order (ADR-0308 §2:4).
 
     ``found`` is each cue's kept records, in cue order: the meaning's first, then each
-    phrase's in the order understanding recorded them. Every cue's ``ASSERTED`` records
+    gap's in the order understanding recorded them. Every cue's ``ASSERTED`` records
     come first, then ``ATTESTED``, then ``DERIVED``, and within a band the cues in that
     order, each cue's records in the order its search kept them. A record more than one
     cue kept is kept once, where it first falls, its ``found_by`` naming each kind of
