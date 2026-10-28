@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
 from pydantic_ai.models.function import FunctionModel
 
 import ai_assistant
@@ -1429,3 +1429,116 @@ def test_the_suites_reader_and_the_stage_read_one_reply_alike() -> None:
         read = read_reply(ProposedActivationUnderstanding, reply)
         stage = None if isinstance(read, ReplyFailure) else read.model_dump(mode="json")
         assert replay_tool.completion_reply("understanding", reply).reading == stage
+
+
+# --- ADR-0355 §8:2, §9:2: the counted providers keep a summary where built to -------------
+
+_EVIDENCE: Final = '{"evidence": []}'
+_SUMMARY: Final = "Weighing the evidence."
+
+
+def _thinking_world(requests: list[int]) -> FunctionModel:
+    """A model whose every response thinks before it replies, counting each request."""
+
+    def answer(messages: list[Any], info: Any) -> Any:
+        del messages, info
+        requests.append(1)
+        return ModelResponse(parts=[ThinkingPart(_SUMMARY), TextPart(_EVIDENCE)])
+
+    return FunctionModel(answer)
+
+
+@pytest.mark.parametrize("keeps", [True, False], ids=["kept", "not-kept"])
+def test_a_counted_provider_keeps_a_summary_where_built_to_on_any_route(
+    monkeypatch: pytest.MonkeyPatch, keeps: bool
+) -> None:
+    """The argument reaches the default model's call and a call naming its route alike."""
+    requests: list[int] = []
+    world = _thinking_world(requests)
+    monkeypatch.setattr(replay_tool, "infer_model", lambda wrapped: world)
+    meter = replay_tool.CallMeter(2, "the bound is reached")
+    provider = replay_tool.CountedProvider("test", meter, thinking_summaries=keeps)
+    messages = [Message(role=Role.USER, content="x")]
+
+    default = asyncio.run(provider.complete_structured(messages, DigestReply))
+    named = asyncio.run(provider.complete_structured(messages, DigestReply, model="test"))
+
+    expected = _SUMMARY if keeps else None
+    assert (default.exchange.thinking, named.exchange.thinking) == (expected, expected)
+    assert (default.exchange.reply, named.exchange.reply) == (_EVIDENCE, _EVIDENCE)
+    assert (meter.made, len(requests)) == (2, 2)
+
+
+def test_a_rerun_keeps_the_observers_summaries_and_not_the_reconcilers_and_counts_each_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§8:2: the package composed as the rerun composes it, every call still counted.
+
+    The observer's two routes are built keeping summaries, the record being on in a rerun
+    (ADR-0335 §7:1), and the reconciler's is not; each is a counted provider on the one
+    meter, so a call past the bound is refused unsent whichever route makes it.
+    """
+    requests: list[int] = []
+    world = _thinking_world(requests)
+    monkeypatch.setattr(replay_tool, "infer_model", lambda wrapped: world)
+    live = tmp_path / "live"
+    live.mkdir(mode=0o700)
+    copy = tmp_path / "copy"
+    replay_tool.copy_data_dir(live, copy, retention=timedelta(days=1), now=now)
+    kept: dict[str, bool] = {}
+    thinking: list[str | None] = []
+    failures: list[str] = []
+
+    class _Composed:
+        """The composed engine, whose observer run calls each of its routes."""
+
+        def __init__(self, engine: Any) -> None:
+            self.engine = engine
+
+        async def observe_episodes(self) -> RunOutcome:
+            observer = self.engine._observer
+            reconciler = observer._writer._writes._writer._reconciler
+            routes = {
+                "scout": observer._scout,
+                "commit": observer._commit,
+                "reconciler": reconciler._completer,
+            }
+            for name, route in routes.items():
+                assert type(route._inner) is replay_tool.CountedProvider
+                kept[name] = route._inner.thinking_summaries
+            messages = [Message(role=Role.USER, content="x")]
+            for route, named in (
+                (observer._scout, None),
+                (observer._commit, None),
+                (reconciler._completer, reconciler._route),
+                (observer._scout, None),
+            ):
+                try:
+                    reply = await route.complete_structured(messages, DigestReply, model=named)
+                except ModelError as exc:
+                    failures.append(type(exc).__name__)
+                else:
+                    thinking.append(reply.exchange.thinking)
+            return RunOutcome(processed=1)
+
+        async def aclose(self) -> None:
+            await self.engine.aclose()
+
+    reports: list[str] = []
+    asyncio.run(
+        replay_tool.rerun(
+            replay_tool.RerunOptions(
+                copy=copy, model="anthropic:claude-test", bound=3, embedder=EmbedderKind.HASHING
+            ),
+            report=reports.append,
+            build=lambda settings: _Composed(replay_tool.build_engine(settings)),
+            check_model=lambda _: None,
+            now=now,
+        )
+    )
+
+    assert kept == {"scout": True, "commit": True, "reconciler": False}
+    assert thinking == [_SUMMARY, _SUMMARY, None]
+    assert len(requests) == 3
+    assert failures == ["ModelError"]
+    assert "3 model calls made (bound 3); 1 refused" in reports

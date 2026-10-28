@@ -1253,18 +1253,29 @@ class CountedProvider(PydanticAIProvider):
     """A completion provider whose every request, a call's own route included, is counted.
 
     A caller may name a model per call, as the reconciler names its route; that model is
-    counted on the same meter as the default, so no route escapes the bound.
+    counted on the same meter as the default, so no route escapes the bound. It keeps a
+    structured call's thinking summary where it is built to, as the provider it stands in
+    for does (ADR-0355 §2:1, §9:2), whichever model the call names.
     """
 
-    def __init__(self, default_model: models.Model | str, meter: CallMeter) -> None:
+    def __init__(
+        self,
+        default_model: models.Model | str,
+        meter: CallMeter,
+        *,
+        thinking_summaries: bool = False,
+    ) -> None:
         """Build the provider over a counted default model.
 
         Args:
             default_model: The model a call that names none goes to.
             meter: Where every request is counted.
+            thinking_summaries: Whether a structured call keeps the thinking's summary,
+                as the composition built the provider this one stands in for.
         """
-        super().__init__(CountedModel(default_model, meter))
+        super().__init__(CountedModel(default_model, meter), thinking_summaries=thinking_summaries)
         self.meter = meter
+        self.thinking_summaries = thinking_summaries
 
     @override
     async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
@@ -1284,7 +1295,9 @@ class CountedProvider(PydanticAIProvider):
         """
         if model is None:
             return await super().complete_structured(messages, shape)
-        provider = PydanticAIProvider(CountedModel(model, self.meter))
+        provider = PydanticAIProvider(
+            CountedModel(model, self.meter), thinking_summaries=self.thinking_summaries
+        )
         return await provider.complete_structured(messages, shape)
 
 
@@ -1934,15 +1947,16 @@ def counted_models(meter: CallMeter) -> Iterator[None]:
     The observer's daily budget counts its own calls (§8:4), but a write it makes may
     reach the memory reconciler, whose calls and retries are not the observer's. So each
     :class:`PydanticAIProvider` the composition builds, the observer's routes and the
-    reconciler's among them, is built over a :class:`CountedModel`. A rerun runs no
-    planning round, so the completer is left as it is.
+    reconciler's among them, is built over a :class:`CountedModel`, keeping a structured
+    call's thinking summary where the composition builds it to (ADR-0355 §9:2). A rerun
+    runs no planning round, so the completer is left as it is.
     """
     held = vars(composition)
     name = "PydanticAIProvider"
     original = held[name]
 
-    def built(spec: models.Model | str) -> PydanticAIProvider:
-        return CountedProvider(spec, meter)
+    def built(spec: models.Model | str, *, thinking_summaries: bool = False) -> PydanticAIProvider:
+        return CountedProvider(spec, meter, thinking_summaries=thinking_summaries)
 
     held[name] = built
     try:

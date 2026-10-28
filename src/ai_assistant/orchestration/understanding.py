@@ -909,10 +909,12 @@ def _returned(
     """The returned entry of a structured call (ADR-0354 §7:2).
 
     The reply as the model wrote it, and what the exchange holds of the model that
-    answered, the mode, the finish reason, a refusal and the usage, and the failure's kind.
+    answered, the mode, the finish reason, a refusal and the usage, and the failure's kind;
+    and the provider's summary of its thinking under ``thinking`` where the exchange holds
+    one, with no such key where it holds none (ADR-0355 §5:1).
     """
     exchange = reply.exchange
-    return {
+    returned: dict[str, str | dict[str, int] | None] = {
         "reply": exchange.reply,
         "model": exchange.model,
         "mode": exchange.mode.value,
@@ -927,6 +929,9 @@ def _returned(
         },
         "failure": None if reply.failure is None else reply.failure.value,
     }
+    if exchange.thinking is not None:
+        returned["thinking"] = exchange.thinking
+    return returned
 
 
 class UnderstandingStage:

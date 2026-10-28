@@ -348,7 +348,11 @@ def _finding(finding: ObservationFinding) -> dict[str, object]:
 
 
 def _exchange_of(reply: StructuredReply[Any]) -> dict[str, object]:
-    """What a structured call's returned entry keeps of it (ADR-0354 §7:2)."""
+    """What a structured call's returned entry keeps of it (ADR-0354 §7:2).
+
+    The provider's summary of its thinking is kept under ``thinking`` where the exchange
+    holds one, and no such key is written where it holds none (ADR-0355 §5:1).
+    """
     exchange = reply.exchange
     held: dict[str, object] = {
         "reply": exchange.reply,
@@ -359,6 +363,8 @@ def _exchange_of(reply: StructuredReply[Any]) -> dict[str, object]:
         "refusal_category": exchange.refusal_category,
         "usage": exchange.usage.model_dump(mode="json"),
     }
+    if exchange.thinking is not None:
+        held["thinking"] = exchange.thinking
     if reply.failure is not None:
         held["failure"] = reply.failure.value
     return held

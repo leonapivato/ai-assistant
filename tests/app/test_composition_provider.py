@@ -357,7 +357,8 @@ async def test_only_the_named_route_is_reached_when_a_consolidation_call_fails(
     """
     built: dict[str, _FailingProvider] = {}
 
-    def _double(spec: str) -> _FailingProvider:
+    def _double(spec: str, *, thinking_summaries: bool) -> _FailingProvider:
+        del thinking_summaries
         # **One double per spec, shared by every consumer of it.** The build
         # constructs more than one single-route provider, and consolidation's and the
         # reconciler's both name `default_model` when neither is configured
