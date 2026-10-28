@@ -127,11 +127,11 @@ async def test_a_stopped_chat_activation_writes_nothing_and_shows_stopped() -> N
     assert episode.processing_record.activation_id == running
 
 
-async def test_what_waited_behind_a_stopped_activation_is_then_taken_in() -> None:
+async def test_a_correction_after_a_stop_starts_its_own_activation() -> None:
     """ADR-0295 §3:6: a stop holds nothing back; the correction is answered after it.
 
-    The correction is written after the stop, so it joins nothing (ADR-0332 §3:3): it
-    waits, and is taken in when the stopped activation ends.
+    No place waits (ADR-0349 §8:1): the correction starts its own activation once its
+    start wait has passed, whatever still runs on the place, and is taken in by it.
     """
     composer = _GatedModel("Sunday it is.")
     harness = chat_harness(composer=composer)

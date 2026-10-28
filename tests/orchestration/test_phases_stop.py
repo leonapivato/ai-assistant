@@ -4,7 +4,7 @@
 round is ``test_engine_phases``'s; each case here is one of the others run with the
 phases wired, so it stays pinned once the switch lands: a stop whose record cannot be
 written still ends the activation stopped, a stop naming an ended or unknown activation
-writes nothing, and what waited behind a stopped activation is then taken in.
+writes nothing, and a correction after a stop starts its own activation.
 """
 
 from __future__ import annotations
@@ -91,11 +91,11 @@ async def test_already_ended_and_no_such_activation_each_write_nothing() -> None
     )
 
 
-async def test_what_waited_behind_a_stopped_activation_is_then_taken_in() -> None:
+async def test_a_correction_after_a_stop_starts_its_own_activation() -> None:
     """ADR-0295 §3:6: a stop holds nothing back; the correction is answered after it.
 
-    The correction is written after the stop, so it joins nothing (ADR-0332 §3:3): it
-    waits, and is taken in when the stopped activation ends.
+    No place waits (ADR-0349 §8:1): the correction starts its own activation once its
+    start wait has passed, whatever still runs on the place, and is taken in by it.
     """
     completer = Gated(RoundResponse(text="Saturday it is."), RoundResponse(text="Sunday it is."))
     harness = phases_harness(completer)
