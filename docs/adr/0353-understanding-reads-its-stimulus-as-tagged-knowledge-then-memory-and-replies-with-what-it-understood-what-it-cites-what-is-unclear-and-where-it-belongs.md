@@ -439,7 +439,8 @@ The reply is one JSON object:
 > `unclear: tuple[UnclearPoint, ...] = ()`. The stage records the reply into it by the
 > table above: `understanding` into `meaning`, `cites` resolved into `meaning_referents`,
 > `unclear` copied unchanged, `belongs_to` resolved into `story_links` and `meant_for`
-> resolved into `continues`.
+> resolved into `continues`. Only `belongs_to` makes story links: a label in `cites`, a
+> matter's included, resolves to its referent and links nothing (ADR-0304 §8:1, §8:2).
 
 > **Normative.** `ActivationUnderstanding` loses `meaning_ground`, `references`,
 > `relationships`, `unresolved` and `answers`, its **retired fields**, and the check that a
@@ -610,12 +611,8 @@ observer's. Confidence belongs in the understanding's own words, where a reader 
 >   §3:6);
 > - what each section is (§2), and that the lines between the tags are the system's own
 >   (§3:4);
-> - what a matter link says: only that the stimulus belongs; that only `belongs_to` links,
->   and only to a matter or an earlier stimulus; that one stimulus may belong to several
->   matters; and that one belonging to none is linked to none (ADR-0300 §6:9);
-> - that a matter's label may be cited wherever a label may, that citing it outside
->   `belongs_to` links nothing, and that a matter's summary and notes are the system's own
->   memory, provisional (ADR-0304 §8:5);
+> - that memory, the matters included, is the system's own memory, provisional and possibly
+>   out of date (ADR-0304 §8:5, in its part that stands);
 > - what concurrent stimuli are, that `meant_for` names the work the stimulus is meant for by
 >   §10:5's test and separate work none, and that only `meant_for` makes the stimulus part of
 >   that work (ADR-0349 §5:2–§5:6, §7:3, and §10);
@@ -625,8 +622,10 @@ observer's. Confidence belongs in the understanding's own words, where a reader 
 
 > **Normative.** The instruction need no longer say what a ground means, that an `M` label
 > grounds a reading `supplied`, anything of a question mark, a `Q` label or an answer, that
-> the language is a hint for reading the person's words, or that always in mind's `M` labels
-> come first. §18 names the clause each of these rested on.
+> the language is a hint for reading the person's words, that always in mind's `M` labels
+> come first, or anything of a link: what one says, which items may be linked, that a
+> remembered fact never links, or that a label cited outside `belongs_to` links nothing. §18
+> names the clause each of these rested on.
 
 > **Normative.** ADR-0337's synthetic cases for understanding are re-rendered in the new
 > format, and the suite gains one case for each probe stimulus acceptance #3481 lists, and
@@ -830,9 +829,9 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0276 | §1:3's *its meaning, the references…, the relationships…, the ground of each…, and the matters the reading leaves unresolved*: the understanding, what it cites, what is unclear, and where it belongs; §1:5's *nothing else*, in the addition alone: the situation; §2:4's copied fields: the record takes the reply by §9's table; §2:5's referent kinds, in the addition alone: `running`; §2:2, for `UnderstandingGround`: it leaves `core`, and the upgrade drops every stored value naming it; §2:6, whole: no ground remains; §3:3's *a reading grounded in the input alone is `stated`*; §4:6's *understood then* and §4:8's *report received*, each in its wording alone: an `understood` tag from the system under memory, and a `received` tag; §6:1's instructed reply and its *`inferred` and not `supplied`*; §6:2's `supplied` check and §6:4's downgrade, whole; §6:2's repair, for a label in `meant_for` and an `R` label anywhere: dropped and counted with none; §7:6's rendering | §3, §9, §9:9, §9:11, §10:1, §12, §6, §14:9 |
 | ADR-0281 | §7:2's *a third section of the prompt, `recalled`*: recalled memories, under long-term memory; §7:3's *its attribution as a report received and its provisional "understood then"* and its attribution by band, *something the user said*, *something the assistant worked out* and *something a connected source reported*, each in its wording alone: a report in a `received` tag, its understanding in an `understood` tag from the system under memory, and the band's words with the person named and the system called "the system"; §7:4's *a reading supported by an `M` label is `supplied`* | §2, §3, §4:1, §4:2, §12 |
 | ADR-0284 | §8:1's *the latest understanding's `meaning`, `meaning_ground` and `unresolved`*: its `meaning` and `unclear` | §14:2 |
-| ADR-0300 | §6:5's *a fourth section of the prompt, `stories`*: matters, under long-term memory; §6:6's `story_labels`: the proposal's `belongs_to`; §6:7, in the addition alone: an `R` label resolves to its running activation | §2, §9:2, §10:3 |
+| ADR-0300 | §6:5's *a fourth section of the prompt, `stories`*: matters, under long-term memory; §6:6's `story_labels`: the proposal's `belongs_to`; §6:7, in the addition alone: an `R` label resolves to its running activation; §6:9, whole: the instruction need not say what a link says, while only `belongs_to` makes story links, as code's rule | §2, §9:2, §9:4, §10:3, §13:3 |
 | ADR-0303 | §7:4 and §7:6, each in the field's name alone: `belongs_to`; §7:5 and §7:8, whole: no item is marked as not linkable, and the instruction says nothing of a mark, while §7:6's drop stands | §9:2, §9:12 |
-| ADR-0304 | §8:1's and §8:4's *in `meaning_labels`, in a reference or in a relationship*: in `cites`; §8:2's and §8:5's `story_labels`: `belongs_to`; §8:3, whole | §9, §12 |
+| ADR-0304 | §8:1's and §8:4's *in `meaning_labels`, in a reference or in a relationship*: in `cites`; §8:2's `story_labels`: `belongs_to`; §8:5's first two things, whole: the instruction need not say that a matter's label may be cited wherever a label may, or that citing it outside `belongs_to` links nothing, while §8:1 and §8:2 still resolve such a label to a referent that links nothing; §8:3, whole | §9, §9:4, §12, §13:2, §13:3 |
 | ADR-0305 | §3:2, in the field's name alone: `belongs_to`; §3:1 and §3:3, whole: a recalled fact is rendered with no mark, and the instruction says nothing of one, while §3:2's drop stands | §9:2, §9:12 |
 | ADR-0308 | §2:2's cues and §2:4's order within a band: each unclear point's gap, in place of each reference's phrase | §14:3, §14:4 |
 | ADR-0321 | §3:1's pointer, and §3:4–§3:11's readings of an answer, until a later decision: understanding records no pointer | §11 |
