@@ -149,8 +149,8 @@ async def test_an_input_whose_origin_is_assistant_is_no_part_a_support_points_at
     record = reading.leaving.record
     assert record is not None
     assert record.processing_record is not None
-    with pytest.raises(ValueError, match="origin is assistant"):
-        input_origin(record.processing_record.trigger, None)
+    with pytest.raises(ValueError, match="include the assistant's statement"):
+        input_origin(record.processing_record, None)
 
 
 async def test_a_round_message_is_outside_where_the_activation_read_outside_content() -> None:

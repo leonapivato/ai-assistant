@@ -39,7 +39,6 @@ from ai_assistant.core.types import (
     ClaimedAuthor,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     InputPart,
     LabelBounds,
     Memory,
@@ -96,6 +95,7 @@ from ai_assistant.testing.memories import (
     said_support,
     sourced_support,
 )
+from ai_assistant.testing.parties import line_input
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -154,6 +154,16 @@ def _episode(name: str, text: str = "") -> EpisodicMemory:
 def _forwarded(name: str, account: int) -> EpisodicMemory:
     """An episode whose one message is a forward from a claimed sender (ADR-0323 §4:10)."""
     channel = ChannelIdentity(channel_type="telegram", instance_id="line")
+    # ADR-0351 §2:7: the forward's party is its sender, claimed.
+    parties, messages = line_input(
+        (
+            RecordedInputMessage(
+                text="Ana works at Santa Maria Hospital.",
+                sent_at=_SAID_AT,
+                forwarded_from=ClaimedAuthor(name="someone", account_id=account),
+            ),
+        )
+    )
     return EpisodicMemory(
         id=_address(name),
         content="forwarded",
@@ -169,14 +179,8 @@ def _forwarded(name: str, account: int) -> EpisodicMemory:
                 payload=RecordedTextInput(text="Ana works at Santa Maria Hospital."),
                 context=ChannelContext(),
                 reply=WholeTextReply(),
-                origin=InputOrigin.USER,
-                messages=(
-                    RecordedInputMessage(
-                        text="Ana works at Santa Maria Hospital.",
-                        sent_at=_SAID_AT,
-                        forwarded_from=ClaimedAuthor(name="someone", account_id=account),
-                    ),
-                ),
+                parties=parties,
+                messages=messages,
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
@@ -197,6 +201,9 @@ def _on_line(name: str, *texts: str) -> EpisodicMemory:
     turn are in the record's order (ADR-0348 §3:2), whatever their clock readings say.
     """
     said = texts or (f"what was said in {name}",)
+    parties, messages = line_input(
+        tuple(RecordedInputMessage(text=one, sent_at=_SAID_AT) for one in said)
+    )
     return EpisodicMemory(
         id=_address(name),
         content=" ".join(said),
@@ -212,8 +219,8 @@ def _on_line(name: str, *texts: str) -> EpisodicMemory:
                 payload=RecordedTextInput(text=said[-1]),
                 context=ChannelContext(),
                 reply=WholeTextReply(),
-                origin=InputOrigin.USER,
-                messages=tuple(RecordedInputMessage(text=one, sent_at=_SAID_AT) for one in said),
+                parties=parties,
+                messages=messages,
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,

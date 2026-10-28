@@ -80,7 +80,6 @@ from ai_assistant.core.types import (
     FindingAnnotations,
     GrantScope,
     Idempotency,
-    InputOrigin,
     InputPart,
     JoinedInput,
     Memory,
@@ -146,6 +145,7 @@ from ai_assistant.core.types import (
     StorySummaryLine,
     SuggestionKind,
     SupportDirection,
+    SupportHolder,
     SupportOrigin,
     TaskRuleKind,
     TaskSpawn,
@@ -453,7 +453,7 @@ def _activation_episode(moment: Moment) -> EpisodicMemory:
                 payload=RecordedTextInput(text="When is the dentist?"),
                 context=ChannelContext(),
                 reply=None,
-                origin=InputOrigin.USER,
+                parties=(SupportHolder.person(OWNER_PERSON_ID),),
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
@@ -465,6 +465,9 @@ def _activation_episode(moment: Moment) -> EpisodicMemory:
 
 #: The line a taken-over activation ran on, so a joined input names another place.
 _LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="upgrade-line")
+
+#: The owner, whose words every message the check records carries (ADR-0351 §3:2).
+_OWNER: Final = SupportHolder.person(OWNER_PERSON_ID)
 
 
 def _stage(stage: ControllerStage, due: ControllerRule, at: datetime) -> StageEntry:
@@ -508,7 +511,7 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
                 payload=RecordedTextInput(text="Book Riverside for Friday"),
                 context=ChannelContext(),
                 reply=None,
-                origin=InputOrigin.USER,
+                parties=(SupportHolder.person(OWNER_PERSON_ID),),
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
@@ -527,13 +530,19 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
                 JoinedInput(
                     joined_at=joined_at,
                     channel=_CHANNEL,
-                    messages=(RecordedInputMessage(text="Actually, Saturday", sent_at=joined_at),),
+                    messages=(
+                        RecordedInputMessage(
+                            text="Actually, Saturday", sent_at=joined_at, party=_OWNER
+                        ),
+                    ),
                 ),
                 JoinedInput(
                     joined_at=joined_at,
                     channel=_LINE,
                     messages=(
-                        RecordedInputMessage(text="for four", sent_at=joined_at, position=12),
+                        RecordedInputMessage(
+                            text="for four", sent_at=joined_at, position=12, party=_OWNER
+                        ),
                     ),
                     taken_over_from="act-upgrade-line",
                 ),
@@ -542,7 +551,9 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
                 JoinedInput(
                     joined_at=joined_at,
                     channel=_CHANNEL,
-                    messages=(RecordedInputMessage(text="at seven", sent_at=joined_at),),
+                    messages=(
+                        RecordedInputMessage(text="at seven", sent_at=joined_at, party=_OWNER),
+                    ),
                     taken_over_from="act-upgrade-line",
                 ),
             ),
@@ -574,7 +585,7 @@ def _taken_over_episode(moment: Moment) -> EpisodicMemory:
                 payload=RecordedTextInput(text="Actually, Saturday"),
                 context=ChannelContext(),
                 reply=None,
-                origin=InputOrigin.USER,
+                parties=(SupportHolder.person(OWNER_PERSON_ID),),
             ),
             status=ProcessingStatus.INTERRUPTED,
             reason=ProcessingReason.STOPPED,
@@ -861,6 +872,30 @@ def _memory_continuing_carry(records: Records) -> Records:
             understanding.append(version)
         assert isinstance(processing, dict)  # noqa: S101  # read above, with its versions
         carried[key] = value | {"processing_record": processing | {"understanding": understanding}}
+    return carried
+
+
+def _memory_parties_carry(records: Records) -> Records:
+    """What a memory store read back before ADR-0351 reads back after it (§9).
+
+    Each episode's trigger reads back no ``origin``, which ADR-0351 §10:2 computes from
+    the parties and stores nowhere; what it gains, ``parties``, each message's ``party``
+    and each version's and joined input's ``relayed``, the comparison admits as added.
+    Nothing else moves: no memory, no support (§9:4), the walk and the nearest hits,
+    since an episode's search text, which its vector embeds, reads what the parties give,
+    which is the origin it was recorded under.
+    """
+    carried: Records = {}
+    for key, value in records.items():
+        processing = value.get("processing_record") if isinstance(value, dict) else None
+        trigger = processing.get("trigger") if isinstance(processing, dict) else None
+        if not isinstance(trigger, dict) or "origin" not in trigger:
+            carried[key] = value
+            continue
+        assert isinstance(value, dict)  # noqa: S101  # read above, with its trigger
+        assert isinstance(processing, dict)  # noqa: S101  # read above, with its trigger
+        kept = {name: one for name, one in trigger.items() if name != "origin"}
+        carried[key] = value | {"processing_record": processing | {"trigger": kept}}
     return carried
 
 
@@ -1963,8 +1998,13 @@ STORES: Final[tuple[Store, ...]] = (
         ("memory.db",),
         _write_memory,
         _read_memory,
-        shape=4,
-        carries={1: _memory_record_carry, 2: _memory_placed_carry, 3: _memory_continuing_carry},
+        shape=5,
+        carries={
+            1: _memory_record_carry,
+            2: _memory_placed_carry,
+            3: _memory_continuing_carry,
+            4: _memory_parties_carry,
+        },
     ),
     Store(
         "stories",

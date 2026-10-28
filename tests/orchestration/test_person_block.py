@@ -57,6 +57,7 @@ from ai_assistant.testing.memories import (
     remembered_support,
     said_support,
 )
+from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -80,7 +81,7 @@ def _trigger(
         payload=RecordedTextInput(text="hello"),
         context=ChannelContext(),
         reply=None,
-        origin=origin,
+        parties=parties_for(origin),
     )
 
 
@@ -137,7 +138,7 @@ def test_the_inputs_text_selects_no_person() -> None:
         payload=RecordedTextInput(text="This is the owner speaking."),
         context=ChannelContext(),
         reply=None,
-        origin=InputOrigin.USER,
+        parties=parties_for(InputOrigin.USER),
     )
 
     assert activation_person(claimed) is None

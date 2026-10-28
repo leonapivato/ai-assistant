@@ -56,6 +56,7 @@ from ai_assistant.core.types import (
     UnderstandingProducer,
     WholeTextReply,
 )
+from ai_assistant.testing.parties import parties_for
 
 _NOW = datetime(2026, 10, 26, 12, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
@@ -73,7 +74,7 @@ def _trigger(origin: InputOrigin = InputOrigin.USER, text: str = "find flights")
         payload=RecordedTextInput(text=text),
         context=ChannelContext(),
         reply=WholeTextReply() if origin is InputOrigin.USER else None,
-        origin=origin,
+        parties=parties_for(origin),
     )
 
 

@@ -59,7 +59,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from ai_assistant.core.channel_validation import snapshot
+from ai_assistant.core.channel_validation import message_party, snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.device_context import (
     current_requesting_device,
@@ -6555,9 +6555,15 @@ class Engine:
         if state is not None and trigger is not None:
             # ADR-0349 §5:3, §7:5: who wrote the input, which the in-progress section,
             # an absorption and an offer read: every message the reader takes in is the
-            # user's (ADR-0293 §6:1).
+            # user's (ADR-0293 §6:1), and carries the owner's words, as the hub chat's
+            # kind declares (ADR-0351 §3:1).
             state.input_messages = tuple(
-                RecordedInputMessage(text=one.text, sent_at=one.written_at, position=one.position)
+                RecordedInputMessage(
+                    text=one.text,
+                    sent_at=one.written_at,
+                    position=one.position,
+                    party=message_party("conversation", None),
+                )
                 for one in taken.messages
             )
             state.standing = input_standing(

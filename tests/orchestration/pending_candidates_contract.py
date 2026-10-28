@@ -54,6 +54,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.authorizer import values_digest
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
@@ -239,7 +240,7 @@ async def _hold(
             payload=RecordedTextInput(text="the words they wrote"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=InputOrigin.USER,
+            parties=parties_for(InputOrigin.USER),
         ),
         status=ProcessingStatus.COMPLETED,
         reason=ProcessingReason.RETURNED,

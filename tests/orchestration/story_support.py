@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActivationUnderstanding, MemoryRecord
@@ -93,7 +94,7 @@ def episode(  # noqa: PLR0913 — one knob per field a case varies
                 payload=RecordedTextInput(text=text),
                 context=ChannelContext(),
                 reply=None if event else WholeTextReply(),
-                origin=input_origin(channel),
+                parties=parties_for(input_origin(channel)),
             ),
             status=ProcessingStatus.COMPLETED if frozen else None,
             reason=ProcessingReason.RETURNED if frozen else None,

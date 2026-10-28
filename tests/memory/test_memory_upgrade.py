@@ -27,6 +27,7 @@ import pytest
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     Attestation,
     BeliefBand,
     EpisodicMemory,
@@ -39,6 +40,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     SupportDirection,
+    SupportHolder,
     SupportOrigin,
 )
 from ai_assistant.memory import SqliteMemoryStore, sqlite_store
@@ -88,12 +90,23 @@ def _raw_rows(path: Path) -> dict[str, tuple[str, dict[str, Any], int]]:
 
 
 def _with_later_defaults(stored: dict[str, Any]) -> dict[str, Any]:
-    """An episode's stored blob, with the defaults of fields added since it was written."""
+    """An episode's stored blob, with the defaults of fields added since it was written.
+
+    And as ADR-0351 §9 carries it: its trigger's ``origin`` gives way to its parties,
+    the owner's for a hub chat input of the origin ``user`` (§9:2), which is the one
+    activation this file holds.
+    """
     record = stored.get("processing_record")
     if record is None:
         return stored
+    assert record["trigger"]["origin"] == "user"  # the hub chat's, §9:2
+    trigger = {name: one for name, one in record["trigger"].items() if name != "origin"}
+    owner = SupportHolder.person(OWNER_PERSON_ID).model_dump(mode="json")
     added: dict[str, Any] = {"joined": [], "stories_position": None, "taken_over_by": None}
-    return {**stored, "processing_record": added | record}
+    return {
+        **stored,
+        "processing_record": added | record | {"trigger": trigger | {"parties": [owner]}},
+    }
 
 
 def _label(path: Path) -> int:
@@ -150,14 +163,21 @@ async def test_the_file_is_upgraded_in_place_and_its_label_advances(legacy: Path
 
 
 async def test_no_episode_is_rewritten(legacy: Path) -> None:
-    """§16:7: an episode keeps every field it had, its processing record included."""
+    """§16:7: an episode keeps every field it had, its processing record included.
+
+    The chain goes on to ADR-0351 §9's upgrade, which rewrites the activation's episode
+    to carry its trigger's parties in place of its origin; the bare episode, which has no
+    processing record, is byte for byte what it was.
+    """
     before = _raw_rows(legacy)
 
     exported = await _upgraded(legacy)
 
     after = _raw_rows(legacy)
     for record_id in _EPISODES:
-        assert after[record_id][:2] == before[record_id][:2]
+        assert after[record_id][0] == before[record_id][0]
+        if "processing_record" not in before[record_id][1]:
+            assert after[record_id][:2] == before[record_id][:2]
         episode = exported[record_id]
         assert isinstance(episode, EpisodicMemory)
         # A field a later decision adds at its default is the one difference: ADR-0332

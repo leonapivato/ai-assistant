@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     WholeTextReply,
 )
+from ai_assistant.testing.parties import parties_for
 from ai_assistant.wire.codec import encode_projection, project
 
 _AT: Final = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
@@ -78,7 +79,7 @@ def _episode(
             payload=RecordedTextInput(text="when?"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=InputOrigin.USER,
+            parties=parties_for(InputOrigin.USER),
         ),
         status=ProcessingStatus.COMPLETED,
         reason=ProcessingReason.RETURNED,

@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
 )
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import parties_for
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -46,7 +47,7 @@ def _processing() -> EpisodeProcessingRecord:
             payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript=None),
             context=ChannelContext(),
             reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-            origin=InputOrigin.USER,
+            parties=parties_for(InputOrigin.USER),
         ),
         status=ProcessingStatus.FAILED,
         reason=ProcessingReason.TRANSCRIPTION_FAILED,
@@ -162,7 +163,7 @@ def test_the_trigger_checks_no_combination_per_channel_type() -> None:
         payload=RecordedTextInput(text=""),
         context=ChannelContext(),
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-        origin=InputOrigin.OUTSIDE,
+        parties=parties_for(InputOrigin.OUTSIDE),
     )
     assert trigger.channel == channel
 
@@ -177,7 +178,7 @@ def test_the_trigger_holds_its_channel_to_its_target() -> None:
             payload=RecordedTextInput(text="hello"),
             context=ChannelContext(),
             reply=None,
-            origin=InputOrigin.USER,
+            parties=parties_for(InputOrigin.USER),
         )
     resolved = RecordedChannelTrigger(
         target=NewConversation(),
@@ -185,17 +186,21 @@ def test_the_trigger_holds_its_channel_to_its_target() -> None:
         payload=RecordedTextInput(text="hello"),
         context=ChannelContext(),
         reply=None,
-        origin=InputOrigin.USER,
+        parties=parties_for(InputOrigin.USER),
     )
     assert resolved.channel == target
 
 
-def test_the_trigger_requires_its_origin_and_carries_no_conversation_options() -> None:
-    """ADR-0284 §2:1 and §3:1: ``origin`` is required, and ``conversation`` is gone."""
+def test_the_trigger_requires_its_parties_and_carries_no_conversation_options() -> None:
+    """ADR-0351 §2:1, §10:2 and ADR-0284 §3:1: ``parties`` is required, ``origin`` is
+    computed and stored nowhere, and ``conversation`` is gone."""
     data = _processing().trigger.model_dump(mode="json")
-    del data["origin"]
+    assert "origin" not in data
+    del data["parties"]
     with pytest.raises(ValidationError, match="missing"):
         RecordedChannelTrigger.model_validate(data)
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        RecordedChannelTrigger.model_validate({**data, "parties": None, "origin": "user"})
     with pytest.raises(ValidationError, match="extra_forbidden"):
         RecordedChannelTrigger.model_validate(
             {**_processing().trigger.model_dump(mode="json"), "conversation": None}

@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import parties_for
 from ai_assistant.wire import envelope
 from ai_assistant.wire.codec import encode_projection, project
 
@@ -80,7 +81,7 @@ def _episode(taker: str | None) -> EpisodicMemory:
             payload=RecordedTextInput(text="book Riverside for Friday"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=InputOrigin.USER,
+            parties=parties_for(InputOrigin.USER),
         ),
         status=ProcessingStatus.INTERRUPTED,
         reason=ProcessingReason.STOPPED,

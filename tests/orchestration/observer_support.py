@@ -68,6 +68,7 @@ from ai_assistant.testing import (
     default_prompt,
 )
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import line_input, parties_for
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -143,8 +144,10 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
                 payload=RecordedTextInput(text=text),
                 context=ChannelContext(),
                 reply=WholeTextReply(),
-                origin=origin,
-                messages=tuple(messages),
+                # ADR-0351 §2:6: an input of messages carries their parties, each as the
+                # line declares it; one with none, the parties its origin names.
+                parties=line_input(messages)[0] if messages else parties_for(origin),
+                messages=line_input(messages)[1],
             ),
             status=ProcessingStatus.COMPLETED if frozen else None,
             reason=ProcessingReason.RETURNED if frozen else None,

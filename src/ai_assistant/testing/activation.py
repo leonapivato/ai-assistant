@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.episode_encoding import canonical_json, episode_content
 from ai_assistant.core.errors import (
     AssistantError,
@@ -169,8 +169,9 @@ class FakeActivation:
                 payload=payload,
                 context=supplied.context,
                 reply=reply,
-                # ADR-0284 §2:2: what the channel declares, fixed at admission.
-                origin=input_origin(supplied.target),
+                # ADR-0351 §3:1: the parties the channel's kind declares, fixed at
+                # admission (§2:8).
+                parties=declared_input(supplied.target)[0],
             ),
             at=at,
             conversation_id=(

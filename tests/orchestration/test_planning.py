@@ -114,6 +114,7 @@ from ai_assistant.testing.memories import (
     said_support,
     sourced_support,
 )
+from ai_assistant.testing.parties import parties_for
 from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN, FAKE_WEB_SEARCH
 
 if TYPE_CHECKING:
@@ -325,7 +326,7 @@ def _episode(
             payload=RecordedTextInput(text=text),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=origin,
+            parties=parties_for(origin),
         ),
         status=ProcessingStatus.COMPLETED,
         reason=ProcessingReason.RETURNED,

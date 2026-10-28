@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     WholeTextReply,
 )
+from ai_assistant.testing.parties import parties_for
 
 _NOW = datetime(2026, 10, 21, 12, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
@@ -70,7 +71,7 @@ def _open(**fields: object) -> EpisodeProcessingRecord:
             payload=RecordedTextInput(text="book Riverside for Friday"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=InputOrigin.USER,
+            parties=parties_for(InputOrigin.USER),
         ),
     }
     values.update(fields)
@@ -115,9 +116,19 @@ def _extends(before: EpisodeProcessingRecord, after: EpisodeProcessingRecord) ->
 
 
 def test_a_joined_input_carries_exactly_the_decisions_fields() -> None:
-    """§7:1: when it joined, the place, its messages, and the activation taken over."""
-    assert set(JoinedInput.model_fields) == {"joined_at", "channel", "messages", "taken_over_from"}
+    """§7:1: when it joined, the place, its messages, and the activation taken over.
+
+    ADR-0351 §5:14 adds ``relayed``, the relay mark an absorption or a take records.
+    """
+    assert set(JoinedInput.model_fields) == {
+        "joined_at",
+        "channel",
+        "messages",
+        "taken_over_from",
+        "relayed",
+    }
     assert _joined().taken_over_from is None
+    assert not _joined().relayed
 
 
 def test_a_joined_input_carries_at_least_one_message() -> None:

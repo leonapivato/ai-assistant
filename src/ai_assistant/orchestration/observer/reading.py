@@ -61,7 +61,6 @@ from ai_assistant.core.types import (
     ConfirmationPart,
     EpisodicMemory,
     EvidenceItemPart,
-    InputOrigin,
     InputPart,
     LabelKind,
     Memory,
@@ -72,13 +71,13 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
-    RecordedChannelTrigger,
     RecordedTextInput,
     RoundMessagePart,
     StoryMember,
     StoryMemberKind,
     SupportOrigin,
     ToolOutcome,
+    input_support_origin,
     origin_is_outside,
 )
 from ai_assistant.orchestration.authorizer import (
@@ -505,36 +504,41 @@ def episode_text(record: EpisodicMemory) -> str:
     return payload.transcript or ""
 
 
-def input_origin(trigger: RecordedChannelTrigger, message: int | None) -> SupportOrigin:
-    """The origin of a support pointing at an input, or one of its messages (ADR-0328 §4:4).
+def input_origin(processing: EpisodeProcessingRecord, message: int | None) -> SupportOrigin:
+    """The origin of a support pointing at an input, or one of its messages (ADR-0351 §7:2).
 
-    The input takes ``outside_input`` where its origin is outside; a message carrying
-    ``forwarded_from`` takes it too, and the input as a whole takes it where any of its
-    messages does. Everything else the user wrote is ``user_message``.
+    The part's parties decide it, by ``core``'s one rule
+    (:func:`~ai_assistant.core.types.input_support_origin`), which the writer checks
+    too, so what the observer proposes is what the writer admits (§11:1): a part whose
+    parties are the person's own takes ``user_message``, so your note beside a forward
+    is yours, and one whose parties are outside takes ``outside_input``, a forward's
+    included. A part of an input the latest understanding version marks relayed takes
+    ``outside_input`` where the mark counts (§7:6).
 
-    **An input whose origin is** ``assistant`` **takes none** (ADR-0350 §6:11): it is a
-    scheduled task's instruction, which no support points at, so the reading offers no
-    such part and this refuses one.
+    **A part whose parties are empty or include the assistant's statement takes none**
+    (§7:3): a scheduled task's instruction, a marked task's included, is no part a
+    support points at, so the reading offers no such part and this refuses one.
 
     Args:
-        trigger: The episode's recorded trigger.
+        processing: The episode's processing record.
         message: The message's position, or ``None`` for the input as a whole.
 
     Returns:
         The origin.
 
     Raises:
-        ValueError: If the input's origin is ``assistant``.
+        ValueError: If no support points at the part (§7:3).
     """
-    if trigger.origin is InputOrigin.ASSISTANT:
-        msg = "no support points at an input whose origin is assistant (ADR-0350 §6:11)"
-        raise ValueError(msg)
-    if trigger.origin is InputOrigin.OUTSIDE:
-        return SupportOrigin.OUTSIDE_INPUT
-    messages = trigger.messages if message is None else trigger.messages[message : message + 1]
-    if any(one.forwarded_from is not None for one in messages):
-        return SupportOrigin.OUTSIDE_INPUT
-    return SupportOrigin.USER_MESSAGE
+    return input_support_origin(processing, message)
+
+
+def _offered(processing: EpisodeProcessingRecord, message: int | None) -> bool:
+    """Whether a support may point at the input, or one of its messages (ADR-0351 §7:3)."""
+    try:
+        input_support_origin(processing, message)
+    except ValueError:
+        return False
+    return True
 
 
 def approval_instant(record: EpisodicMemory) -> datetime:
@@ -1249,12 +1253,14 @@ class _Shown:
     ) -> list[ReadPart]:
         """The input, or each message it took in (ADR-0328 §4:4, §4:12).
 
-        None where the input's origin is ``assistant`` (ADR-0350 §6:11): a scheduled
-        task's instruction is no part a support points at, so a support of such an
-        episode points at another part of it, such as a round's message.
+        None where the input's parties are empty or include the assistant's statement
+        (ADR-0351 §7:3, in place of ADR-0350 §6:11's ``assistant`` origin): a scheduled
+        task's instruction, a marked task's included, is no part a support points at, so
+        a support of such an episode points at another part of it, such as a round's
+        message. Each part offered takes the origin its parties give (§7:2).
         """
         trigger = processing.trigger
-        if trigger.origin is InputOrigin.ASSISTANT:
+        if not _offered(processing, None):
             return []
         if trigger.messages:
             return [
@@ -1262,12 +1268,12 @@ class _Shown:
                     InputPart(episode=record.id, message=index),
                     episode=record,
                     text=one.text,
-                    origin=input_origin(trigger, index),
+                    origin=input_origin(processing, index),
                     when=one.sent_at,
                     answers=answers,
                 )
                 for index, one in enumerate(trigger.messages)
-                if one.text
+                if one.text and _offered(processing, index)
             ]
         text = episode_text(record)
         if not text:
@@ -1277,7 +1283,7 @@ class _Shown:
                 InputPart(episode=record.id),
                 episode=record,
                 text=text,
-                origin=input_origin(trigger, None),
+                origin=input_origin(processing, None),
                 when=record.occurred_at,
                 answers=answers,
             )

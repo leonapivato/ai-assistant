@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     UnresolvedMatter,
     WholeTextReply,
 )
+from ai_assistant.testing.parties import parties_for
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=1)
@@ -64,7 +65,7 @@ def _trigger(origin: InputOrigin, *, text: str = _USER_WORDS) -> RecordedChannel
             payload=RecordedTextInput(text=text),
             context=ChannelContext(),
             reply=None,
-            origin=origin,
+            parties=parties_for(origin),
         )
     return RecordedChannelTrigger(
         target=_CONVERSATION,
@@ -72,7 +73,7 @@ def _trigger(origin: InputOrigin, *, text: str = _USER_WORDS) -> RecordedChannel
         payload=RecordedTextInput(text=text),
         context=ChannelContext(),
         reply=WholeTextReply(),
-        origin=origin,
+        parties=parties_for(origin),
     )
 
 
@@ -88,7 +89,7 @@ def _scheduled() -> RecordedChannelTrigger:
         payload=RecordedTextInput(text=_INSTRUCTION),
         context=ChannelContext(),
         reply=None,
-        origin=InputOrigin.ASSISTANT,
+        parties=parties_for(InputOrigin.ASSISTANT),
     )
 
 
@@ -188,7 +189,7 @@ def test_each_channel_type_declares_its_inputs_origin(
 
 
 def test_a_channel_type_with_no_declaration_is_refused() -> None:
-    with pytest.raises(ValueError, match="declares no input origin"):
+    with pytest.raises(ValueError, match="declares no parties for its input"):
         input_origin(ChannelIdentity(channel_type="sensor", instance_id="door"))
 
 
@@ -201,7 +202,7 @@ def test_the_task_scheduler_declares_its_origin_per_input() -> None:
 
 def test_a_mark_is_declared_by_the_task_scheduler_alone_and_never_with_a_forward() -> None:
     """A kind that pushes no marked input declares no origin for one, and none takes both."""
-    with pytest.raises(ValueError, match="declares no input origin"):
+    with pytest.raises(ValueError, match="declares no parties for an input carrying the mark"):
         input_origin(_CONVERSATION, carries_outside_mark=True)
     with pytest.raises(ValueError, match="not both"):
         input_origin(_SCHEDULE, takes_in_forward=True, carries_outside_mark=True)
@@ -274,7 +275,7 @@ def test_a_users_transcript_is_their_words() -> None:
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript="call mum"),
         context=ChannelContext(),
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-        origin=InputOrigin.USER,
+        parties=parties_for(InputOrigin.USER),
     )
     record = _episode(trigger, understanding=(_understanding("a call to make"),))
     assert episode_content(record) == "a call to make\ncall mum"
@@ -288,7 +289,7 @@ def test_speech_with_no_words_adds_none(transcript: str | None) -> None:
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript=transcript),
         context=ChannelContext(),
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-        origin=InputOrigin.USER,
+        parties=parties_for(InputOrigin.USER),
     )
     record = _episode(
         trigger, status=ProcessingStatus.FAILED, reason=ProcessingReason.TRANSCRIPTION_FAILED
@@ -323,7 +324,7 @@ def test_a_users_episode_projects_every_part() -> None:
     assert projection == EpisodeProjection(
         occurred_at=_NOW,
         channel=_CONVERSATION,
-        origin=InputOrigin.USER,
+        parties=parties_for(InputOrigin.USER),
         input=ProjectedText(text=_USER_WORDS, full_chars=len(_USER_WORDS)),
         meaning="a dentist booking",
         meaning_ground=UnderstandingGround.STATED,
@@ -459,9 +460,14 @@ def test_a_projected_text_is_no_longer_than_its_whole() -> None:
             id="unresolved-without-meaning",
         ),
         pytest.param(
-            {"capture_modality": Modality.TEXT, "origin": InputOrigin.USER},
+            {"capture_modality": Modality.TEXT, "parties": [{"kind": "unknown"}]},
             "carries its content alone",
-            id="recordless-with-origin",
+            id="recordless-with-parties",
+        ),
+        pytest.param(
+            {"capture_modality": Modality.TEXT, "relayed": True},
+            "carries its content alone",
+            id="recordless-relayed",
         ),
         pytest.param({}, "carries its content alone", id="recordless-without-modality"),
         pytest.param(

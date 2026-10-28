@@ -63,6 +63,7 @@ from ai_assistant.core.types import (
     UserMessage,
 )
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -148,7 +149,7 @@ def conversation_episode(
                 payload=RecordedTextInput(text="input"),
                 context=ChannelContext(),
                 reply=None,
-                origin=InputOrigin.USER,
+                parties=parties_for(InputOrigin.USER),
             ),
             status=status,
             reason=reason,

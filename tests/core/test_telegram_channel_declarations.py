@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     TextChannelPayload,
     WholeTextReply,
 )
+from ai_assistant.testing.parties import line_input
 
 LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="conn-0001/424242")
 AT: Final = datetime(2026, 10, 17, 9, 0, tzinfo=UTC)
@@ -53,7 +54,7 @@ def test_the_lines_origin_is_declared_per_input() -> None:
 def test_a_kind_taking_in_no_forward_declares_no_origin_for_one(
     target: NewConversation | ChannelIdentity,
 ) -> None:
-    with pytest.raises(ValueError, match="no input origin"):
+    with pytest.raises(ValueError, match="takes in no forward"):
         input_origin(target, takes_in_forward=True)
 
 
@@ -88,8 +89,10 @@ def _trigger(*messages: RecordedInputMessage) -> RecordedChannelTrigger:
         payload=RecordedTextInput(text="\n\n".join(one.text for one in messages)),
         context=ChannelContext(),
         reply=WholeTextReply(),
-        origin=InputOrigin.OUTSIDE,
-        messages=messages,
+        # ADR-0351 §2:6: an input of messages carries their parties, as the line
+        # declares each.
+        parties=line_input(messages)[0],
+        messages=line_input(messages)[1],
     )
 
 
@@ -119,7 +122,7 @@ def test_a_trigger_recording_no_messages_reads_as_before() -> None:
         "payload": {"modality": "text", "text": "hi"},
         "context": {"history": [], "reply_to": None},
         "reply": {"kind": "whole_text"},
-        "origin": "user",
+        "parties": [{"kind": "person", "identifier": "person:owner"}],
     }
     assert RecordedChannelTrigger.model_validate(stored).messages == ()
 
