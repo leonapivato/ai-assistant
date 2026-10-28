@@ -579,9 +579,9 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
       ``False``);
     - entries appended at the end of ``understanding`` and of ``stages``, each under
       its bound, with its elided count grown by exactly what the bound dropped; where a
-      stored version records the relay mark, the revision's latest version records it
-      too, so a bound that elides the version that marked the input never drops the
-      mark (ADR-0351 §5:9);
+      stored version records the relay mark, every version of the revision numbered
+      after it records it too, so a bound that elides the version that marked the input
+      never drops the mark (ADR-0351 §5:9);
     - entries appended at the end of ``rounds`` and of ``labels``, every earlier entry
       unchanged; neither is bounded (ADR-0307 §10, superseding §3:3 in the additions
       alone);
@@ -675,14 +675,17 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
 
 
 def _drops_a_relay_mark(before: EpisodeProcessingRecord, after: EpisodeProcessingRecord) -> bool:
-    """Whether ``after``'s latest version drops a relay mark ``before`` records (ADR-0351 §5:9).
+    """Whether a version of ``after`` drops a relay mark ``before`` records (ADR-0351 §5:9).
 
-    The mark holds for the rest of the activation. The record's own validator holds it
+    The mark holds for the rest of the activation: every version recorded after the
+    first that marks the input marks it too. The record's own validator holds that
     across the versions a record keeps; this holds it across the versions the bound
-    elides, which the revision no longer carries.
+    elides, which the revision no longer carries, by the versions' own numbers.
     """
-    marked = any(one.relayed for one in before.understanding)
-    return marked and not (after.understanding and after.understanding[-1].relayed)
+    marked = [one.version for one in before.understanding if one.relayed]
+    if not marked:
+        return False
+    return any(one.version > marked[0] and not one.relayed for one in after.understanding)
 
 
 def _understanding_head(limit: int) -> int:

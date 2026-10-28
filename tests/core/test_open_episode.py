@@ -530,6 +530,18 @@ def test_a_bound_that_elides_the_version_marking_the_input_keeps_the_relay_mark(
 
     assert not _extends(stored, _open(understanding=dropped, understanding_elided=1))
     assert _extends(stored, _open(understanding=kept, understanding_elided=1))
+    # A later version marking it again does not mask one between that dropped it.
+    marked = _open(
+        understanding=(
+            version(1, relayed=False),
+            version(2, relayed=True),
+            version(3, relayed=True),
+        )
+    )
+    masked = (version(1, relayed=False), version(4, relayed=False), version(5, relayed=True))
+    held = (version(1, relayed=False), version(4, relayed=True), version(5, relayed=True))
+    assert not _extends(marked, _open(understanding=masked, understanding_elided=2))
+    assert _extends(marked, _open(understanding=held, understanding_elided=2))
 
 
 @pytest.mark.parametrize(
