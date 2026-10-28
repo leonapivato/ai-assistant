@@ -52,6 +52,7 @@ from ai_assistant.orchestration.matters import (
     Became,
     TakeAnswer,
     held_inputs,
+    in_progress,
     input_standing,
 )
 from ai_assistant.orchestration.outside_content import from_outside
@@ -363,6 +364,24 @@ def _with(
     )
     state.understood(understanding, limit=4)
     return understanding
+
+
+def test_a_relay_mark_recorded_since_the_episode_was_written_withholds_its_text() -> None:
+    """ADR-0349 §5:6 as ADR-0351 §5:7 amends it: an in-progress entry reads the mark as
+    the activation holds it now, not as its stored episode last recorded it."""
+    paste = _running("chat", _IDS[0], order=1, standing=_TYPED, text=_EMAIL)
+    viewer = _running("other", _IDS[1], order=2, standing=_TYPED)
+    _with(paste, relayed=True)
+    stored = paste.capture.written if paste.capture is not None else None
+    assert isinstance(stored, EpisodicMemory)
+    assert stored.processing_record is not None
+    assert not stored.processing_record.understanding, "written before the mark"
+
+    (entry,) = in_progress([paste, viewer], viewer=_IDS[1], person=OWNER_PERSON_ID, supply=None)
+
+    assert entry.outside
+    assert entry.input is None
+    assert [one.brief for one in entry.inputs] == [None]
 
 
 def test_a_forward_continuing_another_from_a_different_sender_absorbs_it() -> None:
