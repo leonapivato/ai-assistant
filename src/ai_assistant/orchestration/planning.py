@@ -1555,6 +1555,9 @@ class _Request:
         self._reads_stories = False
         # The episodes rendered whole so far, so one shown again is named by its label.
         self._rendered: set[str] = set()
+        # Each running activation understanding cited: the list it is cited in, its
+        # place there and its episode, named once the request is rendered (ADR-0353 §14:1).
+        self._running_cited: list[tuple[list[object], int, str]] = []
         # What the place window shows of each episode it links to: the user's texts and
         # the assistant's, each in the window's order (ADR-0276 §3, ADR-0307 §5:6). An
         # item someone else wrote is never shown, so it shows nothing of an episode.
@@ -1626,6 +1629,7 @@ class _Request:
             "rounds": [self._round(number, one) for number, one in enumerate(inputs.rounds, 1)],
             "evidence": [self._evidence(one) for one in inputs.evidence],
         }
+        self._name_running()
         return json.dumps(document, ensure_ascii=False, sort_keys=False)
 
     def _place(self) -> dict[str, object]:
@@ -1645,7 +1649,13 @@ class _Request:
         # point with its readings, and the matters it belongs to; no ground (§12).
         shown: dict[str, object] = {"meaning": understanding.meaning}
         if understanding.meaning_referents:
-            shown["rests_on"] = [self._referent(one) for one in understanding.meaning_referents]
+            cited: list[object] = [self._referent(one) for one in understanding.meaning_referents]
+            self._running_cited = [
+                (cited, at, one.id)
+                for at, one in enumerate(understanding.meaning_referents)
+                if one.kind == "running" and one.id is not None
+            ]
+            shown["rests_on"] = cited
         if understanding.unclear:
             shown["unclear"] = [
                 {"gap": one.gap, "readings": list(one.readings)} for one in understanding.unclear
@@ -1673,7 +1683,8 @@ class _Request:
             "memory": LabelKind.MEMORY,
         }
         if referent.kind == "running":
-            return self._running_referent(referent)
+            # Named once the request is rendered (:meth:`_name_running`).
+            return _RUNNING_UNNAMED
         kind = kinds.get(referent.kind)
         if kind is not None and referent.id is not None:
             return self._book.label(kind, referent.id)
@@ -1683,28 +1694,20 @@ class _Request:
             return self._channel_item(referent)
         return f"a {referent.kind} no longer named"
 
-    def _running_referent(self, referent: UnderstandingReferent) -> str:
-        """A running activation understanding cited, by the label planning knows it by.
+    def _name_running(self) -> None:
+        """Name each running activation understanding cited, once the request is rendered.
 
-        Never by its excerpt (ADR-0353 §10:6), and labelled only where planning is shown
-        that work by another way: a label it already holds, or an offer, a wait or earlier
-        work this round shows. A label minted for the citation alone would be a pointer the
-        activation's record keeps (§5:1), which the observer reads (ADR-0346 §2:1), so a
-        read would chain through the referent; such work is named as running work alone.
+        By the label planning knows it by (ADR-0353 §14:1), never by its excerpt
+        (§10:6): the label another section of this request, or an earlier round, gave its
+        episode, wherever that section falls in the request. A label minted for the
+        citation alone would be a pointer the activation's record keeps (ADR-0307 §5:1),
+        which the observer reads (ADR-0346 §2:1), so a read would chain through the
+        referent; work no section names keeps the words it was rendered with.
         """
-        episode = referent.id
-        if episode is None:
-            return _RUNNING_UNNAMED
-        held = self._book.held(LabelKind.EPISODE, episode)
-        if held is not None:
-            return held
-        inputs = self._inputs
-        shown = {episode_address(one.activation_id) for one in inputs.offers}
-        shown.update(episode_address(one.activation_id) for one in inputs.waiting)
-        shown.update(episode_address(one.activation_id) for one in inputs.earlier_work)
-        if episode in shown:
-            return self._book.label(LabelKind.EPISODE, episode)
-        return _RUNNING_UNNAMED
+        for cited, at, episode in self._running_cited:
+            held = self._book.held(LabelKind.EPISODE, episode)
+            if held is not None:
+                cited[at] = held
 
     def _channel_item(self, referent: UnderstandingReferent) -> str:
         """A channel item understanding named, as the place window shows that item.

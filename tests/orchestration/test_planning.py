@@ -705,6 +705,35 @@ async def test_running_work_planning_is_shown_another_way_is_cited_by_its_label(
     ]
 
 
+async def test_running_work_a_later_section_labels_is_cited_by_that_label() -> None:
+    """ADR-0353 §14:1: the label is the one any section of the request gives the work,
+    whether it is rendered before the citation or after it."""
+    linked = _understanding(
+        meaning_referents=(_BOOKING,),
+        story_links=(StoryMember(kind=StoryMemberKind.ACTIVATION, id="booking"),),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(understanding=linked))
+    sent = _sent(completer)["understanding"]
+    assert (sent["rests_on"], sent["belongs_to"]) == (["E1"], ["E1"])
+
+    place = PlaceWindow(
+        takes_message=True,
+        items=(PlaceItem(PlaceAuthor.USER, "book a table", episode_id="activation:booking"),),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(
+        _inputs(
+            understanding=_understanding(meaning_referents=(_BOOKING,)),
+            place=place,
+            episodes=(_episode("activation:booking"),),
+        )
+    )
+    shown = _sent(completer)
+    assert shown["place_window"][0]["episode"] == "E1"
+    assert shown["understanding"]["rests_on"] == ["E1"]
+
+
 async def test_running_work_planning_already_labelled_is_cited_by_that_label() -> None:
     recorded = (PlanningLabel(label="E4", kind=LabelKind.EPISODE, id="activation:booking"),)
     stage, completer, _ = _stage()
