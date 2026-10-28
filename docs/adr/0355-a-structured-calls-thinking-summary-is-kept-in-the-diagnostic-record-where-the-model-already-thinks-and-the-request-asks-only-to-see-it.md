@@ -279,7 +279,9 @@ any returned entry in that way, so it needs no change of its own once §9's lane
 >   such key where it holds `None`, and the given entry is unchanged;
 > - understanding's repair carries the first reply's text and nothing of its thinking;
 > - no log line a stage writes carries a scripted summary's text;
-> - a follow-up asked of a structured call that carried a summary sends nothing of it.
+> - a follow-up asked of a structured call that carried a summary sends nothing of it;
+> - a `rerun` composes the observer's routes with `thinking_summaries` true and the
+>   reconciler's with it false, and still counts every call against its bound (ADR-0335 §8:2).
 
 ### 9. Delivery
 
@@ -289,16 +291,18 @@ The lanes, each after this decision merges `Accepted`:
    `PydanticAIProvider`'s argument and request (§2:1, §2:2, §3), the reading of thinking parts
    (§4:1, §4:2), and the canonical fake (§4:3). Nothing is wired yet.
 2. **T2, the consumers**, briefed against merged T1 (ADR-0137 §4): the composition root's
-   routes (§2:3–§2:5) and the three stages' returned entries (§5, §6). Each is an adaptation,
-   so they are one consumer group.
+   routes (§2:3–§2:5), the three stages' returned entries (§5, §6), and the replay tool's
+   counted providers, which stand in for each `PydanticAIProvider` the composition builds in a
+   `rerun` and so must take the new argument and forward it. Each is an adaptation, so they are
+   one consumer group.
 
 > **Normative.** T1 may touch `core/types.py`, `models/provider.py`, `models/structured.py`,
 > `ai_assistant.testing`, and their tests. It touches no file in `orchestration/`, `memory/`,
 > `app/` or `scripts/`.
 
 > **Normative.** T2 may touch `app/composition.py`, `orchestration/understanding.py`,
-> `orchestration/digesting.py`, the observer's modules under `orchestration/observer/`, and
-> their tests.
+> `orchestration/digesting.py`, the observer's modules under `orchestration/observer/`,
+> `scripts/prompt_replay.py` for `counted_models` and `CountedProvider` alone, and their tests.
 
 > **Normative.** Where V2 merges without rendering a returned entry's `thinking` as §7:1 says,
 > a lane that may touch `scripts/activation_viewer.py` and its tests alone makes it do so.
