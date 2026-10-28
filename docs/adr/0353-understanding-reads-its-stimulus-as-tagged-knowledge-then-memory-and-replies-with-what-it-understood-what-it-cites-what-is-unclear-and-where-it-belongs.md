@@ -621,9 +621,6 @@ observer's. Confidence belongs in the understanding's own words, where a reader 
 > - what concurrent stimuli are, that `meant_for` names the work the stimulus is meant for by
 >   §10:5's test and separate work none, and that only `meant_for` makes the stimulus part of
 >   that work (ADR-0349 §5:2–§5:6, §7:3, and §10);
-> - that a stimulus may belong to a concurrent stimulus's matter, by its `R` label in
->   `belongs_to`, while meant for none of its work: the same matter, separate work, as a
->   weather question asked while a hotel search runs for the same trip;
 > - ADR-0351 §5:12's relay line;
 > - that an unclear point's readings say what the stimulus would mean, never what to do
 >   (ADR-0276 §6:1, as §9 amends it).
