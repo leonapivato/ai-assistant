@@ -272,6 +272,30 @@ def test_a_reply_in_its_six_keys_names_its_labels_text(record: Path) -> None:
     }
 
 
+@pytest.mark.parametrize("failure", [None, "invalid"])
+def test_understanding_walks_as_failed_only_where_its_failure_holds_one(
+    record: Path, failure: str | None
+) -> None:
+    """#3510: structured output writes ``failure`` always, ``null`` where none failed."""
+    returned = {"reply": json.dumps(_REPLY), "mode": "native", "finish_reason": "stop"}
+    _lines(
+        record,
+        "structured",
+        [
+            {"source": "understanding", "kind": "given", "recorded_at": iso(20), "body": {}},
+            {
+                "source": "understanding",
+                "kind": "returned",
+                "recorded_at": iso(30),
+                "body": returned | {"failure": failure},
+            },
+        ],
+    )
+    step = _step(_walk(record, "structured"), "Understanding")
+    assert step["failure"] == failure
+    assert step["reading"]["shape"] == "reply"
+
+
 def test_a_reply_that_is_no_json_object_is_shown_as_written() -> None:
     assert viewer.reading_of("I think they mean a flight.") is None
     assert viewer.reading_of('```\n{"meaning": "m", "extra": 1}\n```') is not None
