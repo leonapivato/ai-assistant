@@ -3171,7 +3171,7 @@ def _phase_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
         if isinstance(run, str):
             shown["title"] = f"Recall · {_words(run)} run"
     elif phase.stage == "understanding":
-        shown |= _understanding_step(phase)
+        shown |= _understanding_step(built, phase)
     elif phase.stage == "planning":
         shown |= _planning_step(phase)
     elif phase.stage == "authorizing":
@@ -3611,19 +3611,16 @@ def _tagged_labels(body: object, wanted: set[str]) -> dict[str, str]:
     return found
 
 
-def _understanding_step(phase: _Phase) -> dict[str, object]:
+def _understanding_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
     """Understanding's run: its reading of the input, field by field, with its labels' text.
 
-    The labels are read from the run's first request: a repair's request carries the same
-    message, and then the reply and the code's statement of what was wrong with it, as its
-    last user message (ADR-0354 §8:3). Beside the reading, what code did with each of its
-    labels (:func:`resolution_of`), the labels the message showed that the reply names in
-    no list, and, where the run was repaired, why.
-
-    What code did is computed only for a reply code resolved: the reply to the run's last
-    request, recorded with no failure. A failed reply, refused or of no parse, resolves
-    nothing, and a reply whose repair has no reply recorded yet was resolved by nothing
-    recorded; each says so instead.
+    The labels are read from the message the run was given: a repair's request carries it
+    as its first user message, then the first reply as the assistant's turn and the code's
+    statement of what was wrong with it as its last user message (ADR-0354 §8:3). So a
+    repair is known by its own request, whether or not the controller's step that holds
+    both calls was written, as it is not while the run is still going. Beside the reading,
+    what code did with each of its labels (:func:`resolution_of`), the labels the message
+    showed that the reply names in no list, and, where the run was repaired, why.
     """
     givens = [one for one in phase.entries if one.kind == "given"]
     returns = [one for one in phase.entries if one.kind == "returned"]
@@ -3632,28 +3629,39 @@ def _understanding_step(phase: _Phase) -> dict[str, object]:
     body = _mapping(None if returned is None else returned.body)
     reply = _text(body.get("reply"))
     reading = None if reply is None else reading_of(reply)
-    labels = (
-        {} if reading is None or given is None else labels_in(given.body, _labels_used(reading))
-    )
-    shown = [] if given is None else shown_labels(given.body)
+    message = None if given is None else _first_message(given.body)
+    labels = {} if reading is None or message is None else labels_in(message, _labels_used(reading))
+    shown = [] if message is None else shown_labels(message)
     used = set() if reading is None else _labels_used(reading)
-    answered = bool(returns) and len(returns) >= len(givens)
-    repair = _repair_of(givens, returns, shown, answered=answered) if len(givens) > 1 else None
+    asked = next((one for one in givens if _is_repair(one.body)), None)
+    answered = (built.pairs.get(givens[-1].line) is not None) if givens else bool(returns)
+    repair = None
+    if asked is not None:
+        back = None if given is None or given is asked else built.pairs.get(given.line)
+        first = next((one for one in returns if one.line == back), None)
+        repair = _repair_of(asked, first, shown, answered=answered)
     resolution: dict[str, list[dict[str, object]]] | None = None
     unresolved: str | None = None
-    if reading is not None and reading.get("shape") == "reply" and given is not None:
-        if _failed(body):
-            unresolved = "The reply failed, so code resolved none of its labels."
-        elif not answered:
-            unresolved = (
-                "No reply to the repair was recorded: the reading is the first reply's, and "
-                "code resolved none of its labels."
-            )
-        else:
+    if reading is not None and reading.get("shape") == "reply" and message is not None:
+        unresolved = _unresolved(built, phase, body, answered=answered)
+        if unresolved is None:
             unlinked, earlier = (None, frozenset[str]()) if repair is None else _repair_told(repair)
             resolution = resolution_of(
                 reading, shown, repaired=repair is not None, unlinked=unlinked, earlier=earlier
             )
+            owed = [
+                f"{row['label']} in {key}"
+                for key, rows in resolution.items()
+                for row in rows
+                if row["outcome"] == "repair"
+            ]
+            if owed:
+                resolution = None
+                unresolved = (
+                    "The reply earned the one repair (ADR-0353 §9:10), and none was recorded: "
+                    f"code resolved none of its labels. These named nothing shown: "
+                    f"{', '.join(owed)}."
+                )
     return {
         "calls": len(givens),
         "returned": returned is not None,
@@ -3664,10 +3672,67 @@ def _understanding_step(phase: _Phase) -> dict[str, object]:
         "resolution": resolution,
         "unresolved": unresolved,
         "not_cited": None
-        if reading is None or given is None
+        if reading is None or message is None
         else [one for one in shown if one["label"] not in used],
         "repair": repair,
     }
+
+
+def _unresolved(
+    built: _Timeline, phase: _Phase, body: Mapping[str, object], *, answered: bool
+) -> str | None:
+    """Why code resolved none of a reply's labels, where the record says it did not.
+
+    A reply recorded with a failure was rejected; a run whose last request has no reply
+    recorded has not been resolved by any reply here; a reply the next understanding
+    request repairs was not the one resolved; and a run whose step ended failed or timed
+    out recorded no understanding.
+    """
+    if _failed(body):
+        return "The reply failed, so code resolved none of its labels."
+    if not answered:
+        return "No reply to the last request was recorded: code resolved none of these labels here."
+    last = max(one.line for one in phase.entries)
+    later = next(
+        (
+            one
+            for one in built.entries
+            if one.source == "understanding" and one.kind == "given" and one.line > last
+        ),
+        None,
+    )
+    if later is not None and _is_repair(later.body):
+        return (
+            "This reply earned the one repair (ADR-0353 §9:10): code resolved the reply to "
+            "it, which the next understanding step shows."
+        )
+    outcome = None if phase.step is None else _text(_mapping(phase.step.body).get("outcome"))
+    if outcome in {"failed", "timed_out"}:
+        return f"The step {_words(outcome or '')}: code recorded no understanding of it."
+    return None
+
+
+def _first_message(body: object) -> dict[str, object] | None:
+    """A request as its first user message alone: the message the stage rendered."""
+    for message in _sequence(_mapping(body).get("messages")):
+        shown = _mapping(message)
+        if shown.get("role") == "user" and isinstance(shown.get("content"), str):
+            return {"messages": [dict(shown)]}
+    return None
+
+
+def _is_repair(body: object) -> bool:
+    """Whether a request is a repair's: its message, the first reply, the statement.
+
+    The message is its first user message, the assistant's turn may be absent where the
+    first reply was empty, and the code's statement is its last user message (ADR-0354 §8:3).
+    """
+    roles = [
+        _mapping(one).get("role")
+        for one in _sequence(_mapping(body).get("messages"))
+        if _mapping(one).get("role") != "system"
+    ]
+    return len(roles) > 1 and roles[0] == "user" and roles[-1] == "user"
 
 
 #: The labels of the ``R`` form: a concurrent stimulus's (ADR-0353 §2:2).
@@ -3923,8 +3988,8 @@ def _repair_told(repair: Mapping[str, object]) -> tuple[frozenset[str] | None, f
 
 
 def _repair_of(
-    givens: Sequence[Entry],
-    returns: Sequence[Entry],
+    asked: Entry,
+    first: Entry | None,
     shown: Sequence[Mapping[str, object]],
     *,
     answered: bool,
@@ -3932,20 +3997,23 @@ def _repair_of(
     """Why a run was repaired: the first reply, its failure, and the code's statement.
 
     The repair's request carries the first reply as the assistant's turn and the code's
-    statement of what was wrong with it as its last user message (ADR-0354 §8:3), so the
-    statement is read from the record, never computed. The first reply's labels that
-    earned it are: those naming nothing shown, computed as :func:`resolution_of` computes
-    them, and those the statement names in ``belongs_to``. A first reply that failed
-    earned it by failing, and none of its labels did.
+    statement of what was wrong with it as its last user message (ADR-0354 §8:3), so both
+    are read from it, never computed; the first reply's own returned entry, where the run
+    holds it, says how it failed and holds it where its text was empty. The first reply's
+    labels that earned the repair are those naming nothing shown, computed as
+    :func:`resolution_of` computes them, and those the statement names in ``belongs_to``.
+    A first reply that failed earned it by failing, and none of its labels did.
     """
-    first = _mapping(returns[0].body) if returns else {}
-    reply = _text(first.get("reply"))
+    messages = [_mapping(one) for one in _sequence(_mapping(asked.body).get("messages"))]
+    turn = next((one for one in messages if one.get("role") == "assistant"), None)
+    held = _mapping(None if first is None else first.body)
+    reply = _text(_mapping(turn).get("content")) if turn is not None else _text(held.get("reply"))
     reading = None if reply is None else reading_of(reply)
-    statement = _user_content(givens[1].body)
+    statement = _user_content(asked.body)
     unlinked = unlinked_in(statement)
     labels: list[str] = []
     earlier: list[str] = []
-    if reading is not None and reading.get("shape") == "reply" and not _failed(first):
+    if reading is not None and reading.get("shape") == "reply" and not _failed(held):
         earlier = _strings(reading.get("belongs_to"))
         for key, rows in resolution_of(reading, shown, repaired=False).items():
             labels += [
@@ -3956,7 +4024,7 @@ def _repair_of(
             ]
     return {
         "statement": statement,
-        "first_failure": _failure_of(first),
+        "first_failure": _failure_of(held),
         "first_reply": None if reply is None else _cut(_readable(reply)),
         "labels": labels,
         "answered": answered,
