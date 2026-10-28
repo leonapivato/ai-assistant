@@ -531,12 +531,13 @@ class FakeAssistantEngine:
         #: transcript or the change stream behind the case's back.
         self.chat_reader = chat_reader
         #: ADR-0293 §6's reader and its writer. **The engine's own reader and
-        #: writer** over this fake's chat space, so the interim — one activation at a
-        #: time per conversation, and everything that waited taken in together as one
-        #: input — and the bookkeeping are the engine's by construction rather than a
-        #: copy kept in step by hand; what this fake supplies is the activation
-        #: (:meth:`_read_in`), which writes a canned reply naming its input. Its reads
-        #: are tasks held here, so none is collected mid-run.
+        #: writer** over this fake's chat space, so the reading — every message starts
+        #: its own activation after the start wait, whatever runs, so several may run
+        #: from one conversation at once (ADR-0349 §8:1) — and the bookkeeping are the
+        #: engine's by construction rather than a copy kept in step by hand; what this
+        #: fake supplies is the activation (:meth:`_read_in`), which writes a canned
+        #: reply naming its input. Its reads are tasks held here, so none is collected
+        #: mid-run.
         self._chat_reads: set[asyncio.Task[None]] = set()
         self._chat_writer = ChatWriter(conversations=self.chat, max_payload_bytes=max_payload_bytes)
         self._reader = ChatReader(
@@ -1616,9 +1617,9 @@ class FakeAssistantEngine:
         if digest is not None:
             running = self._running_on(named)
             # ADR-0293 §8:2: an activation the reader started shows "working…" until the
-            # message answering it is written, which is after its own run has ended.
-            if (reading := self._reader.working(named)) is not None and reading not in running:
-                running.append(reading)
+            # message answering it is written, which is after its own run has ended; and
+            # every one the reader holds, since several may run at once (ADR-0349 §8:1).
+            running.extend(one for one in self._reader.running(named) if one not in running)
             # The state is read off the episodes as the engine reads it (ADR-0293 §8),
             # by the one function both use.
             devices = (
@@ -1682,8 +1683,8 @@ class FakeAssistantEngine:
     def _activity(self) -> dict[str, Activity]:
         """What this fake runs, per conversation, as the engine reads its own (§8:2).
 
-        Each running activation by its id, and the activation the chat's reader has an
-        input in for, beside a count that moves at each end and at each of the
+        Each running activation by its id, and every activation the chat's reader has
+        an input in for, beside a count that moves at each end and at each of the
         reader's admissions and replies — the account the change stream pushes the
         current state from (ADR-0296 §4:9).
         """
@@ -1692,12 +1693,12 @@ class FakeAssistantEngine:
             if one.conversation_id is not None:
                 running.setdefault(one.conversation_id, []).append(one.activation_id)
         reader = self._reader.activity()
-        for conversation_id, (_, reading) in reader.items():
-            if reading is None:
+        # ADR-0349 §8:1: several activations may run from one conversation.
+        for conversation_id in reader:
+            if not (reading := self._reader.running(conversation_id)):
                 continue
             held = running.setdefault(conversation_id, [])
-            if reading not in held:
-                held.append(reading)
+            held.extend(one for one in reading if one not in held)
         named = running.keys() | self._activation_turns.keys() | reader.keys()
         return {
             conversation_id: Activity(
