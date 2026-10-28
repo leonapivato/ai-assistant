@@ -1242,6 +1242,10 @@ _WITHHELD_ITEM: Final = (
 _NO_UNDERSTANDING: Final = "missing: understanding recorded no reading of this input"
 #: A channel item understanding named that the place window cannot be shown pointing at.
 _SOME_ITEM: Final = "an item of the place window"
+
+#: A running activation understanding cited that planning is shown under no label: its
+#: work, never its excerpt (ADR-0353 §10:6).
+_RUNNING_UNNAMED: Final = "running work this input draws on, not shown here"
 #: ADR-0308 §4:13: a failed digest records no evidence, and planning is told so.
 _DIGEST_FAILED: Final = "could not be read: its digest failed, and its content is not shown"
 _NOTHING_ANSWERED: Final = "nothing in it answered what was looked for"
@@ -1667,10 +1671,9 @@ class _Request:
             "story": LabelKind.STORY,
             "episode": LabelKind.EPISODE,
             "memory": LabelKind.MEMORY,
-            # ADR-0353 §10:1, §10:6: a running activation by its episode's label, a
-            # pointer to the other activation's episode and never its excerpt.
-            "running": LabelKind.EPISODE,
         }
+        if referent.kind == "running":
+            return self._running_referent(referent)
         kind = kinds.get(referent.kind)
         if kind is not None and referent.id is not None:
             return self._book.label(kind, referent.id)
@@ -1679,6 +1682,29 @@ class _Request:
         if referent.kind == "channel_item":
             return self._channel_item(referent)
         return f"a {referent.kind} no longer named"
+
+    def _running_referent(self, referent: UnderstandingReferent) -> str:
+        """A running activation understanding cited, by the label planning knows it by.
+
+        Never by its excerpt (ADR-0353 §10:6), and labelled only where planning is shown
+        that work by another way: a label it already holds, or an offer, a wait or earlier
+        work this round shows. A label minted for the citation alone would be a pointer the
+        activation's record keeps (§5:1), which the observer reads (ADR-0346 §2:1), so a
+        read would chain through the referent; such work is named as running work alone.
+        """
+        episode = referent.id
+        if episode is None:
+            return _RUNNING_UNNAMED
+        held = self._book.held(LabelKind.EPISODE, episode)
+        if held is not None:
+            return held
+        inputs = self._inputs
+        shown = {episode_address(one.activation_id) for one in inputs.offers}
+        shown.update(episode_address(one.activation_id) for one in inputs.waiting)
+        shown.update(episode_address(one.activation_id) for one in inputs.earlier_work)
+        if episode in shown:
+            return self._book.label(LabelKind.EPISODE, episode)
+        return _RUNNING_UNNAMED
 
     def _channel_item(self, referent: UnderstandingReferent) -> str:
         """A channel item understanding named, as the place window shows that item.
