@@ -767,6 +767,60 @@ def test_a_response_never_crosses_into_another_rounds_step() -> None:
     assert pending["tone"] == "pending"
 
 
+# --- a failure is what its key holds, not that the key is there (#3510) -----------------
+
+#: Understanding's returned entry as structured output writes it (ADR-0354 §7:2): the key
+#: ``failure`` always, ``null`` where nothing failed.
+_UNDERSTOOD: dict[str, Any] = {
+    "reply": "{}",
+    "model": "m",
+    "mode": "native",
+    "finish_reason": "stop",
+    "refusal": None,
+    "refusal_category": None,
+    "usage": None,
+}
+
+
+@pytest.mark.parametrize(("failure", "tone"), [(None, "ok"), ("invalid", "failed")])
+def test_understanding_failed_only_where_its_failure_holds_one(
+    failure: str | None, tone: str
+) -> None:
+    returned = _UNDERSTOOD | {"failure": failure}
+    paired = [
+        viewer.Entry(0, "understanding", "given", 1.0, "", {"messages": []}),
+        viewer.Entry(1, "understanding", "returned", 2.0, "", returned),
+    ]
+    call = next(one for one in viewer.timeline("a", paired)["items"] if one["kind"] == "call")
+    assert (call["label"], call["tone"]) == ("model call", tone)
+    # Its request never written: the returned entry stands alone, in the same tone.
+    lone = [viewer.Entry(0, "understanding", "returned", 2.0, "", returned)]
+    (point,) = viewer.timeline("a", lone)["items"]
+    assert (point["label"], point["tone"]) == ("understanding returned", tone)
+    read = viewer.model_call(paired, 1)
+    assert read is not None
+    assert read["did"].get("failure") == failure
+
+
+@pytest.mark.parametrize(
+    ("source", "body"),
+    [("digesting", {"reply": "r"}), ("planning", {"response": {"parts": []}})],
+)
+def test_a_returned_entry_with_no_failure_key_is_no_failure(
+    source: str, body: dict[str, Any]
+) -> None:
+    given = viewer.Entry(0, source, "given", 1.0, "", {"messages": []})
+
+    def tones(returned: dict[str, Any]) -> list[object]:
+        shown = viewer.timeline(
+            "a", [given, viewer.Entry(1, source, "returned", 2.0, "", returned)]
+        )
+        return [one["tone"] for one in shown["items"] if one["kind"] == "call"]
+
+    assert tones(body) == ["ok"]
+    assert tones(body | {"failure": "boom"}) == ["failed"]
+
+
 # --- §3:3: a model call, readable beside its bodies ---------------------------------------
 
 

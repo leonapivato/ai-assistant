@@ -309,6 +309,30 @@ def test_odd_observer_lines_lose_their_summary_and_nothing_else() -> None:
     assert sorted(clickable) == list(range(len(odd)))
 
 
+@pytest.mark.parametrize(
+    ("returned", "tone"),
+    [({}, "ok"), ({"failure": None}, "ok"), ({"failure": "timed out"}, "failed")],
+)
+def test_an_observer_call_failed_only_where_its_failure_holds_one(
+    returned: dict[str, Any], tone: str
+) -> None:
+    """#3510: no ``failure`` key and ``failure: null`` alike say nothing failed."""
+    learned = viewer.Learned("calls")
+    kinds = ("given", "returned")
+    for number, (kind, body) in enumerate(zip(kinds, ({}, returned), strict=True)):
+        raw = {
+            "activation_id": "calls",
+            "source": "observer",
+            "kind": kind,
+            "recorded_at": f"2026-10-18T12:00:0{number}+00:00",
+            "body": {"stage": "scout"} | body,
+        }
+        learned.feed(viewer.parse_line(number, json.dumps(raw).encode()))
+    learned.feed(None)
+    (attempt,) = learned.lane()["attempts"]
+    assert [(one["kind"], one["tone"]) for one in attempt["items"]] == [("call", tone)]
+
+
 def test_a_framing_whose_findings_entry_is_absent_keeps_its_link(server: Any, record: Path) -> None:
     """A finding recorded only from its framing on (the record turned on between attempts)."""
     kept = (record / "a-kept.observer.jsonl").read_text(encoding="utf-8").splitlines()

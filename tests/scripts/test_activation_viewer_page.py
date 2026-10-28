@@ -977,6 +977,60 @@ async def test_a_reply_in_its_six_keys_walks_in_that_shape(
         await expect(step).not_to_contain_text("earlier shape")
 
 
+@pytest.fixture(params=[None, "invalid"])
+def structured(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[tuple[Any, str | None]]:
+    """The viewer over an understanding call written with structured output (ADR-0354 §7:2).
+
+    Its returned entry carries ``failure`` always, ``null`` where nothing failed.
+    """
+    failure: str | None = request.param
+    record = write_record(tmp_path)
+    returned = {"reply": json.dumps(_REPLY), "mode": "native", "finish_reason": "stop"}
+    rows = [
+        {"source": "understanding", "kind": "given", "recorded_at": iso(20), "body": {}},
+        {
+            "source": "understanding",
+            "kind": "returned",
+            "recorded_at": iso(30),
+            "body": returned | {"failure": failure},
+        },
+    ]
+    (record / "structured.jsonl").write_text(
+        "".join(json.dumps({"activation_id": "structured", **one}) + "\n" for one in rows)
+    )
+    with serving(record) as bound:
+        yield bound, failure
+
+
+async def test_understanding_shows_as_failed_only_where_its_failure_holds_one(
+    structured: tuple[Any, str | None], gateway_browser: Browser
+) -> None:
+    """#3510: ``failure: null`` is no failure on the timeline, the walk or the drawer."""
+    bound, failure = structured
+    shown = 0 if failure is None else 1
+    async with _page(gateway_browser) as page:
+        await _open(page, bound.port, "structured")
+        await expect(page.locator(".tl-lane .bar.call")).to_have_count(1)
+        await expect(page.locator(".tl-lane .bar.call.t-failed")).to_have_count(shown)
+        await page.goto(f"http://127.0.0.1:{bound.port}/#structured/walk/2")
+        step = page.locator("#walk-step")
+        await expect(step.locator(".walk-head h2")).to_have_text("Understanding", timeout=_SHOWN)
+        await expect(step).to_contain_text(str(_REPLY["understanding"]))
+        await expect(step.locator(".fail")).to_have_count(shown)
+        if failure is not None:
+            await expect(step.locator(".fail")).to_have_text(f"failed: {failure}")
+        await step.locator(".jump", has_text="The call, readable").click()
+        readable = page.locator("#drawer-read")
+        await expect(readable.locator(".call-head h2")).to_have_text(
+            "Understanding", timeout=_SHOWN
+        )
+        await expect(readable.locator("#call-did .fail")).to_have_count(shown)
+        await page.locator("#tab-raw").click()
+        body = page.locator("#drawer-body")
+        await expect(body).to_contain_text("Whole body")
+        await expect(body.locator("dt", has_text="failure")).to_have_count(shown)
+
+
 async def test_a_deep_link_opens_its_step_and_the_overview_is_a_click_away(
     walked: Any, gateway_browser: Browser
 ) -> None:

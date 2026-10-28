@@ -675,7 +675,7 @@ def _ms(seconds: float | None) -> float | None:
 def failed_digest(body: object) -> bool:
     """Whether a digesting returned entry says its digest, or a part of it, failed."""
     shown = _mapping(body)
-    return shown.get("digest") == "failed" or "failure" in shown
+    return shown.get("digest") == "failed" or _failed(shown)
 
 
 # --- the list --------------------------------------------------------------------------
@@ -984,7 +984,7 @@ class _Timeline:
         self._call(given, entry) if given is not None else self._lone(entry)
 
     def _lone(self, entry: Entry) -> None:
-        failed = "failure" in _mapping(entry.body) or (
+        failed = _failed(_mapping(entry.body)) or (
             entry.source == "digesting" and failed_digest(entry.body)
         )
         self._point(entry, "returned", f"{entry.source} returned", "failed" if failed else "ok")
@@ -995,7 +995,7 @@ class _Timeline:
         body = _mapping(None if returned is None else returned.body)
         if returned is None:
             tone = "pending"
-        elif "failure" in body or (given.source == "digesting" and failed_digest(body)):
+        elif _failed(body) or (given.source == "digesting" and failed_digest(body)):
             tone = "failed"
         else:
             tone = "ok"
@@ -1028,7 +1028,7 @@ class _Timeline:
         held = self.rounds[number]
         held["returned"] = entry.line
         body = _mapping(entry.body)
-        if "failure" in body:
+        if _failed(body):
             held["failure"] = _failure_text(body.get("failure"))
         texts: list[str] = []
         calls: list[dict[str, object]] = []
@@ -1067,7 +1067,7 @@ class _Timeline:
         ]
         shown = {one["verdict"] for one in verdicts}
         message = _mapping(body.get("message"))
-        if "failure" in body:
+        if _failed(body):
             tone = "failed"
         elif "needs_you" in shown:
             tone = "needs_you"
@@ -1147,6 +1147,20 @@ def _arguments(value: object) -> object:
         except _UNPARSABLE:
             return None
     return value
+
+
+def _failed(body: Mapping[str, object]) -> bool:
+    """Whether a body records a failure: its ``failure`` key, holding something.
+
+    A returned entry written with structured output (ADR-0354 §7:2) carries ``failure``
+    always, ``null`` where nothing failed; others leave the key out. Both mean none.
+    """
+    return body.get("failure") is not None
+
+
+def _failure_of(body: Mapping[str, object]) -> str | None:
+    """A body's failure as the page shows it, or ``None`` where it records none."""
+    return _failure_text(body.get("failure")) if _failed(body) else None
 
 
 def _failure_text(value: object) -> str:
@@ -1365,7 +1379,7 @@ class Learned:
             return
         waiting = self.waiting.get(key)
         if not waiting:
-            failed = "failure" in body
+            failed = _failed(body)
             self._point(
                 attempt, line, "returned", f"{stage} returned", "failed" if failed else "ok"
             )
@@ -1374,7 +1388,7 @@ class Learned:
         given = item["call"]
         assert isinstance(given, int)  # noqa: S101 — set just above, always a line
         item["end"] = _ms(line.at)
-        item["tone"] = "failed" if "failure" in body else "ok"
+        item["tone"] = "failed" if _failed(body) else "ok"
         item["lines"] = [given, line.line]
         self.pairs[given] = line.line
         self._called(attempt, stage, finding, {"given": given, "returned": line.line})
@@ -2261,7 +2275,7 @@ def _did(source: str, body: object) -> dict[str, object]:
     held = _mapping(body)
     parts: list[dict[str, object]] = []
     did: dict[str, object] = {"parts": parts}
-    if "failure" in held:
+    if _failed(held):
         did["failure"] = _failure_text(held.get("failure"))
     if source == "planning":
         response = _mapping(held.get("response"))
@@ -2274,7 +2288,7 @@ def _did(source: str, body: object) -> dict[str, object]:
         did["read_as_round"] = held.get("read_as_round")
         did["finish_reason"] = _text(response.get("finish_reason"))
         did["model"] = _text(response.get("model_name"))
-        if not isinstance(listed, list) and "failure" not in held:
+        if not isinstance(listed, list) and not _failed(held):
             did["odd"] = "This entry holds no response parts to read."
         return did
     reply = held.get("reply")
@@ -2697,7 +2711,7 @@ def _follow_up(value: object) -> dict[str, object] | None:
         "file": _text(held.get("file")),
         "question": None if question is None else _sized(question),
         "answer": _sized(answer) if isinstance(answer, str) else None,
-        "failure": _failure_text(held.get("failure")) if "failure" in held else None,
+        "failure": _failure_of(held),
     }
 
 
@@ -2754,7 +2768,7 @@ def _hub_follow_up(line: Entry, body: Mapping[str, object]) -> dict[str, object]
         "model": _text(body.get("model")),
         "followed_version": _text(followed.get("version")),
         "answer": _sized(answer) if isinstance(answer, str) else None,
-        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+        "failure": _failure_of(body),
     }
 
 
@@ -2955,7 +2969,7 @@ def _step_facts(entry: Entry | None) -> dict[str, object] | None:
         "due": _text(body.get("due")),
         "outcome": _text(body.get("outcome")),
         "took": None if started is None or ended is None else _ms(ended - started),
-        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+        "failure": _failure_of(body),
     }
 
 
@@ -3098,7 +3112,7 @@ def _recall_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
         "found": len(finds) if listed else None,
         "admitted": sum(1 for one in finds if one.get("admitted") is True) if listed else None,
         "kept": kept,
-        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+        "failure": _failure_of(body),
         "shown": _recalled_shown(built, phase, run, kept),
     }
 
@@ -3350,7 +3364,7 @@ def _understanding_step(phase: _Phase) -> dict[str, object]:
         "reading": reading,
         "reply": reply if reading is None else None,
         "labels": labels,
-        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+        "failure": _failure_of(body),
     }
 
 
@@ -3398,7 +3412,7 @@ def _planning_step(phase: _Phase) -> dict[str, object]:
             for one in map(_mapping, _sequence(_mapping(document).get("evidence")))
         ],
         "returned": returned is not None,
-        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+        "failure": _failure_of(body),
         "read_as_round": body.get("read_as_round")
         if isinstance(body.get("read_as_round"), bool)
         else None,
@@ -3475,7 +3489,7 @@ def _authorizing_step(phase: _Phase) -> dict[str, object]:
             "place": _text(message.get("place")),
         },
         "outside": body.get("read_outside_content") is True,
-        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+        "failure": _failure_of(body),
     }
 
 
@@ -3506,7 +3520,7 @@ def _digest_part(asked: Mapping[str, object], returned: Entry | None) -> dict[st
     part, parts = asked.get("part"), asked.get("parts")
     numbered = type(part) is int and type(parts) is int
     reply = _text(body.get("reply"))
-    why = _failure_text(body.get("failure")) if "failure" in body else _text(body.get("reason"))
+    why = _failure_of(body) if _failed(body) else _text(body.get("reason"))
     return {
         "question": _text(asked.get("question")),
         "result": _text(asked.get("result")),
@@ -6353,7 +6367,8 @@ SCRIPT: Final = r"""
   }
   function arr(value) { return Array.isArray(value) ? value : []; }
   function failure(value) {
-    if (value === undefined) return undefined;
+    // A body written with structured output carries `failure: null` where none failed.
+    if (value === undefined || value === null) return undefined;
     if (typeof value === "string") return value;
     const f = obj(value);
     return [f.class, f.message].filter(Boolean).join(": ") || JSON.stringify(value);
