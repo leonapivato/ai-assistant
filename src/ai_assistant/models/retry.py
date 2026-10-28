@@ -14,6 +14,12 @@ quota.
 The deadline lives here, not in the adapter, for two reasons: every provider
 gets it uniformly, and a retry loop must be able to abandon a hung attempt to
 start the next one.
+
+It implements :class:`~ai_assistant.core.protocols.StructuredCompleter` beside
+``ModelProvider``, applying the same deadline and policy over an inner provider
+that implements both (ADR-0354 §6:1). A structured call's returned failure is a
+response that came back, not a failure of the call, so it is never retried
+(§5:4).
 """
 
 from __future__ import annotations
@@ -25,13 +31,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import ConfigurationError, ModelError, ModelTimeoutError
+from ai_assistant.core.protocols import StructuredCompleter
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
+    from pydantic import BaseModel
+
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import ModelProvider
-    from ai_assistant.core.types import Message
+    from ai_assistant.core.types import Message, StructuredReply
 
 # 2.0 ** 1024 raises OverflowError, so the exponent is clamped below that. The
 # bound never truncates real growth: once the ceiling saturates the configured
@@ -200,12 +209,7 @@ class RetryingProvider:
         ceiling = cap if base >= cap / growth else base * growth
         return ceiling * self._jitter()
 
-    async def _call_inner(
-        self,
-        messages: Sequence[Message],
-        *,
-        model: str | None = None,
-    ) -> Message:
+    async def _call_inner[R](self, attempt: Callable[[], Awaitable[R]]) -> R:
         """Delegate one attempt, translating a timeout the *provider* raised.
 
         Both a provider's own timeout and our expired deadline arrive as
@@ -222,7 +226,7 @@ class RetryingProvider:
         expired is corrected.
         """
         try:
-            return await self._inner.complete(messages, model=model)
+            return await attempt()
         except TimeoutError as exc:
             msg = f"the provider raised a timeout: {exc}"
             raise ModelTimeoutError(msg) from exc
@@ -271,14 +275,63 @@ class RetryingProvider:
         # `model_copy(deep=True)` stays as cheap defence-in-depth over frozen
         # elements that `list(messages)` would already detach.
         conversation = [message.model_copy(deep=True) for message in messages]
-        attempt = 0
+        inner = self._inner
+        return await self._retried(lambda: inner.complete(conversation, model=model))
+
+    async def complete_structured[T: BaseModel](
+        self,
+        messages: Sequence[Message],
+        shape: type[T],
+        *,
+        model: str | None = None,
+    ) -> StructuredReply[T]:
+        """Ask the wrapped provider for ``shape``, retrying transient failures.
+
+        The per-attempt deadline and the retry policy :meth:`complete` applies, over
+        an inner provider that implements
+        :class:`~ai_assistant.core.protocols.StructuredCompleter` (ADR-0354 §6:1). A
+        returned failure is a response that came back, so it is returned from the
+        attempt that got it and never retried (§5:4): only a raised, retryable
+        ``ModelError`` costs another attempt.
+
+        Args:
+            messages: Conversation history, oldest first.
+            shape: The pydantic model class the reply is asked for as.
+            model: Optional ``"provider:model"`` override, passed through unchanged.
+
+        Returns:
+            What the first attempt that did not raise returned: the shape's value or a
+            returned failure.
+
+        Raises:
+            ModelError: The bare class, before any attempt, if the wrapped provider
+                does not implement ``StructuredCompleter``. Otherwise the failure from
+                the final attempt, as :meth:`complete` raises it.
+        """
+        # ADR-0065's clause, on the first executed line, as in `complete`.
+        conversation = [message.model_copy(deep=True) for message in messages]
+        inner = as_structured(self._inner)
+        return await self._retried(
+            lambda: inner.complete_structured(conversation, shape, model=model)
+        )
+
+    async def _retried[R](self, attempt: Callable[[], Awaitable[R]]) -> R:
+        """Run ``attempt`` under the per-attempt deadline, retrying transient failures.
+
+        Raises:
+            ModelError: The failure from the final attempt. A non-retryable
+                failure propagates immediately, without consuming attempts;
+                an attempt that overruns its deadline surfaces as
+                :class:`~ai_assistant.core.errors.ModelTimeoutError`.
+        """
+        attempts = 0
         while True:
-            attempt += 1
+            attempts += 1
             timed_out = False
             cause: BaseException | None = None
             try:
                 async with asyncio.timeout(self._policy.timeout_seconds) as deadline:
-                    reply = await self._call_inner(conversation, model=model)
+                    reply = await self._call_inner(attempt)
                 # Expiry does not always surface as an exception. `asyncio`
                 # abandons a call by *cancelling* it, and a provider that
                 # swallows that CancelledError can still return normally — in
@@ -297,14 +350,32 @@ class RetryingProvider:
                 timed_out = True
                 cause = exc
             except ModelError as exc:
-                if not exc.retryable or attempt >= self._policy.max_attempts:
+                if not exc.retryable or attempts >= self._policy.max_attempts:
                     raise
 
-            if timed_out and attempt >= self._policy.max_attempts:
+            if timed_out and attempts >= self._policy.max_attempts:
                 msg = (
                     f"model call exceeded its {self._policy.timeout_seconds:g}s "
-                    f"deadline on attempt {attempt} of {self._policy.max_attempts}"
+                    f"deadline on attempt {attempts} of {self._policy.max_attempts}"
                 )
                 raise ModelTimeoutError(msg) from cause
 
-            await self._sleep(self._delay_for(attempt))
+            await self._sleep(self._delay_for(attempts))
+
+
+def as_structured(provider: ModelProvider) -> StructuredCompleter:
+    """``provider`` as a :class:`~ai_assistant.core.protocols.StructuredCompleter`.
+
+    The wrappers take their inner providers as ``ModelProvider`` values, and implement
+    ``StructuredCompleter`` over those that implement it too (ADR-0354 §6:1): every
+    provider in ``models/`` does.
+
+    Raises:
+        ModelError: The bare class, neither retryable nor routable, if ``provider``
+            does not implement ``StructuredCompleter``: the composition is wrong, and
+            no attempt or route would answer otherwise.
+    """
+    if not isinstance(provider, StructuredCompleter):
+        msg = "the wrapped provider does not implement StructuredCompleter"
+        raise ModelError(msg)
+    return provider

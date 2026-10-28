@@ -20,6 +20,7 @@ import json
 from typing import TYPE_CHECKING, Final
 
 from pydantic_ai import Agent, models
+from pydantic_ai.direct import model_request
 from pydantic_ai.exceptions import (
     ContentFilterError,
     ModelAPIError,
@@ -46,8 +47,15 @@ from ai_assistant.core.errors import (
     ModelTimeoutError,
     ModelUnavailableError,
 )
+from ai_assistant.core.reply_shapes import reply_schema, schema_version
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models.prompt_cache import prompt_cache_settings
+from ai_assistant.models.structured import (
+    falls_back,
+    mode_for,
+    request_parameters,
+    structured_reply,
+)
 
 _HTTP_UNAUTHORIZED: Final = 401
 _HTTP_FORBIDDEN: Final = 403
@@ -58,9 +66,12 @@ _HTTP_SERVER_ERROR: Final = 500
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from pydantic import BaseModel
     from pydantic_ai import RunContext
     from pydantic_ai.messages import ModelMessage, ModelRequestPart
     from pydantic_ai.settings import ModelSettings
+
+    from ai_assistant.core.types import StructuredReply
 
 
 def ensure_vendor_available(spec: str) -> None:
@@ -479,6 +490,86 @@ class PydanticAIProvider:
             raise _classify(exc) from exc
 
         return Message(role=Role.ASSISTANT, content=result.output)
+
+    async def complete_structured[T: BaseModel](
+        self,
+        messages: Sequence[Message],
+        shape: type[T],
+        *,
+        model: str | None = None,
+    ) -> StructuredReply[T]:
+        """Ask for the next reply as ``shape`` in one request, and read it (ADR-0354 §4).
+
+        Structurally implements
+        :meth:`~ai_assistant.core.protocols.StructuredCompleter.complete_structured`.
+        Everything a malformed call is refused for is refused before the model is
+        resolved: the conversation (ADR-0066 §1, and no ``Role.TOOL`` turn) and the
+        shape (§2:3). The request is built from one observation of ``messages`` before
+        the first await (ADR-0065), and goes, in one request through pydantic-ai's
+        direct API, to the call's ``model`` or the default: in native mode where that
+        model's profile supports JSON-schema output and in prompted mode otherwise
+        (:mod:`~ai_assistant.models.structured`). Its settings are the ones
+        :meth:`complete` sends, the cache marks for that model included (§4:5).
+
+        Args:
+            messages: Conversation history, oldest first. Non-empty, not ending on a
+                ``Role.ASSISTANT`` turn, and carrying no ``Role.TOOL`` turn.
+            shape: The pydantic model class the reply is asked for and read as.
+            model: Optional ``"provider:model"`` override; falls back to the
+                configured default when ``None``.
+
+        Returns:
+            The shape's value or a returned failure, with the exchange beside it.
+
+        Raises:
+            ModelError: The bare class, before any model is contacted, if ``messages``
+                is malformed, ``shape``'s schema cannot be closed, or the model is a
+                fallback model, wrapped or not (§4:4). A failure resolving the model
+                or of the exchange with the provider is narrowed to the most specific
+                subclass, as :meth:`complete`'s are. A response whose text no record
+                can hold is a :class:`~ai_assistant.core.errors.ModelResponseError`.
+        """
+        history = _awaiting_a_reply(messages, caller="complete_structured()")
+        schema = reply_schema(shape)
+        version = schema_version(schema)
+        try:
+            chosen = models.infer_model(self._default_model if model is None else model)
+        except Exception as exc:
+            # Resolving a string model builds its provider, which may fail; classified
+            # as a completion's failure is (ADR-0063).
+            raise _classify(exc) from exc
+        if falls_back(chosen):
+            msg = "a structured call is refused for a fallback model, whose mode is unknowable"
+            raise ModelError(msg)
+        mode = mode_for(chosen)
+        try:
+            response = await model_request(
+                chosen,
+                history,
+                model_settings=prompt_cache_settings(chosen) or None,
+                model_request_parameters=request_parameters(schema, mode),
+            )
+        except Exception as exc:
+            # Broad on purpose: `_classify` is the taxonomy, and its default for an
+            # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
+            raise _classify(exc) from exc
+        return structured_reply(response, shape, mode=mode, version=version, model=chosen)
+
+
+def _awaiting_a_reply(messages: Sequence[Message], *, caller: str) -> list[ModelMessage]:
+    """``messages`` as pydantic-ai history, refused where it awaits no reply (ADR-0066 §1).
+
+    Raises:
+        ModelError: The bare class if ``messages`` is empty, ends on a
+            ``Role.ASSISTANT`` turn, or carries a ``Role.TOOL`` turn.
+    """
+    if not messages:
+        msg = f"{caller} requires at least one message"
+        raise ModelError(msg)
+    if messages[-1].role is Role.ASSISTANT:
+        msg = f"{caller} requires a conversation awaiting a reply"
+        raise ModelError(msg)
+    return _to_model_messages(messages)
 
 
 def _cached(context: RunContext[None]) -> ModelSettings:

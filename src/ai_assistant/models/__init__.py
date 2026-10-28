@@ -5,7 +5,8 @@ Nothing outside this package imports a provider SDK (anthropic, openai, ...) —
 that is the entire point of this seam. Swapping or adding a model provider is a
 change confined to this package.
 
-Implements: ``ModelProvider``, ``ToolCallingCompleter`` and ``Embedder``.
+Implements: ``ModelProvider``, ``StructuredCompleter``, ``ToolCallingCompleter`` and
+``Embedder``.
 
 ``FastEmbedEmbedder`` lives in ``ai_assistant.models.fastembed_embedder`` and is
 deliberately not re-exported here, so importing this package does not pull in the
