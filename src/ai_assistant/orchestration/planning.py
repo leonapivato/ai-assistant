@@ -161,7 +161,6 @@ from ai_assistant.core.types import (
     DiagnosticSource,
     EpisodicMemory,
     HolderKind,
-    InputOrigin,
     LabelKind,
     MemoryMark,
     MemoryStanding,
@@ -181,6 +180,8 @@ from ai_assistant.core.types import (
     SupportHolder,
     ToolOutcome,
     label_prefix,
+    parties_are_assistants,
+    parties_are_outside,
     statement_citations,
 )
 from ai_assistant.orchestration.channel_kinds import place_channel
@@ -715,14 +716,18 @@ class RunningShown:
         place: What caused it: its channel and its place.
         input: What it took in, in brief; ``None`` where it is withheld.
         acted: Whether it has acted.
-        origin: Who its input came from, which says why a withheld input is withheld.
+        parties: Whose words its trigger's input carries (ADR-0351 §2:1), which says
+            that a withheld input is the assistant's; ``None`` where they are unknown.
+        outside: Whether any input it holds is outside, read with its relay mark
+            (ADR-0351 §5:7, §8:5), which says that a withheld input is outside.
     """
 
     activation_id: str
     place: ChannelIdentity
     input: str | None
     acted: bool
-    origin: InputOrigin
+    parties: tuple[SupportHolder, ...] | None
+    outside: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -824,7 +829,8 @@ class PlanningInputs:
         activation_id: The activation being planned.
         place: The place the input came from, and its window.
         understanding: Understanding's latest record, where it recorded one.
-        trigger_origin: Who the trigger's input came from.
+        outside_trigger: Whether the trigger's input is outside, read with its relay mark
+            (ADR-0351 §5:3, §5:7).
         episodes: The episode window's frozen episodes, in its order, as the pass's
             audience predicate already admitted them (ADR-0276 §4:9).
         recalled: What either recall run kept, as planning fetched it: the first run's
@@ -885,7 +891,7 @@ class PlanningInputs:
     activation_id: str
     place: PlaceWindow
     understanding: ActivationUnderstanding | None = None
-    trigger_origin: InputOrigin | None = None
+    outside_trigger: bool = False
     episodes: tuple[EpisodicMemory, ...] = ()
     recalled: tuple[EpisodicMemory | Memory, ...] = ()
     recalled_stories: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
@@ -1637,7 +1643,7 @@ class _Request:
         shown: dict[str, object] = {"takes_message": place.takes_message}
         if place.description is not None:
             shown["description"] = place.description
-        if self._inputs.trigger_origin is InputOrigin.OUTSIDE:
+        if self._inputs.outside_trigger:
             shown["input"] = "an outside report: " + _OUTSIDE
         return shown
 
@@ -1840,7 +1846,11 @@ class _Request:
         return {
             "episode": self._book.label(LabelKind.EPISODE, f"activation:{entry.activation_id}"),
             "place": entry.place,
-            "input": _withheld(entry.origin) if entry.input is None else entry.input,
+            "input": (
+                _withheld(outside=entry.outside, assistants=entry.assistants)
+                if entry.input is None
+                else entry.input
+            ),
             "has_acted": entry.acted,
         }
 
@@ -1848,7 +1858,9 @@ class _Request:
         """An offer open to this work, under the offering activation's label (§7:19)."""
         return {
             "offer": self._book.label(LabelKind.EPISODE, episode_address(one.activation_id)),
-            "input": _withheld(InputOrigin.USER) if one.input is None else one.input,
+            "input": (
+                _withheld(outside=False, assistants=False) if one.input is None else one.input
+            ),
             "understood_as": one.meaning,
         }
 
@@ -1857,7 +1869,11 @@ class _Request:
         shown: dict[str, object] = {
             "episode": self._book.label(LabelKind.EPISODE, episode_address(one.activation_id)),
             "place": _place_text(one.place),
-            "input": _withheld(one.origin) if one.input is None else one.input,
+            "input": (
+                _withheld(outside=one.outside, assistants=parties_are_assistants(one.parties))
+                if one.input is None
+                else one.input
+            ),
             "has_acted": one.acted,
         }
         reasons = [why for older, why in self._inputs.declined if older == one.activation_id]
@@ -1936,7 +1952,10 @@ class _Request:
             if view.joined:
                 shown["also_took_in"] = [_text(text) for text in view.joined]
         else:
-            shown["input"] = _withheld(view.origin)
+            shown["input"] = _withheld(
+                outside=parties_are_outside(view.parties, relayed=view.relayed),
+                assistants=parties_are_assistants(view.parties, relayed=view.relayed),
+            )
         if view.meaning is not None:
             shown["doing"] = f"{_PROVISIONAL}{view.meaning}"
         found: list[object] = []
@@ -2391,17 +2410,20 @@ class _Request:
         return shown
 
     def _episode_input(self, projection: EpisodeProjection, *, in_place: bool) -> object:
-        """Another episode's input as shown, attributed from its origin, or ``None``.
+        """Another episode's input as shown, attributed from its parties, or ``None``.
 
-        An outside report's is withheld and marks the round's notes (ADR-0303 §3:2). A
-        scheduled task's instruction, whose origin is ``assistant``, is the assistant's
-        own words, which the projection never shows and nothing reads as the user's
-        (ADR-0350 §6:12).
+        An outside report's, a relayed input's included, is withheld and marks the
+        round's notes (ADR-0303 §3:2, ADR-0351 §5:4, §5:7). A scheduled task's
+        instruction, whose parties are the assistant's statement, is the assistant's own
+        words, which the projection never shows and nothing reads as the user's
+        (ADR-0350 §6:12). An episode with no processing record has no parties, and is
+        attributed by neither.
         """
-        if projection.origin is InputOrigin.OUTSIDE:
+        recorded = projection.has_processing_record
+        if recorded and parties_are_outside(projection.parties, relayed=projection.relayed):
             self.shown.marked = True
             return "an outside report, not shown"
-        if projection.origin is InputOrigin.ASSISTANT:
+        if recorded and parties_are_assistants(projection.parties, relayed=projection.relayed):
             return "the assistant's own instruction for work it scheduled, not shown"
         if projection.input is None:
             return None
@@ -2658,11 +2680,15 @@ _STARTING: Final = "starting"
 _PROVISIONAL: Final = "provisional, as understood so far: "
 
 
-def _withheld(origin: InputOrigin) -> str:
-    """Why an activation's input is not shown, by its origin (ADR-0284 §8:1)."""
-    if origin is InputOrigin.OUTSIDE:
+def _withheld(*, outside: bool, assistants: bool) -> str:
+    """Why an activation's input is not shown, by whose words it carries (ADR-0284 §8:1).
+
+    Outside, read with its relay mark (ADR-0351 §5:1, §5:7), or the assistant's
+    (§5:2); otherwise only not shown.
+    """
+    if outside:
         return "an outside report, not shown: " + _OUTSIDE
-    if origin is InputOrigin.ASSISTANT:
+    if assistants:
         return "the assistant's own instruction for work it scheduled, not shown"
     return "not shown"
 
@@ -3363,11 +3389,7 @@ class PlanningStage:
             Message(role=Role.USER, content=rendered),
         )
         response = await self._responded(messages, offered_here, instruction)
-        read_outside = (
-            inputs.outside_content_read
-            or inputs.trigger_origin is InputOrigin.OUTSIDE
-            or request.shown.marked
-        )
+        read_outside = inputs.outside_content_read or inputs.outside_trigger or request.shown.marked
         # ADR-0321 §2:3, §2:5-§2:8: the calls the message asks about, each with its exact
         # line appended to the message and recorded with the round. Where the place
         # takes no message nothing is askable, so every name is dropped (§7:3).

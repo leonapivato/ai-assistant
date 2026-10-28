@@ -22,10 +22,10 @@ from test_phase_path_outside_grounds import _book, _grounds, _rounds
 from test_phase_path_outside_grounds import _Given as _DiagnosedGiven
 from test_phase_path_outside_grounds import _path as _diagnosed_path
 from test_planning import _episode as _past_episode
+from test_planning import _recorded_trigger
 
 from ai_assistant.core.types import (
     ControllerStage,
-    InputOrigin,
     LabelKind,
     PlanningLabel,
     RoundResponse,
@@ -113,7 +113,7 @@ async def _run(
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=owner_records,
         labels=labels,
     )
@@ -247,7 +247,7 @@ async def test_a_marked_older_note_a_read_shows_is_named_once_in_authorizings_gr
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=True,
         labels=_shown(("S1", LabelKind.STORY, trip)),
     )

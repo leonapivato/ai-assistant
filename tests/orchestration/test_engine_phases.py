@@ -33,7 +33,7 @@ from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION, _episode
 from test_engine import AT, Harness
 from test_planning import _episode as _past_episode
-from test_planning import _understanding
+from test_planning import _recorded_trigger, _understanding
 from understanding_support import (
     EXCERPT_CHARS,
     STATED_PROPOSAL,
@@ -82,7 +82,6 @@ from ai_assistant.core.types import (
     EvidenceItem,
     Idempotency,
     InformationalEventResult,
-    InputOrigin,
     LabelKind,
     Memory,
     MemoryKind,
@@ -114,6 +113,7 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StorySummaryDraft,
     StorySummaryLine,
+    SupportHolder,
     TextChannelPayload,
     ToolCost,
     ToolDefinition,
@@ -121,6 +121,7 @@ from ai_assistant.core.types import (
     TranscriptMessage,
     UserMessage,
     band_of,
+    parties_are_outside,
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
@@ -191,6 +192,7 @@ from ai_assistant.testing.memories import (
     said_support,
     sourced_support,
 )
+from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN
 
 if TYPE_CHECKING:
@@ -1639,7 +1641,7 @@ def _begun(path: PhasePath) -> PhaseWorking:
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=True,
     )
 
@@ -2031,7 +2033,7 @@ async def _ended_failing(harness: Harness, completer: FakeToolCallingCompleter) 
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel(conversation), messages=()),
         conversation_id=conversation,
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=True,
     )
     given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
@@ -2433,7 +2435,7 @@ async def test_an_outside_episode_of_an_inherited_story_is_outside_content_read(
     completer = FakeToolCallingCompleter.scripted(RoundResponse(text="ok", notes="noted"))
     harness = _harness(completer)
     await harness.memory.add(_episode())
-    await harness.memory.add(_past_episode("activation:report", origin=InputOrigin.OUTSIDE))
+    await harness.memory.add(_past_episode("activation:report", parties=UNIDENTIFIED_WORDS))
     stories = FakeStoryStore(now=lambda: AT)
     trip = (
         await stories.create(
@@ -2629,7 +2631,7 @@ async def test_a_story_note_counts_as_outside_content_by_its_mark(
 
 def _from_outside(episode_id: str) -> EpisodicMemory:
     """A frozen episode whose input came from outside, its provenance unmarked (#2876)."""
-    record = _past_episode(episode_id, origin=InputOrigin.OUTSIDE)
+    record = _past_episode(episode_id, parties=UNIDENTIFIED_WORDS)
     assert not record.provenance.derived_from_external
     return record
 
@@ -2867,9 +2869,12 @@ async def test_a_refused_tidy_up_still_brings_no_round(name: str, *, brings: boo
     assert working.latest_calls_beyond_tidy_ups is brings
 
 
-@pytest.mark.parametrize("origin", [InputOrigin.USER, InputOrigin.OUTSIDE])
+@pytest.mark.parametrize(
+    "parties",
+    [pytest.param(OWNERS_WORDS, id="owners"), pytest.param(UNIDENTIFIED_WORDS, id="outside")],
+)
 async def test_a_note_is_marked_where_the_activation_read_outside_content(
-    origin: InputOrigin,
+    parties: tuple[SupportHolder, ...],
 ) -> None:
     """ADR-0300 §4:2, ADR-0303 §3:1, §9:3: by the hub's record of what was read.
 
@@ -2880,7 +2885,7 @@ async def test_a_note_is_marked_where_the_activation_read_outside_content(
         RoundResponse(calls=(_call("c1", "note_story", story="S1", note="The reply said Sunday."),))
     )
     harness = _harness(completer)
-    await harness.memory.add(_episode(origin=origin))
+    await harness.memory.add(_episode(parties=parties))
     stories = FakeStoryStore(now=lambda: AT)
     trip = (
         await stories.create(
@@ -2893,7 +2898,7 @@ async def test_a_note_is_marked_where_the_activation_read_outside_content(
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=origin,
+        trigger=_recorded_trigger(parties),
         owner_records=True,
     )
     given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
@@ -2906,7 +2911,7 @@ async def test_a_note_is_marked_where_the_activation_read_outside_content(
     assert page is not None
     (note,) = page.notes
     assert note.text == "The reply said Sunday."
-    assert note.outside is (origin is InputOrigin.OUTSIDE)
+    assert note.outside is parties_are_outside(parties)
 
 
 async def test_on_a_pass_that_may_not_show_the_owners_records_planning_still_writes() -> None:
@@ -2920,7 +2925,7 @@ async def test_on_a_pass_that_may_not_show_the_owners_records_planning_still_wri
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=False,
     )
     given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
@@ -3023,7 +3028,7 @@ async def _stages_over(
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=owner_records,
         labels=labels,
     )
@@ -3318,7 +3323,7 @@ async def test_a_search_applies_the_audience_predicate_at_the_search_and_at_the_
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=False,
     )
     given = _Given(
@@ -3380,7 +3385,7 @@ async def _page_read(
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=owner_records,
         labels=(PlanningLabel(label="S1", kind=LabelKind.STORY, id=trip),),
     )

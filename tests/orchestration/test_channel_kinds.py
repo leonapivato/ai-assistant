@@ -10,10 +10,19 @@ names no channel (§4:5, §4:8).
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime
+from typing import Final
 
 import pytest
 
-from ai_assistant.core.types import ApprovalGiver, ChannelIdentity, InputOrigin
+from ai_assistant.core.channel_validation import declared_input
+from ai_assistant.core.types import (
+    ApprovalGiver,
+    ChannelIdentity,
+    ClaimedAuthor,
+    RecordedInputMessage,
+    SupportHolder,
+)
 from ai_assistant.orchestration.channel_kinds import (
     Audience,
     WindowSource,
@@ -26,6 +35,8 @@ from ai_assistant.orchestration.telegram import (
     TELEGRAM_DESCRIPTION,
     line_channel,
 )
+
+_AT: Final = datetime(2026, 10, 28, 9, tzinfo=UTC)
 
 
 def test_a_place_is_its_channel_type_then_its_instance() -> None:
@@ -67,12 +78,19 @@ def test_the_telegram_kind_declares_what_its_table_states() -> None:
     assert TELEGRAM.approval_giver is ApprovalGiver.USER_THROUGH_TELEGRAM
 
 
-def test_the_kind_reads_its_origin_per_input_from_cores_register() -> None:
+def test_the_kind_reads_its_parties_per_input_from_cores_register() -> None:
+    """ADR-0351 §3:1: the line's message is the owner's, a forward its sender's, claimed."""
     line = line_channel("conn-1", 42)
-    assert TELEGRAM.input_origin(line, takes_in_forward=False) is InputOrigin.USER
-    assert TELEGRAM.input_origin(line, takes_in_forward=True) is InputOrigin.OUTSIDE
+    typed = RecordedInputMessage(text="hi", sent_at=_AT)
+    forwarded = RecordedInputMessage(
+        text="see you", sent_at=_AT, forwarded_from=ClaimedAuthor(name="Sam", account_id=7)
+    )
+    assert TELEGRAM.input_parties(line, (typed,)) == declared_input(line, (typed,))
+    parties, (message,) = TELEGRAM.input_parties(line, (forwarded,))
+    assert parties == (SupportHolder.source("7", claimed=True),)
+    assert message.party == parties[0]
     with pytest.raises(ValueError, match="its own channels"):
-        TELEGRAM.input_origin(conversation_channel("c-1"), takes_in_forward=False)
+        TELEGRAM.input_parties(conversation_channel("c-1"), (typed,))
 
 
 def test_a_kind_that_establishes_nobody_gives_no_approval() -> None:

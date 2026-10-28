@@ -6,11 +6,6 @@ records them (:func:`~ai_assistant.core.channel_validation.declared_input`): the
 owner's on the hub chat and the line, the assistant's statement on the Task Scheduler,
 and, for a test that only needs an input that is outside, one member nobody
 identified.
-
-:func:`parties_for` gives a test written against the retiring ``InputOrigin`` the
-parties whose computed origin is the one it names (ADR-0351 §10:2), so a reader that
-still reads the origin reads what it did. It retires with ``InputOrigin`` in the lane
-that moves those readers over (§11).
 """
 
 from __future__ import annotations
@@ -21,7 +16,6 @@ from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ChannelIdentity,
-    InputOrigin,
     StatementPart,
     SupportHolder,
 )
@@ -36,7 +30,6 @@ __all__ = [
     "OWNERS_WORDS",
     "UNIDENTIFIED_WORDS",
     "line_input",
-    "parties_for",
 ]
 
 #: The owner's words: the hub chat's input, or a message the line's account wrote.
@@ -49,26 +42,6 @@ ASSISTANTS_WORDS: Final[tuple[SupportHolder, ...]] = (
 
 #: An input carrying words nobody identified, which is outside (ADR-0351 §5:1).
 UNIDENTIFIED_WORDS: Final[tuple[SupportHolder, ...]] = (SupportHolder.unknown(),)
-
-_BY_ORIGIN: Final[dict[InputOrigin, tuple[SupportHolder, ...]]] = {
-    InputOrigin.USER: OWNERS_WORDS,
-    InputOrigin.OUTSIDE: UNIDENTIFIED_WORDS,
-    InputOrigin.ASSISTANT: ASSISTANTS_WORDS,
-}
-
-
-def parties_for(origin: InputOrigin) -> tuple[SupportHolder, ...]:
-    """Parties whose computed origin is ``origin`` (ADR-0351 §10:2).
-
-    Args:
-        origin: The origin a test was written against.
-
-    Returns:
-        The owner's words for ``user``, the assistant's statement for ``assistant``,
-        and one unidentified member for ``outside``.
-    """
-    return _BY_ORIGIN[origin]
-
 
 #: A line's chat, whose kind declares a party for each message it takes in.
 _LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="testing/1")

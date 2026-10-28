@@ -31,7 +31,6 @@ from ai_assistant.core.types import (
     EpisodeProjection,
     EpisodicMemory,
     EvidenceItem,
-    InputOrigin,
     JoinedInput,
     MemorySource,
     PeerEffect,
@@ -51,12 +50,14 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     StageEntry,
     StageOutcome,
+    SupportHolder,
     ToolOutcome,
     UnderstandingProducer,
     UnderstandingReferent,
     WholeTextReply,
+    parties_are_persons_own,
 )
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 _NOW = datetime(2026, 10, 26, 12, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
@@ -66,15 +67,16 @@ _OWNER_ONLY = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIV
 _ACTIVATION = "act-search"
 
 
-def _trigger(origin: InputOrigin = InputOrigin.USER, text: str = "find flights") -> Any:
-    channel = _PLACE if origin is InputOrigin.USER else _EVENTS
+def _trigger(parties: tuple[SupportHolder, ...] = OWNERS_WORDS, text: str = "find flights") -> Any:
+    own = parties_are_persons_own(parties)
+    channel = _PLACE if own else _EVENTS
     return RecordedChannelTrigger(
         target=channel,
         channel=channel,
         payload=RecordedTextInput(text=text),
         context=ChannelContext(),
-        reply=WholeTextReply() if origin is InputOrigin.USER else None,
-        parties=parties_for(origin),
+        reply=WholeTextReply() if own else None,
+        parties=parties,
     )
 
 
@@ -186,7 +188,8 @@ def test_an_open_episode_is_read_and_says_it_runs() -> None:
     assert isinstance(view, PeerView)
     assert (view.status, view.reason) == (None, None)
     assert view.channel == _PLACE
-    assert view.origin is InputOrigin.USER
+    assert view.parties == OWNERS_WORDS
+    assert not view.relayed
 
 
 def test_a_frozen_episode_says_how_it_ended() -> None:
@@ -227,12 +230,12 @@ def test_the_users_input_and_every_input_it_holds_are_shown_cut() -> None:
     assert _peer(_episode(_record(joined=joined))).joined[0].text == "only direct\n\nunder 400"
 
 
-@pytest.mark.parametrize("origin", [InputOrigin.OUTSIDE, InputOrigin.ASSISTANT])
-def test_input_that_is_not_the_users_own_is_withheld(origin: InputOrigin) -> None:
+@pytest.mark.parametrize("parties", [UNIDENTIFIED_WORDS, ASSISTANTS_WORDS])
+def test_input_that_is_not_the_users_own_is_withheld(parties: tuple[SupportHolder, ...]) -> None:
     """§6:9: as ``project_episode`` renders it with ``admit_outside_input`` false."""
-    view = _peer(_episode(_record(trigger=_trigger(origin, "a report from outside"))))
+    view = _peer(_episode(_record(trigger=_trigger(parties, "a report from outside"))))
 
-    assert view.origin is origin
+    assert view.parties == parties
     assert view.input is None
     assert view.joined == ()
 
@@ -392,7 +395,8 @@ def test_the_view_carries_no_field_beyond_its_work() -> None:
     round; the fields are the work §6:9 names and the facts a reader renders it by."""
     assert set(PeerView.model_fields) == {
         "channel",
-        "origin",
+        "parties",
+        "relayed",
         "input",
         "joined",
         "meaning",
@@ -468,6 +472,8 @@ def test_a_peer_effect_is_done_or_unknown_and_one_thing(fields: dict[str, Any]) 
 
 def test_a_peer_view_shows_input_only_where_it_is_the_users_own() -> None:
     with pytest.raises(ValidationError, match="the user's own"):
-        PeerView(origin=InputOrigin.OUTSIDE, input=ProjectedText(text="x", full_chars=1))
+        PeerView(parties=UNIDENTIFIED_WORDS, input=ProjectedText(text="x", full_chars=1))
+    with pytest.raises(ValidationError, match="the user's own"):
+        PeerView(parties=OWNERS_WORDS, relayed=True, input=ProjectedText(text="x", full_chars=1))
     with pytest.raises(ValidationError, match="exactly with its reason"):
-        PeerView(origin=InputOrigin.USER, status=ProcessingStatus.COMPLETED)
+        PeerView(parties=OWNERS_WORDS, status=ProcessingStatus.COMPLETED)

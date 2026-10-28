@@ -29,9 +29,10 @@ from ai_assistant.core.types import (
     ChannelInput,
     ChannelResult,
     EpisodicMemory,
-    InputOrigin,
     RecordedChannelTrigger,
+    SupportHolder,
     TextChannelPayload,
+    parties_are_outside,
 )
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.orchestration.conversations import conversation_channel
@@ -137,12 +138,12 @@ async def _episode(composed: Composed, result: ChannelResult) -> EpisodicMemory:
     return episode
 
 
-def _origin(episode: EpisodicMemory) -> InputOrigin | None:
-    """The origin the episode's trigger recorded."""
+def _parties(episode: EpisodicMemory) -> tuple[SupportHolder, ...] | None:
+    """The parties the episode's trigger recorded (ADR-0351 §2:1)."""
     assert episode.processing_record is not None
     trigger = episode.processing_record.trigger
     assert isinstance(trigger, RecordedChannelTrigger)
-    return trigger.origin
+    return trigger.parties
 
 
 async def _event(composed: Composed) -> ChannelResult:
@@ -157,9 +158,9 @@ async def _event(composed: Composed) -> ChannelResult:
 async def test_an_event_episode_is_outside_and_its_content_the_meaning_alone(
     composed: Composed,
 ) -> None:
-    """ADR-0284 §2:2 and §7:1: admission records ``outside``; the words are not content."""
+    """ADR-0284 §2:2 and §7:1: admission records outside parties; the words are not content."""
     episode = await _episode(composed, await _event(composed))
 
-    assert _origin(episode) is InputOrigin.OUTSIDE
+    assert parties_are_outside(_parties(episode))
     assert episode.content == _MEANING
     assert _REPORTED not in episode.content

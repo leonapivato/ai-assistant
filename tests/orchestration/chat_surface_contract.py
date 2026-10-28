@@ -45,7 +45,6 @@ from ai_assistant.core.types import (
     DevicesChangedChange,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     MessageAddedChange,
     MessageAuthor,
@@ -63,7 +62,9 @@ from ai_assistant.core.types import (
     UserMessage,
 )
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    OWNERS_WORDS,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -149,7 +150,7 @@ def conversation_episode(
                 payload=RecordedTextInput(text="input"),
                 context=ChannelContext(),
                 reply=None,
-                parties=parties_for(InputOrigin.USER),
+                parties=OWNERS_WORDS,
             ),
             status=status,
             reason=reason,

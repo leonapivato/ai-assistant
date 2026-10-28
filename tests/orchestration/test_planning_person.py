@@ -23,7 +23,6 @@ import pytest
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
-    InputOrigin,
     LabelKind,
     PlanningRound,
     Profile,
@@ -108,7 +107,6 @@ def _inputs(**fields: Any) -> PlanningInputs:
     values: dict[str, Any] = {
         "activation_id": "a1",
         "place": CHAT,
-        "trigger_origin": InputOrigin.USER,
     }
     values.update(fields)
     return PlanningInputs(**values)

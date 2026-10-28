@@ -66,7 +66,6 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     EvidenceItem,
-    InputOrigin,
     JoinedInput,
     LabelKind,
     Memory,
@@ -115,7 +114,10 @@ from ai_assistant.core.types import (
     band_of,
     record_transaction_time,
 )
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    OWNERS_WORDS,
+    UNIDENTIFIED_WORDS,
+)
 
 # Far in the past: expired (or window-closed) under any clock at or after 2000 —
 # every real wall-clock and the fixed test clocks the subclasses inject.
@@ -979,7 +981,7 @@ def _activation_episode(record_id: str, *, completed: bool = True) -> EpisodicMe
                 payload=RecordedTextInput(text="exact input"),
                 context=ChannelContext(),
                 reply=None,
-                parties=parties_for(InputOrigin.OUTSIDE),
+                parties=UNIDENTIFIED_WORDS,
             ),
             status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
             reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
@@ -1073,7 +1075,7 @@ def _open_episode(
                 payload=RecordedTextInput(text="exact input"),
                 context=ChannelContext(),
                 reply=WholeTextReply(),
-                parties=parties_for(InputOrigin.USER),
+                parties=OWNERS_WORDS,
             ),
         ),
     )

@@ -17,7 +17,6 @@ from ai_assistant.core.types import (
     EpisodePosition,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     NewConversation,
     ProcessingReason,
@@ -31,7 +30,10 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
 )
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    OWNERS_WORDS,
+    UNIDENTIFIED_WORDS,
+)
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -47,7 +49,7 @@ def _processing() -> EpisodeProcessingRecord:
             payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript=None),
             context=ChannelContext(),
             reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-            parties=parties_for(InputOrigin.USER),
+            parties=OWNERS_WORDS,
         ),
         status=ProcessingStatus.FAILED,
         reason=ProcessingReason.TRANSCRIPTION_FAILED,
@@ -163,7 +165,7 @@ def test_the_trigger_checks_no_combination_per_channel_type() -> None:
         payload=RecordedTextInput(text=""),
         context=ChannelContext(),
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-        parties=parties_for(InputOrigin.OUTSIDE),
+        parties=UNIDENTIFIED_WORDS,
     )
     assert trigger.channel == channel
 
@@ -178,7 +180,7 @@ def test_the_trigger_holds_its_channel_to_its_target() -> None:
             payload=RecordedTextInput(text="hello"),
             context=ChannelContext(),
             reply=None,
-            parties=parties_for(InputOrigin.USER),
+            parties=OWNERS_WORDS,
         )
     resolved = RecordedChannelTrigger(
         target=NewConversation(),
@@ -186,7 +188,7 @@ def test_the_trigger_holds_its_channel_to_its_target() -> None:
         payload=RecordedTextInput(text="hello"),
         context=ChannelContext(),
         reply=None,
-        parties=parties_for(InputOrigin.USER),
+        parties=OWNERS_WORDS,
     )
     assert resolved.channel == target
 

@@ -28,7 +28,6 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     EvidenceItem,
-    InputOrigin,
     LabelBounds,
     MemoryDecisionKind,
     MemorySource,
@@ -72,7 +71,7 @@ from ai_assistant.testing import (
     default_prompt,
 )
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import line_input, parties_for
+from ai_assistant.testing.parties import OWNERS_WORDS, line_input
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -112,7 +111,6 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
     *,
     at: datetime = AT,
     text: str = "I prefer window seats when I fly.",
-    origin: InputOrigin = InputOrigin.USER,
     channel: ChannelIdentity = CHAT,
     messages: Sequence[RecordedInputMessage] = (),
     rounds: Sequence[PlanningRound] = (),
@@ -131,7 +129,7 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
     A frozen one ends at ``ended``, by default the instant it started.
 
     Its input's parties are its messages', as the line declares each (ADR-0351 §2:6),
-    or, with none, ``parties`` where given and else those ``origin`` names.
+    or, with none, ``parties`` where given and else the owner's.
     """
     frozen = not open_
     owner = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
@@ -158,8 +156,10 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
                 context=ChannelContext(),
                 reply=WholeTextReply(),
                 # ADR-0351 §2:6: an input of messages carries their parties, each as the
-                # line declares it; one with none, the parties its origin names.
-                parties=line_input(messages)[0] if messages else parties or parties_for(origin),
+                # line declares it; one with none, the owner's unless named.
+                parties=line_input(messages)[0]
+                if messages
+                else (OWNERS_WORDS if parties is None else parties),
                 messages=line_input(messages)[1],
             ),
             status=ProcessingStatus.COMPLETED if frozen else None,

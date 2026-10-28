@@ -19,7 +19,6 @@ from ai_assistant.core.types import (
     ControllerStage,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     JoinedInput,
     MemorySource,
     NewConversation,
@@ -37,7 +36,9 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     WholeTextReply,
 )
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    OWNERS_WORDS,
+)
 
 _NOW = datetime(2026, 10, 21, 12, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
@@ -71,7 +72,7 @@ def _open(**fields: object) -> EpisodeProcessingRecord:
             payload=RecordedTextInput(text="book Riverside for Friday"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            parties=parties_for(InputOrigin.USER),
+            parties=OWNERS_WORDS,
         ),
     }
     values.update(fields)

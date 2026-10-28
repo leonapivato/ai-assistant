@@ -63,13 +63,12 @@ from ai_assistant.core.types import (
     TextChannelPayload,
     canonical_parties,
     forward_party,
-    parties_origin,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import ChannelTarget, InputOrigin
+    from ai_assistant.core.types import ChannelTarget
 
 _REPLY = TypeAdapter[ReplyCapability | None](ReplyCapability | None)
 
@@ -98,11 +97,6 @@ _A_SOURCES_REPORT: Final = frozenset({"informational_event"})
 #: question's message is *shown to you* only in such a place (ADR-0321 §4:4), and a
 #: type absent from it establishes nobody.
 _ESTABLISHES_THE_USER: Final = frozenset({"conversation", "telegram"})
-
-#: A forward whose sender is not in hand, which :func:`input_origin` reads the kind's
-#: declaration for: its party is unknown, an outside member, as every forward's is
-#: outside whatever its sender (ADR-0351 §2:7, §5:1).
-_SOME_FORWARD: Final = ClaimedAuthor(name="a forward's original sender")
 
 
 def snapshot(
@@ -273,37 +267,6 @@ def declared_input(
     )
     carried = [one.party for one in stamped if one.party is not None]
     return _parties(target, carried, carries_outside_mark=carries_outside_mark), stamped
-
-
-def input_origin(
-    target: ChannelTarget, *, takes_in_forward: bool = False, carries_outside_mark: bool = False
-) -> InputOrigin:
-    """The origin computed from the parties a kind declares, until it retires.
-
-    ADR-0351 §10:2 keeps ``origin`` as a value computed from the parties alone, so
-    this reads the one declaration :func:`declared_input` reads and computes the
-    origin from it, rather than declaring an origin of its own: ``user`` for the
-    owner's words, ``outside`` for a forward, an informational event or a marked task,
-    and ``assistant`` for a scheduled task's instruction. A new conversation declares
-    what the hub chat declares.
-
-    Args:
-        target: The input's target.
-        takes_in_forward: Whether the input takes in a forward.
-        carries_outside_mark: Whether the input carries the outside-content mark.
-
-    Returns:
-        The computed :class:`~ai_assistant.core.types.InputOrigin`.
-
-    Raises:
-        ValueError: If the channel type declares no parties for the input, or the input
-            both takes in a forward and carries the mark.
-    """
-    if takes_in_forward and carries_outside_mark:
-        msg = "an input takes in a forward or carries the outside-content mark, not both"
-        raise ValueError(msg)
-    carried = (message_party(_kind(target), _SOME_FORWARD),) if takes_in_forward else ()
-    return parties_origin(_parties(target, carried, carries_outside_mark=carries_outside_mark))
 
 
 def establishes_the_user(channel_type: str) -> bool:

@@ -60,7 +60,7 @@ def _working(output: FrozenJsonValue, *, proposed_as: str) -> PhaseWorking:
         activation_id="yes",
         place=PlaceWindow(takes_message=True),
         conversation_id=None,
-        trigger_origin=None,
+        trigger=None,
         owner_records=False,
         round_limit=3,
     )

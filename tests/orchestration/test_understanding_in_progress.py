@@ -27,7 +27,6 @@ from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ChannelContext,
     ChannelIdentity,
-    InputOrigin,
     JoinedInput,
     ProposedActivationUnderstanding,
     RecordedInputMessage,
@@ -37,6 +36,7 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     SupportHolder,
     UnderstandingReferent,
+    parties_are_outside,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.matters import InProgressEntry
@@ -47,6 +47,7 @@ from ai_assistant.orchestration.understanding import (
     UnderstandingStage,
 )
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt
+from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -81,10 +82,15 @@ def _entry(
     text: str | None,
     *,
     acted: bool = False,
-    origin: InputOrigin = InputOrigin.USER,
+    parties: tuple[SupportHolder, ...] = OWNERS_WORDS,
 ) -> InProgressEntry:
     return InProgressEntry(
-        activation_id=activation_id, channel=_THERE, input=text, acted=acted, origin=origin
+        activation_id=activation_id,
+        channel=_THERE,
+        input=text,
+        acted=acted,
+        parties=parties,
+        outside=parties_are_outside(parties),
     )
 
 
@@ -193,8 +199,8 @@ async def test_a_withheld_input_says_why_and_never_appears() -> None:
     """§5:6: an entry's input is read through the peer view, so outside input never shows."""
     model = FakeModelProvider(_proposal())
     running = (
-        _entry(_RIVERSIDE, None, origin=InputOrigin.OUTSIDE),
-        _entry(_WEATHER, None, origin=InputOrigin.ASSISTANT),
+        _entry(_RIVERSIDE, None, parties=UNIDENTIFIED_WORDS),
+        _entry(_WEATHER, None, parties=ASSISTANTS_WORDS),
     )
     await _understand(model, running=running)
     outside, task = _payload(model).containers("Concurrent stimuli")
@@ -289,7 +295,7 @@ async def test_an_r_label_in_cites_records_a_running_referent_and_costs_no_repai
     model = FakeModelProvider.scripted(_proposal(cites=["R2", "R1"]))
     running = (
         _entry(_RIVERSIDE, "book Riverside"),
-        _entry(_SATURDAY, None, origin=InputOrigin.OUTSIDE),
+        _entry(_SATURDAY, None, parties=UNIDENTIFIED_WORDS),
     )
 
     understood = await _understand(model, running=running)

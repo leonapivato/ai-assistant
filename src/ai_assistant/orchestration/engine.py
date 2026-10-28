@@ -219,6 +219,7 @@ from ai_assistant.orchestration.matters import (
     input_standing,
 )
 from ai_assistant.orchestration.notifications import RulingPolicy, hand_off
+from ai_assistant.orchestration.outside_content import relayed_by
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
@@ -6476,14 +6477,13 @@ class Engine:
         state = active_state()
         trigger = None if state is None else state.trigger
         if state is not None and trigger is not None:
-            # ADR-0349 §5:3, §7:5: who wrote the input, which the in-progress section,
-            # an absorption and an offer read: the line's kind establishes the user as
-            # the author of every message but a forward (ADR-0323 §4:6, §4:10).
+            # ADR-0349 §5:3, §7:5: who handed the input in, which the in-progress
+            # section, an absorption and an offer read: the line's kind establishes the
+            # user as the author of every message it takes in, a forward's included, who
+            # forwarded it, and a forward's party is its original sender, claimed
+            # (ADR-0351 §4:2, §2:7), so its parties carry no authority (§6:1).
             state.input_messages = taken.recorded
-            state.standing = input_standing(
-                origin=trigger.origin,
-                established=all(one.forwarded_from is None for one in taken.recorded),
-            )
+            state.standing = input_standing(parties=trigger.parties, established=True)
         resolved = ResolvedChannelInput(
             channel=taken.channel,
             text=taken.text,
@@ -6510,7 +6510,7 @@ class Engine:
                 target=target,
                 description=TELEGRAM.description,
                 giver=LINE_GIVER,
-                trigger_origin=None if trigger is None else trigger.origin,
+                trigger=trigger,
                 owner_records=True,
             ),
             input=resolved,
@@ -6567,7 +6567,7 @@ class Engine:
                 for one in taken.messages
             )
             state.standing = input_standing(
-                origin=trigger.origin,
+                parties=trigger.parties,
                 established=all(one.author is MessageAuthor.USER for one in taken.messages),
             )
         working = _TurnPass(
@@ -6588,7 +6588,7 @@ class Engine:
                 activation_id=taken.activation_id,
                 window=taken.window,
                 conversation_id=taken.conversation_id,
-                trigger_origin=None if trigger is None else trigger.origin,
+                trigger=trigger,
                 owner_records=True,
             ),
             activation=state,
@@ -6664,7 +6664,7 @@ class Engine:
                 # An activation whose id was not minted has a degraded capture
                 # (ADR-0275 §2); its rounds still need one to claim under.
                 activation_id=_uuid() if activation_id is None else activation_id,
-                trigger_origin=None if trigger is None else trigger.origin,
+                trigger=trigger,
                 owner_records=True,
             ),
             activation=state,
@@ -7116,7 +7116,7 @@ class Engine:
         )
         working_phases = phases.begin_task(
             activation_id=activation_id,
-            trigger_origin=None if trigger is None else trigger.origin,
+            trigger=trigger,
             lineage=tuple(
                 PlaceItem(
                     author=PlaceAuthor.TASK_SCHEDULER,
@@ -7741,9 +7741,9 @@ class Engine:
                     recall=None if recalled is None else recalled.result,
                     recalled=fetched.recalled,
                     stories=stories,
-                    # ADR-0284 §2:2: the origin admission recorded, which a kind
-                    # declaring it per input sets for this input (ADR-0323 §4:11).
-                    origin=None if state is None else state.trigger.origin,
+                    # ADR-0351 §5:9: a relay mark an earlier version recorded holds for
+                    # the rest of the activation, so this version records it too.
+                    relayed=state is not None and relayed_by(state.understanding),
                     joined=joined,
                     running=running,
                     running_more=more,
@@ -7830,7 +7830,7 @@ class Engine:
             state.understood(understood, limit=self._understanding_version_limit, inputs=covers)
             working.understanding = understood
             if working.phases is not None:
-                working.phases.understood(understood.version)
+                working.phases.understood(understood.version, relayed=understood.relayed)
         working.understood = covers
         # ADR-0349 §7:12, §7:15: a recorded version may settle what waits on this one.
         self._matters.changed()

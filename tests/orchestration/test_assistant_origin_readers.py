@@ -24,7 +24,6 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodeProjection,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     ProcessingReason,
     ProcessingStatus,
@@ -36,7 +35,9 @@ from ai_assistant.core.types import (
     UnderstandingProducer,
 )
 from ai_assistant.orchestration import matters_pass, planning, story_tidy_up, understanding
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    ASSISTANTS_WORDS,
+)
 
 _AT = datetime(2026, 10, 25, 8, tzinfo=UTC)
 _SCHEDULE = ChannelIdentity(channel_type="task_scheduler", instance_id="schedule")
@@ -62,7 +63,7 @@ def _scheduled_episode() -> EpisodicMemory:
                 payload=RecordedTextInput(text=_INSTRUCTION),
                 context=ChannelContext(),
                 reply=None,
-                parties=parties_for(InputOrigin.ASSISTANT),
+                parties=ASSISTANTS_WORDS,
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
@@ -113,7 +114,7 @@ def test_understanding_attributes_the_input_it_reads_as_the_assistants_instructi
     sentence, tag = _renderer()._stimulus(
         _INSTRUCTION,
         window=understanding.SuppliedWindow(ChannelContext()),
-        parties=parties_for(InputOrigin.ASSISTANT),
+        parties=ASSISTANTS_WORDS,
         trigger=None,
         joined=(),
         by_position={},

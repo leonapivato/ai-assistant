@@ -18,7 +18,6 @@ from pydantic import ValidationError
 from ai_assistant.core.channel_validation import (
     TASK_SCHEDULER,
     declared_input,
-    input_origin,
     message_party,
 )
 from ai_assistant.core.episode_encoding import project_episode
@@ -31,7 +30,6 @@ from ai_assistant.core.types import (
     ClaimedAuthor,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     InputPart,
     JoinedInput,
     MemorySource,
@@ -277,15 +275,17 @@ def test_a_kind_that_declares_nothing_for_an_input_is_refused_at_admission(
         declared_input(target, messages, carries_outside_mark=marked)
 
 
-def test_the_retiring_origin_is_computed_from_the_same_declaration() -> None:
-    """§10:2: ``user``, ``outside`` and ``assistant`` from the parties alone, stored nowhere."""
-    assert input_origin(_CHAT) is InputOrigin.USER
-    assert input_origin(_LINE, takes_in_forward=True) is InputOrigin.OUTSIDE
-    assert input_origin(_EVENTS) is InputOrigin.OUTSIDE
-    assert input_origin(_SCHEDULE) is InputOrigin.ASSISTANT
-    assert input_origin(_SCHEDULE, carries_outside_mark=True) is InputOrigin.OUTSIDE
+def test_the_trigger_carries_no_origin_and_its_class_is_read_from_its_parties() -> None:
+    """§8:1, §8:2: the origin is gone; outside, the person's own and the assistant's are
+    read from the parties the same declaration gives, stored nowhere."""
+    assert parties_are_persons_own(declared_input(_CHAT)[0])
+    assert parties_are_outside(declared_input(_LINE, (_forward(),))[0])
+    assert parties_are_outside(declared_input(_EVENTS)[0])
+    assert parties_are_assistants(declared_input(_SCHEDULE)[0])
+    assert parties_are_outside(declared_input(_SCHEDULE, carries_outside_mark=True)[0])
     trigger = _processing(_episode(_LINE, _note(), _forward())).trigger
-    assert trigger.origin is InputOrigin.OUTSIDE
+    assert parties_are_outside(trigger.parties)
+    assert not hasattr(trigger, "origin")
     assert "origin" not in trigger.model_dump()
 
 
@@ -396,7 +396,7 @@ def test_unknown_parties_read_as_outside_and_every_part_of_them_is_held_by_unkno
         one["party"] = None
     episode = EpisodicMemory.model_validate(stored)
 
-    assert _processing(episode).trigger.origin is InputOrigin.OUTSIDE
+    assert parties_are_outside(_processing(episode).trigger.parties)
     for message in (None, 0, 1):
         assert _stamped(episode, message) == (SupportOrigin.OUTSIDE_INPUT, _UNKNOWN)
 
@@ -478,10 +478,14 @@ def test_a_joined_inputs_messages_all_carry_a_party_or_none_does() -> None:
 
 
 def test_the_projection_carries_the_parties_and_the_latest_relay_mark() -> None:
-    """§8:4, §10:4: in place of the origin, which stays computed from the parties alone."""
+    """§8:4, §10:4: in place of the origin; the relay mark makes the input outside."""
     relayed = project_episode(_episode(_CHAT, relayed=(True,)), excerpt_chars=40)
     plain = project_episode(_episode(_CHAT, relayed=(False,)), excerpt_chars=40)
 
     assert (relayed.parties, relayed.relayed) == ((_OWNER,), True)
     assert (plain.parties, plain.relayed) == ((_OWNER,), False)
-    assert relayed.origin is InputOrigin.USER
+    assert parties_are_outside(relayed.parties, relayed=relayed.relayed)
+    assert not parties_are_persons_own(relayed.parties, relayed=relayed.relayed)
+    assert relayed.input is None
+    assert parties_are_persons_own(plain.parties, relayed=plain.relayed)
+    assert plain.input is not None

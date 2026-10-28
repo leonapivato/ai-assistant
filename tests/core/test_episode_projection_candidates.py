@@ -12,18 +12,19 @@ from pydantic import ValidationError
 from test_episode_projection import _NOW, _episode, _recordless, _trigger
 
 from ai_assistant.core.episode_encoding import project_episode
-from ai_assistant.core.types import EpisodeProjection, InputOrigin, Modality, ProjectedText
+from ai_assistant.core.types import EpisodeProjection, Modality, ProjectedText
+from ai_assistant.testing.parties import OWNERS_WORDS
 
 
 def test_a_projection_carries_no_candidate_unless_handed_one() -> None:
-    projection = project_episode(_episode(_trigger(InputOrigin.USER)), excerpt_chars=100)
+    projection = project_episode(_episode(_trigger(OWNERS_WORDS)), excerpt_chars=100)
 
     assert projection.candidates == ()
 
 
 def test_the_handed_facts_are_carried_in_order_each_cut_to_the_bound() -> None:
     projection = project_episode(
-        _episode(_trigger(InputOrigin.USER)),
+        _episode(_trigger(OWNERS_WORDS)),
         excerpt_chars=10,
         candidates=("prefers window seats", "short"),
     )

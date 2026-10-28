@@ -35,7 +35,6 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     Idempotency,
-    InputOrigin,
     MemorySource,
     NewConversation,
     PermissionDecision,
@@ -98,7 +97,7 @@ from ai_assistant.testing import (
     FakeStoryStore,
     FakeToolRegistry,
 )
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -183,7 +182,7 @@ def _episode(
             payload=RecordedTextInput(text="the words they wrote"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            parties=parties_for(InputOrigin.OUTSIDE if outside else InputOrigin.USER),
+            parties=UNIDENTIFIED_WORDS if outside else OWNERS_WORDS,
         ),
         rounds=tuple(rounds),
     )

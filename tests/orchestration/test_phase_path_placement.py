@@ -39,6 +39,7 @@ from test_engine_phases import (
     _searching_harness,
     _settled,
 )
+from test_planning import _recorded_trigger
 from understanding_support import understanding_stage
 
 from ai_assistant.core.errors import PlanningError
@@ -47,7 +48,6 @@ from ai_assistant.core.types import (
     ActivationRecall,
     BeliefBand,
     ControllerStage,
-    InputOrigin,
     LabelKind,
     Memory,
     MemoryKind,
@@ -367,7 +367,7 @@ async def test_a_stamped_episode_a_storys_full_view_shows_is_held_for_the_freeze
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=True,
         labels=(PlanningLabel(label="S1", kind=LabelKind.STORY, id=created.story_id),),
     )
@@ -419,7 +419,7 @@ async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_roun
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=True,
         labels=(PlanningLabel(label="S1", kind=LabelKind.STORY, id=created.story_id),),
     )

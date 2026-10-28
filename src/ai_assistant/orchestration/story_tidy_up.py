@@ -32,7 +32,7 @@ nothing of it is copied, and the run records nothing of it, so no version names
 itself a reason to raise the flag (ADR-0304 §6).
 
 **Nothing but outside content** (§5:8). A run does not start on a story whose every
-activation member's trigger ``origin`` is ``outside`` and whose every note is marked:
+activation member's trigger's input is outside and whose every note is marked:
 it makes no completion and writes nothing, so what is pending stays pending, and the
 first run after anything else comes to the story takes it all in.
 
@@ -70,8 +70,8 @@ output that fails is refused whole, writes nothing and makes no second completio
 (ADR-0300 §5:8); the store's ``over_cap`` stays the backstop.
 
 **The summary's mark comes from records, never from the model** (§3:4): it is set where
-the run read a marked note, an outside episode — its trigger's ``origin`` is
-``outside`` or its provenance records outside content
+the run read a marked note, an outside episode — its trigger's input is outside, read
+with its relay mark (ADR-0351 §5:7), or its provenance records outside content
 (:func:`~ai_assistant.core.types.rests_on_recorded_external_content`) — or a marked
 current summary. Another story's summary shown for the flag marks nothing, however it
 is marked (ADR-0304 §3).
@@ -120,7 +120,6 @@ from ai_assistant.core.types import (
     STORY_SUMMARY_CAP_CHARS,
     BeliefBand,
     EpisodicMemory,
-    InputOrigin,
     MemoryKind,
     Message,
     ReplyFailure,
@@ -132,8 +131,15 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StorySummaryDraft,
     StorySummaryLine,
+    parties_are_outside,
 )
 from ai_assistant.orchestration.episode_reads import is_open_episode, without_open_episodes
+from ai_assistant.orchestration.outside_content import (
+    projected_assistants,
+    projected_outside,
+    projected_own,
+    relayed_by,
+)
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_flags import (
     StoryRecords,
@@ -308,9 +314,7 @@ class _Episode:
     @property
     def outside(self) -> bool:
         """ADR-0303 §3:2: its trigger came from outside, or what it read rests on outside."""
-        return (
-            self.projection.origin is InputOrigin.OUTSIDE or self.projection.derived_from_external
-        )
+        return projected_outside(self.projection) or self.projection.derived_from_external
 
     @property
     def cue(self) -> str | None:
@@ -334,11 +338,11 @@ class _Episode:
             "label": label,
             "item": (
                 f"a report received on {source}, never something the user said"
-                if projection.origin is InputOrigin.OUTSIDE
+                if projected_outside(projection)
                 else f"an exchange with the user on {source}"
-                if projection.origin is InputOrigin.USER
+                if projected_own(projection)
                 else f"work the assistant scheduled, run on {source}, never something the user said"
-                if projection.origin is InputOrigin.ASSISTANT
+                if projected_assistants(projection)
                 else f"an episode on {source}"
             ),
             "occurred_at": projection.occurred_at.isoformat(),
@@ -710,21 +714,21 @@ class StoryTidyUp:
     ) -> bool:
         """ADR-0303 §5:8: whether nothing but outside content has come to the story.
 
-        Every activation member's trigger ``origin`` is ``outside``, by its episode's
+        Every activation member's trigger's input is outside, by its episode's
         record, open or frozen, and every note the story holds is marked. A member
-        whose episode the store no longer holds, or whose trigger records no
-        ``outside`` origin, is not established as outside, so the run starts. The
+        whose episode the store no longer holds, or whose trigger's input is not outside
+        by its parties and relay mark, is not established as outside, so the run starts. The
         cheap tests run first: an episode or a note already read answers most stories
         without a further read.
         """
-        if any(episode.projection.origin is not InputOrigin.OUTSIDE for episode in episodes):
+        if any(not projected_outside(episode.projection) for episode in episodes):
             return False
         if any(not note.outside for note in state.pending_notes):
             return False
         return await self._every_note_marked(story_id) and await self._every_member_outside(linked)
 
     async def _every_member_outside(self, linked: Mapping[str, int]) -> bool:
-        """Whether every activation member's trigger ``origin`` is ``outside``, by record.
+        """Whether every activation member's trigger's input is outside, by record.
 
         The trigger is read off the stored processing record itself, never through
         the model-facing projection, which refuses an open episode: an open member is
@@ -739,7 +743,9 @@ class StoryTidyUp:
             if not isinstance(record, EpisodicMemory) or activation_of(record) != activation_id:
                 return False
             processing = record.processing_record
-            if processing is None or processing.trigger.origin is not InputOrigin.OUTSIDE:
+            if processing is None or not parties_are_outside(
+                processing.trigger.parties, relayed=relayed_by(processing.understanding)
+            ):
                 return False
         return True
 

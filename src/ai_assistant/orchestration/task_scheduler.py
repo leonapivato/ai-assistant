@@ -57,7 +57,6 @@ from ai_assistant.core.types import (
     DueNow,
     DueOnRule,
     Idempotency,
-    InputOrigin,
     LabelKind,
     OccurrenceState,
     ProcessingReason,
@@ -78,6 +77,7 @@ from ai_assistant.orchestration.channel_kinds import (
     WindowSource,
     place_of,
 )
+from ai_assistant.orchestration.outside_content import holds_outside
 from ai_assistant.orchestration.task_rules import (
     clock_text,
     computed_elsewhere,
@@ -557,9 +557,11 @@ class ActivationEntry:
         status: ``running``, or how it ended.
         input: Its input in brief, or ``None`` where it is withheld: an outside one, with
             its mark shown (§4:7), or a scheduled task's own instruction.
-        outside: Whether its input's origin is outside.
+        outside: Whether any input it holds is outside, read with its relay mark
+            (ADR-0351 §5:1, §5:7, §8:5).
         acted: For a running one, whether it has acted (ADR-0349 §5:6, §6:2).
-        origin: Who its input came from, which says why a withheld input is withheld.
+        assistants: Whether its input is the assistant's (ADR-0351 §5:2), which says
+            why a withheld input that is not outside is withheld.
         wrote_into: For an ended one, the places its messages were written into, as
             their effect records name them (ADR-0350 §12:8), each once; empty where it
             wrote none. ``None`` for a running one, and where the records could not be
@@ -575,7 +577,7 @@ class ActivationEntry:
     input: str | None
     outside: bool
     acted: bool = False
-    origin: InputOrigin = InputOrigin.USER
+    assistants: bool = False
     wrote_into: tuple[str, ...] | None = None
     may_have_written_into: tuple[str, ...] = ()
 
@@ -690,7 +692,7 @@ def _activation_json(entry: ActivationEntry) -> dict[str, FrozenJson]:
         "input": entry.input,
         "outside": entry.outside,
         "acted": entry.acted,
-        "origin": entry.origin.value,
+        "assistants": entry.assistants,
         "wrote_into": None if entry.wrote_into is None else list(entry.wrote_into),
         "may_have_written_into": list(entry.may_have_written_into),
     }
@@ -763,7 +765,7 @@ def _activation_of(value: object) -> ActivationEntry:
         input=_optional_str(held, "input"),
         outside=bool(held["outside"]),
         acted=bool(held.get("acted", False)),
-        origin=_origin(held),
+        assistants=_assistants(held),
         wrote_into=(None if held.get("wrote_into") is None else _strs(held, "wrote_into")),
         may_have_written_into=(
             _strs(held, "may_have_written_into") if "may_have_written_into" in held else ()
@@ -771,12 +773,31 @@ def _activation_of(value: object) -> ActivationEntry:
     )
 
 
-def _origin(held: Mapping[str, object]) -> InputOrigin:
-    """An entry's origin, a key added after a listing may have been recorded."""
-    value = held.get("origin")
-    if not isinstance(value, str):
-        return InputOrigin.OUTSIDE if held.get("outside") else InputOrigin.USER
-    return InputOrigin(value)
+#: What a listing recorded before ADR-0351 §8:1 named its entry's origin by, and whether
+#: each named the assistant's input.
+_RECORDED_ORIGINS: Final = {"user": False, "outside": False, "assistant": True}
+
+
+def _assistants(held: Mapping[str, object]) -> bool:
+    """Whether an entry's input is the assistant's, a key added after a listing may have been.
+
+    A listing recorded before it named the entry's origin instead, ``assistant`` for the
+    assistant's input, and before that nothing, which reads as not the assistant's. A
+    value neither key admits is no listing.
+    """
+    if "assistants" in held:
+        value = held["assistants"]
+        if not isinstance(value, bool):
+            msg = "a listing's assistants is a flag"
+            raise TypeError(msg)
+        return value
+    recorded = held.get("origin")
+    if recorded is None:
+        return False
+    if not isinstance(recorded, str) or recorded not in _RECORDED_ORIGINS:
+        msg = "a listing's origin is one it recorded"
+        raise ValueError(msg)
+    return _RECORDED_ORIGINS[recorded]
 
 
 def decode_listing(output: FrozenJsonValue) -> TaskListing | None:
@@ -1134,7 +1155,8 @@ def lineage_steps(
         payload = getattr(processing.trigger.payload, "text", None)
         said = (
             "its input rests on outside content, and is not shown"
-            if processing.trigger.origin is InputOrigin.OUTSIDE or not isinstance(payload, str)
+            if holds_outside(processing.trigger, processing.understanding, processing.joined)
+            or not isinstance(payload, str)
             else _brief(payload)
         )
         steps.append(

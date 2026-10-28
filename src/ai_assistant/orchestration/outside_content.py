@@ -10,11 +10,19 @@ must agree, so the glue and authorizing ask their question of one rule, here, in
 module the phase modules may import without breaking their independence (ADR-0309
 §2:3). Planning counts what it renders, by the same facts, as it renders them.
 
-**An outside episode** (ADR-0303 §3:2) is one whose trigger's ``origin`` is
-``outside``, or whose activation's record of what it read shows outside content: its
+**An outside episode** (ADR-0303 §3:2) is one one of whose inputs is outside (ADR-0351
+§5:1, §8:3), or whose activation's record of what it read shows outside content: its
 provenance rests on recorded external content (ADR-0106 §1), it records a digest that
 answered with evidence (ADR-0308 §5:4-§5:5), or one of its rounds carries a marked note
 (ADR-0307 §4:3).
+
+**Whose words an input carries** (ADR-0351 §5, §8:2). An input is outside where its
+parties are, read with its relay mark: the trigger's by the latest understanding version
+its activation records (§5:11), a joined input's by its own record (§5:14). An
+activation holding more than one input is read over all of them, so it holds outside
+input where any of them is outside (§8:5, §5:13). :func:`relayed_by`,
+:func:`joined_parties` and :func:`holds_outside` are that reading, which the readers
+of a stored episode and of a running activation share.
 
 This is the built lineage rule, read over its own inputs; it is not the authority
 design's value tracing.
@@ -22,29 +30,139 @@ design's value tracing.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ai_assistant.core.types import (
     DigestOutcome,
     EpisodicMemory,
-    InputOrigin,
     MemoryRecord,
+    canonical_parties,
+    parties_are_assistants,
+    parties_are_outside,
+    parties_are_persons_own,
     rests_on_recorded_external_content,
 )
 
-__all__ = ["carries_evidence", "from_outside", "is_outside_episode", "rests_on_outside_content"]
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ai_assistant.core.types import (
+        ActivationUnderstanding,
+        EpisodeProjection,
+        JoinedInput,
+        RecordedChannelTrigger,
+        SupportHolder,
+    )
+
+__all__ = [
+    "carries_evidence",
+    "from_outside",
+    "holds_outside",
+    "is_outside_episode",
+    "joined_parties",
+    "projected_assistants",
+    "projected_outside",
+    "projected_own",
+    "relayed_by",
+    "rests_on_outside_content",
+]
+
+
+def relayed_by(understanding: Sequence[ActivationUnderstanding]) -> bool:
+    """Whether the trigger's input is relayed, by the latest version recorded (§5:11).
+
+    Before any version exists, and where understanding was omitted, there is no relay
+    mark, and the input is read by its parties alone.
+
+    Args:
+        understanding: The activation's understanding versions, in order.
+
+    Returns:
+        Whether the latest version marks the trigger's input relayed.
+    """
+    return bool(understanding) and understanding[-1].relayed
+
+
+def joined_parties(joined: JoinedInput) -> tuple[SupportHolder, ...] | None:
+    """Whose words a joined input carries: its messages' distinct parties (ADR-0351 §2:6).
+
+    ``None`` where one of its messages has unknown parties, which only the episode store's
+    upgrade records (§9:3).
+
+    Args:
+        joined: The joined input.
+
+    Returns:
+        Its parties, or ``None`` where they are unknown.
+    """
+    if any(message.party is None for message in joined.messages):
+        return None
+    return canonical_parties(
+        message.party for message in joined.messages if message.party is not None
+    )
+
+
+def holds_outside(
+    trigger: RecordedChannelTrigger,
+    understanding: Sequence[ActivationUnderstanding],
+    joined: Sequence[JoinedInput],
+) -> bool:
+    """Whether an activation holds outside input: any of its inputs is (ADR-0351 §8:5).
+
+    Its trigger's input, by its parties and the latest version's relay mark, and each
+    joined input, by its parties and its own relay mark (§5:7, §5:13, §5:14).
+
+    Args:
+        trigger: The activation's trigger.
+        understanding: Its understanding versions, in order.
+        joined: The inputs it took in beside its trigger's.
+
+    Returns:
+        Whether any input it holds is outside.
+    """
+    return parties_are_outside(trigger.parties, relayed=relayed_by(understanding)) or any(
+        parties_are_outside(joined_parties(one), relayed=one.relayed) for one in joined
+    )
+
+
+def projected_outside(projection: EpisodeProjection) -> bool:
+    """Whether a projected episode's input is outside, read with its relay mark (§5:1).
+
+    An episode with no processing record has no parties, and is none of the three.
+    """
+    return projection.has_processing_record and parties_are_outside(
+        projection.parties, relayed=projection.relayed
+    )
+
+
+def projected_own(projection: EpisodeProjection) -> bool:
+    """Whether a projected episode's input is the person's own, read with its relay mark."""
+    return projection.has_processing_record and parties_are_persons_own(
+        projection.parties, relayed=projection.relayed
+    )
+
+
+def projected_assistants(projection: EpisodeProjection) -> bool:
+    """Whether a projected episode's input is the assistant's, read with its relay mark."""
+    return projection.has_processing_record and parties_are_assistants(
+        projection.parties, relayed=projection.relayed
+    )
 
 
 def from_outside(record: EpisodicMemory) -> bool:
-    """Whether an episode's input came from outside (ADR-0284 §2:1, ADR-0303 §3:2).
+    """Whether an episode's input came from outside (ADR-0351 §5:1, §8:3, ADR-0303 §3:2).
 
     Args:
         record: The episode.
 
     Returns:
-        Whether its trigger is a channel trigger whose ``origin`` is ``outside``.
+        Whether it has a processing record one of whose inputs is outside, read with
+        its relay mark (:func:`holds_outside`).
     """
     processing = record.processing_record
-    trigger = None if processing is None else processing.trigger
-    return trigger is not None and trigger.origin is InputOrigin.OUTSIDE
+    return processing is not None and holds_outside(
+        processing.trigger, processing.understanding, processing.joined
+    )
 
 
 def carries_evidence(record: MemoryRecord) -> bool:

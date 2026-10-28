@@ -15,7 +15,6 @@ from ai_assistant.core.types import (
     AnsweredQuestion,
     ChannelContext,
     EpisodeProcessingRecord,
-    InputOrigin,
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
@@ -31,7 +30,9 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    OWNERS_WORDS,
+)
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _INPUT = UnderstandingReferent(kind="input", excerpt="book the dentist")
@@ -62,7 +63,7 @@ def _record(**overrides: object) -> EpisodeProcessingRecord:
             payload=RecordedTextInput(text="book the dentist"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            parties=parties_for(InputOrigin.USER),
+            parties=OWNERS_WORDS,
         ),
         "status": ProcessingStatus.COMPLETED,
         "reason": ProcessingReason.RETURNED,

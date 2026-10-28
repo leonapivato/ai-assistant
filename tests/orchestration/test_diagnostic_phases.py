@@ -30,7 +30,6 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     DiagnosticKind,
     DiagnosticSource,
-    InputOrigin,
     Memory,
     Message,
     OfferedTool,
@@ -327,7 +326,6 @@ def _inputs() -> PlanningInputs:
         activation_id=_ACTIVATION,
         place=PlaceWindow(takes_message=True, description="the kitchen chat"),
         capabilities=(),
-        trigger_origin=InputOrigin.USER,
     )
 
 

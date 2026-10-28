@@ -32,7 +32,6 @@ from ai_assistant.core.types import (
     ClaimedAuthor,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     JoinedInput,
     MemorySource,
     MessageAuthor,
@@ -145,7 +144,6 @@ async def _rendered(  # noqa: PLR0913 — one knob per thing the phase hands the
     running: Sequence[InProgressEntry] = (),
     more: int = 0,
     joined: Sequence[JoinedInput] = (),
-    origin: InputOrigin | None = None,
 ) -> Rendered:
     model = FakeStructuredCompleter(_reply())
     stage = UnderstandingStage(
@@ -162,7 +160,6 @@ async def _rendered(  # noqa: PLR0913 — one knob per thing the phase hands the
         deadline=asyncio.get_running_loop().time() + 60,
         recall=recall,
         stories=stories,
-        origin=origin,
         joined=joined,
         running=running,
         running_more=more,
@@ -604,7 +601,7 @@ async def test_a_last_stimulus_is_the_newest_earlier_one_for_the_person_running_
         channel=LINE,
         input="still going",
         acted=False,
-        origin=InputOrigin.USER,
+        parties=(OWNER,),
         arrived_at=AT - timedelta(minutes=2),
         inputs=(EntryInput(brief="still going", parties=(OWNER,)),),
     )
@@ -713,7 +710,7 @@ async def test_a_concurrent_stimulus_holding_several_inputs_renders_one_tag_each
         channel=CHAT,
         input="book a table at Luigi's for 4",
         acted=False,
-        origin=InputOrigin.USER,
+        parties=(OWNER,),
         arrived_at=AT - timedelta(minutes=2),
         inputs=(
             EntryInput(brief="book a table at Luigi's", parties=(OWNER,)),
@@ -739,7 +736,7 @@ async def test_an_outside_concurrent_stimulus_is_marked_and_its_withheld_input_n
         channel=LINE,
         input=None,
         acted=True,
-        origin=InputOrigin.OUTSIDE,
+        parties=(SupportHolder.source("12345", claimed=True),),
         arrived_at=AT - timedelta(minutes=1),
         inputs=(EntryInput(brief=None, parties=(SupportHolder.source("12345", claimed=True),)),),
         outside=True,

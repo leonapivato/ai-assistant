@@ -1,4 +1,4 @@
-"""ADR-0284 §2, §7 and §8: the input's origin, the search text and the one projection.
+"""ADR-0284 §2, §7 and §8: the input's parties, the search text and the one projection.
 
 As ADR-0318 §3 and §4 leave them: no resume trigger and no stage verdict.
 """
@@ -12,8 +12,8 @@ from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import (
     TASK_SCHEDULER,
+    declared_input,
     establishes_the_user,
-    input_origin,
 )
 from ai_assistant.core.episode_encoding import episode_content, project_episode
 from ai_assistant.core.types import (
@@ -26,7 +26,6 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodeProjection,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     Modality,
     NewConversation,
@@ -41,12 +40,21 @@ from ai_assistant.core.types import (
     SpokenReply,
     StageEntry,
     StageOutcome,
+    StatementPart,
+    SupportHolder,
     UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
+    parties_are_assistants,
+    parties_are_outside,
+    parties_are_persons_own,
 )
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    ASSISTANTS_WORDS,
+    OWNERS_WORDS,
+    UNIDENTIFIED_WORDS,
+)
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=1)
@@ -56,15 +64,17 @@ _USER_WORDS = "book the dentist for Tuesday at 3"
 _REPORT = "Dentist appointment moved to Wednesday 10:00 by the clinic"
 
 
-def _trigger(origin: InputOrigin, *, text: str = _USER_WORDS) -> RecordedChannelTrigger:
-    if origin is InputOrigin.OUTSIDE:
+def _trigger(
+    parties: tuple[SupportHolder, ...], *, text: str = _USER_WORDS
+) -> RecordedChannelTrigger:
+    if parties_are_outside(parties):
         return RecordedChannelTrigger(
             target=_EVENTS,
             channel=_EVENTS,
             payload=RecordedTextInput(text=text),
             context=ChannelContext(),
             reply=None,
-            parties=parties_for(origin),
+            parties=parties,
         )
     return RecordedChannelTrigger(
         target=_CONVERSATION,
@@ -72,7 +82,7 @@ def _trigger(origin: InputOrigin, *, text: str = _USER_WORDS) -> RecordedChannel
         payload=RecordedTextInput(text=text),
         context=ChannelContext(),
         reply=WholeTextReply(),
-        parties=parties_for(origin),
+        parties=parties,
     )
 
 
@@ -81,14 +91,14 @@ _INSTRUCTION = "check back with the user about the dentist"
 
 
 def _scheduled() -> RecordedChannelTrigger:
-    """A trigger the Task Scheduler pushed: a task's instruction, its origin ``assistant``."""
+    """A trigger the Task Scheduler pushed: a task's instruction, the assistant's words."""
     return RecordedChannelTrigger(
         target=_SCHEDULE,
         channel=_SCHEDULE,
         payload=RecordedTextInput(text=_INSTRUCTION),
         context=ChannelContext(),
         reply=None,
-        parties=parties_for(InputOrigin.ASSISTANT),
+        parties=ASSISTANTS_WORDS,
     )
 
 
@@ -160,50 +170,62 @@ def _recordless(content: str = "The user asked: what is on today?") -> EpisodicM
 # --- §2: where the input came from ----------------------------------------------
 
 
-def test_the_origin_enumeration_is_user_outside_and_assistant() -> None:
-    """ADR-0284 §2:1, ADR-0350 §12:7: closed, added to and never renamed."""
-    assert [member.value for member in InputOrigin] == ["user", "outside", "assistant"]
-
-
-@pytest.mark.parametrize("origin", list(InputOrigin))
-def test_a_recorded_trigger_round_trips_its_origin(origin: InputOrigin) -> None:
-    trigger = _trigger(origin)
+@pytest.mark.parametrize(
+    "parties",
+    [
+        pytest.param(OWNERS_WORDS, id="owners"),
+        pytest.param(UNIDENTIFIED_WORDS, id="unidentified"),
+        pytest.param(ASSISTANTS_WORDS, id="assistants"),
+    ],
+)
+def test_a_recorded_trigger_round_trips_its_parties(parties: tuple[SupportHolder, ...]) -> None:
+    trigger = _trigger(parties)
     assert RecordedChannelTrigger.model_validate_json(trigger.model_dump_json()) == trigger
-    assert trigger.origin is origin
+    assert trigger.parties == parties
+    assert not hasattr(trigger, "origin")
 
 
 @pytest.mark.parametrize(
-    ("target", "origin"),
+    ("target", "parties"),
     [
-        pytest.param(_CONVERSATION, InputOrigin.USER, id="conversation"),
-        pytest.param(NewConversation(), InputOrigin.USER, id="new-conversation"),
-        pytest.param(_EVENTS, InputOrigin.OUTSIDE, id="informational-event"),
+        pytest.param(_CONVERSATION, OWNERS_WORDS, id="conversation"),
+        pytest.param(NewConversation(), OWNERS_WORDS, id="new-conversation"),
+        pytest.param(_EVENTS, None, id="informational-event"),
     ],
 )
-def test_each_channel_type_declares_its_inputs_origin(
-    target: ChannelIdentity | NewConversation, origin: InputOrigin
+def test_each_channel_type_declares_its_inputs_parties(
+    target: ChannelIdentity | NewConversation, parties: tuple[SupportHolder, ...] | None
 ) -> None:
-    assert input_origin(target) is origin
+    declared, _ = declared_input(target)
+    if parties is None:
+        # ADR-0351 §3:5: an event's party is its connected source, established.
+        assert parties_are_outside(declared)
+        assert len(declared) == 1
+    else:
+        assert declared == parties
+        assert parties_are_persons_own(declared)
 
 
 def test_a_channel_type_with_no_declaration_is_refused() -> None:
     with pytest.raises(ValueError, match="declares no parties for its input"):
-        input_origin(ChannelIdentity(channel_type="sensor", instance_id="door"))
+        declared_input(ChannelIdentity(channel_type="sensor", instance_id="door"))
 
 
-def test_the_task_scheduler_declares_its_origin_per_input() -> None:
-    """ADR-0350 §2:7, §6:3: ``assistant``, or ``outside`` for a task carrying the mark."""
-    assert input_origin(_SCHEDULE) is InputOrigin.ASSISTANT
-    assert input_origin(_SCHEDULE, carries_outside_mark=True) is InputOrigin.OUTSIDE
+def test_the_task_scheduler_declares_its_parties_per_input() -> None:
+    """ADR-0351 §3:6: the assistant's statement, with unknown for a task carrying the mark."""
+    plain, _ = declared_input(_SCHEDULE)
+    marked, _ = declared_input(_SCHEDULE, carries_outside_mark=True)
+    assert plain == (SupportHolder.statement(StatementPart.SCHEDULED_INSTRUCTION),)
+    assert parties_are_assistants(plain)
+    assert parties_are_outside(marked)
+    assert SupportHolder.unknown() in marked
     assert not establishes_the_user(TASK_SCHEDULER)
 
 
-def test_a_mark_is_declared_by_the_task_scheduler_alone_and_never_with_a_forward() -> None:
-    """A kind that pushes no marked input declares no origin for one, and none takes both."""
+def test_a_mark_is_declared_by_the_task_scheduler_alone() -> None:
+    """A kind that pushes no marked input declares no parties for one."""
     with pytest.raises(ValueError, match="declares no parties for an input carrying the mark"):
-        input_origin(_CONVERSATION, carries_outside_mark=True)
-    with pytest.raises(ValueError, match="not both"):
-        input_origin(_SCHEDULE, takes_in_forward=True, carries_outside_mark=True)
+        declared_input(_CONVERSATION, carries_outside_mark=True)
 
 
 # --- §7: the search text ----------------------------------------------------------
@@ -211,7 +233,7 @@ def test_a_mark_is_declared_by_the_task_scheduler_alone_and_never_with_a_forward
 
 def test_a_users_episode_is_found_by_its_meaning_and_the_users_words() -> None:
     record = _episode(
-        _trigger(InputOrigin.USER),
+        _trigger(OWNERS_WORDS),
         understanding=(
             _understanding("an earlier reading", version=1),
             _understanding("a dentist booking", version=2),
@@ -222,7 +244,7 @@ def test_a_users_episode_is_found_by_its_meaning_and_the_users_words() -> None:
 
 def test_an_outside_episode_is_found_by_its_meaning_alone() -> None:
     record = _episode(
-        _trigger(InputOrigin.OUTSIDE, text=_REPORT),
+        _trigger(UNIDENTIFIED_WORDS, text=_REPORT),
         understanding=(_understanding("the dentist moved the appointment"),),
     )
     content = episode_content(record)
@@ -232,7 +254,7 @@ def test_an_outside_episode_is_found_by_its_meaning_alone() -> None:
 
 def test_an_outside_episode_no_stage_understood_never_carries_the_report() -> None:
     record = _episode(
-        _trigger(InputOrigin.OUTSIDE, text=_REPORT),
+        _trigger(UNIDENTIFIED_WORDS, text=_REPORT),
         status=ProcessingStatus.FAILED,
         reason=ProcessingReason.UNDERSTANDING_FAILED,
     )
@@ -247,19 +269,19 @@ def test_a_scheduled_steps_episode_is_found_by_its_meaning_alone() -> None:
     assert _INSTRUCTION not in content
 
 
-def test_a_scheduled_steps_input_is_never_shown_and_carries_its_origin() -> None:
-    """ADR-0350 §6:12: a reader attributes it from its origin, never as the user's words."""
+def test_a_scheduled_steps_input_is_never_shown_and_carries_its_parties() -> None:
+    """ADR-0350 §6:12: a reader attributes it from its parties, never as the user's words."""
     record = _episode(_scheduled(), understanding=(_understanding("checking back"),))
     for admitted in (False, True):
         projection = project_episode(record, excerpt_chars=200, admit_outside_input=admitted)
-        assert projection.origin is InputOrigin.ASSISTANT
+        assert parties_are_assistants(projection.parties, relayed=projection.relayed)
         assert projection.input is None
         assert projection.meaning == "checking back"
 
 
 def test_an_episode_with_no_understanding_is_found_by_how_it_ended() -> None:
     record = _episode(
-        _trigger(InputOrigin.USER),
+        _trigger(OWNERS_WORDS),
         status=ProcessingStatus.FAILED,
         reason=ProcessingReason.PROCESSING_FAILED,
     )
@@ -273,7 +295,7 @@ def test_a_users_transcript_is_their_words() -> None:
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript="call mum"),
         context=ChannelContext(),
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-        parties=parties_for(InputOrigin.USER),
+        parties=OWNERS_WORDS,
     )
     record = _episode(trigger, understanding=(_understanding("a call to make"),))
     assert episode_content(record) == "a call to make\ncall mum"
@@ -287,7 +309,7 @@ def test_speech_with_no_words_adds_none(transcript: str | None) -> None:
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript=transcript),
         context=ChannelContext(),
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-        parties=parties_for(InputOrigin.USER),
+        parties=OWNERS_WORDS,
     )
     record = _episode(
         trigger, status=ProcessingStatus.FAILED, reason=ProcessingReason.TRANSCRIPTION_FAILED
@@ -296,7 +318,7 @@ def test_speech_with_no_words_adds_none(transcript: str | None) -> None:
 
 
 def test_the_search_text_ignores_the_content_it_replaces() -> None:
-    record = _episode(_trigger(InputOrigin.USER), understanding=(_understanding("a booking"),))
+    record = _episode(_trigger(OWNERS_WORDS), understanding=(_understanding("a booking"),))
     assert "never shown" not in episode_content(record)
 
 
@@ -318,7 +340,7 @@ def test_the_projection_carries_unclear_and_no_ground() -> None:
 def test_a_users_episode_projects_every_part() -> None:
     unclear = (UnclearPoint(gap="which dentist", readings=("Dr Lind", "Dr Moss")),)
     record = _episode(
-        _trigger(InputOrigin.USER),
+        _trigger(OWNERS_WORDS),
         understanding=(
             _understanding("an earlier reading", version=1),
             _understanding("a dentist booking", version=2, unclear=unclear),
@@ -329,7 +351,7 @@ def test_a_users_episode_projects_every_part() -> None:
     assert projection == EpisodeProjection(
         occurred_at=_NOW,
         channel=_CONVERSATION,
-        parties=parties_for(InputOrigin.USER),
+        parties=OWNERS_WORDS,
         input=ProjectedText(text=_USER_WORDS, full_chars=len(_USER_WORDS)),
         meaning="a dentist booking",
         unclear=unclear,
@@ -344,11 +366,11 @@ def test_a_users_episode_projects_every_part() -> None:
 
 def test_an_outside_input_is_withheld_unless_admitted() -> None:
     record = _episode(
-        _trigger(InputOrigin.OUTSIDE, text=_REPORT),
+        _trigger(UNIDENTIFIED_WORDS, text=_REPORT),
         understanding=(_understanding("the appointment moved"),),
     )
     withheld = project_episode(record, excerpt_chars=1000)
-    assert withheld.origin is InputOrigin.OUTSIDE
+    assert parties_are_outside(withheld.parties, relayed=withheld.relayed)
     assert withheld.input is None
     assert withheld.meaning == "the appointment moved"
     admitted = project_episode(record, excerpt_chars=1000, admit_outside_input=True)
@@ -357,9 +379,7 @@ def test_an_outside_input_is_withheld_unless_admitted() -> None:
 
 def test_the_input_and_the_response_are_cut_and_the_cut_is_carried() -> None:
     reply = "R" * 50
-    projection = project_episode(
-        _episode(_trigger(InputOrigin.USER), outcome=reply), excerpt_chars=10
-    )
+    projection = project_episode(_episode(_trigger(OWNERS_WORDS), outcome=reply), excerpt_chars=10)
     assert projection.input == ProjectedText(text=_USER_WORDS[:10], full_chars=len(_USER_WORDS))
     assert projection.response == ProjectedText(text="R" * 10, full_chars=50)
     assert projection.input is not None
@@ -370,7 +390,7 @@ def test_the_input_and_the_response_are_cut_and_the_cut_is_carried() -> None:
 
 def test_a_text_exactly_at_the_bound_is_not_cut() -> None:
     projection = project_episode(
-        _episode(_trigger(InputOrigin.USER), outcome="ok"), excerpt_chars=len(_USER_WORDS)
+        _episode(_trigger(OWNERS_WORDS), outcome="ok"), excerpt_chars=len(_USER_WORDS)
     )
     assert projection.input is not None
     assert projection.response is not None
@@ -387,7 +407,7 @@ def test_an_episode_without_a_processing_record_shows_its_content_as_its_input()
         response=ProjectedText(text="Two meetings", full_chars=39),
     )
     assert not projection.has_processing_record
-    assert (projection.channel, projection.origin, projection.status) == (None, None, None)
+    assert (projection.channel, projection.parties, projection.status) == (None, None, None)
 
 
 def test_derived_from_external_is_what_the_predicate_answers() -> None:
@@ -398,7 +418,7 @@ def test_derived_from_external_is_what_the_predicate_answers() -> None:
         derived_from_external=True,
     )
     projection = project_episode(
-        _episode(_trigger(InputOrigin.USER), provenance=tainted), excerpt_chars=100
+        _episode(_trigger(OWNERS_WORDS), provenance=tainted), excerpt_chars=100
     )
     assert projection.derived_from_external
     # ADR-0106 §2: the field means nothing in the asserted band, and the predicate
@@ -410,15 +430,15 @@ def test_derived_from_external_is_what_the_predicate_answers() -> None:
         derived_from_external=True,
     )
     projection = project_episode(
-        _episode(_trigger(InputOrigin.USER), provenance=asserted), excerpt_chars=100
+        _episode(_trigger(OWNERS_WORDS), provenance=asserted), excerpt_chars=100
     )
     assert not projection.derived_from_external
 
 
-def test_origin_and_derived_from_external_are_independent() -> None:
+def test_the_parties_and_derived_from_external_are_independent() -> None:
     # §8:4: an outside report read over no external material is outside and untainted.
-    projection = project_episode(_episode(_trigger(InputOrigin.OUTSIDE)), excerpt_chars=100)
-    assert projection.origin is InputOrigin.OUTSIDE
+    projection = project_episode(_episode(_trigger(UNIDENTIFIED_WORDS)), excerpt_chars=100)
+    assert parties_are_outside(projection.parties, relayed=projection.relayed)
     assert not projection.derived_from_external
 
 
@@ -429,7 +449,7 @@ def test_the_excerpt_bound_is_a_positive_integer(bound: object) -> None:
 
 
 def test_the_projection_never_carries_the_search_text_of_a_recorded_episode() -> None:
-    projection = project_episode(_episode(_trigger(InputOrigin.USER)), excerpt_chars=1000)
+    projection = project_episode(_episode(_trigger(OWNERS_WORDS)), excerpt_chars=1000)
     assert "never shown" not in projection.model_dump_json()
 
 

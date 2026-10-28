@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, NoReturn
 
-from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
@@ -31,7 +31,6 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActivationUnderstanding, MemoryRecord
@@ -94,7 +93,7 @@ def episode(  # noqa: PLR0913 — one knob per field a case varies
                 payload=RecordedTextInput(text=text),
                 context=ChannelContext(),
                 reply=None if event else WholeTextReply(),
-                parties=parties_for(input_origin(channel)),
+                parties=declared_input(channel)[0],
             ),
             status=ProcessingStatus.COMPLETED if frozen else None,
             reason=ProcessingReason.RETURNED if frozen else None,

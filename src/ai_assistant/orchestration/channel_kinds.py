@@ -5,7 +5,7 @@ directions, whether it is pulled or pushes, which events are input, its push fil
 how it establishes authors, its places, its window, what counts as sent, its
 description, its requirements and its audience. Until the Telegram line no kind was
 declared in code: the hub chat's description is stated where the phases show it, and
-what admission needs of every type — its input origin, and whether it establishes the
+what admission needs of every type — the parties of its input, and whether it establishes the
 user as an author — is :mod:`ai_assistant.core.channel_validation`'s register.
 
 **This module is the shape the first kind declared in code takes** (ADR-0323 §9:1,
@@ -14,7 +14,7 @@ ADR-0324's "the shape the first kind declared in code takes"): one frozen
 rather than prose. A kind declared here states what it is; the module that builds its
 spoke reads the rows it acts on (its description, its window, its writer's rules), and
 the rows admission reads stay in ``core``'s register, which :meth:`ChannelKind.
-establishes_the_user` and :meth:`ChannelKind.input_origin` read rather than restate,
+establishes_the_user` and :meth:`ChannelKind.input_parties` read rather than restate,
 so the two can never disagree. A pulled kind's declaration needs of this only its
 description (ADR-0324), and the shape takes it with no spoke at all.
 
@@ -49,12 +49,18 @@ from typing import TYPE_CHECKING, Final
 
 from pydantic import ValidationError
 
-from ai_assistant.core.channel_validation import establishes_the_user, input_origin, origin_kind
+from ai_assistant.core.channel_validation import (
+    declared_input,
+    establishes_the_user,
+    origin_kind,
+)
 from ai_assistant.core.types import ChannelIdentity
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.core.channel_validation import OriginKind
-    from ai_assistant.core.types import ApprovalGiver, InputOrigin
+    from ai_assistant.core.types import ApprovalGiver, RecordedInputMessage, SupportHolder
 
 __all__ = [
     "Audience",
@@ -202,29 +208,27 @@ class ChannelKind:
         """Whether the kind can confirm a claimed message's delivery (ADR-0350 §8:12)."""
         return confirms_delivery(self.channel_type)
 
-    def input_origin(
+    def input_parties(
         self,
         channel: ChannelIdentity,
+        messages: Sequence[RecordedInputMessage] = (),
         *,
-        takes_in_forward: bool,
         carries_outside_mark: bool = False,
-    ) -> InputOrigin:
-        """The origin the kind declares for one input on ``channel`` (ADR-0284 §2:2).
+    ) -> tuple[tuple[SupportHolder, ...], tuple[RecordedInputMessage, ...]]:
+        """The parties the kind declares for one input on ``channel`` (ADR-0351 §3:1).
 
-        A kind that declares its origin per input reads, for this one, whether it takes
-        in a forward (ADR-0323 §4:11) or carries the outside-content mark (ADR-0350
-        §6:3).
+        Per input, as admission records them: each message with the party the kind
+        declares for it, a forward's its original sender, claimed (§2:7), and the
+        input's parties their distinct parties (§2:6).
 
         Raises:
             ValueError: If ``channel`` is not of this kind, or the register declares no
-                origin for the input.
+                parties for the input.
         """
         if channel.channel_type != self.channel_type:
-            msg = "a kind declares the origin of its own channels' input alone"
+            msg = "a kind declares the parties of its own channels' input alone"
             raise ValueError(msg)
-        return input_origin(
-            channel, takes_in_forward=takes_in_forward, carries_outside_mark=carries_outside_mark
-        )
+        return declared_input(channel, messages, carries_outside_mark=carries_outside_mark)
 
 
 def confirms_delivery(channel_type: str) -> bool:
