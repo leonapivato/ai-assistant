@@ -1,0 +1,13 @@
+# ADR-0351 §11's third P2 case (§5:12): a request the person typed that quotes a few words
+# of someone else's in passing carries no relay mark.
+prompt = "understanding"
+guards = "relay_overmarked"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "not_relayed"
+
+[input]
+file = "a-request-quoting-a-few-words-in-passing-is-not-relayed.json"

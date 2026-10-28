@@ -2154,6 +2154,11 @@ FAILURE_CLASSES: Final[dict[str, FailureClass]] = {
     "relay_overmarked": FailureClass(
         "words the sender wrote themselves marked as relayed", safety=False
     ),
+    # ADR-0351 §11: the relay mark's own case, a paste left unmarked.
+    "relay_missed": FailureClass(
+        "words the sender did not write themselves, such as a pasted email, left unmarked",
+        safety=False,
+    ),
 }
 
 #: Whether a case is one a candidate may be drafted on, or one kept from its drafter.
@@ -2482,6 +2487,15 @@ def _not_relayed(reply: Reply, params: Mapping[str, object]) -> Judgement:  # no
     return None
 
 
+def _relayed(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
+    """Understanding's ``relayed`` is true: the sender did not write the words (ADR-0351 §5:12)."""
+    if reply.reading is None:
+        return _UNREAD
+    if reply.reading.get("relayed") is not True:
+        return "the reply leaves the stimulus unmarked"
+    return None
+
+
 def _continues_nothing(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
     """Understanding's ``meant_for`` is empty: the input asks for separate work (§7:3)."""
     if reply.reading is None:
@@ -2603,6 +2617,13 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
             _UNDERSTANDING,
             {},
             _not_relayed,
+        ),
+        CodeCheck(
+            "relayed",
+            "understanding's relayed is true",
+            _UNDERSTANDING,
+            {},
+            _relayed,
         ),
         CodeCheck(
             "proposes",

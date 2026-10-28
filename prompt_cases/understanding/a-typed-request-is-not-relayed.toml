@@ -1,0 +1,13 @@
+# ADR-0351 §11's second P2 case (§5:12): a request the person typed themselves carries no
+# relay mark.
+prompt = "understanding"
+guards = "relay_overmarked"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "not_relayed"
+
+[input]
+file = "a-typed-request-is-not-relayed.json"
