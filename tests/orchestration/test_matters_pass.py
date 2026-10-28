@@ -19,6 +19,7 @@ from story_support import AT, EVENTS, activation, episode, memory_of, story
 from structlog.testing import capture_logs
 
 from ai_assistant.core.types import (
+    ActivationUnderstanding,
     Message,
     Role,
     StoryActor,
@@ -32,6 +33,8 @@ from ai_assistant.core.types import (
     StoryRefusalReason,
     StorySummaryDraft,
     StorySummaryLine,
+    UnclearPoint,
+    UnderstandingProducer,
 )
 from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT, MattersPass
 from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT
@@ -46,6 +49,19 @@ if TYPE_CHECKING:
 _BUDGET: Final = timedelta(seconds=10)
 _LEAVE: Final = json.dumps({"decision": "leave"})
 _TWO: Final = StoryFlag(kind=StoryFlagKind.TWO_MATTERS)
+
+#: A version with a meaning and an unclear point, as ADR-0353 records one.
+_UNDERSTOOD: Final = ActivationUnderstanding(
+    version=1,
+    recorded_at=AT,
+    producer=UnderstandingProducer.INTERPRETATION,
+    meaning="Plans a camping trip to Riverside in October.",
+    unclear=(UnclearPoint(gap="which weekend in October", readings=("the 18th",)),),
+)
+_SHOWN_THEN: Final = {
+    "provisional": "what the assistant understood then, not an established fact",
+    "meaning": "Plans a camping trip to Riverside in October.",
+}
 
 
 def _stories() -> FakeStoryStore:
@@ -1007,6 +1023,22 @@ async def test_an_outside_episodes_input_is_never_shown_and_it_is_marked() -> No
     shown = _shown(model)["episodes"]
     assert "outside_content" in shown[1]
     assert "outside_content" not in shown[0]
+
+
+async def test_an_episode_is_shown_with_its_versions_meaning_alone() -> None:
+    """ADR-0353 §14:8: the pass reads the projection's meaning alone."""
+    stories = _stories()
+    memory = await memory_of(episode("a-1", understanding=(_UNDERSTOOD,)), episode("a-2"))
+    trip = await _story(stories, "a-1", "a-2")
+    await _raise(stories, trip, _TWO)
+    model = FakeModelProvider(_LEAVE)
+
+    await _pass(model, stories, memory).run()
+
+    understood, not_understood = _shown(model)["episodes"]
+    assert understood["understood_then"] == _SHOWN_THEN
+    assert "understood_then" not in not_understood
+    assert "which weekend" not in model.calls[0].messages[1].content
 
 
 async def test_an_open_member_episode_is_not_shown_and_cannot_be_named() -> None:
