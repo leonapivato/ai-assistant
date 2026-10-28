@@ -3265,10 +3265,13 @@ async def _suite_outcome(call: SuiteCall, caller: Caller) -> tuple[dict[str, obj
             return {"reply": text}, completion_reply(call.case.prompt, text)
         shape = STRUCTURED.get(call.case.prompt)
         if shape is not None and call.case.tools is None and followed is None:
-            # ADR-0354 §8:6: sent as the stage sends it, and read by the one rule.
+            # ADR-0354 §8:6: sent as the stage sends it, and scored on the value the seam
+            # read by the one rule; a returned failure, ``cut`` or ``refused`` included
+            # whatever its text holds, is a reply the stage would not take (§8:3, §8:4).
             reply = await caller.complete_structured(call.messages, shape)
             outcome = _structured_outcome(reply, shape, None)
-            return outcome, completion_reply(call.case.prompt, reply.exchange.reply)
+            value = reply.value
+            return outcome, Reply(reading=None if value is None else value.model_dump(mode="json"))
         if call.case.tools is None:
             text = await caller.complete(call.messages)
             return {"reply": text}, completion_reply(call.case.prompt, text)

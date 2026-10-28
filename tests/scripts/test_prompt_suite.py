@@ -1069,6 +1069,29 @@ def test_continues_nothing_passes_only_an_empty_list() -> None:
     assert _judge("continues_nothing", {}, "understanding", _meaning(meant_for=["R1"])) is not None
 
 
+@pytest.mark.parametrize(("finish", "failure"), [("length", "cut"), ("content_filter", "refused")])
+def test_a_structured_failure_passes_no_check_whatever_its_text_holds(
+    tmp_path: Path, finish: str, failure: str
+) -> None:
+    """ADR-0354 §8:3, §8:4, §8:6: a case is scored on the value the seam read, so a reply
+    the stage would repair or refuse passes nothing, though its text would read."""
+    text = json.dumps({"understanding": "A note to self.", "relayed": False})
+    model = Model(
+        reply=lambda _system: ModelResponse(parts=[TextPart(text)], finish_reason=finish)  # type: ignore[arg-type]  # a finish reason in pydantic-ai's vocabulary
+    )
+    directory = _cases(
+        tmp_path, ("understanding/one.toml", _understanding(property={"check": "not_relayed"}))
+    )
+    results = tmp_path / "results"
+
+    _suite(directory, model, [], results=results)
+
+    lines = _lines(results)
+    assert [one["passed"] for one in lines] == [False, False]
+    assert [one["reason"] for one in lines] == ["the reply is not one its stage reads"] * 2
+    assert {one["structured"]["failure"] for one in lines} == {failure}
+
+
 # --- ADR-0353 §13:4: the checks of the probe stimuli and the controls -------------------
 
 

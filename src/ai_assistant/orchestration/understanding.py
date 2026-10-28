@@ -863,6 +863,7 @@ class _Words:
     text: str
     replies_to: str | None = None
     forward: bool = False
+    number: int | None = None
 
 
 # --- the rendered call -----------------------------------------------------------
@@ -1402,7 +1403,17 @@ class _Renderer:
         """
         words: list[_Words]
         if isinstance(window, TranscriptWindow) and window.input_messages:
-            words = [self._input_message(one, window, by_position) for one in window.input_messages]
+            # ADR-0293 §4:5: a message of the input may reply to another of the input, which
+            # carries no label, so each is numbered and a reply names the number.
+            numbers = {one.position: n for n, one in enumerate(window.input_messages, 1)}
+            replied = {
+                **{position: f"message {n}" for position, n in numbers.items()},
+                **by_position,
+            }
+            words = [
+                self._input_message(one, window, replied, numbers[one.position])
+                for one in window.input_messages
+            ]
         elif trigger is not None and trigger.messages:
             words = [self._recorded_message(one, None) for one in trigger.messages]
         else:
@@ -1481,6 +1492,8 @@ class _Renderer:
         lines = [f"{opening}. {verb} {content}:"]
         for one in words:
             attributes = [("from", one.writer)]
+            if one.number is not None and several:
+                attributes.append(("message", str(one.number)))
             if one.at is not None and several:
                 attributes.append(("at", self._at(one.at)))
             if one.replies_to is not None:
@@ -1496,7 +1509,9 @@ class _Renderer:
     ) -> tuple[str, str | None]:
         """The framing sentence's ``{what}`` and ``{content}`` (§7:1's table), from records."""
         kind = _origin_of(channel)
-        where = _origin_where(channel)
+        # §3:5: a value from a record, a fallback's channel type among them, is escaped and
+        # kept to one line wherever a line between the tags carries it.
+        where = _line(_origin_where(channel))
         if parties is not None and not parties:
             return f"an input with no one's words in it arrived {where}", None
         if kind is not None and kind.act:
@@ -1505,7 +1520,7 @@ class _Renderer:
         if parties and all(one.kind is HolderKind.ASSISTANT_STATEMENT for one in parties):
             what = "a step of scheduled work came due"
         elif parties and all(one.kind is HolderKind.OUTSIDE_SOURCE for one in parties):
-            what = f"a report from {self._naming.parties(parties)}"
+            what = f"a report from {_line(self._naming.parties(parties))}"
         elif len(words) > 1:
             return f"{_count(len(words))} inputs {where}", "these messages"
         else:
@@ -1521,7 +1536,7 @@ class _Renderer:
             act = f"{kind.act} or forwarded"
         else:
             act = kind.act
-        who = self._naming.who
+        who = _line(self._naming.who)
         if len(words) > 1:
             return f"{_count(len(words))} messages {who} {act} {where}", "these messages"
         return f"a message {who} {act} {where}", kind.content
@@ -1531,11 +1546,13 @@ class _Renderer:
         message: TranscriptMessage | LineMessage,
         window: TranscriptWindow,
         by_position: Mapping[int, str],
+        number: int,
     ) -> _Words:
         """One message of the input as the medium holds it: who wrote it, when, what it answers.
 
         A forward is its original sender's, claimed, and never the person's words
-        (ADR-0323 §4:10, ADR-0351 §2:7).
+        (ADR-0323 §4:10, ADR-0351 §2:7). What it replies to is named by the window item's
+        label, or by the number of the input's own message it replies to.
         """
         forward = window.forwarded.get(message.position)
         replies = None if message.replies_to is None else by_position.get(message.replies_to)
@@ -1547,6 +1564,7 @@ class _Renderer:
                 text=message.text,
                 replies_to=replies,
                 forward=True,
+                number=number,
             )
         return _Words(
             tag="said",
@@ -1554,6 +1572,7 @@ class _Renderer:
             at=message.written_at,
             text=message.text,
             replies_to=replies,
+            number=number,
         )
 
     def _recorded_message(self, message: RecordedInputMessage, replies: str | None) -> _Words:
@@ -1607,7 +1626,7 @@ class _Renderer:
                 f"- {_upper(who)}'s last stimulus: the system holds none earlier than this one."
             )
         else:
-            second = f"- {_upper(who)}'s last stimulus: {self._at(last[0])}, {last[1]}."
+            second = f"- {_upper(who)}'s last stimulus: {self._at(last[0])}, {_line(last[1])}."
         name = _origin_name(self._channel)
         if kind is None:
             third = f"- The origin: {_line(name)}; the system has no description of it."
@@ -1714,7 +1733,9 @@ class _Renderer:
             return _SYSTEM
         if item.author is MessageAuthor.USER:
             return self._naming.who
-        return item.source or _UNKNOWN
+        # ADR-0274 §5:4, ADR-0276 §3:6: a source label the channel supplied establishes no
+        # writer, so it is named as claimed, however it reads.
+        return _UNKNOWN if item.source is None else f"{item.source}, as claimed"
 
     def _knowledge_note(self, window: ChannelWindow, *, remembered: bool) -> str:
         """Origin knowledge's note where it renders nothing (§8:1)."""
