@@ -1736,7 +1736,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # hold ADR-0121 §1's certain agreements alone — so this line buys the
             # judgement rather than enabling the write path.
             reconciler=ModelBackedReconciler(
-                model=reconciler_model,
+                # ADR-0354 §6:2: its `StructuredCompleter` is the object it was handed
+                # as its `ModelProvider` before, with its route and retry unchanged.
+                completer=reconciler_model,
                 route=reconciler_route,
                 # ADR-0334 §3:5: its instruction, as read at start, default or override.
                 prompt=prompts[MEMORY_RECONCILER_PROMPT.name],
@@ -3334,7 +3336,8 @@ def _build_reconciler_provider(settings: Settings, spec: str) -> RetryingProvide
         spec: The reconciler's ``"provider:model"`` spec (:func:`_reconciler_spec`).
 
     Returns:
-        The provider the reconciler labels through.
+        The provider the reconciler labels through, as its ``StructuredCompleter``
+        (ADR-0354 §6:2): ``RetryingProvider`` implements it beside ``complete``.
 
     Raises:
         ConfigurationError: If ``spec`` names a vendor unknown to pydantic-ai or

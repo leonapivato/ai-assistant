@@ -23,9 +23,11 @@ from ai_assistant.app.composition import (
 )
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError, ModelError, ModelUnavailableError
+from ai_assistant.core.protocols import StructuredCompleter
 from ai_assistant.core.types import Message, Role
 from ai_assistant.memory import MemoryIngestor, ModelBackedReconciler
 from ai_assistant.models import PydanticAIProvider, RetryingProvider, RoutingProvider
+from ai_assistant.models.retry import RetryPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -414,15 +416,15 @@ def _reconciler_of(engine: Engine) -> ModelBackedReconciler:
     return reconciler
 
 
-def _reconciler_provider(engine: Engine) -> ModelProvider:
-    """The provider the composed engine's writer will actually label through.
+def _reconciler_provider(engine: Engine) -> StructuredCompleter:
+    """The completer the composed engine's writer will actually label through.
 
     The same deliberate reach-in ``_consolidation_provider`` uses: the composition root's
     obligations are about *which object ends up where*, and no public surface
     exposes that — a writer holds its reconciler and shows nobody, which is the
     whole of ADR-0159 §2's "``memory``-internal seam".
     """
-    return _reconciler_of(engine)._model
+    return _reconciler_of(engine)._completer
 
 
 def test_the_reconciler_labels_through_the_conversational_route_when_unset() -> None:
@@ -462,6 +464,36 @@ async def test_the_reconcilers_seam_is_a_retrying_provider_and_never_a_router(
         model = _reconciler_provider(engine)
         assert isinstance(model, RetryingProvider)
         assert not isinstance(model, RoutingProvider)
+    finally:
+        await engine.aclose()
+
+
+async def test_the_reconciler_is_handed_its_route_as_a_structured_completer(
+    tmp_path: Path,
+) -> None:
+    """ADR-0354 §6:2: the object it held as its ``ModelProvider``, as its completer.
+
+    The same composed object: one retrying wrapper over the one provider its named
+    route builds, under the retry policy every other route gets from ``Settings``,
+    and implementing ``StructuredCompleter`` beside ``complete``. Its route, its retry
+    policy and its lack of a fallback stay as they were before the move.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-x",
+        reconciler_model="openai:gpt-5",
+        model_max_attempts=5,
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        reconciler = _reconciler_of(engine)
+        completer = reconciler._completer
+        assert isinstance(completer, StructuredCompleter)
+        assert isinstance(completer, RetryingProvider)
+        assert completer._policy == RetryPolicy.from_settings(settings)
+        inner = completer._inner
+        assert type(inner) is PydanticAIProvider
+        assert reconciler._route == "openai:gpt-5"
     finally:
         await engine.aclose()
 

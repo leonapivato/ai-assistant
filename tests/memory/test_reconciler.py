@@ -12,6 +12,15 @@ same reason — ``reconcile`` absorbs its own provider failures, so which outcom
 call took is a fact only this side of the seam holds — while what the *writer*
 does with the report is pinned against the emitted trace in
 ``test_reconciliation_traces.py``.
+
+ADR-0354 moved its one request onto ``StructuredCompleter`` (§9, §10), so every
+case here drives the canonical :class:`~ai_assistant.testing.FakeStructuredCompleter`,
+which reads a scripted reply by the seam's one rule. §12:7's list, for this consumer:
+each returned failure lands where §9:2 puts it, the shape passes §2:3's check, and the
+text-JSON reader is gone are below. Its other two items are vacuous here, and no case
+pretends otherwise: the reconciler writes no diagnostic entry (the comment above
+``MEMORY_RECONCILER_PROMPT``), so there is no given or returned entry to carry
+``reply_shape`` or usage, and no recording of one of its calls to replay.
 """
 
 from __future__ import annotations
@@ -24,28 +33,42 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import ModelError
+from ai_assistant.core.errors import ModelContentFilterError, ModelError, ModelTimeoutError
 from ai_assistant.core.prompts import PromptDeclaration
+from ai_assistant.core.reply_shapes import reply_schema
 from ai_assistant.core.types import (
     ConflictRelation,
     Memory,
     MemoryUpdateProposal,
     Message,
+    ReplyFailure,
     Role,
+    StructuredReply,
 )
+from ai_assistant.memory import _reconciler
 from ai_assistant.memory._reconciler import (
     DEFAULT_RECONCILER_MAX_CONFLICTS,
     MEMORY_RECONCILER_PROMPT,
     ModelBackedReconciler,
     ReconcilerOutcome,
+    ReconcilerReply,
     _quoted_span,
     _render,
 )
-from ai_assistant.testing import FakeModelProvider, default_prompt, prompt_from
+from ai_assistant.testing import (
+    FakeStructuredCompleter,
+    ScriptedReply,
+    default_prompt,
+    prompt_from,
+)
 from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from pydantic import BaseModel
+
+    from ai_assistant.core.protocols import StructuredCompleter
 
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -70,13 +93,13 @@ def _reply(**labels: str) -> str:
     )
 
 
-def _answering(labels: dict[str, str]) -> FakeModelProvider:
-    """A provider that labels whatever it is asked about, plus ``labels``' extras."""
+def _answering(labels: dict[str, str]) -> FakeStructuredCompleter:
+    """A completer whose every reply is ADR-0159 §3's envelope for ``labels``."""
 
-    def reply(_messages: Sequence[Message]) -> str:
+    def reply(_messages: Sequence[Message], _shape: type[BaseModel]) -> str:
         return _reply(**labels)
 
-    return FakeModelProvider(reply=reply)
+    return FakeStructuredCompleter(reply)
 
 
 async def test_the_agrees_rung_labels_restates_with_no_model_call() -> None:
@@ -86,8 +109,8 @@ async def test_the_agrees_rung_labels_restates_with_no_model_call() -> None:
     the model's contribution additive: a verbatim restatement is certain, so it
     costs nothing and the model is never asked about it.
     """
-    model = FakeModelProvider()
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT)
+    model = FakeStructuredCompleter()
+    reconciler = ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT)
     identical = _record("identical", "I prefer window seats")
 
     report = await reconciler.reconcile(
@@ -108,7 +131,9 @@ async def test_one_request_covers_every_member_it_consults_about() -> None:
     latency statement a statement: one request under one deadline.
     """
     model = _answering({"a": "adds", "b": "contradicts", "c": "adds"})
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT, max_conflicts=3)
+    reconciler = ModelBackedReconciler(
+        completer=model, route=_ROUTE, prompt=_PROMPT, max_conflicts=3
+    )
     conflicts = [_record("a"), _record("b"), _record("c")]
 
     report = await reconciler.reconcile(_proposal(_record("new")), conflicts)
@@ -126,7 +151,7 @@ async def test_the_route_is_named_on_every_request() -> None:
     """ADR-0159 §3: a reconciler names the route it calls rather than inheriting it."""
     model = _answering({"a": "adds"})
 
-    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), [_record("a")]
     )
 
@@ -144,7 +169,7 @@ async def test_only_kind_and_content_reach_the_prompt() -> None:
     model = _answering({"a": "adds"})
     conflict = _record("a", "Jon lost his job shortly before 21 June 2023")
 
-    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", "Jon took a temporary job around mid-July 2023")), [conflict]
     )
 
@@ -160,7 +185,7 @@ async def test_the_request_covers_no_member_beyond_the_bound() -> None:
     conflicts = [_record("a"), _record("b"), _record("c"), _record("beyond")]
 
     await ModelBackedReconciler(
-        model=model, route=_ROUTE, prompt=_PROMPT, max_conflicts=3
+        completer=model, route=_ROUTE, prompt=_PROMPT, max_conflicts=3
     ).reconcile(_proposal(_record("new")), conflicts)
 
     sent = _user_turn(model)
@@ -182,7 +207,7 @@ async def test_a_volunteered_label_for_a_beyond_bound_member_is_discarded() -> N
     conflicts = [_record("a"), _record("b"), _record("c"), _record("beyond")]
 
     report = await ModelBackedReconciler(
-        model=model, route=_ROUTE, prompt=_PROMPT, max_conflicts=3
+        completer=model, route=_ROUTE, prompt=_PROMPT, max_conflicts=3
     ).reconcile(_proposal(_record("new")), conflicts)
     relations = report.relations
 
@@ -200,7 +225,7 @@ async def test_a_label_for_a_member_the_rung_already_settled_is_discarded() -> N
     identical = _record("identical", "I prefer window seats")
     proposal = _proposal(_record("new", "I prefer window seats"))
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    report = await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         proposal, [identical, _record("other")]
     )
     relations = report.relations
@@ -213,7 +238,7 @@ async def test_a_label_for_a_member_the_rung_already_settled_is_discarded() -> N
 async def test_a_label_naming_no_member_at_all_is_discarded() -> None:
     model = _answering({"ghost": "contradicts"})
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    report = await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), [_record("a")]
     )
     relations = report.relations
@@ -223,10 +248,10 @@ async def test_a_label_naming_no_member_at_all_is_discarded() -> None:
 
 async def test_no_request_is_made_where_the_rung_settled_everything() -> None:
     """ADR-0159 §3: none where the rung labelled every member it would have asked about."""
-    model = FakeModelProvider()
+    model = FakeStructuredCompleter()
     same = "I prefer window seats"
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    report = await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", same)), [_record("a", same), _record("b", same)]
     )
     relations = report.relations
@@ -236,9 +261,9 @@ async def test_no_request_is_made_where_the_rung_settled_everything() -> None:
 
 
 async def test_no_request_is_made_for_an_empty_conflict_set() -> None:
-    model = FakeModelProvider()
+    model = FakeStructuredCompleter()
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    report = await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), []
     )
     relations = report.relations
@@ -247,23 +272,44 @@ async def test_no_request_is_made_for_an_empty_conflict_set() -> None:
     assert relations == {}
 
 
-class _RaisingProvider:
-    """A provider whose every call fails the way a dead route does."""
+class _BrokenCompleter:
+    """A seam raising what its contract says it never raises.
+
+    ``StructuredCompleter`` raises only ``ModelError`` (ADR-0354 §2:5), and the
+    canonical fake keeps to that: a script that raises anything else is wrapped in one.
+    So it cannot stand for the case ADR-0159 §3's never-raises clause is about when the
+    seam itself is broken, and this double is the one place a non-``ModelError`` comes
+    from. Every other raised failure in this file is the canonical fake's.
+    """
 
     def __init__(self, error: BaseException) -> None:
         self._error = error
         self.calls = 0
 
-    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+    async def complete_structured[T: BaseModel](
+        self, messages: Sequence[Message], shape: type[T], *, model: str | None = None
+    ) -> StructuredReply[T]:
         """Fail, counting the attempt."""
         self.calls += 1
         raise self._error
 
 
+def _raising(error: Exception) -> StructuredCompleter:
+    """A seam whose every call raises ``error``: the canonical fake for a ``ModelError``."""
+    if isinstance(error, ModelError):
+        return FakeStructuredCompleter(error)
+    return _BrokenCompleter(error)
+
+
 @pytest.mark.parametrize(
     "error",
-    [ModelError("the route is down"), TimeoutError("deadline"), RuntimeError("something else")],
-    ids=["model-error", "self-issued-deadline", "unexpected"],
+    [
+        ModelError("the route is down"),
+        ModelTimeoutError("deadline"),
+        ModelContentFilterError("declined"),
+        RuntimeError("something else"),
+    ],
+    ids=["model-error", "self-issued-deadline", "content-filter", "unexpected"],
 )
 async def test_a_failed_request_yields_unlabelled_and_never_raises(error: Exception) -> None:
     """ADR-0159 §3's never-raises clause, over every failure it names.
@@ -278,7 +324,7 @@ async def test_a_failed_request_yields_unlabelled_and_never_raises(error: Except
     conflicts = [identical, _record("other")]
 
     report = await ModelBackedReconciler(
-        model=_RaisingProvider(error), route=_ROUTE, prompt=_PROMPT
+        completer=_raising(error), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new", "I prefer window seats")), conflicts)
     relations = report.relations
 
@@ -294,8 +340,13 @@ async def test_a_cancellation_from_outside_is_delivered_onward() -> None:
     `BaseException` — and that is exactly the property a later "tidy up the bare
     except" would break.
     """
+
+    def cancelled(_messages: Sequence[Message], _shape: type[BaseModel]) -> str:
+        # A `BaseException`, so the fake delivers it as it came rather than wrapping it.
+        raise asyncio.CancelledError
+
     reconciler = ModelBackedReconciler(
-        model=_RaisingProvider(asyncio.CancelledError()), route=_ROUTE, prompt=_PROMPT
+        completer=FakeStructuredCompleter(cancelled), route=_ROUTE, prompt=_PROMPT
     )
 
     with pytest.raises(asyncio.CancelledError):
@@ -316,23 +367,53 @@ async def test_a_cancellation_from_outside_is_delivered_onward() -> None:
 )
 async def test_an_unreadable_reply_leaves_every_member_unlabelled(content: str) -> None:
     report = await ModelBackedReconciler(
-        model=FakeModelProvider(reply=content), route=_ROUTE, prompt=_PROMPT
+        completer=FakeStructuredCompleter(content), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new")), [_record("a")])
     relations = report.relations
 
     assert relations == {}
 
 
-async def test_an_envelope_wrapped_in_prose_and_a_fence_is_still_read() -> None:
-    """ADR-0071's scan: a model that wraps the object is tolerated, a decoy stepped over."""
-    wrapped = 'Here you go {"note": "ignore me"} ```json\n' + _reply(a="adds") + "\n``` done"
+async def test_an_envelope_in_one_enclosing_fence_is_read() -> None:
+    """ADR-0354 §3:4: the one rule removes one fence enclosing the whole reply."""
+    fenced = "```json\n" + _reply(a="adds") + "\n```"
 
     report = await ModelBackedReconciler(
-        model=FakeModelProvider(reply=wrapped), route=_ROUTE, prompt=_PROMPT
+        completer=FakeStructuredCompleter(fenced), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new")), [_record("a")])
-    relations = report.relations
 
-    assert relations == {"a": ConflictRelation.ADDS}
+    assert report.relations == {"a": ConflictRelation.ADDS}
+    assert report.outcomes == frozenset({ReconcilerOutcome.ANSWERED})
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        'Here you go {"note": "ignore me"} ```json\n' + _reply(a="adds") + "\n``` done",
+        "Here you go: " + _reply(a="adds"),
+        _reply(a="adds") + " That is all.",
+        '{"note": "a decoy"} ' + _reply(a="adds"),
+    ],
+    ids=["prose-decoy-and-fence", "prose-before", "prose-after", "decoy-object"],
+)
+async def test_the_envelope_scan_is_gone_and_a_wrapped_envelope_is_not_read(
+    content: str,
+) -> None:
+    """ADR-0354 §10:1: ``_extract_object`` and its miss budget go, and nothing replaces them.
+
+    Each reply here is one the scan read before the move. After it the reply is read by
+    §3:4's rule alone, which cuts no prose away, so each is ``invalid``: a request that
+    yielded no readable answer, ``FAILED`` (§9:2, ADR-0164 §3). A second reader kept
+    beside the seam would label ``a`` here.
+    """
+    report = await ModelBackedReconciler(
+        completer=FakeStructuredCompleter(content), route=_ROUTE, prompt=_PROMPT
+    ).reconcile(_proposal(_record("new")), [_record("a")])
+
+    assert report.relations == {}
+    assert report.outcomes == frozenset({ReconcilerOutcome.FAILED})
+    assert not hasattr(_reconciler, "_extract_object")
+    assert not hasattr(_reconciler, "_MAX_EXTRACTION_MISSES")
 
 
 async def test_a_repeated_entry_takes_the_first_answer() -> None:
@@ -351,7 +432,7 @@ async def test_a_repeated_entry_takes_the_first_answer() -> None:
     )
 
     report = await ModelBackedReconciler(
-        model=FakeModelProvider(reply=doubled), route=_ROUTE, prompt=_PROMPT
+        completer=FakeStructuredCompleter(doubled), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new")), [_record("a")])
     relations = report.relations
 
@@ -390,7 +471,7 @@ async def test_the_default_bound_reaching_a_request_is_the_one_settings_carries(
     beyond = conflicts[-1].id
 
     # Constructed with **no** ``max_conflicts``, which is the whole point.
-    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), conflicts
     )
 
@@ -404,21 +485,21 @@ def test_a_non_positive_bound_is_refused_at_construction(bound: int) -> None:
     """ADR-0022 §4a: a bound the caller got wrong fails where it was set."""
     with pytest.raises(ValueError, match="at least 1"):
         ModelBackedReconciler(
-            model=FakeModelProvider(), route=_ROUTE, prompt=_PROMPT, max_conflicts=bound
+            completer=FakeStructuredCompleter(), route=_ROUTE, prompt=_PROMPT, max_conflicts=bound
         )
 
 
 def test_a_boolean_bound_is_refused_at_construction() -> None:
     with pytest.raises(TypeError, match="must be an integer"):
         ModelBackedReconciler(
-            model=FakeModelProvider(), route=_ROUTE, prompt=_PROMPT, max_conflicts=True
+            completer=FakeStructuredCompleter(), route=_ROUTE, prompt=_PROMPT, max_conflicts=True
         )
 
 
 def test_a_blank_route_is_refused_at_construction() -> None:
     """A reconciler *names* its route (ADR-0159 §3), so a blank one is not one."""
     with pytest.raises(ValueError, match="provider:model"):
-        ModelBackedReconciler(model=FakeModelProvider(), route="  ", prompt=_PROMPT)
+        ModelBackedReconciler(completer=FakeStructuredCompleter(), route="  ", prompt=_PROMPT)
 
 
 def test_a_template_of_another_prompt_is_refused_at_construction() -> None:
@@ -426,7 +507,7 @@ def test_a_template_of_another_prompt_is_refused_at_construction() -> None:
     other = prompt_from(PromptDeclaration(name="other", package="ai_assistant.memory"), "Other.")
 
     with pytest.raises(ValueError, match="memory_reconciler"):
-        ModelBackedReconciler(model=FakeModelProvider(), route=_ROUTE, prompt=other)
+        ModelBackedReconciler(completer=FakeStructuredCompleter(), route=_ROUTE, prompt=other)
 
 
 async def test_the_system_message_is_the_template_it_was_handed() -> None:
@@ -439,7 +520,7 @@ async def test_the_system_message_is_the_template_it_was_handed() -> None:
     model = _answering({"a": "adds"})
     template = prompt_from(MEMORY_RECONCILER_PROMPT, "A stand-in instruction.")
 
-    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=template).reconcile(
+    await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=template).reconcile(
         _proposal(_record("new")), [_record("a")]
     )
 
@@ -460,10 +541,14 @@ async def test_every_call_reports_exactly_one_outcome() -> None:
     one is non-conforming in whole at the writer, and this is the guarantee that
     keeps the conforming implementation out of that arm.
     """
-    answering = ModelBackedReconciler(model=_answering({"a": "adds"}), route=_ROUTE, prompt=_PROMPT)
-    silent = ModelBackedReconciler(model=FakeModelProvider(), route=_ROUTE, prompt=_PROMPT)
+    answering = ModelBackedReconciler(
+        completer=_answering({"a": "adds"}), route=_ROUTE, prompt=_PROMPT
+    )
+    silent = ModelBackedReconciler(
+        completer=FakeStructuredCompleter(), route=_ROUTE, prompt=_PROMPT
+    )
     failing = ModelBackedReconciler(
-        model=_RaisingProvider(ModelError("down")), route=_ROUTE, prompt=_PROMPT
+        completer=_raising(ModelError("down")), route=_ROUTE, prompt=_PROMPT
     )
     proposal = _proposal(_record("new"))
 
@@ -489,10 +574,10 @@ async def test_a_settled_set_reports_unconsulted_rather_than_answered() -> None:
     what settled it — the empty set below reaches the same outcome — which is why
     the key it fills is read beside ``relations_offered`` and never alone.
     """
-    model = FakeModelProvider()
+    model = FakeStructuredCompleter()
     same = "I prefer window seats"
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    report = await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", same)), [_record("a", same), _record("b", same)]
     )
 
@@ -503,9 +588,9 @@ async def test_a_settled_set_reports_unconsulted_rather_than_answered() -> None:
 
 async def test_an_empty_conflict_set_reports_unconsulted_too() -> None:
     """The path ADR-0164 §3 says dominates the population, reported as what it is."""
-    model = FakeModelProvider()
+    model = FakeStructuredCompleter()
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    report = await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), []
     )
 
@@ -522,9 +607,9 @@ async def test_a_readable_reply_naming_nothing_reports_answered() -> None:
     first as ``reconciler_unconsulted`` would pass every other test here while
     emitting a trace that denies the request was made.
     """
-    model = FakeModelProvider(reply='{"relations": []}')
+    model = FakeStructuredCompleter('{"relations": []}')
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    report = await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), [_record("a")]
     )
 
@@ -559,7 +644,7 @@ async def test_an_unreadable_reply_is_failed_and_a_readable_one_is_not(
     reconciler only in the cases the reconciler is actually the place to look.
     """
     report = await ModelBackedReconciler(
-        model=FakeModelProvider(reply=content), route=_ROUTE, prompt=_PROMPT
+        completer=FakeStructuredCompleter(content), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new")), [_record("a")])
 
     assert report.relations == {}
@@ -585,11 +670,134 @@ async def test_a_failed_request_reports_failed_and_keeps_the_certain_rung(
     identical = _record("identical", "I prefer window seats")
 
     report = await ModelBackedReconciler(
-        model=_RaisingProvider(error), route=_ROUTE, prompt=_PROMPT
+        completer=_raising(error), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new", "I prefer window seats")), [identical, _record("other")])
 
     assert report.relations == {"identical": ConflictRelation.RESTATES}
     assert report.outcomes == frozenset({ReconcilerOutcome.FAILED})
+
+
+# --- ADR-0354's structured call: the shape, the route, each returned failure ------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ScriptedReply(text=_reply(other="adds"), failure=ReplyFailure.REFUSED),
+        ScriptedReply(text=_reply(other="adds"), failure=ReplyFailure.CUT),
+        "",
+        "```json\n   \n```",
+        "I cannot help with that.",
+        '{"relations": [{"id": "other", "relation": "adds"}]',
+    ],
+    ids=["refused", "cut", "empty", "empty-fence", "invalid-prose", "invalid-truncated"],
+)
+async def test_each_returned_failure_is_failed_and_keeps_the_certain_rung(
+    answer: str | ScriptedReply,
+) -> None:
+    """ADR-0354 §9:2: every returned failure lands on the reconciler's one failure path.
+
+    ``refused`` lands where a raised ``ModelContentFilterError`` lands, and ``invalid``,
+    ``empty`` and ``cut`` where a reply that does not read lands. Before the move both
+    were ADR-0164 §3's ``FAILED``, so each is ``FAILED`` here, with the certain rung's
+    labels standing. A refused and a cut response carry a reply that would read on its
+    own, so an implementation that read the exchange's text instead of honouring the
+    failure would label ``other`` and report ``ANSWERED``.
+    """
+    completer = FakeStructuredCompleter(answer)
+    identical = _record("identical", "I prefer window seats")
+
+    report = await ModelBackedReconciler(
+        completer=completer, route=_ROUTE, prompt=_PROMPT
+    ).reconcile(_proposal(_record("new", "I prefer window seats")), [identical, _record("other")])
+
+    assert completer.call_count == 1
+    assert report.relations == {"identical": ConflictRelation.RESTATES}
+    assert report.outcomes == frozenset({ReconcilerOutcome.FAILED})
+
+
+async def test_the_one_request_asks_for_the_reconcilers_own_shape_on_its_route() -> None:
+    """ADR-0354 §9:1 and §6:2: one structured call, with the reconciler's shape, its route.
+
+    The canonical fake has no ``complete``, so a reconciler still completing in text
+    could not pass here at all.
+    """
+    completer = _answering({"a": "adds"})
+
+    await ModelBackedReconciler(completer=completer, route=_ROUTE, prompt=_PROMPT).reconcile(
+        _proposal(_record("new")), [_record("a"), _record("b")]
+    )
+
+    assert completer.call_count == 1
+    assert completer.last_call.shape is ReconcilerReply
+    assert completer.last_call.model == _ROUTE
+
+
+def test_the_reply_shape_passes_the_seams_check_and_keeps_the_envelopes_names() -> None:
+    """ADR-0354 §2:3 and §3:2: the shape closes, and its names are the envelope's.
+
+    The schema sent carries no text, so a model sees only the names: the default prompt
+    and the owner's override both ask for ``relations``, each entry an ``id`` and a
+    ``relation``, so those are the names the shape must keep or no reply reads. The
+    three spellings are ``ConflictRelation``'s, so a model in native mode writes one.
+    """
+    # `reply_schema` raises where §2:3 refuses the shape. Compared whole, so a `null`
+    # admitted beside an entry — a dropped entry is the reader's, never the schema's —
+    # or an open position fails here as surely as a renamed field does.
+    assert reply_schema(ReconcilerReply) == {
+        "$defs": {
+            "ReconcilerReplyEntry": {
+                "properties": {
+                    "id": {"type": "string"},
+                    "relation": {
+                        "enum": [relation.value for relation in ConflictRelation],
+                        "type": "string",
+                    },
+                },
+                "required": ["id", "relation"],
+                "type": "object",
+                "additionalProperties": False,
+            }
+        },
+        "properties": {
+            "relations": {"items": {"$ref": "#/$defs/ReconcilerReplyEntry"}, "type": "array"}
+        },
+        "required": ["relations"],
+        "type": "object",
+        "additionalProperties": False,
+    }
+
+
+async def test_a_malformed_entry_is_dropped_and_the_rest_of_the_list_stands() -> None:
+    """ADR-0164 §3, kept through the move: one bad entry does not make the reply unreadable.
+
+    Each malformed entry here — not an object, a ``null``, an id that is not a string,
+    no relation, an unknown relation — is dropped by the checks after the parse, and the
+    entries beside them still label their members. A shape strict enough to refuse the
+    whole reply over one of them would report ``FAILED`` and label nothing. The relation
+    is judged case and surrounding whitespace aside, as it was before the move.
+    """
+    reply = json.dumps(
+        {
+            "relations": [
+                ["a", "adds"],
+                None,
+                {"id": 3, "relation": "adds"},
+                {"id": "a"},
+                {"id": "a", "relation": "sort-of"},
+                {"id": "b", "relation": " Contradicts "},
+                {"id": "c", "relation": "adds", "why": "an unnamed key"},
+            ],
+            "note": "an unnamed key",
+        }
+    )
+
+    report = await ModelBackedReconciler(
+        completer=FakeStructuredCompleter(reply), route=_ROUTE, prompt=_PROMPT
+    ).reconcile(_proposal(_record("new")), [_record("a"), _record("b"), _record("c")])
+
+    assert report.relations == {"b": ConflictRelation.CONTRADICTS, "c": ConflictRelation.ADDS}
+    assert report.outcomes == frozenset({ReconcilerOutcome.ANSWERED})
 
 
 # ADR-0098 §2's non-forgeability, and ADR-0098 §9's marked clause: a lane
@@ -601,7 +809,7 @@ async def test_a_failed_request_reports_failed_and_keeps_the_certain_rung(
 # belief reaches this prompt on the ordinary ingest path (ADR-0183 §8, #1454).
 
 
-def _user_turn(model: FakeModelProvider) -> str:
+def _user_turn(model: FakeStructuredCompleter) -> str:
     """The one user message of the one request, which is where `_render`'s output goes.
 
     Every check on what a request carries reads this turn and never the system message,
@@ -630,7 +838,7 @@ def _belief_lines(prompt: str) -> list[str]:
 async def _turn_for(proposal_content: str, *conflicts: tuple[str, str]) -> str:
     """The user turn one `reconcile` actually sent, for the given proposal and members."""
     model = _answering({record_id: "adds" for record_id, _ in conflicts})
-    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", proposal_content)),
         [_record(record_id, content) for record_id, content in conflicts],
     )
@@ -767,7 +975,7 @@ async def test_an_id_needing_an_escape_is_labelled_from_the_value_not_the_displa
     awkward = 'a"b'
     model = _answering({awkward: "adds"})
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    report = await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", "Jon eats early")), [_record(awkward, "Jon eats late")]
     )
 
@@ -786,7 +994,7 @@ async def test_an_id_returned_with_its_display_quotes_is_discarded() -> None:
     """
     model = _answering({'"a"': "contradicts"})
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
+    report = await ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", "Jon eats early")), [_record("a", "Jon eats late")]
     )
 
