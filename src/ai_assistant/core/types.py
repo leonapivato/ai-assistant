@@ -550,6 +550,125 @@ class Message(BaseModel):
     name: EncodableText | None = Field(default=None, description="Optional author/tool name.")
 
 
+# --- a structured reply: a shape's value, or a named failure (ADR-0354) -------
+# What :class:`~ai_assistant.core.protocols.StructuredCompleter` returns, declared
+# beside :class:`Message` because each answers a conversation. A **shape** is the
+# caller's own pydantic model class (§3:1); nothing here names one. The schema sent
+# for a shape, its version and the rule a reply is read by live in
+# :mod:`ai_assistant.core.reply_shapes`.
+
+
+class ReplyFailure(StrEnum):
+    """Why a response that came back is not the shape's value (ADR-0354 §5:2).
+
+    A **closed** enumeration. A response is the first of these that applies, in the
+    order they are declared, and its reply is read as the shape only where none does.
+    A returned failure is never raised, retried or routed (§5:4).
+    """
+
+    REFUSED = "refused"
+    """The provider declined to answer: the finish reason ``content_filter``."""
+    CUT = "cut"
+    """The response stopped at its output ceiling: the finish reason ``length``."""
+    EMPTY = "empty"
+    """The reply holds nothing but whitespace once its enclosing fence is removed."""
+    INVALID = "invalid"
+    """The reply does not validate as the shape, or the response carries a call."""
+
+
+class ReplyMode(StrEnum):
+    """How a structured request asked for its shape (ADR-0354 §4:2). Closed."""
+
+    NATIVE = "native"
+    """The provider's own JSON-schema output."""
+    PROMPTED = "prompted"
+    """The schema written into the instructions, the reply read as text."""
+
+
+#: A shape's version: the first twelve hexadecimal digits of its schema's SHA-256
+#: (ADR-0354 §3:3).
+type ReplyShapeVersion = Annotated[EncodableText, Field(pattern=r"^[0-9a-f]{12}$")]
+
+
+class ReplyUsage(BaseModel):
+    """The tokens one structured request spent, as the provider reported them (§5:3).
+
+    Attributes:
+        input_tokens: The input tokens, cached ones included.
+        output_tokens: The output tokens.
+        cache_read_tokens: The input tokens read from the provider's cache.
+        cache_write_tokens: The input tokens written to the provider's cache.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cache_read_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
+
+
+class ReplyExchange(BaseModel):
+    """What came back with a structured call's reply (ADR-0354 §5:3).
+
+    It holds nothing derived from the value: a stage records it whether the reply was
+    read as the shape or not (§7:2).
+
+    Attributes:
+        reply: The reply as the model wrote it, the response's text parts joined in
+            order, possibly empty. A thinking part is no part of it (§4:6).
+        model: The ``"provider:model"`` that answered, as the response names it.
+        mode: How the request asked for the shape.
+        finish_reason: The response's finish reason, in pydantic-ai's normalised
+            vocabulary (``stop``, ``length``, ``content_filter``, ``tool_call``,
+            ``error``), or ``None`` where the provider gave none.
+        refusal: The provider's statement of a refusal, where it gave one.
+        refusal_category: The category the provider put a refusal in, where it gave
+            one.
+        usage: The tokens the request spent.
+        shape: The shape's class name.
+        shape_version: The shape's version (§3:3).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reply: EncodableText
+    model: EncodableText
+    mode: ReplyMode
+    finish_reason: EncodableText | None = None
+    refusal: EncodableText | None = None
+    refusal_category: EncodableText | None = None
+    usage: ReplyUsage = Field(default_factory=ReplyUsage)
+    shape: NonBlankEncodableText
+    shape_version: ReplyShapeVersion
+
+
+class StructuredReply[T: BaseModel](BaseModel):
+    """A structured call's outcome: the shape's value or a returned failure (§5:1).
+
+    Exactly one of ``value`` and ``failure`` is held, and the exchange always is. A
+    validator refuses a record holding both or neither.
+
+    Attributes:
+        value: The reply read as the shape, or ``None`` where it was not.
+        failure: Why the reply is not the shape's value, or ``None`` where it is.
+        exchange: What came back with the reply.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    value: T | None = None
+    failure: ReplyFailure | None = None
+    exchange: ReplyExchange
+
+    @model_validator(mode="after")
+    def _value_or_failure(self) -> Self:
+        if (self.value is None) == (self.failure is None):
+            msg = "a structured reply holds the shape's value or a failure, exactly one"
+            raise ValueError(msg)
+        return self
+
+
 # --- bulk inference: the batch, and the handle the caller holds (ADR-0143) ---
 # The eight public names ADR-0143 §9 fixes, declared beside :class:`Message`
 # because every one of them either carries a conversation or answers one. They
