@@ -132,8 +132,10 @@ story tidy-up and the memory reconciler follow, and each drops its own text-JSON
 
 > **Normative.** `messages` is held to `ModelProvider.complete`'s precondition (ADR-0066 §1)
 > and carries no `Role.TOOL` turn. `shape` is a pydantic model class whose schema (§3:2) is a
-> JSON object. A call failing either is refused before any model is contacted with a
-> `ModelError` carrying ADR-0066 §3's disposition: neither `retryable` nor `routable`.
+> JSON object that can be closed: every object in it names its properties, none gives its
+> further keys a schema of their own, and no position in it admits any JSON value. A call
+> failing either is refused before any model is contacted with a `ModelError` carrying
+> ADR-0066 §3's disposition: neither `retryable` nor `routable`.
 
 > **Normative.** `complete_structured` observes `messages` under `core/protocols.py`'s
 > input-observation clause (ADR-0065), and its conformance suite enforces that as
@@ -170,6 +172,16 @@ another subsystem's hands.
 
 So what each field means is said by the stage's prompt template, which the owner may
 override (ADR-0334 §3:3), and never by the schema, which is code (ADR-0334 §1:3).
+
+**Why some shapes are refused.** Two kinds of field cannot be closed. A mapping, such as
+`dict[str, int]`, names no property and gives its keys a schema; closing it leaves no key
+it may hold, so a mapping that must hold one could never be produced. An open value, such
+as pydantic's `JsonValue`, has the schema `{}`, which admits any JSON at all; left open, it
+lets the model write keys nobody named, and closed, it holds nothing. Sending either would
+send a schema that is unsatisfiable or unconstrained. So §2:3 refuses such a shape before
+any model is contacted, and a consumer restates the field with named properties (§9:7). Two
+of the observer's shapes hold open values today: placement's `answers` and framing's
+`style` and `pin`.
 
 > **Normative.** A shape's version is the first twelve hexadecimal digits of the SHA-256 of
 > its schema (§3:2), serialised as JSON with its keys sorted and no insignificant
@@ -342,9 +354,12 @@ completion and its repair are structured calls with that shape.
 > **Normative.** The regression suite reads an understanding reply by §3:4's rule with the
 > reply shape.
 
-> **Normative.** The replay tool sends a recorded understanding call as a structured call
-> with the package's shape of the recorded name (ADR-0335 §4:6). Where the recorded version
-> differs from the package's, the tool marks the result.
+> **Normative.** The replay tool sends a recorded understanding call whose given entry
+> carries `reply_shape` as a structured call with the package's shape of the recorded name
+> (ADR-0335 §4:6), and marks a result whose recorded version differs from the package's. A
+> given entry carrying no `reply_shape`, recorded before the move, is sent as it was made,
+> a plain completion, and its result is marked as sent plain. A recorded name the package
+> holds no shape for fails that call, naming the defect and nothing of the call's content.
 
 > **Normative.** A follow-up question asked of a structured call (ADR-0337 §6:3) carries the
 > followed reply's text as the assistant's turn and is sent with no shape, through
@@ -384,6 +399,13 @@ reconciler is the one that is left.
 
 > **Normative.** The follow-up question does not move: it answers in text (ADR-0337 §6:5),
 > and what becomes of it is open on #3414.
+
+> **Normative.** A consumer whose reply today holds a mapping or an open value restates it in
+> its shape as named properties, so that the shape passes §2:3. The restated fields carry
+> what the consumer's readers read today, and those readers run the checks they run today.
+
+> **Normative.** Each moved consumer's regression-suite reader and replay follow §8:6 and
+> §8:7, as understanding's do.
 
 ### 10. What each consumer drops
 
@@ -467,7 +489,8 @@ them.
 > others:
 >
 > - the suite's precondition cases (§2:3), refused before a model is contacted, with
->   ADR-0066 §3's disposition; and its input-observation case (§2:4);
+>   ADR-0066 §3's disposition, a shape holding a mapping, a schema for further keys or an
+>   open value among them; and its input-observation case (§2:4);
 > - a reply that validates is returned as the value, with no failure;
 > - each of §5:2's four kinds is returned and never raised, in §5:2's order where several
 >   apply, such as a refusal that also stopped at its ceiling;
@@ -501,11 +524,15 @@ them.
 > - the given entry carries `reply_shape`, and the returned entry carries the reply, the
 >   usage, the model, the mode and the failure's kind;
 > - the regression suite's reader and the stage read one reply alike;
+> - a recorded call whose given entry carries no `reply_shape` replays as a plain
+>   completion, marked so;
 > - ADR-0339's drop and its log line are gone.
 
 > **Normative.** F1's and F2's tests include, for each consumer:
 >
 > - each returned failure lands where §9:2 puts it;
+> - its shape passes §2:3's check, the observer's restated fields (§9:7) included;
+> - a recording made before the move replays as a plain completion (§9:8);
 > - the given entry carries `reply_shape` and the returned entry the usage, where that
 >   consumer writes entries;
 > - its text-JSON reader is gone (§10:1).
