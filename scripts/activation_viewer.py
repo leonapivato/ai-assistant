@@ -28,7 +28,11 @@ One file holding its server and its page, outside the ``ai_assistant`` package a
 importing the standard library alone (ADR-0316 §2). It depends on ADR-0314 §6:2's line
 alone: one JSON object holding ``activation_id``, ``source``, ``kind``, ``recorded_at``
 and ``body``. The body keys it reads for the list and the timeline are hints (§5:2):
-where one is missing, the hint is lost and the entry is still shown whole.
+where one is missing, the hint is lost and the entry is still shown whole. Understanding's
+request is read in the form it was recorded in, since the record is never upgraded
+(ADR-0353 §14:10): the JSON object its user message carried before ADR-0353, or the
+tagged text it carries since, whose tags and escapes it reads without importing the stage
+that writes them.
 
 A model call (understanding's, a planning round's, a digest part's) also opens
 readable: what it was told, split into its paragraphs; what it was given, its JSON a
@@ -365,8 +369,10 @@ def _text(value: object) -> str | None:
 def input_of(body: object) -> str | None:
     """The user's input in a rendered request, where the request shows it.
 
-    Understanding's request carries it as ``input.text`` in its user message's JSON.
-    The rendering is a hint (ADR-0316 §5:2): where it is not found, nothing is.
+    Understanding's request carries it as ``input.text`` in its user message's JSON, and
+    since ADR-0353 as the text tags of its tagged message's stimulus section: each is read
+    in the form it was recorded in (§14:10). The rendering is a hint (ADR-0316 §5:2):
+    where it is not found, nothing is.
 
     Args:
         body: An understanding's or planning's given entry's body.
@@ -376,48 +382,227 @@ def input_of(body: object) -> str | None:
     """
     document = _user_document(body)
     if document is None:
-        return None
+        sections = _tagged_request(body)
+        shown = None if sections is None else _tagged_arrival(sections)
+        return None if shown is None else _text(shown["text"])
     received = document.get("input")
     if isinstance(received, str):
         return received
     return _text(_mapping(received).get("text"))
 
 
-def _user_document(body: object) -> Mapping[str, object] | None:
-    """A rendered request's last user message, read as the JSON object it carries."""
+def _user_content(body: object) -> str | None:
+    """A rendered request's last user message's text, where it has one."""
     for message in reversed(_sequence(_mapping(body).get("messages"))):
         shown = _mapping(message)
         content = _text(shown.get("content"))
-        if shown.get("role") != "user" or content is None:
-            continue
-        try:
-            document = json.loads(content)
-        except _UNPARSABLE:
-            return None
-        return _mapping(document)
+        if shown.get("role") == "user" and content is not None:
+            return content
     return None
+
+
+def _user_document(body: object) -> Mapping[str, object] | None:
+    """A rendered request's last user message, read as the JSON object it carries."""
+    content = _user_content(body)
+    if content is None:
+        return None
+    try:
+        document = json.loads(content)
+    except _UNPARSABLE:
+        return None
+    return _mapping(document)
+
+
+# --- understanding's tagged request (ADR-0353 §2, §3) --------------------------------
+
+#: The heading understanding's tagged message opens with (ADR-0353 §2).
+_STIMULUS_HEADING: Final = "# The stimulus"
+
+#: One tag of the tagged message: opening, closing or empty, its attributes quoted. Every
+#: value a record or a medium carries is escaped wherever it renders (ADR-0353 §3:5), so
+#: no text of theirs reads as a tag.
+_TAG: Final = re.compile(r'<(/?)([a-z_]+)((?:\s+[a-z_]+="[^"<>]*")*)\s*(/?)>')
+_ATTRIBUTE: Final = re.compile(r'([a-z_]+)="([^"<>]*)"')
+
+#: The character references §3:5 escapes with, and what each stands for.
+_REFERENCE: Final = re.compile(r"&(amp|lt|gt|quot|#35);")
+_REFERENCED: Final = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "#35": "#"}
+
+#: The containers, which hold tags and carry no text of their own (ADR-0353 §3:3).
+_CONTAINERS: Final = frozenset({"stimulus", "matter"})
+
+#: The text tags a stimulus's own words sit in, by their parties (ADR-0353 §3:2).
+_WORDS_TAGS: Final = frozenset({"said", "received", "task"})
+
+
+@dataclass(frozen=True, slots=True)
+class _Tag:
+    """One tag of the tagged message: a text tag with its text, or a container its tags."""
+
+    name: str
+    attributes: Mapping[str, str]
+    #: Its text, unescaped; ``None`` for an empty tag or a container.
+    text: str | None
+    tags: tuple[_Tag, ...] = ()
+
+
+def _unescape(value: str) -> str:
+    """``value`` with §3:5's character references read back, and no other."""
+    return _REFERENCE.sub(lambda found: _REFERENCED[found.group(1)], value)
+
+
+def _tagged_request(body: object) -> dict[str, str] | None:
+    """Understanding's tagged message by its sections, each body under its heading's words.
+
+    A line that begins with ``#`` is a heading, since a record's ``#`` that begins a line is
+    escaped (ADR-0353 §3:5). A message that does not open with the stimulus's heading is
+    not this one, and is ``None``.
+    """
+    content = _user_content(body)
+    if content is None or content.lstrip("\n").split("\n", 1)[0] != _STIMULUS_HEADING:
+        return None
+    sections: dict[str, str] = {}
+    heading: str | None = None
+    lines: list[str] = []
+    for line in content.split("\n"):
+        if line.startswith("#"):
+            if heading is not None:
+                sections.setdefault(heading, "\n".join(lines))
+            heading, lines = line.lstrip("#").strip(), []
+        else:
+            lines.append(line)
+    if heading is not None:
+        sections.setdefault(heading, "\n".join(lines))
+    return sections
+
+
+def _tagged(section: str) -> list[_Tag | str] | None:
+    """A section's lines between the tags and its outermost tags, in the order they render.
+
+    A line between the tags is the system's own words (ADR-0353 §3:4), read back unescaped;
+    a blank one is left out. The read is a hint (ADR-0316 §5:2): a section whose tags do
+    not balance is ``None``.
+    """
+    pieces: list[_Tag | str] = []
+    held: list[tuple[str, dict[str, str], int, list[_Tag]]] = []
+    at = 0
+    for found in _TAG.finditer(section):
+        if not held:
+            pieces.extend(_lines_between(section[at : found.start()]))
+        at = found.end()
+        closing, name, written, empty = found.groups()
+        attributes = {key: _unescape(value) for key, value in _ATTRIBUTE.findall(written)}
+        if closing:
+            if not held or held[-1][0] != name:
+                return None
+            _, attributes, start, inner = held.pop()
+            text = None if name in _CONTAINERS else _unescape(section[start : found.start()])
+            tag = _Tag(name, attributes, text, tuple(inner))
+        elif empty:
+            tag = _Tag(name, attributes, None)
+        else:
+            held.append((name, attributes, found.end(), []))
+            continue
+        (held[-1][3] if held else pieces).append(tag)
+    if held:
+        return None
+    pieces.extend(_lines_between(section[at:]))
+    return pieces
+
+
+def _lines_between(text: str) -> list[str]:
+    return [line for line in (one.strip() for one in _unescape(text).split("\n")) if line]
+
+
+def _tag_text(tag: _Tag, limit: int) -> str:
+    """What a labelled item of the tagged message says, cut: its text, or its tags' texts.
+
+    A container says each of its tags, by name, a line each; an empty tag says what its
+    attributes mark, as an item of the earlier request with no text said its keys.
+    """
+    if tag.text is not None:
+        return _cut(tag.text, limit)
+    if tag.tags:
+        return _cut("\n".join(f"{one.name}: {_tag_text(one, limit)}" for one in tag.tags), limit)
+    marks = " ".join(f'{key}="{value}"' for key, value in tag.attributes.items() if key != "label")
+    return _cut(marks, limit)
+
+
+def _tagged_arrival(sections: Mapping[str, str]) -> dict[str, object] | None:
+    """The stimulus section's framing sentences and its text tags (ADR-0353 §7:1).
+
+    Each input's framing sentence says how it arrived, and its text tags follow it: each
+    tag's text with its writer as ``from`` names it, its number and its time as the
+    message writes them, and the label or number of what it replies to. The time is shown
+    as written, in the zone the situation names, and is no instant here.
+    """
+    pieces = None if "The stimulus" not in sections else _tagged(sections["The stimulus"])
+    if pieces is None:
+        return None
+    framing: list[str] = []
+    messages: list[dict[str, object]] = []
+    for one in pieces:
+        if isinstance(one, str):
+            framing.append(one)
+        elif one.name in _WORDS_TAGS and one.text is not None:
+            messages.append(
+                {
+                    "position": _message_number(one.attributes.get("message")),
+                    "at": None,
+                    "text": one.text,
+                    "input": len(framing) - 1 if framing else None,
+                    "tag": one.name,
+                    "writer": one.attributes.get("from"),
+                    "written_at": one.attributes.get("at"),
+                    "replies_to": one.attributes.get("replies_to"),
+                }
+            )
+    if not framing and not messages:
+        return None
+    texts = [str(one["text"]) for one in messages]
+    return {
+        "form": "tagged",
+        "text": "\n".join(texts) if texts else None,
+        "received_as": "\n".join(framing) if framing else None,
+        "framing": framing,
+        "messages": messages,
+    }
+
+
+def _message_number(value: str | None) -> int | None:
+    """A message's number as the stimulus writes it, where it is a whole number."""
+    if value is None or not value.isdecimal() or len(value) > len(str(_SAFE_INTEGER)):
+        return None
+    return _position(int(value))
 
 
 def arrival_of(lines: Sequence[Line]) -> dict[str, object] | None:
     """The activation's input as it arrived, read from the first request that shows it.
 
     The record keeps no entry of its own for the input, so this is read back from what a
-    model was given: understanding's ``input``, or else the items of planning's place
-    window marked as the input. The rendering is a hint (ADR-0316 §5:2): where neither is
-    found, nothing is.
+    model was given: understanding's ``input``, or since ADR-0353 its tagged message's
+    stimulus section, each in the form it was recorded in (§14:10); or else the items of
+    planning's place window marked as the input. The rendering is a hint (ADR-0316 §5:2):
+    where neither is found, nothing is.
 
     Args:
         lines: The activation's complete lines.
 
     Returns:
         The input's text, where it came from and its messages with their instants, and
-        which request it was read from; or ``None``.
+        which request it was read from; or ``None``. Read from a tagged message, where it
+        came from is each input's framing sentence, and each message also names its tag
+        and its writer and keeps its time as the message writes it.
     """
     for line in lines:
         if not isinstance(line, Entry) or line.kind != "given":
             continue
         document = _user_document(line.body)
         if document is None:
+            sections = _tagged_request(line.body) if line.source == "understanding" else None
+            tagged = None if sections is None else _tagged_arrival(sections)
+            if tagged is not None:
+                return {"from": "understanding", "line": line.line, **tagged}
             continue
         if line.source == "understanding":
             received = _mapping(document.get("input"))
@@ -2927,17 +3112,15 @@ def _recalled_shown(
         ),
         None,
     )
-    document = None if request is None else _user_document(request.body)
-    if request is None or document is None or "recalled" not in document:
+    if request is None:
         return None
-    section = document.get("recalled")
-    shown: dict[str, object] = {"from": source, "line": request.line, "said": None}
-    if isinstance(section, str):
-        return {**shown, "said": section, "items": [], "joined": False}
-    items = [
-        {"label": _text(one.get("label")), "text": _item_text(one, RECALLED_CHARS)}
-        for one in map(_mapping, _sequence(section))
-    ]
+    recalled = _recalled_in(request.body, source)
+    if recalled is None:
+        return None
+    said, items = recalled
+    shown: dict[str, object] = {"from": source, "line": request.line, "said": said}
+    if said is not None:
+        return {**shown, "items": [], "joined": False}
     joined = (
         source == "understanding"
         and bool(kept)
@@ -2948,6 +3131,53 @@ def _recalled_shown(
         for held, item in zip(kept, items, strict=True):
             held["label"], held["text"] = item["label"], item["text"]
     return {**shown, "items": [] if joined else items, "joined": joined}
+
+
+def _recalled_in(body: object, source: str) -> tuple[str | None, list[dict[str, object]]] | None:
+    """A request's recalled section, in the form it was recorded in (ADR-0353 §14:10).
+
+    The earlier request's ``recalled`` is text, or its items each under ``label``; the
+    tagged message's is read by :func:`_tagged_recalled`. Its note where it says why it
+    shows none, else ``None`` and its items; or ``None`` where the request shows no such
+    section.
+    """
+    document = _user_document(body)
+    if document is None:
+        sections = _tagged_request(body) if source == "understanding" else None
+        return None if sections is None else _tagged_recalled(sections)
+    if "recalled" not in document:
+        return None
+    section = document.get("recalled")
+    if isinstance(section, str):
+        return section, []
+    return None, [
+        {"label": _text(one.get("label")), "text": _item_text(one, RECALLED_CHARS)}
+        for one in map(_mapping, _sequence(section))
+    ]
+
+
+def _tagged_recalled(
+    sections: Mapping[str, str],
+) -> tuple[str | None, list[dict[str, object]]] | None:
+    """The tagged message's recalled memories: its note, or each item under its label.
+
+    Each is a ``memory`` tag or a ``stimulus`` container, in recall's order (ADR-0353
+    §2); a section that renders none says why, by its note (§8:1), as the earlier
+    request's ``recalled`` said it as text.
+    """
+    section = sections.get("Recalled memories")
+    pieces = None if section is None else _tagged(section)
+    if pieces is None:
+        return None
+    items: list[dict[str, object]] = [
+        {"label": one.attributes.get("label"), "text": _tag_text(one, RECALLED_CHARS)}
+        for one in pieces
+        if isinstance(one, _Tag)
+    ]
+    if items:
+        return None, items
+    notes = [one for one in pieces if isinstance(one, str)]
+    return ("\n".join(notes) if notes else None), []
 
 
 def reading_of(reply: str) -> dict[str, object] | None:
@@ -3053,6 +3283,10 @@ def _labels_used(reading: Mapping[str, object]) -> set[str]:
 def labels_in(body: object, wanted: set[str]) -> dict[str, str]:
     """The text each wanted label names in a request: the item shown under it, in short.
 
+    The request is read in the form it was recorded in (ADR-0353 §14:10): the earlier
+    one's JSON, each value carrying ``label``; or the tagged message, each tag carrying
+    the ``label`` attribute (§3:6), with its text, or a container's tags'.
+
     Args:
         body: A given entry's body.
         wanted: The labels to look for.
@@ -3063,7 +3297,9 @@ def labels_in(body: object, wanted: set[str]) -> dict[str, str]:
     """
     found: dict[str, str] = {}
     document = _user_document(body)
-    pending: list[tuple[object, int]] = [] if document is None else [(document, 0)]
+    if document is None:
+        return _tagged_labels(body, wanted)
+    pending: list[tuple[object, int]] = [(document, 0)]
     while pending and len(found) < len(wanted):
         value, depth = pending.pop()
         if depth > LABEL_DEPTH:
@@ -3075,6 +3311,20 @@ def labels_in(body: object, wanted: set[str]) -> dict[str, str]:
             pending.extend((one, depth + 1) for one in reversed(value.values()))
         elif isinstance(value, list):
             pending.extend((one, depth + 1) for one in reversed(value))
+    return found
+
+
+def _tagged_labels(body: object, wanted: set[str]) -> dict[str, str]:
+    """Each wanted label's item in the tagged message, its text cut to the bound."""
+    found: dict[str, str] = {}
+    sections = _tagged_request(body)
+    for section in () if sections is None else sections.values():
+        for one in _tagged(section) or ():
+            if not isinstance(one, _Tag):
+                continue
+            label = one.attributes.get("label")
+            if label is not None and label in wanted and label not in found:
+                found[label] = _tag_text(one, LABEL_CHARS)
     return found
 
 
@@ -4487,6 +4737,7 @@ SCRIPT: Final = r"""
     if (a) arrivalInto(root, a);
   }
   function arrivalInto(root, a) {
+    if (a.form === "tagged") return taggedArrivalInto(root, a);
     const read = a.from === "understanding" ? "understanding's input" : "planning's place window";
     kv(root, [["where", a.received_as], ["read from", read + ", line " + a.line]]);
     const rows = a.messages || [];
@@ -4497,6 +4748,32 @@ SCRIPT: Final = r"""
       const at = clock(m.at, true);
       row.appendChild(el("div", "m", m.position === null ? at : "#" + m.position + " · " + at));
       row.appendChild(el("div", "part-text", m.text === null ? DASH : m.text));
+      root.appendChild(row);
+    }
+  }
+  // Understanding's tagged request (ADR-0353 §7): each input's framing sentence, then its
+  // text tags, each by its tag and writer, its time as the message writes it.
+  function taggedArrivalInto(root, a) {
+    kv(root, [["read from", "understanding's stimulus section, line " + a.line]]);
+    const rows = a.messages || [];
+    const framing = a.framing || [];
+    const inputRows = (n) => rows.filter((m) => m.input === n);
+    taggedRowsInto(root, inputRows(null));
+    framing.forEach((sentence, n) => {
+      root.appendChild(el("div", "part-text arrival-framing", sentence));
+      taggedRowsInto(root, inputRows(n));
+    });
+  }
+  function taggedRowsInto(root, rows) {
+    for (const m of rows) {
+      const row = el("div", "arrival-message");
+      const facts = [];
+      if (m.position !== null) facts.push("#" + m.position);
+      if (m.written_at !== null) facts.push(m.written_at);
+      facts.push(m.tag + (m.writer === null ? "" : " from " + m.writer));
+      if (m.replies_to !== null) facts.push("replies to " + m.replies_to);
+      row.appendChild(el("div", "m", facts.join(" · ")));
+      row.appendChild(el("div", "part-text", m.text));
       root.appendChild(row);
     }
   }

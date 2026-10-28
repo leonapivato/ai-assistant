@@ -1224,6 +1224,140 @@ def test_a_record_whose_requests_show_no_input_shows_none(body: Any) -> None:
     assert viewer.timeline("a", lines)["arrival"] is None
 
 
+# --- understanding's tagged request (ADR-0353 §2, §3, §7), written by hand -------------
+# ``test_activation_viewer_walk`` reads one the stage itself rendered; these hold the
+# shapes it does not render there.
+
+
+def _tagged(*sections: str) -> dict[str, object]:
+    content = "\n\n".join(sections)
+    return {"messages": [{"role": "user", "content": content, "name": None}]}
+
+
+def test_each_input_of_a_tagged_stimulus_follows_its_own_framing_sentence() -> None:
+    """ADR-0353 §7:1: a joined input is framed by a sentence of its own, after the first."""
+    body = _tagged(
+        "# The stimulus\n"
+        "A stimulus reached the system at 9:00 am on Tuesday 27 October 2026: a message "
+        "Maren typed in the hub chat. It contains this text:\n"
+        '<said from="Maren">Remind me</said>\n'
+        "\n"
+        "A stimulus reached the system at 8:59 am on Tuesday 27 October 2026: a report from "
+        "orders@bakery.example, taken in from other work, which was stopped. It contains this "
+        "report:\n"
+        '<received from="orders@bakery.example, as claimed">Cake &amp; candles</received>'
+    )
+    lines: list[Any] = [viewer.Entry(3, "understanding", "given", 1.0, "", body)]
+    arrival = viewer.timeline("a", lines)["arrival"]
+    assert (arrival["from"], arrival["line"]) == ("understanding", 3)
+    assert arrival["text"] == "Remind me\nCake & candles"
+    assert len(arrival["framing"]) == 2
+    assert arrival["received_as"] == "\n".join(arrival["framing"])
+    assert [(one["tag"], one["writer"], one["input"]) for one in arrival["messages"]] == [
+        ("said", "Maren", 0),
+        ("received", "orders@bakery.example, as claimed", 1),
+    ]
+
+
+def test_a_tagged_input_with_no_ones_words_is_its_framing_sentence_alone() -> None:
+    """ADR-0353 §7:5: no content clause, and no content follows it."""
+    sentence = (
+        "A stimulus reached the system at 9:00 am on Tuesday 27 October 2026: an input with no "
+        "one's words in it arrived from the hallway sensor."
+    )
+    body = _tagged(f"# The stimulus\n{sentence}", "# Knowledge")
+    lines: list[Any] = [viewer.Entry(0, "understanding", "given", 1.0, "", body)]
+    arrival = viewer.timeline("a", lines)["arrival"]
+    assert (arrival["text"], arrival["received_as"], arrival["messages"]) == (None, sentence, [])
+    assert viewer.input_of(body) is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # Tags that do not balance: the read is a hint, so nothing is read.
+        '# The stimulus\nA stimulus reached the system.\n<said from="Maren">hi</received>',
+        '# The stimulus\nA stimulus reached the system.\n<said from="Maren">hi',
+        # Not the tagged message: it opens with no stimulus heading.
+        'Something else\n# The stimulus\n<said from="Maren">hi</said>',
+        "# The stimulus",
+    ],
+)
+def test_a_tagged_request_that_does_not_read_shows_no_input(content: str) -> None:
+    body = {"messages": [{"role": "user", "content": content}]}
+    lines: list[Any] = [viewer.Entry(0, "understanding", "given", 1.0, "", body)]
+    assert viewer.timeline("a", lines)["arrival"] is None
+    assert viewer.labels_in(body, {"M1"}) == {}
+
+
+def test_a_tagged_label_names_its_tags_text_or_a_containers_tags() -> None:
+    """ADR-0353 §3:3, §3:6: each item the reply may cite carries ``label``; a container's
+    text is its tags', and an empty tag says what it marks."""
+    body = _tagged(
+        '# The stimulus\nA stimulus reached the system.\n<said from="Maren">hi</said>',
+        "## Stimulus origin knowledge\n"
+        '<message label="H1" from="Maren" at="Mon 26 Oct 2026, 9:00 am">see you &lt;3</message>\n'
+        '<message label="H2" deleted="yes"/>',
+        "## Concurrent stimuli\n"
+        '<stimulus label="R1" origin="the hub chat" acted="no">\n'
+        '  <said from="Maren">book a table</said>\n'
+        '  <said from="Maren" withheld="yes"/>\n'
+        "</stimulus>",
+        "### Matters\n"
+        '<matter label="S1">\n  <summary from="the system">Ivy\'s party</summary>\n</matter>',
+    )
+    assert viewer.labels_in(body, {"H1", "H2", "R1", "S1", "M9"}) == {
+        "H1": "see you <3",
+        "H2": 'deleted="yes"',
+        "R1": 'said: book a table\nsaid: from="Maren" withheld="yes"',
+        "S1": "summary: Ivy's party",
+    }
+
+
+def _recalled_after(section: str, kept: int) -> dict[str, Any]:
+    recalled = {"finds": [], "kept": [{"id": f"mem-{n}"} for n in range(kept)]}
+    lines: list[Any] = [
+        viewer.Entry(0, "recall", "given", 1.0, "", {"run": "first"}),
+        viewer.Entry(1, "recall", "returned", 2.0, "", recalled),
+        viewer.Entry(2, "understanding", "given", 3.0, "", _tagged("# The stimulus", section)),
+    ]
+    walked: dict[str, Any] = viewer.walk(lines, None, own=True)
+    (first,) = [one for one in walked["steps"] if one["title"] == "Recall · first run"]
+    found: dict[str, Any] = first
+    return found
+
+
+def test_tagged_recalled_memories_saying_why_none_shows_is_their_note() -> None:
+    note = "Nothing is shown: everything recall found is already shown above."
+    first = _recalled_after(f"### Recalled memories\n{note}", kept=1)
+    assert first["shown"] == {
+        "from": "understanding",
+        "line": 2,
+        "said": note,
+        "items": [],
+        "joined": False,
+    }
+
+
+def test_tagged_recalled_memories_fewer_than_were_kept_are_listed_apart() -> None:
+    section = (
+        "### Recalled memories\n"
+        '<memory label="M1" from="the system">f</memory>\n'
+        '<stimulus label="M2" at="Mon 26 Oct 2026, 9:00 am">\n'
+        '  <said from="Maren">earlier</said>\n'
+        "</stimulus>"
+    )
+    first = _recalled_after(section, kept=3)
+    assert first["shown"]["joined"] is False
+    assert first["shown"]["items"] == [
+        {"label": "M1", "text": "f"},
+        {"label": "M2", "text": "said: earlier"},
+    ]
+    assert [one["text"] for one in first["kept"]] == [None, None, None]
+    joined = _recalled_after(section, kept=2)
+    assert [one["label"] for one in joined["kept"]] == ["M1", "M2"]
+
+
 def test_a_calls_view_names_the_prompt_version_origin_and_flags_on() -> None:
     prompt = {
         "name": "planning",

@@ -59,6 +59,7 @@ from _learning_record import (
 from _model_call_record import ADDED, CALLS, LABELS, ODD, ROUND_1_INPUT, write_calls
 from _replay_record import ACT_A, PLANNING_TOLD, Model, make_copy, replay_tool
 from _replay_record import now as replay_now
+from _tagged_record import FIRST, SECOND, TAGGED, write_tagged
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -160,6 +161,44 @@ async def test_an_input_with_no_messages_shows_its_text_on_the_input_card(
         await expect(card.locator(".arrival-text")).to_have_text("Scheduled instruction")
         await expect(card.locator("dd").first).to_have_text("scheduled work")
         await expect(card.locator(".arrival-message")).to_have_count(0)
+
+
+@pytest.fixture
+def tagged(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over an activation whose understanding request is ADR-0353's tagged one."""
+    directory = write_tagged(write_record(tmp_path))
+    with serving(directory) as bound:
+        yield bound
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "phone"])
+async def test_a_tagged_input_shows_its_framing_then_each_message_as_text(
+    tagged: Any, gateway_browser: Browser, width: int
+) -> None:
+    """ADR-0353 §7:1, §14:10: the framing sentence, then each text tag by its writer and its
+    time as written, its text put into the page as text."""
+    async with _page(gateway_browser, width=width) as page:
+        await _open(page, tagged.port, TAGGED)
+        card = page.locator("#arrival-card")
+        await expect(card).to_be_visible(timeout=_SHOWN)
+        await expect(card.locator(".arrival-framing")).to_have_text(
+            re.compile(r"^A stimulus reached the system at 3:51 pm .*these messages:$")
+        )
+        rows = card.locator(".arrival-message")
+        await expect(rows.locator(".m")).to_have_text(
+            [
+                "#1 · Mon 26 Oct 2026, 3:48 pm · said from Maren",
+                "#2 · Mon 26 Oct 2026, 3:51 pm · said from Maren · replies to message 1",
+            ]
+        )
+        await expect(rows.locator(".part-text")).to_have_text([FIRST, SECOND])
+        # The text's tags are text: none of them is an element of the page.
+        await expect(card.locator("b")).to_have_count(0)
+        await expect(card.locator("said")).to_have_count(0)
+        wide = await page.evaluate(
+            "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+        )
+        assert wide <= 0
 
 
 def _offered(page: Page) -> Locator:
