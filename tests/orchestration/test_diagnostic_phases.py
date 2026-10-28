@@ -19,9 +19,11 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from understanding_support import TextAsStructured
 
 from ai_assistant.core.diagnostics import diagnosed_activation, write_diagnostic
 from ai_assistant.core.errors import MemoryStoreError, ModelError
+from ai_assistant.core.reply_shapes import reply_shape_version
 from ai_assistant.core.types import (
     ActivationDigest,
     ChannelIdentity,
@@ -34,7 +36,9 @@ from ai_assistant.core.types import (
     Placement,
     PlanningLabel,
     PlanningRound,
+    ProposedActivationUnderstanding,
     RecallCue,
+    ReplyUsage,
     Role,
     RoundResponse,
 )
@@ -63,6 +67,7 @@ from ai_assistant.testing import (
 )
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import said_support
+from ai_assistant.testing.structured import FakeStructuredCompleter, ScriptedReply
 
 #: Understanding's and planning's shipped templates, as the composition root hands them on.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
@@ -204,7 +209,13 @@ async def _understand(stage: UnderstandingStage) -> None:
 
 
 async def test_understanding_writes_its_rendered_request_and_the_reply() -> None:
-    model = FakeModelProvider(reply=_PROPOSAL)
+    """ADR-0354 §7:1-§7:2: the given entry names the reply's shape and version, and the
+    returned entry keeps the reply as written with the model, the mode, the finish and
+    the usage the exchange holds."""
+    usage = ReplyUsage(input_tokens=900, output_tokens=40, cache_read_tokens=800)
+    model = FakeStructuredCompleter(
+        ScriptedReply(text=_PROPOSAL, usage=usage, model="anthropic:claude-x")
+    )
     sink = FakeDiagnosticSink()
     stage = UnderstandingStage(
         model=model, excerpt_chars=200, prompt=_UNDERSTANDING, diagnostics=sink
@@ -218,19 +229,37 @@ async def test_understanding_writes_its_rendered_request_and_the_reply() -> None
     assert _body(given) == {
         "messages": [one.model_dump(mode="json") for one in sent],
         # ADR-0334 §8:2: which template, in which version, the system message came from;
-        # ADR-0335 §9:1: and each flag it declares, as the stage computed it for the call.
+        # ADR-0353 §8:3: and it declares no flag.
         "prompt": {
             "name": "understanding",
             "version": _UNDERSTANDING.version,
             "origin": "default",
-            "flags": {"person": False, "recalled": False, "stories": False},
+            "flags": {},
+        },
+        "reply_shape": {
+            "name": "ProposedActivationUnderstanding",
+            "version": reply_shape_version(ProposedActivationUnderstanding),
         },
     }
-    assert _body(returned) == {"reply": _PROPOSAL}
+    assert _body(returned) == {
+        "reply": _PROPOSAL,
+        "model": "anthropic:claude-x",
+        "mode": "native",
+        "finish_reason": "stop",
+        "refusal": None,
+        "refusal_category": None,
+        "usage": {
+            "input_tokens": 900,
+            "output_tokens": 40,
+            "cache_read_tokens": 800,
+            "cache_write_tokens": 0,
+        },
+        "failure": None,
+    }
 
 
 async def test_understanding_s_repair_is_a_second_given_and_returned_pair() -> None:
-    model = FakeModelProvider.scripted("not json", _PROPOSAL)
+    model = FakeStructuredCompleter.scripted("not json", _PROPOSAL)
     sink = FakeDiagnosticSink()
     stage = UnderstandingStage(
         model=model, excerpt_chars=200, prompt=_UNDERSTANDING, diagnostics=sink
@@ -242,15 +271,13 @@ async def test_understanding_s_repair_is_a_second_given_and_returned_pair() -> N
     entries = sink.of(DiagnosticSource.UNDERSTANDING)
     kinds = [one.kind for one in entries]
     assert kinds == [DiagnosticKind.GIVEN, DiagnosticKind.RETURNED] * 2
-    # The repair resends the system message, so its given entry names the template, and
-    # the flags it was rendered under, too.
+    # The repair resends the system message, so its given entry names the template and
+    # the reply's shape too.
     assert _body(entries[2])["prompt"] == _body(entries[0])["prompt"]
-    assert _body(entries[2])["prompt"]["flags"] == {
-        "person": False,
-        "recalled": False,
-        "stories": False,
-    }
-    assert _body(sink.of(DiagnosticSource.UNDERSTANDING)[1]) == {"reply": "not json"}
+    assert _body(entries[2])["reply_shape"] == _body(entries[0])["reply_shape"]
+    # ADR-0354 §7:2: written before the stage acts on the failure, its kind named.
+    first = _body(sink.of(DiagnosticSource.UNDERSTANDING)[1])
+    assert (first["reply"], first["failure"]) == ("not json", "invalid")
 
 
 async def test_understanding_writes_the_failure_of_its_call() -> None:
@@ -260,7 +287,7 @@ async def test_understanding_writes_the_failure_of_its_call() -> None:
 
     sink = FakeDiagnosticSink()
     stage = UnderstandingStage(
-        model=FakeModelProvider(reply=down),
+        model=TextAsStructured(FakeModelProvider(reply=down)),
         excerpt_chars=200,
         prompt=_UNDERSTANDING,
         diagnostics=sink,
@@ -562,7 +589,7 @@ async def test_with_no_sink_every_phase_writes_nothing_and_decides_the_same() ->
         )
         await _understand(
             UnderstandingStage(
-                model=FakeModelProvider(reply=_PROPOSAL),
+                model=TextAsStructured(FakeModelProvider(reply=_PROPOSAL)),
                 excerpt_chars=200,
                 prompt=_UNDERSTANDING,
             )

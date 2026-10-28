@@ -25,7 +25,7 @@ from phases_support import chat_turn, frozen, processing, until, written
 from story_support import CONVERSATION
 from telegram_support import CASE_START_WAIT, CHAT, REFERENCE, YieldingTelegram, text
 from test_engine import AT, Harness
-from understanding_support import recall_stage
+from understanding_support import TextAsStructured, recall_stage
 
 from ai_assistant.core.errors import ClassifiedToolError, OversizedValueError
 from ai_assistant.core.types import (
@@ -256,7 +256,8 @@ class _Reader:
     A reading approves nothing, or is a yes: a reply in the shape a build before
     ADR-0353 read, whose ``answers`` points at the first question it was shown. No call
     renders a ``Q`` label any more, so the pointer names nothing the call rendered, and
-    the drop removes ``answers`` before the parse whatever it holds (§9:14).
+    the reply's shape names no ``answers``, so such a reply does not parse and costs the
+    one repair, whose reading approves nothing (ADR-0354 §8:3).
     """
 
     def __init__(self) -> None:
@@ -339,7 +340,7 @@ class _Hub:
             memory=self.memory,
             plans=plans,
             understanding=UnderstandingStage(
-                model=self.reader.model, excerpt_chars=2000, prompt=_UNDERSTANDING
+                model=TextAsStructured(self.reader.model), excerpt_chars=2000, prompt=_UNDERSTANDING
             ),
             recall=recall_stage(self.memory) if recall else None,
             # A question asked long enough ago has left the episode window, and is
@@ -533,7 +534,7 @@ async def test_a_booking_is_asked_with_its_exact_line_and_a_yes_runs_nothing() -
     assert _asked_calls(yes) == [(), ()]
     assert "answers" not in processing(yes).understanding[-1].model_dump()
     # Understanding was shown the question's message, and no mark on it.
-    shown = hub.reader.model.calls[-1].messages[-1].content
+    shown = hub.reader.model.calls[-1].messages[1].content
     assert _ASKING in shown
     assert "answer_label" not in shown
     assert not [

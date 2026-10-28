@@ -1,0 +1,14 @@
+# Round 10, case 1b (#3481): the same correction once the booking's work has acted is
+# still meant for it, whether or not the work has acted (ADR-0353 §10:5).
+prompt = "understanding"
+guards = "continuation_missed"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "continues_exactly"
+labels = ["R1"]
+
+[input]
+file = "make-it-seven-after-the-booking-acted.json"

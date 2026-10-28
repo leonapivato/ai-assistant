@@ -13,13 +13,12 @@ was never taken in, never what an interrupted activation took in, and writes not
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 from phases_support import hold_start_waits, phases_harness
 from test_engine import AT, Harness
-from understanding_support import STATED_PROPOSAL, understanding_stage
+from understanding_support import STATED_PROPOSAL, Rendered, rendered, understanding_stage
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
@@ -308,15 +307,17 @@ async def test_the_window_is_the_recent_transcript_each_message_keeping_its_auth
         conversation, message=_said("m-2", "Who is it?", replies_to=1)
     )
     await _answered(harness, conversation, 2)
-    payload = json.loads(model.calls[-1].messages[1].content)
-    assert payload["input"]["text"] == "Who is it?"
-    window = payload["channel_window"]
-    assert [(item["label"], item["author"], item["text"]) for item in window] == [
-        ("H1", "the user", "My dentist is Rao."),
-        ("H2", "the assistant", "Hello there."),
+    message = rendered(model.calls[-1].messages)
+    assert message.stimulus == "Who is it?"
+    window = message.tags("Stimulus origin knowledge", "message")
+    assert [(item.get("label"), item.get("from"), item.text) for item in window] == [
+        ("H1", "the owner", "My dentist is Rao."),
+        ("H2", "the system", "Hello there."),
     ]
-    assert [item["position"] for item in window] == [1, 2]
-    assert all("written_after_the_input_began" not in item for item in window)
+    # §4:5: the input names the message it replies to by its label.
+    (words,) = message.tags("The stimulus")
+    assert words.get("replies_to") == "H1"
+    assert all(item.get("after_stimulus") is None for item in window)
 
 
 async def test_a_reply_written_during_a_messages_start_wait_is_marked_as_after_it(
@@ -348,12 +349,12 @@ async def test_a_reply_written_during_a_messages_start_wait_is_marked_as_after_i
     await _answered(harness, conversation, 1)
     over.set()
     await _answered(harness, conversation, 2)
-    payload = json.loads(model.calls[-1].messages[1].content)
-    assert payload["input"]["text"] == "meanwhile"
-    window = payload["channel_window"]
-    assert [(item["position"], item.get("written_after_the_input_began")) for item in window] == [
-        (1, None),
-        (3, True),
+    message = rendered(model.calls[-1].messages)
+    assert message.stimulus == "meanwhile"
+    window = message.tags("Stimulus origin knowledge", "message")
+    assert [(item.text, item.get("after_stimulus")) for item in window] == [
+        ("first", None),
+        (window[1].text, "yes"),
     ]
 
 
@@ -374,12 +375,13 @@ async def test_a_message_replying_outside_the_window_brings_that_message_in() ->
         conversation, message=_said("m-3", "No, the other one.", replies_to=1)
     )
     await _answered(harness, conversation, 3)
-    window = json.loads(model.calls[-1].messages[1].content)["channel_window"]
-    assert [(item["item"], item["position"]) for item in window] == [
-        ("a recent message of this conversation", 4),
-        ("an earlier message the input replies to", 1),
-    ]
-    assert window[1]["text"] == "Book Pinecrest."
+    message = rendered(model.calls[-1].messages)
+    window = message.tags("Stimulus origin knowledge", "message")
+    # The window's one recent message, then the earlier one the input replies to.
+    assert [item.get("label") for item in window] == ["H1", "H2"]
+    assert window[1].text == "Book Pinecrest."
+    (words,) = message.tags("The stimulus")
+    assert words.get("replies_to") == "H2"
 
 
 # --- endings: couldn't finish, and the current state (§8, §9:1, §10:2) ---------------
@@ -574,12 +576,27 @@ async def test_each_input_message_carries_the_message_it_replies_to() -> None:
     await _answered(harness, conversation, 2)
     await harness.engine.write_message(conversation, message=_said("m-3", "No.", replies_to=2))
     await _answered(harness, conversation, 3)
-    first = json.loads(model.calls[-1].messages[1].content)["input"]["messages"]
+    first = rendered(model.calls[-1].messages)
     await harness.engine.write_message(conversation, message=_said("m-4", "No.", replies_to=4))
     await _answered(harness, conversation, 4)
-    second = json.loads(model.calls[-1].messages[1].content)["input"]["messages"]
-    assert [(one["position"], one["text"], one["replies_to"]) for one in first] == [(5, "No.", 2)]
-    assert [(one["position"], one["text"], one["replies_to"]) for one in second] == [(7, "No.", 4)]
+    second = rendered(model.calls[-1].messages)
+
+    def answered_by(message: Rendered) -> str | None:
+        # The label of the window message the input's one message replies to, by its text.
+        (words,) = message.tags("The stimulus")
+        assert words.text == "No."
+        by_label = {
+            one.get("label"): one.text
+            for one in message.tags("Stimulus origin knowledge", "message")
+        }
+        return by_label.get(words.get("replies_to"))
+
+    # Each "No." replies to a reply of the assistant's: the first to the one after "Book
+    # it.", the second to the one after "And dinner.", each named by its label.
+    assert answered_by(first) == answered_by(second) == "Hello there."
+    (one,) = first.tags("The stimulus")
+    (other,) = second.tags("The stimulus")
+    assert (one.get("replies_to"), other.get("replies_to")) == ("H2", "H4")
 
 
 def test_the_writer_fits_a_message_with_leading_whitespace_and_wide_characters() -> None:

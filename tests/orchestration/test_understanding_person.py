@@ -1,12 +1,13 @@
-"""Understanding's person section (ADR-0338 §7:2, §7:6-§7:7).
+"""Understanding's always in mind (ADR-0338 §7:2, §7:6-§7:7; ADR-0353 §2, §4).
 
-The stage alone, over a scripted model and a hand-built block: the section comes first;
-it carries the five fields, each said as the person's own choice and a field not set
-said to be not set; and it carries the pinned memories and nothing else of the block,
-under the first ``M`` labels, with recall's labels following on and a recalled record the
-section shows rendered there only. A label naming a pinned memory resolves to a
-``memory`` referent, and the template's ``person`` flag is set exactly where the section
-renders. With no block, nothing of the person model reaches the call.
+The stage alone, over a scripted model and a hand-built block. Always in mind says who the
+person is to the system, by their name, and three more of their fields, each said as
+theirs and a field not set said to be not set (ADR-0353 §4:2, §4:5); the zone is the
+situation's alone. It carries the pinned memories and nothing else of the block, under
+the first ``M`` labels, with recall's labels following on and a recalled record it shows
+rendered there only. A label naming a pinned memory resolves to a ``memory`` referent.
+With no block it says the system does not have it, and the template takes no flag
+(§8:1, §8:3).
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from understanding_support import Rendered, TextAsStructured
 
 from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.types import (
@@ -47,7 +49,6 @@ from ai_assistant.testing import (
     FakeDiagnosticSink,
     FakeModelProvider,
     default_prompt,
-    prompt_from,
 )
 from ai_assistant.testing.memories import memory, said_support
 
@@ -63,10 +64,6 @@ BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 WINDOW: Final = SuppliedWindow(ChannelContext())
 
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
-_FLAG_ECHO: Final = prompt_from(
-    UNDERSTANDING_PROMPT,
-    "$if recalled\nrecalled\n$end\n$if stories\nstories\n$end\n$if person\nperson\n$end\n",
-)
 
 DIET: Final = memory("m:diet", "Eats no meat.", said_support(when=AT, added_at=AT))
 SISTER: Final = memory("m:sister", "Has a sister called Ada.", said_support(when=AT, added_at=AT))
@@ -122,7 +119,7 @@ async def _understand(
             items=tuple(_item(record.id) for record in recalled),
         )
     stage = UnderstandingStage(
-        model=model, excerpt_chars=2000, prompt=prompt, diagnostics=diagnostics
+        model=TextAsStructured(model), excerpt_chars=2000, prompt=prompt, diagnostics=diagnostics
     )
     with diagnosed_activation("a-0", clock=lambda: AT):
         return await stage.understand(
@@ -140,50 +137,53 @@ async def _understand(
         )
 
 
-def _payload(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:
-    loaded: dict[str, Any] = json.loads(model.calls[call].messages[1].content)
-    return loaded
+def _payload(model: FakeModelProvider, call: int = 0) -> Rendered:
+    return Rendered(model.calls[call].messages[1].content)
 
 
-async def test_no_block_renders_nothing_of_the_person_model() -> None:
+def _always(model: FakeModelProvider) -> list[str]:
+    """Always in mind's lines, as rendered."""
+    return _payload(model).section("Always in mind").split("\n")
+
+
+async def test_no_block_says_the_system_does_not_have_it() -> None:
     model = FakeModelProvider(_proposal())
 
     await _understand(model, person=None)
 
-    assert "person" not in _payload(model)
+    (note,) = _always(model)
+    assert note.startswith("The system does not have it")
 
 
-async def test_the_person_section_comes_first_with_the_fields_as_the_persons_own() -> None:
+async def test_always_in_mind_says_who_the_person_is_and_their_fields_as_their_own() -> None:
     model = FakeModelProvider(_proposal())
 
     await _understand(model, person=BLOCK)
 
-    payload = _payload(model)
-    assert next(iter(payload)) == "person"
-    section = payload["person"]
-    assert "own current choice" in section["item"]
-    assert "never an instruction" in section["item"]
-    profile = section["profile"]
-    assert list(profile) == [one.value for one in ProfileField]
-    assert profile["name"]["value"] == "Robin Vale"
-    assert profile["address"]["value"] == "Robin"
-    assert profile["time_zone"]["value"] == "not set"
-    # §3:9: an assistant's name not set is not set, never Aether presented as their choice.
-    assert profile["assistant_name"]["value"].startswith("not set")
-    # §3:11: understanding is shown the language as a hint for reading their input.
-    assert "hint for reading what they write" in profile["language"]["is"]
+    lines = _always(model)
+    # ADR-0353 §4:2: named as the block names them; §3:9: the assistant's name not set is
+    # said to be not set, never Aether presented as their choice.
+    assert lines[:3] == [
+        "- Robin Vale is the one the system serves, and has not set a name for it, so it is "
+        "called Aether.",
+        "- How Robin Vale likes to be addressed: Robin.",
+        "- The language Robin Vale writes in: English.",
+    ]
+    # §4:5: the zone is the situation's alone.
+    assert "zone" not in "\n".join(lines)
+    situation = _payload(model).section("The situation")
+    assert "Robin Vale has not set a time zone" in situation
 
 
-async def test_the_section_names_whom_the_work_is_for_and_leaves_authorship_to_the_input() -> None:
+async def test_the_stimulus_is_attributed_by_its_parties_and_the_person_named() -> None:
     """ADR-0284 §2:3: a connected source's event is the owner's, and never their words."""
     model = FakeModelProvider(_proposal())
 
     await _understand(model, person=BLOCK)
 
-    payload = _payload(model)
-    assert "working for" in payload["person"]["item"]
-    assert "Who wrote the input is said with the input" in payload["person"]["item"]
-    assert "never something the user said" in payload["input"]["received_as"]
+    (words,) = _payload(model).tags("The stimulus")
+    assert (words.name, words.get("from")) == ("received", "informational_event:calendar")
+    assert "Robin Vale's last stimulus" in _payload(model).section("The situation")
 
 
 async def test_understanding_is_shown_the_pinned_memories_and_nothing_else_of_the_block() -> None:
@@ -191,16 +191,15 @@ async def test_understanding_is_shown_the_pinned_memories_and_nothing_else_of_th
 
     await _understand(model, person=BLOCK)
 
-    section = _payload(model)["person"]
-    assert [(one["label"], one["fact"]) for one in section["kept_in_mind"]] == [
-        ("M1", "Eats no meat."),
-        ("M2", "Has a sister called Ada."),
+    kept = _payload(model).tags("Always in mind", "memory")
+    assert [(one.get("label"), one.get("pinned"), one.text) for one in kept] == [
+        ("M1", "yes", "Eats no meat."),
+        ("M2", "yes", "Has a sister called Ada."),
     ]
-    assert all(one["not_linkable"] for one in section["kept_in_mind"])
-    rendered = json.dumps(section)
+    rendered = _payload(model).section("Always in mind")
     assert "Likes short answers." not in rendered  # a style memory (§7:2)
-    assert 'Rob"' not in rendered  # a suggestion
-    assert "left_out" not in section
+    assert "Rob." not in rendered  # a suggestion
+    assert "left" not in rendered
 
 
 async def test_a_block_with_no_pins_says_so() -> None:
@@ -209,7 +208,13 @@ async def test_a_block_with_no_pins_says_so() -> None:
 
     await _understand(model, person=block)
 
-    assert _payload(model)["person"]["kept_in_mind"].startswith("missing:")
+    lines = _always(model)
+    assert lines == [
+        "- The owner has not set a name, nor one for the system, so it is called Aether.",
+        "- The owner has not set how they like to be addressed.",
+        "- The owner has not set the language they write in.",
+        "- The owner has pinned nothing for the system to keep in mind.",
+    ]
 
 
 async def test_recalls_labels_follow_the_pins_and_a_pinned_memory_is_rendered_once() -> None:
@@ -218,8 +223,8 @@ async def test_recalls_labels_follow_the_pins_and_a_pinned_memory_is_rendered_on
     await _understand(model, person=BLOCK, recalled=(SISTER, CANOE))
 
     payload = _payload(model)
-    assert [one["label"] for one in payload["person"]["kept_in_mind"]] == ["M1", "M2"]
-    assert [(one["label"], one["fact"]) for one in payload["recalled"]] == [
+    assert payload.labelled("Always in mind") == ["M1", "M2"]
+    assert [(one.get("label"), one.text) for one in payload.tags("Recalled memories")] == [
         ("M3", "The canoe holds two.")
     ]
 
@@ -229,7 +234,9 @@ async def test_everything_recalled_already_shown_above_says_so() -> None:
 
     await _understand(model, person=BLOCK, recalled=(DIET,))
 
-    assert _payload(model)["recalled"] == "missing: everything recalled is already shown above"
+    assert _payload(model).section("Recalled memories") == (
+        "Nothing is shown: everything recall found is already shown above."
+    )
 
 
 async def test_a_pinned_memorys_label_resolves_to_its_memory_once() -> None:
@@ -241,26 +248,28 @@ async def test_a_pinned_memorys_label_resolves_to_its_memory_once() -> None:
     assert understood.grounding_dropped == 0
 
 
-async def test_a_label_past_the_person_sections_is_repaired_naming_its_sequence() -> None:
+async def test_a_label_past_always_in_mind_is_repaired_naming_its_sequence() -> None:
     model = FakeModelProvider.scripted(_proposal(cites=["M3"]), _proposal())
 
     await _understand(model, person=BLOCK)
     alongside = FakeModelProvider.scripted(_proposal(cites=["M9"]), _proposal())
     await _understand(alongside, person=BLOCK, recalled=(CANOE,))
 
-    assert "M1 to M2 (the person section)" in model.calls[1].messages[-1].content
-    assert "M1 to M3 (the person and recalled sections)" in alongside.calls[1].messages[-1].content
+    named = "(always in mind and the recalled memories)"
+    assert f"M1 to M2 {named}" in model.calls[1].messages[-1].content
+    assert f"M1 to M3 {named}" in alongside.calls[1].messages[-1].content
 
 
-async def test_the_person_flag_is_set_exactly_where_the_section_renders() -> None:
-    for person, handed in ((None, set()), (BLOCK, {"person"})):
+async def test_the_template_takes_no_flag_with_a_block_or_without() -> None:
+    """ADR-0353 §8:3: one instruction for every pass, its given entry recording no flag."""
+    instructions = set()
+    for person in (None, BLOCK):
         model = FakeModelProvider(_proposal())
         sink = FakeDiagnosticSink()
 
-        await _understand(model, person=person, prompt=_FLAG_ECHO, diagnostics=sink)
+        await _understand(model, person=person, diagnostics=sink)
 
-        assert set(model.calls[0].messages[0].content.split("\n")) - {""} == handed
-        # ADR-0335 §9:1: the given entry records the flag as the stage computed it.
+        instructions.add(model.calls[0].messages[0].content)
         (given,) = sink.of(DiagnosticSource.UNDERSTANDING, DiagnosticKind.GIVEN)
-        flags = given.model_dump(mode="json")["body"]["prompt"]["flags"]
-        assert flags["person"] is (person is not None)
+        assert given.model_dump(mode="json")["body"]["prompt"]["flags"] == {}
+    assert len(instructions) == 1

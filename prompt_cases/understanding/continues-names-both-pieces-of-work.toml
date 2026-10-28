@@ -1,16 +1,11 @@
-# ADR-0349 §7:3, §10:1: an input that changes two pieces of running work, on two of the
-# person's places, names both in continues: the theatre tickets and the table, each
-# moved to Sunday.
+# ADR-0349 §7:3, ADR-0353 §10:5: an input that changes two pieces of running work, on
+# two of the person's origins, is meant for both: the theatre tickets and the table,
+# each moved to Sunday. Re-rendered in ADR-0353's format (§13:4).
 prompt = "understanding"
 guards = "continuation_missed"
 came_from = "2026-10-26"
 set = "development"
 samples = 2
-
-[flags]
-recalled = false
-stories = false
-person = false
 
 [property]
 check = "continues_exactly"

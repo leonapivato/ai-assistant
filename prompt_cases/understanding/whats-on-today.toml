@@ -1,0 +1,18 @@
+# The prompts front's base stimulus (acceptance #3481): a new conversation asking what
+# is on today, with a reminder, a pinned birthday, a recalled appointment and a matter
+# around it. The understanding says what the stimulus means and how the context bears on
+# it, and never what to do: the closest code check to a reading by eye for advice is no
+# advising phrase in the understanding or a reading.
+prompt = "understanding"
+guards = "advice_in_understanding"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "says_none_of"
+fields = ["understanding", "readings"]
+phrases = ["should tell", "should let", "should notify", "should send", "should reply", "should ask", "should alert", "should check", "should remind", "should call", "should contact", "could mention", "could be mentioned", "worth mentioning", "worth checking", "recommend", "suggest"]
+
+[input]
+file = "whats-on-today.json"

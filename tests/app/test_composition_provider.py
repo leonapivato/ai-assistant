@@ -44,8 +44,10 @@ async def _no_sleep(delay: float) -> None:
     del delay
 
 
-def _routed_model(engine: Engine) -> ModelProvider:
+def _routed_model(engine: Engine) -> StructuredCompleter:
     """The routed provider the composed engine's understanding stage will actually call.
+
+    Handed to the stage as its ``StructuredCompleter`` (ADR-0354 §6:2, §8:1).
 
     The same object the phases' digests reach through (``_PhaseSeams.model``). The
     reach-in is deliberate and matches ``test_composition.py``'s existing idiom: the

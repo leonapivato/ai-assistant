@@ -1,0 +1,14 @@
+# Round 10, case 1a (#3481): two minutes after a booking request still being worked on,
+# "actually make it 7" corrects it, so it is meant for that work (ADR-0353 §10:5).
+prompt = "understanding"
+guards = "continuation_missed"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "continues_exactly"
+labels = ["R1"]
+
+[input]
+file = "make-it-seven-is-meant-for-the-booking.json"

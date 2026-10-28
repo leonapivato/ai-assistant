@@ -231,7 +231,7 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
-from ai_assistant.orchestration.person_block import activation_person, still_held
+from ai_assistant.orchestration.person_block import activation_person, person_zone, still_held
 from ai_assistant.orchestration.phase_path import PlaceTarget, Scheduling, failing_stage
 from ai_assistant.orchestration.planning import PlaceAuthor, PlaceItem
 from ai_assistant.orchestration.recall import Recalled
@@ -7726,6 +7726,9 @@ class Engine:
                 # ADR-0349 §5:8: the in-progress section as it stands when the call is
                 # rendered, read with no await before the stage renders it.
                 running, more = self._in_progress(state, working)
+                # ADR-0353 §5:2: every time is rendered in the person's zone, or the hub's
+                # where they set none or the stimulus is no person's.
+                own = None if person is None else person_zone(person.profile, stage="understanding")
                 understood = await self._understanding.understand(
                     input.text,
                     channel=input.channel,
@@ -7745,6 +7748,13 @@ class Engine:
                     running=running,
                     running_more=more,
                     person=person,
+                    # ADR-0353 §3:1, §7:3: the stimulus is attributed and framed by its
+                    # recorded trigger's parties and messages, and §5:2's zone is the
+                    # person's own or the hub's.
+                    trigger=None if state is None else state.trigger,
+                    zone=self._task_zones.default if own is None else own,
+                    own_zone=own is not None,
+                    received_at=None if state is None else state.started_at,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the

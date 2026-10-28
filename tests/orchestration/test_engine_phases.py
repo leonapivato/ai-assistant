@@ -36,6 +36,7 @@ from test_planning import _understanding
 from understanding_support import (
     EXCERPT_CHARS,
     STATED_PROPOSAL,
+    TextAsStructured,
     recall_stage,
     understanding_stage,
 )
@@ -3478,7 +3479,7 @@ async def test_with_the_record_on_each_source_writes_for_the_one_activation() ->
     )
     harness = Harness(
         understanding=UnderstandingStage(
-            model=FakeModelProvider(reply=STATED_PROPOSAL),
+            model=TextAsStructured(FakeModelProvider(reply=STATED_PROPOSAL)),
             excerpt_chars=EXCERPT_CHARS,
             prompt=default_prompt(UNDERSTANDING_PROMPT),
             diagnostics=sink,

@@ -22,7 +22,7 @@ import pytest
 from channel_receiver_contract import event_input
 from phases_support import SETTLE, entries, phases_harness, processing
 from test_engine import AT
-from understanding_support import recall_stage, understanding_stage
+from understanding_support import recall_stage, rendered, understanding_stage
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
@@ -193,7 +193,7 @@ async def test_overlapping_events_keep_separate_identity_context_and_receipts() 
 
     def meaning_of(messages: Sequence[Message]) -> str:
         """Understanding's reading names the input it was handed, so it can be traced."""
-        text = json.loads(messages[1].content)["input"]["text"]
+        text = rendered(messages).stimulus
         return json.dumps({"understanding": f"It reported {text}."})
 
     completer = _Controlled(arrivals=2)
@@ -216,8 +216,8 @@ async def test_overlapping_events_keep_separate_identity_context_and_receipts() 
     # its own supplied history, never the other's.
     assert len(completer.calls) == 0  # neither round has been answered yet
     seen = sorted(
-        (sent["input"]["text"], [item.get("text") for item in sent["channel_window"]])
-        for sent in (json.loads(call.messages[1].content) for call in understood.calls)
+        (sent.stimulus, [item.text for item in sent.tags("Stimulus origin knowledge")])
+        for sent in (rendered(call.messages) for call in understood.calls)
     )
     assert seen == [("first", ["first"]), ("second", ["second"])]
     completer.release.set()

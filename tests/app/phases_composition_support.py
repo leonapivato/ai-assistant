@@ -6,8 +6,9 @@ survived the cutover — the open episode, a channel's history, a restart's clos
 through the root as it is.
 
 The substitutes are the model-facing seams alone, as the old-path composition suites
-substitute them: the provider's ``complete``, answering the understanding stage with a
-stated reading, and the tool-calling completer planning's rounds go through. A
+substitute them: the provider's ``complete``, and its ``complete_structured`` through it
+(:func:`structured_through`), answering the understanding stage with a stated reading,
+and the tool-calling completer planning's rounds go through. A
 conversational activation is a message written into a conversation and taken in by the
 chat's reader (ADR-0293 §6), since ``converse`` retires at the cutover (ADR-0309 §5:1).
 
@@ -26,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.reply_shapes import read_reply, reply_shape_version
 from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
@@ -34,7 +36,11 @@ from ai_assistant.core.types import (
     DeviceAccess,
     EpisodicMemory,
     MessageAuthor,
+    ReplyExchange,
+    ReplyFailure,
+    ReplyMode,
     RoundResponse,
+    StructuredReply,
     TextChannelPayload,
     TranscriptMessage,
     UserMessage,
@@ -51,6 +57,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
+    from pydantic import BaseModel
 
     from ai_assistant.core.protocols import (
         ActionPolicy,
@@ -102,6 +109,41 @@ PHASE_PATH_STAGES: Final = frozenset(
         ControllerStage.END,
     }
 )
+
+
+type Completion = Callable[..., Awaitable[Message]]
+
+
+def structured_through(complete: Completion) -> Callable[..., Awaitable[StructuredReply[Any]]]:
+    """``PydanticAIProvider.complete_structured``, answered by a substituted ``complete``.
+
+    Understanding asks its reply as a structured call (ADR-0354 §8:1). Each such call is
+    the substitute's completion, its text read as the shape by ``core``'s one rule
+    (§3:4), so the suites keep one substitute for both seams of the provider.
+    """
+
+    async def complete_structured(
+        self: PydanticAIProvider,
+        messages: Sequence[Message],
+        shape: type[BaseModel],
+        *,
+        model: str | None = None,
+    ) -> StructuredReply[Any]:
+        text = (await complete(self, messages, model=model)).content
+        exchange = ReplyExchange(
+            reply=text,
+            model="fake:structured",
+            mode=ReplyMode.NATIVE,
+            finish_reason="stop",
+            shape=shape.__name__,
+            shape_version=reply_shape_version(shape),
+        )
+        read = read_reply(shape, text)
+        if isinstance(read, ReplyFailure):
+            return StructuredReply(failure=read, exchange=exchange)
+        return StructuredReply(value=read, exchange=exchange)
+
+    return complete_structured
 
 
 def _reply(messages: Sequence[Message]) -> str:
@@ -289,6 +331,7 @@ def build_phased(
 
     recorded = model
     monkeypatch.setattr(PydanticAIProvider, "complete", complete)
+    monkeypatch.setattr(PydanticAIProvider, "complete_structured", structured_through(complete))
     monkeypatch.setattr(PydanticAIToolCallingCompleter, "respond", respond)
     built = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING, **settings)
     engine = build_engine(built, data_dir=tmp_path)

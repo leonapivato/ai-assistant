@@ -19,6 +19,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from phases_composition_support import structured_through
 
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -119,6 +120,7 @@ async def _build(
 
     controlled = model
     monkeypatch.setattr(PydanticAIProvider, "complete", complete)
+    monkeypatch.setattr(PydanticAIProvider, "complete_structured", structured_through(complete))
     engine = build_engine(settings, data_dir=tmp_path)
     composed = Composed(engine)
     if start:

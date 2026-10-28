@@ -18,6 +18,7 @@ import json
 from typing import TYPE_CHECKING, Final
 
 import pytest
+from phases_composition_support import structured_through
 
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -76,6 +77,7 @@ async def engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
 
     controlled = model
     monkeypatch.setattr(PydanticAIProvider, "complete", complete)
+    monkeypatch.setattr(PydanticAIProvider, "complete_structured", structured_through(complete))
     built = build_engine(
         Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING), data_dir=tmp_path
     )

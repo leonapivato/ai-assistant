@@ -101,7 +101,6 @@ def _understanding(**changes: Any) -> dict[str, Any]:
         "came_from": "2026-10-21",
         "set": "development",
         "samples": 2,
-        "flags": {"recalled": False, "stories": False, "person": False},
         "property": {"check": "no_label", "fields": ["understanding"], "labels": ["H", "P"]},
         "input": {"messages": [{"role": "user", "content": json.dumps({"input": PRIVATE})}]},
     }
@@ -222,7 +221,8 @@ def test_a_well_formed_case_reads_whole(tmp_path: Path) -> None:
     assert reading.defects == []
     (case,) = reading.cases
     assert case.name == "understanding/one"
-    assert case.flags == {"recalled": False, "stories": False, "person": False}
+    # ADR-0353 §8:3, §13:4: understanding declares no flag, and its case names none.
+    assert case.flags == {}
     assert case.samples == 2
     assert not case.held_out
     assert case.tools is None
@@ -256,15 +256,9 @@ def test_an_input_may_be_a_json_file_beside_the_case(tmp_path: Path) -> None:
         (_understanding(samples=0), "samples"),
         (_understanding(samples=True), "samples"),
         (_understanding(guards="approval_as_habit", samples=2), "at least 3"),
-        (_understanding(flags={"recalled": False, "person": False}), "missing ['stories']"),
-        (
-            _understanding(flags={"recalled": False, "stories": False, "person": False, "x": True}),
-            "['x']",
-        ),
-        (
-            _understanding(flags={"recalled": "no", "stories": False, "person": False}),
-            "true and false",
-        ),
+        (_understanding(flags={"recalled": False}), "undeclared ['recalled']"),
+        (_understanding(flags={"x": True}), "['x']"),
+        (_understanding(flags={"x": "no"}), "true and false"),
         (_understanding(property={"check": "guess"}), "no code check"),
         (_understanding(property={"check": "asks_about", "calls": ["1.1"]}), "reads no reply"),
         (
@@ -507,6 +501,11 @@ def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) 
         "relation_in": {"memory": "M1", "relations": ["contained"]},
         "continues_exactly": {"labels": ["R1"]},
         "continues_nothing": {},
+        "belongs_to_each": {"labels": ["S1"]},
+        "belongs_to_nothing": {},
+        "understanding_names": {"phrases": ["x"]},
+        "says_none_of": {"fields": ["understanding"], "phrases": ["x"]},
+        "not_relayed": {},
     }
 
     for check in checks:
@@ -650,7 +649,7 @@ def test_each_case_is_sent_for_each_sample_under_the_candidate_and_the_control(
 
     assert status == 0
     control = replay_tool.default_candidate(replay_tool.declared_prompts()["understanding"])
-    rendered = control.template.render(flags={"recalled": False, "stories": False, "person": False})
+    rendered = control.template.render(flags={})
     assert model.systems == ["Candidate understanding."] * 2 + [rendered] * 2
     lines = _lines(results)
     assert [(one["version"]["role"], one["sample"]) for one in lines] == [
@@ -1068,6 +1067,69 @@ def test_continues_nothing_passes_only_an_empty_list() -> None:
     assert _judge("continues_nothing", {}, "understanding", _meaning(meant_for=[])) is None
     assert _judge("continues_nothing", {}, "understanding", _meaning()) is None
     assert _judge("continues_nothing", {}, "understanding", _meaning(meant_for=["R1"])) is not None
+
+
+# --- ADR-0353 §13:4: the checks of the probe stimuli and the controls -------------------
+
+
+def test_belongs_to_each_passes_where_every_named_label_is_linked() -> None:
+    params: dict[str, object] = {"labels": ["S1"]}
+    assert (
+        _judge("belongs_to_each", params, "understanding", _meaning(belongs_to=["P2", "S1"]))
+        is None
+    )
+    assert _judge("belongs_to_each", params, "understanding", _meaning(belongs_to=["P2"])) == (
+        "the reply's belongs_to leaves out 1 of the named labels"
+    )
+    assert _judge("belongs_to_each", params, "understanding", _meaning()) is not None
+
+
+def test_belongs_to_nothing_passes_only_an_empty_list() -> None:
+    assert _judge("belongs_to_nothing", {}, "understanding", _meaning()) is None
+    assert _judge("belongs_to_nothing", {}, "understanding", _meaning(belongs_to=["S1"])) == (
+        "the reply links the stimulus to a matter"
+    )
+
+
+def test_understanding_names_reads_the_understanding_in_any_case() -> None:
+    params: dict[str, object] = {"phrases": ["27 October"]}
+    said = json.dumps({"understanding": "A reminder at 9 am on Tuesday 27 october 2026."})
+    assert _judge("understanding_names", params, "understanding", said) is None
+    unsaid = json.dumps({"understanding": "A reminder at 9 tomorrow."})
+    assert _judge("understanding_names", params, "understanding", unsaid) == (
+        "the understanding leaves out 1 of the named phrases"
+    )
+
+
+def test_says_none_of_reads_each_named_field_where_a_word_begins() -> None:
+    params: dict[str, object] = {"fields": ["understanding", "readings"], "phrases": ["suggest"]}
+    clean = _meaning(unclear=[{"gap": "which", "readings": ["the cake came early"]}])
+    advice = _meaning(unclear=[{"gap": "which", "readings": ["Suggests telling Maren"]}])
+    inside = json.dumps({"understanding": "Autosuggestion is not advice."})
+    assert _judge("says_none_of", params, "understanding", clean) is None
+    assert _judge("says_none_of", params, "understanding", advice) == (
+        "a named phrase stands in readings"
+    )
+    assert _judge("says_none_of", params, "understanding", inside) is None
+
+
+def test_not_relayed_passes_only_where_relayed_is_false() -> None:
+    assert _judge("not_relayed", {}, "understanding", _meaning()) is None
+    assert _judge("not_relayed", {}, "understanding", _meaning(relayed=False)) is None
+    assert _judge("not_relayed", {}, "understanding", _meaning(relayed=True)) == (
+        "the reply marks the stimulus relayed"
+    )
+
+
+def test_says_none_of_refuses_a_field_no_reply_holds_as_text(tmp_path: Path) -> None:
+    case = _understanding(
+        property={"check": "says_none_of", "fields": ["unclear"], "phrases": ["x"]}
+    )
+    directory = _cases(tmp_path, ("understanding/bad.toml", case))
+
+    (found,) = _defects(directory)
+
+    assert "names fields no understanding reply holds as text: ['unclear']" in found
 
 
 def _calls(*calls: tuple[str, dict[str, object]]) -> RoundResponse:

@@ -1,0 +1,17 @@
+# Rounds 12 and 13, D7 (#3481): Tom asks the family group chat, an origin no kind
+# declares yet, who can get Ivy. The understanding holds what bears on it and nothing
+# that does not, not even to say so: no phrase calling the pinned peanut allergy, or
+# anything else, unrelated, the closest code check to the probe's count of such remarks.
+prompt = "understanding"
+guards = "relevance_announced"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "says_none_of"
+fields = ["understanding"]
+phrases = ["not relevant", "no bearing", "not touched", "not mentioned", "unaffected", "unrelated", "not about", "not part of"]
+
+[input]
+file = "a-family-group-message-names-nothing-that-does-not-bear.json"

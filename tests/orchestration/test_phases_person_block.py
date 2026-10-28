@@ -19,7 +19,14 @@ from phases_support import chat_turn, event, phases_harness
 from test_activation_state import _admitted
 from test_engine import AT as HARNESS_AT
 from test_engine import Harness
-from understanding_support import EXCERPT_CHARS, STATED_PROPOSAL, understanding_stage
+from understanding_support import (
+    EXCERPT_CHARS,
+    STATED_PROPOSAL,
+    Rendered,
+    TextAsStructured,
+    rendered,
+    understanding_stage,
+)
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -80,9 +87,9 @@ async def _wired(pinned: Memory = DIET) -> tuple[FakeMemoryStore, _Counting, Per
     return memory_store, counting, blocks
 
 
-def _understood(model: FakeModelProvider) -> dict[str, Any]:
-    loaded: dict[str, Any] = json.loads(model.calls[0].messages[1].content)
-    return loaded
+def _understood(model: FakeModelProvider) -> str:
+    """What understanding was shown as always in mind (ADR-0353 §2, §4:5)."""
+    return rendered(model.calls[0].messages).section("Always in mind")
 
 
 def _planned(completer: FakeToolCallingCompleter) -> dict[str, Any]:
@@ -96,7 +103,7 @@ def _recorded(
     """The phases harness with the diagnostic record on, which records each call's flags."""
     sink = FakeDiagnosticSink()
     understanding = UnderstandingStage(
-        model=model,
+        model=TextAsStructured(model),
         excerpt_chars=EXCERPT_CHARS,
         prompt=default_prompt(UNDERSTANDING_PROMPT),
         diagnostics=sink,
@@ -112,7 +119,10 @@ def _recorded(
 
 
 def _flags(sink: FakeDiagnosticSink, source: DiagnosticSource) -> dict[str, bool]:
-    """The person flags the code handed the stage's template (ADR-0335 §9:1)."""
+    """The person flags the code handed the stage's template (ADR-0335 §9:1).
+
+    Understanding's declares none (ADR-0353 §8:3), so it is handed none.
+    """
     given = sink.of(source, DiagnosticKind.GIVEN)[-1]
     flags: dict[str, bool] = given.model_dump(mode="json")["body"]["prompt"]["flags"]
     return {name: flags[name] for name in ("person", "suggestions") if name in flags}
@@ -125,10 +135,11 @@ async def test_with_no_store_wired_nothing_of_the_person_model_reaches_a_model()
 
     await chat_turn(harness, "What should I cook tonight?")
 
-    assert "person" not in _understood(model)
+    # ADR-0353 §8:1: always in mind is rendered, and says the system does not have it.
+    assert _understood(model).startswith("The system does not have it")
     assert "person" not in _planned(completer)
     # ADR-0338 §11:2: no flag set, so no instruction about the person model either.
-    assert _flags(sink, DiagnosticSource.UNDERSTANDING) == {"person": False}
+    assert _flags(sink, DiagnosticSource.UNDERSTANDING) == {}
     assert _flags(sink, DiagnosticSource.PLANNING) == {"person": False, "suggestions": False}
 
 
@@ -141,13 +152,13 @@ async def test_an_owners_turn_is_given_its_block_in_understanding_and_planning()
     await chat_turn(harness, "What should I cook tonight?")
 
     understood = _understood(model)
-    assert next(iter(understood)) == "person"
-    assert understood["person"]["profile"]["address"]["value"] == "Robin"
-    assert [one["fact"] for one in understood["person"]["kept_in_mind"]] == ["Eats no meat."]
+    assert "- How the owner likes to be addressed: Robin." in understood.split("\n")
+    (kept,) = Rendered(model.calls[0].messages[1].content).tags("Always in mind", "memory")
+    assert (kept.get("label"), kept.get("pinned"), kept.text) == ("M1", "yes", "Eats no meat.")
     planned = _planned(completer)
     assert next(iter(planned)) == "person"
     assert [one["fact"] for one in planned["person"]["kept_in_mind"]] == ["Eats no meat."]
-    assert _flags(sink, DiagnosticSource.UNDERSTANDING) == {"person": True}
+    assert _flags(sink, DiagnosticSource.UNDERSTANDING) == {}
     assert _flags(sink, DiagnosticSource.PLANNING) == {"person": True, "suggestions": False}
     assert counting.reads == 1
 
@@ -161,7 +172,7 @@ async def test_a_connected_sources_event_is_the_owners_too() -> None:
 
     await event(harness)
 
-    assert _understood(model)["person"]["profile"]["address"]["value"] == "Robin"
+    assert "- How the owner likes to be addressed: Robin." in _understood(model).split("\n")
     assert counting.reads == 1
 
 

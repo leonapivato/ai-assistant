@@ -20,7 +20,12 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Final
 
-from phases_composition_support import UNDERSTANDING_INSTRUCTIONS, build_phased, until
+from phases_composition_support import (
+    UNDERSTANDING_INSTRUCTIONS,
+    build_phased,
+    structured_through,
+    until,
+)
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -148,6 +153,7 @@ async def test_a_request_to_remember_is_pending_then_kept_once_it_leaves_the_win
         return ModelMessage(role=Role.ASSISTANT, content=models(messages))
 
     monkeypatch.setattr(PydanticAIProvider, "complete", complete)
+    monkeypatch.setattr(PydanticAIProvider, "complete_structured", structured_through(complete))
     engine = phased.engine
     plans = engine._plans
     try:

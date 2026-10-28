@@ -1,0 +1,15 @@
+# Round 10, case 3b, an untagged line (#3481): "remind me at 9 tomorrow" is read against
+# the situation's now, Monday 26 October 2026, so the understanding names the date it
+# means.
+prompt = "understanding"
+guards = "situation_unread"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "understanding_names"
+phrases = ["27 October"]
+
+[input]
+file = "nine-tomorrow-reads-the-date.json"

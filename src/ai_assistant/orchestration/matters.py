@@ -65,6 +65,9 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     InputOrigin,
     JoinedInput,
+    SupportHolder,
+    canonical_parties,
+    parties_are_outside,
 )
 from ai_assistant.orchestration.defects import is_defect, log_defect
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
@@ -97,6 +100,7 @@ __all__ = [
     "THE_USER",
     "Answered",
     "Became",
+    "EntryInput",
     "HeldInput",
     "InProgressEntry",
     "InputStanding",
@@ -367,6 +371,26 @@ class HeldInput:
 
 
 @dataclass(frozen=True, slots=True)
+class EntryInput:
+    """One input a running activation holds, as its in-progress entry shows it.
+
+    ADR-0353 §2:6-§2:7: understanding renders one text tag per input, the trigger's
+    first and then each joined input in the order it was joined, its tag and ``from``
+    given by the input's parties, and an input the peer view withholds as an empty
+    marker, never as its text.
+
+    Attributes:
+        brief: The input in brief, read through the peer view; ``None`` where the view
+            withholds it.
+        parties: Whose words it carries (ADR-0351 §2:1, §2:6), or ``None`` where they are
+            unknown.
+    """
+
+    brief: str | None
+    parties: tuple[SupportHolder, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
 class InProgressEntry:
     """One running activation, as an in-progress entry shows it (§5:6).
 
@@ -378,6 +402,13 @@ class InProgressEntry:
             view withholds it.
         acted: Whether it has acted (§3:5).
         origin: Who its input came from, by which a withheld input is said to be outside.
+        arrived_at: When its input arrived, its episode's ``occurred_at``, the one addition
+            ADR-0353 §2:5 makes to §5:6's list; ``None`` where its episode was never
+            written.
+        inputs: Each input it holds, the trigger's first and then each joined one in the
+            order it was joined (ADR-0353 §2:6); empty where its episode was never written.
+        outside: Whether its input is outside (ADR-0351 §5:1, §5:7), by its trigger's
+            parties and its latest understanding's relay mark (ADR-0353 §2:7).
     """
 
     activation_id: str
@@ -385,6 +416,9 @@ class InProgressEntry:
     input: str | None
     acted: bool
     origin: InputOrigin
+    arrived_at: datetime | None = None
+    inputs: tuple[EntryInput, ...] = ()
+    outside: bool = False
 
 
 def _brief(text: str) -> str:
@@ -415,12 +449,39 @@ def entry_of(state: ActivationState) -> InProgressEntry | None:
     ):
         return None
     view = project_episode(episode, excerpt_chars=PEER_BRIEF_CHARS, effects=())
+    trigger = state.trigger
+    # ADR-0353 §2:6: one input per text tag, the trigger's then each joined one, each as
+    # the peer view shows it and with its own parties (ADR-0351 §2:6).
+    joined = episode.processing_record.joined
+    inputs = (
+        EntryInput(
+            brief=None if view.input is None else _brief(view.input.text),
+            parties=trigger.parties,
+        ),
+        *(
+            EntryInput(
+                brief=None if index >= len(view.joined) else _brief(view.joined[index].text),
+                # §2:6: a joined input's parties are its messages' distinct parties, or
+                # unknown where the episode store's upgrade could not read them (§9:3).
+                parties=None
+                if any(message.party is None for message in one.messages)
+                else canonical_parties(
+                    message.party for message in one.messages if message.party is not None
+                ),
+            )
+            for index, one in enumerate(joined)
+        ),
+    )
+    latest = state.understanding[-1] if state.understanding else None
     return InProgressEntry(
         activation_id=state.activation_id,
         channel=place,
         input=brief_input(view),
         acted=state.committed,
-        origin=state.trigger.origin,
+        origin=trigger.origin,
+        arrived_at=episode.occurred_at,
+        inputs=inputs,
+        outside=parties_are_outside(trigger.parties, relayed=latest is not None and latest.relayed),
     )
 
 

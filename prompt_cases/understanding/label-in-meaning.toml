@@ -1,17 +1,12 @@
-# The input asks about something a channel window item says. The meaning, the references'
-# phrases, the relationships' statements and the unresolved matters are free text a later
-# stage reads and may copy into a note, so none of them names a window label: the labels
-# belong in the label lists alone.
+# The input asks about something a place-window message says. The understanding and each
+# gap are free text a later stage reads and may copy into a note, so none of them names
+# a label: the labels belong in the lists of labels alone. Re-rendered in ADR-0353's
+# format (§13:4).
 prompt = "understanding"
 guards = "label_in_text"
 came_from = "2026-10-21"
 set = "development"
 samples = 2
-
-[flags]
-recalled = false
-stories = false
-person = false
 
 [property]
 check = "no_label"

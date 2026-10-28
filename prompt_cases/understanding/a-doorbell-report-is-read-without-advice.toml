@@ -1,0 +1,17 @@
+# Round 12, D1 (#3481): a doorbell camera's report, an origin no kind declares yet, so
+# its framing and description are fixed text (ADR-0353 §7:5). The reading says what the
+# report means and never what to do: no advising phrase, the closest code check to the
+# probe's reading by eye.
+prompt = "understanding"
+guards = "advice_in_understanding"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "says_none_of"
+fields = ["understanding", "readings"]
+phrases = ["should tell", "should let", "should notify", "should send", "should reply", "should ask", "should alert", "should check", "should remind", "should call", "should contact", "could mention", "could be mentioned", "worth mentioning", "worth checking", "recommend", "suggest"]
+
+[input]
+file = "a-doorbell-report-is-read-without-advice.json"

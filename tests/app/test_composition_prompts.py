@@ -46,7 +46,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _PRIVATE = "the owner's private wording 9d41"
 
 #: A well-formed override of understanding's prompt, naming both its flags.
-_OVERRIDE = f"{_PRIVATE}\n$if recalled\nrecalled\n$end\n$if stories\nstories\n$end\n"
+_OVERRIDE = f"{_PRIVATE}\nunderstood\n"
 
 
 def _settings(*, overrides: bool) -> Settings:
@@ -117,7 +117,8 @@ def test_the_ten_prompts_carry_their_flags_and_values() -> None:
         MEMORY_RECONCILER_PROMPT,
         FOLLOW_UP_PROMPT,
     )
-    assert UNDERSTANDING_PROMPT.flags == frozenset({"recalled", "stories", "person"})
+    # ADR-0353 §8:3: understanding's template takes no flag.
+    assert UNDERSTANDING_PROMPT.flags == frozenset()
     assert UNDERSTANDING_PROMPT.values == frozenset()
     assert PLANNING_PROMPT.flags == frozenset(
         {
@@ -201,9 +202,7 @@ def test_an_override_replaces_its_prompts_default_whole(tmp_path: Path) -> None:
 
     assert template.origin is PromptOrigin.OVERRIDE
     assert template.version == hashlib.sha256(written.read_bytes()).hexdigest()[:12]
-    assert template.render(flags={"recalled": True, "stories": False, "person": False}) == (
-        f"{_PRIVATE}\nrecalled"
-    )
+    assert template.render(flags={}) == f"{_PRIVATE}\nunderstood"
 
 
 def test_the_start_logs_each_prompts_name_version_and_origin_and_none_of_its_text(
@@ -298,7 +297,7 @@ def test_an_entry_that_is_a_pipe_is_refused_without_waiting_on_it(tmp_path: Path
         (b"\xff" + _PRIVATE.encode(), "is not UTF-8"),
         (" \n\t\n", "holds only whitespace"),
         (f"{_PRIVATE}\n$if planning_only\nx\n$end", "line 2: a block names a flag"),
-        (f"{_PRIVATE}\n$if recalled\nx", "line 2: a block opened here is never closed"),
+        (f"{_PRIVATE}\n$end", "line 2: an $end closes no block"),
         (f"{_PRIVATE} costs 5$", "line 1: a $ is none of"),
         (f"{_PRIVATE} $tool", "line 1: names a flag or value its prompt does not declare"),
     ],

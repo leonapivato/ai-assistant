@@ -4,19 +4,22 @@ The stage alone, over a scripted model and hand-built windows. Understanding is 
 question mark and no ``Q`` label wherever it is shown a message that asked, though the
 windows still bring the question each assistant message is (§11:1); the reply carries no
 answer pointer, and whatever the reply holds no version records one (§11:2, §16:4). A
-reply that still holds ``answers`` parses with the key dropped and costs no repair
-(§9:14), and a ``Q`` label cited in ``cites`` resolves to nothing, as any label the call
-did not render, and earns the one repair (§9:10).
+reply that still holds ``answers`` names a key its shape does not, so it does not parse
+and costs the one repair (ADR-0354 §8:3, §10:1); and a ``Q`` label cited in ``cites``
+resolves to nothing, as any label the call did not render, and earns the one repair
+(§9:10).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from story_support import AT, CONVERSATION, episode
+from understanding_support import Rendered, TextAsStructured
 
 from ai_assistant.core.types import (
     ActivationRecall,
@@ -177,7 +180,7 @@ async def _understand(  # noqa: PLR0913 — one knob per section a case renders
             items=tuple(_item(record.id, MemoryKind(record.kind)) for record in recalled),
         )
     return await UnderstandingStage(
-        model=model, excerpt_chars=2000, prompt=_UNDERSTANDING
+        model=TextAsStructured(model), excerpt_chars=2000, prompt=_UNDERSTANDING
     ).understand(
         "yes",
         channel=channel,
@@ -209,52 +212,15 @@ def _view(story_id: str, *episodes: EpisodicMemory) -> ShortView:
     return ShortView(story_id=story_id, lines=(), notes=(), episodes=episodes)
 
 
-def _shown(model: FakeModelProvider) -> dict[str, Any]:
-    shown: dict[str, Any] = json.loads(model.calls[0].messages[-1].content)
-    return shown
-
-
-def _marks(model: FakeModelProvider) -> list[tuple[str, str, list[int]]]:
-    """Every question mark the first call rendered, in order.
-
-    As ``(Q label, label of the item that shows it, parts)``: a place-window message's
-    own mark is ``question``, an episode's are ``questions_asked``, each giving its ``Q``
-    label as ``answer_label``; a story's episodes take no label, so the item that shows
-    them is the story.
-    """
-    found: list[tuple[str, str, list[int]]] = []
-
-    def walk(value: object, holder: str) -> None:
-        if isinstance(value, dict):
-            asked = value.get("answer_label")
-            if isinstance(asked, str):
-                found.append((asked, holder, value["parts"]))
-                return
-            label = value.get("label")
-            if isinstance(label, str):
-                holder = label
-            for one in value.values():
-                walk(one, holder)
-        elif isinstance(value, list):
-            for one in value:
-                walk(one, holder)
-
-    walk(_shown(model), "")
-    return found
-
-
 def _rendered(model: FakeModelProvider) -> str:
     """The first call's user message, as sent."""
-    return model.calls[0].messages[-1].content
+    return model.calls[0].messages[1].content
 
 
-def _keys(value: object) -> set[str]:
-    """Every key anywhere in a rendered value."""
-    if isinstance(value, dict):
-        return {str(key) for key in value} | {k for one in value.values() for k in _keys(one)}
-    if isinstance(value, list):
-        return {k for one in value for k in _keys(one)}
-    return set()
+def _marks(model: FakeModelProvider) -> list[str]:
+    """Every question mark the first call rendered: a ``Q`` label, or a marking attribute."""
+    rendered = _rendered(model)
+    return re.findall(r"\bQ[0-9]+\b|answer_label|questions_asked|question=", rendered)
 
 
 # --- no question is marked (ADR-0353 §11:1) ----------------------------------------------
@@ -282,9 +248,6 @@ async def test_no_place_understanding_is_shown_a_question_carries_a_mark_or_a_q_
     )
 
     assert _marks(model) == []
-    keys = _keys(_shown(model))
-    assert not keys & {"question", "questions_asked", "answer_label"}
-    assert '"Q1"' not in _rendered(model)
     # The messages themselves are still shown, as the window brought them.
     assert "Shall I book it?" in _rendered(model)
 
@@ -306,9 +269,9 @@ async def test_an_exchange_shown_in_the_place_window_carries_no_question_of_its_
 
     await _understand(model, window=window, episodes=(record,))
 
-    first, second = _shown(model)["channel_window"]
-    assert "questions_asked" not in first
-    assert "question" not in second
+    first, second = Rendered(_rendered(model)).tags("Stimulus origin knowledge", "message")
+    assert (first.text, second.text) == ("Book it.", "Shall I book r-1?")
+    assert _marks(model) == []
     assert "And r-2?" not in _rendered(model)
 
 
@@ -328,15 +291,15 @@ async def test_an_exchange_shown_in_the_place_window_carries_no_question_of_its_
 async def test_no_version_records_an_answer_pointer_whatever_the_reply_holds(
     answers: object,
 ) -> None:
-    """§11:2, §9:14: ``answers`` is a key the reply shape does not name, so it is dropped
-    before the parse, whatever it holds, the reply records no pointer and costs no
-    repair."""
+    """§11:2: ``answers`` is a key the reply shape does not name, so a reply holding it,
+    whatever it holds, does not parse and costs the one repair (ADR-0354 §8:3), and no
+    version records a pointer."""
     record = _asking("a-1", _round("r-1", asked=2))
-    model = FakeModelProvider.scripted(_proposal(answers=answers))
+    model = FakeModelProvider.scripted(_proposal(answers=answers), _proposal())
 
     understood = await _understand(model, window=_CHAT, episodes=(record,))
 
-    assert len(model.calls) == 1
+    assert len(model.calls) == 2
     assert understood.meaning == "The user says yes."
     assert "answers" not in understood.model_dump()
     assert understood.grounding_dropped == 0
@@ -359,7 +322,7 @@ async def test_a_q_label_cited_in_cites_names_nothing_and_is_repaired() -> None:
     label of a form other than ``R``'s, and earns the one repair; the repair statement
     names no ``Q`` sequence."""
     record = _asking("a-1", _round("r-1", asked=1))
-    bad = _proposal(cites=["Q1"], answers=_pointers("Q1"))
+    bad = _proposal(cites=["Q1"])
     model = FakeModelProvider.scripted(bad, bad)
 
     understood = await _understand(model, episodes=(record,))

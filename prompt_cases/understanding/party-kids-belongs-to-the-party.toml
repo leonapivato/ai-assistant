@@ -1,0 +1,14 @@
+# Round 10, case 2a (#3481): a question about who is coming to the party asks about the
+# birthday party, so it belongs to that matter.
+prompt = "understanding"
+guards = "link_missed"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "belongs_to_each"
+labels = ["S1"]
+
+[input]
+file = "party-kids-belongs-to-the-party.json"
