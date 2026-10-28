@@ -27,15 +27,24 @@ A response carrying a call, where none was offered, is ``invalid``. The exchange
 it holds what §5:3 names and nothing derived from the value. Nothing that came back is
 raised (§2:5): text no record can hold, a lone surrogate code point, is recorded with
 U+FFFD in its place, and the response is still read as it came.
+
+**The thinking's summary** (ADR-0355 §3, §4) is asked for and kept only by a provider
+built to keep it. Such a provider's request to a model :data:`THINKS_UNASKED` names,
+whose own settings configure no thinking, carries Anthropic's
+``{"type": "adaptive", "display": "summarized"}`` and differs in nothing else
+(:func:`summary_settings`): on those models it asks only to see the thinking the model
+already does. What comes back is the response's thinking parts' text, on the exchange
+and never in the reply; a provider not built to keep it keeps none.
 """
 
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Final
+import sys
+from typing import TYPE_CHECKING, Final, cast
 
 from pydantic import BaseModel
-from pydantic_ai.messages import BaseToolCallPart, TextPart
+from pydantic_ai.messages import BaseToolCallPart, TextPart, ThinkingPart
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.wrapper import WrapperModel
@@ -55,12 +64,44 @@ if TYPE_CHECKING:
 
     from pydantic_ai import models
     from pydantic_ai.messages import ModelResponse
+    from pydantic_ai.settings import ModelSettings
 
 #: The one fixed sentence a prompted request's schema follows (§4:2). The schema is
 #: appended after it, on its own paragraph.
 PROMPTED_INSTRUCTION: Final = (
     "Reply with one JSON object and nothing else, matching this JSON schema:"
 )
+
+#: The models Anthropic documents as thinking adaptively when a request carries no
+#: ``thinking`` field, matched exactly against the name of the model a request goes to
+#: (ADR-0355 §3:2). A name is added only by a change citing the vendor's statement that
+#: the model does so: on any other model, asking to see the thinking would turn it on.
+THINKS_UNASKED: Final = (
+    "claude-opus-5-5",
+    "claude-opus-5",
+    "claude-sonnet-5-5",
+    "claude-sonnet-5",
+    "claude-haiku-5-5",
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "claude-mythos-5-1",
+    "claude-mythos-5",
+    "claude-mythos-preview",
+)
+
+#: Anthropic's thinking configuration a request keeping the summary carries (§3:1): the
+#: adaptive thinking those models already do, its summary shown.
+_SUMMARISED_ADAPTIVE: Final[Mapping[str, str]] = {"type": "adaptive", "display": "summarized"}
+
+#: The settings keys, pydantic-ai's unified one and Anthropic's own, by which a model's
+#: own settings configure its thinking. A model whose settings hold either, at any
+#: value, is sent the request it would be sent anyway (§3:4).
+_THINKING_SETTINGS: Final = frozenset({"thinking", "anthropic_thinking"})
+
+#: The module pydantic-ai's Anthropic model is defined in, looked up rather than
+#: imported, as :mod:`~ai_assistant.models.prompt_cache` looks it up: it imports the
+#: vendor SDK, and until something has imported it no Anthropic model can exist.
+_ANTHROPIC_MODULE: Final = "pydantic_ai.models.anthropic"
 
 #: pydantic-ai's normalised finish reasons that end a response as a returned failure,
 #: before its reply is read (§5:2).
@@ -93,6 +134,39 @@ def mode_for(model: models.Model) -> ReplyMode:
     return ReplyMode.PROMPTED
 
 
+def summary_settings(model: models.Model) -> ModelSettings:
+    """The settings asking ``model``'s request to show its thinking's summary (§3).
+
+    Args:
+        model: The model the request goes to, as pydantic-ai resolved it.
+
+    Returns:
+        Anthropic's ``{"type": "adaptive", "display": "summarized"}`` as the settings
+        key ``anthropic_thinking``, where ``model`` is pydantic-ai's Anthropic model or
+        wraps one, its name is one :data:`THINKS_UNASKED` names, and no layer's own
+        settings configure thinking; otherwise no settings at all, so the request is
+        the one it would be without them (§3:4).
+    """
+    layer = model
+    while True:
+        configured: Mapping[str, object] = layer.settings or {}
+        if _THINKING_SETTINGS & configured.keys():
+            return cast("ModelSettings", {})
+        if not isinstance(layer, WrapperModel):
+            break
+        layer = layer.wrapped
+    if not _is_anthropic(layer) or layer.model_name not in THINKS_UNASKED:
+        return cast("ModelSettings", {})
+    # Anthropic's own settings key, which ``ModelSettings`` does not declare.
+    return cast("ModelSettings", {"anthropic_thinking": dict(_SUMMARISED_ADAPTIVE)})
+
+
+def _is_anthropic(model: models.Model) -> bool:
+    """Whether ``model`` is pydantic-ai's Anthropic model."""
+    module = sys.modules.get(_ANTHROPIC_MODULE)
+    return module is not None and isinstance(model, module.AnthropicModel)
+
+
 def request_parameters(schema: Mapping[str, object], mode: ReplyMode) -> ModelRequestParameters:
     """The request parameters asking for ``schema`` in ``mode``, with no tool offered.
 
@@ -121,13 +195,14 @@ def request_parameters(schema: Mapping[str, object], mode: ReplyMode) -> ModelRe
     )
 
 
-def structured_reply[T: BaseModel](
+def structured_reply[T: BaseModel](  # noqa: PLR0913 — the response, its shape, and the four facts of the request it answers
     response: ModelResponse,
     shape: type[T],
     *,
     mode: ReplyMode,
     version: str,
     model: models.Model,
+    thinking_summaries: bool,
 ) -> StructuredReply[T]:
     """Read ``response`` as ``shape``, or as the returned failure it is (§4:6, §5).
 
@@ -138,6 +213,9 @@ def structured_reply[T: BaseModel](
         version: The shape's version (§3:3).
         model: The model the request went to, which names the answer where the response
             does not.
+        thinking_summaries: Whether the provider keeps the thinking's summary: where
+            it does, the exchange's ``thinking`` is the response's thinking parts' text
+            (ADR-0355 §4:1); where it does not, it is ``None``.
 
     Returns:
         The shape's value or a returned failure, with the exchange beside it. Nothing
@@ -160,6 +238,7 @@ def structured_reply[T: BaseModel](
         ),
         shape=shape.__name__,
         shape_version=version,
+        thinking=_summary(response) if thinking_summaries else None,
     )
     # Read off the response as it came, never off the record of it: a refusal is
     # refused and a reply read as the model wrote it, whatever the record had to change.
@@ -167,6 +246,18 @@ def structured_reply[T: BaseModel](
     if isinstance(read, ReplyFailure):
         return StructuredReply(failure=read, exchange=exchange)
     return StructuredReply(value=read, exchange=exchange)
+
+
+def _summary(response: ModelResponse) -> str | None:
+    """The response's thinking parts' text, in order, joined by one blank line (§4:1).
+
+    A part with no text, as one whose display was omitted or one that was redacted, is
+    left out, and where no part has text there is no summary.
+    """
+    texts = [
+        part.content for part in response.parts if isinstance(part, ThinkingPart) and part.content
+    ]
+    return recordable("\n\n".join(texts)) if texts else None
 
 
 def answered_by(response: ModelResponse, model: models.Model) -> str:

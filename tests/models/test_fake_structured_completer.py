@@ -139,3 +139,25 @@ class TestTheFakeBeyondTheContract:
     async def test_an_unscripted_fake_reads_an_empty_object(self) -> None:
         reply = await FakeStructuredCompleter().complete_structured(request(), _Defaults)
         assert reply.value == _Defaults()
+
+    async def test_a_scripted_summary_comes_back_on_the_exchange_and_not_in_the_reply(
+        self,
+    ) -> None:
+        """ADR-0355 §4:3."""
+        scripted = ScriptedReply(text=VALID_REPLY, thinking="Blue light scatters \ud800 most.")
+        reply = await FakeStructuredCompleter(scripted).complete_structured(request(), Verdict)
+        assert reply.value == VALID_VALUE
+        assert reply.exchange.reply == VALID_REPLY
+        assert reply.exchange.thinking == "Blue light scatters � most."
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            pytest.param(VALID_REPLY, id="text"),
+            pytest.param(ScriptedReply(text=VALID_REPLY), id="unscripted-summary"),
+            pytest.param(ScriptedReply(text=VALID_REPLY, thinking=""), id="empty-summary"),
+        ],
+    )
+    async def test_an_unscripted_summary_is_none(self, answer: str | ScriptedReply) -> None:
+        reply = await FakeStructuredCompleter(answer).complete_structured(request(), Verdict)
+        assert reply.exchange.thinking is None

@@ -73,6 +73,10 @@ class ScriptedReply:
         usage: The tokens the response reports.
         model: The ``"provider:model"`` the response says answered.
         mode: The mode the request is reported as sent in.
+        thinking: The provider's summary of its thinking, which the exchange carries
+            and the reply never does (ADR-0355 §4:3). ``None``, or empty text, gives
+            the exchange no summary, as a response whose thinking has no text gives
+            none.
     """
 
     text: str = ""
@@ -82,6 +86,7 @@ class ScriptedReply:
     usage: ReplyUsage = field(default_factory=ReplyUsage)
     model: str = DEFAULT_STRUCTURED_MODEL
     mode: ReplyMode = ReplyMode.NATIVE
+    thinking: str | None = None
 
 
 #: What a scripted call answers with: a reply's text, a scripted response, or a failure
@@ -212,6 +217,7 @@ class FakeStructuredCompleter:
             usage=scripted.usage,
             shape=shape.__name__,
             shape_version=version,
+            thinking=recordable(scripted.thinking) if scripted.thinking else None,
         )
         read = (
             scripted.failure if scripted.failure is not None else read_reply(shape, scripted.text)

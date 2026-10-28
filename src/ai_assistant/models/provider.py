@@ -17,7 +17,7 @@ do.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 from pydantic_ai import Agent, models
 from pydantic_ai.direct import model_request
@@ -55,6 +55,7 @@ from ai_assistant.models.structured import (
     mode_for,
     request_parameters,
     structured_reply,
+    summary_settings,
 )
 
 _HTTP_UNAUTHORIZED: Final = 401
@@ -415,17 +416,29 @@ class PydanticAIProvider:
     Each completion asks the provider to cache its instructions where the model
     it goes to is Anthropic's (:mod:`~ai_assistant.models.prompt_cache`, #3077),
     whether it is the default model or a call's override.
+
+    A provider built with ``thinking_summaries`` keeps a structured call's thinking
+    summary (ADR-0355 §2:1): its structured request to a model that thinks unasked
+    asks to see that thinking, and the exchange carries what came back
+    (:mod:`~ai_assistant.models.structured`). It bears on nothing else.
     """
 
-    def __init__(self, default_model: models.Model | str) -> None:
+    def __init__(
+        self, default_model: models.Model | str, *, thinking_summaries: bool = False
+    ) -> None:
         """Initialise the provider.
 
         Args:
             default_model: The model used when a call does not override it,
                 either as a pydantic-ai ``"provider:model"`` name or a
                 pre-built ``Model`` instance.
+            thinking_summaries: Whether :meth:`complete_structured` keeps the
+                thinking's summary (ADR-0355 §2:1). False, the default, sends and
+                returns exactly what it would without it (§2:2). :meth:`complete`
+                is the same either way.
         """
         self._default_model = default_model
+        self._thinking_summaries = thinking_summaries
         # ``defer_model_check`` keeps construction offline: a string model is
         # only resolved (and credentials required) at first completion.
         self._agent: Agent[None, str] = Agent(
@@ -509,7 +522,10 @@ class PydanticAIProvider:
         direct API, to the call's ``model`` or the default: in native mode where that
         model's profile supports JSON-schema output and in prompted mode otherwise
         (:mod:`~ai_assistant.models.structured`). Its settings are the ones
-        :meth:`complete` sends, the cache marks for that model included (§4:5).
+        :meth:`complete` sends, the cache marks for that model included (§4:5), and,
+        where this provider keeps thinking summaries, the request to show that model's
+        thinking where it thinks unasked (ADR-0355 §3), whose summary the exchange
+        then carries (§4:1).
 
         Args:
             messages: Conversation history, oldest first. Non-empty, not ending on a
@@ -542,18 +558,28 @@ class PydanticAIProvider:
             msg = "a structured call is refused for a fallback model, whose mode is unknowable"
             raise ModelError(msg)
         mode = mode_for(chosen)
+        settings = prompt_cache_settings(chosen)
+        if self._thinking_summaries:
+            settings = cast("ModelSettings", {**settings, **summary_settings(chosen)})
         try:
             response = await model_request(
                 chosen,
                 history,
-                model_settings=prompt_cache_settings(chosen) or None,
+                model_settings=settings or None,
                 model_request_parameters=request_parameters(schema, mode),
             )
         except Exception as exc:
             # Broad on purpose: `_classify` is the taxonomy, and its default for an
             # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
             raise _classify(exc) from exc
-        return structured_reply(response, shape, mode=mode, version=version, model=chosen)
+        return structured_reply(
+            response,
+            shape,
+            mode=mode,
+            version=version,
+            model=chosen,
+            thinking_summaries=self._thinking_summaries,
+        )
 
 
 def _awaiting_a_reply(messages: Sequence[Message], *, caller: str) -> list[ModelMessage]:
