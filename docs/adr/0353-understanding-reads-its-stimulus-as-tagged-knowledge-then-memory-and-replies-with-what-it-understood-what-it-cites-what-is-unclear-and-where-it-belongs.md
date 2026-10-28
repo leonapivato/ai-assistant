@@ -293,10 +293,11 @@ rule, and the suite judges it (§13).
 > **Normative.** The data says "origin" for ADR-0349's place, as `origin=` and as "The
 > origin:", and never "place". An origin is named by its kind's description of it (§6:3).
 
-> **Normative.** Always in mind renders all five of the person block's fields (ADR-0338
+> **Normative.** Always in mind renders four of the person block's five fields (ADR-0338
 > §7:2): the name and the assistant's name in the sentence §4:2 gives, how they like to be
-> addressed, and the language they write in, each said as theirs, and the time zone as
-> §5:2 states it. A field not set is said not to be set.
+> addressed, and the language they write in, each said as theirs. A field not set is said
+> not to be set. The fifth, the time zone, is said in the situation alone (§5:2, §6:1), and
+> always in mind does not repeat it.
 
 ### 5. Times
 
@@ -306,8 +307,9 @@ rule, and the suite judges it (§13).
 
 > **Normative.** Every time is rendered in the zone of the person the stimulus is for
 > (ADR-0338 §2:2, §3:6), or in the hub's zone where that person has set none or the
-> stimulus is no person's. The situation says which zone once (§6:1), and no other line
-> repeats it.
+> stimulus is no person's. The situation's first line says which zone once (§6:1), and no
+> other line repeats it: the person's zone, or, where they have set none, that it is not set
+> and that every time is in the hub's zone, named (ADR-0338 §3:9).
 
 > **Normative.** No relative time is written by code: never "3 hours ago", and never
 > "today" or "yesterday" in place of a date.
@@ -827,8 +829,8 @@ Superseded in part. Every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0276 | §1:3's *its meaning, the references…, the relationships…, the ground of each…, and the matters the reading leaves unresolved*: the understanding, what it cites, what is unclear, and where it belongs; §1:5's *nothing else*, in the addition alone: the situation; §2:4's copied fields: the record takes the reply by §9's table; §2:5's referent kinds, in the addition alone: `running`; §2:2, for `UnderstandingGround`: it leaves `core`, and the upgrade drops every stored value naming it; §2:6, whole: no ground remains; §3:3's *a reading grounded in the input alone is `stated`*; §6:1's instructed reply and its *`inferred` and not `supplied`*; §6:2's `supplied` check and §6:4's downgrade, whole; §6:2's repair, for a label in `meant_for` and an `R` label anywhere: dropped and counted with none; §7:6's rendering | §9, §9:9, §9:11, §10:1, §12, §6, §14:9 |
-| ADR-0281 | §7:2's *a third section of the prompt, `recalled`*: recalled memories, under long-term memory; §7:4's *a reading supported by an `M` label is `supplied`* | §2, §12 |
+| ADR-0276 | §1:3's *its meaning, the references…, the relationships…, the ground of each…, and the matters the reading leaves unresolved*: the understanding, what it cites, what is unclear, and where it belongs; §1:5's *nothing else*, in the addition alone: the situation; §2:4's copied fields: the record takes the reply by §9's table; §2:5's referent kinds, in the addition alone: `running`; §2:2, for `UnderstandingGround`: it leaves `core`, and the upgrade drops every stored value naming it; §2:6, whole: no ground remains; §3:3's *a reading grounded in the input alone is `stated`*; §4:6's *understood then* and §4:8's *report received*, each in its wording alone: an `understood` tag from the system under memory, and a `received` tag; §6:1's instructed reply and its *`inferred` and not `supplied`*; §6:2's `supplied` check and §6:4's downgrade, whole; §6:2's repair, for a label in `meant_for` and an `R` label anywhere: dropped and counted with none; §7:6's rendering | §3, §9, §9:9, §9:11, §10:1, §12, §6, §14:9 |
+| ADR-0281 | §7:2's *a third section of the prompt, `recalled`*: recalled memories, under long-term memory; §7:3's *its attribution as a report received and its provisional "understood then"* and its attribution by band, *something the user said*, *something the assistant worked out* and *something a connected source reported*, each in its wording alone: a report in a `received` tag, its understanding in an `understood` tag from the system under memory, and the band's words with the person named and the system called "the system"; §7:4's *a reading supported by an `M` label is `supplied`* | §2, §3, §4:1, §4:2, §12 |
 | ADR-0284 | §8:1's *the latest understanding's `meaning`, `meaning_ground` and `unresolved`*: its `meaning` and `unclear` | §14:2 |
 | ADR-0300 | §6:5's *a fourth section of the prompt, `stories`*: matters, under long-term memory; §6:6's `story_labels`: the proposal's `belongs_to`; §6:7, in the addition alone: an `R` label resolves to its running activation | §2, §9:2, §10:3 |
 | ADR-0303 | §7:4, §7:6 and §7:8, each in the field's name alone: `belongs_to` | §9:2 |
@@ -850,14 +852,15 @@ Read through and not superseded:
 | --- | --- |
 | ADR-0098 §2, ADR-0274 §5:4 | Nothing: the tags are code's, every value is escaped (§3:5), so no span can forge its attribution, and ADR-0098 §2:4 leaves the delimiter open |
 | ADR-0326 §3:4, §4:4 | Nothing in their words: the owner ruled the drop of the retired fields (§9:6), and a fresh data directory on the owner's hub as a fallback alone, which a deploy taking it records on an issue first (§15:5) |
-| ADR-0276 §3:5, §3:6, §4:9, §4:13, §7:4, §7:7 | Nothing: one exchange is rendered once (§2:4), attribution is the record's, withheld records reach no rendering (§8:2), and an understanding grants nothing |
+| ADR-0276 §3:5, §3:6, §3:7, §4:9, §4:13, §7:4, §7:7 | Nothing: one exchange is rendered once (§2:4), attribution is the record's, a missing window is rendered as missing by a note saying why (§8:1), withheld records reach no rendering (§8:2), and an understanding grants nothing |
+| ADR-0350 §6:12, ADR-0351 §5:4 | Nothing: they fix how an input is attributed, not its words; the assistant's words render in a `task` tag from "the system", the name §4:2 gives it |
 | ADR-0303 §3:7, §3:8, §3:11, §7:5, §7:7, §7:10 | Nothing: the marks render as `outside` (§3:8), a page withheld is still said to be, and the line's window is an episode window rendered as memory (§2) |
 | ADR-0305 §3:1, §4:1 | Nothing: every remembered fact renders `linkable="no"`, and withheld notes are absent (§8:2) |
 | ADR-0307 §6:1 | Nothing: planning is given understanding's record, which §14:1 shows in the new form |
 | ADR-0321 §3:2, §3:3, §4 | Nothing in their words: §4 finds no pointer and asks (§11:3) |
 | ADR-0322 §4:3, §5 | Nothing in their words: the projection keeps a round's asked parts, and §5's acceptance is not met again until approvals are redesigned |
 | ADR-0332 | Nothing: its `R` and `continues` clauses were superseded whole by ADR-0349, and `JoinedInput` keeps its shape |
-| ADR-0338 §7:2, §7:6, §7:7 | Nothing: always in mind renders the five fields as the person's own, and its memories take the first `M` labels |
+| ADR-0338 §3:9, §7:2, §7:6, §7:7 | Nothing: understanding receives the five fields as the person's own, four in always in mind and the zone in the situation, which says where it is not set (§4:5, §5:2); and the block's memories take the first `M` labels |
 | ADR-0345, ADR-0348 | Nothing: no support, holder or claim rule reads understanding's fields. A yes to a rendered wording (ADR-0348 §2:4) arises no more while approvals stop (§11) |
 | ADR-0346 §2:1–§2:3, §5:1, §7:7, §7:10 | Nothing in their words: an episode the record points at that was open when the leaving episode ended, or ended after it, is not held as it stood at the leaving episode's time, so §2:3 shows it by its identity alone and nothing later is read (§14:6, §14:7); and no version keeps an answer pointer, so framing is shown no answered message for a reply |
 | ADR-0349 §5:2–§5:5, §5:8–§5:10, §6:10, §7:4, §7:17, §10:2, §10:8 | Nothing beyond the rows above: the section, its predicate and its bound stand; no read chains through a `running` referent (§10:6); §10:2's drop of a label naming no shown activation, never a parse failure, stands (§9:11); and the takeover reads `continues` alone |
