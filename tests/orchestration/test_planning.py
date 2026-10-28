@@ -65,6 +65,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
     TrackRecordEntry,
+    UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
     UnderstandingReferent,
@@ -644,6 +645,50 @@ async def test_what_understanding_names_is_labelled_on_first_show() -> None:
         ("E1", LabelKind.EPISODE, "activation:old"),
         ("S1", LabelKind.STORY, "story:dinner"),
     ]
+
+
+async def test_planning_is_shown_a_versions_cited_items_and_unclear_points_and_no_ground() -> None:
+    """ADR-0353 §14:1: the understanding, each cited item by its label, each unclear point
+    with its readings, and the matters it belongs to; and no ground (§12)."""
+    understanding = _understanding(
+        meaning_referents=(
+            UnderstandingReferent(kind="memory", id="mem-1", excerpt="likes 7pm"),
+            UnderstandingReferent(
+                kind="running",
+                id="activation:booking",
+                source="hub",
+                excerpt="book a table at Luigi's",
+            ),
+        ),
+        unclear=(
+            UnclearPoint(gap="which night", readings=("tonight", "Friday")),
+            UnclearPoint(gap="how many", readings=("two",)),
+        ),
+        story_links=(StoryMember(kind=StoryMemberKind.STORY, id="story:dinner"),),
+    )
+    stage, completer, _ = _stage()
+    planned = await stage.plan(_inputs(understanding=understanding))
+    sent = _sent(completer)["understanding"]
+    assert sent == {
+        "meaning": "the user wants a table for two tonight",
+        "rests_on": ["M1", "E1"],
+        "unclear": [
+            {"gap": "which night", "readings": ["tonight", "Friday"]},
+            {"gap": "how many", "readings": ["two"]},
+        ],
+        "belongs_to": ["S1"],
+    }
+    # §10:6: running work is named by its episode's label, never by its excerpt.
+    assert "Luigi" not in json.dumps(_sent(completer))
+    assert ("E1", LabelKind.EPISODE, "activation:booking") in [
+        (one.label, one.kind, one.id) for one in planned.labels
+    ]
+
+
+async def test_a_version_with_no_unclear_point_shows_no_unclear_key() -> None:
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(understanding=_understanding()))
+    assert "unclear" not in _sent(completer)["understanding"]
 
 
 async def test_a_place_item_linking_to_an_activation_takes_its_episodes_label() -> None:

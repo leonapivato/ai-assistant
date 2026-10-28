@@ -1637,9 +1637,15 @@ class _Request:
         understanding = self._inputs.understanding
         if understanding is None:
             return _NO_UNDERSTANDING
+        # ADR-0353 §14:1: the understanding, each cited item by its label, each unclear
+        # point with its readings, and the matters it belongs to; no ground (§12).
         shown: dict[str, object] = {"meaning": understanding.meaning}
         if understanding.meaning_referents:
             shown["rests_on"] = [self._referent(one) for one in understanding.meaning_referents]
+        if understanding.unclear:
+            shown["unclear"] = [
+                {"gap": one.gap, "readings": list(one.readings)} for one in understanding.unclear
+            ]
         if understanding.story_links:
             shown["belongs_to"] = [
                 self._book.label(LabelKind.STORY, one.id)
@@ -1661,6 +1667,9 @@ class _Request:
             "story": LabelKind.STORY,
             "episode": LabelKind.EPISODE,
             "memory": LabelKind.MEMORY,
+            # ADR-0353 §10:1, §10:6: a running activation by its episode's label, a
+            # pointer to the other activation's episode and never its excerpt.
+            "running": LabelKind.EPISODE,
         }
         kind = kinds.get(referent.kind)
         if kind is not None and referent.id is not None:
