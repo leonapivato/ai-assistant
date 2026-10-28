@@ -139,9 +139,9 @@ from ai_assistant.core.types import (
     SupportHolder,
     UnderstandingProducer,
     UnderstandingReferent,
-    parties_are_assistants,
     parties_are_outside,
     parties_are_persons_own,
+    relay_mark_counts,
 )
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
@@ -782,10 +782,10 @@ def _words_tag(parties: Sequence[SupportHolder] | None, *, relayed: bool = False
     """The text tag words of these parties sit in (ADR-0353 §3:2, ADR-0351 §5).
 
     ``said`` for the person's own, ``task`` for the assistant's statement, ``received``
-    for every other: outside, mixed, or unknown, and words a relay mark makes outside
-    (ADR-0351 §5:4, §5:7).
+    for every other: outside, mixed, or unknown, and words a relay mark that counts
+    makes outside (ADR-0351 §5:4, §5:7).
     """
-    if relayed and (parties_are_persons_own(parties) or parties_are_assistants(parties)):
+    if relay_mark_counts(parties, relayed=relayed):
         return "received"
     if parties and all(one.kind is HolderKind.PERSON for one in parties):
         return "said"
@@ -795,7 +795,11 @@ def _words_tag(parties: Sequence[SupportHolder] | None, *, relayed: bool = False
 
 
 def _received(words: Sequence[_Words]) -> list[_Words]:
-    """``words`` of a relayed input, each attributed as received (ADR-0351 §5:5, §5:7)."""
+    """``words`` of an input a relay mark counts on, each attributed as received.
+
+    ADR-0351 §5:5, §5:7: only an input whose parties are the person's own or the
+    assistant's; on one already outside, each message keeps its own party's tag.
+    """
     return [replace(one, tag="received") for one in words]
 
 
@@ -1438,7 +1442,7 @@ class _Renderer:
             and not window.messages
             and not window.replied_to
         )
-        if self._relayed:
+        if relay_mark_counts(parties, relayed=self._relayed):
             words = _received(words)
         lines = self._framed(
             self._channel, parties, words, at=self._received_at, new_conversation=new_conversation
@@ -1446,7 +1450,7 @@ class _Renderer:
         for one in joined:
             joined_parties = _known_parties(one.messages)
             joined_words = [self._recorded_message(message, None) for message in one.messages]
-            if one.relayed:
+            if relay_mark_counts(joined_parties, relayed=one.relayed):
                 joined_words = _received(joined_words)
             lines.append("")
             lines.extend(

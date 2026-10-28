@@ -560,6 +560,47 @@ async def test_an_input_taken_in_from_other_work_is_framed_as_its_own_kind_and_t
     assert "a-older" not in message.content
 
 
+async def test_a_joined_input_is_received_where_its_relay_mark_counts_and_only_there() -> None:
+    """ADR-0351 §5:7, §5:14: a joined input of the owner's own words marked relayed is
+    received; one already outside, a forward beside the owner's note, keeps each
+    message's own tag whatever its mark."""
+    pasted = JoinedInput(
+        joined_at=AT,
+        channel=LINE,
+        messages=(
+            RecordedInputMessage(
+                text="Trip forms are due Friday.", sent_at=AT - timedelta(minutes=2), party=OWNER
+            ),
+        ),
+        taken_over_from="a-older",
+        relayed=True,
+    )
+    sam = SupportHolder.source("5", claimed=True)
+    beside = JoinedInput(
+        joined_at=AT,
+        channel=LINE,
+        messages=(
+            RecordedInputMessage(
+                text="Dinner at 8?",
+                sent_at=AT - timedelta(minutes=1),
+                forwarded_from=ClaimedAuthor(name="Sam", account_id=5),
+                party=sam,
+            ),
+            RecordedInputMessage(text="say yes", sent_at=AT - timedelta(minutes=1), party=OWNER),
+        ),
+        taken_over_from="a-other",
+        relayed=True,
+    )
+
+    message = await _rendered(joined=(pasted, beside))
+
+    own, paste, forward, note = message.tags("The stimulus")
+    assert own.name == "said", "the trigger's own input is not relayed"
+    assert (paste.name, paste.get("from")) == ("received", "Maren")
+    assert forward.name == "received"
+    assert (note.name, note.get("from")) == ("said", "Maren")
+
+
 # --- §5, §6: times and the situation ------------------------------------------------------
 
 

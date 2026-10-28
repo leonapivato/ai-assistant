@@ -22,8 +22,11 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
-from phases_support import chat_turn, phases_harness, processing
+from phases_support import chat_turn, phases_harness, processing, stopped
+from telegram_support import SETTLE, text
 from test_matters import _matters, _running, _version
+from test_phases_matters import _Planner
+from test_phases_telegram import _Line, _settled
 from test_phases_yes_path import _from, _Hub, _window
 from test_planning import _recorded_trigger
 from understanding_support import rendered, understanding_stage
@@ -38,6 +41,8 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportHolder,
     SupportOrigin,
+    TelegramForwardKind,
+    TelegramForwardOrigin,
     input_support_origin,
     stamped_support,
 )
@@ -60,6 +65,7 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         Message,
         RecordedChannelTrigger,
+        TelegramUpdate,
     )
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.phase_path import PhaseWorking
@@ -245,6 +251,104 @@ def test_a_reminder_coming_due_carries_no_authority() -> None:
         relayed=False,
         other_relayed=False,
     )
+
+
+# --- on the line, through admission ---------------------------------------------------------
+
+
+class _LineUnderstanding(FakeModelProvider):
+    """Understanding's model for the line: an input saying ``continues`` is meant for every
+    concurrent stimulus it is shown, and one holding :data:`_PASTED` is relayed."""
+
+    def __init__(self) -> None:
+        super().__init__(reply=self._reply)
+
+    @staticmethod
+    def _reply(messages: Sequence[Message]) -> str:
+        message = rendered(messages)
+        text = message.stimulus
+        running = [str(one["label"]) for one in message.concurrent()]
+        return json.dumps(
+            {
+                "understanding": text,
+                "cites": [],
+                "unclear": [],
+                "belongs_to": [],
+                "meant_for": running if "continues" in text else [],
+                "relayed": _PASTED in text,
+            }
+        )
+
+
+def _forwarded(name: str, account_id: int) -> TelegramForwardOrigin:
+    return TelegramForwardOrigin(kind=TelegramForwardKind.USER, name=name, account_id=account_id)
+
+
+async def _on_the_line(
+    older: TelegramUpdate, older_text: str, newer: TelegramUpdate
+) -> tuple[EpisodicMemory, EpisodicMemory]:
+    """The older update's activation held in planning, then the newer one on the line.
+
+    Returns:
+        The older's frozen episode and the newer's.
+    """
+    line = _Line()
+    planner = _Planner()
+    entered, release = planner.hold(older_text)
+    harness = phases_harness(
+        planner,
+        telegram=line.seams,
+        understanding=understanding_stage(model=_LineUnderstanding()),
+    )
+    line.fake.hold(older)
+    await harness.engine.start()
+    await asyncio.wait_for(entered.wait(), SETTLE)
+    line.fake.hold(newer)
+    found = await _settled(harness, 1)
+    release.set()
+    found = await _settled(harness, 2)
+    await harness.engine.aclose()
+    first, second = sorted(found, key=lambda one: one.occurred_at)
+    return first, second
+
+
+async def test_on_the_line_a_forward_continuing_another_from_a_different_sender_absorbs_it() -> (
+    None
+):
+    """ADR-0351 §4:2, §8:5: each forward is handed in by the owner, established, and is
+    outside with no authority, so the newer takes the older in, whoever sent each."""
+    older, newer = await _on_the_line(
+        text(1, "Dinner at 8 on Friday?", forward=_forwarded("Sam", 5)),
+        "Dinner at 8 on Friday?",
+        text(2, "continues: and bring the wine", minute=1, forward=_forwarded("Ana", 6)),
+    )
+
+    stopped(older)
+    absorber = processing(newer)
+    (joined,) = absorber.joined
+    assert joined.taken_over_from == processing(older).activation_id
+    assert [one.party for one in joined.messages] == [SupportHolder.source("5", claimed=True)]
+    assert absorber.trigger.parties == (SupportHolder.source("6", claimed=True),)
+    assert not joined.relayed
+
+
+async def test_on_the_line_a_forward_absorbing_a_relayed_paste_freezes_with_its_mark() -> None:
+    """ADR-0351 §5:14: the absorber's episode, frozen with no further version, still
+    records the joined input relayed."""
+    pasted = f"{_PASTED}\nThe trip forms are due on Friday."
+    older, newer = await _on_the_line(
+        text(1, pasted),
+        pasted,
+        text(2, "continues: Sam's take on it", minute=1, forward=_forwarded("Sam", 5)),
+    )
+
+    stopped(older)
+    assert [one.relayed for one in processing(older).understanding] == [True]
+    absorber = processing(newer)
+    assert len(absorber.understanding) == 1, "frozen with no further version"
+    (joined,) = absorber.joined
+    assert (joined.taken_over_from, joined.relayed) == (processing(older).activation_id, True)
+    assert [one.party for one in joined.messages] == list(OWNERS_WORDS)
 
 
 # --- §8:5: the class the takeover step and the waits compare ------------------------------
