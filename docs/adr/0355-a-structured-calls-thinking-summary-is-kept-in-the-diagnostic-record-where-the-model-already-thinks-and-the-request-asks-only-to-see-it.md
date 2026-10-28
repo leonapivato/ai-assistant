@@ -148,10 +148,10 @@ reach the reconciler, which writes no entry, wherever it runs inside a bound act
 ### 3. What the request changes
 
 > **Normative.** Where `thinking_summaries` is true, a structured request to a model §3:2 names,
-> whose own settings configure no `anthropic_thinking`, carries Anthropic's thinking
-> configuration `{"type": "adaptive", "display": "summarized"}`, as the settings key
-> `anthropic_thinking`. It differs in nothing else from the request the same call sends with
-> `thinking_summaries` false.
+> where the request the same call sends with `thinking_summaries` false carries no thinking
+> configuration of any kind, carries Anthropic's thinking configuration
+> `{"type": "adaptive", "display": "summarized"}`, as the settings key `anthropic_thinking`. It
+> differs in nothing else from the request the same call sends with `thinking_summaries` false.
 
 > **Normative.** The models are a closed tuple in `models/structured.py`, matched exactly
 > against the name of the model the request goes to, where that model is pydantic-ai's
@@ -164,9 +164,10 @@ reach the reconciler, which writes no entry, wherever it runs inside a bound act
 > **Normative.** Which case applies is resolved per request, for the model that request goes
 > to, as the mode is (ADR-0354 §4:3).
 
-> **Normative.** A request to any other model, and to a named model whose own settings
-> configure `anthropic_thinking`, is the request the same call sends with `thinking_summaries`
-> false.
+> **Normative.** A request to any other model, and to a named model where the request with
+> `thinking_summaries` false would carry a thinking configuration, is the request the same call
+> sends with `thinking_summaries` false. The settings that make one include the model's own
+> pydantic-ai unified `thinking` and its own `anthropic_thinking`.
 
 > **Normative.** The request asks for no effort, no budget, no other thinking field and no beta
 > header of its own, and sets no output ceiling of its own (ADR-0354 §4:5).
@@ -256,7 +257,8 @@ any returned entry in that way, so it needs no change of its own once §9's lane
 >   `{"type": "adaptive", "display": "summarized"}`, and carries no `output_config.effort`, no
 >   changed `max_tokens` and no added beta header;
 > - with `thinking_summaries` true, the body sent to `claude-opus-4-8` and `claude-sonnet-4-6`,
->   to a listed model whose own settings configure `anthropic_thinking`, and the request to an
+>   to a listed model whose own settings configure `anthropic_thinking`, to a listed model whose
+>   own settings configure pydantic-ai's unified `thinking`, and the request to an
 >   OpenAI model, each equal the request with it false;
 > - a response holding thinking parts beside its text gives the same reply, value, failure and
 >   failure kind as the same response without them, for a valid reply and for each of
@@ -322,7 +324,7 @@ Read through and not superseded:
 | ADR-0314 §3 | Nothing: the record stays write-only and nothing reads the summary back (§5:4) |
 | ADR-0314 §5 | Nothing: planning's thinking is kept as it is, and this decision does for a structured call what §5:1 does for a round, on the models where it changes nothing else |
 | ADR-0314 §2:1, §4:4 | Nothing: the setting follows `diagnostic_record`, and where the record is off no entry is built and every request is as it was |
-| ADR-0335, ADR-0337 | Nothing: the replay tool and the suite send as they do, and the follow-up asker and `keep` take nothing of the key (§5:2) |
+| ADR-0335, ADR-0337 | Nothing: `replay` and `suite` send as they do, through providers built with `thinking_summaries` false. `rerun` composes the package over a copy with the record on (ADR-0335 §7:1), so its observer calls ask and record as the hub's do, into the copy's record. The follow-up asker and `keep` take nothing of the key (§5:2) |
 | ADR-0316 | Nothing: the viewer reads the record as files and shows the key (§7:1) |
 | ADR-0004 §1, §5 | Nothing: the summary is Tier 1 in the record and never logged |
 
