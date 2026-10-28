@@ -1,6 +1,6 @@
 # 322. A reply may approve several questions, each under its own approval, and understanding sees which messages are questions
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0353 (§2:1–§2:7, whole; §4:1, §4:2 and §4:4–§4:9, whole; each until a later decision: understanding is shown no mark and records no pointer)
 - Date: 2026-10-15
 - Scope: the authority milestone, M44 ([milestone #11](https://github.com/leonapivato/ai-assistant/milestone/11)), acceptance [#3058](https://github.com/leonapivato/ai-assistant/issues/3058), batch [#3059](https://github.com/leonapivato/ai-assistant/issues/3059): how many questions one reply may approve, and how understanding tells a question from a message that only asked in words.
 - Dependency: [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md), Accepted, and the yes path its lanes built, on `main` at `8257e6fa`.
@@ -10,6 +10,7 @@
   [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md) (§3:1's one pointer, §3:2 in the addition alone, §3:6 per question, and §9's two understanding rows),
   [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) (§3:3's label scheme and §2:1's field sets, in the additions alone) and
   [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) (§8:1's projection, in the addition alone).
+- Partially superseded: 2026-10-27 by ADR-0353 — §2:1–§2:7, whole; §4:1, §4:2 and §4:4–§4:9, whole; each until a later decision redesigns approvals: understanding is shown no question mark and no `Q` label, and records no pointer (ADR-0353 §11). §4:3's projection of a round's asked parts stands. Every other clause stands. This replacement takes effect on ratification of ADR-0353. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 

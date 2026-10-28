@@ -1,6 +1,6 @@
 # 304. A story's page is its summary, shown where owner records are; a lookalike is not read, and a story is a referent
 
-- Status: Partially superseded by ADR-0307 (§9:3's and §9:5's treatment of a named note the story does not hold, for a move whose actor is planning)
+- Status: Partially superseded by ADR-0307 (§9:3's and §9:5's treatment of a named note the story does not hold, for a move whose actor is planning) and ADR-0353 (§8:1's and §8:4's *in `meaning_labels`, in a reference or in a relationship*: in `cites`; §8:2's and §8:5's `story_labels`: `belongs_to`; §8:3, whole)
 - Date: 2026-10-09
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), after its second acceptance run [#2792](https://github.com/leonapivato/ai-assistant/issues/2792) and the owner's review of the milestone: what a story's page is called, what a tidy-up's run reads, who may be shown a summary, what forgetting reaches, what the *looks like another story* flag is shown and told, what an `S` label resolves to outside `story_labels`, and whether a note may move on its own. It decides [#2794](https://github.com/leonapivato/ai-assistant/issues/2794), [#2793](https://github.com/leonapivato/ai-assistant/issues/2793), [#2796](https://github.com/leonapivato/ai-assistant/issues/2796) and [#2795](https://github.com/leonapivato/ai-assistant/issues/2795).
 - Dependency: ADR-0303, implemented at `5b0b094b`.
@@ -17,6 +17,7 @@
   other clause stands. This scoped replacement takes effect on ratification of ADR-0307.
   This reciprocal header record accompanies the numbered draft under ADR-0070 and
   ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-27 by ADR-0353 — §8:1's and §8:4's *in `meaning_labels`, in a reference or in a relationship*: in `cites` (ADR-0353 §9:2, §9:4). §8:2's and §8:5's `story_labels`: `belongs_to` (§9:2). §8:3, whole: no reading carries a ground (ADR-0353 §12:1). Every other clause stands. This replacement takes effect on ratification of ADR-0353. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
