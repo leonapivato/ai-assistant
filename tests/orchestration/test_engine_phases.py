@@ -192,7 +192,7 @@ from ai_assistant.testing.memories import (
 from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import ActionPolicy, EgressBinder
     from ai_assistant.core.types import (
@@ -1277,11 +1277,13 @@ async def _recalling_harness(
     *,
     digests: FakeModelProvider | None = None,
     extra: Sequence[Memory] = (),
+    reply: Mapping[str, object] | None = None,
 ) -> tuple[Harness, FakeModelProvider]:
     """A test hub with recall wired, its store holding what the second run finds.
 
     ``digests`` answers recall's digest of the outside fact the second run finds, and of
-    any outside fact in ``extra``; by default it finds nothing answering.
+    any outside fact in ``extra``; by default it finds nothing answering. ``reply`` is
+    understanding's, by default its reading alone.
     """
     store = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
     noted = PlanningRound(
@@ -1298,7 +1300,9 @@ async def _recalling_harness(
     )
     for record in records:
         await store.add(record)
-    understanding = FakeModelProvider(reply=json.dumps({"understanding": _DENTIST}))
+    understanding = FakeModelProvider(
+        reply=json.dumps(reply if reply is not None else {"understanding": _DENTIST})
+    )
     harness = Harness(
         understanding=understanding_stage(model=understanding),
         tools=(_BOOK,),
@@ -1372,6 +1376,45 @@ async def test_a_found_episode_reaches_planning_after_recall_runs_again() -> Non
     labels = {(one.label, one.id) for one in record.labels}
     assert {("E1", "activation:past"), ("M1", "said")} <= labels
     assert "reported" not in {one.id for one in record.labels}
+
+
+class _Searched(FakeMemoryStore):
+    """A store that keeps every query it was searched with, in order."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.queries: list[str] = []
+
+    async def search(self, query: str, **kwargs: Any) -> MemorySearchResult:
+        self.queries.append(query)
+        return await super().search(query, **kwargs)
+
+
+async def test_the_second_run_searches_the_meaning_then_each_unclear_points_gap() -> None:
+    """ADR-0353 §14:3: the second run is cued by the meaning and each gap, in that order."""
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="It is on Friday."))
+    store = _Searched(now=lambda: AT)
+    reply = {
+        "understanding": _DENTIST,
+        "unclear": [
+            {"gap": "which dentist", "readings": ["Dr Rao"]},
+            {"gap": "which week", "readings": ["this week", "next week"]},
+        ],
+    }
+    harness, _ = await _recalling_harness(completer, store, reply=reply)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "when?")
+    episode = await _settled(harness, conversation, seeded=frozenset({"activation:past"}))
+
+    record = episode.processing_record
+    assert record is not None
+    second = record.recall_second_run
+    assert second is not None
+    assert second.cues == (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_GAP)
+    first_run = store.queries.index(_DENTIST)
+    searched = list(dict.fromkeys(store.queries[first_run:]))
+    assert searched == [_DENTIST, "which dentist", "which week"]
 
 
 async def test_a_failed_second_run_is_recorded_and_planning_goes_on() -> None:

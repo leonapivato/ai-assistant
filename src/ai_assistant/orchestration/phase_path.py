@@ -118,7 +118,7 @@ it is refused as any capability planning was not offered is.
 **Recall's second run** (ADR-0308 §2, ADR-0309 §3's row 6). The controller runs one
 stage per name, so :meth:`PhasePath.recall_stage` hands it one ``recall`` stage: the
 engine's first run where the pass has no recall decision, and the second run, on the
-latest understanding's meaning and phrases, where it has one. The rows decide which is
+latest understanding's meaning and gaps, where it has one. The rows decide which is
 due. The second run's decision is held in :class:`PhaseWorking` and carried on the
 activation's state, and understanding never reads it (§2:8).
 
@@ -4164,11 +4164,11 @@ class PhasePath:
     async def _recall_again(self, given: PhasePass, recall: RecallStage | None) -> StageResult:
         """Recall's second run, on what understanding found (ADR-0308 §2).
 
-        Its cues are the latest understanding's meaning and the phrase of each of its
-        references (§2:2), and it passes over what the windows hold and every record the
-        first run kept (§2:3). The decision is held in the working set and carried on
-        the activation's state before the stage returns, so the row that made it due
-        does not answer again; understanding never reads it (§2:8). A ``failed`` or
+        Its cues are the latest understanding's meaning and the gap of each of its unclear
+        points (§2:2, ADR-0353 §14:3), and it passes over what the windows hold and every
+        record the first run kept (§2:3). The decision is held in the working set and
+        carried on the activation's state before the stage returns, so the row that made
+        it due does not answer again; understanding never reads it (§2:8). A ``failed`` or
         ``timed_out`` decision is returned ``tolerated`` with its error, and planning
         goes on without it while the pass's deadline holds (§2:7). Past the deadline,
         whatever the run returned is the expiry, as for the first run.
@@ -4187,9 +4187,7 @@ class PhasePath:
         kept = () if first is None else tuple(item.id for item in first.result.items)
         recalled = await recall.recall_again(
             understanding.meaning,
-            # ADR-0353 §14:3: a version has no references, so no phrase cues the run;
-            # each unclear point's gap is the readers' lane's to add (§16:3).
-            (),
+            tuple(one.gap for one in understanding.unclear),
             audience=given.supply,
             deadline=given.deadline,
             passed_over=windows.shared | frozenset(windows.episode_ids or ()) | frozenset(kept),

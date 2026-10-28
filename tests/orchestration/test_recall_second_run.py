@@ -1,4 +1,4 @@
-"""ADR-0308 §2: recall's second run, on what understanding found.
+"""ADR-0308 §2: recall's second run, on what understanding found (as ADR-0353 §14:3 cues it).
 
 The searches are scripted: each cue's text answers, per band, with the records and
 scores a case sets, so what the run keeps, in what order and found by which cue is
@@ -43,8 +43,8 @@ AT: Final = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
 BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
 MEANING: Final = "the user asks when their dentist appointment is"
-PHRASE_A: Final = "my dentist"
-PHRASE_B: Final = "the appointment"
+GAP_A: Final = "which dentist"
+GAP_B: Final = "which appointment"
 
 
 def _fact(memory_id: str, band: BeliefBand = BeliefBand.ASSERTED) -> Memory:
@@ -111,7 +111,7 @@ def _stage(
 
 async def _again(  # noqa: PLR0913 — one knob per argument a case varies
     stage: RecallStage,
-    phrases: Sequence[str] = (PHRASE_A,),
+    gaps: Sequence[str] = (GAP_A,),
     *,
     meaning: str = MEANING,
     passed_over: frozenset[str] = frozenset(),
@@ -121,7 +121,7 @@ async def _again(  # noqa: PLR0913 — one knob per argument a case varies
 ) -> Recalled:
     return await stage.recall_again(
         meaning,
-        phrases,
+        gaps,
         audience=audience,
         deadline=deadline,
         passed_over=passed_over,
@@ -137,19 +137,19 @@ def _ids(recalled: Recalled) -> list[str]:
 # --- §2:2: the cues -----------------------------------------------------------------------
 
 
-async def test_the_meaning_and_each_distinct_phrase_is_searched_on_its_own_per_band() -> None:
+async def test_the_meaning_and_each_distinct_gap_is_searched_on_its_own_per_band() -> None:
     memory = _Scripted()
-    recalled = await _again(_stage(memory), (PHRASE_A, PHRASE_B, PHRASE_A))
+    recalled = await _again(_stage(memory), (GAP_A, GAP_B, GAP_A))
     assert [(one.query, one.band) for one in memory.searches] == [
         (text, band)
-        for text in (MEANING, PHRASE_A, PHRASE_B)
+        for text in (MEANING, GAP_A, GAP_B)
         for band in (BeliefBand.ASSERTED, BeliefBand.ATTESTED, BeliefBand.DERIVED)
     ]
     assert recalled.result.outcome is RecallOutcome.NOTHING_FOUND
-    assert recalled.result.cues == (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE)
+    assert recalled.result.cues == (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_GAP)
 
 
-async def test_with_no_references_the_meaning_is_the_one_cue() -> None:
+async def test_with_no_unclear_point_the_meaning_is_the_one_cue() -> None:
     memory = _Scripted(answers={MEANING: [(_fact("m"), 0.9)]})
     recalled = await _again(_stage(memory), ())
     assert {one.query for one in memory.searches} == {MEANING}
@@ -157,13 +157,13 @@ async def test_with_no_references_the_meaning_is_the_one_cue() -> None:
     assert recalled.result.items[0].found_by == (RecallCue.UNDERSTOOD_MEANING,)
 
 
-async def test_a_phrase_that_is_the_meaning_is_searched_once_and_found_by_both() -> None:
+async def test_a_gap_that_is_the_meaning_is_searched_once_and_found_by_both() -> None:
     memory = _Scripted(answers={MEANING: [(_fact("m"), 0.9)]})
     recalled = await _again(_stage(memory), (MEANING,))
     assert [one.query for one in memory.searches] == [MEANING] * 3
     assert recalled.result.items[0].found_by == (
         RecallCue.UNDERSTOOD_MEANING,
-        RecallCue.UNDERSTOOD_PHRASE,
+        RecallCue.UNDERSTOOD_GAP,
     )
 
 
@@ -174,7 +174,7 @@ async def test_each_cue_keeps_under_the_threshold_and_its_own_limit() -> None:
     memory = _Scripted(
         answers={
             MEANING: [(_fact(f"m{n}"), 0.9) for n in range(4)] + [(_fact("low"), 0.4)],
-            PHRASE_A: [(_fact(f"p{n}"), 0.9) for n in range(4)],
+            GAP_A: [(_fact(f"p{n}"), 0.9) for n in range(4)],
         }
     )
     recalled = await _again(_stage(memory, limit=2))
@@ -202,11 +202,11 @@ async def test_the_cues_records_are_kept_in_band_order_meaning_first_within_a_ba
     memory = _Scripted(
         answers={
             MEANING: [(_fact("m-derived", DERIVED), 0.99), (_fact("m-asserted"), 0.6)],
-            PHRASE_A: [(_fact("a-derived", DERIVED), 0.99), (_fact("a-asserted"), 0.7)],
-            PHRASE_B: [(_fact("b-asserted"), 0.9)],
+            GAP_A: [(_fact("a-derived", DERIVED), 0.99), (_fact("a-asserted"), 0.7)],
+            GAP_B: [(_fact("b-asserted"), 0.9)],
         }
     )
-    recalled = await _again(_stage(memory), (PHRASE_A, PHRASE_B))
+    recalled = await _again(_stage(memory), (GAP_A, GAP_B))
     assert _ids(recalled) == ["m-asserted", "a-asserted", "b-asserted", "m-derived", "a-derived"]
 
 
@@ -214,7 +214,7 @@ async def test_the_cap_bounds_the_total_in_band_order() -> None:
     memory = _Scripted(
         answers={
             MEANING: [(_fact("m-derived", DERIVED), 0.99), (_fact("m-asserted"), 0.6)],
-            PHRASE_A: [(_fact("a-asserted"), 0.7)],
+            GAP_A: [(_fact("a-asserted"), 0.7)],
         }
     )
     recalled = await _again(_stage(memory), cap=2)
@@ -226,14 +226,14 @@ async def test_a_record_two_cues_found_is_kept_once_found_by_both_kinds() -> Non
     memory = _Scripted(
         answers={
             MEANING: [(shared, 0.6)],
-            PHRASE_A: [(shared, 0.9), (_fact("phrase-only"), 0.8)],
+            GAP_A: [(shared, 0.9), (_fact("gap-only"), 0.8)],
         }
     )
     recalled = await _again(_stage(memory))
-    assert _ids(recalled) == ["shared", "phrase-only"]
+    assert _ids(recalled) == ["shared", "gap-only"]
     first, second = recalled.result.items
-    assert first.found_by == (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE)
-    assert second.found_by == (RecallCue.UNDERSTOOD_PHRASE,)
+    assert first.found_by == (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_GAP)
+    assert second.found_by == (RecallCue.UNDERSTOOD_GAP,)
     assert recalled.scores == (0.9, 0.8)
 
 
@@ -262,14 +262,14 @@ async def test_a_bounded_audience_searches_episodes_and_semantic_records() -> No
 
 
 async def test_a_store_failure_is_a_failed_decision_carrying_the_cues() -> None:
-    memory = _Scripted(answers={MEANING: [(_fact("m"), 0.9)]}, fail_on=PHRASE_A)
+    memory = _Scripted(answers={MEANING: [(_fact("m"), 0.9)]}, fail_on=GAP_A)
     recalled = await _again(_stage(memory))
     assert (recalled.result.outcome, recalled.result.items, recalled.scores) == (
         RecallOutcome.FAILED,
         (),
         (),
     )
-    assert recalled.result.cues == (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE)
+    assert recalled.result.cues == (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_GAP)
     assert isinstance(recalled.error, MemoryStoreError)
 
 
