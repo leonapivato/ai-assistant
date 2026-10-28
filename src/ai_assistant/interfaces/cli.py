@@ -1749,7 +1749,8 @@ def chat(
     received once the conversation has recorded it. The assistant's messages, and
     any written from your other devices, are shown as they arrive, and so is what the
     assistant is doing: working, or how it last ended. Writing while it works is
-    fine — your message waits and is taken in when it is done.
+    fine: each message starts its own work, and one that carries on what is running
+    may be taken up with it.
 
     This device has to be one of the conversation's devices to write in it. Where it
     is not, you are asked whether to add it, which is saying its screen is private.
@@ -1875,8 +1876,8 @@ def stop(
     of finishes first, and anything it had already sent is not called back — how that
     turned out is recorded. The conversation then shows it as stopped.
 
-    Writing "stop" in a conversation is a message, not a stop — it waits like any
-    other.
+    Writing "stop" in a conversation is a message, read like any other: the assistant
+    may stop the work for it.
 
     Where the work had already ended, or nothing here says it ran, this says so and
     changes nothing.
