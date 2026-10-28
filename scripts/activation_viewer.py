@@ -3685,9 +3685,10 @@ def _unresolved(
 
     A reply recorded with a failure was rejected; a run whose last request has no reply
     recorded has not been resolved by any reply here; a reply the next understanding
-    request repairs was not the one resolved; and a run whose step ended failed or timed
-    out recorded no understanding.
+    request repairs, carrying it as the first reply, was not the one resolved; and a run
+    whose step ended failed or timed out recorded no understanding.
     """
+    reply = _text(body.get("reply"))
     if _failed(body):
         return "The reply failed, so code resolved none of its labels."
     if not answered:
@@ -3701,7 +3702,9 @@ def _unresolved(
         ),
         None,
     )
-    if later is not None and _is_repair(later.body):
+    # A run whose step holds it holds its repair too; one with no step is repaired by the
+    # next request only where that request carries this reply as the assistant's turn.
+    if phase.step is None and later is not None and _first_reply_in(later.body) == reply:
         return (
             "This reply earned the one repair (ADR-0353 §9:10): code resolved the reply to "
             "it, which the next understanding step shows."
@@ -3709,6 +3712,17 @@ def _unresolved(
     outcome = None if phase.step is None else _text(_mapping(phase.step.body).get("outcome"))
     if outcome in {"failed", "timed_out"}:
         return f"The step {_words(outcome or '')}: code recorded no understanding of it."
+    return None
+
+
+def _first_reply_in(body: object) -> str | None:
+    """The first reply a repair's request carries as the assistant's turn, where it does."""
+    if not _is_repair(body):
+        return None
+    for message in _sequence(_mapping(body).get("messages")):
+        shown = _mapping(message)
+        if shown.get("role") == "assistant":
+            return _text(shown.get("content"))
     return None
 
 
@@ -3749,6 +3763,10 @@ _UNLINKED_SENTENCE: Final = re.compile(
     r'((?:"(?:[^"\\]|\\.)*"(?:, )?)+)\.'
 )
 _QUOTED: Final = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+#: How the statement the label check writes opens: a reply that did not parse earns one
+#: that says so instead (ADR-0354 §8:3), and its labels were never checked.
+_LABEL_STATEMENT: Final = re.compile(r"These labels in `(?:cites|belongs_to)` ")
 
 #: What each outcome of a label's resolution says of it, by ADR-0353 §9's rules.
 _RESOLVED: Final = {
@@ -4002,7 +4020,9 @@ def _repair_of(
     holds it, says how it failed and holds it where its text was empty. The first reply's
     labels that earned the repair are those naming nothing shown, computed as
     :func:`resolution_of` computes them, and those the statement names in ``belongs_to``.
-    A first reply that failed earned it by failing, and none of its labels did.
+    A first reply that failed earned it by failing, and none of its labels did: its labels
+    were checked only where the statement is the one the label check writes, so they are
+    read only then, whatever else the record holds or has lost.
     """
     messages = [_mapping(one) for one in _sequence(_mapping(asked.body).get("messages"))]
     turn = next((one for one in messages if one.get("role") == "assistant"), None)
@@ -4010,10 +4030,11 @@ def _repair_of(
     reply = _text(_mapping(turn).get("content")) if turn is not None else _text(held.get("reply"))
     reading = None if reply is None else reading_of(reply)
     statement = _user_content(asked.body)
-    unlinked = unlinked_in(statement)
+    checked = statement is not None and _LABEL_STATEMENT.match(statement) is not None
+    unlinked = unlinked_in(statement) if checked else None
     labels: list[str] = []
     earlier: list[str] = []
-    if reading is not None and reading.get("shape") == "reply" and not _failed(held):
+    if checked and reading is not None and reading.get("shape") == "reply":
         earlier = _strings(reading.get("belongs_to"))
         for key, rows in resolution_of(reading, shown, repaired=False).items():
             labels += [
