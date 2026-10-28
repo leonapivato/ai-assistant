@@ -43,6 +43,8 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     StageEntry,
     StageOutcome,
+    StoryMember,
+    StoryMemberKind,
     UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
@@ -456,6 +458,40 @@ def test_human_detail_shows_a_versions_meaning_and_no_ground() -> None:
     assert section == [
         "Understanding v1 (interpretation)",
         '  Meaning: "compare the two quotes"',
+        "  Cites referent kinds: episode",
+        "  Relayed: no",
+    ]
+
+
+def test_human_detail_shows_a_versions_unclear_points_matter_links_continues_and_mark() -> None:
+    """ADR-0353 §14:9: each unclear point with its readings, its matter links (#2755), the
+    activations in ``continues`` and its relay mark, in that order after the meaning."""
+    version = _version(
+        2,
+        unclear=(
+            UnclearPoint(gap="which quote", readings=("the plumber's", "the roofer's")),
+            UnclearPoint(gap="by when", readings=("Friday",)),
+        ),
+        story_links=(
+            StoryMember(kind=StoryMemberKind.STORY, id="story:kitchen"),
+            StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-earlier"),
+        ),
+        continues=("act-running",),
+        relayed=True,
+    )
+    section = _understanding_section(_record("record", response="none", understanding=(version,)))
+    assert section == [
+        "Understanding v2 (interpretation)",
+        '  Meaning: "compare the two quotes"',
+        '  Unclear: "which quote"',
+        '    Reading: "the plumber\'s"',
+        '    Reading: "the roofer\'s"',
+        '  Unclear: "by when"',
+        '    Reading: "Friday"',
+        '  Belongs to story "story:kitchen"',
+        '  Belongs to activation "act-earlier"',
+        '  Continues activation "act-running"',
+        "  Relayed: yes",
     ]
 
 
@@ -470,24 +506,30 @@ def test_human_detail_names_the_elided_count_before_the_retained_versions() -> N
         "Understanding versions elided: 7",
         "Understanding v1 (interpretation)",
         '  Meaning: "compare the two quotes"',
+        "  Relayed: no",
         "Understanding v9 (interpretation)",
         '  Meaning: "the latest reading"',
+        "  Relayed: no",
     ]
 
 
 def test_human_detail_renders_a_full_version_and_no_referent_detail() -> None:
-    """Its meaning, quoted and escaped; no referent's id, source or excerpt. What U3 adds
-    to the detail (ADR-0353 §14:8) is the readers' lane's."""
+    """Its meaning, quoted and escaped, and each cited referent's kind; no referent's id,
+    source or excerpt (ADR-0353 §14:9)."""
     version = _version(
         3,
         meaning="compare [bold]both[/bold] :smile: quotes\nUnderstanding v9 (forged)",
         meaning_referents=tuple(_referent(kind) for kind in _REFERENT_KINDS),
-        unclear=(UnclearPoint(gap="which currency", readings=("euros",)),),
+        unclear=(UnclearPoint(gap="which currency\nRelayed: yes", readings=("[bold]euros",)),),
     )
     section = _understanding_section(_record("record", response="none", understanding=(version,)))
     assert section == [
         "Understanding v3 (interpretation)",
         '  Meaning: "compare [bold]both[/bold] :smile: quotes\\nUnderstanding v9 (forged)"',
+        "  Cites referent kinds: " + ", ".join(_REFERENT_KINDS),
+        '  Unclear: "which currency\\nRelayed: yes"',
+        '    Reading: "[bold]euros"',
+        "  Relayed: no",
     ]
     joined = "\n".join(section)
     for withheld in (_REFERENT_ID, _REFERENT_SOURCE, _REFERENT_EXCERPT):
@@ -505,7 +547,7 @@ def test_cli_human_detail_carries_the_understanding_section(
     assert (
         "audio playback. Recall: none recorded Recall (second run): none recorded "
         "Understanding v1 (interpretation) "
-        'Meaning: "compare the two quotes" Retention expiry'
+        'Meaning: "compare the two quotes" Relayed: no Retention expiry'
     ) in rendered
 
 
