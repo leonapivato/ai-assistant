@@ -97,7 +97,7 @@ import re
 # At runtime, not under TYPE_CHECKING: `EpisodeSelector` is a PEP 695 alias, whose
 # value is read lazily and must resolve when it is (#1706).
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo
@@ -107,7 +107,6 @@ import structlog
 from ai_assistant.core.channel_validation import (
     OriginKind,
     declared_input,
-    input_origin,
     origin_kind,
 )
 from ai_assistant.core.diagnostics import write_diagnostic, write_failure
@@ -126,7 +125,6 @@ from ai_assistant.core.types import (
     DiagnosticSource,
     EpisodicMemory,
     HolderKind,
-    InputOrigin,
     Memory,
     Message,
     MessageAuthor,
@@ -135,14 +133,15 @@ from ai_assistant.core.types import (
     RecallOutcome,
     ReplyFailure,
     Role,
-    StatementPart,
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
     SupportHolder,
     UnderstandingProducer,
     UnderstandingReferent,
+    parties_are_assistants,
     parties_are_outside,
+    parties_are_persons_own,
 )
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
@@ -779,12 +778,15 @@ def _origin_where(channel: ChannelIdentity | None) -> str:
     )
 
 
-def _words_tag(parties: Sequence[SupportHolder] | None) -> str:
+def _words_tag(parties: Sequence[SupportHolder] | None, *, relayed: bool = False) -> str:
     """The text tag words of these parties sit in (ADR-0353 §3:2, ADR-0351 §5).
 
     ``said`` for the person's own, ``task`` for the assistant's statement, ``received``
-    for every other: outside, mixed, or unknown.
+    for every other: outside, mixed, or unknown, and words a relay mark makes outside
+    (ADR-0351 §5:4, §5:7).
     """
+    if relayed and (parties_are_persons_own(parties) or parties_are_assistants(parties)):
+        return "received"
     if parties and all(one.kind is HolderKind.PERSON for one in parties):
         return "said"
     if parties and all(one.kind is HolderKind.ASSISTANT_STATEMENT for one in parties):
@@ -792,15 +794,9 @@ def _words_tag(parties: Sequence[SupportHolder] | None) -> str:
     return "received"
 
 
-def _origin_parties(origin: InputOrigin | None) -> tuple[SupportHolder, ...] | None:
-    """The parties an input attributed by its origin alone carries, where no trigger is held."""
-    if origin is InputOrigin.USER:
-        return (SupportHolder.person(OWNER_PERSON_ID),)
-    if origin is InputOrigin.ASSISTANT:
-        return (SupportHolder.statement(StatementPart.SCHEDULED_INSTRUCTION),)
-    if origin is InputOrigin.OUTSIDE:
-        return (SupportHolder.unknown(),)
-    return None
+def _received(words: Sequence[_Words]) -> list[_Words]:
+    """``words`` of a relayed input, each attributed as received (ADR-0351 §5:5, §5:7)."""
+    return [replace(one, tag="received") for one in words]
 
 
 @dataclass(frozen=True, slots=True)
@@ -988,7 +984,7 @@ class UnderstandingStage:
         recall: ActivationRecall | None = None,
         recalled: tuple[EpisodicMemory | Memory, ...] = (),
         stories: Candidates | None = None,
-        origin: InputOrigin | None = None,
+        relayed: bool = False,
         joined: Sequence[JoinedInput] = (),
         running: Sequence[InProgressEntry] | None = None,
         running_more: int = 0,
@@ -1023,8 +1019,10 @@ class UnderstandingStage:
                 fetched, in recall's order (ADR-0282 §5).
             stories: The candidate stories the understanding phase assembled
                 (ADR-0300 §6:1-§6:4); ``None`` where it assembled none.
-            origin: Who the input came from, as admission recorded it on the trigger;
-                read only where no ``trigger`` is handed.
+            relayed: Whether an earlier version of the activation's understanding marked
+                its trigger's input relayed (ADR-0351 §5:6). The mark holds for the rest
+                of the activation, so this version records it whatever the reply says
+                (§5:9), and the input is rendered as received (§5:5, §5:7).
             joined: The inputs the activation took in beside its trigger's, in the order
                 it took them in (ADR-0349 §7:7, §7:21), each rendered with its own framing
                 sentence after the trigger's (ADR-0353 §2:2).
@@ -1051,19 +1049,19 @@ class UnderstandingStage:
             TimeoutError: If ``deadline`` had passed when a completion was due.
         """
         moment = now()
-        # Who the input came from: its trigger's parties, or, where none is handed, what
-        # admission records for its origin, the channel's own declaration where none is
-        # given (ADR-0284 §2:2, ADR-0351 §3:1).
-        declared = input_origin(channel) if origin is None and trigger is None else origin
+        # Whose words the input carries: its trigger's parties, or, where none is handed,
+        # those its channel's kind declares (ADR-0351 §2:1, §3:1).
+        parties = _parties_of(trigger, channel)
         brief = _Renderer(
             excerpt_chars=self._excerpt_chars,
             zone=zone or _UTC,
             own_zone=own_zone,
-            naming=_naming(person, trigger, declared),
+            naming=_naming(person, trigger, parties),
             channel=channel,
             now=moment,
             received_at=received_at or moment,
             profiled=person is not None,
+            relayed=relayed,
         ).brief(
             self._prompt,
             text,
@@ -1073,7 +1071,7 @@ class UnderstandingStage:
             recall=recall,
             recalled=recalled,
             stories=stories,
-            parties=_parties_of(trigger, channel, origin),
+            parties=parties,
             trigger=trigger,
             joined=joined,
             running=running or (),
@@ -1110,6 +1108,7 @@ class UnderstandingStage:
             version=version,
             recorded_at=now(),
             running=brief.running,
+            relayed=relayed,
         )
 
     async def _completed(
@@ -1202,29 +1201,33 @@ class _Problem:
 
 
 def _parties_of(
-    trigger: RecordedChannelTrigger | None, channel: ChannelIdentity, origin: InputOrigin | None
+    trigger: RecordedChannelTrigger | None, channel: ChannelIdentity
 ) -> tuple[SupportHolder, ...] | None:
     """Whose words the stimulus carries: its trigger's parties (ADR-0351 §2:1).
 
-    Where no trigger is handed, the parties its channel's kind declares, or, where an
-    origin is handed, those of that origin (ADR-0351 §3:1, §10:2).
+    Where no trigger is handed, the parties its channel's kind declares (§3:1).
     """
     if trigger is not None:
         return trigger.parties
-    if origin is not None:
-        return _origin_parties(origin)
     return declared_input(channel)[0]
 
 
 def _naming(
-    person: PersonBlock | None, trigger: RecordedChannelTrigger | None, origin: InputOrigin | None
+    person: PersonBlock | None,
+    trigger: RecordedChannelTrigger | None,
+    parties: Sequence[SupportHolder] | None,
 ) -> _Naming:
-    """Who the stimulus is for, from its person block, else its trigger (ADR-0338 §2:2)."""
+    """Who the stimulus is for, from its person block, else its trigger (ADR-0338 §2:2).
+
+    With neither, the owner where the words are the person's own (ADR-0351 §3:2).
+    """
     if person is not None:
         return _Naming(person_id=person.person_id, name=person.profile.value(ProfileField.NAME))
     if trigger is not None:
         return _Naming(person_id=activation_person(trigger), name=None)
-    return _Naming(person_id=OWNER_PERSON_ID if origin is InputOrigin.USER else None, name=None)
+    return _Naming(
+        person_id=OWNER_PERSON_ID if parties_are_persons_own(parties) else None, name=None
+    )
 
 
 # --- the renderer (ADR-0353 §2-§8) -------------------------------------------------------
@@ -1233,7 +1236,7 @@ def _naming(
 class _Renderer:
     """One call's message: its sections in order, its labels minted as they render."""
 
-    def __init__(  # noqa: PLR0913 — the bound, the zone and whose it is, the naming, the origin, the two instants, and whether a profile is held
+    def __init__(  # noqa: PLR0913 — the bound, the zone and whose it is, the naming, the origin, the two instants, whether a profile is held, and the relay mark
         self,
         *,
         excerpt_chars: int,
@@ -1244,8 +1247,11 @@ class _Renderer:
         now: datetime,
         received_at: datetime,
         profiled: bool,
+        relayed: bool = False,
     ) -> None:
         self._profiled = profiled
+        # ADR-0351 §5:9: an earlier version's relay mark on the trigger's input.
+        self._relayed = relayed
         self._excerpt_chars = excerpt_chars
         self._zone = zone
         self._own_zone = own_zone
@@ -1432,12 +1438,16 @@ class _Renderer:
             and not window.messages
             and not window.replied_to
         )
+        if self._relayed:
+            words = _received(words)
         lines = self._framed(
             self._channel, parties, words, at=self._received_at, new_conversation=new_conversation
         )
         for one in joined:
             joined_parties = _known_parties(one.messages)
             joined_words = [self._recorded_message(message, None) for message in one.messages]
+            if one.relayed:
+                joined_words = _received(joined_words)
             lines.append("")
             lines.extend(
                 self._framed(
@@ -1783,7 +1793,7 @@ class _Renderer:
             if entry.arrived_at is not None:
                 attributes.append(("at", self._at(entry.arrived_at)))
             attributes.append(("acted", "yes" if entry.acted else "no"))
-            if entry.outside or (not entry.inputs and entry.origin is InputOrigin.OUTSIDE):
+            if entry.outside:
                 attributes.append(("outside", "yes"))
             lines.extend(_container("stimulus", attributes, tags))
             self.running[label] = entry.activation_id
@@ -1806,7 +1816,7 @@ class _Renderer:
         attributes = [("from", self._naming.parties(one.parties))]
         if one.brief is None:
             attributes.append(("withheld", "yes"))
-        return _tag(_words_tag(one.parties), attributes, one.brief)
+        return _tag(_words_tag(one.parties, relayed=one.relayed), attributes, one.brief)
 
     # --- always in mind (ADR-0338 §7:2, ADR-0353 §4:5) ---
 
@@ -1914,11 +1924,17 @@ class _Renderer:
         shown = projection.input
         if shown is None:
             if projection.status is not None:
-                tags.append(_tag(_words_tag(parties), [*words, ("withheld", "yes")], None))
+                tags.append(
+                    _tag(
+                        _words_tag(parties, relayed=projection.relayed),
+                        [*words, ("withheld", "yes")],
+                        None,
+                    )
+                )
         else:
             if shown.cut:
                 words.append(("cut", "yes"))
-            tags.append(_tag(_words_tag(parties), words, shown.text))
+            tags.append(_tag(_words_tag(parties, relayed=projection.relayed), words, shown.text))
         return tags
 
     def _short_term_note(self, episodes: Sequence[EpisodicMemory] | None) -> str:
@@ -2070,10 +2086,10 @@ def _known_parties(messages: Sequence[RecordedInputMessage]) -> tuple[SupportHol
 
 
 def _entry_inputs(entry: InProgressEntry) -> tuple[EntryInput, ...]:
-    """A concurrent stimulus's inputs; one built from its origin where none is recorded."""
+    """A concurrent stimulus's inputs; one built from its trigger's where none is recorded."""
     if entry.inputs:
         return entry.inputs
-    return (EntryInput(brief=entry.input, parties=_origin_parties(entry.origin)),)
+    return (EntryInput(brief=entry.input, parties=entry.parties),)
 
 
 # --- the channel window ------------------------------------------------------------
@@ -2462,6 +2478,7 @@ def _resolved(  # noqa: PLR0913 — the reply, what each label kind resolves to,
     version: int,
     recorded_at: datetime,
     running: Mapping[str, str] | None = None,
+    relayed: bool = False,
 ) -> ActivationUnderstanding:
     """Record the reply by ADR-0353 §9's table, dropping and counting what resolves to nothing.
 
@@ -2480,6 +2497,11 @@ def _resolved(  # noqa: PLR0913 — the reply, what each label kind resolves to,
     repair (§9:12), and anything else after the one repair (§9:10). No dropped or absent
     label becomes a referent. The reply carries no answer pointer, and none is recorded
     (§11:2).
+
+    ``relayed`` is copied from the reply as the version's relay mark on the trigger's
+    input (ADR-0351 §5:6, §5:10), and recorded wherever ``relayed`` says an earlier
+    version of the activation marked it, whatever the reply says: the mark holds for the
+    rest of the activation, and only lowers (§5:8, §5:9).
     """
     resolution = _Resolution(labels)
     meaning_referents = resolution.referents(proposal.cites)
@@ -2507,6 +2529,7 @@ def _resolved(  # noqa: PLR0913 — the reply, what each label kind resolves to,
         grounding_dropped=resolution.dropped,
         story_links=tuple(links),
         continues=tuple(continues),
+        relayed=proposal.relayed or relayed,
     )
 
 

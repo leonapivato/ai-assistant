@@ -21,7 +21,6 @@ from ai_assistant.core.types import (
     ControllerStage,
     EpisodicMemory,
     InformationalEventResult,
-    InputOrigin,
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
@@ -34,6 +33,7 @@ from ai_assistant.core.types import (
     TextChannelPayload,
     UnderstandingOmission,
     UnderstandingProducer,
+    parties_are_outside,
 )
 
 _BUDGET = timedelta(seconds=10)
@@ -146,7 +146,7 @@ class ChannelReceiverContract:
         assert processing.trigger.context == event_input().context
         assert isinstance(processing.trigger.payload, RecordedTextInput)
         assert processing.trigger.payload.text == "The thermostat entered eco mode at 18:00."
-        assert processing.trigger.origin is InputOrigin.OUTSIDE
+        assert parties_are_outside(processing.trigger.parties)
 
     @pytest.mark.parametrize("budget", [timedelta(0), timedelta(seconds=-1)])
     async def test_channel_event_whose_budget_runs_out_couldnt_finish(

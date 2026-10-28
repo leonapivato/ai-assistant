@@ -30,7 +30,6 @@ from ai_assistant.core.types import (
     EpisodeProjection,
     EpisodeSummary,
     EpisodicMemory,
-    InputOrigin,
     PeerEffect,
     PeerNotes,
     PeerView,
@@ -42,6 +41,8 @@ from ai_assistant.core.types import (
     RecordedSpeechInput,
     RecordedTextInput,
     ToolOutcome,
+    parties_are_outside,
+    parties_are_persons_own,
     rests_on_recorded_external_content,
 )
 
@@ -197,15 +198,16 @@ def episode_content(record: EpisodicMemory) -> str:
     **A recipe, not a ruling** (§7:4). Today it is the latest understanding's
     ``meaning``, or, where the activation has no understanding, one line of its
     status and reason; followed, on its own line, by the input text or transcript
-    where the trigger's ``origin`` is ``user``. So a conversational episode is found
-    by its sense and by the exact names and numbers in the user's words, an outside
-    report by its sense alone, and an episode no stage understood by how it ended. An
-    activation the Task Scheduler started, whose ``origin`` is ``assistant``, is found by
-    its sense alone too: its input is the assistant's own instruction, never the user's
-    words (ADR-0350 §6:3, §6:12).
+    where the trigger's input is the person's own, read by its parties with its latest
+    understanding version's relay mark (ADR-0351 §5:2, §5:7, §5:11). So a conversational
+    episode is found by its sense and by the exact names and numbers in the user's words,
+    an outside report by its sense alone, and an episode no stage understood by how it
+    ended. An activation the Task Scheduler started, whose input is the assistant's, is
+    found by its sense alone too: its input is the assistant's own instruction, never the
+    user's words (ADR-0350 §6:3, §6:12).
 
     **What it never includes** is §7:2's invariant: the input text of a trigger whose
-    ``origin`` is ``outside``.
+    input is outside, a relayed one included (ADR-0351 §5:7, §8:3).
 
     **An open episode's** search text is empty (ADR-0286 §1, superseding §7:1 in
     when): the freezing write derives it, and this returns ``""`` until then.
@@ -234,7 +236,7 @@ def episode_content(record: EpisodicMemory) -> str:
     else:
         lines = [f"status {processing.status.value}, reason {processing.reason.value}"]
     trigger = processing.trigger
-    if trigger.origin is InputOrigin.USER:
+    if parties_are_persons_own(trigger.parties, relayed=_trigger_relayed(processing)):
         words = _input_text(trigger)
         if words is not None and words.strip():
             lines.append(words)
@@ -380,17 +382,21 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
             derived_from_external=external,
         )
     trigger = processing.trigger
-    origin = trigger.origin
-    shown = origin is InputOrigin.USER or (origin is InputOrigin.OUTSIDE and admit_outside_input)
+    relayed = _trigger_relayed(processing)
+    # ADR-0351 §8:4: the input text where the input, read with its relay mark, is not
+    # outside, or is outside and the rendering admits it; an input with empty parties,
+    # which is neither, has none to carry.
+    shown = parties_are_persons_own(trigger.parties, relayed=relayed) or (
+        parties_are_outside(trigger.parties, relayed=relayed) and admit_outside_input
+    )
     latest = processing.understanding[-1] if processing.understanding else None
     return EpisodeProjection(
         occurred_at=record.occurred_at,
         channel=trigger.channel,
         # ADR-0351 §8:4, §10:4: the parties and the latest version's relay mark, in
-        # place of the origin, which the projection computes from the parties alone
-        # until the lane that moves this reader over (§10:2, §11).
+        # place of the origin.
         parties=trigger.parties,
-        relayed=latest is not None and latest.relayed,
+        relayed=relayed,
         input=_projected(_input_text(trigger), excerpt_chars) if shown else None,
         meaning=None if latest is None else latest.meaning,
         unclear=() if latest is None else latest.unclear,
@@ -419,7 +425,10 @@ def _peer_view(
         msg = "a peer view reads an activation's episode, which has a processing record"
         raise ValueError(msg)
     trigger = processing.trigger
-    shown = trigger.origin is InputOrigin.USER
+    # ADR-0351 §8:5: an activation holding more than one input is read over all of them,
+    # each with its relay mark, so its input is shown only where every one is the user's.
+    relayed = _trigger_relayed(processing) or any(one.relayed for one in processing.joined)
+    shown = parties_are_persons_own(trigger.parties, relayed=relayed)
     latest = processing.understanding[-1] if processing.understanding else None
     notes = (
         tuple(
@@ -432,7 +441,8 @@ def _peer_view(
     )
     return PeerView(
         channel=trigger.channel,
-        origin=trigger.origin,
+        parties=trigger.parties,
+        relayed=relayed,
         input=_projected(_input_text(trigger), bound) if shown else None,
         joined=tuple(_joined_text(one, bound) for one in processing.joined) if shown else (),
         meaning=None if latest is None else latest.meaning,
@@ -443,6 +453,16 @@ def _peer_view(
         reason=processing.reason,
         derived_from_external=rests_on_recorded_external_content(record.provenance),
     )
+
+
+def _trigger_relayed(processing: EpisodeProcessingRecord) -> bool:
+    """Whether the trigger's input is relayed: its latest understanding version marks it.
+
+    ADR-0351 §5:11: before any version exists, and where understanding was omitted, the
+    input is read by its parties alone.
+    """
+    latest = processing.understanding[-1] if processing.understanding else None
+    return latest is not None and latest.relayed
 
 
 def _joined_text(joined: JoinedInput, bound: int) -> ProjectedText:

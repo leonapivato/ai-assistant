@@ -3,12 +3,26 @@
 ADR-0349 §5-§7, the engine's half: who an input is from, what understanding's
 in-progress section shows, the waits, and the takeover stage's one step.
 
-**Who an input is from** (§7:5's third condition). :class:`InputStanding` is who wrote an
-input, as its place's kind establishes it, whether it carries the user's authority
-(ADR-0292 §5:5), and its origin (ADR-0284 §2:2). Two activations are of one standing
-where both authors are established as one person and both inputs carry the same
-authority and origin (:meth:`InputStanding.meets`). A forward on the line has a claimed
-author, so its standing names none and meets no other.
+**Who an input is from** (§7:5's third condition). :class:`InputStanding` is who handed
+an input in, as its place's kind establishes it, whether it carries the user's authority
+(ADR-0292 §5:5, ADR-0351 §6:1), and whose words it carries, its parties (ADR-0351 §2:1).
+Two activations are of one standing where both authors are established as one person,
+both carry the same authority, and both are outside, or both the person's own, or both
+the assistant's: ADR-0351 §8:5's class, read over every input each holds with its relay
+mark (:meth:`InputStanding.meets`). An input whose parties are ``None`` or empty meets
+none. A forward on the line has the user as its author, established, who forwarded it
+(ADR-0351 §4:2), and its original sender as its party, claimed, so it meets another
+forward, whoever sent that, and never the user's own words.
+
+**The relay mark** (ADR-0351 §5:6-§5:14). A running activation's inputs are read with
+their relay marks: its trigger's by its latest understanding version, and each joined
+input's by its own record. In the takeover step each activation is read so, one whose
+trigger's input no version has yet covered by its parties alone (§5:11); in a wait, such
+a one, whose understanding was not omitted, is read both as its parties give it and as
+a relay mark would leave it, outside and with no authority (§8:5), so that a wait covers
+every input a relay mark could bring into the waiting activation's class. An
+absorption and a take record ``relayed`` on each joined input they append, where that
+input is relayed in the activation it comes from (§5:14).
 
 **The person an activation is for** (§5:3). An activation whose input's author its place
 establishes is that person's; one the Task Scheduler started is the person's its task is
@@ -63,14 +77,15 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     ChannelIdentity,
     EpisodicMemory,
-    InputOrigin,
     JoinedInput,
     SupportHolder,
-    canonical_parties,
+    parties_are_assistants,
     parties_are_outside,
+    parties_are_persons_own,
 )
 from ai_assistant.orchestration.defects import is_defect, log_defect
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
+from ai_assistant.orchestration.outside_content import holds_outside, joined_parties, relayed_by
 from ai_assistant.orchestration.person_block import activation_person
 
 if TYPE_CHECKING:
@@ -153,57 +168,119 @@ PEER_VIEW_CHARS: Final = 2000
 _RECHECK: Final = 0.05
 
 
+class _Class(StrEnum):
+    """ADR-0351 §8:5's class: outside, the person's own, or the assistant's (§5:1, §5:2)."""
+
+    OUTSIDE = "outside"
+    OWN = "own"
+    ASSISTANTS = "assistants"
+
+
+def _class_of(parties: Sequence[SupportHolder] | None, *, relayed: bool) -> _Class | None:
+    """The class of an input of ``parties`` read with its relay mark; ``None`` for none.
+
+    An input whose parties are ``None`` or empty meets the condition with no input
+    (§8:5), so it has no class here, though ``None`` parties are outside (§5:1).
+    """
+    if not parties:
+        return None
+    if parties_are_outside(parties, relayed=relayed):
+        return _Class.OUTSIDE
+    if parties_are_persons_own(parties, relayed=relayed):
+        return _Class.OWN
+    if parties_are_assistants(parties, relayed=relayed):
+        return _Class.ASSISTANTS
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class InputStanding:
-    """Who wrote an input, as its place establishes it, and what it carries (§7:5).
+    """Who handed an input in, as its place establishes it, and whose words it is (§7:5).
+
+    Its authority and its class are read with the relay mark of every input its
+    activation holds (ADR-0351 §5:7, §6:5, §8:5), which :meth:`meets` is handed: the
+    standing itself is what the place and the parties give, and changes with no reply.
 
     Attributes:
         author: The person the place's kind establishes as the input's author, or
-            ``None`` where it establishes none: a forward's author is claimed (ADR-0323
-            §4:10), and so is an input that takes one in, and an event's.
-        users_authority: Whether the input carries the user's authority (ADR-0292
-            §5:5, ADR-0321 §3:3).
-        origin: Who the input came from, as admission records it (ADR-0284 §2:2).
+            ``None`` where it establishes none: an event's, or an input on a place whose
+            kind establishes no author.
+        users_authority: Whether the input carries the user's authority as its author and
+            its parties give it, before any relay mark (ADR-0292 §5:5, ADR-0351 §6:1).
+        parties: Whose words the trigger's input carries (ADR-0351 §2:1), or ``None``
+            where they are unknown.
     """
 
     author: str | None
     users_authority: bool
-    origin: InputOrigin
+    parties: tuple[SupportHolder, ...] | None
 
-    def meets(self, other: InputStanding) -> bool:
-        """§7:5's third condition: one author, established alike, one authority, one origin.
+    def meets(self, other: InputStanding, *, relayed: bool, other_relayed: bool) -> bool:
+        """§7:5's third condition: one author, established alike, one authority, one class.
 
-        An author not established meets nothing.
+        Each side is read with ``relayed``, whether any input its activation holds is
+        relayed (ADR-0351 §5:7, §8:5). An author not established meets nothing, and nor
+        does an input whose parties are ``None`` or empty.
         """
+        mine = _class_of(self.parties, relayed=relayed)
         return (
             self.author is not None
             and self.author == other.author
-            and self.users_authority == other.users_authority
-            and self.origin is other.origin
+            and (self.users_authority and not relayed)
+            == (other.users_authority and not other_relayed)
+            and mine is not None
+            and mine is _class_of(other.parties, relayed=other_relayed)
         )
 
 
-def input_standing(*, origin: InputOrigin, established: bool) -> InputStanding:
+def input_standing(
+    *, parties: tuple[SupportHolder, ...] | None, established: bool
+) -> InputStanding:
     """The standing of an input whose authors its place's kind either establishes or not.
 
     Today's kinds that establish an author establish one person, the user
-    (:data:`THE_USER`): an input whose every message they establish as the user's is the
-    user's, and carries the user's authority where its origin is the user's (ADR-0323
-    §4:7, as ADR-0321 §3:3 reads it for every channel).
+    (:data:`THE_USER`): an input whose every message they establish as handed in by the
+    user is the user's to hand in, and carries the user's authority where its parties are
+    the user alone (ADR-0351 §6:1, ADR-0323 §4:7, as ADR-0321 §3:3 reads it for every
+    channel). A forward on the line is handed in by the user, and its parties are its
+    sender's, claimed, so it carries none (ADR-0351 §4:2, §6:2).
 
     Args:
-        origin: Who the input came from, as admission records it.
-        established: Whether the place's kind establishes every message of the input as
-            the user's: on the line, none a forward (ADR-0323 §4:6, §4:10).
+        parties: Whose words the trigger's input carries, as admission recorded them.
+        established: Whether the place's kind establishes the user as having handed in
+            every message of the input.
 
     Returns:
         The input's standing.
     """
     return InputStanding(
         author=THE_USER if established else None,
-        users_authority=established and origin is InputOrigin.USER,
-        origin=origin,
+        users_authority=established and parties_are_persons_own(parties),
+        parties=parties,
     )
+
+
+def holds_relayed(state: ActivationState) -> bool:
+    """Whether any input ``state`` holds is relayed (ADR-0351 §5:11, §5:14, §8:5).
+
+    Its trigger's, by its latest understanding version, or a joined input's, by its own
+    record.
+    """
+    return relayed_by(state.understanding) or any(one.relayed for one in state.joined)
+
+
+def _covered(state: ActivationState) -> bool:
+    """Whether a version covers ``state``'s trigger's input, or its understanding was omitted.
+
+    Until then its relay mark is not known, and a wait reads it both ways (§8:5).
+    """
+    return bool(state.understanding) or state.understanding_omitted is not None
+
+
+def _readings(state: ActivationState) -> tuple[bool, ...]:
+    """The relay marks ``state`` may be read with: its own, or both where not yet known."""
+    relayed = holds_relayed(state)
+    return (relayed,) if relayed or _covered(state) else (False, True)
 
 
 #: The effects a pure read may declare (ADR-0341 §2:1): none, or the assistant's own
@@ -263,21 +340,36 @@ def _held_person(place: ChannelIdentity) -> str | None:
     return OWNER_PERSON_ID if establishes_the_user(place.channel_type) else None
 
 
-def _same_matter(one: ActivationState, other: ActivationState) -> bool:
-    """§7:5's third condition between two activations, the same person's (§5:3)."""
-    if one.standing is None or other.standing is None:
+def _same_matter(one: ActivationState, other: ActivationState, *, waiting: bool = False) -> bool:
+    """§7:5's third condition between two activations, the same person's (§5:3).
+
+    Each is read with its relay marks as it holds them now (ADR-0351 §5:11, §8:5): the
+    takeover step reads each so, one whose trigger's input no version has yet covered by
+    its parties alone. A wait reads such a one both ways (:func:`_readings`), and the
+    condition holds where either reading meets, so that a wait covers every input a
+    relay mark could bring into the waiting activation's class.
+    """
+    mine, theirs = one.standing, other.standing
+    if mine is None or theirs is None or person_of(one) != person_of(other):
         return False
-    return one.standing.meets(other.standing) and person_of(one) == person_of(other)
+    if not waiting:
+        return mine.meets(theirs, relayed=holds_relayed(one), other_relayed=holds_relayed(other))
+    return any(
+        mine.meets(theirs, relayed=relayed, other_relayed=other_relayed)
+        for relayed in _readings(one)
+        for other_relayed in _readings(other)
+    )
 
 
 def _may_share(one: ActivationState, other: ActivationState) -> bool:
     """Whether ``one`` is, or may yet show itself to be, of ``other``'s standing (§7:5).
 
-    It is where its standing meets ``other``'s; and it may yet be where its pass has not
-    set its standing, on a place whose kind establishes an author.
+    It is where its standing meets ``other``'s under any reading of its relay marks; and
+    it may yet be where its pass has not set its standing, on a place whose kind
+    establishes an author.
     """
     if one.standing is not None:
-        return _same_matter(one, other)
+        return _same_matter(one, other, waiting=True)
     place = one.place
     return (
         other.standing is not None
@@ -289,9 +381,10 @@ def _may_share(one: ActivationState, other: ActivationState) -> bool:
 def _waited_out(one: ActivationState, other: ActivationState) -> bool:
     """Whether a wait of ``other``'s need wait for ``one`` no longer (§7:12, §7:15).
 
-    It has settled, or its standing, now set, shows it is not of ``other``'s.
+    It has settled, or its standing, now set, shows it is not of ``other``'s under any
+    reading of its relay marks (ADR-0351 §8:5).
     """
-    return settled(one) or (one.standing is not None and not _same_matter(one, other))
+    return settled(one) or (one.standing is not None and not _same_matter(one, other, waiting=True))
 
 
 def settled(state: ActivationState) -> bool:
@@ -384,10 +477,14 @@ class EntryInput:
             withholds it.
         parties: Whose words it carries (ADR-0351 §2:1, §2:6), or ``None`` where they are
             unknown.
+        relayed: Whether it is relayed: the trigger's input by the activation's latest
+            understanding version, a joined input by its own record (ADR-0351 §5:11,
+            §5:14).
     """
 
     brief: str | None
     parties: tuple[SupportHolder, ...] | None
+    relayed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,21 +498,23 @@ class InProgressEntry:
         input: What it took in, in brief, read through the peer view; ``None`` where the
             view withholds it.
         acted: Whether it has acted (§3:5).
-        origin: Who its input came from, by which a withheld input is said to be outside.
+        parties: Whose words its trigger's input carries (ADR-0351 §2:1), by which a
+            withheld input is said to be the assistant's; ``None`` where they are unknown.
         arrived_at: When its input arrived, its episode's ``occurred_at``, the one addition
             ADR-0353 §2:5 makes to §5:6's list; ``None`` where its episode was never
             written.
         inputs: Each input it holds, the trigger's first and then each joined one in the
             order it was joined (ADR-0353 §2:6); empty where its episode was never written.
-        outside: Whether its input is outside (ADR-0351 §5:1, §5:7), by its trigger's
-            parties and its latest understanding's relay mark (ADR-0353 §2:7).
+        outside: Whether any input it holds is outside (ADR-0351 §5:1, §5:7, §8:5), by
+            its parties and its relay mark (ADR-0353 §2:7), by which a withheld input is
+            said to be outside.
     """
 
     activation_id: str
     channel: ChannelIdentity
     input: str | None
     acted: bool
-    origin: InputOrigin
+    parties: tuple[SupportHolder, ...] | None
     arrived_at: datetime | None = None
     inputs: tuple[EntryInput, ...] = ()
     outside: bool = False
@@ -457,31 +556,28 @@ def entry_of(state: ActivationState) -> InProgressEntry | None:
         EntryInput(
             brief=None if view.input is None else _brief(view.input.text),
             parties=trigger.parties,
+            relayed=relayed_by(state.understanding),
         ),
         *(
             EntryInput(
                 brief=None if index >= len(view.joined) else _brief(view.joined[index].text),
                 # §2:6: a joined input's parties are its messages' distinct parties, or
                 # unknown where the episode store's upgrade could not read them (§9:3).
-                parties=None
-                if any(message.party is None for message in one.messages)
-                else canonical_parties(
-                    message.party for message in one.messages if message.party is not None
-                ),
+                parties=joined_parties(one),
+                relayed=one.relayed,
             )
             for index, one in enumerate(joined)
         ),
     )
-    latest = state.understanding[-1] if state.understanding else None
     return InProgressEntry(
         activation_id=state.activation_id,
         channel=place,
         input=brief_input(view),
         acted=state.committed,
-        origin=trigger.origin,
+        parties=trigger.parties,
         arrived_at=episode.occurred_at,
         inputs=inputs,
-        outside=parties_are_outside(trigger.parties, relayed=latest is not None and latest.relayed),
+        outside=holds_outside(trigger, state.understanding, state.joined),
     )
 
 
@@ -822,7 +918,8 @@ class Matters:
             channel=state.place,
             input=None,
             acted=state.committed,
-            origin=state.trigger.origin,
+            parties=state.trigger.parties,
+            outside=holds_outside(state.trigger, state.understanding, state.joined),
         )
 
     # --- the waits (§7:12-§7:16) ---
@@ -1182,7 +1279,9 @@ class Matters:
         offering.handed_to = older.activation_id
         offering.offered_to = None
         self._handed[offering_id] = str(older.activation_id)
-        older.take_inputs(offer.inputs, merged=(*offering.merged, offering_id))
+        older.take_inputs(
+            _marked_now(offer.inputs, offering), merged=(*offering.merged, offering_id)
+        )
         older.offers_untaken -= 1
         offer.decision.became = Became.TAKEN
         older.took.append(Named(offering_id, None, Became.TAKEN))
@@ -1265,6 +1364,9 @@ def held_inputs(state: ActivationState, *, at: datetime) -> tuple[JoinedInput, .
 
     Its trigger's input, from its place, then each input it took in, in order. Empty
     where its trigger's messages were never held, which no absorption or take brings.
+    Each carries its relay mark as ``state`` holds it when this reads it (ADR-0351
+    §5:14): the trigger's, by its latest understanding version, and each joined input's
+    own, which it keeps.
     """
     place = state.place
     activation_id = state.activation_id
@@ -1276,6 +1378,21 @@ def held_inputs(state: ActivationState, *, at: datetime) -> tuple[JoinedInput, .
             channel=place,
             messages=state.input_messages,
             taken_over_from=activation_id,
+            relayed=relayed_by(state.understanding),
         ),
         *(one.model_copy(update={"taken_over_from": activation_id}) for one in state.joined),
     )
+
+
+def _marked_now(
+    inputs: Sequence[JoinedInput], offering: ActivationState
+) -> tuple[JoinedInput, ...]:
+    """An offer's inputs, each with its relay mark as the take reads it (ADR-0351 §5:14).
+
+    The offer was made from what the offering activation held then. A relay mark is never
+    dropped (§5:9), so the take reads it again: the trigger's input, the first, is relayed
+    where the offering activation's latest version now marks it.
+    """
+    if not inputs or inputs[0].relayed or not relayed_by(offering.understanding):
+        return tuple(inputs)
+    return (inputs[0].model_copy(update={"relayed": True}), *inputs[1:])

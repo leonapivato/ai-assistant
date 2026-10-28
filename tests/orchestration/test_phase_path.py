@@ -368,7 +368,7 @@ def test_a_pulls_attribution_follows_its_result_when_a_follow_up_offers_it_again
         activation_id="act",
         place=place_window(TranscriptWindow(conversation=conversation_channel("c1"), messages=())),
         conversation_id="c1",
-        trigger_origin=None,
+        trigger=None,
         owner_records=True,
         round_limit=2,
     )
@@ -414,7 +414,7 @@ def test_the_working_set_answers_the_rules_from_the_latest_rounds_decisions() ->
         activation_id="act",
         place=place_window(TranscriptWindow(conversation=conversation_channel("c1"), messages=())),
         conversation_id="c1",
-        trigger_origin=None,
+        trigger=None,
         owner_records=True,
         round_limit=2,
     )
@@ -451,7 +451,7 @@ def test_only_a_call_other_than_a_tidy_up_brings_a_round(
         activation_id="act",
         place=place_window(TranscriptWindow(conversation=conversation_channel("c1"), messages=())),
         conversation_id="c1",
-        trigger_origin=None,
+        trigger=None,
         owner_records=True,
         round_limit=2,
     )
@@ -464,7 +464,7 @@ def test_only_a_call_other_than_a_tidy_up_brings_a_round(
             activation_id="act",
             place=working.place,
             conversation_id=None,
-            trigger_origin=None,
+            trigger=None,
             owner_records=False,
             round_limit=0,
         )
@@ -547,7 +547,7 @@ def test_a_taken_offers_messages_join_the_place_window_in_the_order_sent() -> No
         activation_id="act",
         place=place_window(TranscriptWindow(conversation=place, messages=())),
         conversation_id="c1",
-        trigger_origin=None,
+        trigger=None,
         owner_records=True,
         round_limit=2,
     )
@@ -595,7 +595,7 @@ def test_a_take_in_a_later_round_lands_among_the_messages_it_came_between() -> N
         activation_id="act",
         place=place_window(TranscriptWindow(conversation=place, messages=())),
         conversation_id="c1",
-        trigger_origin=None,
+        trigger=None,
         owner_records=True,
         round_limit=2,
     )
@@ -649,7 +649,7 @@ def test_a_take_follows_the_mediums_positions_where_the_clock_went_back() -> Non
         activation_id="act",
         place=PlaceWindow(takes_message=True, items=(original,)),
         conversation_id="c1",
-        trigger_origin=None,
+        trigger=None,
         owner_records=True,
         round_limit=2,
     )

@@ -1853,10 +1853,11 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     method set does not move and stays at 69.**
 
     **118 is ADR-0350 §12:6, on wire-carried core types alone.** The processing record on
-    ``EpisodicMemory`` holds ``PlanningRound.place``, and ``InputOrigin`` and
-    ``LabelKind`` gain members it names. A peer at 117 refuses the new field as extra
-    and the new members as unknown (ADR-0124 §9:2). **The method set does not move and
-    stays at 69**: ``AssistantEngine`` gains no member (§10:6).
+    ``EpisodicMemory`` holds ``PlanningRound.place``, and the trigger's origin (since
+    retired for the parties, ADR-0351 §8:1) and ``LabelKind`` gain members it names. A
+    peer at 117 refuses the new field as extra and the new members as unknown (ADR-0124
+    §9:2). **The method set does not move and stays at 69**: ``AssistantEngine`` gains
+    no member (§10:6).
 
     **119 is ADR-0349 §10:5, on wire-carried core types alone.** The processing record on
     ``EpisodicMemory`` holds understanding versions whose ``continues`` becomes a

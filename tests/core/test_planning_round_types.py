@@ -24,7 +24,6 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     Idempotency,
-    InputOrigin,
     LabelKind,
     MemorySource,
     NewConversation,
@@ -54,7 +53,9 @@ from ai_assistant.core.types import (
     label_prefix,
 )
 from ai_assistant.testing import with_phase_declaration
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    OWNERS_WORDS,
+)
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
@@ -88,7 +89,7 @@ def _open(**fields: object) -> EpisodeProcessingRecord:
             payload=RecordedTextInput(text="what is on today?"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            parties=parties_for(InputOrigin.USER),
+            parties=OWNERS_WORDS,
         ),
     }
     values.update(fields)

@@ -20,7 +20,6 @@ from ai_assistant.core.types import (
     ChannelContext,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     ProcessingReason,
     ProcessingStatus,
@@ -32,7 +31,9 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    OWNERS_WORDS,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryStore
@@ -85,7 +86,7 @@ def conversation_episode(
                 payload=RecordedTextInput(text="exact input"),
                 context=ChannelContext(),
                 reply=WholeTextReply(),
-                parties=parties_for(InputOrigin.USER),
+                parties=OWNERS_WORDS,
             ),
             status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
             reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,

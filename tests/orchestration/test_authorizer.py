@@ -17,6 +17,7 @@ from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.errors import AuditError, MemoryStoreError
 from ai_assistant.core.types import (
     ActivationDigest,
+    ActivationUnderstanding,
     CapabilityEffect,
     CapabilityResult,
     ChannelContext,
@@ -30,7 +31,6 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     EvidenceItem,
     Idempotency,
-    InputOrigin,
     LabelKind,
     Memory,
     MemorySource,
@@ -52,10 +52,12 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     StoryNote,
     StoryNoteAuthor,
+    SupportHolder,
     ToolCall,
     ToolCost,
     ToolDefinition,
     ToolResult,
+    UnderstandingProducer,
     WholeTextReply,
 )
 from ai_assistant.orchestration import acting
@@ -95,7 +97,7 @@ from ai_assistant.testing import (
     FakeStoryStore,
     FakeToolRegistry,
 )
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -163,7 +165,8 @@ def _tool(name: str, **overrides: Any) -> ToolDefinition:
 def _episode(  # noqa: PLR0913 — one keyword per part of the record a case varies
     episode_id: str = _EPISODE,
     *,
-    origin: InputOrigin = InputOrigin.USER,
+    parties: tuple[SupportHolder, ...] = OWNERS_WORDS,
+    understanding: Sequence[ActivationUnderstanding] = (),
     rounds: Sequence[PlanningRound] = (),
     labels: Sequence[PlanningLabel] = (),
     digests: Sequence[ActivationDigest] = (),
@@ -179,8 +182,9 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a case var
             payload=RecordedTextInput(text="the words they wrote"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            parties=parties_for(origin),
+            parties=parties,
         ),
+        understanding=tuple(understanding),
         rounds=tuple(rounds),
         labels=tuple(labels),
         digests=tuple(digests),
@@ -460,7 +464,7 @@ async def test_an_unbindable_egress_call_is_not_done() -> None:
 
 async def test_after_outside_content_a_call_leaving_the_hub_needs_you_and_one_inside_runs() -> None:
     """§4:4: no standing permission for a call that leaves the hub; the message is untouched."""
-    hub = _Hub(episode=_episode(origin=InputOrigin.OUTSIDE))
+    hub = _Hub(episode=_episode(parties=UNIDENTIFIED_WORDS))
 
     decided = await hub.authorize(
         _round(
@@ -490,7 +494,7 @@ async def test_the_fact_reaches_the_policy_on_the_binding_where_there_is_one() -
     tool = _tool("lookup")
     binder = FakeEgressBinder()
     binder.register_egress(tool, reference="conn-1", identity="me@example.com")
-    hub = _Hub(tool, binder=binder, episode=_episode(origin=InputOrigin.OUTSIDE))
+    hub = _Hub(tool, binder=binder, episode=_episode(parties=UNIDENTIFIED_WORDS))
 
     decided = await hub.authorize(_round(_call("c1", "lookup", q="x")))
 
@@ -534,11 +538,24 @@ def _marked_round(round_id: str = "round:0") -> PlanningRound:
     return PlanningRound(id=round_id, recorded_at=_AT, notes="seen", notes_marked=True)
 
 
+def _version(*, relayed: bool) -> ActivationUnderstanding:
+    return ActivationUnderstanding(
+        version=1,
+        recorded_at=_AT,
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="a pasted email from the school",
+        relayed=relayed,
+    )
+
+
 @pytest.mark.parametrize(
     ("episode", "read"),
     [
         (_episode(), False),
-        (_episode(origin=InputOrigin.OUTSIDE), True),
+        (_episode(parties=UNIDENTIFIED_WORDS), True),
+        # ADR-0351 §5:13: the user's own words that understanding marks relayed.
+        (_episode(understanding=(_version(relayed=True),)), True),
+        (_episode(understanding=(_version(relayed=False),)), False),
         (_episode(derived_from_external=True), True),
         # ADR-0308 §5:4: a digest that answered counts, even with no items.
         (_episode(digests=(_digest(DigestOutcome.ANSWERED),)), True),
@@ -611,7 +628,7 @@ async def test_a_fetched_record_resting_on_outside_content_counts_through_the_st
         # Shown with its outside mark, notes or none (ADR-0181 §4's disjunction).
         (_episode("activation:other", derived_from_external=True), True),
         # Its input is withheld, but its understood meaning is shown (ADR-0303 §3:2).
-        (_episode("activation:other", origin=InputOrigin.OUTSIDE), True),
+        (_episode("activation:other", parties=UNIDENTIFIED_WORDS), True),
         # #2870: its evidence is outside content planning is shown (ADR-0308 §5:5).
         (
             _episode("activation:other", digests=(_digest(DigestOutcome.ANSWERED, "the 9:10"),)),
@@ -726,7 +743,7 @@ async def test_a_candidate_after_outside_content_is_marked_and_allowed() -> None
     on outside content is never committed unconfirmed (ADR-0106 §6); a candidate writes
     no memory, and the observer's writes carry that floor.
     """
-    hub = _Hub(episode=_episode(origin=InputOrigin.OUTSIDE))
+    hub = _Hub(episode=_episode(parties=UNIDENTIFIED_WORDS))
 
     decided = await hub.authorize(_round(_call("c1", "remember", **_fact("the 9:10 runs"))))
 
@@ -982,7 +999,7 @@ async def test_the_stand_in_and_every_ground_that_held_are_written() -> None:
     """§4: whether the activation had read outside content, each ground and its record."""
     sink = FakeDiagnosticSink()
     episode = _episode(
-        origin=InputOrigin.OUTSIDE,
+        parties=UNIDENTIFIED_WORDS,
         digests=(_digest(DigestOutcome.ANSWERED, "the 9:10"),),
         rounds=(_marked_round("round:0"),),
     )

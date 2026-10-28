@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Final
 from test_planning import _AT, _earlier, _episode, _inputs, _sent, _stage
 
 from ai_assistant.core.types import (
-    InputOrigin,
     LabelKind,
     PlanningLabel,
     RoundResponse,
@@ -30,6 +29,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.planning import PlanningStories, PlanningStory
 from ai_assistant.orchestration.story_links import ShortView
+from ai_assistant.testing.parties import UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import EpisodicMemory
@@ -346,7 +346,7 @@ async def test_an_outside_episode_in_an_inherited_or_cited_view_marks_the_rounds
     Its provenance carries no mark and it holds no digest, so only its origin says so;
     the round's notes are recorded marked.
     """
-    outside = _episode("activation:report", origin=InputOrigin.OUTSIDE)
+    outside = _episode("activation:report", parties=UNIDENTIFIED_WORDS)
     for stories in (
         PlanningStories(
             stories=(_story(inherited=(_short("story:summer", episodes=(outside,)),)),)

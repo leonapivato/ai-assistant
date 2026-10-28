@@ -23,7 +23,6 @@ from ai_assistant.core.types import (
     ControllerStage,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     NewConversation,
     Placement,
@@ -45,7 +44,9 @@ from ai_assistant.core.types import (
     UnderstandingProducer,
     WholeTextReply,
 )
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    OWNERS_WORDS,
+)
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
@@ -60,7 +61,7 @@ def _trigger(*, channel: ChannelIdentity | None = None) -> RecordedChannelTrigge
         payload=RecordedTextInput(text="what is on today?"),
         context=ChannelContext(),
         reply=WholeTextReply(),
-        parties=parties_for(InputOrigin.USER),
+        parties=OWNERS_WORDS,
     )
 
 
@@ -71,7 +72,7 @@ def _speech(transcript: str | None) -> RecordedChannelTrigger:
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript=transcript),
         context=ChannelContext(),
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-        parties=parties_for(InputOrigin.USER),
+        parties=OWNERS_WORDS,
     )
 
 

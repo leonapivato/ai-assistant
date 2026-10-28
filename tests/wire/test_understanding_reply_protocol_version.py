@@ -29,7 +29,6 @@ from ai_assistant.core.types import (
     ChannelContext,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemoryKind,
     MemorySource,
     NewConversation,
@@ -48,7 +47,9 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    OWNERS_WORDS,
+)
 from ai_assistant.wire import envelope
 from ai_assistant.wire.codec import encode_projection, project
 
@@ -116,7 +117,7 @@ def _episode() -> EpisodicMemory:
             payload=RecordedTextInput(text="make it Saturday"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            parties=parties_for(InputOrigin.USER),
+            parties=OWNERS_WORDS,
         ),
         status=ProcessingStatus.COMPLETED,
         reason=ProcessingReason.RETURNED,

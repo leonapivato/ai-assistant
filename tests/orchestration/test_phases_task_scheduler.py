@@ -27,7 +27,6 @@ from ai_assistant.core.types import (
     DueAt,
     DueNow,
     EpisodicMemory,
-    InputOrigin,
     MessageAuthor,
     OccurrenceState,
     ProcessingStatus,
@@ -35,6 +34,7 @@ from ai_assistant.core.types import (
     RoundResponse,
     ScheduledTaskAuthor,
     TaskSpawn,
+    parties_are_outside,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.orchestration.task_manager import PlaceLists
@@ -507,7 +507,7 @@ async def test_an_outside_marked_tasks_text_is_withheld_from_planning() -> None:
     try:
         (episode,) = await _until_scheduled(harness, 1)
         assert episode.processing_record is not None
-        assert episode.processing_record.trigger.origin is InputOrigin.OUTSIDE
+        assert parties_are_outside(episode.processing_record.trigger.parties)
         (request,) = seen
         assert "parcel number" not in json.dumps(request)
     finally:

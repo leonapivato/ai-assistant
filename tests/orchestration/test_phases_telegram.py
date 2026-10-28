@@ -32,7 +32,6 @@ from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ApprovalGiver,
-    InputOrigin,
     ProcessingReason,
     ProcessingStatus,
     RecordedInputMessage,
@@ -42,6 +41,8 @@ from ai_assistant.core.types import (
     TelegramForwardOrigin,
     TelegramQuotedMessage,
     ToolOutcome,
+    parties_are_outside,
+    parties_are_persons_own,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.orchestration.telegram import (
@@ -155,7 +156,7 @@ async def test_a_message_in_is_answered_in_the_chat_through_the_phases() -> None
     record = processing(episode)
     trigger = record.trigger
     assert trigger.channel == line_channel(REFERENCE, CHAT)
-    assert trigger.origin is InputOrigin.USER
+    assert parties_are_persons_own(trigger.parties)
     # ADR-0351 §2:6, §3:1: the message carries the owner's words, as the line declares.
     assert trigger.messages == (
         RecordedInputMessage(
@@ -269,7 +270,7 @@ async def test_a_forward_makes_the_input_outside_and_planning_never_sees_its_tex
     await harness.engine.aclose()
 
     trigger = processing(episode).trigger
-    assert trigger.origin is InputOrigin.OUTSIDE
+    assert parties_are_outside(trigger.parties)
     forwarded, own = trigger.messages
     assert forwarded.forwarded_from is not None
     assert forwarded.forwarded_from.name == "A stranger"

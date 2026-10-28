@@ -26,7 +26,6 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     Placement,
     PlacementReach,
@@ -68,7 +67,9 @@ from ai_assistant.core.types import (
 from ai_assistant.interfaces import cli, episode_inspection, story_inspection
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    UNIDENTIFIED_WORDS,
+)
 from ai_assistant.wire.errors import ProtocolError
 
 if TYPE_CHECKING:
@@ -89,7 +90,7 @@ def _episode(activation_id: str, *, open_: bool = False) -> EpisodicMemory:
         payload=RecordedTextInput(text="input"),
         context=ChannelContext(),
         reply=None,
-        parties=parties_for(InputOrigin.OUTSIDE),
+        parties=UNIDENTIFIED_WORDS,
     )
     if open_:
         processing = EpisodeProcessingRecord(

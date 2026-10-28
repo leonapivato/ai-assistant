@@ -14,7 +14,7 @@ import pytest
 from structlog.testing import capture_logs
 from understanding_support import Rendered, TextAsStructured
 
-from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import ModelError, UnderstandingError
 from ai_assistant.core.prompts import PromptDeclaration, PromptOrigin, PromptTemplate
@@ -27,7 +27,6 @@ from ai_assistant.core.types import (
     ClaimedAuthor,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
@@ -40,6 +39,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    SupportHolder,
     TranscriptMessage,
     UnclearPoint,
     UnderstandingOmission,
@@ -64,7 +64,7 @@ from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, default_pro
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import remembered_support
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import UNIDENTIFIED_WORDS
 
 #: Understanding's shipped template, as the composition root hands it the stage.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
@@ -97,11 +97,12 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
     understanding: tuple[ActivationUnderstanding, ...] = (),
     placement: Placement | None = None,
     completed: bool = True,
+    parties: tuple[SupportHolder, ...] | None = None,
 ) -> EpisodicMemory:
     """One captured episode carrying a processing record, as admission and capture write it.
 
-    The trigger's ``origin`` is admission's (ADR-0284 §2:2) and ``content`` is §7's one
-    rule over the record.
+    The trigger's parties are admission's unless named (ADR-0351 §3:1) and ``content`` is
+    §7's one rule over the record.
     """
     event = channel.channel_type == "informational_event"
     record = EpisodicMemory(
@@ -121,7 +122,7 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
                 payload=RecordedTextInput(text=text),
                 context=ChannelContext() if context is None else context,
                 reply=None if event else WholeTextReply(),
-                parties=parties_for(input_origin(channel)),
+                parties=declared_input(channel)[0] if parties is None else parties,
             ),
             status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
             reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
@@ -661,6 +662,7 @@ async def test_an_episode_is_projected_explicitly_and_never_serialized() -> None
         outcome=None,
         context=attached,
         understanding=(earlier,),
+        parties=UNIDENTIFIED_WORDS,
     )
     model = FakeModelProvider.scripted(_proposal(cites=["P1"]))
     understood = await _understand(
@@ -863,7 +865,6 @@ async def test_a_line_input_taking_in_a_forward_is_attributed_as_a_report_by_its
         version=1,
         now=lambda: AT,
         deadline=math.inf,
-        origin=InputOrigin.OUTSIDE,
     )
 
     sent = _sent(model)

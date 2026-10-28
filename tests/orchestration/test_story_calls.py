@@ -26,7 +26,6 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     EpisodicMemory,
-    InputOrigin,
     LabelKind,
     MemorySource,
     PermissionDecision,
@@ -754,7 +753,6 @@ async def test_a_story_label_planning_was_never_shown_refuses_the_call_whole() -
         PlanningInputs(
             activation_id=_ACTIVATION,
             place=PlaceWindow(takes_message=True),
-            trigger_origin=InputOrigin.USER,
             labels=(shown,),
             capabilities=STORY_CALLS,
             label_arguments=STORY_LABEL_ARGUMENTS,
@@ -1363,7 +1361,6 @@ async def test_planning_refuses_a_note_label_it_was_never_shown() -> None:
         PlanningInputs(
             activation_id=_ACTIVATION,
             place=PlaceWindow(takes_message=True),
-            trigger_origin=InputOrigin.USER,
             labels=shown,
             capabilities=STORY_CALLS,
             label_arguments=STORY_LABEL_ARGUMENTS,

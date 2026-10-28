@@ -30,11 +30,13 @@ from understanding_support import Rendered
 from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.types import (
     EpisodicMemory,
-    InputOrigin,
     ProcessingStatus,
     RecordedChannelTrigger,
     RoundResponse,
+    SupportHolder,
     Validity,
+    parties_are_outside,
+    parties_are_persons_own,
 )
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing import FakeToolCallingCompleter
@@ -118,11 +120,11 @@ async def _fail(composed: Phased, conversation_id: str) -> str:
     return turn.address
 
 
-def _origin(episode: EpisodicMemory) -> InputOrigin | None:
+def _parties(episode: EpisodicMemory) -> tuple[SupportHolder, ...] | None:
     assert episode.processing_record is not None
     trigger = episode.processing_record.trigger
     assert isinstance(trigger, RecordedChannelTrigger)
-    return trigger.origin
+    return trigger.parties
 
 
 # --- a channel's history is its episodes (ADR-0283) ----------------------------------
@@ -384,10 +386,10 @@ async def test_reclaim_keeps_a_conversation_whose_channel_holds_a_live_episode(
 async def test_a_conversational_episode_is_the_users_and_its_content_the_meaning_and_words(
     composed: Phased,
 ) -> None:
-    """ADR-0284 §2:2 and §7:1: admission records ``user``; content is meaning, then words."""
+    """ADR-0284 §2:2, §7:1: admission records the owner's words; content is meaning, then words."""
     episode = await _episode(composed, (await composed.say("hello there")).address)
 
-    assert _origin(episode) is InputOrigin.USER
+    assert parties_are_persons_own(_parties(episode))
     assert episode.content == f"{MEANING}\nhello there"
     assert episode.content == episode_content(episode)
 
@@ -395,12 +397,12 @@ async def test_a_conversational_episode_is_the_users_and_its_content_the_meaning
 async def test_an_event_episode_is_outside_and_its_content_the_meaning_alone(
     composed: Phased,
 ) -> None:
-    """ADR-0284 §2:2 and §7:1: admission records ``outside``; the words are not content."""
+    """ADR-0284 §2:2 and §7:1: admission records outside parties; the words are not content."""
     result = await composed.event(_REPORTED)
     assert result.capture.episode_id is not None
     episode = await _episode(composed, result.capture.episode_id)
 
-    assert _origin(episode) is InputOrigin.OUTSIDE
+    assert parties_are_outside(_parties(episode))
     assert episode.content == MEANING
     assert _REPORTED not in episode.content
 
@@ -408,7 +410,7 @@ async def test_an_event_episode_is_outside_and_its_content_the_meaning_alone(
 async def test_a_later_activation_renders_the_event_as_a_report_received(
     composed: Phased,
 ) -> None:
-    """ADR-0284 §2:3 and §8: read by ``origin``, never by the channel type.
+    """ADR-0284 §2:3 and §8: read by the parties, never by the channel type.
 
     The next conversational activation's understanding stage is shown the event in its
     episode window as a report received, never as something the user said, with the

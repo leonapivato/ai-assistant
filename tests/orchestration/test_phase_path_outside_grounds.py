@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final
 from phases_support import chat_turn, phase_path, phases_harness
 from test_authorizer import _ACTIVATION, _episode
 from test_planning import _episode as _past_episode
+from test_planning import _recorded_trigger
 
 from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.types import (
@@ -29,7 +30,6 @@ from ai_assistant.core.types import (
     DiagnosticSource,
     DigestOutcome,
     EvidenceItem,
-    InputOrigin,
     LabelKind,
     MemoryKind,
     PlanningLabel,
@@ -57,6 +57,7 @@ from ai_assistant.testing import (
     FakeToolCallingCompleter,
     FakeWebSearcher,
 )
+from ai_assistant.testing.parties import UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
     from test_engine import Harness
@@ -118,7 +119,7 @@ def _begun(path: PhasePath, labels: tuple[PlanningLabel, ...] = ()) -> PhaseWork
         activation_id=_ACTIVATION,
         window=TranscriptWindow(conversation=conversation_channel("c1"), messages=()),
         conversation_id="c1",
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(),
         owner_records=True,
         labels=labels,
     )
@@ -234,7 +235,7 @@ async def test_a_story_view_names_its_summary_note_and_moment_once_each_every_ro
     )
     harness = phases_harness(completer)
     await harness.memory.add(_episode())
-    await harness.memory.add(_past_episode("activation:report", origin=InputOrigin.OUTSIDE))
+    await harness.memory.add(_past_episode("activation:report", parties=UNIDENTIFIED_WORDS))
     stories = FakeStoryStore(now=lambda: _AT)
     trip = (
         await stories.create(

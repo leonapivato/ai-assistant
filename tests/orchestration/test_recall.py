@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 import pytest
 
-from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
@@ -21,7 +21,6 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     Memory,
     MemoryKind,
     MemorySource,
@@ -55,12 +54,12 @@ from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.memories import memory_in_band
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import MemoryRecord, MemorySearchResult
+    from ai_assistant.core.types import MemoryRecord, MemorySearchResult, SupportHolder
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.recall import Recalled
 
@@ -127,9 +126,9 @@ def _text_trigger(
     text: str,
     channel: ChannelIdentity = CONVERSATION,
     *,
-    origin: InputOrigin | Literal["admitted"] = "admitted",
+    parties: tuple[SupportHolder, ...] | Literal["admitted"] = "admitted",
 ) -> RecordedChannelTrigger:
-    """A text trigger whose ``origin`` is admission's for ``channel`` unless named."""
+    """A text trigger whose parties are admission's for ``channel`` unless named."""
     event = channel.channel_type == "informational_event"
     return RecordedChannelTrigger(
         target=channel,
@@ -137,7 +136,7 @@ def _text_trigger(
         payload=RecordedTextInput(text=text),
         context=ChannelContext(),
         reply=None if event else WholeTextReply(),
-        parties=parties_for(input_origin(channel) if origin == "admitted" else origin),
+        parties=declared_input(channel)[0] if parties == "admitted" else parties,
     )
 
 
@@ -457,9 +456,9 @@ async def test_an_episodes_provenance_and_excerpt_read_its_origin_never_its_chan
     reader testing the channel type would label every one of them the other way.
     """
     records = (
-        _episode("told", processing=_processing(_text_trigger("TOLD", origin=InputOrigin.OUTSIDE))),
+        _episode("told", processing=_processing(_text_trigger("TOLD", parties=UNIDENTIFIED_WORDS))),
         _episode(
-            "spoke", processing=_processing(_text_trigger("SPOKE", EVENTS, origin=InputOrigin.USER))
+            "spoke", processing=_processing(_text_trigger("SPOKE", EVENTS, parties=OWNERS_WORDS))
         ),
     )
     recalled = await _recall(_stage(await _store(*records), limit=3))
@@ -498,14 +497,14 @@ async def test_a_scheduled_steps_episode_is_never_the_users_and_never_shows_its_
     understood = _episode(
         "understood",
         processing=_processing(
-            _text_trigger("INSTRUCTION-SENTINEL", schedule, origin=InputOrigin.ASSISTANT),
+            _text_trigger("INSTRUCTION-SENTINEL", schedule, parties=ASSISTANTS_WORDS),
             understanding=(_understood("Checking the listing again."),),
         ),
     )
     bare = _episode(
         "bare",
         processing=_processing(
-            _text_trigger("INSTRUCTION-SENTINEL", schedule, origin=InputOrigin.ASSISTANT)
+            _text_trigger("INSTRUCTION-SENTINEL", schedule, parties=ASSISTANTS_WORDS)
         ),
     )
     recalled = await _recall(_stage(await _store(understood, bare)))
@@ -526,7 +525,7 @@ async def test_another_episodes_excerpt_is_its_input_text_or_its_content() -> No
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript=None),
         context=ChannelContext(),
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-        parties=parties_for(InputOrigin.USER),
+        parties=OWNERS_WORDS,
     )
     records = (
         _episode("typed", processing=_processing(_text_trigger("Book the dentist."))),

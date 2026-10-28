@@ -113,7 +113,6 @@ from ai_assistant.core.prompts import PromptDeclaration
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     EpisodicMemory,
-    InputOrigin,
     Message,
     ReplyFailure,
     Role,
@@ -126,6 +125,11 @@ from ai_assistant.core.types import (
     StoryRefusalReason,
 )
 from ai_assistant.orchestration.episode_reads import is_open_episode
+from ai_assistant.orchestration.outside_content import (
+    projected_assistants,
+    projected_outside,
+    projected_own,
+)
 from ai_assistant.orchestration.reply_keys import shape_keys
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_flags import (
@@ -463,11 +467,11 @@ class _Episode:
             "label": label,
             "item": (
                 f"a report received on {source}, never something the user said"
-                if projection.origin is InputOrigin.OUTSIDE
+                if projected_outside(projection)
                 else f"an exchange with the user on {source}"
-                if projection.origin is InputOrigin.USER
+                if projected_own(projection)
                 else f"work the assistant scheduled, run on {source}, never something the user said"
-                if projection.origin is InputOrigin.ASSISTANT
+                if projected_assistants(projection)
                 else f"an episode on {source}"
             ),
             "occurred_at": projection.occurred_at.isoformat(),
@@ -485,7 +489,7 @@ class _Episode:
             }
         if projection.response is not None:
             rendered["assistants_reply"] = projection.response.text
-        if projection.origin is InputOrigin.OUTSIDE or projection.derived_from_external:
+        if projected_outside(projection) or projection.derived_from_external:
             rendered["outside_content"] = _OUTSIDE_TEXT
         return rendered
 

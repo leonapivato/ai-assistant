@@ -1,9 +1,10 @@
 """The ``telegram`` channel type's declarations in ``core`` (ADR-0323 §4, §15's first rows).
 
-Its input origin is declared per input — ``outside`` for an input that takes in a
-forward, ``user`` otherwise (§4:11, ADR-0284 §2:2); it is a type whose kind establishes
-the user as an author in its places, as the hub chat's is (§4:8); and it is admitted by
-its reader in the hub alone, never by ``receive``'s dispatch table (§4:1, §4:3). The
+Its input's parties are declared per input — a forward's original sender, claimed, for
+an input that takes in a forward, the owner otherwise (§4:11, ADR-0351 §3:1); it is a
+type whose kind establishes the user as an author in its places, as the hub chat's is
+(§4:8); and it is admitted by its reader in the hub alone, never by ``receive``'s
+dispatch table (§4:1, §4:3). The
 recorded input keeps each message it took in, dated, with a forward's sender claimed
 (§4:10, §5:4).
 """
@@ -17,8 +18,8 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import (
+    declared_input,
     establishes_the_user,
-    input_origin,
     snapshot,
 )
 from ai_assistant.core.types import (
@@ -27,35 +28,46 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ClaimedAuthor,
-    InputOrigin,
     NewConversation,
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
     TextChannelPayload,
     WholeTextReply,
+    parties_are_outside,
+    parties_are_persons_own,
 )
-from ai_assistant.testing.parties import line_input
+from ai_assistant.testing.parties import OWNERS_WORDS, line_input
 
 LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="conn-0001/424242")
 AT: Final = datetime(2026, 10, 17, 9, 0, tzinfo=UTC)
 
 
-def test_the_lines_origin_is_declared_per_input() -> None:
-    """§4:11: ``user`` for an input taking in no forward, ``outside`` for one that does."""
-    assert input_origin(LINE) is InputOrigin.USER
-    assert input_origin(LINE, takes_in_forward=True) is InputOrigin.OUTSIDE
+_TYPED: Final = RecordedInputMessage(text="ok", sent_at=AT, position=1)
+_FORWARDED: Final = RecordedInputMessage(
+    text="see you", sent_at=AT, position=2, forwarded_from=ClaimedAuthor(name="Sam")
+)
+
+
+def test_the_lines_parties_are_declared_per_input() -> None:
+    """§4:11, ADR-0351 §3:1: the owner's for an input taking in no forward, and outside
+    for one that does."""
+    typed, _ = declared_input(LINE, (_TYPED,))
+    forwarded, _ = declared_input(LINE, (_FORWARDED,))
+    assert typed == OWNERS_WORDS
+    assert parties_are_persons_own(typed)
+    assert parties_are_outside(forwarded)
 
 
 @pytest.mark.parametrize(
     "target",
     [NewConversation(), ChannelIdentity(channel_type="informational_event", instance_id="x")],
 )
-def test_a_kind_taking_in_no_forward_declares_no_origin_for_one(
+def test_a_kind_taking_in_no_forward_declares_no_party_for_one(
     target: NewConversation | ChannelIdentity,
 ) -> None:
     with pytest.raises(ValueError, match="takes in no forward"):
-        input_origin(target, takes_in_forward=True)
+        declared_input(target, (_FORWARDED,))
 
 
 def test_the_kinds_that_establish_the_user_are_the_chat_and_the_line() -> None:

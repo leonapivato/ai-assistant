@@ -34,8 +34,9 @@ and each episode is shown only where it may be shown to that reader:
   what it reads (ADR-0282 §2:8), and never an open one, which is never a model input
   (ADR-0286 §6). An episode not shown is not counted either.
 
-An **outside episode** is marked (ADR-0303 §3:2, §3:8): one whose trigger's ``origin``
-is ``outside``, or whose activation's record of what it read shows outside content.
+An **outside episode** is marked (ADR-0303 §3:2, §3:8): one holding an input that is
+outside, read by its parties with its relay mark (ADR-0351 §5:1, §5:7, §8:3), or whose
+activation's record of what it read shows outside content.
 
 **Under ADR-0303 §3's privacy default.** Where a matter stands carries no summary and no
 note: it is worked out from the records, and the summary is the story summary view's
@@ -60,7 +61,6 @@ from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     STORY_STANDING_RECENT,
     EpisodicMemory,
-    InputOrigin,
     StoryEffectState,
     StoryEntry,
     StoryMember,
@@ -76,6 +76,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import TurnSupply, admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
+from ai_assistant.orchestration.outside_content import holds_outside
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
@@ -265,7 +266,7 @@ def _moment(record: EpisodicMemory, activation_id: str) -> StoryStandingEpisode:
     """One episode as the timeline shows it: its instant, its meaning and its marks.
 
     Reads the fields ADR-0284 §8:1's projection carries for these facts, the latest
-    understanding's ``meaning``, the trigger's ``origin`` and the record's
+    understanding's ``meaning``, its inputs' parties and relay marks, and the record's
     ``derived_from_external``, and no input, response or ``content``. The view is
     data for a reader, not a rendering: a reader that renders it into a prompt
     renders the meaning as quoted source data (ADR-0098 §2), marked where it is
@@ -281,15 +282,16 @@ def _moment(record: EpisodicMemory, activation_id: str) -> StoryStandingEpisode:
             in_progress=False,
             outside=external,
         )
-    trigger = processing.trigger
-    origin = trigger.origin
     latest = processing.understanding[-1] if processing.understanding else None
     return StoryStandingEpisode(
         activation_id=activation_id,
         occurred_at=record.occurred_at,
         meaning=None if latest is None else latest.meaning,
         in_progress=processing.is_open,
-        outside=origin is InputOrigin.OUTSIDE or external,
+        # ADR-0351 §5:1, §5:13, §8:5: outside where any input it holds is, each read with
+        # its relay mark.
+        outside=holds_outside(processing.trigger, processing.understanding, processing.joined)
+        or external,
     )
 
 

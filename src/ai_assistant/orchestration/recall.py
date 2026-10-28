@@ -84,7 +84,6 @@ from ai_assistant.core.types import (
     DiagnosticKind,
     DiagnosticSource,
     EpisodicMemory,
-    InputOrigin,
     Memory,
     MemoryKind,
     RecallCue,
@@ -94,6 +93,8 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     StoryMember,
     StoryMemberKind,
+    parties_are_assistants,
+    parties_are_persons_own,
     record_attestation,
     record_band,
     record_rests_on_outside_content,
@@ -102,6 +103,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
     admitted_to_understanding,
 )
+from ai_assistant.orchestration.outside_content import joined_parties, relayed_by
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import activation_of
 
@@ -110,7 +112,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.protocols import DiagnosticSink, MemoryStore, StoryStore
-    from ai_assistant.core.types import MemoryRecord
+    from ai_assistant.core.types import EpisodeProcessingRecord, MemoryRecord
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = ["RecallStage", "Recalled", "RecalledRecord"]
@@ -604,35 +606,50 @@ def _item(
 def _provenance_of(record: RecalledRecord) -> RecallProvenance:
     """§4's two-value label, and the only provenance judgment recall makes.
 
-    An episode's is read off its trigger's ``origin`` and never off its channel type
-    (ADR-0284 §2:3, superseding ADR-0281 §4:4's test): a channel activation's episode is
-    ``user`` exactly where its input came from the user, and an input whose origin is
-    not recorded is not taken for the user's — the same reading :func:`_excerpt_of`
-    makes, so the label and the excerpt never disagree; an input whose origin is
-    ``assistant`` is not the user's either (ADR-0350 §6:12). A resume has no input (§2:4)
-    and an episode with no processing record no trigger, and both are ``user``, as
-    ADR-0281 §4:4 labelled them.
+    An episode's is read off its inputs' parties, with their relay marks, and never off
+    its channel type (ADR-0284 §2:3 as ADR-0351 §8:2 amends it, superseding ADR-0281
+    §4:4's test): a channel activation's episode is ``user`` exactly where every input it
+    holds is the user's own (:func:`_users_own`), and an input whose parties are unknown
+    is not taken for the user's — the same reading :func:`_excerpt_of` makes, so the
+    label and the excerpt never disagree; an input that is the assistant's is not the
+    user's either (ADR-0350 §6:12), and nor is one understanding marked relayed
+    (ADR-0351 §5:7). A resume has no input (§2:4) and an episode with no processing
+    record no trigger, and both are ``user``, as ADR-0281 §4:4 labelled them.
     """
     if isinstance(record, Memory):
         outside = record.rests_on_outside_content
     else:
         processing = record.processing_record
-        outside = processing is not None and processing.trigger.origin is not InputOrigin.USER
+        outside = processing is not None and not _users_own(processing)
     return RecallProvenance.OUTSIDE if outside else RecallProvenance.USER
+
+
+def _users_own(processing: EpisodeProcessingRecord) -> bool:
+    """Whether every input an episode holds is the user's own (ADR-0351 §5:2, §5:7, §8:5).
+
+    Its trigger's, by its parties and its latest understanding version's relay mark,
+    and each joined input's, by its parties and its own.
+    """
+    return parties_are_persons_own(
+        processing.trigger.parties, relayed=relayed_by(processing.understanding)
+    ) and all(
+        parties_are_persons_own(joined_parties(one), relayed=one.relayed)
+        for one in processing.joined
+    )
 
 
 def _excerpt_of(record: RecalledRecord) -> str:
     """§6's excerpt, from the stored record and never from this pass's model output.
 
     **An outside episode's raw input never enters it** (ADR-0284 §2:3, superseding
-    ADR-0281 §6:3's channel-type test): an episode whose trigger's ``origin`` is
-    ``outside`` gives its latest understanding's meaning, or the fixed text that it
-    was a report received on its channel. The user's own input is given where the
-    ``origin`` is ``user``; an input whose origin is not recorded is not taken for
-    the user's, and gives what an outside one does. An input whose origin is
-    ``assistant``, a scheduled task's instruction, is not the user's either (ADR-0350
-    §6:12): it gives its meaning, or the fixed text that it was work the assistant
-    scheduled.
+    ADR-0281 §6:3's channel-type test): an episode holding an input that is not the
+    user's own gives its latest understanding's meaning, or the fixed text that it was
+    a report received on its channel. The user's own input is given where every input
+    it holds is the user's own, read with its relay mark (ADR-0351 §5:4, §5:7); an
+    input whose parties are unknown is not taken for the user's, and gives what an
+    outside one does. An input that is the assistant's, a scheduled task's instruction,
+    is not the user's either (ADR-0350 §6:12): it gives its meaning, or the fixed text
+    that it was work the assistant scheduled.
     """
     if isinstance(record, Memory):
         return record.content
@@ -640,7 +657,7 @@ def _excerpt_of(record: RecalledRecord) -> str:
     if processing is None:
         return record.content
     trigger = processing.trigger
-    if trigger.origin is InputOrigin.USER:
+    if _users_own(processing):
         payload = trigger.payload
         text = payload.text if isinstance(payload, RecordedTextInput) else payload.transcript
         if text is not None:
@@ -651,7 +668,7 @@ def _excerpt_of(record: RecalledRecord) -> str:
         channel = trigger.channel
         what = (
             "work the assistant scheduled"
-            if trigger.origin is InputOrigin.ASSISTANT
+            if parties_are_assistants(trigger.parties, relayed=relayed_by(processing.understanding))
             else "a report received"
         )
         return (

@@ -32,7 +32,6 @@ from ai_assistant.core.types import (
     ClaimedAuthor,
     EpisodicMemory,
     EvidenceItemPart,
-    InputOrigin,
     InputPart,
     LabelKind,
     MemoryKind,
@@ -77,6 +76,7 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.testing import FakeToolCallingCompleter, default_prompt
 from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.parties import ASSISTANTS_WORDS, UNIDENTIFIED_WORDS
 
 
 def _reader(harness: Harness) -> EpisodeReader:
@@ -121,7 +121,7 @@ async def test_each_message_is_a_part_its_origin_set_by_the_record() -> None:
 
 async def test_an_outside_input_is_outside_and_its_when_is_the_occurrence() -> None:
     harness = Harness()
-    await harness.hold(episode("one", origin=InputOrigin.OUTSIDE, text="The lower loop closes."))
+    await harness.hold(episode("one", parties=UNIDENTIFIED_WORDS, text="The lower loop closes."))
 
     reading = await _read(harness, "one")
 
@@ -130,13 +130,13 @@ async def test_an_outside_input_is_outside_and_its_when_is_the_occurrence() -> N
     assert (part.origin, part.when) == (SupportOrigin.OUTSIDE_INPUT, AT)
 
 
-async def test_an_input_whose_origin_is_assistant_is_no_part_a_support_points_at() -> None:
+async def test_an_input_that_is_the_assistants_is_no_part_a_support_points_at() -> None:
     """ADR-0350 §6:11: a scheduled task's instruction is not offered; its round's message is."""
     harness = Harness()
     await harness.hold(
         episode(
             "step",
-            origin=InputOrigin.ASSISTANT,
+            parties=ASSISTANTS_WORDS,
             text="Check whether the apartment listing is still up.",
             rounds=(said("r1", "It is still listed.", at=AT + timedelta(seconds=5)),),
         )
@@ -658,7 +658,6 @@ async def _planning_labels(understood: ActivationUnderstanding) -> tuple[Plannin
             activation_id="one",
             place=PlaceWindow(takes_message=True),
             capabilities=(),
-            trigger_origin=InputOrigin.USER,
             understanding=understood,
         )
     )

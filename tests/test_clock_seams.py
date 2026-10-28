@@ -515,7 +515,7 @@ async def _phase_path(now: Clock) -> None:
         activation_id="act-1",
         place=PlaceWindow(takes_message=True),
         conversation_id="c-1",
-        trigger_origin=None,
+        trigger=None,
         owner_records=True,
         round_limit=1,
     )

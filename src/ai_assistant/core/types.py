@@ -3134,26 +3134,6 @@ def parties_are_assistants(
     return _all_of(parties, HolderKind.ASSISTANT_STATEMENT) and not relayed
 
 
-def parties_origin(parties: Sequence[SupportHolder] | None) -> InputOrigin:
-    """The origin computed from ``parties`` alone, until the lane removing it (ADR-0351 §10:2).
-
-    ``user`` for the person's own, ``assistant`` for the assistant's, and ``outside``
-    otherwise. It reads no relay mark: none is recorded before the lane that removes the
-    origin records the first (§10:2, §11).
-
-    Args:
-        parties: An input's parties, or ``None`` where they are unknown.
-
-    Returns:
-        The computed origin, stored nowhere.
-    """
-    if parties_are_persons_own(parties):
-        return InputOrigin.USER
-    if parties_are_assistants(parties):
-        return InputOrigin.ASSISTANT
-    return InputOrigin.OUTSIDE
-
-
 def _mixes_person_and_assistant(parties: Sequence[SupportHolder]) -> bool:
     """Whether ``parties`` mix a person and the assistant's statement alone (ADR-0351 §3:8)."""
     kinds = {one.kind for one in parties}
@@ -3162,31 +3142,6 @@ def _mixes_person_and_assistant(parties: Sequence[SupportHolder]) -> bool:
         and HolderKind.ASSISTANT_STATEMENT in kinds
         and not any(_outside_member(one) for one in parties)
     )
-
-
-class InputOrigin(StrEnum):
-    """Who an activation's input came from (ADR-0284 §2:1), retiring (ADR-0351 §8:1).
-
-    A **closed** enumeration, **added to and never renamed**. ADR-0351 §10:2 keeps it,
-    until the lane that removes it, as a value computed from an input's parties and
-    stored nowhere (:func:`parties_origin`): no trigger records it, and a reader that
-    still reads it reads what the parties give.
-
-    It is not :attr:`Provenance.derived_from_external`: that says whether processing
-    read material resting on external content, this says who sent the input, and
-    no renderer derives one from the other (§8:4).
-    """
-
-    USER = "user"
-    """The user's own words, typed or spoken."""
-
-    OUTSIDE = "outside"
-    """Something the world reported, never something the user said."""
-
-    ASSISTANT = "assistant"
-    """The assistant's own words: a scheduled task's instruction as planning wrote it,
-    which the Task Scheduler pushes when it falls due (ADR-0350 §6:3). Never something
-    the user said, whoever set the task, and no outside trigger (§6:12-§6:13)."""
 
 
 #: The bound a medium's own identifier is read below, where a recorded input carries
@@ -3297,8 +3252,8 @@ class RecordedChannelTrigger(BaseModel):
     mix a person and the assistant's statement with no outside member are refused
     (§3:8). Outside content, the person's own and the assistant's are computed from them
     by :func:`parties_are_outside`, :func:`parties_are_persons_own` and
-    :func:`parties_are_assistants` (§5), never stored apart from them, and ``origin``
-    is computed from them alone until the lane that removes it (§10:2).
+    :func:`parties_are_assistants` (§5), never stored apart from them; the input has no
+    origin (§8:1).
 
     **It checks no combination per channel type** (§3:2). Which payloads, reply
     shapes and options a channel accepts is checked at admission, by
@@ -3321,11 +3276,6 @@ class RecordedChannelTrigger(BaseModel):
     reply: ReplyCapability | None
     parties: tuple[SupportHolder, ...] | None
     messages: tuple[RecordedInputMessage, ...] = ()
-
-    @property
-    def origin(self) -> InputOrigin:
-        """The origin computed from its parties alone, stored nowhere (ADR-0351 §10:2)."""
-        return parties_origin(self.parties)
 
     @field_validator("parties", mode="after")
     @classmethod
@@ -5262,14 +5212,17 @@ class EpisodeProjection(BaseModel):
 
     **An episode with a processing record** carries its ``channel``, the trigger's
     ``parties`` and whether its latest understanding version marks the trigger's input
-    ``relayed`` (ADR-0351 §8:4, §10:4), its input text where ``origin`` is ``user`` (or
-    ``outside``, for the two renderings that admit it, §8:5), the latest
+    ``relayed`` (ADR-0351 §8:4, §10:4), its input text where the input, read with that
+    relay mark, is the person's own (or outside, for the two renderings that admit it,
+    ADR-0284 §8:5), the latest
     understanding's ``meaning`` and ``unclear`` (ADR-0353 §14:2), its ``status``
     and ``reason``, and no stage verdict (ADR-0318 §3:1). **An episode without one**
     (§8:2) carries its ``capture_modality`` instead of a channel and its ``content`` as
     its input, and no parties, no relay mark, no understanding and no status; ``status``
-    is ``None`` exactly there. ``origin`` is computed from the parties alone and stored
-    nowhere, ``None`` where there is no processing record (ADR-0351 §10:2). Both carry
+    is ``None`` exactly there. A reader reads whose words the input carries from
+    ``parties`` and ``relayed`` through :func:`parties_are_outside`,
+    :func:`parties_are_persons_own` and :func:`parties_are_assistants` (ADR-0351 §8:2).
+    Both carry
     ``occurred_at``, ``response`` and ``derived_from_external``. Only an episode with a
     processing record carries ``rounds`` (ADR-0307 §10) and ``evidence`` (ADR-0308
     §5:5).
@@ -5292,7 +5245,7 @@ class EpisodeProjection(BaseModel):
         reason: Why, present exactly with ``status``.
         derived_from_external: Whether processing read material resting on recorded
             external content, as :func:`rests_on_recorded_external_content` answers
-            it of the episode's provenance (ADR-0106 §2). Not ``origin`` (§8:4).
+            it of the episode's provenance (ADR-0106 §2). Not the parties (§8:4).
         rounds: The episode's planning rounds that show a message or notes, in
             order, under the reader's audience (ADR-0307 §10).
         evidence: The items of the episode's digests, in the order they were
@@ -5355,14 +5308,6 @@ class EpisodeProjection(BaseModel):
     def has_processing_record(self) -> bool:
         """Whether the episode had a processing record (§8:2's other path)."""
         return self.status is not None
-
-    @property
-    def origin(self) -> InputOrigin | None:
-        """The origin computed from its parties alone, stored nowhere (ADR-0351 §10:2).
-
-        ``None`` on an episode with no processing record, as §8:2 has it.
-        """
-        return parties_origin(self.parties) if self.has_processing_record else None
 
 
 # --- memory: a statement resting on supports (ADR-0328 §§3-9) -----------------
@@ -17213,16 +17158,24 @@ class PeerView(BaseModel):
     is never stored and crosses no wire.
 
     Beside the work, it carries the facts a reader needs to render and count it: the
-    trigger's ``channel``, what caused the activation (§5:6); its ``origin`` and
-    ``derived_from_external``, by which an outside episode shown counts in the reader's
-    record of what it read (§6:13, ADR-0284 §8:4); and its ``status`` and ``reason``,
-    ``None`` while it runs, by which a reader says that it has ended (§4:10, §6:6).
+    trigger's ``channel``, what caused the activation (§5:6); its trigger's ``parties``,
+    whether any input it holds is ``relayed``, and ``derived_from_external``, by which
+    an outside episode shown counts in the reader's record of what it read (§6:13,
+    ADR-0284 §8:4, ADR-0351 §8:4); and its ``status`` and ``reason``, ``None`` while it
+    runs, by which a reader says that it has ended (§4:10, §6:6). Whose words its input
+    carries is read from ``parties`` and ``relayed`` through :func:`parties_are_outside`,
+    :func:`parties_are_persons_own` and :func:`parties_are_assistants`, read over every
+    input it holds (ADR-0351 §8:2, §8:5).
 
     Attributes:
         channel: The channel its trigger names, where one is recorded.
-        origin: Who its trigger's input came from.
-        input: Its trigger's input text, cut to the excerpt bound, where ``origin`` is
-            ``user``; ``None`` otherwise.
+        parties: Whose words its trigger's input carries (ADR-0351 §2:1), or ``None``
+            where they are unknown.
+        relayed: Whether any input it holds is relayed: its trigger's, by its latest
+            understanding version (ADR-0351 §5:10, §5:11), or a joined input's, by its
+            own record (§5:14).
+        input: Its trigger's input text, cut to the excerpt bound, where every input it
+            holds is the user's own (ADR-0351 §5:2, §5:7); ``None`` otherwise.
         joined: The text of each input it holds beside its trigger's, in the order it
             took them in, each cut to the excerpt bound, under the same condition;
             empty otherwise.
@@ -17240,7 +17193,8 @@ class PeerView(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     channel: ChannelIdentity | None = None
-    origin: InputOrigin
+    parties: tuple[SupportHolder, ...] | None
+    relayed: bool = False
     input: ProjectedText | None = None
     joined: tuple[ProjectedText, ...] = ()
     meaning: NonBlankEncodableText | None = None
@@ -17256,7 +17210,9 @@ class PeerView(BaseModel):
         if (self.status is None) != (self.reason is None):
             msg = "a peer view carries a status exactly with its reason"
             raise ValueError(msg)
-        if self.origin is not InputOrigin.USER and (self.input is not None or self.joined):
+        if not parties_are_persons_own(self.parties, relayed=self.relayed) and (
+            self.input is not None or self.joined
+        ):
             msg = "a peer view shows input only where it is the user's own (ADR-0349 §6:9)"
             raise ValueError(msg)
         return self

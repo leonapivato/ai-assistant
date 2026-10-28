@@ -18,7 +18,6 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     Placement,
     PlacementReach,
@@ -46,7 +45,7 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, Unbound
 from ai_assistant.orchestration.story_standing import OWNER_READER, story_standing
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -61,15 +60,15 @@ _BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 _UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
 
 
-def _trigger(origin: InputOrigin) -> RecordedChannelTrigger:
-    channel = _EVENTS if origin is InputOrigin.OUTSIDE else _CONVERSATION
+def _trigger(*, outside: bool) -> RecordedChannelTrigger:
+    channel = _EVENTS if outside else _CONVERSATION
     return RecordedChannelTrigger(
         target=channel,
         channel=channel,
         payload=RecordedTextInput(text="the raw input, never shown here"),
         context=ChannelContext(),
-        reply=None if origin is InputOrigin.OUTSIDE else WholeTextReply(),
-        parties=parties_for(origin),
+        reply=None if outside else WholeTextReply(),
+        parties=UNIDENTIFIED_WORDS if outside else OWNERS_WORDS,
     )
 
 
@@ -87,7 +86,7 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a case var
     *,
     at: datetime = _AT,
     meanings: tuple[str, ...] = (),
-    origin: InputOrigin = InputOrigin.USER,
+    outside: bool = False,
     external: bool = False,
     open_: bool = False,
     owner_only: bool = False,
@@ -108,7 +107,7 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a case var
         {
             "activation_id": activation_id,
             "started_at": at,
-            "trigger": _trigger(origin),
+            "trigger": _trigger(outside=outside),
             "understanding": understanding,
             **ending,
         }
@@ -344,18 +343,18 @@ async def test_story_standing_withheld_episodes_are_not_counted_among_the_earlie
 
 
 @pytest.mark.parametrize(
-    ("origin", "external", "marked"),
+    ("outside", "external", "marked"),
     [
-        (InputOrigin.USER, False, False),
-        (InputOrigin.OUTSIDE, False, True),
-        (InputOrigin.USER, True, True),
+        (False, False, False),
+        (True, False, True),
+        (False, True, True),
     ],
 )
 async def test_story_standing_an_episode_resting_on_outside_content_is_marked(
-    origin: InputOrigin, *, external: bool, marked: bool
+    *, outside: bool, external: bool, marked: bool
 ) -> None:
     world = _World()
-    await world.episodes(_episode("e", origin=origin, external=external, meanings=("a reply",)))
+    await world.episodes(_episode("e", outside=outside, external=external, meanings=("a reply",)))
     story = await world.story(_activation("e"))
 
     standing = await story_standing(world.stories, world.memory, story, reader=OWNER_READER)

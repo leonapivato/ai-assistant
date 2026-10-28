@@ -26,6 +26,7 @@ from story_support import CONVERSATION
 from structured_support import structured
 from telegram_support import CASE_START_WAIT, CHAT, REFERENCE, YieldingTelegram, text
 from test_engine import AT, Harness
+from test_planning import _recorded_trigger
 from understanding_support import TextAsStructured, recall_stage
 
 from ai_assistant.core.errors import ClassifiedToolError, OversizedValueError
@@ -41,19 +42,20 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     Idempotency,
-    InputOrigin,
     MessageAuthor,
     NewMessage,
     PermissionOutcome,
     PermissionRuling,
     PlanningRound,
     ProposedCall,
+    RecordedChannelTrigger,
     Reversibility,
     RiskLevel,
     RoundResponse,
     StoryActor,
     StoryMember,
     StoryMemberKind,
+    SupportHolder,
     TelegramForwardKind,
     TelegramForwardOrigin,
     TelegramQuotedMessage,
@@ -104,6 +106,7 @@ from ai_assistant.testing import (
     FakeWebSearcher,
     default_prompt,
 )
+from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 #: Understanding's shipped template, as the composition root hands it the stage.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
@@ -684,14 +687,22 @@ def _from(author: MessageAuthor, position: int = 1) -> TranscriptMessage:
 
 
 @pytest.mark.parametrize(
-    ("origin", "taken", "expected"),
+    ("trigger", "taken", "expected"),
     [
-        pytest.param(InputOrigin.USER, (MessageAuthor.USER,), True, id="the-users-message"),
-        pytest.param(InputOrigin.OUTSIDE, (MessageAuthor.USER,), False, id="an-outside-origin"),
-        pytest.param(None, (MessageAuthor.USER,), False, id="no-origin-recorded"),
-        pytest.param(InputOrigin.USER, (), False, id="nothing-taken-in"),
         pytest.param(
-            InputOrigin.USER,
+            _recorded_trigger(OWNERS_WORDS), (MessageAuthor.USER,), True, id="the-users-message"
+        ),
+        pytest.param(
+            _recorded_trigger(UNIDENTIFIED_WORDS),
+            (MessageAuthor.USER,),
+            False,
+            id="outside-parties",
+        ),
+        pytest.param(_recorded_trigger(None), (MessageAuthor.USER,), False, id="parties-unknown"),
+        pytest.param(None, (MessageAuthor.USER,), False, id="no-trigger-recorded"),
+        pytest.param(_recorded_trigger(OWNERS_WORDS), (), False, id="nothing-taken-in"),
+        pytest.param(
+            _recorded_trigger(OWNERS_WORDS),
             (MessageAuthor.USER, MessageAuthor.ASSISTANT),
             False,
             id="a-message-not-the-users",
@@ -699,7 +710,7 @@ def _from(author: MessageAuthor, position: int = 1) -> TranscriptMessage:
     ],
 )
 def test_only_the_users_own_chat_message_carries_their_authority(
-    origin: InputOrigin | None, taken: tuple[MessageAuthor, ...], expected: bool
+    trigger: RecordedChannelTrigger | None, taken: tuple[MessageAuthor, ...], expected: bool
 ) -> None:
     """§3:3, ADR-0292 §5:5: anything that cannot be established is not the user's."""
     hub = _Hub()
@@ -710,7 +721,7 @@ def test_only_the_users_own_chat_message_carries_their_authority(
         activation_id="a-2",
         window=_window(*messages),
         conversation_id=CONVERSATION.instance_id,
-        trigger_origin=origin,
+        trigger=trigger,
         owner_records=True,
     )
 
@@ -730,6 +741,9 @@ class _NoWrites:
 
 _LINE = line_channel(REFERENCE, CHAT)
 
+#: A forward's party: its original sender, claimed (ADR-0351 §2:7).
+_FORWARDED: Final = (SupportHolder.source("sam", claimed=True),)
+
 
 def _said_on_the_line(position: int, author: MessageAuthor = MessageAuthor.USER) -> LineMessage:
     return LineMessage(
@@ -741,16 +755,16 @@ def _said_on_the_line(position: int, author: MessageAuthor = MessageAuthor.USER)
 
 
 @pytest.mark.parametrize(
-    ("origin", "forwarded", "expected"),
+    ("parties", "forwarded", "expected"),
     [
-        pytest.param(InputOrigin.USER, (), True, id="the-owners-own-messages"),
-        pytest.param(InputOrigin.OUTSIDE, (2,), False, id="a-forward-among-them"),
-        pytest.param(InputOrigin.USER, (2,), False, id="a-forward-whatever-the-origin"),
-        pytest.param(InputOrigin.OUTSIDE, (), False, id="an-outside-origin"),
+        pytest.param(OWNERS_WORDS, (), True, id="the-owners-own-messages"),
+        pytest.param(_FORWARDED, (2,), False, id="a-forward-among-them"),
+        pytest.param(OWNERS_WORDS, (2,), False, id="a-forward-whatever-the-parties"),
+        pytest.param(_FORWARDED, (), False, id="outside-parties"),
     ],
 )
 def test_on_the_line_only_the_owners_own_messages_none_forwarded_carry_authority(
-    origin: InputOrigin, forwarded: tuple[int, ...], expected: bool
+    parties: tuple[SupportHolder, ...], forwarded: tuple[int, ...], expected: bool
 ) -> None:
     """ADR-0323 §4:6: every message taken in is the user's, established, none a forward."""
     hub = _Hub()
@@ -769,7 +783,7 @@ def test_on_the_line_only_the_owners_own_messages_none_forwarded_carry_authority
         target=PlaceTarget(channel=_LINE, writer=_NoWrites()),
         description="the line",
         giver=ApprovalGiver.USER_THROUGH_TELEGRAM,
-        trigger_origin=origin,
+        trigger=_recorded_trigger(parties),
         owner_records=True,
     )
 
@@ -802,7 +816,7 @@ def test_a_forward_in_the_lines_window_is_someone_elses_whose_text_planning_neve
 def test_an_event_never_carries_the_users_authority() -> None:
     hub = _Hub()
     working = hub.phases(hub.harness).begin_event(
-        activation_id="a-2", trigger_origin=InputOrigin.USER, owner_records=True
+        activation_id="a-2", trigger=_recorded_trigger(OWNERS_WORDS), owner_records=True
     )
 
     assert working.users_authority is False
@@ -964,7 +978,7 @@ def test_a_round_whose_message_the_writer_would_cut_asks_about_nothing(
         activation_id="a-1",
         window=_window(),
         conversation_id=CONVERSATION.instance_id,
-        trigger_origin=InputOrigin.USER,
+        trigger=_recorded_trigger(OWNERS_WORDS),
         owner_records=True,
     )
     planned = _asking_round(text)
@@ -980,7 +994,9 @@ def test_a_round_in_a_place_that_takes_no_message_asks_about_nothing() -> None:
     hub = _Hub()
     path = hub.phases(hub.harness)
     working = path.begin_event(
-        activation_id="a-1", trigger_origin=InputOrigin.OUTSIDE, owner_records=True
+        activation_id="a-1",
+        trigger=_recorded_trigger(UNIDENTIFIED_WORDS),
+        owner_records=True,
     )
 
     assert path.shown_whole(working, _asking_round("Shall I?")).asked == ()

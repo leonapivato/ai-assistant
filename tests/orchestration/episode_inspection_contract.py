@@ -18,7 +18,6 @@ from ai_assistant.core.types import (
     ControllerRule,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemorySource,
     ProcessingReason,
     ProcessingStatus,
@@ -32,7 +31,9 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.payloads import canonical_payload
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    UNIDENTIFIED_WORDS,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
@@ -69,7 +70,7 @@ def _episode(record_id: str, *, activation: bool = False) -> EpisodicMemory:
                 payload=RecordedTextInput(text=" exact input "),
                 context=ChannelContext(),
                 reply=None,
-                parties=parties_for(InputOrigin.OUTSIDE),
+                parties=UNIDENTIFIED_WORDS,
             ),
             status=ProcessingStatus.FAILED,
             reason=ProcessingReason.PROCESSING_FAILED,

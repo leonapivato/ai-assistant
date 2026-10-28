@@ -26,7 +26,6 @@ from ai_assistant.core.types import (
     EpisodeChunk,
     EpisodeProcessingRecord,
     EpisodicMemory,
-    InputOrigin,
     MemoryKind,
     MemorySource,
     Placement,
@@ -53,7 +52,9 @@ from ai_assistant.core.types import (
 from ai_assistant.interfaces import cli, episode_inspection
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
 from ai_assistant.testing.activation import ended_pass
-from ai_assistant.testing.parties import parties_for
+from ai_assistant.testing.parties import (
+    UNIDENTIFIED_WORDS,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
@@ -95,7 +96,7 @@ def _record(
                     payload=RecordedTextInput(text=" exact input "),
                     context=ChannelContext(),
                     reply=None,
-                    parties=parties_for(InputOrigin.OUTSIDE),
+                    parties=UNIDENTIFIED_WORDS,
                 ),
                 status=ProcessingStatus.COMPLETED,
                 reason=ProcessingReason.RETURNED,
@@ -877,7 +878,7 @@ def _open_record(record_id: str, **fields: object) -> EpisodicMemory:
                 payload=RecordedTextInput(text=" exact input "),
                 context=ChannelContext(),
                 reply=None,
-                parties=parties_for(InputOrigin.OUTSIDE),
+                parties=UNIDENTIFIED_WORDS,
             ),
             **fields,
         }

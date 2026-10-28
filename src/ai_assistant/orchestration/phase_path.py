@@ -262,7 +262,6 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EpisodicMemory,
     ForecastRefusal,
-    InputOrigin,
     LabelKind,
     Memory,
     MemoryKind,
@@ -283,6 +282,8 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
+    parties_are_outside,
+    parties_are_persons_own,
 )
 from ai_assistant.orchestration.acting import (
     ActedCall,
@@ -430,6 +431,7 @@ if TYPE_CHECKING:
         MemoryRecord,
         MessageReceipt,
         PlanningRound,
+        RecordedChannelTrigger,
         ScheduledTask,
         SearchOutcome,
         StoryNote,
@@ -1580,13 +1582,13 @@ class PhaseWorking:
     never saved), and the messages it wrote.
     """
 
-    def __init__(  # noqa: PLR0913 — the activation, its place, its trigger's origin, its audience, its round limit, its recorded labels and its input's authority
+    def __init__(  # noqa: PLR0913 — the activation, its place, its trigger, its audience, its round limit, its recorded labels and its input's authority
         self,
         *,
         activation_id: str,
         place: PlaceWindow,
         conversation_id: str | None,
-        trigger_origin: InputOrigin | None,
+        trigger: RecordedChannelTrigger | None,
         owner_records: bool,
         round_limit: int,
         labels: Sequence[PlanningLabel] = (),
@@ -1602,17 +1604,20 @@ class PhaseWorking:
             place: The place the input came from, and what planning is shown of it.
             conversation_id: The conversation a message is written into, through the
                 path's chat writer, or ``None`` where it is not a conversation.
-            trigger_origin: Who the trigger's input came from.
+            trigger: The activation's recorded trigger, whose parties say whose words its
+                input carries (ADR-0351 §2:1); ``None`` where no channel admitted it.
             owner_records: Whether a record placed for the owner alone may be shown on
                 this pass (ADR-0307 §6:4).
             round_limit: The most rounds the activation runs (ADR-0307 §8:4).
             labels: The labels the episode already records.
             users_authority: Whether the input carries the user's authority (ADR-0321
                 §3:3, ADR-0292 §5:5), read as ADR-0323 §4:7 restates it for every
-                channel: only an input whose author its channel's kind establishes as
-                the user, sent as an instruction, does — the user's message in the hub
-                chat, or on the Telegram line from their own account, not forwarding.
-                ``False``, the default, wherever it cannot be established.
+                channel and ADR-0351 §6:1 completes it: only an input whose author its
+                channel's kind establishes as the user, sent as an instruction, whose
+                parties are the user alone, does — the user's message in the hub chat,
+                or on the Telegram line from their own account, not forwarding.
+                ``False``, the default, wherever it cannot be established. A relay mark
+                takes it away for the rest of the activation (ADR-0351 §6:5).
             given_at: When the input was given, timezone-aware: a yes it carries is
                 given then (ADR-0321 §4:6). ``None`` where it is not known, and then
                 no yes is read from it.
@@ -1635,9 +1640,14 @@ class PhaseWorking:
         self.activation_id = activation_id
         self.place = place
         self.conversation_id = conversation_id
-        self.trigger_origin = trigger_origin
+        self.trigger = trigger
         self.owner_records = owner_records
-        self.users_authority = users_authority
+        self._users_authority = users_authority
+        # ADR-0351 §5:9, §5:14: whether the latest understanding version marks the
+        # trigger's input relayed, and whether an input an absorption or a take appended
+        # is; each, once set, holds for the rest of the activation.
+        self.trigger_relayed = False
+        self.joined_relayed = False
         self.given_at = given_at
         self.target = target
         self.giver = giver
@@ -1871,13 +1881,41 @@ class PhaseWorking:
         """
         return frozenset(one.planned.round.id for one in self._rounds if one.not_taken)
 
-    def understood(self, version: int) -> None:
+    def understood(self, version: int, *, relayed: bool = False) -> None:
         """Hold the latest recorded understanding version, which planning starts over for.
 
         ADR-0332 §3:12: ``first_round_due`` answers until a round is planned from it,
         and ``round_due`` and ``round_limit_reached`` count that version's rounds.
+        ``relayed`` is the version's relay mark on the trigger's input, which holds from
+        that version on (ADR-0351 §5:9, §6:5).
         """
         self.version = version
+        self.trigger_relayed = self.trigger_relayed or relayed
+
+    @property
+    def relayed(self) -> bool:
+        """Whether any input the activation holds is relayed (ADR-0351 §5:11, §5:14)."""
+        return self.trigger_relayed or self.joined_relayed
+
+    @property
+    def users_authority(self) -> bool:
+        """Whether the input carries the user's authority (ADR-0351 §6:1, §6:5, §8:5).
+
+        What its author and its parties give it, and only while no input the activation
+        holds is relayed: an activation holding a relayed input acts with no authority
+        from the version, or the append, that brings the relay mark.
+        """
+        return self._users_authority and not self.relayed
+
+    @property
+    def outside_trigger(self) -> bool:
+        """Whether the trigger's input is outside, read with its relay mark (ADR-0351 §5:3).
+
+        A pass no channel admitted has no trigger, and so no outside one.
+        """
+        return self.trigger is not None and parties_are_outside(
+            self.trigger.parties, relayed=self.trigger_relayed
+        )
 
     def take_joined(
         self,
@@ -1898,6 +1936,8 @@ class PhaseWorking:
         """
         fresh = list(joined[self._joined_taken :])
         self._joined_taken = len(joined)
+        # ADR-0351 §5:13-§5:14: an input appended relayed brings its relay mark here.
+        self.joined_relayed = self.joined_relayed or any(one.relayed for one in fresh)
         sent: list[tuple[datetime, PlaceItem]] = []
         for one in fresh:
             if one.taken_over_from not in taken or one.channel != place:
@@ -2131,10 +2171,12 @@ class PhaseWorking:
 
         Authorizing computes it over the activation's whole record (ADR-0306 §4:5-§4:6);
         a digest that answered says so too (ADR-0308 §5:4), and so does an outside
-        trigger or a fetched record resting on outside content.
+        trigger, a relayed input, or a fetched record resting on outside content
+        (ADR-0351 §5:13).
         """
         return (
-            self.trigger_origin is InputOrigin.OUTSIDE
+            self.outside_trigger
+            or self.relayed
             or self.fetched_outside
             or any(
                 one.authorization is not None and one.authorization.read_outside_content
@@ -3187,13 +3229,13 @@ class PhasePath:
         if self._append is not None:
             await self._append()
 
-    def begin(  # noqa: PLR0913 — the activation, its window, its place, its origin, its audience and its recorded labels
+    def begin(  # noqa: PLR0913 — the activation, its window, its place, its trigger, its audience and its recorded labels
         self,
         *,
         activation_id: str,
         window: TranscriptWindow,
         conversation_id: str,
-        trigger_origin: InputOrigin | None,
+        trigger: RecordedChannelTrigger | None,
         owner_records: bool,
         labels: Sequence[PlanningLabel] = (),
     ) -> PhaseWorking:
@@ -3201,8 +3243,9 @@ class PhasePath:
 
         A turn is the hub chat's: the chat's reader brings its input in. Its input
         carries the user's authority (ADR-0321 §3:3, ADR-0292 §5:5) only where the
-        trigger says the user sent it and every message taken in is the user's, the
-        author a conversation establishes; anything not established is not the user's.
+        trigger's parties are the user alone (ADR-0351 §6:1) and every message taken in
+        is the user's, the author a conversation establishes; anything not established
+        is not the user's.
         A yes it carries is given when its latest message was written (§4:6).
 
         Args:
@@ -3210,7 +3253,8 @@ class PhasePath:
             window: The conversation's recent transcript, brought in with the input.
             conversation_id: The conversation the input came from, which a message is
                 written into (ADR-0307 §3:1).
-            trigger_origin: Who the trigger's input came from.
+            trigger: The activation's recorded trigger, whose parties say whose words its
+                input carries.
             owner_records: Whether a record placed for the owner alone may be shown.
             labels: The labels the episode already records.
 
@@ -3222,19 +3266,20 @@ class PhasePath:
             activation_id=activation_id,
             place=place_window(window),
             conversation_id=conversation_id,
-            trigger_origin=trigger_origin,
+            trigger=trigger,
             owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
             users_authority=(
-                trigger_origin is InputOrigin.USER
+                trigger is not None
+                and parties_are_persons_own(trigger.parties)
                 and bool(taken)
                 and all(one.author is MessageAuthor.USER for one in taken)
             ),
             given_at=max((one.written_at for one in taken), default=None),
         )
 
-    def begin_line(  # noqa: PLR0913 — the activation, its window, its place, its kind's two facts, its origin, its audience and its recorded labels
+    def begin_line(  # noqa: PLR0913 — the activation, its window, its place, its kind's two facts, its trigger, its audience and its recorded labels
         self,
         *,
         activation_id: str,
@@ -3242,7 +3287,7 @@ class PhasePath:
         target: PlaceTarget,
         description: str,
         giver: ApprovalGiver,
-        trigger_origin: InputOrigin | None,
+        trigger: RecordedChannelTrigger | None,
         owner_records: bool,
         labels: Sequence[PlanningLabel] = (),
     ) -> PhaseWorking:
@@ -3253,10 +3298,11 @@ class PhasePath:
         brings the input in with the window its kind declares (§10), and its messages
         go into the input's place through ``target``'s writer alone (§6:1). Its input
         carries the user's authority (ADR-0321 §3:3 as ADR-0323 §4:7 restates it) only
-        where the trigger says the user sent it and **every message taken in is the
-        user's, established, and none is a forward** (§4:6): a forward's author is
-        claimed (§4:10), and an input taking one in is an outside trigger (§4:11). A
-        yes it carries is given by ``giver`` when its latest message was sent (§4:9).
+        where the trigger's parties are the user alone (ADR-0351 §6:1, §6:3) and **every
+        message taken in is the user's, established, and none is a forward** (§4:6): a
+        forward's party is its original sender, claimed (ADR-0351 §2:7), and an input
+        taking one in is an outside trigger (§5:3). A yes it carries is given by
+        ``giver`` when its latest message was sent (§4:9).
 
         Args:
             activation_id: The activation.
@@ -3265,7 +3311,8 @@ class PhasePath:
             description: The line's kind's description, which planning is shown with
                 the place (ADR-0292 §8:1).
             giver: Who a yes on the line is: the user, through it (§4:9).
-            trigger_origin: Who the trigger's input came from.
+            trigger: The activation's recorded trigger, whose parties say whose words its
+                input carries.
             owner_records: Whether a record placed for the owner alone may be shown.
             labels: The labels the episode already records.
 
@@ -3277,12 +3324,13 @@ class PhasePath:
             activation_id=activation_id,
             place=place_window(window, description=description),
             conversation_id=None,
-            trigger_origin=trigger_origin,
+            trigger=trigger,
             owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
             users_authority=(
-                trigger_origin is InputOrigin.USER
+                trigger is not None
+                and parties_are_persons_own(trigger.parties)
                 and bool(taken)
                 and all(
                     one.author is MessageAuthor.USER and one.position not in window.forwarded
@@ -3298,7 +3346,7 @@ class PhasePath:
         self,
         *,
         activation_id: str,
-        trigger_origin: InputOrigin | None,
+        trigger: RecordedChannelTrigger | None,
         owner_records: bool,
         labels: Sequence[PlanningLabel] = (),
     ) -> PhaseWorking:
@@ -3316,7 +3364,7 @@ class PhasePath:
 
         Args:
             activation_id: The activation.
-            trigger_origin: Who the trigger's input came from.
+            trigger: The activation's recorded trigger.
             owner_records: Whether a record placed for the owner alone may be shown.
             labels: The labels the episode already records.
 
@@ -3327,7 +3375,7 @@ class PhasePath:
             activation_id=activation_id,
             place=PlaceWindow(takes_message=False, description=EVENT_DESCRIPTION),
             conversation_id=None,
-            trigger_origin=trigger_origin,
+            trigger=trigger,
             owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
@@ -3339,7 +3387,7 @@ class PhasePath:
         self,
         *,
         activation_id: str,
-        trigger_origin: InputOrigin | None,
+        trigger: RecordedChannelTrigger | None,
         lineage: Sequence[PlaceItem],
         labels: Sequence[PlanningLabel] = (),
     ) -> PhaseWorking:
@@ -3354,7 +3402,9 @@ class PhasePath:
 
         Args:
             activation_id: The activation.
-            trigger_origin: Who the trigger's input came from: the assistant, or outside.
+            trigger: The activation's recorded trigger, whose parties are the assistant's
+                statement, with unknown where its task carries the outside-content mark
+                (ADR-0351 §3:6).
             lineage: The schedule's place window, the lineage as steps (§6:5).
             labels: The labels the episode already records.
 
@@ -3367,7 +3417,7 @@ class PhasePath:
                 takes_message=False, description=TASK_SCHEDULER_DESCRIPTION, items=tuple(lineage)
             ),
             conversation_id=None,
-            trigger_origin=trigger_origin,
+            trigger=trigger,
             owner_records=True,
             round_limit=self._round_limit,
             labels=labels,
@@ -3624,7 +3674,7 @@ class PhasePath:
             activation_id=activation_id,
             place=PlaceWindow(takes_message=True, description=description),
             conversation_id=conversation_id,
-            trigger_origin=None,
+            trigger=None,
             owner_records=False,
             round_limit=self._round_limit,
             target=target,
@@ -3708,7 +3758,7 @@ class PhasePath:
             activation_id=working.activation_id,
             place=working.place,
             understanding=given.understanding,
-            trigger_origin=working.trigger_origin,
+            outside_trigger=working.outside_trigger,
             episodes=() if fetched is None or fetched.episodes is None else fetched.episodes,
             recalled=found.recalled,
             recalled_stories=_recalled_stories(given.recalled, working.second_recall),
@@ -3809,7 +3859,8 @@ class PhasePath:
                         place=entry.channel,
                         input=entry.input,
                         acted=entry.acted,
-                        origin=entry.origin,
+                        parties=entry.parties,
+                        outside=entry.outside,
                     )
                 )
         return tuple(shown)

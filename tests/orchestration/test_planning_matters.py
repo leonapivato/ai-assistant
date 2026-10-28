@@ -21,7 +21,6 @@ from test_planning import FLAG_ECHO, _earlier, _flags, _inputs, _sent, _stage
 from ai_assistant.core.types import (
     PEER_COULDNT_FINISH_LINE,
     ChannelIdentity,
-    InputOrigin,
     PeerEffect,
     PeerNotes,
     PeerView,
@@ -53,6 +52,7 @@ from ai_assistant.orchestration.task_scheduler import (
     TaskEntry,
     TaskListing,
 )
+from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 _AT: Final = datetime(2026, 10, 21, 9, tzinfo=UTC)
 _LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="ref/42")
@@ -67,7 +67,7 @@ def _text(text: str) -> ProjectedText:
 def _view(**fields: Any) -> PeerView:
     values: dict[str, Any] = {
         "channel": _LINE,
-        "origin": InputOrigin.USER,
+        "parties": OWNERS_WORDS,
         "input": _text("search flats"),
         "meaning": "Search for flats.",
         "notes": (PeerNotes(notes=_text("Three in Leith.")),),
@@ -105,7 +105,7 @@ async def test_the_list_pulls_running_part_is_the_in_progress_entries() -> None:
         status="running",
         input=None,
         outside=False,
-        origin=InputOrigin.ASSISTANT,
+        assistants=True,
     )
     outcome = CallOutcome(
         "round:earlier",
@@ -174,7 +174,7 @@ async def test_a_waiting_round_is_shown_what_it_waits_on_and_why_it_was_declined
         place=_LINE,
         input="book Saturday",
         acted=True,
-        origin=InputOrigin.USER,
+        parties=OWNERS_WORDS,
     )
 
     await stage.plan(_inputs(**_matters(waiting=(waited,), declined=((_A, "already booked"),))))
@@ -222,7 +222,7 @@ async def test_a_failed_activations_couldnt_finish_is_a_fixed_line() -> None:
     stage, completer, _ = _stage(RoundResponse(text=""))
     view = _view(
         input=None,
-        origin=InputOrigin.OUTSIDE,
+        parties=UNIDENTIFIED_WORDS,
         meaning=None,
         notes=(),
         did=(PeerEffect(outcome=ToolOutcome.SUCCEEDED, couldnt_finish=True),),
@@ -344,9 +344,10 @@ async def test_the_sections_appear_only_where_they_apply() -> None:
     assert not {"running_work", "offers", "waiting", "earlier_work"} & _flags(completer)
 
 
-def test_a_running_entry_round_trips_its_acted_mark_and_origin() -> None:
-    """§6:2: the listing carries both; an unknown origin reads as no listing, and one
-    recorded before the key reads from its outside mark."""
+def test_a_running_entry_round_trips_its_acted_mark_and_whose_input_it_is() -> None:
+    """§6:2: the listing carries both; one recorded with the retired origin key reads an
+    assistant's input from it, and one recorded before either reads as not the
+    assistant's (ADR-0351 §8:1)."""
     from ai_assistant.orchestration.task_scheduler import (  # noqa: PLC0415 — this case's
         decode_listing,
         encode_listing,
@@ -360,7 +361,7 @@ def test_a_running_entry_round_trips_its_acted_mark_and_origin() -> None:
         input=None,
         outside=False,
         acted=True,
-        origin=InputOrigin.ASSISTANT,
+        assistants=True,
     )
     encoded = encode_listing(TaskListing(running=(entry,), listed=True))
     decoded = decode_listing(encoded)
@@ -369,12 +370,16 @@ def test_a_running_entry_round_trips_its_acted_mark_and_origin() -> None:
 
     assert isinstance(encoded, dict)
     running = dict(encoded["running"][0])
-    unknown = {**encoded, "running": [{**running, "origin": "unexpected"}]}
+    unknown = {**encoded, "running": [{**running, "assistants": "unexpected"}]}
     assert decode_listing(unknown) is None
-    legacy = {k: v for k, v in running.items() if k not in {"origin", "acted"}}
+    legacy = {k: v for k, v in running.items() if k not in {"assistants", "acted"}}
+    assert decode_listing({**encoded, "running": [{**legacy, "origin": "unexpected"}]}) is None
+    retired = decode_listing({**encoded, "running": [{**legacy, "origin": "assistant"}]})
+    assert retired is not None
+    assert (retired.running[0].assistants, retired.running[0].acted) == (True, False)
     older = decode_listing({**encoded, "running": [{**legacy, "outside": True}]})
     assert older is not None
-    assert (older.running[0].origin, older.running[0].acted) == (InputOrigin.OUTSIDE, False)
+    assert (older.running[0].assistants, older.running[0].outside) == (False, True)
 
 
 def _stop_shown(set_up: StillLive) -> CallOutcome:
@@ -418,7 +423,7 @@ async def test_a_stop_calls_result_lists_what_the_work_set_up_that_is_still_live
         status="running",
         input=None,
         outside=False,
-        origin=InputOrigin.ASSISTANT,
+        assistants=True,
     )
     left = StillLive(
         tasks=(task, marked),

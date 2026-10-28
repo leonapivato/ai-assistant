@@ -68,7 +68,6 @@ from ai_assistant.core.types import (
     DueNow,
     DueOnRule,
     EpisodicMemory,
-    InputOrigin,
     OccurrenceState,
     RuleDay,
     ScheduledTaskAuthor,
@@ -78,12 +77,14 @@ from ai_assistant.core.types import (
     TaskWriteAnswer,
     ToolOutcome,
     ToolResult,
+    parties_are_assistants,
 )
 from ai_assistant.orchestration.acting import Unwritten
 from ai_assistant.orchestration.channel_kinds import place_channel, place_of
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.matters import in_progress
+from ai_assistant.orchestration.outside_content import holds_outside
 from ai_assistant.orchestration.person_block import activation_person
 from ai_assistant.orchestration.person_calls import NotDone
 from ai_assistant.orchestration.task_rules import (
@@ -680,9 +681,9 @@ class TaskManager:
                     place=place_description(entry.channel),
                     status="running",
                     input=entry.input,
-                    outside=entry.origin is InputOrigin.OUTSIDE,
+                    outside=entry.outside,
                     acted=entry.acted,
-                    origin=entry.origin,
+                    assistants=not entry.outside and parties_are_assistants(entry.parties),
                 )
             )
         return entries
@@ -886,7 +887,7 @@ class TaskManager:
                 continue
             if supply is not None and not admitted_to_understanding(supply, (record,)):
                 continue
-            outside = processing.trigger.origin is InputOrigin.OUTSIDE
+            outside = holds_outside(processing.trigger, processing.understanding, processing.joined)
             payload = processing.trigger.payload
             text = getattr(payload, "text", None)
             status = _ended_text(processing.status, processing.reason)

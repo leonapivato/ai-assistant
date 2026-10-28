@@ -26,7 +26,6 @@ from ai_assistant.core.types import (
     ChannelInput,
     DataTier,
     EpisodicMemory,
-    InputOrigin,
     JoinedInput,
     MemorySource,
     Placement,
@@ -34,6 +33,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     Provenance,
     RecordedInputMessage,
+    SupportHolder,
     TextChannelPayload,
     ToolDefinition,
     UnderstandingOmission,
@@ -75,6 +75,7 @@ from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.story_calls import STORY_CALLS
 from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore
+from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, UNIDENTIFIED_WORDS
 from ai_assistant.tools.web_search import WEB_SEARCH
 
 _AT: Final = datetime(2026, 10, 21, 9, tzinfo=UTC)
@@ -84,7 +85,14 @@ _IDS: Final = (
     "2dab0a2a-4c7e-4e77-9c8e-8c4e3b2d2f33",
     "3ebc1b3b-5d8f-4f88-8d9f-9d5f4c3e3a44",
 )
-_USERS: Final = input_standing(origin=InputOrigin.USER, established=True)
+_USERS: Final = input_standing(parties=OWNERS_WORDS, established=True)
+#: A forward on the line: handed in by the user, its words its sender's, claimed
+#: (ADR-0351 §4:2, §2:7).
+_FORWARD: Final = input_standing(
+    parties=(SupportHolder.source("telegram:sam", claimed=True),), established=True
+)
+#: An input whose author its place does not establish, as an event's.
+_UNESTABLISHED: Final = input_standing(parties=UNIDENTIFIED_WORDS, established=False)
 _SUPPLY: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 
 
@@ -186,21 +194,57 @@ def test_a_limit_below_one_is_refused() -> None:
 # --- §7:5: one standing --------------------------------------------------------------
 
 
-def test_only_the_same_established_author_with_the_same_authority_and_origin_meet() -> None:
-    assert _USERS.meets(_USERS)
-    forward = input_standing(origin=InputOrigin.OUTSIDE, established=False)
-    assert forward.author is None
-    assert not forward.users_authority
-    assert not forward.meets(_USERS)
-    assert not _USERS.meets(forward)
-    assert not forward.meets(forward)
-    assert not _USERS.meets(InputStanding(THE_USER, users_authority=False, origin=InputOrigin.USER))
-    assert not _USERS.meets(
-        InputStanding(THE_USER, users_authority=True, origin=InputOrigin.OUTSIDE)
+def _meet(one: InputStanding, other: InputStanding, *, relayed: bool = False) -> bool:
+    return one.meets(other, relayed=relayed, other_relayed=relayed)
+
+
+def test_only_the_same_established_author_with_the_same_authority_and_class_meet() -> None:
+    """§7:5's third condition, as ADR-0351 §8:5 reads it: one class, not one origin."""
+    assert _meet(_USERS, _USERS)
+    assert _FORWARD.author == THE_USER
+    assert not _FORWARD.users_authority
+    assert _meet(_FORWARD, _FORWARD)
+    assert not _meet(_FORWARD, _USERS)
+    assert not _meet(_USERS, _FORWARD)
+    assert _UNESTABLISHED.author is None
+    assert not _meet(_UNESTABLISHED, _UNESTABLISHED)
+    assert not _meet(_USERS, InputStanding(THE_USER, users_authority=False, parties=OWNERS_WORDS))
+    assert not _meet(
+        _USERS, InputStanding(THE_USER, users_authority=True, parties=UNIDENTIFIED_WORDS)
     )
-    assert not _USERS.meets(
-        InputStanding("someone else", users_authority=True, origin=InputOrigin.USER)
+    assert not _meet(
+        _USERS, InputStanding("someone else", users_authority=True, parties=OWNERS_WORDS)
     )
+
+
+def test_forwards_from_different_senders_meet_and_their_parties_need_not_be_equal() -> None:
+    """ADR-0351 §8:5: both outside, both carrying no authority, the same author."""
+    other = input_standing(
+        parties=(SupportHolder.source("telegram:ana", claimed=True),), established=True
+    )
+    assert _meet(_FORWARD, other)
+
+
+def test_a_relay_mark_moves_the_users_own_input_into_the_outside_class() -> None:
+    """ADR-0351 §5:7, §6:5, §8:5: relayed, the user's own words carry no authority and
+    are outside, so they meet a forward and not the user's unmarked input."""
+    assert not _USERS.meets(_USERS, relayed=True, other_relayed=False)
+    assert not _USERS.meets(_USERS, relayed=False, other_relayed=True)
+    assert _meet(_USERS, _USERS, relayed=True)
+    assert _USERS.meets(_FORWARD, relayed=True, other_relayed=False)
+    assert _FORWARD.meets(_FORWARD, relayed=True, other_relayed=True), "it changes nothing there"
+
+
+def test_an_input_whose_parties_are_unknown_or_empty_meets_nothing() -> None:
+    """ADR-0351 §8:5: ``None`` or empty parties meet the condition with no input."""
+    unknown = input_standing(parties=None, established=True)
+    empty = input_standing(parties=(), established=True)
+    for one in (unknown, empty):
+        assert not one.users_authority
+        assert not _meet(one, one)
+        assert not _meet(one, _USERS)
+        assert not _meet(one, _FORWARD)
+        assert not _meet(_FORWARD, one)
 
 
 # --- ADR-0341 §2: the pure read ------------------------------------------------------
@@ -287,7 +331,8 @@ def test_the_section_enters_what_the_task_scheduler_started_its_input_withheld()
     assert entry.activation_id == _IDS[0]
     assert entry.channel == SCHEDULE
     assert entry.input is None
-    assert entry.origin is InputOrigin.ASSISTANT
+    assert entry.parties == ASSISTANTS_WORDS
+    assert not entry.outside
 
 
 def test_nothing_is_entered_that_is_stopped_unwritten_or_another_persons() -> None:
@@ -296,14 +341,12 @@ def test_nothing_is_entered_that_is_stopped_unwritten_or_another_persons() -> No
     stopped = _running("a", _IDS[0], order=1)
     stopped.stop()
     unwritten = _running("b", _IDS[1], order=2, episode=False)
-    forward = _running(
-        "b",
-        _IDS[2],
-        order=3,
-        standing=input_standing(origin=InputOrigin.OUTSIDE, established=False),
-    )
+    unestablished = _running("b", _IDS[2], order=3, standing=_UNESTABLISHED)
     entries = in_progress(
-        [viewer, stopped, unwritten, forward], viewer=_IDS[3], person="person:owner", supply=_SUPPLY
+        [viewer, stopped, unwritten, unestablished],
+        viewer=_IDS[3],
+        person="person:owner",
+        supply=_SUPPLY,
     )
     assert entries == []
 
@@ -311,13 +354,8 @@ def test_nothing_is_entered_that_is_stopped_unwritten_or_another_persons() -> No
 def test_nothing_is_shown_to_an_author_not_established_or_where_the_audience_withholds_it() -> None:
     """§5:4-§5:5: an owner-placed episode is withheld from an unbounded audience."""
     other = _running("a", _IDS[0], order=1)
-    forward = _running(
-        "c",
-        _IDS[1],
-        order=2,
-        standing=input_standing(origin=InputOrigin.OUTSIDE, established=False),
-    )
-    shown, more = _matters([other, forward]).in_progress(forward, supply=_SUPPLY)
+    unestablished = _running("c", _IDS[1], order=2, standing=_UNESTABLISHED)
+    shown, more = _matters([other, unestablished]).in_progress(unestablished, supply=_SUPPLY)
     assert (shown, more) == ((), 0)
     established = _running("c", _IDS[2], order=3)
     shown, _ = _matters([other, established]).in_progress(
@@ -461,7 +499,7 @@ def test_nothing_newer_older_stopped_or_of_another_standing_is_absorbed() -> Non
         "b",
         _IDS[1],
         order=2,
-        standing=InputStanding(THE_USER, users_authority=False, origin=InputOrigin.USER),
+        standing=InputStanding(THE_USER, users_authority=False, parties=OWNERS_WORDS),
     )
     matters = _matters([taker, newer, stopped, other])
     decided, absorbed = matters.merge(taker, _understood(taker, _IDS[3], _IDS[0], _IDS[1]), at=_AT)
@@ -851,6 +889,7 @@ async def test_an_act_waits_for_a_newer_one_whose_pass_has_not_set_its_standing(
     """§7:12: admitted on a place that establishes its author, it may be of this standing,
     so it is waited for until its standing shows it is not, or it settles."""
     older = _running("a", _IDS[0], order=1)
+    _understood(older)
     newer = _running("b", _IDS[1], order=2, standing=None)
     matters = _matters([older, newer])
     loop = asyncio.get_running_loop()
@@ -858,7 +897,7 @@ async def test_an_act_waits_for_a_newer_one_whose_pass_has_not_set_its_standing(
 
     waiting = asyncio.ensure_future(matters.before_act(older, loop.time() + 5))
     await asyncio.sleep(0.01)
-    newer.standing = input_standing(origin=InputOrigin.OUTSIDE, established=False)
+    newer.standing = _FORWARD
     matters.changed()
     assert await asyncio.wait_for(waiting, 1), "a forward's standing is not this one's"
 
@@ -943,13 +982,8 @@ async def test_no_act_waits_on_its_own_input_an_older_ones_or_one_no_person_wrot
     loop = asyncio.get_running_loop()
     assert await matters.before_act(older, loop.time() + 0.05), "none of them is waited for"
 
-    forward = _running(
-        "b",
-        _IDS[2],
-        order=3,
-        standing=input_standing(origin=InputOrigin.OUTSIDE, established=False),
-    )
+    unestablished = _running("b", _IDS[2], order=3, standing=_UNESTABLISHED)
     matters.hold(_place("b"))
-    assert await matters.before_act(forward, loop.time() + 0.05), (
+    assert await matters.before_act(unestablished, loop.time() + 0.05), (
         "an input whose author is not established meets none, so it waits for none"
     )
