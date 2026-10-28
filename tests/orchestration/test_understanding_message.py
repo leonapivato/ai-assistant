@@ -180,6 +180,7 @@ def _episode(  # noqa: PLR0913 — one knob per field a case varies
     channel: ChannelIdentity = CHAT,
     meaning: str | None = None,
     parties: tuple[SupportHolder, ...] | None = (OWNER,),
+    relayed: bool = False,
 ) -> EpisodicMemory:
     understood = (
         ()
@@ -190,6 +191,7 @@ def _episode(  # noqa: PLR0913 — one knob per field a case varies
                 recorded_at=at,
                 producer=UnderstandingProducer.INTERPRETATION,
                 meaning=meaning,
+                relayed=relayed,
             ),
         )
     )
@@ -726,6 +728,42 @@ async def test_a_concurrent_stimulus_holding_several_inputs_renders_one_tag_each
         '  <said from="Maren">for 4</said>\n'
         "</stimulus>"
     )
+
+
+async def test_a_relayed_input_is_received_and_outside_wherever_it_renders() -> None:
+    """ADR-0351 §5:4-§5:7: a stimulus in memory, and a concurrent stimulus's input,
+    that understanding marked relayed are attributed as received, the person still
+    named as who handed them in, and marked outside. Understanding admits outside input
+    in memory (ADR-0284 §8:5), and a concurrent one's is withheld (ADR-0349 §6:9)."""
+    pasted = _episode(
+        "activation:a-1",
+        "From: the school office. Trip forms are due Friday.",
+        at=AT - timedelta(hours=1),
+        channel=LINE,
+        meaning="Maren passed on the school's note about the trip forms.",
+        relayed=True,
+    )
+    entry = InProgressEntry(
+        activation_id="a-2",
+        channel=CHAT,
+        input=None,
+        acted=False,
+        parties=(OWNER,),
+        arrived_at=AT - timedelta(minutes=2),
+        inputs=(EntryInput(brief=None, parties=(OWNER,), relayed=True),),
+        outside=True,
+    )
+
+    message = await _rendered(episodes=(pasted,), running=(entry,))
+
+    (remembered,) = message.containers("Short-term memory")
+    taken, *_ = remembered.tags
+    assert (taken.name, taken.get("from")) == ("received", "Maren")
+    assert remembered.get("outside") == "yes"
+    (running,) = message.containers("Concurrent stimuli")
+    (shown,) = running.tags
+    assert (shown.name, shown.get("from"), shown.get("withheld")) == ("received", "Maren", "yes")
+    assert running.get("outside") == "yes"
 
 
 async def test_an_outside_concurrent_stimulus_is_marked_and_its_withheld_input_never_shown() -> (

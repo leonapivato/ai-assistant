@@ -173,6 +173,7 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
     audience: TurnSupply = BOUNDED,
     episodes: bool = True,
     deadline: float = math.inf,
+    relayed: bool = False,
 ) -> ActivationUnderstanding:
     channel_window = TranscriptWindow(CONVERSATION, ()) if window is None else window
     windows = await pipeline.windows.assemble(channel_window, audience=audience, episodes=episodes)
@@ -188,6 +189,7 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
         version=1,
         now=lambda: AT,
         deadline=deadline,
+        relayed=relayed,
     )
 
 
@@ -246,6 +248,29 @@ async def test_a_reply_of_the_six_keys_records_each_into_its_field() -> None:
     ]
     assert understood.continues == ()
     assert understood.grounding_dropped == 0
+
+
+@pytest.mark.parametrize("marked", [True, False])
+async def test_the_replys_relay_mark_is_recorded_on_the_version(*, marked: bool) -> None:
+    """ADR-0351 §5:6, §5:10: ``relayed`` is copied into the version's relay mark."""
+    model = FakeModelProvider.scripted(_proposal(relayed=marked))
+    understood = await _understand(_stage(model, await _store()))
+    assert understood.relayed is marked
+
+
+async def test_a_relay_mark_an_earlier_version_recorded_is_recorded_again() -> None:
+    """ADR-0351 §5:9: the mark holds for the rest of the activation, whatever the reply
+    says, and the input it marks is rendered as received (§5:5, §5:7)."""
+    model = FakeModelProvider.scripted(_proposal(relayed=False))
+    understood = await _understand(_stage(model, await _store()), relayed=True)
+    assert understood.relayed
+    (stimulus,) = _sent(model).tags("The stimulus")
+    assert stimulus.name == "received"
+
+    unmarked = FakeModelProvider.scripted(_proposal(relayed=False))
+    assert not (await _understand(_stage(unmarked, await _store()))).relayed
+    (own,) = _sent(unmarked).tags("The stimulus")
+    assert own.name == "said"
 
 
 async def test_a_reply_with_a_gap_and_no_reading_is_refused_and_repaired() -> None:
