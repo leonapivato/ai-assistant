@@ -36,6 +36,9 @@ from _activation_record import (
     write_walked,
 )
 from _learning_record import ALONE_CLAIM, EVIDENCE_CLAIM, write_learning
+from _tagged_record import FIRST, PINNED, SECOND, TAGGED, write_tagged
+from _tagged_record import KEPT_FACTS as TAGGED_FACTS
+from _tagged_record import KEPT_IDS as TAGGED_IDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -279,6 +282,62 @@ def test_a_reply_that_is_no_json_object_is_shown_as_written() -> None:
     assert odd["meaning"] is None
     assert odd["references"] == []
     assert odd["answers"] == [{"question": None, "parts": [1]}]
+
+
+# --- a request in ADR-0353's tagged form, as understanding's own stage records it -------
+
+
+def test_a_tagged_request_s_stimulus_is_the_input_step(record: Path) -> None:
+    """ADR-0353 §7:1, §14:10: each input's framing sentence, then each text tag's text,
+    read back unescaped, with its writer, number, time as written and what it answers."""
+    write_tagged(record)
+    arrival = _step(_walk(record, TAGGED), "Input")["arrival"]
+    assert (arrival["from"], arrival["form"]) == ("understanding", "tagged")
+    assert arrival["text"] == f"{FIRST}\n{SECOND}"
+    assert arrival["framing"] == [
+        "A stimulus reached the system at 3:51 pm on Monday 26 October 2026: two messages "
+        "Maren typed on Telegram. They contain these messages:"
+    ]
+    assert arrival["received_as"] == arrival["framing"][0]
+    assert [
+        (one["position"], one["tag"], one["writer"], one["written_at"], one["replies_to"])
+        for one in arrival["messages"]
+    ] == [
+        (1, "said", "Maren", "Mon 26 Oct 2026, 3:48 pm", None),
+        (2, "said", "Maren", "Mon 26 Oct 2026, 3:51 pm", "message 1"),
+    ]
+    assert [(one["text"], one["at"], one["input"]) for one in arrival["messages"]] == [
+        (FIRST, None, 0),
+        (SECOND, None, 0),
+    ]
+
+
+def test_a_tagged_request_joins_recall_s_kept_items_by_order(record: Path) -> None:
+    """The recalled memories are labelled after always in mind's, in recall's order."""
+    write_tagged(record)
+    first = _step(_walk(record, TAGGED), "Recall · first run")
+    assert first["shown"]["joined"] is True
+    assert [(one["id"], one["label"], one["text"]) for one in first["kept"]] == [
+        (TAGGED_IDS[0], "M2", TAGGED_FACTS[0]),
+        (TAGGED_IDS[1], "M3", TAGGED_FACTS[1]),
+    ]
+
+
+def test_a_tagged_request_names_the_text_behind_each_cited_label(record: Path) -> None:
+    write_tagged(record)
+    step = _step(_walk(record, TAGGED), "Understanding")
+    assert step["reading"]["shape"] == "reply"
+    assert step["labels"] == {"M2": TAGGED_FACTS[0], "M1": PINNED}
+
+
+def test_a_tagged_request_s_input_is_the_list_s(record: Path) -> None:
+    write_tagged(record)
+    own = viewer.Record(record.parent).lines(TAGGED)
+    assert own is not None
+    tally = viewer.Tally(TAGGED)
+    for line in own[0]:
+        tally.feed(line)
+    assert tally.input == " ".join(f"{FIRST} {SECOND}".split())
 
 
 def test_each_planning_round_shows_what_came_back_and_what_it_proposed(record: Path) -> None:
