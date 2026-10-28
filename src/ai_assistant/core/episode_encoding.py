@@ -386,7 +386,11 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
     return EpisodeProjection(
         occurred_at=record.occurred_at,
         channel=trigger.channel,
-        origin=origin,
+        # ADR-0351 §8:4, §10:4: the parties and the latest version's relay mark, in
+        # place of the origin, which the projection computes from the parties alone
+        # until the lane that moves this reader over (§10:2, §11).
+        parties=trigger.parties,
+        relayed=latest is not None and latest.relayed,
         input=_projected(_input_text(trigger), excerpt_chars) if shown else None,
         meaning=None if latest is None else latest.meaning,
         meaning_ground=None if latest is None else latest.meaning_ground,

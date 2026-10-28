@@ -2727,7 +2727,16 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     nothing was handed over, and a peer at 119 refuses it as extra (ADR-0124 §9:2).
 #:     The method set does not move: no ``Protocol`` gains a member, and
 #:     ``ConversationState`` keeps its shape (§6:8).
-PROTOCOL_VERSION: Final[int] = 120
+#: 121: ADR-0351 §10:3 advances the version once for its lane P1 (§11:1), on this ground:
+#:     the wire-carried ``EpisodicMemory.processing_record`` changes shape. Its trigger
+#:     loses ``origin``, which is computed from the parties and stored nowhere (§10:2),
+#:     and gains ``parties``; each recorded message, the trigger's and a joined input's,
+#:     gains ``party`` (§2:1, §2:6); each understanding version and each joined input
+#:     gains ``relayed`` (§5:10, §5:14). A peer at 120 refuses a trigger with no
+#:     ``origin`` and the new members as extra, and a hub at 121 refuses a trigger with
+#:     no ``parties`` (ADR-0124 §9:2). The method set does not move: no ``Protocol``
+#:     gains a member.
+PROTOCOL_VERSION: Final[int] = 121
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

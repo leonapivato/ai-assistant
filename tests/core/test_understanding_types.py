@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import parties_for
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _INPUT = UnderstandingReferent(kind="input", excerpt="book the dentist")
@@ -66,7 +67,7 @@ def _record(**overrides: object) -> EpisodeProcessingRecord:
             payload=RecordedTextInput(text="book the dentist"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=InputOrigin.USER,
+            parties=parties_for(InputOrigin.USER),
         ),
         "status": ProcessingStatus.COMPLETED,
         "reason": ProcessingReason.RETURNED,
@@ -212,6 +213,8 @@ def test_a_proposal_carries_labels_and_no_identity() -> None:
         "answers",
         # ADR-0349 §10:1: the R labels of the running activations this input continues.
         "continues",
+        # ADR-0351 §5:10: the reply's relay mark on the input it reads.
+        "relayed",
     }
     assert proposal.story_labels == ()
     assert proposal.answers == ()
@@ -310,6 +313,8 @@ def test_a_recorded_understanding_carries_no_label() -> None:
         "answers",
         # ADR-0349 §10:2: the running activations the continues labels resolved to.
         "continues",
+        # ADR-0351 §5:10: the relay mark this version records on the trigger's input.
+        "relayed",
     }
     for model in (
         ActivationUnderstanding,

@@ -55,6 +55,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.payloads import canonical_payload
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine, StoryStore
@@ -101,7 +102,7 @@ def episode(activation_id: str, *, running: bool = False) -> EpisodicMemory:
                 payload=RecordedTextInput(text="input"),
                 context=ChannelContext(),
                 reply=None,
-                origin=InputOrigin.OUTSIDE,
+                parties=parties_for(InputOrigin.OUTSIDE),
             ),
             status=None if running else ProcessingStatus.FAILED,
             reason=None if running else ProcessingReason.PROCESSING_FAILED,

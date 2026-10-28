@@ -47,6 +47,7 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, Unbound
 from ai_assistant.orchestration.story_standing import OWNER_READER, story_standing
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -69,7 +70,7 @@ def _trigger(origin: InputOrigin) -> RecordedChannelTrigger:
         payload=RecordedTextInput(text="the raw input, never shown here"),
         context=ChannelContext(),
         reply=None if origin is InputOrigin.OUTSIDE else WholeTextReply(),
-        origin=origin,
+        parties=parties_for(origin),
     )
 
 

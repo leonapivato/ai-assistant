@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from memory_parties_carry import origin_recorded, parties_carried
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 from ai_assistant.core.types import (
@@ -167,7 +168,11 @@ async def test_each_stored_continues_becomes_a_sequence(legacy: Path) -> None:
 
 async def test_only_the_episodes_that_record_continues_are_rewritten(legacy: Path) -> None:
     """ADR-0326 §4:4: every row is kept; a rewritten one keeps its kind, revision, band
-    and openness, and every other row is byte for byte what it was."""
+    and openness, and every other row is byte for byte what it was.
+
+    The chain goes on to ADR-0351 §9's upgrade, which rewrites every episode whose
+    trigger records an origin, so those are rewritten too, on the same terms.
+    """
     before = _raw_rows(legacy)
 
     exported = await _exported(legacy)
@@ -175,7 +180,7 @@ async def test_only_the_episodes_that_record_continues_are_rewritten(legacy: Pat
     after = _raw_rows(legacy)
     assert set(exported) == set(before) == set(after) == _IDS
     for record_id, row in before.items():
-        if record_id in _CONTINUING:
+        if record_id in _CONTINUING or origin_recorded(row[1]):
             kind, _, revision, band, is_open = row
             assert (after[record_id][0], *after[record_id][2:]) == (kind, revision, band, is_open)
             assert after[record_id][1] != row[1]
@@ -195,7 +200,7 @@ async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:
         stored: dict[str, Any] = json.loads(data)
         stored.pop("revision", None)
         continuing_episode(stored)
-        _holds(record.model_dump(mode="json", exclude={"revision"}), stored)
+        _holds(record.model_dump(mode="json", exclude={"revision"}), parties_carried(stored))
 
 
 async def test_the_walk_resumes_and_the_open_episode_stays_open(legacy: Path) -> None:

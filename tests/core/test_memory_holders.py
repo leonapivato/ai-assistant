@@ -22,7 +22,6 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     HolderKind,
-    InputOrigin,
     InputPart,
     LabelBounds,
     MemoryMark,
@@ -69,14 +68,18 @@ from ai_assistant.testing.memories import (
     sourced_support,
     support_with_origin,
 )
+from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, line_input
 
 _OWNER: Final = SupportHolder.person(OWNER_PERSON_ID)
 _CHANNEL: Final = ChannelIdentity(channel_type="telegram", instance_id="line")
 
 
 def _episode(
-    *messages: RecordedInputMessage, origin: InputOrigin = InputOrigin.USER
+    *messages: RecordedInputMessage, parties: tuple[SupportHolder, ...] | None = None
 ) -> EpisodicMemory:
+    """An episode whose input took ``messages`` in on the line, or carries ``parties``."""
+    if parties is None:
+        parties, messages = line_input(messages) if messages else (OWNERS_WORDS, ())
     return EpisodicMemory(
         id="activation:held",
         content="",
@@ -92,7 +95,7 @@ def _episode(
                 payload=RecordedTextInput(text=" ".join(one.text for one in messages)),
                 context=ChannelContext(),
                 reply=WholeTextReply(),
-                origin=origin,
+                parties=parties,
                 messages=messages,
             ),
             status=ProcessingStatus.COMPLETED,
@@ -163,10 +166,11 @@ def test_a_forward_is_held_by_its_claimed_sender_and_otherwise_unknown() -> None
     named = _episode(_forward(4242))
     assert support_holder(_outside(), named) == SupportHolder.source("4242", claimed=True)
     assert support_holder(_outside(), _episode(_forward(None))) == SupportHolder.unknown()
-    outside = _episode(
-        RecordedInputMessage(text="a report", sent_at=AT), origin=InputOrigin.OUTSIDE
-    )
-    assert support_holder(_outside(None), outside) == SupportHolder.unknown()
+    # ADR-0351 §7:1: the input as a whole is held by its one party, and by unknown where
+    # it carries several, as a note beside a forward does.
+    beside = _episode(RecordedInputMessage(text="Who is she?", sent_at=AT), _forward(4242))
+    assert support_holder(_outside(None), beside) == SupportHolder.unknown()
+    assert support_holder(_outside(None), named) == SupportHolder.source("4242", claimed=True)
 
 
 def test_a_gone_episode_leaves_the_origin_alone_to_decide() -> None:
@@ -232,21 +236,25 @@ def test_the_writer_keeps_a_producer_named_person_and_refuses_another_holder() -
 
 
 @pytest.mark.parametrize("message", [None, 0])
-def test_no_support_points_at_an_input_whose_origin_is_assistant(message: int | None) -> None:
-    """ADR-0350 §6:11: a scheduled task's instruction is no part a support points at.
+@pytest.mark.parametrize(
+    "parties", [ASSISTANTS_WORDS, (*ASSISTANTS_WORDS, SupportHolder.unknown())]
+)
+def test_no_support_points_at_an_input_that_carries_the_assistants_statement(
+    message: int | None, parties: tuple[SupportHolder, ...]
+) -> None:
+    """ADR-0351 §7:3: a scheduled task's instruction, a marked task's too, backs nothing.
 
     The stamp both writers use refuses it, whatever origin the producer gave it; a support
     of such an episode points at another part of it, such as a round's message.
     """
-    scheduled = _episode(
-        RecordedInputMessage(text="check back", sent_at=AT), origin=InputOrigin.ASSISTANT
-    )
-    pointing = said_support().model_copy(
-        update={"points_at": InputPart(episode="activation:held", message=message)}
-    )
-
-    with pytest.raises(ValueError, match="origin is assistant"):
-        stamped_support(pointing, scheduled)
+    scheduled = _episode(parties=parties)
+    for origin in (SupportOrigin.USER_MESSAGE, SupportOrigin.OUTSIDE_INPUT):
+        pointing = _outside(message) if origin is SupportOrigin.OUTSIDE_INPUT else said_support()
+        pointing = pointing.model_copy(
+            update={"points_at": InputPart(episode="activation:held", message=message)}
+        )
+        with pytest.raises(ValueError, match="include the assistant's statement"):
+            stamped_support(pointing, scheduled)
     assert stamped_support(message_support(), scheduled).holder is not None
 
 

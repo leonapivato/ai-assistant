@@ -494,11 +494,11 @@ def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> Non
         store.close()
     (memory,) = [one for one in STORES if one.name == "memory"]
 
-    # Carried on through ADR-0345 §13's shape and ADR-0349 §10:6's, which the head's
-    # upgrades reach next.
-    carried = memory.carries[3](memory.carries[2](memory.carries[1](base)))
+    # Carried on through ADR-0345 §13's shape, ADR-0349 §10:6's and ADR-0351 §9's, which
+    # the head's upgrades reach next.
+    carried = memory.carries[4](memory.carries[3](memory.carries[2](memory.carries[1](base))))
 
-    assert memory.shape == 4
+    assert memory.shape == 5
     assert set(carried) == set(head)
     assert {
         key: first_difference(value, head[key]) for key, value in carried.items()
@@ -543,8 +543,9 @@ def test_the_memory_stores_carry_from_shape_2_is_what_its_upgrade_does(tmp_path:
         store.close()
     (memory,) = [one for one in STORES if one.name == "memory"]
 
-    # Carried on through ADR-0349 §10:6's shape, which the head's upgrade reaches next.
-    carried = memory.carries[3](memory.carries[2](base))
+    # Carried on through ADR-0349 §10:6's shape and ADR-0351 §9's, which the head's
+    # upgrades reach next.
+    carried = memory.carries[4](memory.carries[3](memory.carries[2](base)))
 
     assert set(carried) == set(head)
     assert {
@@ -592,7 +593,8 @@ def test_the_memory_stores_carry_from_shape_3_is_what_its_upgrade_does(tmp_path:
         store.close()
     (memory,) = [one for one in STORES if one.name == "memory"]
 
-    carried = memory.carries[3](base)
+    # Carried on through ADR-0351 §9's shape, which the head's upgrade reaches next.
+    carried = memory.carries[4](memory.carries[3](base))
 
     assert set(carried) == set(head)
     assert {

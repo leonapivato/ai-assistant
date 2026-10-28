@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     WholeTextReply,
     check_story_version,
 )
+from ai_assistant.testing.parties import parties_for
 
 _NOW = datetime(2026, 10, 23, 12, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
@@ -53,7 +54,7 @@ def _open(**fields: object) -> EpisodeProcessingRecord:
             payload=RecordedTextInput(text="how is the camping trip going"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=InputOrigin.USER,
+            parties=parties_for(InputOrigin.USER),
         ),
     }
     values.update(fields)

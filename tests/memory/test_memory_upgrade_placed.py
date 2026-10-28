@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 import sqlite_vec
 from memory_continuing_carry import carried, continues_recorded
+from memory_parties_carry import holds, origin_recorded, parties_carried
 
 from ai_assistant.core.errors import IncompatibleStateError
 from ai_assistant.core.types import (
@@ -205,6 +206,11 @@ async def test_every_record_reads_back_with_nothing_dropped(legacy: Path) -> Non
     for record_id, (kind, data, revision, band) in before.items():
         assert after[record_id][2] == revision
         assert after[record_id][3] == band
+        if kind != "memory" and origin_recorded(data):
+            # ADR-0351 §9: the chain ends in carrying the trigger's origin onto its
+            # parties, and, before it, ``continues`` onto a sequence (ADR-0349 §10:6).
+            holds(json.loads(after[record_id][1]), parties_carried(carried(json.loads(data))))
+            continue
         if kind != "memory" and continues_recorded(data):
             # ADR-0349 §10:6: the chain ends in carrying ``continues`` onto a sequence.
             # Rewritten as the store writes a record, so it may spell out fields added

@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     UnderstandingProducer,
 )
 from ai_assistant.orchestration import matters_pass, planning, story_tidy_up, understanding
+from ai_assistant.testing.parties import parties_for
 
 _AT = datetime(2026, 10, 25, 8, tzinfo=UTC)
 _SCHEDULE = ChannelIdentity(channel_type="task_scheduler", instance_id="schedule")
@@ -60,7 +61,7 @@ def _scheduled_episode() -> EpisodicMemory:
                 payload=RecordedTextInput(text=_INSTRUCTION),
                 context=ChannelContext(),
                 reply=None,
-                origin=InputOrigin.ASSISTANT,
+                parties=parties_for(InputOrigin.ASSISTANT),
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,

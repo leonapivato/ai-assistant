@@ -56,6 +56,7 @@ from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.memories import memory_in_band
+from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -137,7 +138,7 @@ def _text_trigger(
         payload=RecordedTextInput(text=text),
         context=ChannelContext(),
         reply=None if event else WholeTextReply(),
-        origin=input_origin(channel) if origin == "admitted" else origin,
+        parties=parties_for(input_origin(channel) if origin == "admitted" else origin),
     )
 
 
@@ -527,7 +528,7 @@ async def test_another_episodes_excerpt_is_its_input_text_or_its_content() -> No
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript=None),
         context=ChannelContext(),
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
-        origin=InputOrigin.USER,
+        parties=parties_for(InputOrigin.USER),
     )
     records = (
         _episode("typed", processing=_processing(_text_trigger("Book the dentist."))),

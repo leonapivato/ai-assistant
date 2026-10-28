@@ -95,6 +95,7 @@ from ai_assistant.testing import (
     FakeStoryStore,
     FakeToolRegistry,
 )
+from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -178,7 +179,7 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a case var
             payload=RecordedTextInput(text="the words they wrote"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=origin,
+            parties=parties_for(origin),
         ),
         rounds=tuple(rounds),
         labels=tuple(labels),

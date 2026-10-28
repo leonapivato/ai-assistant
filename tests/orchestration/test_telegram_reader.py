@@ -79,6 +79,7 @@ from ai_assistant.testing import (
     FakeTelegramBotClient,
     FakeTelegramIntakeRecord,
 )
+from ai_assistant.testing.parties import OWNERS_WORDS
 from ai_assistant.testing.telegram import GET_UPDATES, SEND_MESSAGE
 
 if TYPE_CHECKING:
@@ -232,8 +233,11 @@ async def test_a_text_from_the_owner_is_one_input_taken_in_and_then_confirmed() 
     (taken,) = line.inputs
     assert taken.text == "What's on tomorrow?"
     assert taken.channel == line.seams.channel
+    # ADR-0351 §2:6, §3:1: the message carries the owner's words, as the line declares.
     assert taken.recorded == (
-        RecordedInputMessage(text="What's on tomorrow?", sent_at=AT, position=55),
+        RecordedInputMessage(
+            text="What's on tomorrow?", sent_at=AT, position=55, party=OWNERS_WORDS[0]
+        ),
     )
     assert line.marked == [(10,)], "taken in by its activation as it was admitted"
     (held,) = line.held_then[0].values()

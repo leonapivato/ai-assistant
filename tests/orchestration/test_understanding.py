@@ -64,6 +64,7 @@ from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, default_pro
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import remembered_support
+from ai_assistant.testing.parties import parties_for
 
 #: Understanding's shipped template, as the composition root hands it the stage.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
@@ -120,7 +121,7 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
                 payload=RecordedTextInput(text=text),
                 context=ChannelContext() if context is None else context,
                 reply=None if event else WholeTextReply(),
-                origin=input_origin(channel),
+                parties=parties_for(input_origin(channel)),
             ),
             status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
             reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,

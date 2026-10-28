@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 from memory_continuing_carry import carried, continues_recorded
+from memory_parties_carry import origin_recorded, parties_carried
 
 from ai_assistant.core.errors import IncompatibleStateError
 from ai_assistant.core.types import (
@@ -156,17 +157,19 @@ async def test_the_file_is_upgraded_in_place_by_its_label_alone(legacy: Path) ->
     assert _label(legacy) == MEMORY_RECORD_FORMAT
     after = _raw_rows(legacy)
     assert set(exported) == _IDS
-    # The chain goes on to ADR-0345 §13's upgrade, which rewrites each memory, and to
+    # The chain goes on to ADR-0345 §13's upgrade, which rewrites each memory, to
     # ADR-0349 §10:6's, which rewrites each episode whose understandings record
-    # ``continues``: every other episode's row is byte for byte what it was, and a
-    # rewritten row keeps its kind, its revision and its band.
+    # ``continues``, and to ADR-0351 §9's, which rewrites each whose trigger records an
+    # origin: every other episode's row is byte for byte what it was, and a rewritten
+    # row keeps its kind, its revision and its band.
     for record_id, row in before.items():
-        if row[0] == "memory" or continues_recorded(row[1]):
+        rewritten = continues_recorded(row[1]) or origin_recorded(row[1])
+        if row[0] == "memory" or rewritten:
             assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
         else:
             assert after[record_id] == row
-        if row[0] != "memory" and continues_recorded(row[1]):
-            _holds(json.loads(after[record_id][1]), carried(json.loads(row[1])))
+        if row[0] != "memory" and rewritten:
+            _holds(json.loads(after[record_id][1]), parties_carried(carried(json.loads(row[1]))))
 
 
 async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:
@@ -178,8 +181,9 @@ async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:
     for record_id, (_, data, revision, _) in before.items():
         record = exported[record_id]
         assert record.revision == revision
-        # ADR-0349 §10:6: the chain ends in carrying ``continues`` onto a sequence.
-        stored: dict[str, Any] = carried(json.loads(data))
+        # ADR-0349 §10:6, ADR-0351 §9: the chain carries ``continues`` onto a sequence,
+        # and the trigger's origin onto its parties.
+        stored: dict[str, Any] = parties_carried(carried(json.loads(data)))
         stored.pop("revision", None)
         # ADR-0345 §13:1, §10:2: a memory's subject is carried as ``subjects`` and its
         # topics as labels added by ``migration``.

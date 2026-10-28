@@ -15,7 +15,7 @@ from uuid import UUID
 
 import structlog
 
-from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.errors import (
     AssistantError,
     ModelTimeoutError,
@@ -607,13 +607,13 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
 ) -> ActivationState:
     """Allocate capture metadata after channel validation, without making it admission policy.
 
-    The trigger's ``origin`` is what the channel declares about its input (ADR-0284
-    §2:2), read from the one declaration beside the dispatch table and fixed on the
-    episode here. ``input_origin`` refuses a channel type that declares none; the
-    dispatch table has already refused every such type by the time this runs. A kind
-    that declares its origin per input is read for this one: an input whose
-    ``messages`` take in a forward has the origin its kind declares for that
-    (ADR-0323 §4:11).
+    The trigger's ``parties`` are what the channel's kind declares of its input
+    (ADR-0351 §3:1), read from the one declaration beside the dispatch table and fixed
+    on the episode here (§2:8), and each of its ``messages`` carries the party the kind
+    declares for it: the owner's for one the sender wrote, a forward's original sender,
+    claimed, for a forward (§2:6, §2:7). ``declared_input`` refuses a channel type that
+    declares none; the dispatch table has already refused every such type by the time
+    this runs.
 
     A channel that is not a conversation is on its own channel from admission, as an
     event's is, so its episode is read by it (ADR-0283 §1, ADR-0323 §10); a
@@ -621,12 +621,11 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     ``messages`` are each message the input took in, recorded on the trigger
     (ADR-0323 §5:4); none for a channel that records none. ``carries_outside_mark`` is
     whether the input carries the outside-content mark, as an occurrence of a scheduled
-    task carrying it does (ADR-0350 §3:8, §6:3): its kind declares its origin for that.
+    task carrying it does (ADR-0350 §3:8): its kind declares its parties for that, with
+    unknown beside the assistant's statement (ADR-0351 §3:6).
     """
-    origin = input_origin(
-        input.target,
-        takes_in_forward=any(one.forwarded_from is not None for one in messages),
-        carries_outside_mark=carries_outside_mark,
+    parties, recorded = declared_input(
+        input.target, messages, carries_outside_mark=carries_outside_mark
     )
     on_its_channel = (
         isinstance(input.target, ChannelIdentity) and input.target.channel_type != "conversation"
@@ -648,8 +647,8 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
             payload=payload,
             context=input.context,
             reply=reply,
-            origin=origin,
-            messages=tuple(messages),
+            parties=parties,
+            messages=recorded,
         ),
         activation_id=activation_id,
         started_at=started_at,

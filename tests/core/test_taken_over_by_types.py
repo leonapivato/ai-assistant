@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     WholeTextReply,
 )
+from ai_assistant.testing.parties import parties_for
 
 _NOW = datetime(2026, 10, 26, 12, tzinfo=UTC)
 _LATER = _NOW + timedelta(seconds=30)
@@ -56,7 +57,7 @@ def _open(**fields: object) -> EpisodeProcessingRecord:
             payload=RecordedTextInput(text="book Riverside for Friday"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=InputOrigin.USER,
+            parties=parties_for(InputOrigin.USER),
         ),
     }
     values.update(fields)

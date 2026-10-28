@@ -2768,13 +2768,290 @@ RecordedChannelPayload = Annotated[
 ]
 
 
-class InputOrigin(StrEnum):
-    """Who an activation's input came from (ADR-0284 §2:1).
+# --- whose words an input carries: its parties (ADR-0351 §2) ----------------------
+#
+# ADR-0345 §2's holder kinds, moved here from the memory record's block below because
+# ADR-0351 §2:1 records an input's parties as these same values, and the trigger is
+# declared first. Relocating a type is not redefining it (ADR-0084 §4).
 
-    A **closed** enumeration, **added to and never renamed**. Admission sets it on
-    the recorded trigger from what the channel declares about its input, and the
-    value is fixed on the episode (§2:2). A reader that needs to know who the input
-    came from reads it, and never the channel type (§2:3).
+
+class HolderKind(StrEnum):
+    """What kind of source a support's holder is (ADR-0345 §2:3).
+
+    Closed, **added to and never renamed**. Every kind is held under the same capture
+    rules: the kinds matter to usage, not to how a belief is captured.
+    """
+
+    PERSON = "person"
+    """A person, named by an identity the channel establishes for them (§2:7)."""
+    OUTSIDE_SOURCE = "outside_source"
+    """An outside source, named by an identifier and marked established or claimed."""
+    ASSISTANT_STATEMENT = "assistant_statement"
+    """The assistant's statement: that it said or inferred something, never a belief (§2:4)."""
+    UNKNOWN = "unknown"
+    """A part whose record carries no identifier for whoever said or reported it (§2:6)."""
+
+
+class StatementPart(StrEnum):
+    """Which part the assistant made, on a holder that is its statement (ADR-0345 §2:3).
+
+    Closed, **added to and never renamed**: a round's message, a remember call, or an
+    observer's inference, the three parts §2's table gives the assistant's statement;
+    and the instruction a scheduled task carries (ADR-0350 §3:6), which ADR-0351 §3:7
+    adds as the part a Task Scheduler input's assistant party names. No support points
+    at that part (ADR-0351 §7:3), so no support's holder names it.
+    """
+
+    ROUND_MESSAGE = "round_message"
+    REMEMBER_CALL = "remember_call"
+    OBSERVER_INFERENCE = "observer_inference"
+    SCHEDULED_INSTRUCTION = "scheduled_instruction"
+    """A scheduled task's instruction, as planning wrote it (ADR-0351 §3:6, §3:7)."""
+
+
+class SupportHolder(BaseModel):
+    """The source of the claim a support records: whose belief it is (ADR-0345 §2).
+
+    Set by code from the part the support points at and the episode's record, never
+    by a model (§2:2); a support keeps the identifier it was recorded under, and no
+    write rewrites it (§2:9).
+
+    **Same holder is a connection, not an identity** (§2:6). Two holders are the same
+    exactly where they are of one kind and name the same identifier, an outside source
+    marked alike, established or claimed: a claimed source is never the same holder as
+    an established one, whatever identifier either carries (§2:7). An unknown holder is
+    never the same as any other, itself included, and neither is the assistant's
+    statement, which holds no belief, so nothing changes a memory on the ground that it
+    believes anything (§2:4): :meth:`same_as` is false for both.
+
+    Attributes:
+        kind: The kind of source.
+        identifier: The stable identifier the record carries for a person or an outside
+            source; ``None`` for the other two kinds.
+        claimed: For an outside source, whether it is only claimed (a forward's
+            original sender) rather than established (a source that reported it).
+        made: For the assistant's statement, the part it made.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: HolderKind
+    identifier: NonBlankEncodableText | None = None
+    claimed: bool | None = None
+    made: StatementPart | None = None
+
+    @model_validator(mode="after")
+    def _fields_follow_the_kind(self) -> Self:
+        named = self.kind in {HolderKind.PERSON, HolderKind.OUTSIDE_SOURCE}
+        if (self.identifier is not None) != named:
+            msg = "a person or an outside source is named by an identifier, and nothing else is"
+            raise ValueError(msg)
+        if (self.claimed is not None) != (self.kind is HolderKind.OUTSIDE_SOURCE):
+            msg = "an outside source, and only it, is marked established or claimed (§2:3)"
+            raise ValueError(msg)
+        if (self.made is not None) != (self.kind is HolderKind.ASSISTANT_STATEMENT):
+            msg = "the assistant's statement, and only it, names the part it made (§2:3)"
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def person(cls, identifier: str) -> SupportHolder:
+        """A person, named by ``identifier``."""
+        return cls(kind=HolderKind.PERSON, identifier=identifier)
+
+    @classmethod
+    def source(cls, identifier: str, *, claimed: bool) -> SupportHolder:
+        """An outside source, named by ``identifier``, established or ``claimed``."""
+        return cls(kind=HolderKind.OUTSIDE_SOURCE, identifier=identifier, claimed=claimed)
+
+    @classmethod
+    def statement(cls, made: StatementPart) -> SupportHolder:
+        """The assistant's statement, in the part it ``made``."""
+        return cls(kind=HolderKind.ASSISTANT_STATEMENT, made=made)
+
+    @classmethod
+    def unknown(cls) -> SupportHolder:
+        """A holder whose record carries no identifier."""
+        return cls(kind=HolderKind.UNKNOWN)
+
+    def same_as(self, other: SupportHolder | None) -> bool:
+        """Whether ``other`` is the same holder (ADR-0345 §2:6, §2:7).
+
+        Args:
+            other: Another holder, or ``None`` for a support recorded with none.
+
+        Returns:
+            ``True`` exactly for a person or an outside source of the same identifier,
+            an outside source marked alike.
+        """
+        if other is None or self.kind not in {HolderKind.PERSON, HolderKind.OUTSIDE_SOURCE}:
+            return False
+        return (
+            other.kind is self.kind
+            and other.identifier == self.identifier
+            and other.claimed == self.claimed
+        )
+
+
+#: ADR-0351 §2:3: the canonical order of an input's parties, kind first. A person, then
+#: an outside source, then the assistant's statement, then unknown; within a kind, by
+#: identifier, an established source before a claimed one, and by the part it made.
+_PARTY_KIND_ORDER: Final[dict[HolderKind, int]] = {
+    HolderKind.PERSON: 0,
+    HolderKind.OUTSIDE_SOURCE: 1,
+    HolderKind.ASSISTANT_STATEMENT: 2,
+    HolderKind.UNKNOWN: 3,
+}
+
+
+def _party_key(party: SupportHolder) -> tuple[int, str, int, str]:
+    """``party``'s place in ADR-0351 §2:3's canonical order."""
+    return (
+        _PARTY_KIND_ORDER[party.kind],
+        party.identifier or "",
+        -1 if party.claimed is None else int(party.claimed),
+        "" if party.made is None else party.made.value,
+    )
+
+
+def canonical_parties(parties: Iterable[SupportHolder]) -> tuple[SupportHolder, ...]:
+    """``parties`` as an input carries them: each member once, in the canonical order.
+
+    ADR-0351 §2:3. Two members are one where they are equal, field for field, so the one
+    unknown member stands for every member nobody identified, and two claimed sources of
+    one identifier are one member. This is equality, not :meth:`SupportHolder.same_as`,
+    which no unknown holder ever meets.
+
+    Args:
+        parties: The members, in any order and possibly repeated.
+
+    Returns:
+        The distinct members, in the canonical order.
+    """
+    return tuple(sorted(dict.fromkeys(parties), key=_party_key))
+
+
+def _outside_member(party: SupportHolder) -> bool:
+    """Whether ``party`` is neither a person nor the assistant's statement (ADR-0351 §5:1)."""
+    return party.kind in {HolderKind.OUTSIDE_SOURCE, HolderKind.UNKNOWN}
+
+
+def _all_of(parties: Sequence[SupportHolder] | None, kind: HolderKind) -> bool:
+    """Whether ``parties`` are not empty and every member is of ``kind`` (ADR-0351 §5:2)."""
+    return bool(parties) and all(one.kind is kind for one in parties or ())
+
+
+def relay_mark_counts(parties: Sequence[SupportHolder] | None, *, relayed: bool) -> bool:
+    """Whether understanding's relay mark counts on an input of ``parties`` (ADR-0351 §5:7).
+
+    It counts only where the parties, read alone, are the person's own or the
+    assistant's. On parties already outside, ``None`` or empty it changes nothing: the
+    parties already record whose the words are.
+
+    Args:
+        parties: The input's parties, or ``None`` where they are unknown.
+        relayed: Whether understanding marked the input relayed (ADR-0351 §5:6).
+
+    Returns:
+        ``True`` exactly where the input is relayed and the mark lowers what follows.
+    """
+    return relayed and (
+        _all_of(parties, HolderKind.PERSON) or _all_of(parties, HolderKind.ASSISTANT_STATEMENT)
+    )
+
+
+def parties_are_outside(parties: Sequence[SupportHolder] | None, *, relayed: bool = False) -> bool:
+    """Whether an input of ``parties`` is outside (ADR-0351 §5:1, §5:7).
+
+    Outside where its parties are ``None``, or include a member that is neither a person
+    nor the assistant's statement, or where a relay mark counts on it. Computed wherever
+    it is read, and never stored apart from the parties (§5:1).
+
+    Args:
+        parties: The input's parties, or ``None`` where they are unknown.
+        relayed: Whether understanding marked the input relayed (ADR-0351 §5:6).
+
+    Returns:
+        Whether the input is outside.
+    """
+    if parties is None:
+        return True
+    return any(_outside_member(one) for one in parties) or relay_mark_counts(
+        parties, relayed=relayed
+    )
+
+
+def parties_are_persons_own(
+    parties: Sequence[SupportHolder] | None, *, relayed: bool = False
+) -> bool:
+    """Whether an input of ``parties`` is the person's own (ADR-0351 §5:2, §5:7).
+
+    Its parties are not empty, every member is a person, and no relay mark counts on it.
+
+    Args:
+        parties: The input's parties, or ``None`` where they are unknown.
+        relayed: Whether understanding marked the input relayed (ADR-0351 §5:6).
+
+    Returns:
+        Whether the input is the person's own.
+    """
+    return _all_of(parties, HolderKind.PERSON) and not relayed
+
+
+def parties_are_assistants(
+    parties: Sequence[SupportHolder] | None, *, relayed: bool = False
+) -> bool:
+    """Whether an input of ``parties`` is the assistant's (ADR-0351 §5:2, §5:7).
+
+    Its parties are not empty, every member is the assistant's statement, and no relay
+    mark counts on it.
+
+    Args:
+        parties: The input's parties, or ``None`` where they are unknown.
+        relayed: Whether understanding marked the input relayed (ADR-0351 §5:6).
+
+    Returns:
+        Whether the input is the assistant's.
+    """
+    return _all_of(parties, HolderKind.ASSISTANT_STATEMENT) and not relayed
+
+
+def parties_origin(parties: Sequence[SupportHolder] | None) -> InputOrigin:
+    """The origin computed from ``parties`` alone, until the lane removing it (ADR-0351 §10:2).
+
+    ``user`` for the person's own, ``assistant`` for the assistant's, and ``outside``
+    otherwise. It reads no relay mark: none is recorded before the lane that removes the
+    origin records the first (§10:2, §11).
+
+    Args:
+        parties: An input's parties, or ``None`` where they are unknown.
+
+    Returns:
+        The computed origin, stored nowhere.
+    """
+    if parties_are_persons_own(parties):
+        return InputOrigin.USER
+    if parties_are_assistants(parties):
+        return InputOrigin.ASSISTANT
+    return InputOrigin.OUTSIDE
+
+
+def _mixes_person_and_assistant(parties: Sequence[SupportHolder]) -> bool:
+    """Whether ``parties`` mix a person and the assistant's statement alone (ADR-0351 §3:8)."""
+    kinds = {one.kind for one in parties}
+    return (
+        HolderKind.PERSON in kinds
+        and HolderKind.ASSISTANT_STATEMENT in kinds
+        and not any(_outside_member(one) for one in parties)
+    )
+
+
+class InputOrigin(StrEnum):
+    """Who an activation's input came from (ADR-0284 §2:1), retiring (ADR-0351 §8:1).
+
+    A **closed** enumeration, **added to and never renamed**. ADR-0351 §10:2 keeps it,
+    until the lane that removes it, as a value computed from an input's parties and
+    stored nowhere (:func:`parties_origin`): no trigger records it, and a reader that
+    still reads it reads what the parties give.
 
     It is not :attr:`Provenance.derived_from_external`: that says whether processing
     read material resting on external content, this says who sent the input, and
@@ -2820,6 +3097,23 @@ class ClaimedAuthor(BaseModel):
     )
 
 
+def forward_party(sender: ClaimedAuthor) -> SupportHolder:
+    """The party of a recorded message carrying ``forwarded_from`` (ADR-0351 §2:7).
+
+    An outside source, claimed, named by the sender's ``account_id``, or unknown where
+    the medium reports none. Never a person, whatever the name (ADR-0345 §2:7).
+
+    Args:
+        sender: The forward's original sender, as the medium reported it.
+
+    Returns:
+        The message's party.
+    """
+    if sender.account_id is None:
+        return SupportHolder.unknown()
+    return SupportHolder.source(str(sender.account_id), claimed=True)
+
+
 class RecordedInputMessage(BaseModel):
     """One message an input took in, kept separate and dated (ADR-0323 §5:4).
 
@@ -2835,6 +3129,13 @@ class RecordedInputMessage(BaseModel):
             names.
         forwarded_from: For a forward, its original sender, claimed (§4:10); ``None``
             for a message its sender wrote.
+        party: Whose words it carries, set by code at admission from what its kind
+            declares (ADR-0351 §2:6, §2:8), or ``None`` where they are unknown, which
+            only the episode store's upgrade records (§9:3). A forward's is its sender,
+            claimed (:func:`forward_party`, §2:7).
+
+    Raises:
+        ValueError: If a forward carries a party other than its sender's (§2:7).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -2843,6 +3144,17 @@ class RecordedInputMessage(BaseModel):
     sent_at: UtcInstant
     position: int | None = Field(default=None, strict=True, ge=0, lt=_MEDIUM_ID_CEILING)
     forwarded_from: ClaimedAuthor | None = None
+    party: SupportHolder | None = None
+
+    @model_validator(mode="after")
+    def _a_forward_carries_its_senders_words(self) -> Self:
+        # ADR-0351 §2:7: a forward's party is its sender, claimed, or unknown where the
+        # medium names none, or ``None`` where its trigger's parties are ``None``.
+        sender = self.forwarded_from
+        if sender is not None and self.party is not None and self.party != forward_party(sender):
+            msg = "a forward's party is its sender, claimed, or unknown (ADR-0351 §2:7)"
+            raise ValueError(msg)
+        return self
 
 
 class RecordedChannelTrigger(BaseModel):
@@ -2850,17 +3162,35 @@ class RecordedChannelTrigger(BaseModel):
 
     It records how the input arrived (ADR-0284 §3): the target, the channel it
     resolved to, the payload, its context, the reply capability it was offered, and
-    ``origin``, who the input came from (§2), set at admission from the channel's
-    declaration and fixed on the episode. Where the channel took several messages in
-    as one input, ``messages`` keeps each of them, dated, with a forward's original
-    sender, claimed (ADR-0323 §4:10, §5:4); the payload is still the text they make
+    ``parties``, whose words the input carries (ADR-0351 §2:1), set by code at admission
+    from what the channel's kind declares and fixed on the episode (§2:8). Where the
+    channel took several messages in as one input, ``messages`` keeps each of them,
+    dated, each with its own party, a forward's its original sender, claimed (ADR-0323
+    §4:10, §5:4; ADR-0351 §2:6, §2:7); the payload is still the text they make
     together, and a channel that records no messages leaves it empty.
+
+    **The parties** are a set of :class:`SupportHolder` values, held in the canonical
+    order :func:`canonical_parties` gives and each member once (§2:3), possibly empty
+    for an input that carries no one's words (§2:4), or ``None`` where they are unknown,
+    which admission never records and only the episode store's upgrade does (§2:5).
+    Where the trigger records messages, its parties are exactly their distinct parties,
+    and where its parties are ``None`` every message's party is too (§2:6). Parties that
+    mix a person and the assistant's statement with no outside member are refused
+    (§3:8). Outside content, the person's own and the assistant's are computed from them
+    by :func:`parties_are_outside`, :func:`parties_are_persons_own` and
+    :func:`parties_are_assistants` (§5), never stored apart from them, and ``origin``
+    is computed from them alone until the lane that removes it (§10:2).
 
     **It checks no combination per channel type** (§3:2). Which payloads, reply
     shapes and options a channel accepts is checked at admission, by
     :mod:`ai_assistant.core.channel_validation`'s one dispatch table; the trigger
     holds only that, where its target is a :class:`ChannelIdentity` and its
-    ``channel`` is set, the two are equal.
+    ``channel`` is set, the two are equal, and the parties' rules above.
+
+    Raises:
+        ValueError: If its channel is not its target, a party repeats, its messages'
+            parties are not its own, or its parties mix a person and the assistant's
+            statement alone.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -2870,8 +3200,47 @@ class RecordedChannelTrigger(BaseModel):
     payload: RecordedChannelPayload
     context: ChannelContext
     reply: ReplyCapability | None
-    origin: InputOrigin
+    parties: tuple[SupportHolder, ...] | None
     messages: tuple[RecordedInputMessage, ...] = ()
+
+    @property
+    def origin(self) -> InputOrigin:
+        """The origin computed from its parties alone, stored nowhere (ADR-0351 §10:2)."""
+        return parties_origin(self.parties)
+
+    @field_validator("parties", mode="after")
+    @classmethod
+    def _parties_once_each_in_order(
+        cls, parties: tuple[SupportHolder, ...] | None
+    ) -> tuple[SupportHolder, ...] | None:
+        # ADR-0351 §2:3: no member twice, carried in the one canonical order.
+        if parties is None:
+            return None
+        ordered = canonical_parties(parties)
+        if len(ordered) != len(parties):
+            msg = "an input's parties hold no member twice (ADR-0351 §2:3)"
+            raise ValueError(msg)
+        return ordered
+
+    @model_validator(mode="after")
+    def _the_parties_are_its_messages(self) -> Self:
+        # ADR-0351 §2:6: a set's messages each carry one of them, and together all of
+        # them; ``None`` parties carry ``None`` on every message. §3:8: no input mixes a
+        # person and the assistant's statement with no outside member.
+        parties = self.parties
+        held = [one.party for one in self.messages]
+        if parties is None:
+            if any(one is not None for one in held):
+                msg = "where an input's parties are unknown, so is each message's (ADR-0351 §2:6)"
+                raise ValueError(msg)
+            return self
+        if held and (None in held or canonical_parties(one for one in held if one) != parties):
+            msg = "an input's parties are exactly its messages' parties (ADR-0351 §2:6)"
+            raise ValueError(msg)
+        if _mixes_person_and_assistant(parties):
+            msg = "no input mixes a person and the assistant's statement alone (ADR-0351 §3:8)"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _channel_is_the_target(self) -> Self:
@@ -3602,6 +3971,11 @@ class ProposedActivationUnderstanding(BaseModel):
     scheme. Empty where the input continues none. A label that resolves to no shown
     activation is a grounding defect the stage drops (ADR-0349 §10:2), and one named
     twice is the stage's to resolve once, so this type validates nothing about them.
+
+    ``relayed`` (ADR-0351 §5:6, §5:10) is the reply's **relay mark** on the input it
+    reads: that the input carries words its sender did not write themselves, such as a
+    pasted email or a quoted message. ``False`` marks nothing. It only lowers what the
+    input's parties give, and changes no party (§5:8).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3614,6 +3988,7 @@ class ProposedActivationUnderstanding(BaseModel):
     story_labels: tuple[EncodableText, ...] = ()
     answers: tuple[ProposedAnswer, ...] = ()
     continues: tuple[EncodableText, ...] = ()
+    relayed: bool = False
 
 
 #: ADR-0276 §2: an excerpt is a bounded prefix of the referent's rendered text.
@@ -3697,6 +4072,11 @@ class ActivationUnderstanding(BaseModel):
     carried to a one-element or an empty sequence by the memory store's upgrade
     (§10:6).
 
+    ``relayed`` (ADR-0351 §5:10) is the relay mark this version records on the
+    trigger's input: ``False`` marks nothing. A version recorded before the field
+    validates unchanged and marks nothing (§9:6). Once a version records it, every later
+    one does, which :class:`EpisodeProcessingRecord` holds (§5:9).
+
     Raises:
         ValueError: If ``continues`` names one activation twice.
     """
@@ -3715,6 +4095,7 @@ class ActivationUnderstanding(BaseModel):
     story_links: tuple[StoryMember, ...] = ()
     answers: tuple[AnsweredQuestion, ...] = ()
     continues: tuple[Identifier, ...] = ()
+    relayed: bool = False
 
     @model_validator(mode="after")
     def _continues_each_once(self) -> Self:
@@ -4360,8 +4741,17 @@ class JoinedInput(BaseModel):
     appends every input the other activation holds, each naming it, so several may name
     one activation, side by side (ADR-0349 §7:7, §7:21).
 
+    Each message carries its party as a trigger's does (ADR-0351 §2:6): every one set,
+    or, on a record the episode store's upgrade could not read, every one ``None``
+    (§9:3). ``relayed`` (ADR-0351 §5:14) is the relay mark an absorption or a take
+    records on the input it appends, where that input was relayed in the activation it
+    came from; ``False`` marks nothing, and a joined input stored before the field
+    validates unchanged and marks nothing (§9:6). It is set in the step that appends
+    the input and never changes after, which the record's extension rule holds.
+
     Raises:
-        ValueError: If it carries no message.
+        ValueError: If it carries no message, or some of its messages carry a party and
+            others none.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -4369,6 +4759,18 @@ class JoinedInput(BaseModel):
     channel: ChannelIdentity
     messages: tuple[RecordedInputMessage, ...] = Field(min_length=1)
     taken_over_from: Identifier | None = None
+    relayed: bool = False
+
+    @model_validator(mode="after")
+    def _every_message_has_a_party_or_none_does(self) -> Self:
+        # ADR-0351 §2:6, §9:3: a joined input's messages carry their parties the way a
+        # trigger's do, so either every one is known or, after an upgrade that could not
+        # read them, none is.
+        known = {one.party is not None for one in self.messages}
+        if len(known) > 1:
+            msg = "a joined input's messages all carry a party, or none does (ADR-0351 §2:6)"
+            raise ValueError(msg)
+        return self
 
 
 class EpisodeProcessingRecord(BaseModel):
@@ -4427,6 +4829,10 @@ class EpisodeProcessingRecord(BaseModel):
     §3:8). ``None`` by default, so a record written before the field validates unchanged
     and ``schema_version`` does not move, as ``joined`` was added.
 
+    **A relay mark holds for the rest of the activation** (ADR-0351 §5:9): where an
+    understanding version records ``relayed``, every later version records it too, and a
+    record in which a later version drops it is refused.
+
     ``schema_version`` is 11 because the record loses the old path's links, resume
     trigger and compose-stage degradation, and its stages their verdicts (ADR-0318
     §4, §5:3, §7:1; ADR-0309 §3:7): a version-10 record carries them and does not
@@ -4477,6 +4883,19 @@ class EpisodeProcessingRecord(BaseModel):
         if self.taken_over_by == self.activation_id:
             msg = "a record never names its own activation as the one that took its matter"
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_relay_mark_holds_for_the_activation(self) -> Self:
+        # ADR-0351 §5:9: once a version records the relay mark, every later one does, so
+        # no later version raises trust on a model's word. The versions an elision drops
+        # sit between the first and the latest (ADR-0276 §7:4), which both stay.
+        marked = False
+        for one in self.understanding:
+            if marked and not one.relayed:
+                msg = "a later understanding version never drops a relay mark (ADR-0351 §5:9)"
+                raise ValueError(msg)
+            marked = marked or one.relayed
         return self
 
     @model_validator(mode="after")
@@ -4817,22 +5236,27 @@ class EpisodeProjection(BaseModel):
     (§8:3). It is never stored and crosses no wire.
 
     **An episode with a processing record** carries its ``channel``, the trigger's
-    ``origin``, its input text where ``origin`` is ``user`` (or ``outside``, for the
-    two renderings that admit it, §8:5), the latest understanding's ``meaning``,
-    ``meaning_ground`` and ``unresolved``, its ``status`` and ``reason``, and no stage
-    verdict (ADR-0318 §3:1). **An episode without one** (§8:2) carries its
-    ``capture_modality`` instead of a channel and its ``content`` as its input, and no
-    origin, no understanding and no status; ``status`` is ``None`` exactly there.
-    Both carry ``occurred_at``, ``response`` and ``derived_from_external``. Only an
-    episode with a processing record carries ``rounds`` (ADR-0307 §10) and
-    ``evidence`` (ADR-0308 §5:5).
+    ``parties`` and whether its latest understanding version marks the trigger's input
+    ``relayed`` (ADR-0351 §8:4, §10:4), its input text where ``origin`` is ``user`` (or
+    ``outside``, for the two renderings that admit it, §8:5), the latest
+    understanding's ``meaning``, ``meaning_ground`` and ``unresolved``, its ``status``
+    and ``reason``, and no stage verdict (ADR-0318 §3:1). **An episode without one**
+    (§8:2) carries its ``capture_modality`` instead of a channel and its ``content`` as
+    its input, and no parties, no relay mark, no understanding and no status; ``status``
+    is ``None`` exactly there. ``origin`` is computed from the parties alone and stored
+    nowhere, ``None`` where there is no processing record (ADR-0351 §10:2). Both carry
+    ``occurred_at``, ``response`` and ``derived_from_external``. Only an episode with a
+    processing record carries ``rounds`` (ADR-0307 §10) and ``evidence`` (ADR-0308
+    §5:5).
 
     Attributes:
         occurred_at: When the episode happened.
         channel: The channel its trigger names, where it has a processing record.
         capture_modality: Its capture modality, where it has no processing record.
-        origin: Who the trigger's input came from; ``None`` on an episode with no
-            processing record.
+        parties: The trigger's parties (ADR-0351 §2:1), or ``None`` where they are
+            unknown or the episode has no processing record.
+        relayed: Whether the latest understanding version marks the trigger's input
+            relayed (ADR-0351 §5:10, §5:11); ``False`` with no version.
         input: The input text or transcript, cut to the excerpt bound, or ``None``
             where none is shown.
         meaning: The latest understanding's meaning, or ``None`` where there is none.
@@ -4862,7 +5286,8 @@ class EpisodeProjection(BaseModel):
     occurred_at: UtcInstant
     channel: ChannelIdentity | None = None
     capture_modality: Modality | None = None
-    origin: InputOrigin | None = None
+    parties: tuple[SupportHolder, ...] | None = None
+    relayed: bool = False
     input: ProjectedText | None = None
     meaning: NonBlankEncodableText | None = None
     meaning_ground: UnderstandingGround | None = None
@@ -4887,11 +5312,13 @@ class EpisodeProjection(BaseModel):
             msg = "a projection carries unresolved matters only with a meaning"
             raise ValueError(msg)
         if self.status is None:
-            # §8:2: no origin, no understanding and no status.
+            # §8:2: no origin, no understanding and no status; ADR-0351 §8:4: and so
+            # no parties and no relay mark.
             if (
                 self.channel is not None
                 or self.capture_modality is None
-                or self.origin is not None
+                or self.parties is not None
+                or self.relayed
                 or self.meaning is not None
                 or self.rounds
                 or self.evidence
@@ -4908,6 +5335,14 @@ class EpisodeProjection(BaseModel):
     def has_processing_record(self) -> bool:
         """Whether the episode had a processing record (§8:2's other path)."""
         return self.status is not None
+
+    @property
+    def origin(self) -> InputOrigin | None:
+        """The origin computed from its parties alone, stored nowhere (ADR-0351 §10:2).
+
+        ``None`` on an episode with no processing record, as §8:2 has it.
+        """
+        return parties_origin(self.parties) if self.has_processing_record else None
 
 
 # --- memory: a statement resting on supports (ADR-0328 §§3-9) -----------------
@@ -5321,122 +5756,11 @@ def part_episode(part: SupportPart) -> str | None:
     return None if isinstance(part, LegacyPart | PinPart) else part.episode
 
 
-class HolderKind(StrEnum):
-    """What kind of source a support's holder is (ADR-0345 §2:3).
-
-    Closed, **added to and never renamed**. Every kind is held under the same capture
-    rules: the kinds matter to usage, not to how a belief is captured.
-    """
-
-    PERSON = "person"
-    """A person, named by an identity the channel establishes for them (§2:7)."""
-    OUTSIDE_SOURCE = "outside_source"
-    """An outside source, named by an identifier and marked established or claimed."""
-    ASSISTANT_STATEMENT = "assistant_statement"
-    """The assistant's statement: that it said or inferred something, never a belief (§2:4)."""
-    UNKNOWN = "unknown"
-    """A part whose record carries no identifier for whoever said or reported it (§2:6)."""
-
-
-class StatementPart(StrEnum):
-    """Which part the assistant made, on a holder that is its statement (ADR-0345 §2:3).
-
-    Closed, **added to and never renamed**: a round's message, a remember call, or an
-    observer's inference, the three parts §2's table gives the assistant's statement.
-    """
-
-    ROUND_MESSAGE = "round_message"
-    REMEMBER_CALL = "remember_call"
-    OBSERVER_INFERENCE = "observer_inference"
-
-
-class SupportHolder(BaseModel):
-    """The source of the claim a support records: whose belief it is (ADR-0345 §2).
-
-    Set by code from the part the support points at and the episode's record, never
-    by a model (§2:2); a support keeps the identifier it was recorded under, and no
-    write rewrites it (§2:9).
-
-    **Same holder is a connection, not an identity** (§2:6). Two holders are the same
-    exactly where they are of one kind and name the same identifier, an outside source
-    marked alike, established or claimed: a claimed source is never the same holder as
-    an established one, whatever identifier either carries (§2:7). An unknown holder is
-    never the same as any other, itself included, and neither is the assistant's
-    statement, which holds no belief, so nothing changes a memory on the ground that it
-    believes anything (§2:4): :meth:`same_as` is false for both.
-
-    Attributes:
-        kind: The kind of source.
-        identifier: The stable identifier the record carries for a person or an outside
-            source; ``None`` for the other two kinds.
-        claimed: For an outside source, whether it is only claimed (a forward's
-            original sender) rather than established (a source that reported it).
-        made: For the assistant's statement, the part it made.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: HolderKind
-    identifier: NonBlankEncodableText | None = None
-    claimed: bool | None = None
-    made: StatementPart | None = None
-
-    @model_validator(mode="after")
-    def _fields_follow_the_kind(self) -> Self:
-        named = self.kind in {HolderKind.PERSON, HolderKind.OUTSIDE_SOURCE}
-        if (self.identifier is not None) != named:
-            msg = "a person or an outside source is named by an identifier, and nothing else is"
-            raise ValueError(msg)
-        if (self.claimed is not None) != (self.kind is HolderKind.OUTSIDE_SOURCE):
-            msg = "an outside source, and only it, is marked established or claimed (§2:3)"
-            raise ValueError(msg)
-        if (self.made is not None) != (self.kind is HolderKind.ASSISTANT_STATEMENT):
-            msg = "the assistant's statement, and only it, names the part it made (§2:3)"
-            raise ValueError(msg)
-        return self
-
-    @classmethod
-    def person(cls, identifier: str) -> SupportHolder:
-        """A person, named by ``identifier``."""
-        return cls(kind=HolderKind.PERSON, identifier=identifier)
-
-    @classmethod
-    def source(cls, identifier: str, *, claimed: bool) -> SupportHolder:
-        """An outside source, named by ``identifier``, established or ``claimed``."""
-        return cls(kind=HolderKind.OUTSIDE_SOURCE, identifier=identifier, claimed=claimed)
-
-    @classmethod
-    def statement(cls, made: StatementPart) -> SupportHolder:
-        """The assistant's statement, in the part it ``made``."""
-        return cls(kind=HolderKind.ASSISTANT_STATEMENT, made=made)
-
-    @classmethod
-    def unknown(cls) -> SupportHolder:
-        """A holder whose record carries no identifier."""
-        return cls(kind=HolderKind.UNKNOWN)
-
-    def same_as(self, other: SupportHolder | None) -> bool:
-        """Whether ``other`` is the same holder (ADR-0345 §2:6, §2:7).
-
-        Args:
-            other: Another holder, or ``None`` for a support recorded with none.
-
-        Returns:
-            ``True`` exactly for a person or an outside source of the same identifier,
-            an outside source marked alike.
-        """
-        if other is None or self.kind not in {HolderKind.PERSON, HolderKind.OUTSIDE_SOURCE}:
-            return False
-        return (
-            other.kind is self.kind
-            and other.identifier == self.identifier
-            and other.claimed == self.claimed
-        )
-
-
 #: ADR-0345 §2's table, joined to ADR-0328 §4's origins: the holder kinds each origin
 #: admits. A part the user wrote, a yes and a pin are a person's; an outside input or an
-#: evidence item is an outside source's, or unknown where its record names none; a part
-#: the assistant made is its statement; a legacy record's is unknown.
+#: evidence item is an outside source's, established or claimed (ADR-0351 §7:4), or
+#: unknown where its record names none; a part the assistant made is its statement; a
+#: legacy record's is unknown.
 _ORIGIN_HOLDERS: Final[dict[SupportOrigin, frozenset[HolderKind]]] = {
     SupportOrigin.USER_MESSAGE: frozenset({HolderKind.PERSON}),
     SupportOrigin.CONFIRMATION: frozenset({HolderKind.PERSON}),
@@ -5465,17 +5789,16 @@ def _holder_fault(support: MemorySupport) -> str | None:
 
     A support recorded with no holder is the writer's to give one (§2:2); one recorded
     with a holder carries the kind §2's table gives its origin, an outside source marked
-    claimed exactly for an outside input (a forward, §2:7), and the assistant's
-    statement naming the part the support points at.
+    claimed only for an outside input (a forward, §2:7), which may also be held by an
+    outside source established, the connected source an event names (ADR-0351 §7:4),
+    and the assistant's statement naming the part the support points at.
     """
     holder = support.holder
     if holder is None:
         return None
     if holder.kind not in _ORIGIN_HOLDERS[support.origin]:
         return f"a {support.origin} support is not held by {holder.kind} (ADR-0345 §2)"
-    if holder.claimed is not None and holder.claimed != (
-        support.origin is SupportOrigin.OUTSIDE_INPUT
-    ):
+    if holder.claimed and support.origin is not SupportOrigin.OUTSIDE_INPUT:
         return "a forward's sender is claimed, and a reporting source established (§2:7)"
     if holder.made is not None and holder.made is not _STATEMENT_PARTS[support.points_at.part]:
         return "the assistant's statement names the part the support points at (ADR-0345 §2)"
@@ -5594,46 +5917,104 @@ class MemorySupport(BaseModel):
 
 
 #: ADR-0345 §2's rows the origin alone settles: the person whose part it is (the owner,
-#: today, §2:5), or the assistant's statement. The others need the record the part is in.
+#: today, §2:5), or the assistant's statement. A part of the input is read from its
+#: parties instead (ADR-0351 §7:1), where its episode resolves.
 _PERSON_ORIGINS: Final[frozenset[SupportOrigin]] = frozenset(
     {SupportOrigin.USER_MESSAGE, SupportOrigin.CONFIRMATION, SupportOrigin.PINNED}
 )
 
 
-def _forward_sender(episode: EpisodicMemory, message: int | None) -> str | None:
-    """The claimed sender's identifier an outside input records, where it records one.
+def _refused_parties(parties: Sequence[SupportHolder] | None) -> bool:
+    """Whether ADR-0351 §7:3 refuses a support on a part of ``parties``.
 
-    The sender of the forward the part is (ADR-0345 §2's fourth row), by the identifier
-    the medium gives for them (``ClaimedAuthor.account_id``): for one message, its own;
-    for the input as a whole, the one sender every forward in it names. A forward whose
-    sender carries no identifier, or an input whose forwards name several, names none.
+    Parties that are empty, or include the assistant's statement, back nothing: a
+    scheduled task's instruction, a marked task's included, is the assistant's words.
     """
-    processing = episode.processing_record
-    if processing is None:
+    return parties is not None and (
+        not parties or any(one.kind is HolderKind.ASSISTANT_STATEMENT for one in parties)
+    )
+
+
+def _input_reading(
+    processing: EpisodeProcessingRecord, message: int | None
+) -> tuple[SupportOrigin, SupportHolder] | None:
+    """The origin and holder ADR-0351 §7 gives a support on the input or one message.
+
+    ``None`` where §7:3 refuses the part. The trigger's relay mark is the latest
+    understanding version's, and before any version, or where understanding was omitted,
+    there is none (§5:11). A message the trigger does not record has unknown parties.
+    """
+    trigger = processing.trigger
+    parties = trigger.parties
+    if message is None:
+        part: tuple[SupportHolder, ...] | None = parties
+    else:
+        recorded = trigger.messages[message] if message < len(trigger.messages) else None
+        party = None if recorded is None else recorded.party
+        part = None if party is None else (party,)
+    if _refused_parties(parties) or _refused_parties(part):
         return None
-    messages = processing.trigger.messages
-    if message is not None:
-        messages = messages[message : message + 1]
-    senders = {one.forwarded_from.account_id for one in messages if one.forwarded_from is not None}
-    if len(senders) != 1:
-        return None
-    (sender,) = senders
-    return None if sender is None else str(sender)
+    latest = processing.understanding[-1] if processing.understanding else None
+    if relay_mark_counts(parties, relayed=latest is not None and latest.relayed):
+        # §7:6: the words are not their sender's, and nothing records whose they are.
+        return SupportOrigin.OUTSIDE_INPUT, SupportHolder.unknown()
+    origin = (
+        SupportOrigin.USER_MESSAGE if parties_are_persons_own(part) else SupportOrigin.OUTSIDE_INPUT
+    )
+    holder = part[0] if part is not None and len(part) == 1 else SupportHolder.unknown()
+    return origin, holder
+
+
+def input_support_origin(processing: EpisodeProcessingRecord, message: int | None) -> SupportOrigin:
+    """The origin of a support pointing at an episode's input, or one of its messages.
+
+    ADR-0351 §7:2 and §7:6, the rule the observer offers a part by and the writer
+    checks, so what the observer proposes is what the writer admits (§11:1). The part
+    takes ``user_message`` where its parties are the person's own, and ``outside_input``
+    where they are outside, ``None`` included; a message's parties are its one party,
+    and the input's the trigger's. Where the latest understanding version marks the
+    input relayed and the mark counts (§5:7), every part of it takes ``outside_input``.
+
+    Args:
+        processing: The episode's processing record.
+        message: The message's position among the trigger's, or ``None`` for the input
+            as a whole.
+
+    Returns:
+        The origin.
+
+    Raises:
+        ValueError: If no support points at the part: its parties, or the input's, are
+            empty or include the assistant's statement (§7:3).
+    """
+    reading = _input_reading(processing, message)
+    if reading is None:
+        msg = (
+            "no support points at an input whose parties are empty or include the "
+            "assistant's statement (ADR-0351 §7:3)"
+        )
+        raise ValueError(msg)
+    return reading[0]
 
 
 def support_holder(support: MemorySupport, episode: EpisodicMemory | None) -> SupportHolder:
     """The holder ADR-0345 §2's table gives ``support``, from the record it points at.
 
     One rule, in ``core``, so the two writers and the upgrade set it identically
-    (ADR-0016 §2), and set by code alone (§2:2). A part the user wrote, a yes and a pin
-    are the owner's, the one person a holder names until a decision on identified people
-    (§2:5), named by :data:`OWNER_PERSON_ID`, the identity the person model and the
-    channels already give the owner (ADR-0338 §2:1); a part the assistant made is its
-    statement (§2:4); a legacy record's holder is unknown. An evidence item's is the
-    source the record names, which its support carries as source details only where the
-    record states them (ADR-0328 §4:13), and a forward's is its claimed sender (§2:7).
-    Where the part's episode no longer resolves, the origin alone decides, and an outside
-    part is unknown (§13:2).
+    (ADR-0016 §2), and set by code alone (§2:2). A part of the input is held by its
+    party (ADR-0351 §7:1): a message by its one party, the input as a whole by its one
+    party where it has exactly one, and by unknown otherwise, unknown or several parties
+    included; and a part of an input understanding marks relayed, where the mark counts,
+    by unknown (§7:6). A support recorded before ADR-0351 under an origin its part's
+    parties no longer give keeps the holder that origin gave it (§9:4): the owner for
+    ``user_message``, and unknown for ``outside_input``. A yes and a pin are the
+    owner's, the one person a holder names until a decision on identified people (§2:5),
+    named by :data:`OWNER_PERSON_ID`, the identity the person model and the channels
+    already give the owner (ADR-0338 §2:1); a part the assistant made is its statement
+    (§2:4); a legacy record's holder is unknown. An evidence item's is the source the
+    record names, which its support carries as source details only where the record
+    states them (ADR-0328 §4:13). Where the part's episode no longer resolves, or has no
+    processing record, the origin alone decides, and an outside part is unknown (§13:2).
 
     Args:
         support: The support.
@@ -5645,36 +6026,44 @@ def support_holder(support: MemorySupport, episode: EpisodicMemory | None) -> Su
     """
     origin = support.origin
     part = support.points_at
+    processing = None if episode is None else episode.processing_record
+    if isinstance(part, InputPart) and processing is not None:
+        reading = _input_reading(processing, part.message)
+        if reading is not None and reading[0] is origin:
+            return reading[1]
     if origin in _PERSON_ORIGINS:
         return SupportHolder.person(OWNER_PERSON_ID)
     made = _STATEMENT_PARTS.get(part.part)
     if made is not None:
         return SupportHolder.statement(made)
-    if episode is None or origin in {SupportOrigin.LEGACY, SupportOrigin.LEGACY_OUTSIDE}:
-        return SupportHolder.unknown()
-    if origin is SupportOrigin.EVIDENCE:
+    if origin is SupportOrigin.EVIDENCE and episode is not None:
         details = support.source_details
         if details is None:
             return SupportHolder.unknown()
         return SupportHolder.source(details.reported_by, claimed=False)
-    sender = _forward_sender(episode, part.message) if isinstance(part, InputPart) else None
-    return SupportHolder.unknown() if sender is None else SupportHolder.source(sender, claimed=True)
-
-
-def _assistant_input(episode: EpisodicMemory | None) -> bool:
-    """Whether ``episode``'s input is the assistant's own words (ADR-0350 §6:3, §6:11)."""
-    processing = None if episode is None else episode.processing_record
-    return processing is not None and processing.trigger.origin is InputOrigin.ASSISTANT
+    return SupportHolder.unknown()
 
 
 def stamped_support(support: MemorySupport, episode: EpisodicMemory | None) -> MemorySupport:
     """``support`` carrying the holder §2's table gives it (ADR-0345 §2:2).
 
-    A support recorded with no holder gains the one :func:`support_holder` computes; one
-    recorded with a holder keeps it where it is that holder, and where both are people,
-    since which person sent a part is the channel's to establish (ADR-0323 §4:2) and
-    producer code names them. Nothing else is admitted: no producer names an outside
-    source, the assistant's statement or an unknown holder other than the record does.
+    A support recorded with no holder is one a write adds, and gains the one
+    :func:`support_holder` computes; where it points at the input or one of its
+    messages, its origin must be the one :func:`input_support_origin` gives the part
+    (ADR-0351 §7:2, §7:6), so a producer cannot name ``user_message`` for words that are
+    not the person's own. One recorded with a holder keeps it where it is that holder,
+    and where both are people, since which person sent a part is the channel's to
+    establish (ADR-0323 §4:2) and producer code names them. Nothing else is admitted: no
+    producer names an outside source, the assistant's statement or an unknown holder
+    other than the record does.
+
+    **No support points at an input whose parties are empty or include the
+    assistant's statement** (ADR-0351 §7:3, in place of ADR-0350 §6:11's ``assistant``
+    origin): such an input is a scheduled task's instruction, a marked task's included,
+    or one that carries no one's words, so the stamp refuses a support a write adds on
+    any part of it, whichever writer built it. A support recorded before ADR-0351 keeps
+    the origin and holder it was recorded under (§9:4), so the stamp refuses a recorded
+    one only on an input that is the assistant's, as ADR-0350 §6:11 already did.
 
     Args:
         support: The support, as a producer built it.
@@ -5683,17 +6072,23 @@ def stamped_support(support: MemorySupport, episode: EpisodicMemory | None) -> M
     Returns:
         The support with its holder.
 
-    **No support points at an input whose origin is** ``assistant`` (ADR-0350 §6:11): such
-    an input is a scheduled task's instruction, the assistant's own words, never a holder
-    §2's table has a kind for, so the stamp refuses it whichever writer built it.
-
     Raises:
-        ValueError: If the support carries a holder §2's table does not give its part, or
-            points at an input whose origin is ``assistant``.
+        ValueError: If the support carries a holder §2's table does not give its part,
+            points at an input §7:3 refuses, or takes an origin its part does not give.
     """
-    if isinstance(support.points_at, InputPart) and _assistant_input(episode):
-        msg = "no support points at an input whose origin is assistant (ADR-0350 §6:11)"
-        raise ValueError(msg)
+    processing = None if episode is None else episode.processing_record
+    if isinstance(support.points_at, InputPart) and processing is not None:
+        if support.holder is None:
+            required = input_support_origin(processing, support.points_at.message)
+            if support.origin is not required:
+                msg = (
+                    f"a support on this part takes {required}, not {support.origin} "
+                    f"(ADR-0351 §7:2, §7:6)"
+                )
+                raise ValueError(msg)
+        elif parties_are_assistants(processing.trigger.parties):
+            msg = "no support points at an input that is the assistant's (ADR-0350 §6:11)"
+            raise ValueError(msg)
     computed = support_holder(support, episode)
     recorded = support.holder
     if recorded is None:

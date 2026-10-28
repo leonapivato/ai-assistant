@@ -94,6 +94,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from ai_assistant.core.channel_validation import message_party
 from ai_assistant.core.errors import (
     MemoryStoreError,
     TelegramIntakeRecordError,
@@ -458,20 +459,31 @@ class TelegramInput:
 
 
 def _recorded(messages: Sequence[TelegramMessage]) -> tuple[RecordedInputMessage, ...]:
-    """Each message as an episode records it: dated, a forward with its sender (§5:4)."""
+    """Each message as an episode records it: dated, a forward with its sender (§5:4).
+
+    Each carries the party the line's kind declares for it (ADR-0351 §2:6, §3:1): the
+    owner's for a message the configured account wrote, and a forward's original
+    sender, claimed, for a forward (§2:7), so an absorption or a take that brings these
+    messages brings their parties.
+    """
     return tuple(
         RecordedInputMessage(
             text=one.text or "",
             sent_at=one.sent_at,
             position=one.message_id,
-            forwarded_from=None
-            if one.forward_origin is None
-            else ClaimedAuthor(
-                name=one.forward_origin.name, account_id=one.forward_origin.account_id
-            ),
+            forwarded_from=_sender(one),
+            party=message_party(TELEGRAM_CHANNEL_TYPE, _sender(one)),
         )
         for one in messages
     )
+
+
+def _sender(message: TelegramMessage) -> ClaimedAuthor | None:
+    """A forward's original sender, claimed, as Telegram reported it; ``None`` otherwise."""
+    origin = message.forward_origin
+    if origin is None:
+        return None
+    return ClaimedAuthor(name=origin.name, account_id=origin.account_id)
 
 
 def is_stop_command(message: TelegramMessage) -> bool:

@@ -57,6 +57,7 @@ from ai_assistant.testing import (
     FakeTelegramIntakeRecord,
     FakeToolCallingCompleter,
 )
+from ai_assistant.testing.parties import OWNERS_WORDS
 from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 
 if TYPE_CHECKING:
@@ -155,9 +156,13 @@ async def test_a_message_in_is_answered_in_the_chat_through_the_phases() -> None
     trigger = record.trigger
     assert trigger.channel == line_channel(REFERENCE, CHAT)
     assert trigger.origin is InputOrigin.USER
+    # ADR-0351 §2:6, §3:1: the message carries the owner's words, as the line declares.
     assert trigger.messages == (
-        RecordedInputMessage(text="What's on today?", sent_at=AT, position=40),
+        RecordedInputMessage(
+            text="What's on today?", sent_at=AT, position=40, party=OWNERS_WORDS[0]
+        ),
     )
+    assert trigger.parties == OWNERS_WORDS
     assert input_of(episode) == "What's on today?"
     assert record.status is ProcessingStatus.COMPLETED
     assert episode.outcome == DEFAULT_ROUND_TEXT

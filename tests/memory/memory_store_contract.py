@@ -116,6 +116,7 @@ from ai_assistant.core.types import (
     band_of,
     record_transaction_time,
 )
+from ai_assistant.testing.parties import parties_for
 
 # Far in the past: expired (or window-closed) under any clock at or after 2000 —
 # every real wall-clock and the fixed test clocks the subclasses inject.
@@ -979,7 +980,7 @@ def _activation_episode(record_id: str, *, completed: bool = True) -> EpisodicMe
                 payload=RecordedTextInput(text="exact input"),
                 context=ChannelContext(),
                 reply=None,
-                origin=InputOrigin.OUTSIDE,
+                parties=parties_for(InputOrigin.OUTSIDE),
             ),
             status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
             reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
@@ -1073,7 +1074,7 @@ def _open_episode(
                 payload=RecordedTextInput(text="exact input"),
                 context=ChannelContext(),
                 reply=WholeTextReply(),
-                origin=InputOrigin.USER,
+                parties=parties_for(InputOrigin.USER),
             ),
         ),
     )

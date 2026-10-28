@@ -98,6 +98,7 @@ from ai_assistant.testing import (
     FakeStoryStore,
     FakeToolRegistry,
 )
+from ai_assistant.testing.parties import parties_for
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -182,7 +183,7 @@ def _episode(
             payload=RecordedTextInput(text="the words they wrote"),
             context=ChannelContext(),
             reply=WholeTextReply(),
-            origin=InputOrigin.OUTSIDE if outside else InputOrigin.USER,
+            parties=parties_for(InputOrigin.OUTSIDE if outside else InputOrigin.USER),
         ),
         rounds=tuple(rounds),
     )
