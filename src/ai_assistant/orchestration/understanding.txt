@@ -44,7 +44,7 @@ What each field holds:
   - A stimulus belongs with a matter when it continues, changes, answers or asks about it; sharing a person, a place or a topic is not enough. "Make it two nights", after a request to book Friday, belongs with that booking.
 - `meant_for`: the concurrent stimuli whose work this stimulus is meant for: where that work, carried on without it, would now do the wrong thing or something no longer wanted, because this stimulus corrects, completes, cancels or changes it, whether or not the work has acted yet.
   - A stimulus asking for separate work, even on the same matter, is meant for none. Only `meant_for` makes the stimulus part of that work: a concurrent stimulus's label cited anywhere else makes it part of nothing.
-- `relayed`: whether the stimulus carries words its sender did not write themselves, such as a pasted email or a quoted message.
+- `relayed`: whether the stimulus passes on a message someone else wrote, such as a pasted email or a quoted text message, rather than the sender's own words. A few words quoted inside the sender's own message are still the sender's own.
 
 Throughout the reply:
 
