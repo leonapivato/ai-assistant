@@ -5873,6 +5873,46 @@ class MemoryStoreContract:
         await _replace(store, kept, door)
         assert _unstamped_or_none(await store.get("episode")) == kept
 
+        # A later version marking it again does not mask one between that dropped it.
+        thrice = _revised(
+            _open_episode("episode-3", channel=_CONVERSATION_A),
+            processing={
+                "understanding": (
+                    version(1, relayed=False),
+                    version(2, relayed=True),
+                    version(3, relayed=True),
+                )
+            },
+        )
+        await store.add(thrice)
+        masked = _revised(
+            thrice,
+            processing={
+                "understanding": (
+                    version(1, relayed=False),
+                    version(4, relayed=False),
+                    version(5, relayed=True),
+                ),
+                "understanding_elided": 2,
+            },
+        )
+        with pytest.raises(MemoryStoreError):
+            await _replace(store, masked, door, companion=door != "add")
+        assert _unstamped_or_none(await store.get("episode-3")) == thrice
+        held = _revised(
+            thrice,
+            processing={
+                "understanding": (
+                    version(1, relayed=False),
+                    version(4, relayed=True),
+                    version(5, relayed=True),
+                ),
+                "understanding_elided": 2,
+            },
+        )
+        await _replace(store, held, door)
+        assert _unstamped_or_none(await store.get("episode-3")) == held
+
     @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
     async def test_the_guard_admits_planning_rounds_and_labels_appended(
         self, store: MemoryStore, door: str
