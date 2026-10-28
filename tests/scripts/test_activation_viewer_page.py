@@ -867,6 +867,8 @@ async def test_the_arrow_keys_move_and_a_step_opens_its_call_readable(
         await page.keyboard.press("ArrowRight")
         await expect(step.locator(".walk-head h2")).to_have_text("Understanding")
         await expect(step).to_contain_text(READING["meaning"])
+        # ADR-0353 §14:10: a reply recorded before it, in the shape it was written in.
+        await expect(step).to_contain_text("earlier shape")
         await expect(step).to_contain_text("Which date in May")
         await expect(step.locator(".walk-label", has_text="S1")).to_contain_text("Trip to Lisbon")
         await page.keyboard.press("ArrowLeft")
@@ -876,6 +878,64 @@ async def test_the_arrow_keys_move_and_a_step_opens_its_call_readable(
         await expect(page.locator("#drawer-read .call-head h2")).to_have_text(
             "Understanding", timeout=_SHOWN
         )
+
+
+#: A reply in ADR-0353 §9:1's shape, written to an activation of its own.
+_REPLIED: Final = "replied"
+_REPLY: Final = {
+    "understanding": "Move the Lisbon booking to the 10th.",
+    "cites": ["S1"],
+    "unclear": [{"gap": "which flight on the 10th", "readings": ["the morning one"]}],
+    "belongs_to": ["S1"],
+    "meant_for": [],
+    "relayed": False,
+}
+
+
+@pytest.fixture
+def replied(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over an activation whose understanding replied in the reply's shape."""
+    record = write_record(tmp_path)
+    given = {
+        "messages": [
+            {
+                "role": "user",
+                "content": json.dumps({"stories": [{"label": "S1", "summary": "Trip to Lisbon"}]}),
+            }
+        ]
+    }
+    rows = [
+        {"source": "understanding", "kind": "given", "recorded_at": iso(20), "body": given},
+        {
+            "source": "understanding",
+            "kind": "returned",
+            "recorded_at": iso(30),
+            "body": {"reply": json.dumps(_REPLY)},
+        },
+    ]
+    (record / f"{_REPLIED}.jsonl").write_text(
+        "".join(json.dumps({"activation_id": _REPLIED, **one}) + "\n" for one in rows)
+    )
+    with serving(record) as bound:
+        yield bound
+
+
+async def test_a_reply_in_its_six_keys_walks_in_that_shape(
+    replied: Any, gateway_browser: Browser
+) -> None:
+    """ADR-0353 §14:10: the reply's shape, its unclear point with its reading, its labels."""
+    async with _page(gateway_browser) as page:
+        await page.goto(f"http://127.0.0.1:{replied.port}/#{_REPLIED}/walk/2")
+        step = page.locator("#walk-step")
+        await expect(step.locator(".walk-head h2")).to_have_text("Understanding", timeout=_SHOWN)
+        await expect(step).to_contain_text(str(_REPLY["understanding"]))
+        await expect(step).to_contain_text("which flight on the 10th")
+        await expect(step).to_contain_text("reading: the morning one")
+        await expect(step.locator("h3", has_text="Belongs to")).to_be_visible()
+        await expect(step.locator(".walk-label", has_text="S1").first).to_contain_text(
+            "Trip to Lisbon"
+        )
+        await expect(step).not_to_contain_text("earlier shape")
 
 
 async def test_a_deep_link_opens_its_step_and_the_overview_is_a_click_away(
