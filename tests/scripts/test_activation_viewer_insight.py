@@ -14,9 +14,12 @@ import http.client
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final
 
 import pytest
+
+from ai_assistant.orchestration.understanding import _label_statement
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _activation_record import iso, serving, viewer, write_record
@@ -391,3 +394,100 @@ def test_the_walk_serves_what_it_computed(record: Path) -> None:
     step = next(one for one in served["steps"] if one["title"] == "Understanding")
     assert step["resolution"]["cites"][0]["outcome"] == "kept"
     assert step["spent"][1]["thinking"] == THINKING
+
+
+# --- a label is resolved only where code resolved it -----------------------------------
+
+
+def _understanding(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The walk's understanding step over ``rows``, inside one controller step."""
+    span = {
+        "source": "controller",
+        "kind": "step",
+        "body": {
+            "stage": "understanding",
+            "due": "not_understood",
+            "started_at": iso(0),
+            "ended_at": iso(10_000),
+            "outcome": "done",
+        },
+    }
+    written = [*({"recorded_at": iso(10 * (n + 1)), **one} for n, one in enumerate(rows))]
+    written.append({"recorded_at": iso(10_000), **span})
+    lines = [
+        viewer.parse_line(n, json.dumps({"activation_id": "u", **one}).encode())
+        for n, one in enumerate(written)
+    ]
+    return _step(viewer.walk(lines), "Understanding")
+
+
+def _given(*after: dict[str, str]) -> dict[str, Any]:
+    first = {"role": "user", "content": _TAGGED}
+    return {"source": "understanding", "kind": "given", "body": {"messages": [first, *after]}}
+
+
+def _returned(reply: dict[str, Any], **more: Any) -> dict[str, Any]:
+    body = {"reply": json.dumps({"understanding": "u", **reply}), **more}
+    return {"source": "understanding", "kind": "returned", "body": body}
+
+
+def _statement(unresolved: list[str], unlinkable: list[str]) -> str:
+    """The repair statement as understanding's own stage words it, so its form is pinned."""
+    brief = SimpleNamespace(counts={"H": 1, "R": 1, "M": 1, "P": 1, "S": 1})
+    statement: str = _label_statement(unresolved, brief, unlinkable)  # type: ignore[arg-type]
+    return statement
+
+
+def _repaired(first: dict[str, Any], second: dict[str, Any], statement: str) -> dict[str, Any]:
+    told = [{"role": "assistant", "content": "x"}, {"role": "user", "content": statement}]
+    return _understanding([_given(), _returned(first), _given(*told), _returned(second)])
+
+
+def test_a_reply_that_failed_resolves_no_label() -> None:
+    """A reply recorded with a failure is one the stage rejected: it resolved nothing."""
+    step = _understanding([_given(), _returned({"cites": ["M1"]}, failure="invalid")])
+    assert step["reading"]["cites"] == ["M1"]
+    assert step["resolution"] is None
+    assert "failed" in step["unresolved"]
+
+
+def test_a_repair_with_no_reply_recorded_resolves_no_label() -> None:
+    """The reading is the first reply's, and nothing has answered the repair."""
+    told = [{"role": "user", "content": _statement(["M9"], [])}]
+    step = _understanding([_given(), _returned({"cites": ["M9"]}), _given(*told)])
+    assert step["resolution"] is None
+    assert "No reply to the repair" in step["unresolved"]
+    assert step["repair"]["answered"] is False
+    assert step["repair"]["labels"] == ["M9 in cites"]
+
+
+def test_a_stimulus_in_belongs_to_with_no_repair_links() -> None:
+    """One whose episode records no activation would have earned the repair (ADR-0300 §6:8)."""
+    step = _understanding([_given(), _returned({"belongs_to": ["P1"]})])
+    assert [one["outcome"] for one in step["resolution"]["belongs_to"]] == ["kept"]
+
+
+def test_a_stimulus_the_repair_named_as_linking_nothing_is_dropped_after_it() -> None:
+    statement = _statement([], ["P1"])
+    assert viewer.unlinked_in(statement) == frozenset({"P1"})
+    step = _repaired({"belongs_to": ["P1"]}, {"belongs_to": ["P1"]}, statement)
+    assert step["repair"]["labels"] == ["P1 in belongs_to"]
+    assert [one["outcome"] for one in step["resolution"]["belongs_to"]] == ["dropped"]
+
+
+def test_after_a_repair_a_stimulus_links_only_where_the_record_says_so() -> None:
+    """Named first and not by the repair: it links. Named only after it: not known."""
+    statement = _statement(["M9"], [])
+    assert viewer.unlinked_in(statement) == frozenset()
+    step = _repaired(
+        {"cites": ["M9"], "belongs_to": ["P1"]}, {"belongs_to": ["P1", "R1", "S1"]}, statement
+    )
+    assert [one["outcome"] for one in step["resolution"]["belongs_to"]] == ["kept"] * 3
+    step = _repaired({"cites": ["M9"]}, {"belongs_to": ["P1"]}, statement)
+    assert [one["outcome"] for one in step["resolution"]["belongs_to"]] == ["unknown"]
+
+
+def test_a_statement_naming_as_many_labels_as_the_stage_shows_says_nothing_sure() -> None:
+    labels = [f"P{n}" for n in range(1, viewer.REPAIR_LABELS_SHOWN + 5)]
+    assert viewer.unlinked_in(_statement([], labels)) is None
+    assert viewer.unlinked_in(None) is None

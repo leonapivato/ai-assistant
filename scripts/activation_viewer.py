@@ -3619,9 +3619,16 @@ def _understanding_step(phase: _Phase) -> dict[str, object]:
     last user message (ADR-0354 §8:3). Beside the reading, what code did with each of its
     labels (:func:`resolution_of`), the labels the message showed that the reply names in
     no list, and, where the run was repaired, why.
+
+    What code did is computed only for a reply code resolved: the reply to the run's last
+    request, recorded with no failure. A failed reply, refused or of no parse, resolves
+    nothing, and a reply whose repair has no reply recorded yet was resolved by nothing
+    recorded; each says so instead.
     """
-    given, returned = _first(phase, "given"), _last(phase, "returned")
-    calls = sum(1 for one in phase.entries if one.kind == "given")
+    givens = [one for one in phase.entries if one.kind == "given"]
+    returns = [one for one in phase.entries if one.kind == "returned"]
+    given = givens[0] if givens else None
+    returned = returns[-1] if returns else None
     body = _mapping(None if returned is None else returned.body)
     reply = _text(body.get("reply"))
     reading = None if reply is None else reading_of(reply)
@@ -3630,25 +3637,53 @@ def _understanding_step(phase: _Phase) -> dict[str, object]:
     )
     shown = [] if given is None else shown_labels(given.body)
     used = set() if reading is None else _labels_used(reading)
+    answered = bool(returns) and len(returns) >= len(givens)
+    repair = _repair_of(givens, returns, shown, answered=answered) if len(givens) > 1 else None
+    resolution: dict[str, list[dict[str, object]]] | None = None
+    unresolved: str | None = None
+    if reading is not None and reading.get("shape") == "reply" and given is not None:
+        if _failed(body):
+            unresolved = "The reply failed, so code resolved none of its labels."
+        elif not answered:
+            unresolved = (
+                "No reply to the repair was recorded: the reading is the first reply's, and "
+                "code resolved none of its labels."
+            )
+        else:
+            unlinked, earlier = (None, frozenset[str]()) if repair is None else _repair_told(repair)
+            resolution = resolution_of(
+                reading, shown, repaired=repair is not None, unlinked=unlinked, earlier=earlier
+            )
     return {
-        "calls": calls,
+        "calls": len(givens),
         "returned": returned is not None,
         "reading": reading,
         "reply": reply if reading is None else None,
         "labels": labels,
         "failure": _failure_of(body),
-        "resolution": None
-        if reading is None or reading.get("shape") != "reply" or given is None
-        else resolution_of(reading, shown, repaired=calls > 1),
+        "resolution": resolution,
+        "unresolved": unresolved,
         "not_cited": None
         if reading is None or given is None
         else [one for one in shown if one["label"] not in used],
-        "repair": _repair_of(phase, shown) if calls > 1 else None,
+        "repair": repair,
     }
 
 
 #: The labels of the ``R`` form: a concurrent stimulus's (ADR-0353 §2:2).
 _R_LABEL: Final = re.compile(r"R[0-9]+")
+
+#: The most labels a repair's statement names in one sentence, as understanding bounds them
+#: (``_REPAIR_LABELS_SHOWN``): a sentence naming this many may have left some out.
+REPAIR_LABELS_SHOWN: Final = 20
+
+#: The repair statement's sentence naming the labels in ``belongs_to`` that name no matter
+#: and no earlier stimulus (ADR-0300 §6:8), each written as a JSON string.
+_UNLINKED_SENTENCE: Final = re.compile(
+    r"in `belongs_to` name no matter and no earlier stimulus: "
+    r'((?:"(?:[^"\\]|\\.)*"(?:, )?)+)\.'
+)
+_QUOTED: Final = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 #: What each outcome of a label's resolution says of it, by ADR-0353 §9's rules.
 _RESOLVED: Final = {
@@ -3656,8 +3691,15 @@ _RESOLVED: Final = {
     "running": "names a concurrent stimulus shown under it: links to that running activation "
     "(ADR-0353 §10:3)",
     "matter": "names a matter shown under it: links to that matter",
-    "stimulus": "names a stimulus shown under it: links to its activation, where its episode "
-    "records one",
+    "stimulus": "names a stimulus shown under it: links to its activation, since one whose "
+    "episode records none would have earned the repair (ADR-0300 §6:8, ADR-0353 §9:10)",
+    "stimulus_linked": "names a stimulus shown under it, which the first reply named too and "
+    "the repair did not: links to its activation",
+    "stimulus_unlinked": "names a stimulus whose episode records no activation, as the repair "
+    "said, still after it: dropped (ADR-0300 §6:8, ADR-0353 §9:10)",
+    "stimulus_unknown": "names a stimulus shown under it, after the repair: whether its "
+    "episode records an activation to link is not known here; where it records none, it is "
+    "dropped (ADR-0353 §9:10)",
     "continues": "names a concurrent stimulus shown under it: this stimulus continues its "
     "work (ADR-0353 §10:4)",
     "fact": "names a remembered fact, which links nothing: dropped, with no repair "
@@ -3670,8 +3712,7 @@ _RESOLVED: Final = {
     "no_running": "names no concurrent stimulus shown: dropped, with no repair (ADR-0353 §9:11)",
     "not_running": "is no concurrent stimulus's label: dropped, with no repair (ADR-0353 §9:11)",
     "after_repair": "names nothing shown, after the one repair: dropped (ADR-0353 §9:10)",
-    "repair": "names nothing shown: the reply earns the one repair (ADR-0353 §9:10), and the "
-    "record shows none",
+    "repair": "names nothing shown: a reply naming it earns the one repair (ADR-0353 §9:10)",
     "again": "listed again: recorded once",
 }
 
@@ -3728,7 +3769,12 @@ def _labels_of_document(document: Mapping[str, object]) -> list[dict[str, object
 
 
 def resolution_of(
-    reading: Mapping[str, object], shown: Sequence[Mapping[str, object]], *, repaired: bool
+    reading: Mapping[str, object],
+    shown: Sequence[Mapping[str, object]],
+    *,
+    repaired: bool,
+    unlinked: frozenset[str] | None = None,
+    earlier: frozenset[str] = frozenset(),
 ) -> dict[str, list[dict[str, object]]]:
     """What code did with each label of a reply in ADR-0353 §9:1's shape, computed.
 
@@ -3742,10 +3788,19 @@ def resolution_of(
     to a shown concurrent stimulus (§9:11); and any other label naming nothing shown earns
     the one repair, and is dropped where it is still there after it (§9:10).
 
+    A stimulus in ``belongs_to`` links where its episode records an activation, which the
+    message does not say either (ADR-0300 §6:8). Where the reply needed no repair it did,
+    since one that did not would have earned it; after a repair, it did where the first
+    reply named it too and the repair's statement did not, and did not where the
+    statement named it; any other is not known.
+
     Args:
         reading: The reply, as :func:`reading_of` reads it in the reply's shape.
         shown: The labels the message showed, as :func:`shown_labels` gives them.
         repaired: Whether this reply answered the one repair.
+        unlinked: The labels in ``belongs_to`` the repair's statement named as linking
+            nothing; ``None`` where that is not known.
+        earlier: The labels in the first reply's ``belongs_to``, where it was repaired.
 
     Returns:
         Each of ``cites``, ``belongs_to`` and ``meant_for``, each label in the reply's
@@ -3760,6 +3815,8 @@ def resolution_of(
         for label in _strings(reading.get(key)):
             item = by_label.get(label)
             why = "again" if label in seen else _resolution(key, label, item, repaired=repaired)
+            if why == "stimulus" and repaired:
+                why = _after_repair(label, unlinked, earlier)
             seen.add(label)
             rows.append(
                 {
@@ -3774,12 +3831,24 @@ def resolution_of(
     return resolved
 
 
+def _after_repair(label: str, unlinked: frozenset[str] | None, earlier: frozenset[str]) -> str:
+    """Whether a stimulus in the repaired reply's ``belongs_to`` links, where it is known."""
+    if unlinked is None:
+        return "stimulus_unknown"
+    if label in unlinked:
+        return "stimulus_unlinked"
+    return "stimulus_linked" if label in earlier else "stimulus_unknown"
+
+
 #: Each reason's outcome for the label.
 _OUTCOMES: Final = {
     "shown": "kept",
     "running": "kept",
     "matter": "kept",
     "stimulus": "kept",
+    "stimulus_linked": "kept",
+    "stimulus_unlinked": "dropped",
+    "stimulus_unknown": "unknown",
     "continues": "kept",
     "fact": "dropped",
     "item": "unknown",
@@ -3818,28 +3887,81 @@ _LINKED_BY_TAG: Final = {
 }
 
 
-def _repair_of(phase: _Phase, shown: Sequence[Mapping[str, object]]) -> dict[str, object]:
+def unlinked_in(statement: str | None) -> frozenset[str] | None:
+    """The labels a repair's statement names as in ``belongs_to`` and linking nothing.
+
+    The statement is the code's own (ADR-0300 §6:8, ADR-0354 §8:3), each label written as
+    a JSON string. A statement with no such sentence names none. ``None`` where that is
+    not known: no statement, a label that does not read, or as many labels as the stage
+    names at most, since it may have left some out.
+    """
+    if statement is None:
+        return None
+    found = _UNLINKED_SENTENCE.search(statement)
+    if found is None:
+        return frozenset()
+    labels: list[str] = []
+    for quoted in _QUOTED.findall(found.group(1)):
+        try:
+            label = json.loads(quoted)
+        except _UNPARSABLE:
+            return None
+        if not isinstance(label, str):
+            return None
+        labels.append(label)
+    return None if len(labels) >= REPAIR_LABELS_SHOWN else frozenset(labels)
+
+
+def _repair_told(repair: Mapping[str, object]) -> tuple[frozenset[str] | None, frozenset[str]]:
+    """What a repair says of the first reply's ``belongs_to``: what linked nothing, and all."""
+    unlinked = repair.get("unlinked")
+    earlier = repair.get("earlier")
+    return (
+        frozenset(_strings(unlinked)) if isinstance(unlinked, list) else None,
+        frozenset(_strings(earlier)),
+    )
+
+
+def _repair_of(
+    givens: Sequence[Entry],
+    returns: Sequence[Entry],
+    shown: Sequence[Mapping[str, object]],
+    *,
+    answered: bool,
+) -> dict[str, object]:
     """Why a run was repaired: the first reply, its failure, and the code's statement.
 
     The repair's request carries the first reply as the assistant's turn and the code's
     statement of what was wrong with it as its last user message (ADR-0354 §8:3), so the
-    statement is read from the record, never computed. The labels of the first reply
-    that named nothing shown are computed, as :func:`resolution_of` computes them.
+    statement is read from the record, never computed. The first reply's labels that
+    earned it are: those naming nothing shown, computed as :func:`resolution_of` computes
+    them, and those the statement names in ``belongs_to``. A first reply that failed
+    earned it by failing, and none of its labels did.
     """
-    givens = [one for one in phase.entries if one.kind == "given"]
-    returns = [one for one in phase.entries if one.kind == "returned"]
     first = _mapping(returns[0].body) if returns else {}
     reply = _text(first.get("reply"))
     reading = None if reply is None else reading_of(reply)
+    statement = _user_content(givens[1].body)
+    unlinked = unlinked_in(statement)
     labels: list[str] = []
-    if reading is not None and reading.get("shape") == "reply":
+    earlier: list[str] = []
+    if reading is not None and reading.get("shape") == "reply" and not _failed(first):
+        earlier = _strings(reading.get("belongs_to"))
         for key, rows in resolution_of(reading, shown, repaired=False).items():
-            labels += [f"{row['label']} in {key}" for row in rows if row["outcome"] == "repair"]
+            labels += [
+                f"{row['label']} in {key}"
+                for row in rows
+                if row["outcome"] == "repair"
+                or (key == "belongs_to" and unlinked and row["label"] in unlinked)
+            ]
     return {
-        "statement": _user_content(givens[1].body),
+        "statement": statement,
         "first_failure": _failure_of(first),
         "first_reply": None if reply is None else _cut(_readable(reply)),
         "labels": labels,
+        "answered": answered,
+        "unlinked": None if unlinked is None else sorted(unlinked),
+        "earlier": earlier,
     }
 
 
@@ -6172,11 +6294,12 @@ SCRIPT: Final = r"""
   function repairInto(root, rep) {
     const box = sec(root, "The repair");
     box.appendChild(el("p", "note", "The first reply earned the one repair (ADR-0353 "
-      + "\u00a79:10); the reading below is the repaired reply\u2019s."));
+      + "\u00a79:10); " + (rep.answered ? "the reading below is the repaired reply's."
+        : "no reply to the repair was recorded, so the reading below is the first reply's.")));
     if (rep.first_failure) box.appendChild(el("div", "m", "the first reply: "
       + words(rep.first_failure)));
     if (rep.labels.length) {
-      box.appendChild(el("div", "m", "labels in it that named nothing shown (computed): "
+      box.appendChild(el("div", "m", "labels in it that earned the repair (computed): "
         + rep.labels.join(", ")));
     }
     if (rep.statement !== null) {
@@ -6192,6 +6315,9 @@ SCRIPT: Final = r"""
   // message showed that the reply names in no list.
   function labelWorkInto(root, s) {
     const res = s.resolution;
+    if (s.unresolved) {
+      sec(root, "What code did with its labels").appendChild(el("p", "note", s.unresolved));
+    }
     if (res) {
       const box = sec(root, "What code did with its labels");
       box.appendChild(el("p", "note", "Computed here from the labels the message showed, by "
