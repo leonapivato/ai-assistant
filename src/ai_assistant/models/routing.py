@@ -21,6 +21,11 @@ The first is the intended shape and the one ADR-0013 recommends: exhaust the
 cheap in-provider retries before paying to re-send the prompt somewhere else.
 Nothing here enforces that — the wrapper composes either way — so whoever wires
 the pipeline chooses deliberately.
+
+It implements :class:`~ai_assistant.core.protocols.StructuredCompleter` beside
+``ModelProvider``, with the same route order and ``model`` override handling, over
+routes whose providers implement both (ADR-0354 §6:1). A structured call's returned
+failure is a response that came back, so it is never routed (§5:4).
 """
 
 from __future__ import annotations
@@ -34,12 +39,15 @@ import structlog
 
 from ai_assistant.core import errors as _errors
 from ai_assistant.core.errors import ConfigurationError, ModelError
+from ai_assistant.models.retry import as_structured
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+    from pydantic import BaseModel
 
     from ai_assistant.core.protocols import ModelProvider
-    from ai_assistant.core.types import Message
+    from ai_assistant.core.types import Message, StructuredReply
 
 _log = structlog.get_logger(__name__)
 
@@ -327,3 +335,90 @@ class RoutingProvider:
             failures=[{"route": label, "error": _classify(exc)} for label, exc in failures],
         )
         raise last
+
+    async def complete_structured[T: BaseModel](
+        self,
+        messages: Sequence[Message],
+        shape: type[T],
+        *,
+        model: str | None = None,
+    ) -> StructuredReply[T]:
+        """Ask the first candidate that answers for ``shape`` (ADR-0354 §6:1).
+
+        The route order and the ``model`` override handling :meth:`complete` applies,
+        over routes whose providers implement
+        :class:`~ai_assistant.core.protocols.StructuredCompleter`. Each route's request
+        is sent in the mode its own model takes (§4:3). A returned failure is a
+        response that came back, so it is returned from the route that got it and
+        never routed (§5:4): only a raised, routable ``ModelError`` moves on to the
+        next route.
+
+        Args:
+            messages: Conversation history, oldest first.
+            shape: The pydantic model class the reply is asked for as.
+            model: An explicit ``"provider:model"`` override, which disables routing
+                as it does for :meth:`complete`.
+
+        Returns:
+            What the first route that did not raise returned: the shape's value or a
+            returned failure.
+
+        Raises:
+            ModelError: The bare class, before any route is tried, if a route that
+                could be tried has a provider that does not implement
+                ``StructuredCompleter``. Otherwise as :meth:`complete` raises.
+        """
+        # ADR-0065's clause, on the first executed line, as in `complete`.
+        conversation = [message.model_copy(deep=True) for message in messages]
+        for route in self._routes if model is None else self._routes[:1]:
+            as_structured(route.provider)
+        return await self._routed(
+            lambda provider, chosen: as_structured(provider).complete_structured(
+                conversation, shape, model=chosen
+            ),
+            model,
+        )
+
+    async def _routed[R](
+        self,
+        send: Callable[[ModelProvider, str | None], Awaitable[R]],
+        model: str | None,
+    ) -> R:
+        """Send to the first candidate that answers, by ``send``: :meth:`complete`'s loop.
+
+        :meth:`complete` keeps its own copy, whose comments carry the reasoning for each
+        step (what is logged, and why the last failure is re-raised untouched), so a
+        failure it re-raises carries no frame more than it did before structured calls
+        existed. The two loops route, log and raise alike.
+
+        Raises:
+            ModelError: A non-routable failure, immediately and unchanged. If
+                every route fails routably, the last failure is re-raised
+                untouched.
+        """
+        if model is not None:
+            primary = self._routes[0]
+            return await send(primary.provider, model)
+
+        failures: list[tuple[str, ModelError]] = []
+
+        for position, route in enumerate(self._routes, start=1):
+            try:
+                return await send(route.provider, route.model)
+            except ModelError as exc:
+                if not exc.routable:
+                    raise
+                if position < len(self._routes):
+                    _warn(
+                        "route failed; trying the next one",
+                        route=route.describe(position),
+                        error=_classify(exc),
+                    )
+                failures.append((route.describe(position), exc))
+
+        _warn(
+            "all routes failed",
+            routes=len(self._routes),
+            failures=[{"route": label, "error": _classify(exc)} for label, exc in failures],
+        )
+        raise failures[-1][1]
