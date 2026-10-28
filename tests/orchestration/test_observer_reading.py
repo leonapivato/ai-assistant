@@ -50,6 +50,7 @@ from ai_assistant.core.types import (
     RecallProvenance,
     RecordedInputMessage,
     RoundMessagePart,
+    RoundResponse,
     StoryActor,
     StoryMember,
     StoryMemberKind,
@@ -68,6 +69,13 @@ from ai_assistant.orchestration.observer.reading import (
     input_origin,
     memory_then,
 )
+from ai_assistant.orchestration.planning import (
+    PLANNING_PROMPT,
+    PlaceWindow,
+    PlanningInputs,
+    PlanningStage,
+)
+from ai_assistant.testing import FakeToolCallingCompleter, default_prompt
 from ai_assistant.testing.memories import memory, said_support
 
 
@@ -622,6 +630,67 @@ async def test_a_running_referent_reads_nothing_even_of_work_that_ended_first() 
     )
 
     _by_identity_alone(reading)
+
+
+class _Kept:
+    """A round recorder that keeps the labels each round assigned."""
+
+    def __init__(self) -> None:
+        self.labels: list[PlanningLabel] = []
+
+    async def record(self, _round: object, labels: tuple[PlanningLabel, ...]) -> None:
+        self.labels.extend(labels)
+
+
+async def _planning_labels(understood: ActivationUnderstanding) -> tuple[PlanningLabel, ...]:
+    """The labels a planning round shown ``understood`` records, as the activation keeps."""
+    kept = _Kept()
+    stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT),
+        completer=FakeToolCallingCompleter.scripted(RoundResponse(text="Done.")),
+        recorder=kept,
+        excerpt_chars=200,
+        now=lambda: AT,
+        new_id=lambda: "round:1",
+    )
+    await stage.plan(
+        PlanningInputs(
+            activation_id="one",
+            place=PlaceWindow(takes_message=True),
+            capabilities=(),
+            trigger_origin=InputOrigin.USER,
+            understanding=understood,
+        )
+    )
+    return tuple(kept.labels)
+
+
+async def test_planning_s_labels_open_no_read_through_a_running_referent() -> None:
+    """ADR-0353 §10:6 from planning to the observer: the work a running referent names
+    ended before the leaving episode did, and planning was shown the version; nothing
+    planning recorded makes the observer read that work."""
+    understood = _understood(referents=(_running(),))
+    labels = await _planning_labels(understood)
+    harness = Harness()
+    ended = AT - timedelta(minutes=5)
+    await harness.hold(
+        episode(
+            "booking",
+            at=AT - timedelta(minutes=10),
+            text=_BOOKING_INPUT,
+            rounds=(said("r1", _BOOKED, at=ended),),
+            ended=ended,
+        ),
+        episode(
+            "one",
+            at=AT - timedelta(minutes=3),
+            text="make it five",
+            labels=labels,
+            understanding=(understood,),
+        ),
+    )
+
+    _by_identity_alone(await _read(harness, "one"))
 
 
 async def test_linked_work_that_ended_before_the_leaving_episode_is_read_as_it_stood() -> None:

@@ -82,6 +82,7 @@ from ai_assistant.orchestration.planning import (
     CallOutcomeKind,
     DigestedEvidence,
     DigestItem,
+    OfferShown,
     PlaceAuthor,
     PlaceItem,
     PlaceWindow,
@@ -671,18 +672,46 @@ async def test_planning_is_shown_a_versions_cited_items_and_unclear_points_and_n
     sent = _sent(completer)["understanding"]
     assert sent == {
         "meaning": "the user wants a table for two tonight",
-        "rests_on": ["M1", "E1"],
+        "rests_on": ["M1", "running work this input draws on, not shown here"],
         "unclear": [
             {"gap": "which night", "readings": ["tonight", "Friday"]},
             {"gap": "how many", "readings": ["two"]},
         ],
         "belongs_to": ["S1"],
     }
-    # §10:6: running work is named by its episode's label, never by its excerpt.
+    # §10:6: never by its excerpt, and no label is minted for the citation alone, which
+    # the record would keep and the observer read through.
     assert "Luigi" not in json.dumps(_sent(completer))
+    assert "activation:booking" not in {one.id for one in planned.labels}
+
+
+_BOOKING: Final = UnderstandingReferent(
+    kind="running", id="activation:booking", source="hub", excerpt="book a table at Luigi's"
+)
+
+
+async def test_running_work_planning_is_shown_another_way_is_cited_by_its_label() -> None:
+    """ADR-0353 §14:1: running work shown to planning as an offer is cited by its label."""
+    offer = OfferShown(activation_id="booking", input="book a table", meaning="Books a table.")
+    stage, completer, _ = _stage()
+    planned = await stage.plan(
+        _inputs(understanding=_understanding(meaning_referents=(_BOOKING,)), offers=(offer,))
+    )
+    sent = _sent(completer)
+    assert sent["understanding"]["rests_on"] == ["E1"]
+    assert sent["offers"][0]["offer"] == "E1"
     assert ("E1", LabelKind.EPISODE, "activation:booking") in [
         (one.label, one.kind, one.id) for one in planned.labels
     ]
+
+
+async def test_running_work_planning_already_labelled_is_cited_by_that_label() -> None:
+    recorded = (PlanningLabel(label="E4", kind=LabelKind.EPISODE, id="activation:booking"),)
+    stage, completer, _ = _stage()
+    await stage.plan(
+        _inputs(understanding=_understanding(meaning_referents=(_BOOKING,)), labels=recorded)
+    )
+    assert _sent(completer)["understanding"]["rests_on"] == ["E4"]
 
 
 async def test_a_version_with_no_unclear_point_shows_no_unclear_key() -> None:
