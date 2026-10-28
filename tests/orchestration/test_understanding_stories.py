@@ -37,6 +37,7 @@ from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationRecall,
+    ActivationUnderstanding,
     BeliefBand,
     ChannelContext,
     ChannelContextItem,
@@ -54,6 +55,7 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StorySummaryLine,
     TranscriptMessage,
+    UnderstandingProducer,
     UnderstandingReferent,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
@@ -75,7 +77,7 @@ from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.prompts import PromptTemplate
-    from ai_assistant.core.types import ActivationUnderstanding, EpisodicMemory
+    from ai_assistant.core.types import EpisodicMemory
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.understanding import ChannelWindow
 
@@ -121,7 +123,20 @@ _TRIP: Final = ShortView(
         ),
         _note(3, "The campground emailed a new rate.", outside=True),
     ),
-    episodes=(episode("a-1", text="Book the canoe for Sunday."),),
+    episodes=(
+        episode(
+            "a-1",
+            text="Book the canoe for Sunday.",
+            understanding=(
+                ActivationUnderstanding(
+                    version=1,
+                    recorded_at=AT,
+                    producer=UnderstandingProducer.INTERPRETATION,
+                    meaning="Asks to book the canoe for Sunday.",
+                ),
+            ),
+        ),
+    ),
 )
 _RUNNING: Final = ShortView(story_id="story:running", lines=(), notes=(), episodes=())
 
@@ -235,15 +250,17 @@ async def test_the_candidates_render_under_s_labels_attributed_by_their_records(
 
     first, second = _matters(model)
     assert (first.label, second.label) == ("S1", "S2")
-    summary, owner, outside = first.tags
+    summary, owner, outside, latest = first.tags
     assert (summary.name, summary.get("from")) == ("summary", "the system")
     assert summary.text == "A camping trip to Riverside.\nThe park says the lake is closed."
     # ADR-0303 §3:8, ADR-0353 §3:7: marked outside by the record's mark, never its text.
     assert summary.get("outside") == "yes"
     assert (owner.name, owner.get("from"), owner.get("outside")) == ("note", "the owner", None)
     assert (outside.get("from"), outside.get("outside")) == ("the system", "yes")
-    # §6:5: a short view's latest episodes take no label; with no meaning, none renders.
-    assert 'label="' not in "".join(str(one.attributes) for one in first.tags)
+    # §6:5, ADR-0353 §3:2: a latest stimulus as its meaning, from the system, with no label.
+    assert (latest.name, latest.text) == ("latest", "Asks to book the canoe for Sunday.")
+    assert latest.attributes == {"from": "the system", "at": "Thu 8 Oct 2026, 12:00 pm"}
+    assert all("label" not in one.attributes for one in first.tags)
     # A story with nothing written holds nothing.
     assert second.tags == []
 
@@ -300,7 +317,7 @@ async def test_a_view_that_may_not_show_notes_renders_no_notes_part(
     await _understand(model, stories=Candidates(views=(hidden,)), audience=UNBOUNDED)
 
     (view,) = _matters(model)
-    assert [one.name for one in view.tags] == ["summary"]
+    assert [one.name for one in view.tags] == ["summary", "latest"]
     assert view.tags[0].get("withheld") == "yes"
 
 

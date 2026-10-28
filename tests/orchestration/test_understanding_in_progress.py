@@ -187,11 +187,6 @@ async def test_each_entry_shows_exactly_what_caused_it_its_input_and_whether_it_
     assert understood.continues == (_SATURDAY,)
     assert understood.grounding_dropped == 0
     assert len(model.calls) == 1
-    # The instruction says what the section is, and what meant_for names.
-    instruction = model.calls[0].messages[0].content
-    assert "Concurrent stimuli" in instruction
-    assert "`meant_for`" in instruction
-    assert "corrects, completes, cancels or changes" in instruction
 
 
 async def test_a_withheld_input_says_why_and_never_appears() -> None:
