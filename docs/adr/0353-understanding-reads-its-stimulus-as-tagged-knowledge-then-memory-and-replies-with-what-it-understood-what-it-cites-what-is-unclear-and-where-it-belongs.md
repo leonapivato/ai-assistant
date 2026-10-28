@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-10-27
 - Scope: understanding's user message and its reply. The message becomes tagged text in a fixed order, knowledge then memory (§2), with tags that name every writer (§3), people named and "origin" for ADR-0349's place (§4), times in full in the person's zone (§5), a situation (§6), a framing sentence for each kind of stimulus (§7) and a reason for every empty section, so the instruction takes no flag (§8). The reply becomes `{understanding, cites, unclear, belongs_to, meant_for, relayed}`, mapped onto `core`, with every stored version upgraded to the new form (§9). A running activation becomes a referent, so an `R` label may be cited anywhere, and only `meant_for` drives the takeover (§10). Approvals stop until the authority run (§11), and grounds go (§12). The instruction, its required wording and the live override (§13), the readers (§14), the code it binds and the lanes (§15, §16). [Milestone 17](https://github.com/leonapivato/ai-assistant/milestone/17), acceptance [#3481](https://github.com/leonapivato/ai-assistant/issues/3481), batch [#3482](https://github.com/leonapivato/ai-assistant/issues/3482).
-- Dependency: [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md), [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md), [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md), [ADR-0326](0326-a-persons-memory-carries-across-every-upgrade-each-schema-change-ships-its-migration-and-a-fresh-data-directory-is-the-owners-ruling.md), [ADR-0334](0334-a-prompt-is-a-template-the-hub-loads-at-start-the-owners-hub-may-override-it-from-its-data-directory-and-each-model-call-records-the-version-it-sent.md), [ADR-0337](0337-a-prompt-change-is-judged-on-a-regression-suite-with-repeated-samples-each-recorded-call-is-asked-what-it-had-to-guess-and-a-candidate-is-promoted-after-three-clean-days.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md), [ADR-0349](0349-a-place-is-only-what-caused-an-activation-a-stop-is-reached-three-ways-running-work-is-shared-by-reading-it-and-the-newest-absorbs-what-it-continues.md) and [ADR-0351](0351-an-input-carries-the-parties-whose-words-it-is-and-outside-content-authority-and-a-supports-holder-follow-from-them.md), whose parties and relay mark this decision reads and does not redecide, as their status lines leave them.
+- Dependency: [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md), [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md), [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md), [ADR-0326](0326-a-persons-memory-carries-across-every-upgrade-each-schema-change-ships-its-migration-and-a-fresh-data-directory-is-the-owners-ruling.md), [ADR-0334](0334-a-prompt-is-a-template-the-hub-loads-at-start-the-owners-hub-may-override-it-from-its-data-directory-and-each-model-call-records-the-version-it-sent.md), [ADR-0337](0337-a-prompt-change-is-judged-on-a-regression-suite-with-repeated-samples-each-recorded-call-is-asked-what-it-had-to-guess-and-a-candidate-is-promoted-after-three-clean-days.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md), [ADR-0349](0349-a-place-is-only-what-caused-an-activation-a-stop-is-reached-three-ways-running-work-is-shared-by-reading-it-and-the-newest-absorbs-what-it-continues.md), [ADR-0354](0354-a-stage-asks-for-its-replys-shape-through-a-structured-completer-beside-the-model-provider-and-gets-back-a-value-or-a-named-failure.md), whose seam carries the reply once understanding moves to it, and [ADR-0351](0351-an-input-carries-the-parties-whose-words-it-is-and-outside-content-authority-and-a-supports-holder-follow-from-them.md), whose parties and relay mark this decision reads and does not redecide, as their status lines leave them.
 - Authorization: the owner rewrote understanding's system prompt with the prompts front on 2026-10-26 and 2026-10-27, in the shared document "Understanding prompt: working draft", ruling each part of the input format and the reply as it went. On 2026-10-27 the owner directed that the code be made compatible with that draft before work moves to the next prompt (#3482). The owner's words on the points this decision turns on, verbatim: on grounds, "remove ground from here" (§12); on running work cited outside `continues` ([#3461](https://github.com/leonapivato/ai-assistant/issues/3461)), "I like this change" (§10); on the question mark and its label, "I think this is bad design. We'll revisit when doing the authority run. For now I think understanding shouldnt see the Q label", and then "thats fine if approvals stop working for now" (§11); on the flags, "why not just have it always on and if those are off it gives the message off or err?" (§8); and on the field names, "go with meant_for". The owner then ruled, on 2026-10-27, the four points this draft raised, verbatim: on the deploys, "ok whatever is easist to get to the final state, the intrim doesnt matter" (§15:4); on the live override and ADR-0337's three days, "Thats fine" (§13:5, §13:7); on the fields the reply no longer fills, "I think its fine for a clean wipe too if its easier", and then "for 3. wiping episodes and memories and stuff is fine too" (§9:6, §15:5); and on a relayed input and the person's own running work, "I agree, your saying that an activation that the understanding marks as a relay doesnt have authority and also cannot takeover another activation" (Consequences). The dispatcher assigned 0353. Ratification is the owner's, after the owner reads it (§1:1).
 - **Contract-surface decision, and a breaking change under golden rule 5.** It changes `core/types.py`: `ProposedActivationUnderstanding` takes the reply's keys, and `ProposedReference`, `ProposedRelationship` and `ProposedAnswer` leave it (§9:2, §9:9); `UnclearPoint` is added, `ActivationUnderstanding` gains `unclear` and loses `meaning_ground`, `references`, `relationships`, `unresolved` and `answers`, and `UnderstandingGround`, `UnderstandingReference`, `UnderstandingRelationship` and `UnresolvedMatter` leave `core` (§9:3–§9:9); `UnderstandingReferent.kind` gains `running` (§10:1); `EpisodeProjection` loses `meaning_ground` and carries `unclear` for `unresolved` (§14:2); and `RecallCue` gains a member (§14:4). No `Protocol` member changes. The episode store ships an upgrade (§15:3), and `PROTOCOL_VERSION` advances (§15:2).
 - **Partially supersedes**, in the clauses §18's first table names: ADR-0276, ADR-0281, ADR-0284, ADR-0300, ADR-0303, ADR-0304, ADR-0305, ADR-0308, ADR-0321, ADR-0322, ADR-0334, ADR-0337, ADR-0338, ADR-0339, ADR-0346 and ADR-0349.
@@ -483,10 +483,11 @@ The reply is one JSON object:
 > repair, as ADR-0303 §7:6 and ADR-0305 §3:2 have it.
 
 > **Normative.** The reply arrives by the existing text path, read as JSON after one
-> enclosing code fence is removed, until the structured-output decision batch #3482's lane
-> A2 drafts is built. Once it is, the reply arrives by structured output, its schema
-> `ProposedActivationUnderstanding`'s, and this section's checks run on what it returns.
-> Nothing in this decision waits on that one.
+> enclosing code fence is removed, until understanding makes ADR-0354's move (ADR-0354 §8:1,
+> §12:2). From then it arrives as a structured call whose reply shape is
+> `ProposedActivationUnderstanding`, this section's label checks and drops run on the value
+> it returns (ADR-0354 §8:2), and a returned `invalid`, `empty` or `cut` is an output that
+> fails to parse (ADR-0354 §8:3). Nothing in this decision waits on that move.
 
 > **Normative.** On the text path, ADR-0339's drop applies to every reply, at the top level
 > and in each element of `unclear`: no key exempts a reply from it, `answers` included.
@@ -737,8 +738,8 @@ The lanes, each after this decision merges `Accepted`:
 2. **U2, the renderer and the instruction**, briefed against merged U1: §2–§8's message, the
    situation and the framing, each kind's origin description and framing, the default
    prompt (§13:1) with no flag, the required-wording list (§13:2), the suite's cases
-   (§13:4), and structured output where the decision batch #3482's lane A2 drafts has been
-   built by then.
+   (§13:4), and understanding's move to structured output (ADR-0354 §8), briefed against
+   ADR-0354's merged S1 as well (ADR-0354 §12).
 3. **U3, the readers** (ADR-0137 §4:1), briefed against merged U1: §14's planning view,
    recall's second run, the cited stories, the observer, the matters pass, the story tidy-up,
    episode inspection and the activation viewer.
@@ -754,8 +755,8 @@ The lanes, each after this decision merges `Accepted`:
 > kinds' declarations (`core/channel_validation.py`, `orchestration/channel_kinds.py`,
 > `orchestration/telegram.py`, `orchestration/task_scheduler.py`), what the understanding
 > phase hands the stage in `orchestration/phase_path.py`, `prompt_cases/`, and
-> `scripts/prompt_replay.py` with its tests, and the wiring of structured output into the
-> stage.
+> `scripts/prompt_replay.py` with its tests, and, for the move to structured output, what
+> ADR-0354 §12:2 lets it touch.
 
 > **Normative.** U3 may touch `orchestration/planning.py`, `orchestration/phase_path.py`,
 > `orchestration/recall.py`, `orchestration/observer/`, `orchestration/matters_pass.py`,
@@ -857,6 +858,7 @@ Read through and not superseded:
 | ADR-0349 §5:2–§5:5, §5:8–§5:10, §6:10, §7:4, §7:17, §10:2, §10:8 | Nothing beyond the rows above: the section, its predicate and its bound stand; no read chains through a `running` referent (§10:6); §10:2's drop of a label naming no shown activation, never a parse failure, stands (§9:11); and the takeover reads `continues` alone |
 | ADR-0351 §5:6–§5:14, §11:4 | Nothing: `relayed` is its relay mark, and §5:12's line is in the new default, whichever of P2 and U2 merges first; P2's cases are written in the format current when it lands |
 | ADR-0352 §8:1 | Its row on #3461, an `R` label outside `continues`, is decided here (§10) |
+| ADR-0354 §8, §12:2 | Nothing: understanding's reply shape is this decision's proposal type (§9:2), which ADR-0354's U2 sends as §8 has it, and the label checks, the one repair and §9:11's drops run on the value (ADR-0354 §8:2) |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
 > dated header note of ADR-0276, ADR-0281, ADR-0284, ADR-0300, ADR-0303, ADR-0304, ADR-0305,
@@ -938,8 +940,8 @@ fields (§4:5). The understanding text "6 pm today" stays as it was recorded (§
   call #3461 measured goes, and with it the delay it added to other activations' waits.
 - **The reply is smaller.** One understanding, one list of what it cites, the gaps with what
   each would mean. Every reply in rounds 10 and 12 parsed, 45 of 45.
-- **Structured output has a schema.** The proposal type is the reply, so the structured-
-  output decision can hand it to the provider as it stands.
+- **Structured output has a schema.** The proposal type is the reply, so ADR-0354's move
+  sends it as understanding's reply shape as it stands (ADR-0354 §8:1).
 
 **What gets harder, and what this leaves.**
 - **Approvals stop.** Until the authority run, no yes approves anything: every call the
