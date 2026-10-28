@@ -35,7 +35,7 @@ from typing import Any, Final
 import pytest
 from memory_parties_carry import holds, origin_recorded, parties_carried
 
-from ai_assistant.core.errors import IncompatibleStateError
+from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     EpisodeProcessingRecord,
@@ -51,6 +51,7 @@ from ai_assistant.core.types import (
     SupportOrigin,
     input_support_origin,
     stamped_support,
+    support_holder,
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory._episode_format import (
@@ -222,7 +223,7 @@ async def test_no_support_is_rewritten(legacy: Path) -> None:
 
     The note beside the forward was recorded ``outside_input`` held by unknown under the
     rule before the decision, and keeps that, though a support a write adds on it now is
-    yours; a later write that carries the stored support keeps it.
+    yours; the rule the store's upgrade gives a stored support's holder by keeps it too.
     """
     before = _raw_rows(legacy)
 
@@ -245,7 +246,7 @@ async def test_no_support_is_rewritten(legacy: Path) -> None:
     assert isinstance(forward, EpisodicMemory)
     assert isinstance(noted, Memory)
     (stored,) = noted.supports
-    assert stamped_support(stored, forward) == stored
+    assert support_holder(stored, forward) == stored.holder == _UNKNOWN
     assert input_support_origin(_processing(forward), 0) is SupportOrigin.USER_MESSAGE
 
 
@@ -291,6 +292,37 @@ async def test_the_walk_resumes_where_it_stood(legacy: Path) -> None:
     read = [record.id for record in rest.records]
     assert "mem-episode" not in read
     assert "mem-episode-open" not in read
+
+
+def test_a_record_the_upgrade_cannot_read_leaves_the_file_as_it_was_found(legacy: Path) -> None:
+    """ADR-0326 §4:3: a forward whose sender no build wrote is refused as the store's
+    error, every row rewritten before it rolls back, and the open holds no lock."""
+    with sqlite3.connect(legacy) as conn:
+        (data,) = conn.execute(
+            "SELECT data FROM records WHERE id = ?", ("mem-episode-line-forward",)
+        ).fetchone()
+        stored = json.loads(data)
+        stored["processing_record"]["trigger"]["messages"][1]["forwarded_from"]["account_id"] = (
+            "broken"
+        )
+        conn.execute(
+            "UPDATE records SET data = ? WHERE id = ?",
+            (json.dumps(stored), "mem-episode-line-forward"),
+        )
+    conn.close()
+    before = _raw_rows(legacy)
+
+    with pytest.raises(MemoryStoreError, match="could not be decoded"):
+        _open(legacy)
+
+    assert _label(legacy) == TAKEN_OVER_RECORD_FORMAT
+    assert _raw_rows(legacy) == before
+    probe = sqlite3.connect(legacy, timeout=0, isolation_level=None)
+    try:
+        probe.execute("BEGIN IMMEDIATE")
+        probe.execute("ROLLBACK")
+    finally:
+        probe.close()
 
 
 async def test_a_second_open_changes_nothing(legacy: Path) -> None:

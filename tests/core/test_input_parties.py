@@ -201,6 +201,10 @@ def test_a_write_naming_another_origin_for_a_part_is_refused() -> None:
         stamped_support(_support(SupportOrigin.USER_MESSAGE, 1), episode)
     with pytest.raises(ValueError, match="takes user_message, not outside_input"):
         stamped_support(_support(SupportOrigin.OUTSIDE_INPUT, 0), episode)
+    # A holder the producer names changes nothing: the part's parties still decide.
+    named = _support(SupportOrigin.USER_MESSAGE, 1).model_copy(update={"holder": _OWNER})
+    with pytest.raises(ValueError, match="takes outside_input, not user_message"):
+        stamped_support(named, episode)
 
 
 @pytest.mark.parametrize("marked", [False, True], ids=["task", "marked-task"])
@@ -216,6 +220,9 @@ def test_a_support_on_a_task_schedulers_input_is_refused(marked: bool) -> None:
     for origin in (SupportOrigin.USER_MESSAGE, SupportOrigin.OUTSIDE_INPUT):
         with pytest.raises(ValueError, match="include the assistant's statement"):
             stamped_support(_support(origin), episode)
+    named = _support(SupportOrigin.OUTSIDE_INPUT).model_copy(update={"holder": _UNKNOWN})
+    with pytest.raises(ValueError, match="include the assistant's statement"):
+        stamped_support(named, episode)
 
 
 def test_an_input_mixing_a_person_and_the_assistants_statement_alone_is_refused() -> None:

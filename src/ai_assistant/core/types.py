@@ -6047,23 +6047,27 @@ def support_holder(support: MemorySupport, episode: EpisodicMemory | None) -> Su
 def stamped_support(support: MemorySupport, episode: EpisodicMemory | None) -> MemorySupport:
     """``support`` carrying the holder §2's table gives it (ADR-0345 §2:2).
 
-    A support recorded with no holder is one a write adds, and gains the one
-    :func:`support_holder` computes; where it points at the input or one of its
-    messages, its origin must be the one :func:`input_support_origin` gives the part
-    (ADR-0351 §7:2, §7:6), so a producer cannot name ``user_message`` for words that are
-    not the person's own. One recorded with a holder keeps it where it is that holder,
-    and where both are people, since which person sent a part is the channel's to
-    establish (ADR-0323 §4:2) and producer code names them. Nothing else is admitted: no
-    producer names an outside source, the assistant's statement or an unknown holder
-    other than the record does.
+    **Every support stamped is one a write adds**: the support an operation adds to a
+    stored memory, and each support of a memory a write creates. A support the stored
+    memory already carries is not stamped again, and keeps the origin and the holder it
+    was recorded under (ADR-0345 §2:9, ADR-0351 §9:4); the store's upgrade gives a
+    stored support with none its holder through :func:`support_holder` alone.
+
+    Where the support points at the input or one of its messages, its origin must be the
+    one :func:`input_support_origin` gives the part (ADR-0351 §7:2, §7:6), whatever holder
+    the producer named, so no producer calls a forward ``user_message`` or your own words
+    ``outside_input``. A support with no holder gains the one :func:`support_holder`
+    computes; one a producer named a holder for keeps it where it is that holder, and
+    where both are people, since which person sent a part is the channel's to establish
+    (ADR-0323 §4:2) and producer code names them. Nothing else is admitted: no producer
+    names an outside source, the assistant's statement or an unknown holder other than
+    the record does.
 
     **No support points at an input whose parties are empty or include the
     assistant's statement** (ADR-0351 §7:3, in place of ADR-0350 §6:11's ``assistant``
     origin): such an input is a scheduled task's instruction, a marked task's included,
-    or one that carries no one's words, so the stamp refuses a support a write adds on
-    any part of it, whichever writer built it. A support recorded before ADR-0351 keeps
-    the origin and holder it was recorded under (§9:4), so the stamp refuses a recorded
-    one only on an input that is the assistant's, as ADR-0350 §6:11 already did.
+    or one that carries no one's words, so the stamp refuses a support on any part of
+    it, whichever writer built it and whatever holder it names.
 
     Args:
         support: The support, as a producer built it.
@@ -6078,16 +6082,12 @@ def stamped_support(support: MemorySupport, episode: EpisodicMemory | None) -> M
     """
     processing = None if episode is None else episode.processing_record
     if isinstance(support.points_at, InputPart) and processing is not None:
-        if support.holder is None:
-            required = input_support_origin(processing, support.points_at.message)
-            if support.origin is not required:
-                msg = (
-                    f"a support on this part takes {required}, not {support.origin} "
-                    f"(ADR-0351 §7:2, §7:6)"
-                )
-                raise ValueError(msg)
-        elif parties_are_assistants(processing.trigger.parties):
-            msg = "no support points at an input that is the assistant's (ADR-0350 §6:11)"
+        required = input_support_origin(processing, support.points_at.message)
+        if support.origin is not required:
+            msg = (
+                f"a support on this part takes {required}, not {support.origin} "
+                f"(ADR-0351 §7:2, §7:6)"
+            )
             raise ValueError(msg)
     computed = support_holder(support, episode)
     recorded = support.holder
