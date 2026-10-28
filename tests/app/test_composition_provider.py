@@ -278,7 +278,7 @@ def test_every_spec_is_checked_not_merely_the_first() -> None:
 # --- consolidation's route: named, separable, and never falling back (ADR-0285 §5) ---
 
 
-def _consolidation_provider(engine: Engine) -> ModelProvider:
+def _consolidation_provider(engine: Engine) -> RetryingProvider:
     """The provider consolidation's route builds, as the composed engine holds it.
 
     Reached through the matters pass, which rides the route with the story tidy-up
@@ -289,7 +289,10 @@ def _consolidation_provider(engine: Engine) -> ModelProvider:
     """
     matters_pass = engine._matters_pass
     assert matters_pass is not None, "the matters pass is always wired"
-    return matters_pass._model
+    model = matters_pass._model
+    # A retrying wrapper and never a router: the no-fallback property (ADR-0285 §5).
+    assert isinstance(model, RetryingProvider)
+    return model
 
 
 def test_consolidation_reads_through_the_conversational_route_when_unset() -> None:
@@ -496,6 +499,48 @@ async def test_the_reconciler_is_handed_its_route_as_a_structured_completer(
         inner = completer._inner
         assert type(inner) is PydanticAIProvider
         assert reconciler._route == "openai:gpt-5"
+    finally:
+        await engine.aclose()
+
+
+async def test_each_moved_consumer_is_handed_its_route_as_a_structured_completer(
+    tmp_path: Path,
+) -> None:
+    """ADR-0354 §6:2, §12:3: the object each held as its ``ModelProvider``, as its completer.
+
+    The digest rides the routed provider understanding rides; the matters pass and the
+    tidy-up the one consolidation route, which cannot fall back; the observer its two
+    routes. Each is the same composed object as before the move, and each implements
+    ``StructuredCompleter`` beside ``complete``.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-x",
+        fallback_models=("openai:gpt-5",),
+        observer_scout_model="openai:gpt-5",
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert engine._phases is not None
+        digest = engine._phases._digesting._provider
+        assert digest is _routed_model(engine)
+        assert isinstance(digest, RoutingProvider)
+
+        consolidation = _consolidation_provider(engine)
+        tidy_up = engine._phases._story_calls
+        assert tidy_up is not None
+        assert tidy_up._tidy_up is not None
+        assert tidy_up._tidy_up._model is consolidation
+        assert isinstance(consolidation, RetryingProvider)
+
+        observer = engine._observer
+        assert observer is not None
+        assert observer._scout is not observer._commit
+        for route in (digest, consolidation, observer._scout, observer._commit):
+            assert isinstance(route, StructuredCompleter)
+        for route in (observer._scout, observer._commit):
+            assert isinstance(route, RetryingProvider)
+            assert not isinstance(route, RoutingProvider)
     finally:
         await engine.aclose()
 

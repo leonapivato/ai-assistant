@@ -18,13 +18,15 @@ import json
 import math
 from datetime import timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from story_support import AT, CONVERSATION, EVENTS, activation, episode, failing, memory_of
 from structlog.testing import capture_logs
+from structured_support import structured
 
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreError, ModelContentFilterError
+from ai_assistant.core.reply_shapes import reply_schema
 from ai_assistant.core.types import (
     STORY_NOTE_MAX_CHARS,
     STORY_SUMMARY_CAP_CHARS,
@@ -32,6 +34,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     MemorySource,
     Message,
+    ReplyFailure,
     Role,
     StoryActor,
     StoryFlag,
@@ -44,9 +47,16 @@ from ai_assistant.core.types import (
     UnclearPoint,
     UnderstandingProducer,
 )
+from ai_assistant.orchestration import story_tidy_up
 from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT
-from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp, TidyUpResult
+from ai_assistant.orchestration.story_tidy_up import (
+    STORY_TIDY_UP_PROMPT,
+    StoryTidyUp,
+    TidyUpReply,
+    TidyUpResult,
+)
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt, prompt_from
+from ai_assistant.testing.structured import FakeStructuredCompleter, ScriptedReply
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -92,7 +102,7 @@ def _tidy_up(  # noqa: PLR0913 — one knob per bound a case varies
     threshold: float = _ANY_MATCH,
 ) -> StoryTidyUp:
     return StoryTidyUp(
-        model=model,
+        model=structured(model),
         stories=stories,
         memory=memory,
         excerpt_chars=2000,
@@ -268,7 +278,7 @@ async def test_the_system_message_is_what_the_template_renders_with_the_cap() ->
     model = FakeModelProvider(_reply(["A camping trip."]))
     template = prompt_from(STORY_TIDY_UP_PROMPT, "Cap: $story_summary_cap_chars")
     tidy_up = StoryTidyUp(
-        model=model,
+        model=structured(model),
         stories=stories,
         memory=memory,
         excerpt_chars=2000,
@@ -291,7 +301,7 @@ async def test_the_tidy_up_refuses_another_prompts_template() -> None:
 
     with pytest.raises(ValueError, match="story_tidy_up prompt"):
         StoryTidyUp(
-            model=FakeModelProvider(_reply([])),
+            model=structured(FakeModelProvider(_reply([]))),
             stories=stories,
             memory=memory,
             excerpt_chars=2000,
@@ -503,27 +513,22 @@ async def test_an_output_that_fails_to_parse_or_a_check_is_refused_whole(
 
 
 @pytest.mark.parametrize(
-    ("reply", "stray"),
+    "reply",
     [
         # ADR-0300's safety net, which ADR-0303 dropped: nothing is taken from it.
-        (json.dumps({"lines": ["A camping trip."], "safety_net": [{"text": "x"}]}), 1),
-        (json.dumps({"lines": ["A camping trip."], "flags": [], "story_zz": "made up"}), 1),
-        (
-            json.dumps(
-                {
-                    "lines": ["A camping trip."],
-                    "flags": [{"kind": "two_matters", "why_zz": "a dentist", "command": None}],
-                    "aside_zz": "x",
-                }
-            ),
-            3,
+        json.dumps({"lines": ["A camping trip."], "safety_net": [{"text": "x"}]}),
+        json.dumps({"lines": ["A camping trip."], "flags": [], "story_zz": "made up"}),
+        json.dumps(
+            {
+                "lines": ["A camping trip."],
+                "flags": [{"kind": "two_matters", "why_zz": "a dentist", "command": None}],
+                "aside_zz": "x",
+            }
         ),
     ],
 )
-async def test_a_stray_key_is_dropped_and_counted_and_the_output_written(
-    reply: str, stray: int
-) -> None:
-    """#3246: a key the reply's shape does not name is dropped, counted, and never logged."""
+async def test_a_key_the_shape_does_not_name_is_read_past_and_never_logged(reply: str) -> None:
+    """ADR-0354 §10:2: the shape keeps its ``extra``, and nothing counts what it passes."""
     stories, memory, trip = await _trip()
 
     with capture_logs() as logs:
@@ -531,26 +536,68 @@ async def test_a_stray_key_is_dropped_and_counted_and_the_output_written(
 
     assert outcome.result is TidyUpResult.WRITTEN
     assert await _summary(stories, trip) == ["A camping trip."]
-    counted = [one for one in logs if one["event"] == "story_tidy_up_stray_keys"]
-    assert counted == [
-        {
-            "event": "story_tidy_up_stray_keys",
-            "log_level": "info",
-            "stage": "tidy_up",
-            "stray": stray,
-        }
-    ]
+    assert not [one for one in logs if "stray" in one["event"]]
     for name in ("safety_net", "story_zz", "made up", "why_zz", "command", "aside_zz"):
         assert name not in repr(logs)
 
 
-async def test_an_output_with_no_stray_key_logs_no_count() -> None:
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ScriptedReply(text=_reply(["A camping trip."]), failure=ReplyFailure.CUT),
+        ScriptedReply(text="   "),
+        ScriptedReply(text='Here it is: {"lines": ["A camping trip."]}'),
+    ],
+    ids=["cut", "empty", "invalid"],
+)
+async def test_a_returned_failure_is_a_reply_that_did_not_parse(answer: ScriptedReply) -> None:
+    """ADR-0354 §9:2: ``cut``, ``empty`` and ``invalid`` land where an unparsed reply did."""
     stories, memory, trip = await _trip()
 
-    with capture_logs() as logs:
-        await _tidy_up(FakeModelProvider(_reply(["A camping trip."])), stories, memory).run(trip)
+    outcome = await _tidy_up(FakeStructuredCompleter(answer), stories, memory).run(trip)
 
-    assert [one for one in logs if one["event"] == "story_tidy_up_stray_keys"] == []
+    assert (outcome.result, outcome.problem) == (TidyUpResult.REFUSED, "the reply did not parse")
+    assert await _summary(stories, trip) is None
+
+
+async def test_a_refusal_fails_the_run_as_a_providers_refusal_did() -> None:
+    """ADR-0354 §9:2, ADR-0300 §5:11: a returned ``refused`` is a failed run, nothing written."""
+    stories, memory, trip = await _trip()
+    model = FakeStructuredCompleter(
+        ScriptedReply(text=_reply(["A camping trip."]), failure=ReplyFailure.REFUSED)
+    )
+
+    outcome = await _tidy_up(model, stories, memory).run(trip)
+
+    assert outcome.result is TidyUpResult.FAILED
+    assert isinstance(outcome.error, ModelContentFilterError)
+    assert await _summary(stories, trip) is None
+
+
+async def test_the_completion_asks_for_the_tidy_ups_own_shape_and_no_route() -> None:
+    """ADR-0354 §9:1, §6:2: one structured call, its shape the tidy-up's, no ``model=``."""
+    stories, memory, trip = await _trip()
+    model = FakeStructuredCompleter(_reply(["A camping trip."]))
+
+    await _tidy_up(model, stories, memory).run(trip)
+
+    assert [(one.shape, one.model) for one in model.calls] == [(TidyUpReply, None)]
+
+
+def test_the_shape_is_closed_and_names_the_prompts_fields() -> None:
+    """ADR-0354 §2:3, §3:2: ``lines`` and ``flags``, each flag ``kind`` and ``story``."""
+    schema = reply_schema(TidyUpReply)
+
+    assert schema["additionalProperties"] is False
+    assert set(cast("dict[str, object]", schema["properties"])) == {"lines", "flags"}
+    flag = cast("dict[str, dict[str, object]]", schema["$defs"])["_ProposedFlag"]
+    assert flag["additionalProperties"] is False
+    assert set(cast("dict[str, object]", flag["properties"])) == {"kind", "story"}
+
+
+def test_the_text_json_reader_is_gone() -> None:
+    """ADR-0354 §10:1: the tidy-up's own reader and its fence removal are removed."""
+    assert not hasattr(story_tidy_up, "_parsed")
 
 
 async def test_lines_over_the_summarys_cap_are_refused_whole_before_the_store_is_asked() -> None:
@@ -1133,7 +1180,7 @@ def test_its_bounds_are_positive_and_its_threshold_finite(
 ) -> None:
     with pytest.raises(ValueError, match=match):
         StoryTidyUp(
-            model=FakeModelProvider(),
+            model=structured(FakeModelProvider()),
             stories=_stories(),
             memory=None,  # type: ignore[arg-type]  # never reached: the bound refuses first
             excerpt_chars=excerpt_chars,

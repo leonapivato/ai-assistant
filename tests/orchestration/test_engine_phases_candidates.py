@@ -13,6 +13,7 @@ import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+from structured_support import structured
 from test_engine import AT, Harness
 from test_engine_phases import _BOOK, _DIGESTED, _PHONE, _call, _conversation, _Policy, _settled
 from understanding_support import understanding_stage
@@ -73,7 +74,7 @@ def _phases(
             planning_prompt=default_prompt(PLANNING_PROMPT),
             digesting_prompt=default_prompt(DIGESTING_PROMPT),
             completer=completer,
-            provider=FakeModelProvider(reply=_DIGESTED),
+            provider=structured(FakeModelProvider(reply=_DIGESTED)),
             authorizing=AuthorizingStage(
                 registry=tools,
                 policy=_Policy(),

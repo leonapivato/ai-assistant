@@ -88,6 +88,7 @@ nothing here (§2:11), and nothing here reads one back (§4:1).
 from __future__ import annotations
 
 import asyncio
+import functools
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final
@@ -99,11 +100,13 @@ from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.diagnostics import failure_body
 from ai_assistant.core.errors import (
     MemoryStoreError,
+    ModelContentFilterError,
     ModelError,
     PersonModelStoreError,
     PlanningError,
     StoryStoreError,
 )
+from ai_assistant.core.reply_shapes import reply_shape_version
 from ai_assistant.core.types import (
     RETIRING_OPERATIONS,
     EpisodicMemory,
@@ -122,18 +125,17 @@ from ai_assistant.core.types import (
     PersonModelWriteKind,
     Placement,
     ProposedSuggestion,
+    ReplyFailure,
     SuggestionKind,
 )
 from ai_assistant.orchestration.observer.entries import Diagnosed, ObserverEntries
 from ai_assistant.orchestration.observer.framing import (
-    FramingReply,
     framed,
     framing_messages,
     framing_view,
 )
 from ai_assistant.orchestration.observer.person import PinConfirmations, person_of
 from ai_assistant.orchestration.observer.placement import (
-    PlacementReply,
     placement_messages,
     placement_of,
 )
@@ -144,7 +146,12 @@ from ai_assistant.orchestration.observer.prompts import (
     PERSON_FLAG,
 )
 from ai_assistant.orchestration.observer.reading import EpisodeReader, episode_text
-from ai_assistant.orchestration.observer.replies import parsed
+from ai_assistant.orchestration.observer.replies import (
+    FramingReplyShape,
+    PersonScoutReplyShape,
+    PlacementReplyShape,
+    ScoutReplyShape,
+)
 from ai_assistant.orchestration.observer.scout import (
     PersonScoutReply,
     ScoutReply,
@@ -162,14 +169,16 @@ from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from pydantic import BaseModel
+
     from ai_assistant.core.prompts import PromptTemplate, RenderedPrompt
     from ai_assistant.core.protocols import (
         DiagnosticSink,
         MemoryStore,
-        ModelProvider,
         PersonModelStore,
         PlanStore,
         StoryStore,
+        StructuredCompleter,
     )
     from ai_assistant.core.types import (
         CandidateDecline,
@@ -326,8 +335,8 @@ class Observer:
     def __init__(  # noqa: PLR0913 — §15:1 names every collaborator the stage holds
         self,
         *,
-        scout: ModelProvider,
-        commit: ModelProvider,
+        scout: StructuredCompleter,
+        commit: StructuredCompleter,
         memory: MemoryStore,
         writes: MemoryWriteStage,
         plans: PlanStore,
@@ -350,9 +359,10 @@ class Observer:
         cannot express either, so both are composition-root obligations.
 
         Args:
-            scout: The scout's model route (ADR-0329 §9:9).
+            scout: The scout's model route (ADR-0329 §9:9), as its structured seam
+                (ADR-0354 §6:2).
             commit: The commit step's model route, which framing and placement ride
-                (ADR-0346 §10:2).
+                (ADR-0346 §10:2), likewise.
             memory: The memory store episodes and memories are read from.
             writes: The write stage every write goes through (ADR-0329 §12:1).
             plans: The plan store observation and effect records are read from and
@@ -677,17 +687,15 @@ class Observer:
         rather than losing a suggestion (ADR-0329 §16:1, §16:4).
         """
         rendered = None if person is None else person.rendered()
-        reply = await self._call(
+        shape: type[ScoutReply] = ScoutReplyShape if person is None else PersonScoutReplyShape
+        reply_read = await self._call(
             attempt,
             ObserverStep.SCOUT,
             self._scout,
             lambda instruction: scout_messages(reading, instruction, person=rendered),
+            shape,
             person=person is not None,
         )
-        shape: type[ScoutReply] = ScoutReply if person is None else PersonScoutReply
-        reply_read = parsed(reply, shape)
-        if reply_read is None:
-            raise _Unparsed(ObserverStep.SCOUT)
         numbered_from = _next_number(kept)
         proposal = proposed(reply_read, reading, numbered_from=numbered_from)
         if proposal is None:
@@ -833,14 +841,15 @@ class Observer:
         set_aside: list[dict[str, object]] = []
 
         async def place(shown: PlacementView) -> MemoryPlacement:
-            text = await self._call(
+            reply = await self._call(
                 attempt,
                 ObserverStep.PLACEMENT,
                 self._commit,
                 lambda instruction: placement_messages(shown, instruction),
+                PlacementReplyShape,
                 finding=_finding(attempt, finding_id),
             )
-            return _placement_read(text, shown, set_aside)
+            return _placement_read(reply, shown, set_aside)
 
         annotations = finding.annotations
         written = await self._writer.write(
@@ -915,17 +924,15 @@ class Observer:
         if view is None:
             return None
         rendered = None if person is None else person.rendered()
-        reply = await self._call(
+        reply_read = await self._call(
             attempt,
             ObserverStep.FRAMING,
             self._commit,
             lambda instruction: framing_messages(view, instruction, person=rendered),
+            FramingReplyShape,
             finding=finding,
             person=person is not None,
         )
-        reply_read = parsed(reply, FramingReply)
-        if reply_read is None:
-            raise _Unparsed(ObserverStep.FRAMING)
         return framed(
             reply_read,
             view,
@@ -965,25 +972,32 @@ class Observer:
                     )
                     await self._suggested(person, [suggestion])
 
-    async def _call(  # noqa: PLR0913 — the step, its route, its request, its finding and flag
+    async def _call[T: BaseModel](  # noqa: PLR0913 — step, route, request, shape, finding, flag
         self,
         attempt: _Attempt,
         step: ObserverStep,
-        route: ModelProvider,
+        route: StructuredCompleter,
         request: Callable[[RenderedPrompt], list[Message]],
+        shape: type[T],
         *,
         finding: ObservationFinding | None = None,
         person: bool = False,
-    ) -> str:
-        """One model call, inside the daily budget (§16:9), recorded on the attempt.
+    ) -> T:
+        """One structured call, inside the daily budget (§16:9), recorded on the attempt.
 
-        Its given entry is written once the budget admits it and before it is made, and
-        its returned entry once it returns or fails (ADR-0333 §2:2); a failure is
-        re-raised unchanged. ``request`` builds the call's messages around the step's
-        instruction, rendered here under ``person`` — whether the step is given a
-        person's fields (ADR-0338 §9:1) — so that the given entry records the ``prompt``
-        key, flag included, of the very instruction they carry (ADR-0334 §8:2, ADR-0335
-        §9:1). The placement prompt declares no flag and is rendered with none.
+        Its given entry is written once the budget admits it and before it is made, with
+        the shape's name and version (ADR-0354 §7:1), and its returned entry once it
+        returns or fails (ADR-0333 §2:2), with what came back with the reply (§7:2); a
+        failure raised is re-raised unchanged. The returned entry is written before a
+        returned failure is acted on (§7:2): a refusal is raised as
+        ``ModelContentFilterError``, where a provider's raised refusal fails the attempt,
+        and any other kind is a reply that does not parse (§9:2, ADR-0329 §16:4).
+
+        ``request`` builds the call's messages around the step's instruction, rendered
+        here under ``person`` — whether the step is given a person's fields (ADR-0338
+        §9:1) — so that the given entry records the ``prompt`` key, flag included, of the
+        very instruction they carry (ADR-0334 §8:2, ADR-0335 §9:1). The placement prompt
+        declares no flag and is rendered with none.
         """
         template = self._prompts[step]
         flags = {PERSON_FLAG: person} if PERSON_FLAG in template.declaration.flags else {}
@@ -998,15 +1012,27 @@ class Observer:
         # mid-flight still counts against the budget (§16:9).
         await self._save(attempt, findings=attempt.record.findings)
         targets = () if attempt.diagnosed is None else (attempt.diagnosed,)
-        await self._entries.given(targets, step, messages, prompt=instruction, finding=finding)
+        await self._entries.given(
+            targets,
+            step,
+            messages,
+            prompt=instruction,
+            finding=finding,
+            reply_shape=_reply_shape(shape),
+        )
         named = None if finding is None else finding.id
         try:
-            reply = await route.complete(messages)
+            reply = await route.complete_structured(messages, shape)
         except Exception as exc:
             await self._entries.returned(targets, step, failure=exc, finding=named)
             raise
-        await self._entries.returned(targets, step, reply=reply.content, finding=named)
-        return reply.content
+        await self._entries.returned(targets, step, structured=reply, finding=named)
+        if reply.failure is ReplyFailure.REFUSED:
+            msg = f"the provider refused the observer's {step.value} call (ADR-0354 §9:2)"
+            raise ModelContentFilterError(msg)
+        if reply.value is None:
+            raise _Unparsed(step)
+        return reply.value
 
     async def _save(
         self,
@@ -1088,8 +1114,14 @@ class Observer:
         return state
 
 
+@functools.cache
+def _reply_shape(shape: type[BaseModel]) -> dict[str, str]:
+    """A given entry's ``reply_shape``: the shape's name and version (ADR-0354 §7:1)."""
+    return {"name": shape.__name__, "version": reply_shape_version(shape)}
+
+
 def _placement_read(
-    text: str, shown: PlacementView, set_aside: list[dict[str, object]]
+    reply: PlacementReplyShape, shown: PlacementView, set_aside: list[dict[str, object]]
 ) -> MemoryPlacement:
     """The placement a reply states, what code set aside of it kept in ``set_aside``.
 
@@ -1099,8 +1131,7 @@ def _placement_read(
     Raises:
         _Unparsed: Where the reply places nothing shown readably (ADR-0329 §16:4).
     """
-    reply = parsed(text, PlacementReply)
-    read = None if reply is None else placement_of(reply, shown)
+    read = placement_of(reply, shown)
     if read is None:
         raise _Unparsed(ObserverStep.PLACEMENT)
     if read.set_aside:

@@ -153,8 +153,8 @@ def _hints(owner: Callable[..., object] | type) -> dict[str, object]:
 #:   which takes the rendered messages and the offered tools and returns the round; and
 #:   ``RoundRecorder.record``, which captures the round into the episode.
 #: - **Digesting's request, recall's digest among them** — the three entry points of
-#:   :class:`DigestingStage`, ``ModelProvider.complete`` again, the parse of a part's
-#:   reply, and ``DigestRecorder.record``, which captures the digest.
+#:   :class:`DigestingStage`, what a part reads of its structured reply (ADR-0354 §7:2),
+#:   and ``DigestRecorder.record``, which captures the digest.
 _SEAMS: tuple[Callable[..., object], ...] = (
     UnderstandingStage.understand,
     ModelProvider.complete,
@@ -166,7 +166,7 @@ _SEAMS: tuple[Callable[..., object], ...] = (
     DigestingStage.digest_records,
     DigestingStage.digest_recall,
     DigestRecorder.record,
-    digesting._parsed,  # the parse of a digest part's reply
+    digesting._exchange_of,  # what a digest part reads of its structured reply
 )
 
 
@@ -374,7 +374,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     frozen JSON. ``RoundResponse`` is planning's text, its ``ProposedCall``s — a provider
     id, a capability name and arguments as frozen JSON — and its notes.
     ``ProposedActivationUnderstanding`` with ``UnclearPoint`` (ADR-0353 §9:2, §9:3), and
-    digesting's ``_Proposed`` and ``_ProposedItem``, are the parse of a reply: prose the
+    digesting's ``DigestReply`` and ``_ProposedItem``, are the parse of a reply: prose the
     model wrote, labels it was shown and a flag; the record keeps the same
     ``UnclearPoint``s. Understanding's comes back as a
     ``StructuredReply[ProposedActivationUnderstanding]`` (ADR-0354 §5:1): that value or a
@@ -498,6 +498,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ConfirmationPart",
         "DeletedMessage",
         "DigestItem",
+        "DigestReply",
         "Digested",
         "DigestedEvidence",
         "EgressBinding",
@@ -549,6 +550,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PlanningStory",
         "Profile",
         "ProposedActivationUnderstanding",
+        "StructuredReply[DigestReply]",
         "StructuredReply[ProposedActivationUnderstanding]",
         "ReplyExchange",
         "ReplyUsage",
@@ -603,7 +605,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "UnderstandingReferent",
         "Validity",
         "WholeTextReply",
-        "_Proposed",
         "_ProposedItem",
     }, (
         "the whole graph the phases hand a model, or capture from one: a type that "

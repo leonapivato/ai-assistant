@@ -17,7 +17,19 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from observer_support import AT, Harness, address, episode, found, framed, framing, limits, reply
+from observer_support import (
+    AT,
+    Harness,
+    address,
+    episode,
+    found,
+    framed,
+    framing,
+    limits,
+    read_as,
+    reply,
+)
+from structured_support import structured
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -38,11 +50,10 @@ from ai_assistant.orchestration.observer.prompts import (
     OBSERVER_SCOUT_PROMPT,
 )
 from ai_assistant.orchestration.observer.reading import Hint, ReadEpisode, Reading, ReadPart
-from ai_assistant.orchestration.observer.replies import parsed
+from ai_assistant.orchestration.observer.replies import ScoutReplyShape
 from ai_assistant.orchestration.observer.scout import (
     DROPPED_REASON,
     Proposal,
-    ScoutReply,
     proposed,
     scout_messages,
 )
@@ -102,7 +113,7 @@ def _reading(*, hints: tuple[Hint, ...] = ()) -> Reading:
 
 
 def _proposal(reading: Reading, *findings: dict[str, object], **extra: object) -> Proposal | None:
-    reply_read = parsed(reply(findings=list(findings), **extra), ScoutReply)
+    reply_read = read_as(reply(findings=list(findings), **extra), ScoutReplyShape)
     assert reply_read is not None
     return proposed(reply_read, reading)
 
@@ -121,28 +132,27 @@ _DRY_RUN_REPLY = """{"findings": [
 def test_a_reply_parses_whole_or_not_at_all() -> None:
     fenced = "```json\n" + reply(findings=[]) + "\n```"
 
-    assert parsed(fenced, ScoutReply) == ScoutReply()
-    assert parsed("not json", ScoutReply) is None
-    assert parsed(reply(findings=[{"rests_on": ["P1"]}]), ScoutReply) is None
-    assert parsed(reply(findings=[{"claim": "x", "rests_on": "P1"}]), ScoutReply) is None
-    assert parsed(reply(findings=[{"claim": ["x"]}]), ScoutReply) is None
-    assert parsed(reply(findings=[], declines=[{"candidate": "C1"}]), ScoutReply) is None
+    assert read_as(fenced, ScoutReplyShape) == ScoutReplyShape()
+    assert read_as("not json", ScoutReplyShape) is None
+    assert read_as(reply(findings=[{"rests_on": ["P1"]}]), ScoutReplyShape) is None
+    assert read_as(reply(findings=[{"claim": "x", "rests_on": "P1"}]), ScoutReplyShape) is None
+    assert read_as(reply(findings=[{"claim": ["x"]}]), ScoutReplyShape) is None
+    assert read_as(reply(findings=[], declines=[{"candidate": "C1"}]), ScoutReplyShape) is None
 
 
-def test_a_scout_reply_with_prose_around_its_object_is_read() -> None:
-    """An object in prose is read and validated as a bare reply is."""
+def test_a_scout_reply_with_prose_around_its_object_is_no_reply() -> None:
+    """ADR-0354 §10:1: the candidate walk is gone, so prose around the object is invalid."""
     findings = reply(findings=[{"claim": _CLAIM, "rests_on": ["P1"]}])
-    expected = ScoutReply.model_validate(json.loads(findings))
 
-    assert parsed(f"Here is what I found.\n{findings}", ScoutReply) == expected
-    assert parsed(f"{findings}\nThat is all.", ScoutReply) == expected
-    assert parsed('I found nothing; {"seat": 1}', ScoutReply) is None
-    assert parsed(f"Here: {reply(findings=[{'rests_on': ['P1']}])}", ScoutReply) is None
+    assert read_as(findings, ScoutReplyShape) == ScoutReplyShape.model_validate_json(findings)
+    assert read_as(f"Here is what I found.\n{findings}", ScoutReplyShape) is None
+    assert read_as(f"{findings}\nThat is all.", ScoutReplyShape) is None
+    assert read_as('I found nothing; {"seat": 1}', ScoutReplyShape) is None
 
 
 def test_a_key_the_shape_does_not_name_is_dropped_and_the_reply_kept() -> None:
     """A stray key is no reason to discard a reply whose every named field is valid."""
-    proposal = parsed(_DRY_RUN_REPLY, ScoutReply)
+    proposal = read_as(_DRY_RUN_REPLY, ScoutReplyShape)
 
     assert proposal is not None
     assert [(one.claim, one.rests_on) for one in proposal.findings] == [
@@ -150,7 +160,7 @@ def test_a_key_the_shape_does_not_name_is_dropped_and_the_reply_kept() -> None:
         ("The user approved the drafted introduction email.", ("P5", "P6")),
         ("The user uses more than one chat channel.", ("P3",)),
     ]
-    assert parsed(reply(findings=[], note="x"), ScoutReply) == ScoutReply()
+    assert read_as(reply(findings=[], note="x"), ScoutReplyShape) == ScoutReplyShape()
     assert "command" not in proposal.findings[1].model_dump()
 
 
@@ -419,8 +429,8 @@ def test_the_observer_refuses_another_prompts_template(field: str) -> None:
 
     with pytest.raises(ValueError, match="prompt"):
         Observer(
-            scout=FakeModelProvider.scripted(),
-            commit=FakeModelProvider.scripted(),
+            scout=structured(FakeModelProvider.scripted()),
+            commit=structured(FakeModelProvider.scripted()),
             memory=harness.memory,
             writes=harness.writes,
             plans=harness.plans,

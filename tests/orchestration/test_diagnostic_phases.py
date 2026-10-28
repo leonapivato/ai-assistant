@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from structured_support import structured
 from understanding_support import TextAsStructured
 
 from ai_assistant.core.diagnostics import diagnosed_activation, write_diagnostic
@@ -38,11 +39,17 @@ from ai_assistant.core.types import (
     PlanningRound,
     ProposedActivationUnderstanding,
     RecallCue,
+    ReplyFailure,
     ReplyUsage,
     Role,
     RoundResponse,
 )
-from ai_assistant.orchestration.digesting import DIGESTING_PROMPT, ActivationLabels, DigestingStage
+from ai_assistant.orchestration.digesting import (
+    DIGESTING_PROMPT,
+    ActivationLabels,
+    DigestingStage,
+    DigestReply,
+)
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult
 from ai_assistant.orchestration.planning import (
@@ -67,7 +74,11 @@ from ai_assistant.testing import (
 )
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import said_support
-from ai_assistant.testing.structured import FakeStructuredCompleter, ScriptedReply
+from ai_assistant.testing.structured import (
+    DEFAULT_STRUCTURED_MODEL,
+    FakeStructuredCompleter,
+    ScriptedReply,
+)
 
 #: Understanding's and planning's shipped templates, as the composition root hands them on.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
@@ -444,7 +455,7 @@ class _Provider:
 
 def _digesting(provider: Any, sink: FakeDiagnosticSink | None) -> DigestingStage:
     return DigestingStage(
-        provider=provider,
+        provider=structured(provider),
         recorder=_DigestRecorder(),
         part_chars=10_000,
         now=_now,
@@ -467,7 +478,10 @@ async def test_digesting_writes_each_part_s_prompt_its_reply_and_the_items_dropp
             ]
         }
     )
-    provider = _Provider(lambda _: reply)
+    usage = ReplyUsage(input_tokens=900, output_tokens=40, cache_read_tokens=800)
+    provider = FakeStructuredCompleter(
+        ScriptedReply(text=reply, usage=usage, model="anthropic:claude-sonnet-5-5")
+    )
     sink = FakeDiagnosticSink()
 
     with diagnosed_activation(_ACTIVATION, clock=_now):
@@ -479,7 +493,7 @@ async def test_digesting_writes_each_part_s_prompt_its_reply_and_the_items_dropp
     about = {"result": "result:1", "question": "when", "part": 1, "parts": 1}
     assert _body(given) == {
         **about,
-        "messages": [one.model_dump(mode="json") for one in provider.calls[0]],
+        "messages": [one.model_dump(mode="json") for one in provider.last_call.messages],
         # ADR-0335 §9:1: the prompt declares no flag, so the key records an empty set.
         "prompt": {
             "name": "digesting",
@@ -487,10 +501,24 @@ async def test_digesting_writes_each_part_s_prompt_its_reply_and_the_items_dropp
             "origin": "default",
             "flags": {},
         },
+        # ADR-0354 §7:1: the shape's name and version.
+        "reply_shape": {"name": "DigestReply", "version": reply_shape_version(DigestReply)},
     }
+    # ADR-0354 §7:2: the reply as written, and what came back with it.
     assert _body(returned) == {
         **about,
         "reply": reply,
+        "model": "anthropic:claude-sonnet-5-5",
+        "mode": "native",
+        "finish_reason": "stop",
+        "refusal": None,
+        "refusal_category": None,
+        "usage": {
+            "input_tokens": 900,
+            "output_tokens": 40,
+            "cache_read_tokens": 800,
+            "cache_write_tokens": 0,
+        },
         "dropped": [{"source": "D9", "text": "made up"}],
     }
 
@@ -517,7 +545,7 @@ async def test_parts_run_in_parallel_are_told_apart_however_they_finish() -> Non
     held = HeldResult(result_id="result:2", round_id="r1", decision_id="d1", content="x" * 150)
     sink = FakeDiagnosticSink()
     stage = DigestingStage(
-        provider=_Reversed(),
+        provider=structured(_Reversed()),
         recorder=_DigestRecorder(),
         part_chars=60,
         now=_now,
@@ -564,11 +592,45 @@ async def test_a_failed_digest_writes_the_part_s_reply_and_the_digest_s_reason()
             "part": 1,
             "parts": 1,
             "reply": "not json",
+            "model": DEFAULT_STRUCTURED_MODEL,
+            "mode": "native",
+            "finish_reason": "stop",
+            "refusal": None,
+            "refusal_category": None,
+            "usage": ReplyUsage().model_dump(mode="json"),
+            "failure": "invalid",
             "dropped": [],
-            "failure": "unparsable",
         },
         {"result": "result:1", "question": "when", "digest": "failed", "reason": "unparsable"},
     ]
+
+
+async def test_a_refused_part_writes_the_refusal_and_fails_the_digest_as_raised() -> None:
+    """ADR-0354 §7:2, §9:2: the refusal is recorded, then lands where a raised one does."""
+    sink = FakeDiagnosticSink()
+    provider = FakeStructuredCompleter(
+        ScriptedReply(failure=ReplyFailure.REFUSED, refusal="I can't help with that.")
+    )
+
+    with diagnosed_activation(_ACTIVATION, clock=_now):
+        await _digesting(provider, sink).digest_result(
+            _HELD, question="when", labels=ActivationLabels(), deadline=_AT + timedelta(seconds=30)
+        )
+
+    part, digest = [
+        _body(one) for one in sink.of(DiagnosticSource.DIGESTING, DiagnosticKind.RETURNED)
+    ]
+    assert (part["failure"], part["finish_reason"], part["refusal"]) == (
+        "refused",
+        "content_filter",
+        "I can't help with that.",
+    )
+    assert digest == {
+        "result": "result:1",
+        "question": "when",
+        "digest": "failed",
+        "reason": "raised",
+    }
 
 
 # --- with the record off -------------------------------------------------------------------

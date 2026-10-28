@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 import structlog.testing
+from structured_support import structured
 
 import ai_assistant
 from ai_assistant.core import clock
@@ -428,7 +429,7 @@ async def _digesting_stage(now: Clock) -> None:
             raise AssertionError
 
     await DigestingStage(
-        provider=FakeModelProvider(),
+        provider=structured(FakeModelProvider()),
         recorder=_Unreached(),
         part_chars=50,
         now=now,
@@ -493,7 +494,7 @@ async def _phase_path(now: Clock) -> None:
     path = PhasePath(
         planning_prompt=default_prompt(PLANNING_PROMPT),
         completer=FakeToolCallingCompleter(),
-        provider=FakeModelProvider(),
+        provider=structured(FakeModelProvider()),
         authorizing=_Unreached(),  # type: ignore[arg-type]  # never reached
         acting=_Unreached(),  # type: ignore[arg-type]  # never reached
         tools=PhaseTools(registry=FakeToolRegistry([]), invoker=_Unreached()),  # type: ignore[arg-type]  # never reached
@@ -598,8 +599,8 @@ async def _observer(now: Clock) -> None:
         store=memory, policy=FakeMemoryPolicy(MemoryDecisionKind.ACCEPT), now=conforming
     )
     await Observer(
-        scout=FakeModelProvider(),
-        commit=FakeModelProvider(),
+        scout=structured(FakeModelProvider()),
+        commit=structured(FakeModelProvider()),
         memory=memory,
         writes=MemoryWriteStage(writer=writer),
         plans=FakePlanStore(now=conforming),

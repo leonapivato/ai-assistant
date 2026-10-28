@@ -28,6 +28,7 @@ import pytest
 from channel_receiver_contract import event_input
 from story_support import episode
 from structlog.testing import capture_logs
+from structured_support import structured
 from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION, _episode
 from test_engine import AT, Harness
@@ -411,7 +412,9 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             planning_prompt=default_prompt(PLANNING_PROMPT),
             digesting_prompt=default_prompt(DIGESTING_PROMPT),
             completer=completer,
-            provider=digests if digests is not None else FakeModelProvider(reply=_DIGESTED),
+            provider=structured(
+                digests if digests is not None else FakeModelProvider(reply=_DIGESTED)
+            ),
             authorizing=authorizing(
                 registry=tools,
                 policy=policy if policy is not None else _Policy(),
@@ -2692,7 +2695,7 @@ def _tidy_up(
 ) -> Callable[[Harness], StoryTidyUp]:
     def build(harness: Harness) -> StoryTidyUp:
         return StoryTidyUp(
-            model=provider,
+            model=structured(provider),
             stories=stories,
             memory=harness.memory,
             excerpt_chars=200,

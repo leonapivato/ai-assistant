@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from phases_support import chat_turn, frozen, processing, until, written
 from story_support import CONVERSATION
+from structured_support import structured
 from telegram_support import CASE_START_WAIT, CHAT, REFERENCE, YieldingTelegram, text
 from test_engine import AT, Harness
 from understanding_support import TextAsStructured, recall_stage
@@ -380,7 +381,7 @@ class _Hub:
         return PhasePath(
             planning_prompt=default_prompt(PLANNING_PROMPT),
             completer=self.planner,
-            provider=FakeModelProvider(reply=_DIGESTED),
+            provider=structured(FakeModelProvider(reply=_DIGESTED)),
             authorizing=AuthorizingStage(
                 registry=tools,
                 policy=self.policy,

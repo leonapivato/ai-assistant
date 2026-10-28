@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
-from observer_support import AT, Harness, address, episode, placing, reply
+from observer_support import AT, Harness, address, episode, placing, read_as, reply
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -34,14 +34,13 @@ from ai_assistant.orchestration.observer.placement import (
     RECHECK_HELD,
     UNREAD_NOTE,
     PlacementRead,
-    PlacementReply,
     PlacementView,
     Retrieved,
     labelled,
     placement_of,
     retrieved,
 )
-from ai_assistant.orchestration.observer.replies import parsed
+from ai_assistant.orchestration.observer.replies import PlacementReplyShape
 from ai_assistant.testing.memories import confirmed_support, memory, said_support
 
 _SEAT = "The user prefers window seats."
@@ -182,7 +181,7 @@ def _view(harness_memory: Memory, *more: Memory) -> PlacementView:
 
 
 def _read(view: PlacementView, text: str) -> PlacementRead | None:
-    read = parsed(text, PlacementReply)
+    read = read_as(text, PlacementReplyShape)
     return None if read is None else placement_of(read, view)
 
 
@@ -259,12 +258,12 @@ def test_a_pair_the_reply_does_not_place_readably_is_unclear_and_the_rest_stand(
 
 def test_the_reply_shape_reads_an_unreadable_relation_as_unclear() -> None:
     """What any reader of the shape reads is what the stage reads (prompt_cases)."""
-    read = parsed(
+    read = read_as(
         placing(("M1", "contradicts", "No."), ("M2", "weakens", " "), ("M3", "restates", "Same.")),
-        PlacementReply,
+        PlacementReplyShape,
     )
-    unreadable = parsed(
-        placing(("M1", "contradicts", "No."), ("M2", "weakens", " ")), PlacementReply
+    unreadable = read_as(
+        placing(("M1", "contradicts", "No."), ("M2", "weakens", " ")), PlacementReplyShape
     )
 
     assert read is not None
@@ -274,7 +273,7 @@ def test_the_reply_shape_reads_an_unreadable_relation_as_unclear() -> None:
         ("restates", "Same."),
     ]
     assert unreadable is None, "a reply placing nothing readably is refused by any reader"
-    assert parsed(reply(relations=[]), PlacementReply) is None
+    assert read_as(reply(relations=[]), PlacementReplyShape) is None
 
 
 def test_an_answered_question_is_named_on_a_memory_shown() -> None:

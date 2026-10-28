@@ -17,6 +17,7 @@ from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
+from structured_support import structured
 
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
@@ -655,7 +656,7 @@ async def test_a_tidy_up_writes_the_story_s_version_log() -> None:
     trip = await _story(stories)
     await stories.append_note(trip, "A camping trip.", author=StoryNoteAuthor.OWNER)
     tidy_up = StoryTidyUp(
-        model=FakeModelProvider(reply=json.dumps({"lines": ["A camping trip."]})),
+        model=structured(FakeModelProvider(reply=json.dumps({"lines": ["A camping trip."]}))),
         stories=stories,
         memory=memory,
         excerpt_chars=200,
@@ -689,7 +690,7 @@ async def test_a_tidy_up_with_none_wired_or_a_refused_reply_is_not_done() -> Non
         stories=stories,
         memory=memory,
         tidy_up=StoryTidyUp(
-            model=FakeModelProvider(reply="not json"),
+            model=structured(FakeModelProvider(reply="not json")),
             stories=stories,
             memory=memory,
             excerpt_chars=200,

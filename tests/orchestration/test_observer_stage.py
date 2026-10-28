@@ -14,6 +14,7 @@ import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NoReturn
 
+import pytest
 import structlog.testing
 from observer_support import (
     AT,
@@ -31,8 +32,14 @@ from observer_support import (
     said,
     scouted,
 )
+from structured_support import structured
 
-from ai_assistant.core.errors import MemoryStoreError, ModelError, PlanningError
+from ai_assistant.core.errors import (
+    MemoryStoreError,
+    ModelContentFilterError,
+    ModelError,
+    PlanningError,
+)
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     EpisodicMemory,
@@ -57,6 +64,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     PlanningLabel,
     Provenance,
+    ReplyFailure,
     Role,
     SupportHolder,
     SupportOrigin,
@@ -64,9 +72,11 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.core.types import Message as MessageType
 from ai_assistant.orchestration.observer import RunOutcome
+from ai_assistant.orchestration.observer.replies import FramingReplyShape, ScoutReplyShape
 from ai_assistant.orchestration.understanding import RecentEpisodes
 from ai_assistant.testing import FakeModelProvider
 from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.structured import FakeStructuredCompleter, ScriptedReply
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -493,7 +503,7 @@ async def test_a_run_asked_for_while_one_runs_does_not_start() -> None:
     await _three(harness)
     route = _Blocking()
     observer = harness.observer()
-    observer._scout = route
+    observer._scout = structured(route)
 
     running = asyncio.create_task(observer.run())
     await route.entered.wait()
@@ -535,6 +545,66 @@ async def test_a_failing_route_is_logged_by_its_error_class_alone() -> None:
     (event,) = [one for one in logs if one["event"] == "observer_attempt"]
     assert event["reason"] == ModelError.__name__
     assert "Imogen" not in repr(logs)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ScriptedReply(text='Here is what I found: {"findings": []}'),
+        ScriptedReply(text=" "),
+        ScriptedReply(text='{"findings": []}', failure=ReplyFailure.CUT),
+    ],
+    ids=["invalid", "empty", "cut"],
+)
+async def test_a_returned_failure_leaves_the_attempt_pending_as_an_unparsed_reply(
+    answer: ScriptedReply,
+) -> None:
+    """ADR-0354 §9:2, §12:7, #3396: a reply the rule refuses is no proposal, and waits."""
+    harness = Harness()
+    await _three(harness)
+    observer = harness.observer(scout=FakeStructuredCompleter.scripted(answer))
+
+    with structlog.testing.capture_logs() as logs:
+        outcome = await observer.run()
+
+    assert outcome.waiting == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.state is ObservationState.WAITING
+    assert record.findings == ()
+    assert record.attempts[-1].end is ObservationAttemptEnd.FAILED
+    assert record.next_attempt_at is not None
+    (event,) = [one for one in logs if one["event"] == "observer_attempt"]
+    assert (event["stage"], event["reason"]) == ("scout", "unparsed")
+
+
+async def test_a_refusal_fails_the_attempt_as_a_providers_refusal_did() -> None:
+    """ADR-0354 §9:2: a returned ``refused`` lands where a raised one did, a model error."""
+    harness = Harness()
+    await _three(harness)
+    refused = ScriptedReply(text=_scout("P1"), failure=ReplyFailure.REFUSED, refusal="no")
+    observer = harness.observer(scout=FakeStructuredCompleter.scripted(refused))
+
+    with structlog.testing.capture_logs() as logs:
+        outcome = await observer.run()
+
+    assert outcome.waiting == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert (record.state, record.findings) == (ObservationState.WAITING, ())
+    (event,) = [one for one in logs if one["event"] == "observer_attempt"]
+    assert event["reason"] == ModelContentFilterError.__name__
+
+
+async def test_each_call_asks_for_its_steps_shape_on_its_route() -> None:
+    """ADR-0354 §9:1, §6:2: each step's own shape, on its own route, no ``model=``."""
+    harness = Harness()
+    await _three(harness)
+    scout = FakeStructuredCompleter.scripted(_scout("P1"))
+    commit = FakeStructuredCompleter.scripted(_frame())
+
+    await harness.observer(scout=scout, commit=commit).run()
+
+    assert [(one.shape, one.model) for one in scout.calls] == [(ScoutReplyShape, None)]
+    assert [(one.shape, one.model) for one in commit.calls] == [(FramingReplyShape, None)]
 
 
 def _answering(decide: Callable[[dict[str, Any]], str]) -> FakeModelProvider:
@@ -657,7 +727,7 @@ async def test_a_memory_takes_the_supply_its_finding_was_proposed_over() -> None
         per_run=1,
     )
     await observer.run()
-    observer._scout = FakeModelProvider.scripted(_scout("P1"))
+    observer._scout = structured(FakeModelProvider.scripted(_scout("P1")))
 
     await observer.run()
 
@@ -806,7 +876,7 @@ async def test_a_cancelled_call_still_counts_against_the_budget() -> None:
     await _three(harness)
     route = _Blocking()
     observer = harness.observer(daily_calls=1)
-    observer._scout = route
+    observer._scout = structured(route)
 
     running = asyncio.create_task(observer.run())
     await route.entered.wait()

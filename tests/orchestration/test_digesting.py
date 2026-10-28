@@ -10,13 +10,15 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from structlog.testing import capture_logs
+from structured_support import structured
 
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.errors import MemoryStoreError, ModelError
+from ai_assistant.core.reply_shapes import reply_schema
 from ai_assistant.core.types import (
     ActivationDigest,
     Attestation,
@@ -26,17 +28,21 @@ from ai_assistant.core.types import (
     Memory,
     Message,
     PlanningLabel,
+    ReplyFailure,
     Role,
 )
+from ai_assistant.orchestration import digesting
 from ai_assistant.orchestration.digesting import (
     DIGESTING_PROMPT,
     ActivationLabels,
     DigestingStage,
+    DigestReply,
 )
 from ai_assistant.orchestration.held_results import HeldResult
 from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT
 from ai_assistant.testing import FakeModelProvider, default_prompt, prompt_from
 from ai_assistant.testing.memories import memory, sourced_support
+from ai_assistant.testing.structured import FakeStructuredCompleter, ScriptedReply
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -103,7 +109,7 @@ def _stage(
     recording = recorder or _Recorder()
     return (
         DigestingStage(
-            provider=provider,
+            provider=structured(provider),
             recorder=recording,
             part_chars=part_chars,
             now=_now,
@@ -131,16 +137,33 @@ async def _digest(
 # --- the call ----------------------------------------------------------------------------
 
 
-async def test_a_digest_is_one_plain_completion_with_no_model_override() -> None:
-    """§4:1, §4:10: one call, no tools, the provider's configured model."""
-    provider = _Provider(lambda _: _reply())
+async def test_a_digest_is_one_structured_call_with_no_model_override() -> None:
+    """§4:1, §4:10, ADR-0354 §9:1: one call, no tools, the digest's shape, no ``model=``."""
+    provider = FakeStructuredCompleter(_reply())
     stage, _ = _stage(provider)
 
     await _digest(stage)
 
-    ((messages, model),) = provider.calls
-    assert model is None
-    assert [one.role for one in messages] == [Role.SYSTEM, Role.USER]
+    (call,) = provider.calls
+    assert (call.shape, call.model) == (DigestReply, None)
+    assert [one.role for one in call.messages] == [Role.SYSTEM, Role.USER]
+
+
+def test_the_shape_is_closed_and_names_the_prompts_fields() -> None:
+    """ADR-0354 §2:3, §3:2: ``evidence``, each item ``text`` and ``source``, nothing else."""
+    schema = reply_schema(DigestReply)
+
+    assert schema["additionalProperties"] is False
+    assert set(cast("dict[str, object]", schema["properties"])) == {"evidence"}
+    item = cast("dict[str, dict[str, object]]", schema["$defs"])["_ProposedItem"]
+    assert item["additionalProperties"] is False
+    assert set(cast("dict[str, object]", item["properties"])) == {"text", "source"}
+
+
+def test_the_text_json_reader_is_gone() -> None:
+    """ADR-0354 §10:1: the digest's own reader and its fence removal are removed."""
+    assert not hasattr(digesting, "_parsed")
+    assert not hasattr(digesting, "stray_keys")
 
 
 async def test_the_records_are_quoted_data_under_a_local_label_attributed_by_the_hub() -> None:
@@ -189,7 +212,7 @@ async def test_the_system_message_is_what_the_template_renders() -> None:
     """ADR-0334 §3:5: the instruction is the template handed in, default or override."""
     provider = _Provider(lambda _: _reply())
     stage = DigestingStage(
-        provider=provider,
+        provider=structured(provider),
         recorder=_Recorder(),
         part_chars=10_000,
         now=_now,
@@ -206,7 +229,7 @@ def test_the_stage_refuses_another_prompts_template() -> None:
     """ADR-0334 §2: the digesting stage renders the digesting prompt alone."""
     with pytest.raises(ValueError, match="digesting prompt"):
         DigestingStage(
-            provider=_Provider(lambda _: _reply()),
+            provider=structured(_Provider(lambda _: _reply())),
             recorder=_Recorder(),
             part_chars=10_000,
             prompt=default_prompt(MATTERS_PASS_PROMPT),
@@ -268,13 +291,16 @@ async def test_a_result_already_labelled_keeps_its_label_and_assigns_none() -> N
     assert digested.labels == ()
 
 
-async def test_nothing_answering_the_question_is_an_answer() -> None:
-    """§4:8: an empty list is a valid answer, and the digest answered."""
-    stage, _ = _stage(_Provider(lambda _: _reply()))
+@pytest.mark.parametrize("reply", [_reply(), '```json\n{"evidence": []}\n```'])
+async def test_nothing_answering_the_question_is_an_answer(reply: str) -> None:
+    """§4:8, ADR-0354 §12:7, #3465: an empty list of evidence is an empty answer."""
+    stage, recorder = _stage(FakeStructuredCompleter(reply))
 
     digested = await _digest(stage)
 
     assert (digested.digest.outcome, digested.digest.evidence) == (DigestOutcome.ANSWERED, ())
+    assert digested.failure is None
+    assert recorder.recorded == [(digested.digest, digested.labels)]
 
 
 async def test_an_item_naming_an_unknown_label_is_dropped() -> None:
@@ -429,43 +455,52 @@ async def test_a_reply_that_does_not_parse_fails_the_digest(reply: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("reply", "stray"),
+    "reply",
     [
-        ('{"evidence": [{"text": "closes on the 15th", "source": "D1"}], "aside_zz": "x"}', 1),
-        ('{"evidence": [{"text": "closes on the 15th", "source": "D1", "why_zz": {"a": 1}}]}', 1),
-        (
-            '{"evidence": [{"text": "closes on the 15th", "source": "D1", "command": null}],'
-            ' "aside_zz": "x", "confidence_zz": 0.9}',
-            3,
-        ),
+        '{"evidence": [{"text": "closes on the 15th", "source": "D1"}], "aside_zz": "x"}',
+        '{"evidence": [{"text": "closes on the 15th", "source": "D1", "why_zz": {"a": 1}}]}',
     ],
 )
-async def test_a_stray_key_is_dropped_and_counted_and_the_reply_read(
-    reply: str, stray: int
-) -> None:
-    """#3246: a key the reply's shape does not name is dropped, counted, and never logged."""
+async def test_a_key_the_shape_does_not_name_is_read_past_and_never_logged(reply: str) -> None:
+    """ADR-0354 §10:2: the shape keeps its ``extra``, and nothing counts what it passes."""
     stage, _ = _stage(FakeModelProvider(reply))
 
     with capture_logs() as logs:
         digested = await _digest(stage)
 
-    assert digested.digest.outcome is DigestOutcome.ANSWERED
     assert digested.digest.evidence == (EvidenceItem(text="closes on the 15th", source="R1"),)
-    counted = [one for one in logs if one["event"] == "digest_stray_keys"]
-    assert counted == [
-        {"event": "digest_stray_keys", "stage": "digesting", "stray": stray, "log_level": "info"}
-    ]
-    for name in ("aside_zz", "why_zz", "command", "confidence_zz"):
+    assert not [one for one in logs if "stray" in one["event"]]
+    for name in ("aside_zz", "why_zz"):
         assert name not in repr(logs)
 
 
-async def test_a_reply_with_no_stray_key_logs_no_count() -> None:
-    stage, _ = _stage(FakeModelProvider(_reply(("closes on the 15th", "D1"))))
+@pytest.mark.parametrize(
+    ("answer", "reason"),
+    [
+        (
+            ScriptedReply(text=_reply(("closes on the 15th", "D1")), failure=ReplyFailure.CUT),
+            "unparsable",
+        ),
+        (ScriptedReply(text="  "), "unparsable"),
+        # #3465's prose before the object: one rule, no second reader (ADR-0354 §10).
+        (ScriptedReply(text='Nothing here answers it.\n{"evidence": []}'), "unparsable"),
+        (ScriptedReply(text=_reply(("x", "D1")), failure=ReplyFailure.REFUSED), "raised"),
+    ],
+    ids=["cut", "empty", "invalid", "refused"],
+)
+async def test_each_returned_failure_lands_where_its_kind_lands_today(
+    answer: ScriptedReply, reason: str
+) -> None:
+    """ADR-0354 §9:2: ``refused`` as a raised call, any other kind as an unparsed reply."""
+    stage, recorder = _stage(FakeStructuredCompleter(answer))
 
     with capture_logs() as logs:
-        await _digest(stage)
+        digested = await _digest(stage)
 
-    assert [one for one in logs if one["event"] == "digest_stray_keys"] == []
+    assert (digested.digest.outcome, digested.digest.evidence) == (DigestOutcome.FAILED, ())
+    assert digested.failure == reason
+    assert recorder.recorded == [(digested.digest, digested.labels)]
+    assert [one["reason"] for one in logs if one["event"] == "digest_failed"] == [reason]
 
 
 async def test_a_deadline_already_passed_fails_the_digest_without_a_call() -> None:
@@ -499,7 +534,7 @@ async def test_no_call_is_made_once_the_deadline_has_passed() -> None:
     readings = iter([_AT, *([_DEADLINE + timedelta(seconds=1)] * 100)])
     provider = _Provider(lambda _: _reply(("x", "D1")))
     stage = DigestingStage(
-        provider=provider,
+        provider=structured(provider),
         recorder=_Recorder(),
         part_chars=1,
         now=lambda: next(readings),
@@ -547,7 +582,7 @@ async def test_a_clock_failing_inside_a_part_escapes_and_is_no_failed_digest(
     provider = _Provider(lambda _: _reply(("x", "D1")))
     recorder = _Recorder()
     stage = DigestingStage(
-        provider=provider,
+        provider=structured(provider),
         recorder=recorder,
         part_chars=100,
         now=_later_reading_fails(fault),
@@ -634,7 +669,7 @@ async def test_the_logs_carry_no_question_record_or_reply() -> None:
 def test_the_part_size_is_a_positive_integer(part_chars: Any) -> None:
     with pytest.raises(ValueError, match="part size"):
         DigestingStage(
-            provider=FakeModelProvider(),
+            provider=structured(FakeModelProvider()),
             recorder=_Recorder(),
             part_chars=part_chars,
             prompt=default_prompt(DIGESTING_PROMPT),

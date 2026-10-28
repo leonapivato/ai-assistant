@@ -187,7 +187,6 @@ if TYPE_CHECKING:
         Embedder,
         Forecaster,
         MemoryStore,
-        ModelProvider,
         NotificationPolicy,
         OutboundTransport,
         PlanStore,
@@ -1757,6 +1756,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # and one skipped or failed loses nothing (§5), so it needs no fallback route and takes no
         # share of the conversational route's limits.
         tidy_up = StoryTidyUp(
+            # ADR-0354 §6:2: consolidation's route, handed as its `StructuredCompleter`.
             model=consolidation_model,
             stories=stories,
             memory=memory,
@@ -1781,6 +1781,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # starts a run on every frozen episode and the scheduler's row runs it on a timer
         # (§7:6).
         observer = Observer(
+            # ADR-0354 §6:2: each route handed as its `StructuredCompleter`, its retry
+            # policy and its absence of a fallback unchanged.
             scout=observer_scout,
             commit=observer_commit,
             memory=memory,
@@ -1977,6 +1979,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # completion fails is decided on a later run, so it needs no fallback. Over
             # the same story store and memory store as every other story reader.
             matters_pass=MattersPass(
+                # ADR-0354 §6:2: consolidation's route, as its `StructuredCompleter`.
                 model=consolidation_model,
                 stories=stories,
                 memory=memory,
@@ -2537,7 +2540,7 @@ class _PhaseSeams:
     most one run is on a story at a time (ADR-0300 §5:10).
     """
 
-    model: ModelProvider
+    model: RoutingProvider
     registry: InMemoryToolRegistry
     plans: PlanStore
     trail: AuditTrail
@@ -2595,9 +2598,10 @@ def _build_phase_path(
     ``MemoryPolicy`` (ADR-0329 §5:6).
 
     **Planning** asks through pydantic-ai's native tool calling, on the deployment's
-    default model (ADR-0307 §10); **a digest** is a plain completion on the routed
-    ``ModelProvider`` the other stages reach through, with no ``model=`` override
-    (ADR-0308 §4:10). The numbers are the provisional ones above (#2589).
+    default model (ADR-0307 §10); **a digest** is one structured call on the routed
+    provider the other stages reach through, handed it as its ``StructuredCompleter``,
+    with no ``model=`` override (ADR-0308 §4:10, ADR-0354 §6:2, §9:1). The numbers are
+    the provisional ones above (#2589).
 
     **The configured providers' route** (ADR-0247 §2-§4, ADR-0260 §6). Authorizing is
     told which tools are this deployment's own registered search and its configured
@@ -2671,6 +2675,7 @@ def _build_phase_path(
         completer=PydanticAIToolCallingCompleter(
             settings.default_model, diagnostics=seams.diagnostics
         ),
+        # ADR-0354 §6:2: the digest's `StructuredCompleter` is the routed provider.
         provider=seams.model,
         authorizing=AuthorizingStage(
             registry=tools,
