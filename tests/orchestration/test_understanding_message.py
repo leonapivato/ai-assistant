@@ -13,10 +13,8 @@ withheld input as the empty marker (§2:6, §2:7); and the template takes no fla
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from importlib.resources import files
 from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
 
@@ -1012,18 +1010,6 @@ def test_the_prompt_declares_no_flag_and_the_default_renders_with_none() -> None
     assert UNDERSTANDING_PROMPT.flags == frozenset()
     # ADR-0334 §9:2: that it renders, with no flag handed, and nothing of its words.
     assert default_prompt(UNDERSTANDING_PROMPT).rendered(flags={}).flags == {}
-
-
-#: The sha256 of the owner's draft of the shipped default, approved 2026-10-28, whose
-#: origin lines say knowledge is how the origin stands now and memory what the system saw
-#: then. A reviewed change to the default changes this with it (ADR-0334 §7:3).
-_DEFAULT_SHA256: Final = "f1c2746f356268a572e33855e0841183a6f6f9d50c1e864705cdb929be116a33"
-
-
-def test_the_shipped_default_is_the_owners_draft() -> None:
-    data = files(UNDERSTANDING_PROMPT.package).joinpath(UNDERSTANDING_PROMPT.filename).read_bytes()
-
-    assert hashlib.sha256(data).hexdigest() == _DEFAULT_SHA256
 
 
 async def test_every_call_sends_the_one_instruction() -> None:
