@@ -17158,8 +17158,8 @@ class PeerView(BaseModel):
     is never stored and crosses no wire.
 
     Beside the work, it carries the facts a reader needs to render and count it: the
-    trigger's ``channel``, what caused the activation (§5:6); its trigger's ``parties``,
-    whether any input it holds is ``relayed``, and ``derived_from_external``, by which
+    trigger's ``channel``, what caused the activation (§5:6); the ``parties`` of every
+    input it holds, whether any is ``relayed``, and ``derived_from_external``, by which
     an outside episode shown counts in the reader's record of what it read (§6:13,
     ADR-0284 §8:4, ADR-0351 §8:4); and its ``status`` and ``reason``, ``None`` while it
     runs, by which a reader says that it has ended (§4:10, §6:6). Whose words its input
@@ -17169,8 +17169,9 @@ class PeerView(BaseModel):
 
     Attributes:
         channel: The channel its trigger names, where one is recorded.
-        parties: Whose words its trigger's input carries (ADR-0351 §2:1), or ``None``
-            where they are unknown.
+        parties: Whose words the inputs it holds carry, its trigger's and each joined
+            input's as one set (ADR-0351 §2:1, §2:6, §8:5), or ``None`` where any of
+            them is unknown.
         relayed: Whether any input it holds is relayed: its trigger's, by its latest
             understanding version (ADR-0351 §5:10, §5:11), or a joined input's, by its
             own record (§5:14).

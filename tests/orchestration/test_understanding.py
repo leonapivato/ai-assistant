@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     Provenance,
     RecordedChannelTrigger,
+    RecordedInputMessage,
     RecordedTextInput,
     SupportHolder,
     TranscriptMessage,
@@ -867,8 +868,29 @@ async def test_the_stage_logs_no_content() -> None:
 _LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="conn-0001/424242")
 
 
-async def test_a_line_input_taking_in_a_forward_is_attributed_as_a_report_by_its_origin() -> None:
-    """§4:11: the origin is declared per input, and admission's record of it attributes."""
+@pytest.mark.parametrize("relayed", [False, True])
+async def test_a_line_input_taking_in_a_forward_is_attributed_message_by_message(
+    *, relayed: bool
+) -> None:
+    """ADR-0351 §2:6, §5:5: each message by its own party, and a relay mark on an input
+    already outside changes nothing (§5:7): the owner's note stays theirs."""
+    forward = ClaimedAuthor(name="A stranger", account_id=9)
+    parties, messages = declared_input(
+        _LINE,
+        (
+            RecordedInputMessage(text="Pay me", sent_at=AT, position=1, forwarded_from=forward),
+            RecordedInputMessage(text="Real?", sent_at=AT, position=2),
+        ),
+    )
+    trigger = RecordedChannelTrigger(
+        target=_LINE,
+        channel=_LINE,
+        payload=RecordedTextInput(text="Pay me\n\nReal?"),
+        context=ChannelContext(),
+        reply=WholeTextReply(),
+        parties=parties,
+        messages=messages,
+    )
     window = TranscriptWindow(
         _LINE,
         (),
@@ -876,7 +898,7 @@ async def test_a_line_input_taking_in_a_forward_is_attributed_as_a_report_by_its
             LineMessage(position=1, written_at=AT, author=MessageAuthor.USER, text="Pay me"),
             LineMessage(position=2, written_at=AT, author=MessageAuthor.USER, text="Real?"),
         ),
-        forwarded={1: ClaimedAuthor(name="A stranger", account_id=9)},
+        forwarded={1: forward},
     )
     model = FakeModelProvider.scripted(_proposal())
     pipeline = _stage(model, await _store())
@@ -890,6 +912,8 @@ async def test_a_line_input_taking_in_a_forward_is_attributed_as_a_report_by_its
         version=1,
         now=lambda: AT,
         deadline=math.inf,
+        trigger=trigger,
+        relayed=relayed,
     )
 
     sent = _sent(model)

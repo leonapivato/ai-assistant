@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     RecordedSpeechInput,
     RecordedTextInput,
     ToolOutcome,
+    canonical_parties,
     parties_are_outside,
     parties_are_persons_own,
     rests_on_recorded_external_content,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
         EpisodeProcessingRecord,
         JoinedInput,
         PlanningRound,
+        SupportHolder,
     )
 
 _MAX_PAGE = 100
@@ -426,9 +428,11 @@ def _peer_view(
         raise ValueError(msg)
     trigger = processing.trigger
     # ADR-0351 §8:5: an activation holding more than one input is read over all of them,
-    # each with its relay mark, so its input is shown only where every one is the user's.
+    # each with its parties and its relay mark, so its input is shown only where every
+    # one is the user's own.
+    parties = _held_parties(processing)
     relayed = _trigger_relayed(processing) or any(one.relayed for one in processing.joined)
-    shown = parties_are_persons_own(trigger.parties, relayed=relayed)
+    shown = parties_are_persons_own(parties, relayed=relayed)
     latest = processing.understanding[-1] if processing.understanding else None
     notes = (
         tuple(
@@ -441,7 +445,7 @@ def _peer_view(
     )
     return PeerView(
         channel=trigger.channel,
-        parties=trigger.parties,
+        parties=parties,
         relayed=relayed,
         input=_projected(_input_text(trigger), bound) if shown else None,
         joined=tuple(_joined_text(one, bound) for one in processing.joined) if shown else (),
@@ -453,6 +457,24 @@ def _peer_view(
         reason=processing.reason,
         derived_from_external=rests_on_recorded_external_content(record.provenance),
     )
+
+
+def _held_parties(processing: EpisodeProcessingRecord) -> tuple[SupportHolder, ...] | None:
+    """Whose words every input an activation holds carries (ADR-0351 §2:6, §8:5).
+
+    The trigger's parties and each joined input's, its messages' distinct parties, as one
+    set; ``None`` where any of them is unknown (§9:3).
+    """
+    held = processing.trigger.parties
+    if held is None:
+        return None
+    parties = list(held)
+    for joined in processing.joined:
+        for message in joined.messages:
+            if message.party is None:
+                return None
+            parties.append(message.party)
+    return canonical_parties(parties)
 
 
 def _trigger_relayed(processing: EpisodeProcessingRecord) -> bool:

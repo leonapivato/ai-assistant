@@ -55,6 +55,7 @@ from ai_assistant.core.types import (
     UnderstandingProducer,
     UnderstandingReferent,
     WholeTextReply,
+    parties_are_outside,
     parties_are_persons_own,
 )
 from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, UNIDENTIFIED_WORDS
@@ -211,23 +212,55 @@ def test_the_projection_still_refuses_an_open_episode() -> None:
 # --- §6:9: what it took in -------------------------------------------------------------
 
 
-def test_the_users_input_and_every_input_it_holds_are_shown_cut() -> None:
-    joined = (
+def _joined(*parties: SupportHolder | None, relayed: bool = False) -> tuple[JoinedInput, ...]:
+    """One joined input of two messages, each of the party given, or the owner's."""
+    first, second = (*parties, *OWNERS_WORDS * 2)[:2]
+    return (
         JoinedInput(
             joined_at=_NOW,
             channel=_PLACE,
             messages=(
-                RecordedInputMessage(text="only direct", sent_at=_NOW),
-                RecordedInputMessage(text="under 400", sent_at=_NOW),
+                RecordedInputMessage(text="only direct", sent_at=_NOW, party=first),
+                RecordedInputMessage(text="under 400", sent_at=_NOW, party=second),
             ),
             taken_over_from="act-older",
+            relayed=relayed,
         ),
     )
+
+
+def test_the_users_input_and_every_input_it_holds_are_shown_cut() -> None:
+    joined = _joined()
     view = _peer(_episode(_record(joined=joined)), bound=8)
 
     assert view.input == ProjectedText(text="find fli", full_chars=12)
     assert view.joined == (ProjectedText(text="only dir", full_chars=22),)
+    assert view.parties == OWNERS_WORDS
     assert _peer(_episode(_record(joined=joined))).joined[0].text == "only direct\n\nunder 400"
+
+
+@pytest.mark.parametrize(
+    ("joined", "parties"),
+    [
+        pytest.param(_joined(None, None), None, id="unknown"),
+        pytest.param(
+            _joined(SupportHolder.unknown(), SupportHolder.unknown()),
+            (*OWNERS_WORDS, SupportHolder.unknown()),
+            id="outside",
+        ),
+        pytest.param(_joined(relayed=True), OWNERS_WORDS, id="relayed"),
+    ],
+)
+def test_input_is_withheld_where_any_input_it_holds_is_not_the_users_own(
+    joined: tuple[JoinedInput, ...], parties: tuple[SupportHolder, ...] | None
+) -> None:
+    """ADR-0351 §8:5: read over every input it holds, each with its parties and its mark."""
+    view = _peer(_episode(_record(joined=joined)))
+
+    assert view.parties == parties
+    assert view.input is None
+    assert view.joined == ()
+    assert parties_are_outside(view.parties, relayed=view.relayed)
 
 
 @pytest.mark.parametrize("parties", [UNIDENTIFIED_WORDS, ASSISTANTS_WORDS])
