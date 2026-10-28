@@ -399,26 +399,35 @@ def test_the_walk_serves_what_it_computed(record: Path) -> None:
 # --- a label is resolved only where code resolved it -----------------------------------
 
 
-def _understanding(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """The walk's understanding step over ``rows``, inside one controller step."""
-    span = {
-        "source": "controller",
-        "kind": "step",
-        "body": {
+def _understandings(rows: list[dict[str, Any]], outcome: str | None) -> list[dict[str, Any]]:
+    """The walk's understanding steps over ``rows``, in a controller step ended ``outcome``.
+
+    Where ``outcome`` is ``None``, no controller step is written, as none is yet while the
+    run is still going.
+    """
+    written = [*({"recorded_at": iso(10 * (n + 1)), **one} for n, one in enumerate(rows))]
+    if outcome is not None:
+        body = {
             "stage": "understanding",
             "due": "not_understood",
             "started_at": iso(0),
             "ended_at": iso(10_000),
-            "outcome": "done",
-        },
-    }
-    written = [*({"recorded_at": iso(10 * (n + 1)), **one} for n, one in enumerate(rows))]
-    written.append({"recorded_at": iso(10_000), **span})
+            "outcome": outcome,
+        }
+        written.append(
+            {"recorded_at": iso(10_000), "source": "controller", "kind": "step", "body": body}
+        )
     lines = [
         viewer.parse_line(n, json.dumps({"activation_id": "u", **one}).encode())
         for n, one in enumerate(written)
     ]
-    return _step(viewer.walk(lines), "Understanding")
+    return [one for one in viewer.walk(lines)["steps"] if one["phase"] == "understanding"]
+
+
+def _understanding(rows: list[dict[str, Any]], outcome: str = "done") -> dict[str, Any]:
+    """The walk's one understanding step over ``rows``, inside one controller step."""
+    (step,) = _understandings(rows, outcome)
+    return step
 
 
 def _given(*after: dict[str, str]) -> dict[str, Any]:
@@ -439,8 +448,8 @@ def _statement(unresolved: list[str], unlinkable: list[str]) -> str:
 
 
 def _repaired(first: dict[str, Any], second: dict[str, Any], statement: str) -> dict[str, Any]:
-    told = [{"role": "assistant", "content": "x"}, {"role": "user", "content": statement}]
-    return _understanding([_given(), _returned(first), _given(*told), _returned(second)])
+    asked = _repair_request(first, statement)
+    return _understanding([_given(), _returned(first), asked, _returned(second)])
 
 
 def test_a_reply_that_failed_resolves_no_label() -> None:
@@ -456,7 +465,7 @@ def test_a_repair_with_no_reply_recorded_resolves_no_label() -> None:
     told = [{"role": "user", "content": _statement(["M9"], [])}]
     step = _understanding([_given(), _returned({"cites": ["M9"]}), _given(*told)])
     assert step["resolution"] is None
-    assert "No reply to the repair" in step["unresolved"]
+    assert "No reply to the last request" in step["unresolved"]
     assert step["repair"]["answered"] is False
     assert step["repair"]["labels"] == ["M9 in cites"]
 
@@ -491,3 +500,60 @@ def test_a_statement_naming_as_many_labels_as_the_stage_shows_says_nothing_sure(
     labels = [f"P{n}" for n in range(1, viewer.REPAIR_LABELS_SHOWN + 5)]
     assert viewer.unlinked_in(_statement([], labels)) is None
     assert viewer.unlinked_in(None) is None
+
+
+def _repair_request(first: dict[str, Any], statement: str) -> dict[str, Any]:
+    reply = json.dumps({"understanding": "u", **first})
+    return _given({"role": "assistant", "content": reply}, {"role": "user", "content": statement})
+
+
+def test_a_repair_whose_first_returned_entry_was_lost_reads_from_its_request() -> None:
+    """An entry can go unwritten (ADR-0314 §2:4): the repair's request still holds it all."""
+    statement = _statement(["M9"], [])
+    rows = [
+        _given(),
+        _repair_request({"cites": ["M1", "M9"]}, statement),
+        _returned({"cites": ["M1"]}),
+    ]
+    step = _understanding(rows)
+    repair = step["repair"]
+    assert repair["answered"] is True
+    assert json.loads(repair["first_reply"])["cites"] == ["M1", "M9"]
+    assert repair["labels"] == ["M9 in cites"]
+    assert step["unresolved"] is None
+    assert [one["outcome"] for one in step["resolution"]["cites"]] == ["kept"]
+
+
+def test_a_repair_with_no_controller_step_is_still_read_as_one() -> None:
+    """While the run goes on no step holds both calls, and each is a step of its own."""
+    statement = _statement(["M9"], [])
+    rows = [
+        _given(),
+        _returned({"cites": ["M1", "M9"]}),
+        _repair_request({"cites": ["M1", "M9"]}, statement),
+        _returned({"cites": ["M1"]}),
+    ]
+    first, second = _understandings(rows, None)
+    assert first["resolution"] is None
+    assert "earned the one repair" in first["unresolved"]
+    assert second["repair"]["labels"] == ["M9 in cites"]
+    assert [one["label"] for one in second["not_cited"]] == ["H1", "R1", "P1", "S1"]
+    assert [(one["label"], one["outcome"]) for one in second["resolution"]["cites"]] == [
+        ("M1", "kept")
+    ]
+
+
+@pytest.mark.parametrize("outcome", ["timed_out", "failed"])
+def test_a_step_that_ended_without_its_result_resolved_no_label(outcome: str) -> None:
+    step = _understanding([_given(), _returned({"cites": ["M1"]})], outcome)
+    assert step["resolution"] is None
+    assert "recorded no understanding" in step["unresolved"]
+
+
+def test_a_reply_owed_a_repair_that_none_followed_resolved_no_label() -> None:
+    """A deadline can end the run between the reply and its repair (``_within``)."""
+    step = _understanding([_given(), _returned({"cites": ["M1", "M9"]})], "timed_out")
+    assert step["resolution"] is None
+    step = _understanding([_given(), _returned({"cites": ["M1", "M9"]})])
+    assert step["resolution"] is None
+    assert "M9 in cites" in step["unresolved"]
