@@ -677,20 +677,14 @@ def _pointed_at(leaving: EpisodicMemory, processing: EpisodeProcessingRecord) ->
                 pointed.add("story", link.id)
             else:
                 pointed.add("episode", episode_address(link.id))
-        for answer in understood.answers:
-            pointed.add("episode", episode_address(answer.activation_id))
     pointed.episodes.pop(leaving.id, None)
     pointed.order = [(kind, one) for kind, one in pointed.order if one != leaving.id]
     return pointed
 
 
 def _referents(understood: ActivationUnderstanding) -> tuple[UnderstandingReferent, ...]:
-    """Every referent an understanding version resolved, its meaning's first."""
-    return (
-        *understood.meaning_referents,
-        *(one for reference in understood.references for one in reference.referents),
-        *(one for relationship in understood.relationships for one in relationship.referents),
-    )
+    """Every referent an understanding version resolved, as ADR-0353 §9:8 collects them."""
+    return understood.meaning_referents
 
 
 class EpisodeReader:
@@ -956,13 +950,8 @@ class EpisodeReader:
         ]
         if not approved:
             return []
-        askers = list(
-            dict.fromkeys(
-                answer.activation_id
-                for understood in processing.understanding
-                for answer in understood.answers
-            )
-        )
+        # ADR-0353 §11:2: no version records an answer pointer, so no asker is named.
+        askers: list[str] = []
         found = without_open_episodes(
             await self._memory.get_many([episode_address(one) for one in askers])
         )
@@ -1003,23 +992,10 @@ def _answers(records: Sequence[EpisodicMemory]) -> dict[str, str]:
     between, so no adjacency is guessed, and an input that answers no recorded question is
     shown answering nothing (§2:4).
     """
-    read = {one.id: one for one in records}
-    answers: dict[str, str] = {}
-    for record in records:
-        processing = record.processing_record
-        if processing is None or not processing.understanding:
-            continue
-        latest = max(processing.understanding, key=lambda one: one.version)
-        for answer in latest.answers:
-            asking = read.get(episode_address(answer.activation_id))
-            asked = None if asking is None else asking.processing_record
-            if asked is None or answer.round is None:
-                continue
-            said = next((one.text for one in asked.rounds if one.id == answer.round), None)
-            if said:
-                answers[record.id] = said
-                break
-    return answers
+    # ADR-0353 §11:2, §9:6: no version records an answer pointer, so every episode read
+    # is shown answering nothing.
+    del records
+    return {}
 
 
 def _understood(
@@ -1027,10 +1003,9 @@ def _understood(
 ) -> dict[str, FrozenJson] | None:
     """The understanding's latest version, rendered (ADR-0346 §2:5).
 
-    Its meaning and ground, its references with what each resolved to, its
-    relationships, what it left unresolved, and the questions its input answers. A
-    referent the reading holds is named by its label; any other by its kind and the
-    excerpt the record kept.
+    Its meaning and what it drew on; it records no ground, reference, relationship,
+    unresolved matter or answer pointer (ADR-0353 §9:5). A referent the reading holds
+    is named by its label; any other by its kind and the excerpt the record kept.
     """
     if not processing.understanding:
         return None
@@ -1046,25 +1021,7 @@ def _understood(
 
     return {
         "meaning": latest.meaning,
-        "ground": latest.meaning_ground.value,
         "meaning_rests_on": [referent(one) for one in latest.meaning_referents],
-        "references": [
-            {"phrase": one.phrase, "resolved_to": [referent(r) for r in one.referents]}
-            for one in latest.references
-        ],
-        "relationships": [
-            {
-                "statement": one.statement,
-                "ground": one.ground.value,
-                "rests_on": [referent(r) for r in one.referents],
-            }
-            for one in latest.relationships
-        ],
-        "unresolved": [
-            {"matter": one.matter, "why_it_matters": one.why_it_matters}
-            for one in latest.unresolved
-        ],
-        "answers": [handles.get(episode_address(one.activation_id)) for one in latest.answers],
     }
 
 

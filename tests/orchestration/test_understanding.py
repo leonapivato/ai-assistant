@@ -40,10 +40,9 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     TranscriptMessage,
-    UnderstandingGround,
+    UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
-    UnresolvedMatter,
     WholeTextReply,
 )
 from ai_assistant.orchestration.disclosure import (
@@ -83,7 +82,7 @@ BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 
 def _proposal(**fields: Any) -> str:
     """A model output: the minimal stated reading, with ``fields`` layered over it."""
-    return json.dumps({"meaning": "They want to go camping.", "meaning_ground": "stated"} | fields)
+    return json.dumps({"understanding": "They want to go camping."} | fields)
 
 
 def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
@@ -202,7 +201,7 @@ def _sent(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:
 async def test_a_parseable_first_output_is_recorded_as_version_one_in_one_completion() -> None:
     """§2, §5: one completion, and orchestration assigns version, instant and producer."""
     model = FakeModelProvider.scripted(
-        _proposal(unresolved=[{"matter": "Which dates.", "why_it_matters": "Availability varies."}])
+        _proposal(unclear=[{"gap": "Which dates.", "readings": ["This weekend.", "Next month."]}])
     )
     understood = await _understand(_stage(model, await _store()))
     assert len(model.calls) == 1
@@ -210,12 +209,53 @@ async def test_a_parseable_first_output_is_recorded_as_version_one_in_one_comple
     assert understood.recorded_at == AT
     assert understood.producer is UnderstandingProducer.INTERPRETATION
     assert understood.meaning == "They want to go camping."
-    assert understood.meaning_ground is UnderstandingGround.STATED
     assert understood.meaning_referents == ()
-    assert understood.unresolved == (
-        UnresolvedMatter(matter="Which dates.", why_it_matters="Availability varies."),
+    assert understood.unclear == (
+        UnclearPoint(gap="Which dates.", readings=("This weekend.", "Next month.")),
     )
     assert understood.grounding_dropped == 0
+
+
+async def test_a_reply_of_the_six_keys_records_each_into_its_field() -> None:
+    """ADR-0353 §9:4, §16:4: ``understanding`` into ``meaning``, ``cites`` resolved into
+    ``meaning_referents``, ``unclear`` copied, ``belongs_to`` resolved into
+    ``story_links`` and ``meant_for`` into ``continues``; the relay mark stays the
+    proposal's, which no lane records yet (ADR-0351 §11:2)."""
+    earlier = _episode("activation:earlier", at=AT - timedelta(minutes=3))
+    point = {"gap": "Which site.", "readings": ["Riverside.", "Pine Flat."]}
+    model = FakeModelProvider.scripted(
+        _proposal(
+            understanding="They want Riverside again.",
+            cites=["P1"],
+            unclear=[point],
+            belongs_to=["P1"],
+            meant_for=[],
+            relayed=False,
+        )
+    )
+    understood = await _understand(_stage(model, await _store(earlier)))
+    assert len(model.calls) == 1
+    assert understood.meaning == "They want Riverside again."
+    assert [(one.kind, one.id) for one in understood.meaning_referents] == [
+        ("episode", "activation:earlier")
+    ]
+    assert understood.unclear == (UnclearPoint.model_validate(point),)
+    assert [(one.kind.value, one.id) for one in understood.story_links] == [
+        ("activation", "4f1d7c0e-1a2b-4c3d-8e9f-0a1b2c3d4e5f")
+    ]
+    assert understood.continues == ()
+    assert understood.grounding_dropped == 0
+
+
+async def test_a_reply_with_a_gap_and_no_reading_is_refused_and_repaired() -> None:
+    """ADR-0353 §9:3, §16:4: a gap with no reading does not parse, so it earns the repair."""
+    model = FakeModelProvider.scripted(
+        _proposal(unclear=[{"gap": "Which dates.", "readings": []}]), _proposal()
+    )
+    understood = await _understand(_stage(model, await _store()))
+    assert len(model.calls) == 2
+    assert "not one JSON object of the required shape" in model.calls[1].messages[3].content
+    assert understood.unclear == ()
 
 
 async def test_an_unparseable_first_output_earns_exactly_one_repair() -> None:
@@ -232,7 +272,7 @@ async def test_an_unparseable_first_output_earns_exactly_one_repair() -> None:
 
 async def test_a_second_unparseable_output_raises_and_takes_no_third_completion() -> None:
     """§6: mechanical failure fails the activation; nothing is substituted."""
-    model = FakeModelProvider.scripted("not json", '{"meaning": ""}')
+    model = FakeModelProvider.scripted("not json", '{"understanding": ""}')
     with pytest.raises(UnderstandingError) as raised:
         await _understand(_stage(model, await _store()))
     assert len(model.calls) == 2
@@ -292,16 +332,13 @@ async def test_an_unresolvable_label_is_repaired_once_and_its_statement_names_th
 ):
     """§6: the repair names what resolved to nothing and which sequences were rendered."""
     window = SuppliedWindow(ChannelContext(history=(ChannelContextItem(text="Trip plans"),)))
-    model = FakeModelProvider.scripted(
-        _proposal(meaning_ground="supplied", meaning_labels=["H7"]),
-        _proposal(meaning_ground="supplied", meaning_labels=["H1"]),
-    )
+    model = FakeModelProvider.scripted(_proposal(cites=["H7"]), _proposal(cites=["H1"]))
     understood = await _understand(_stage(model, await _store()), channel=EVENTS, window=window)
     statement = model.calls[1].messages[3].content
     assert '"H7"' in statement
     assert "H1 (the channel window)" in statement
     assert "no P labels (the episode window is empty)" in statement
-    assert understood.meaning_ground is UnderstandingGround.SUPPLIED
+    assert "ground" not in statement
     assert [referent.kind for referent in understood.meaning_referents] == ["channel_item"]
     assert understood.grounding_dropped == 0
 
@@ -310,65 +347,32 @@ async def test_an_unresolvable_label_is_repaired_once_and_its_statement_names_th
 async def test_a_label_outside_the_rendered_sequences_resolves_to_nothing(label: str) -> None:
     """§3: wrong form, out of range, or of a sequence not rendered — never parsed or folded."""
     window = SuppliedWindow(ChannelContext(history=(ChannelContextItem(text="Trip plans"),)))
-    proposal = _proposal(
-        references=[{"phrase": "the second one", "labels": [label]}],
-        relationships=[
-            {"statement": "It follows the trip.", "labels": [label], "ground": "supplied"}
-        ],
-    )
+    proposal = _proposal(cites=[label, label])
     model = FakeModelProvider.scripted(proposal, proposal)
     understood = await _understand(
         _stage(model, await _store()), channel=EVENTS, window=window, episodes=False
     )
     assert len(model.calls) == 2
-    # Recorded, not refused: each unresolvable label dropped and counted, and the
-    # `supplied` relationship left with no referent recorded `inferred`.
-    assert understood.references[0].referents == ()
-    assert understood.relationships[0].referents == ()
-    assert understood.relationships[0].ground is UnderstandingGround.INFERRED
-    assert understood.grounding_dropped == 2
-
-
-async def test_supplied_naming_no_label_is_counted_once_and_recorded_inferred() -> None:
-    """§6: a `supplied` element with no label is a grounding defect, never a parse failure."""
-    proposal = _proposal(
-        meaning_ground="supplied",
-        relationships=[{"statement": "It concerns the trip.", "ground": "supplied"}],
-    )
-    model = FakeModelProvider.scripted(proposal, proposal)
-    understood = await _understand(_stage(model, await _store()))
-    assert "name no label: the meaning, relationship 1" in model.calls[1].messages[3].content
-    assert understood.meaning_ground is UnderstandingGround.INFERRED
+    # Recorded, not refused: each unresolvable label dropped and counted.
     assert understood.meaning_referents == ()
-    assert understood.relationships[0].ground is UnderstandingGround.INFERRED
     assert understood.grounding_dropped == 2
 
 
-async def test_stated_and_inferred_are_never_downgraded_whatever_became_of_their_labels() -> None:
-    """§6: only a proposed `supplied` can lose its ground; no dropped label becomes a claim."""
-    proposal = _proposal(
-        meaning_labels=["P9"],
-        relationships=[
-            {"statement": "A judgement.", "labels": ["H9"], "ground": "inferred"},
-            {"statement": "Said outright.", "labels": ["P9"], "ground": "stated"},
-        ],
-    )
+async def test_no_dropped_label_becomes_a_referent_and_each_is_counted() -> None:
+    """ADR-0353 §9:10, §12: the labels that resolve are recorded, those that do not are
+    dropped and counted after the one repair, and there is no ground to downgrade."""
+    window = SuppliedWindow(ChannelContext(history=(ChannelContextItem(text="Trip plans"),)))
+    proposal = _proposal(cites=["P9", "H1", "H9"])
     model = FakeModelProvider.scripted(proposal, proposal)
-    understood = await _understand(_stage(model, await _store()))
-    assert understood.meaning_ground is UnderstandingGround.STATED
-    assert [relationship.ground for relationship in understood.relationships] == [
-        UnderstandingGround.INFERRED,
-        UnderstandingGround.STATED,
-    ]
-    assert all(not relationship.referents for relationship in understood.relationships)
-    assert understood.grounding_dropped == 3
+    understood = await _understand(_stage(model, await _store()), channel=EVENTS, window=window)
+    assert len(model.calls) == 2
+    assert [referent.kind for referent in understood.meaning_referents] == ["channel_item"]
+    assert understood.grounding_dropped == 2
 
 
 async def test_a_duplicated_label_names_its_referent_once() -> None:
     window = SuppliedWindow(ChannelContext(history=(ChannelContextItem(text="Trip plans"),)))
-    model = FakeModelProvider.scripted(
-        _proposal(meaning_ground="supplied", meaning_labels=["H1", "H1"])
-    )
+    model = FakeModelProvider.scripted(_proposal(cites=["H1", "H1"]))
     understood = await _understand(_stage(model, await _store()), channel=EVENTS, window=window)
     assert len(understood.meaning_referents) == 1
     assert understood.grounding_dropped == 0
@@ -387,12 +391,7 @@ async def test_a_supplied_window_is_history_then_reply_to_quoted_and_resolved() 
         ),
         reply_to=ChannelContextItem(item_id="feed-9"),
     )
-    model = FakeModelProvider.scripted(
-        _proposal(
-            meaning_ground="supplied",
-            meaning_labels=["H1", "H2", "H3"],
-        )
-    )
+    model = FakeModelProvider.scripted(_proposal(cites=["H1", "H2", "H3"]))
     understood = await _understand(
         _stage(model, await _store()),
         "Riverside is closed.",
@@ -439,7 +438,6 @@ async def test_the_same_exchange_in_both_windows_is_rendered_once_under_its_h_la
                 recorded_at=AT,
                 producer=UnderstandingProducer.INTERPRETATION,
                 meaning="They asked about campsites.",
-                meaning_ground=UnderstandingGround.STATED,
             ),
         ),
     )
@@ -447,14 +445,7 @@ async def test_the_same_exchange_in_both_windows_is_rendered_once_under_its_h_la
         "activation:e-1", at=AT - timedelta(minutes=5), channel=EVENTS, text="Pine Flat full."
     )
     memory = await _store(own, other)
-    model = FakeModelProvider.scripted(
-        _proposal(
-            relationships=[
-                {"statement": "Refers back.", "labels": ["H1"], "ground": "supplied"},
-                {"statement": "Also that.", "labels": ["P1"], "ground": "supplied"},
-            ]
-        )
-    )
+    model = FakeModelProvider.scripted(_proposal(cites=["H1", "P1"]))
     window = SuppliedWindow(
         ChannelContext(history=(ChannelContextItem(text="Campsites?", item_id=own.id),))
     )
@@ -467,9 +458,10 @@ async def test_the_same_exchange_in_both_windows_is_rendered_once_under_its_h_la
     (episode,) = sent["episode_window"]
     assert episode["label"] == "P1"
     assert episode["input"] == "Pine Flat full."
-    first, second = understood.relationships
-    assert [referent.kind for referent in first.referents] == ["channel_item"]
-    assert [referent.kind for referent in second.referents] == ["episode"]
+    assert [referent.kind for referent in understood.meaning_referents] == [
+        "channel_item",
+        "episode",
+    ]
 
 
 async def test_a_supplied_item_naming_a_windowed_episode_carries_its_annotations() -> None:
@@ -492,7 +484,6 @@ async def test_a_supplied_item_naming_a_windowed_episode_carries_its_annotations
                 recorded_at=AT,
                 producer=UnderstandingProducer.INTERPRETATION,
                 meaning="A campsite filled up.",
-                meaning_ground=UnderstandingGround.STATED,
             ),
         ),
     )
@@ -555,7 +546,6 @@ def _exchange(links: dict[int, str]) -> tuple[EpisodicMemory, TranscriptWindow]:
                 recorded_at=AT,
                 producer=UnderstandingProducer.INTERPRETATION,
                 meaning="They asked about campsites.",
-                meaning_ground=UnderstandingGround.STATED,
             ),
         ),
     )
@@ -584,11 +574,7 @@ async def test_a_transcript_exchange_linked_to_its_episode_is_rendered_once_as_i
     other = _episode(
         "activation:e-1", at=AT - timedelta(minutes=5), channel=EVENTS, text="Pine Flat full."
     )
-    model = FakeModelProvider.scripted(
-        _proposal(
-            relationships=[{"statement": "Refers back.", "labels": ["H1"], "ground": "supplied"}]
-        )
-    )
+    model = FakeModelProvider.scripted(_proposal(cites=["H1"]))
     understood = await _understand(_stage(model, await _store(own, other), limit=1), window=window)
     sent = _sent(model)
     asked, replied = sent["channel_window"]
@@ -605,8 +591,9 @@ async def test_a_transcript_exchange_linked_to_its_episode_is_rendered_once_as_i
     (episode,) = sent["episode_window"]
     assert episode["label"] == "P1"
     assert episode["input"] == "Pine Flat full."
-    (relationship,) = understood.relationships
-    assert [(one.kind, one.id) for one in relationship.referents] == [("channel_item", "message:1")]
+    assert [(one.kind, one.id) for one in understood.meaning_referents] == [
+        ("channel_item", "message:1")
+    ]
 
 
 async def test_a_reply_whose_writer_is_unrecorded_is_shown_once_and_the_exchange_once() -> None:
@@ -655,8 +642,7 @@ async def test_an_episode_is_projected_explicitly_and_never_serialized() -> None
         recorded_at=AT,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning="A park closed.",
-        meaning_ground=UnderstandingGround.STATED,
-        unresolved=(UnresolvedMatter(matter="For how long.", why_it_matters="Trips move."),),
+        unclear=(UnclearPoint(gap="For how long.", readings=("A week.",)),),
     )
     record = _episode(
         "ep-SENTINEL-ID",
@@ -666,7 +652,7 @@ async def test_an_episode_is_projected_explicitly_and_never_serialized() -> None
         context=attached,
         understanding=(earlier,),
     )
-    model = FakeModelProvider.scripted(_proposal(meaning_ground="supplied", meaning_labels=["P1"]))
+    model = FakeModelProvider.scripted(_proposal(cites=["P1"]))
     understood = await _understand(
         _stage(model, await _store(record), excerpt_chars=20), "Is our trip still on?"
     )
@@ -681,9 +667,8 @@ async def test_an_episode_is_projected_explicitly_and_never_serialized() -> None
     assert "report received on informational_event:parks" in episode["item"]
     assert episode["status"] == "completed"
     assert episode["understood_then"]["provisional"].startswith("what the assistant understood")
-    assert episode["understood_then"]["unresolved"] == [
-        {"matter": "For how long.", "why_it_matters": "Trips move."}
-    ]
+    # ADR-0353 §12, §16:2: no ground, and the unclear points are the renderer lane's.
+    assert set(episode["understood_then"]) == {"provisional", "meaning"}
     (referent,) = understood.meaning_referents
     assert (referent.kind, referent.id, referent.source) == (
         "episode",

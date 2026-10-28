@@ -41,10 +41,9 @@ from ai_assistant.core.types import (
     SpokenReply,
     StageEntry,
     StageOutcome,
-    UnderstandingGround,
+    UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
-    UnresolvedMatter,
     WholeTextReply,
 )
 from ai_assistant.testing.parties import parties_for
@@ -100,7 +99,6 @@ def _understanding(meaning: str, *, version: int = 1, **fields: object) -> Activ
             "recorded_at": _NOW,
             "producer": UnderstandingProducer.INTERPRETATION,
             "meaning": meaning,
-            "meaning_ground": UnderstandingGround.STATED,
             **fields,
         }
     )
@@ -310,13 +308,20 @@ def test_an_episode_without_a_processing_record_keeps_its_content() -> None:
 # --- §8: the projection -------------------------------------------------------------
 
 
+def test_the_projection_carries_unclear_and_no_ground() -> None:
+    """ADR-0353 §14:2: ``unclear`` in place of ``unresolved``, and no ``meaning_ground``."""
+    fields = set(EpisodeProjection.model_fields)
+    assert "unclear" in fields
+    assert not {"meaning_ground", "unresolved"} & fields
+
+
 def test_a_users_episode_projects_every_part() -> None:
-    unresolved = (UnresolvedMatter(matter="which dentist", why_it_matters="two are saved"),)
+    unclear = (UnclearPoint(gap="which dentist", readings=("Dr Lind", "Dr Moss")),)
     record = _episode(
         _trigger(InputOrigin.USER),
         understanding=(
             _understanding("an earlier reading", version=1),
-            _understanding("a dentist booking", version=2, unresolved=unresolved),
+            _understanding("a dentist booking", version=2, unclear=unclear),
         ),
         outcome="Booked for Tuesday at 3.",
     )
@@ -327,8 +332,7 @@ def test_a_users_episode_projects_every_part() -> None:
         parties=parties_for(InputOrigin.USER),
         input=ProjectedText(text=_USER_WORDS, full_chars=len(_USER_WORDS)),
         meaning="a dentist booking",
-        meaning_ground=UnderstandingGround.STATED,
-        unresolved=unresolved,
+        unclear=unclear,
         response=ProjectedText(text="Booked for Tuesday at 3.", full_chars=24),
         status=ProcessingStatus.COMPLETED,
         reason=ProcessingReason.RETURNED,
@@ -448,16 +452,16 @@ def test_a_projected_text_is_no_longer_than_its_whole() -> None:
         ),
         pytest.param(
             {"meaning": "m", "capture_modality": Modality.TEXT},
-            "meaning exactly with its ground",
-            id="meaning-without-ground",
+            "carries its content alone",
+            id="recordless-with-meaning",
         ),
         pytest.param(
             {
                 "capture_modality": Modality.TEXT,
-                "unresolved": (UnresolvedMatter(matter="m", why_it_matters="w"),),
+                "unclear": (UnclearPoint(gap="g", readings=("r",)),),
             },
-            "unresolved matters only with a meaning",
-            id="unresolved-without-meaning",
+            "unclear points only with a meaning",
+            id="unclear-without-meaning",
         ),
         pytest.param(
             {"capture_modality": Modality.TEXT, "parties": [{"kind": "unknown"}]},

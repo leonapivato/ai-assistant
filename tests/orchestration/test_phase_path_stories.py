@@ -31,9 +31,7 @@ from ai_assistant.core.types import (
     StorySummaryDraft,
     StorySummaryLine,
     ToolOutcome,
-    UnderstandingGround,
     UnderstandingProducer,
-    UnderstandingReference,
     UnderstandingReferent,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
@@ -279,7 +277,7 @@ async def test_a_story_cited_as_a_referent_and_not_one_of_the_activations_is_rea
 
 
 def _citing(*story_ids: str) -> ActivationUnderstanding:
-    """An understanding whose meaning rests on the first story and refers to the rest."""
+    """An understanding whose ``cites`` resolved to every story named, in order."""
     first, *rest = (
         UnderstandingReferent(kind="story", id=one, source="story", excerpt="") for one in story_ids
     )
@@ -288,9 +286,7 @@ def _citing(*story_ids: str) -> ActivationUnderstanding:
         recorded_at=AT,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning="the trip depends on the car",
-        meaning_ground=UnderstandingGround.STATED,
-        meaning_referents=(first,),
-        references=(UnderstandingReference(phrase="the car", referents=tuple(rest)),),
+        meaning_referents=(first, *rest),
     )
 
 

@@ -3161,7 +3161,7 @@ async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, s
     assert db.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 21, 0])
+@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 22, 0])
 def test_current_shape_with_missing_or_unsupported_marker_is_refused(
     tmp_path: Path, marker: int | None
 ) -> None:

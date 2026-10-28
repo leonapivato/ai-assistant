@@ -41,7 +41,6 @@ from ai_assistant.core.types import (
     SpokenReply,
     StageEntry,
     StageOutcome,
-    UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
@@ -103,7 +102,6 @@ def _understanding(version: int) -> ActivationUnderstanding:
         recorded_at=_NOW,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning=f"reading {version}",
-        meaning_ground=UnderstandingGround.INFERRED,
     )
 
 

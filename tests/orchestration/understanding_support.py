@@ -37,9 +37,7 @@ FAKE_RECALL_THRESHOLD: Final = 0.5
 ON_DEVICE_RECALL_THRESHOLD: Final = 0.58
 
 #: The smallest well-formed proposal: a meaning grounded in the input alone.
-STATED_PROPOSAL: Final = json.dumps(
-    {"meaning": "The input means what it says.", "meaning_ground": "stated"}
-)
+STATED_PROPOSAL: Final = json.dumps({"understanding": "The input means what it says."})
 
 
 def understanding_stage(*, model: ModelProvider | None = None) -> UnderstandingStage:

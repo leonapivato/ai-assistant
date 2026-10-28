@@ -28,11 +28,8 @@ from observer_support import (
 from ai_assistant.core.types import (
     ActivationRecall,
     ActivationUnderstanding,
-    AnsweredQuestion,
-    AskedCall,
     BeliefBand,
     ClaimedAuthor,
-    ConfirmationPart,
     EpisodicMemory,
     EvidenceItemPart,
     InputOrigin,
@@ -47,8 +44,6 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     PlanningLabel,
-    PlanningRound,
-    QuestionPart,
     RecallCue,
     RecalledItem,
     RecallOutcome,
@@ -62,9 +57,7 @@ from ai_assistant.core.types import (
     StorySummaryDraft,
     StorySummaryLine,
     SupportOrigin,
-    UnderstandingGround,
     UnderstandingProducer,
-    UnderstandingReference,
     UnderstandingReferent,
     Validity,
 )
@@ -74,7 +67,6 @@ from ai_assistant.orchestration.observer.reading import (
     input_origin,
     memory_then,
 )
-from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.testing.memories import memory, said_support
 
 
@@ -283,28 +275,20 @@ async def test_only_what_the_record_points_at_is_read_and_no_search_is_run() -> 
     assert "Window seats are best." not in json.dumps(reading.payload())
 
 
-async def test_an_input_answers_the_question_its_understanding_recorded() -> None:
-    """ADR-0346 §5:1, §2:4: by the recorded answer pointer, never by guessed adjacency.
-
-    An earlier exchange the record points at that asked something else is no question
-    the input answers, so an input with no recorded answer answers nothing.
-    """
+async def test_no_input_is_shown_answering_a_question() -> None:
+    """ADR-0346 §5:1, §2:4, as ADR-0353 §11:2 leaves them: no version records an answer
+    pointer, and no adjacency is guessed, so an input that replies to an earlier question
+    the record points at is shown answering nothing."""
     harness = Harness()
     understood = ActivationUnderstanding(
         version=1,
         recorded_at=AT,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning="The user picks the window.",
-        meaning_ground=UnderstandingGround.STATED,
-        answers=(AnsweredQuestion(activation_id="asked", round="r1"),),
     )
-    labels = (
-        _label("E1", LabelKind.EPISODE, address("asked")),
-        _label("E2", LabelKind.EPISODE, address("other")),
-    )
+    labels = (_label("E1", LabelKind.EPISODE, address("asked")),)
     await harness.hold(
         episode("asked", at=AT - timedelta(minutes=9), rounds=(said("r1", "Window or aisle?"),)),
-        episode("other", at=AT - timedelta(minutes=5), rounds=(said("r2", "Cancel the booking?"),)),
         episode(
             "one",
             at=AT - timedelta(minutes=3),
@@ -312,31 +296,14 @@ async def test_an_input_answers_the_question_its_understanding_recorded() -> Non
             labels=labels,
             understanding=(understood,),
         ),
-        episode("bare", at=AT - timedelta(minutes=2), text="Yes.", labels=labels),
     )
 
     answered = await _read(harness, "one")
-    unanswered = await _read(harness, "bare")
 
     (window,) = answered.leaving.parts
-    assert (window.text, window.answers) == ("Window.", "Window or aisle?")
-    (yes,) = unanswered.leaving.parts
-    assert yes.answers is None
-    # An earlier reply the record points at keeps what it answered, by its own pointer.
-    await harness.hold(
-        episode(
-            "later",
-            at=AT - timedelta(minutes=1),
-            text="Still the window.",
-            labels=(
-                _label("E1", LabelKind.EPISODE, address("asked")),
-                _label("E2", LabelKind.EPISODE, address("one")),
-            ),
-        )
-    )
-    later = await _read(harness, "later")
-    earlier = {part.text: part.answers for one in later.earlier for part in one.parts}
-    assert earlier["Window."] == "Window or aisle?"
+    assert (window.text, window.answers) == ("Window.", None)
+    assert answered.understood is not None
+    assert "answers" not in answered.understood
 
 
 def _recall(*items: RecalledItem) -> ActivationRecall:
@@ -493,22 +460,16 @@ async def test_a_story_is_shown_with_its_summary_at_the_episodes_position() -> N
 
 
 async def test_the_understanding_is_rendered_with_its_referents_by_label() -> None:
-    """ADR-0346 §2:5: its meaning and ground, its references, and what each resolved to."""
+    """ADR-0346 §2:5, as ADR-0353 §9:5 leaves it: its meaning and what it drew on."""
     harness = Harness()
     understood = ActivationUnderstanding(
         version=1,
         recorded_at=AT,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning="The user restates a seat preference.",
-        meaning_ground=UnderstandingGround.STATED,
-        references=(
-            UnderstandingReference(
-                phrase="as I said",
-                referents=(
-                    UnderstandingReferent(
-                        kind="memory", id="m-seat", excerpt="The user prefers window seats."
-                    ),
-                ),
+        meaning_referents=(
+            UnderstandingReferent(
+                kind="memory", id="m-seat", excerpt="The user prefers window seats."
             ),
         ),
     )
@@ -521,12 +482,12 @@ async def test_the_understanding_is_rendered_with_its_referents_by_label() -> No
     reading = await _read(harness, "one")
 
     understood = json.loads(json.dumps(reading.understood))
-    assert understood["meaning"] == "The user restates a seat preference."
-    assert understood["ground"] == "stated"
-    (reference,) = understood["references"]
-    assert reference["resolved_to"] == [
-        {"kind": "memory", "label": "M1", "excerpt": "The user prefers window seats."}
-    ]
+    assert understood == {
+        "meaning": "The user restates a seat preference.",
+        "meaning_rests_on": [
+            {"kind": "memory", "label": "M1", "excerpt": "The user prefers window seats."}
+        ],
+    }
     (shown,) = reading.memories
     assert shown.handle == "M1"
 
@@ -565,74 +526,6 @@ async def test_a_candidate_is_a_hint_naming_its_parts_and_memory() -> None:
     (shown,) = reading.memories
     assert hint.memory == shown.handle
     assert shown.memory_id == held.id
-
-
-async def test_a_candidate_under_an_approval_rests_on_the_users_yes() -> None:
-    """ADR-0329 §3:3, §5:5: the asked call's fact, and a confirmation pointing at the yes."""
-    harness = Harness()
-    fact = "The user prefers window seats."
-    asked = AskedCall(
-        part=1,
-        tool=REMEMBER_CANDIDATE,
-        values={
-            "fact": fact,
-            "why": "travel",
-            "rests_on_input": True,
-            "confirm": True,
-            "episode": address("asking"),
-            "rests_on_outside_content": False,
-        },
-    )
-    asking_round = PlanningRound(
-        id="r-ask",
-        recorded_at=AT - timedelta(minutes=5),
-        text="Want me to remember that?",
-        asked=(asked,),
-    )
-    yes_at = AT - timedelta(minutes=3)
-    understood = ActivationUnderstanding(
-        version=1,
-        recorded_at=yes_at,
-        producer=UnderstandingProducer.INTERPRETATION,
-        meaning="yes to remembering it",
-        meaning_ground=UnderstandingGround.STATED,
-        answers=(AnsweredQuestion(activation_id="asking", round="r-ask"),),
-    )
-    await harness.hold(
-        episode("asking", at=AT - timedelta(minutes=5), rounds=(asking_round,)),
-        episode(
-            "yes",
-            at=yes_at,
-            text="yes",
-            messages=(RecordedInputMessage(text="yes", sent_at=yes_at - timedelta(seconds=2)),),
-            understanding=(understood,),
-        ),
-    )
-    part = QuestionPart(round="r-ask", part=1)
-    await remembered(
-        harness.plans,
-        "yes",
-        "r-yes",
-        {"fact": fact, "why": "travel", "rests_on_input": True, "confirm": True},
-        part=part,
-    )
-
-    reading = await _read(harness, "yes")
-
-    (hint,) = reading.hints
-    assert hint.fact == fact
-    confirmation = hint.confirmation
-    assert confirmation is not None
-    assert confirmation.part == ConfirmationPart(
-        episode=address("yes"), asking_activation="asking", question=part
-    )
-    assert (confirmation.origin, confirmation.text) == (SupportOrigin.CONFIRMATION, fact)
-    assert confirmation.when == yes_at - timedelta(seconds=2)
-    assert confirmation.part in reading.leaving_parts
-    # §2:1: the question its input answers is among what the record points at.
-    assert [one.episode for one in reading.earlier] == [address("asking")]
-    assert reading.understood is not None
-    assert reading.understood["answers"] == [reading.earlier[0].handle]
 
 
 async def test_the_payload_is_quoted_data_attributed_from_the_record() -> None:

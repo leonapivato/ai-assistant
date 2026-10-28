@@ -54,7 +54,7 @@ _BUDGET = timedelta(seconds=10)
 #: of its flags: how the fake tells understanding's call from the rest without
 #: matching the instruction's words (ADR-0334 §9:1).
 _UNDERSTANDING_INSTRUCTIONS = default_renderings(UNDERSTANDING_PROMPT)
-_UNDERSTOOD = json.dumps({"meaning": "The input means what it says.", "meaning_ground": "stated"})
+_UNDERSTOOD = json.dumps({"understanding": "The input means what it says."})
 
 
 def _reply(messages: Sequence[Message]) -> str:

@@ -47,7 +47,6 @@ from ai_assistant.core.types import (
     StatementPart,
     SupportHolder,
     TextChannelPayload,
-    UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
@@ -272,7 +271,6 @@ def _version(version: int) -> ActivationUnderstanding:
         recorded_at=_AT,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning=f"reading {version}",
-        meaning_ground=UnderstandingGround.STATED,
     )
 
 

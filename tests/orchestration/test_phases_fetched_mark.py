@@ -85,9 +85,7 @@ async def _harness(completer: FakeToolCallingCompleter) -> Harness:
             }
         )
     )
-    understanding = FakeModelProvider(
-        reply=json.dumps({"meaning": _DENTIST, "meaning_ground": "stated"})
-    )
+    understanding = FakeModelProvider(reply=json.dumps({"understanding": _DENTIST}))
     return Harness(
         understanding=understanding_stage(model=understanding),
         tools=(_BOOK,),
@@ -201,10 +199,7 @@ async def _story_read_harness(completer: FakeToolCallingCompleter) -> Harness:
     )
     assert (await stories.write_summary(trip, draft, as_of=state.as_of)).refusal is None
     understanding = FakeModelProvider(
-        reply=json.dumps(
-            {"meaning": "the user asks about the trip", "meaning_ground": "stated"}
-            | {"story_labels": ["S1"]}
-        )
+        reply=json.dumps({"understanding": "the user asks about the trip"} | {"belongs_to": ["S1"]})
     )
     return Harness(
         understanding=understanding_stage(model=understanding),

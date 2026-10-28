@@ -15,7 +15,7 @@ person = false
 
 [property]
 check = "no_label"
-fields = ["meaning", "phrase", "statement", "matter", "why_it_matters"]
+fields = ["understanding", "gap"]
 labels = ["H", "P"]
 
 [input]

@@ -1408,11 +1408,8 @@ def _cited(understanding: ActivationUnderstanding | None) -> list[str]:
     """The stories understanding cited as referents (ADR-0304 §8:1), in order, once each."""
     if understanding is None:
         return []
-    referents = [
-        *understanding.meaning_referents,
-        *(one for reference in understanding.references for one in reference.referents),
-        *(one for relationship in understanding.relationships for one in relationship.referents),
-    ]
+    # ADR-0353 §9:8: a version's referents are its `meaning_referents`.
+    referents = understanding.meaning_referents
     return list(
         dict.fromkeys(
             referent.id
@@ -2155,7 +2152,10 @@ class PhaseWorking:
         runs under an approval (ADR-0321 §4:5). It grants nothing by itself: authorizing
         checks each pointer against the records.
         """
-        answers = () if understanding is None else understanding.answers
+        # ADR-0353 §11:2-§11:3: understanding records no answer pointer until the
+        # authority run, so authorizing's rules find none.
+        del understanding
+        answers: tuple[AnsweredQuestion, ...] = ()
         if not answers or self.given_at is None:
             return None
         return YesContext(
@@ -4187,7 +4187,9 @@ class PhasePath:
         kept = () if first is None else tuple(item.id for item in first.result.items)
         recalled = await recall.recall_again(
             understanding.meaning,
-            tuple(one.phrase for one in understanding.references),
+            # ADR-0353 §14:3: a version has no references, so no phrase cues the run;
+            # each unclear point's gap is the readers' lane's to add (§16:3).
+            (),
             audience=given.supply,
             deadline=given.deadline,
             passed_over=windows.shared | frozenset(windows.episode_ids or ()) | frozenset(kept),
@@ -4836,7 +4838,10 @@ class PhasePath:
         be read. This shows and grants nothing that authorizing does not check again
         (§4:4).
         """
-        pointers = () if given.understanding is None else given.understanding.answers
+        # ADR-0353 §11:2-§11:3: understanding records no answer pointer until the
+        # authority run, so none shows an approved action.
+        del given
+        pointers: tuple[AnsweredQuestion, ...] = ()
         if not pointers or not working.users_authority or self._target(working) is None:
             return ()
         if working.approvable is None or working.approvable[0] != pointers:

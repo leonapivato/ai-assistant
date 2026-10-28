@@ -3794,31 +3794,13 @@ class StoryMember(BaseModel):
 # --- activation understanding (ADR-0276) -------------------------------------
 
 
-class UnderstandingGround(StrEnum):
-    """How an element of an activation's understanding came to be known (ADR-0276 §2).
-
-    A **closed** enumeration, **added to and never renamed** on the rule ADR-0249
-    §1 gave the retired ``Ground``: no later ADR removes a member, renames one, gives one a
-    second spelling, or replaces this enum with a differently named one for the
-    same question.
-    """
-
-    STATED = "stated"
-    """The input says it."""
-
-    SUPPLIED = "supplied"
-    """A supplied item the reading names says it."""
-
-    INFERRED = "inferred"
-    """Neither: the understanding stage judged it."""
-
-
 class UnderstandingOmission(StrEnum):
     """Why a processing record carries no understanding (ADR-0276 §2, §5, §6).
 
-    Closed and never renamed, on :class:`UnderstandingGround`'s rule. ``routed`` and
-    ``no_input`` left with the route and the resume they classified (ADR-0318 §5:4),
-    a recorded exception to that rule: the data directory is fresh (§5:5).
+    A **closed** enumeration, **added to and never renamed**: no later ADR removes a
+    member, renames one or gives one a second spelling. ``routed`` and ``no_input``
+    left with the route and the resume they classified (ADR-0318 §5:4), a recorded
+    exception to that rule: the data directory is fresh (§5:5).
     """
 
     NO_TEXT = "no_text"
@@ -3835,49 +3817,40 @@ class UnderstandingProducer(StrEnum):
     """Which stage recorded a version of an understanding (ADR-0276 §2).
 
     One member because ADR-0276 ships one producer; a later decision adds members
-    rather than reusing this one. Closed and never renamed, on
-    :class:`UnderstandingGround`'s rule.
+    rather than reusing this one. Closed, **added to and never renamed**.
     """
 
     INTERPRETATION = "interpretation"
     """The understanding stage of ADR-0276."""
 
 
-class ProposedReference(BaseModel):
-    """A phrase in the input and the labels the model says it refers to."""
+class UnclearPoint(BaseModel):
+    """One point that is unclear about what a stimulus means (ADR-0353 §9:3).
+
+    ``gap`` is what would need to be known, and ``readings`` what the stimulus would mean
+    under each answer: at least one, since a gap with no reading says nothing about
+    meaning. A reading says what the stimulus would mean, never what to do (ADR-0276
+    §6:1, as ADR-0353 §9 amends it). The proposal and the record carry it alike, the
+    record copying it unchanged (§9:4).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    phrase: NonBlankEncodableText
-    labels: tuple[EncodableText, ...] = ()
-
-
-class ProposedRelationship(BaseModel):
-    """A relationship the model states, with the labels it rests on and its ground."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    statement: NonBlankEncodableText
-    labels: tuple[EncodableText, ...] = ()
-    ground: UnderstandingGround
-
-
-class UnresolvedMatter(BaseModel):
-    """Something the understanding could not settle and why that matters."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    matter: NonBlankEncodableText
-    why_it_matters: NonBlankEncodableText
+    gap: NonBlankEncodableText
+    readings: tuple[NonBlankEncodableText, ...] = Field(min_length=1)
 
 
 # --- a question, its answer, and the approval a yes makes (ADR-0321) -----------
 #
 # A question is an ordinary message a planning round writes (ADR-0307 §3:6), and each
 # call it asks about is one of its parts (ADR-0321 §2:6). An answer is an activation
-# like any other, whose understanding may record a pointer naming the question and the
+# like any other, whose understanding recorded a pointer naming the question and the
 # parts it approves (§3:1). Where authorizing's three facts hold, code assembles an
-# approval from those records (§4:6), and each part is spent once (§4:9).
+# approval from those records (§4:6), and each part is spent once (§4:9). Understanding
+# records no pointer until the authority run (ADR-0353 §11:2), so authorizing's rules,
+# which stand unchanged, find none (§11:3); :class:`AnsweredQuestion` stays as the type
+# they hold (§9:9).
 #
-# Declared here, ahead of :class:`ProposedActivationUnderstanding`, which carries the
-# proposed pointer, and of :class:`UserConfirmation`, which names the part it answers;
+# Declared here, ahead of :class:`UserConfirmation`, which names the part it answers;
 # the rule above :data:`Identifier` decides the placement. The asked call itself is
 # declared beside :class:`ActionRequest`, whose declaration it carries.
 
@@ -3913,30 +3886,15 @@ class QuestionPart(BaseModel):
     part: int = Field(strict=True, ge=1, le=QUESTION_PART_MAX)
 
 
-class ProposedAnswer(BaseModel):
-    """One question understanding proposes an input approves (ADR-0321 §3:1, ADR-0322 §2:1).
-
-    ``question`` names the question by its ``Q`` label, the label the call gave the
-    question's mark (ADR-0322 §4:4-§4:5), meaningful only within the call that rendered
-    it. ``parts`` are the parts the input approves; empty means every part the question
-    showed (ADR-0321 §3:6, ADR-0322 §2:4). Like every proposed field it is a reading,
-    and the stage resolves or drops it, so a label naming nothing, or naming something
-    other than a question, is not refused here.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    question: NonBlankEncodableText
-    parts: tuple[Annotated[int, Field(strict=True, ge=1, le=QUESTION_PART_MAX)], ...] = ()
-
-
 class AnsweredQuestion(BaseModel):
-    """One recorded answer pointer: a question an input approves, by ids (ADR-0321 §3:1).
+    """One answer pointer: a question an input approves, by ids (ADR-0321 §3:1).
 
-    The resolved form of :class:`ProposedAnswer`, carrying no label (ADR-0276 §2:4); an
-    understanding records one per question its input approves (ADR-0322 §2:1). It
-    names the question's message by the records its writer and its delivery keep:
-    ``activation_id`` is the activation that asked, and the message is then named by
-    the round that wrote it, by its place and position in that place, or by both.
+    It carries no label (ADR-0276 §2:4). No understanding records one until the
+    authority run redesigns approvals (ADR-0353 §11:2), and authorizing's rules, which
+    read it, stand unchanged (§11:3). It names the question's message by the records
+    its writer and its delivery keep: ``activation_id`` is the activation that asked,
+    and the message is then named by the round that wrote it, by its place and
+    position in that place, or by both.
     Either names exactly one message, because a round writes at most one and a place
     holds one message at a position, and either reaches the message's delivery record,
     an :class:`ActivationEffect` of that activation carrying the round, the place and
@@ -4064,32 +4022,24 @@ class Approval(BaseModel):
 
 
 class ProposedActivationUnderstanding(BaseModel):
-    """What the model produces, and the whole of what it produces (ADR-0276 §2).
+    """Understanding's reply, field for field, under the reply's own names (ADR-0353 §9:2).
 
-    It carries **no identifier, no timestamp, no version and no producer**: a label
-    is a string of ADR-0276 §3's scheme, meaningful only within the call that
-    rendered it. A ``supplied`` ground with no label is a grounding defect the
-    stage repairs and then records as ``inferred`` (§6), never a parse failure —
-    so this type validates nothing about it.
+    It carries **no identifier, no timestamp, no version and no producer**: a label is
+    a string of ADR-0276 §3's scheme, meaningful only within the call that rendered it,
+    and the stage resolves or drops each, so this type validates nothing about labels.
+    It carries no ground, no reference, no relationship, no unresolved matter and no
+    answer (§9:1, §12:1). The stage records it into :class:`ActivationUnderstanding` by
+    §9's table (§9:4).
 
-    ``story_labels`` (ADR-0300 §6:6) are the labels of the candidate stories, and of
-    earlier episodes, that the input belongs with as one matter. A label naming
-    nothing a story link can be made from is a label defect the stage repairs and
-    then drops (§6:8), so this type validates nothing about them either.
-
-    ``answers`` (ADR-0321 §3:1, ADR-0322 §2:1) are the proposed answer pointers, one
-    per question the input approves, each naming its question by the ``Q`` label the
-    call rendered and the parts it approves. Empty where the input approves no
-    question, a bare yes that could fit more than one included (ADR-0321 §3:5). Each is
-    a reading and grants nothing; two naming one question are the stage's to drop
-    (ADR-0322 §2:7), so this type does not refuse them.
-
-    ``continues`` (ADR-0349 §7:3, §10:1) are the labels of the running activations shown
-    to understanding whose work this input continues: corrects, completes, cancels or
-    changes. Each is of the kind ``R`` that ADR-0332 §7:3 adds to ADR-0276 §3:3's
-    scheme. Empty where the input continues none. A label that resolves to no shown
-    activation is a grounding defect the stage drops (ADR-0349 §10:2), and one named
-    twice is the stage's to resolve once, so this type validates nothing about them.
+    ``understanding`` is the understanding passed on, in full, standing on its own,
+    recorded as ``meaning``. ``cites`` are the labels of the items it draws on, an ``R``
+    label included (§10:2), each resolved into ``meaning_referents``. ``unclear`` is what
+    is unclear about what the stimulus means, copied unchanged. ``belongs_to`` are the
+    matters the stimulus belongs to, by a matter's label or an earlier stimulus's, an
+    ``R`` label's running activation included (§10:3), resolved into ``story_links``.
+    ``meant_for`` are the ``R`` labels of the concurrent stimuli whose work this one is
+    meant for, resolved into ``continues`` (§10:4): only they make the stimulus part of
+    running work.
 
     ``relayed`` (ADR-0351 §5:6, §5:10) is the reply's **relay mark** on the input it
     reads: that the input carries words its sender did not write themselves, such as a
@@ -4098,15 +4048,11 @@ class ProposedActivationUnderstanding(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    meaning: NonBlankEncodableText
-    meaning_ground: UnderstandingGround
-    meaning_labels: tuple[EncodableText, ...] = ()
-    references: tuple[ProposedReference, ...] = ()
-    relationships: tuple[ProposedRelationship, ...] = ()
-    unresolved: tuple[UnresolvedMatter, ...] = ()
-    story_labels: tuple[EncodableText, ...] = ()
-    answers: tuple[ProposedAnswer, ...] = ()
-    continues: tuple[EncodableText, ...] = ()
+    understanding: NonBlankEncodableText
+    cites: tuple[EncodableText, ...] = ()
+    unclear: tuple[UnclearPoint, ...] = ()
+    belongs_to: tuple[EncodableText, ...] = ()
+    meant_for: tuple[EncodableText, ...] = ()
     relayed: bool = False
 
 
@@ -4127,69 +4073,56 @@ class UnderstandingReferent(BaseModel):
     ``excerpt`` the first line of its summary as its short view rendered it, or empty
     where the view rendered none. A story since merged is a dangling ``id`` like any
     other, and a record written before the kind validates unchanged.
+
+    ``running`` (ADR-0353 §10:1) names a running activation shown in concurrent stimuli,
+    which an ``R`` label stands for: ``id`` that activation's episode id
+    (``activation:`` and the activation's id), stable once the episode freezes;
+    ``source`` its origin's channel, as an episode's is (ADR-0276 §2:5); and ``excerpt``
+    its input in brief, as its entry rendered it, so outside input stays withheld. It is
+    this episode's record of what its understanding drew on, and no read chains through
+    it: a reading of this episode that reaches a model shows of it at most a pointer to
+    the other activation's episode, never its excerpt (§10:6).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["input", "channel_item", "episode", "memory", "story"]
+    kind: Literal["input", "channel_item", "episode", "memory", "story", "running"]
     id: EncodableText | None = None
     source: NonBlankEncodableText | None = None
     excerpt: EncodableText = Field(max_length=UNDERSTANDING_REFERENT_EXCERPT_CHARS)
 
 
-class UnderstandingReference(BaseModel):
-    """A phrase and the referents its labels resolved to."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    phrase: NonBlankEncodableText
-    referents: tuple[UnderstandingReferent, ...] = ()
-
-
-class UnderstandingRelationship(BaseModel):
-    """A stated relationship, the referents it rests on and its ground.
-
-    ``supplied`` names its source: the enclosing :class:`ActivationUnderstanding`
-    refuses a ``supplied`` relationship whose ``referents`` are empty.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    statement: NonBlankEncodableText
-    referents: tuple[UnderstandingReferent, ...] = ()
-    ground: UnderstandingGround
-
-
 class ActivationUnderstanding(BaseModel):
     """One recorded version of what the assistant understood an activation to mean.
 
-    The recorded form of :class:`ProposedActivationUnderstanding` (ADR-0276 §2):
-    ``orchestration`` assigns ``version``, ``recorded_at`` and ``producer``,
-    resolves every label into an :class:`UnderstandingReferent`, and copies the
-    texts and grounds unchanged. It carries no goal id, no attempt id, no plan id
-    and no label, and it crosses no model-facing seam under ADR-0276. It grants no
-    authority and establishes no fact; it is what the assistant understood.
+    The recorded form of :class:`ProposedActivationUnderstanding` (ADR-0276 §2, as
+    ADR-0353 §9:4 maps it): ``orchestration`` assigns ``version``, ``recorded_at`` and
+    ``producer``, records the reply's ``understanding`` as ``meaning``, resolves its
+    ``cites`` into ``meaning_referents``, copies its ``unclear`` unchanged, resolves its
+    ``belongs_to`` into ``story_links`` and its ``meant_for`` into ``continues``. It
+    carries no goal id, no attempt id, no plan id and no label, and no ground, reference,
+    relationship, unresolved matter or answer pointer (§9:5): the episode store's upgrade
+    drops those from every version stored before (§9:6). It grants no authority and
+    establishes no fact; it is what the assistant understood.
+
+    ``meaning_referents`` are what the understanding drew on, each label resolved once,
+    in order. A matter's label among them resolves to its referent and links nothing:
+    only ``belongs_to`` makes story links (§9:4, ADR-0304 §8:1, §8:2).
+
+    ``unclear`` (§9:3, §9:4) is what was unclear about what the stimulus means, each
+    point with the readings it would have.
 
     ``story_links`` (ADR-0300 §6:7) are the matters the input was understood to
     belong to, in proposal order with no member twice: a candidate story as a story
-    member, and an earlier episode as its activation. A link says the input belongs
-    to that matter and nothing more; the story-links stage records it in the story
-    store (§6:12), and a record written before the field validates unchanged
-    (§12:1).
+    member, and an earlier episode or a running activation as its activation (ADR-0353
+    §10:3). A link says the input belongs to that matter and nothing more; the
+    story-links stage records it in the story store (§6:12).
 
-    ``answers`` (ADR-0321 §3:1, ADR-0322 §2:1) are the recorded answer pointers, one per
-    question the input approves, each resolved to ids with no label (ADR-0276 §2:4),
-    naming no question twice (ADR-0322 §2:7); empty where the input approves no
-    question. Like every other field here they grant no authority: authorizing checks
-    each against the records (ADR-0321 §4:4, ADR-0322 §3:1).
-
-    ``continues`` (ADR-0349 §10:2) are the activations the proposal's ``continues``
-    labels resolved to, in the proposal's order and each once: the running activations
-    this input continues, which the takeover stage reads (§7:4). Empty where the
-    proposal named none, or named only labels that resolved to no shown activation,
-    which the stage drops as grounding defects (ADR-0276 §6). Like ``answers``, it
-    grants nothing: the takeover stage checks each against the running activation
-    (ADR-0349 §7:5). A record written before ADR-0332 added the field validates
-    unchanged; one a build before ADR-0349 wrote, naming one activation or none, is
-    carried to a one-element or an empty sequence by the memory store's upgrade
-    (§10:6).
+    ``continues`` (ADR-0349 §10:2) are the activations the reply's ``meant_for`` labels
+    resolved to, in its order and each once: the running activations this input is meant
+    for, which the takeover stage reads (§7:4). Empty where the reply named none, or
+    named only labels that resolved to no shown activation, which the stage drops and
+    counts (ADR-0353 §9:11). It grants nothing: the takeover stage checks each against
+    the running activation (ADR-0349 §7:5).
 
     ``relayed`` (ADR-0351 §5:10) is the relay mark this version records on the
     trigger's input: ``False`` marks nothing. A version recorded before the field
@@ -4197,7 +4130,8 @@ class ActivationUnderstanding(BaseModel):
     one does, which :class:`EpisodeProcessingRecord` holds (§5:9).
 
     Raises:
-        ValueError: If ``continues`` names one activation twice.
+        ValueError: If ``continues`` names one activation twice, or ``story_links`` one
+            member twice.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -4205,14 +4139,10 @@ class ActivationUnderstanding(BaseModel):
     recorded_at: UtcInstant
     producer: UnderstandingProducer
     meaning: NonBlankEncodableText
-    meaning_ground: UnderstandingGround
     meaning_referents: tuple[UnderstandingReferent, ...] = ()
-    references: tuple[UnderstandingReference, ...] = ()
-    relationships: tuple[UnderstandingRelationship, ...] = ()
-    unresolved: tuple[UnresolvedMatter, ...] = ()
+    unclear: tuple[UnclearPoint, ...] = ()
     grounding_dropped: int = Field(default=0, strict=True, ge=0, lt=2**31)
     story_links: tuple[StoryMember, ...] = ()
-    answers: tuple[AnsweredQuestion, ...] = ()
     continues: tuple[Identifier, ...] = ()
     relayed: bool = False
 
@@ -4227,34 +4157,6 @@ class ActivationUnderstanding(BaseModel):
     def _no_story_link_twice(self) -> Self:
         if len(set(self.story_links)) != len(self.story_links):
             msg = "an understanding links to each story member at most once (ADR-0300 §6:7)"
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _no_question_twice(self) -> Self:
-        # A question is its asking activation's message: named by its round, by its place
-        # and position, or by both, and either names exactly one message (ADR-0321 §3:1).
-        by_round = [(one.activation_id, one.round) for one in self.answers if one.round is not None]
-        by_place = [
-            (one.activation_id, one.place, one.position)
-            for one in self.answers
-            if one.place is not None
-        ]
-        if len(set(by_round)) != len(by_round) or len(set(by_place)) != len(by_place):
-            msg = "an understanding names each question it approves once (ADR-0322 §2:7)"
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _supplied_names_its_source(self) -> Self:
-        if self.meaning_ground is UnderstandingGround.SUPPLIED and not self.meaning_referents:
-            msg = "a supplied meaning names at least one referent"
-            raise ValueError(msg)
-        if any(
-            relationship.ground is UnderstandingGround.SUPPLIED and not relationship.referents
-            for relationship in self.relationships
-        ):
-            msg = "a supplied relationship names at least one referent"
             raise ValueError(msg)
         return self
 
@@ -4445,6 +4347,10 @@ class RecallCue(StrEnum):
     UNDERSTOOD_PHRASE = "understood_phrase"
     """Recall's second run, cued by the ``phrase`` of one of the latest understanding's
     ``references``, resolved or not (ADR-0308 §2:2)."""
+    UNDERSTOOD_GAP = "understood_gap"
+    """Recall's second run, cued by the ``gap`` of one of the latest understanding's
+    unclear points (ADR-0353 §14:3, §14:4). ``understood_phrase`` stays beside it, since
+    stored recall records name it."""
 
 
 class RecallProvenance(StrEnum):
@@ -5358,7 +5264,7 @@ class EpisodeProjection(BaseModel):
     ``parties`` and whether its latest understanding version marks the trigger's input
     ``relayed`` (ADR-0351 §8:4, §10:4), its input text where ``origin`` is ``user`` (or
     ``outside``, for the two renderings that admit it, §8:5), the latest
-    understanding's ``meaning``, ``meaning_ground`` and ``unresolved``, its ``status``
+    understanding's ``meaning`` and ``unclear`` (ADR-0353 §14:2), its ``status``
     and ``reason``, and no stage verdict (ADR-0318 §3:1). **An episode without one**
     (§8:2) carries its ``capture_modality`` instead of a channel and its ``content`` as
     its input, and no parties, no relay mark, no understanding and no status; ``status``
@@ -5379,8 +5285,7 @@ class EpisodeProjection(BaseModel):
         input: The input text or transcript, cut to the excerpt bound, or ``None``
             where none is shown.
         meaning: The latest understanding's meaning, or ``None`` where there is none.
-        meaning_ground: Its ground, present exactly with ``meaning``.
-        unresolved: The latest understanding's unresolved matters.
+        unclear: The latest understanding's unclear points, each with its readings.
         response: What the episode records the assistant sent back (``outcome``),
             cut to the excerpt bound.
         status: How processing ended, or ``None`` where there is no processing record.
@@ -5409,8 +5314,7 @@ class EpisodeProjection(BaseModel):
     relayed: bool = False
     input: ProjectedText | None = None
     meaning: NonBlankEncodableText | None = None
-    meaning_ground: UnderstandingGround | None = None
-    unresolved: tuple[UnresolvedMatter, ...] = ()
+    unclear: tuple[UnclearPoint, ...] = ()
     response: ProjectedText | None = None
     status: ProcessingStatus | None = None
     reason: ProcessingReason | None = None
@@ -5424,11 +5328,8 @@ class EpisodeProjection(BaseModel):
         if (self.status is None) != (self.reason is None):
             msg = "a projection carries a status exactly with its reason"
             raise ValueError(msg)
-        if (self.meaning is None) != (self.meaning_ground is None):
-            msg = "a projection carries a meaning exactly with its ground"
-            raise ValueError(msg)
-        if self.meaning is None and self.unresolved:
-            msg = "a projection carries unresolved matters only with a meaning"
+        if self.meaning is None and self.unclear:
+            msg = "a projection carries unclear points only with a meaning"
             raise ValueError(msg)
         if self.status is None:
             # §8:2: no origin, no understanding and no status; ADR-0351 §8:4: and so

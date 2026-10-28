@@ -2,13 +2,12 @@
 
 The yes-path hub of :mod:`test_phases_yes_path`, with a person-model store wired: a
 ``pin`` planning proposes needs the person's yes; the question shows the memory's
-wording in its exact line, and records its id; a yes pins it, as the person's act by
-that yes, and the pending suggestion it answers is accepted in the same write. A
-``set_profile`` runs the same way, and the next activation tells the time in the zone it
-set (§3:6). With no store wired, none of the three is offered, and nothing changes
-(§11:2). A ``pin`` or ``unpin`` whose memory the asking round's live read does not
-return current, finds resting on outside content, or cannot read is not asked about
-(§8:6).
+wording in its exact line, and records its id. A ``set_profile`` is asked the same way.
+Until the authority run a yes approves nothing (ADR-0353 §11:3), so neither runs on one:
+each goes back to planning as needing the person. With no store wired, none of the three
+is offered, and nothing changes (§11:2). A ``pin`` or ``unpin`` whose memory the asking
+round's live read does not return current, finds resting on outside content, or cannot
+read is not asked about (§8:6).
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ import json
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from phases_support import processing
 from structlog.testing import capture_logs
 from test_engine import AT
 from test_person_block import _ended
@@ -28,7 +26,6 @@ from test_phases_yes_path import (
     _call,
     _Hooked,
     _Hub,
-    _run_approved,
 )
 
 from ai_assistant.app import build_engine
@@ -37,7 +34,6 @@ from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     MemoryStatus,
-    PersonActHow,
     ProfileField,
     ProposedSuggestion,
     RoundResponse,
@@ -144,8 +140,9 @@ async def test_wired_the_three_are_offered_and_only_to_an_activation_given_a_blo
     assert offered.isdisjoint(PERSON_MODEL_CAPABILITIES)
 
 
-async def test_a_pin_is_asked_with_the_memorys_wording_and_a_yes_pins_it() -> None:
-    """§8:5-§8:6, §8:8: needs you by rule; the line shows the wording; the yes pins it."""
+async def test_a_pin_is_asked_with_the_memorys_wording_and_a_yes_pins_nothing() -> None:
+    """§8:5-§8:6: needs you by rule, and the line shows the wording; ADR-0353 §11:3: a
+    yes records no pointer, so nothing is pinned."""
     hub, people = await _hub()
     hub.reader.nothing()
     hub.planner.then(RoundResponse(calls=(_call("c1", "pin", memory="M1"),)), _ask(_ASKING_PIN))
@@ -159,26 +156,19 @@ async def test_a_pin_is_asked_with_the_memorys_wording_and_a_yes_pins_it() -> No
     assert model is not None
     assert model.pins == ()
 
-    hub.reader.yes(_ASKING_PIN)
-    hub.planner.then(_run_approved(), _DONE)
-    _, approving = await hub.turn("Yes.", conversation=conversation, message_id="m-2")
+    hub.reader.yes()
+    hub.planner.then(RoundResponse(text="I'm waiting on your answer above."))
+    await hub.turn("Yes.", conversation=conversation, message_id="m-2")
 
     model = await people.store.read(OWNER_PERSON_ID)
     assert model is not None
-    (pin,) = model.standing_pins
-    assert pin.memory_id == DIET.id
-    assert pin.act.how is PersonActHow.APPROVAL
-    assert pin.act.approval is not None
-    assert pin.act.approval.part == asked.part
-    assert pin.act.episode_id == f"activation:{processing(approving).activation_id}"
-    # §8:8: the suggestion it answers is accepted in the same write.
-    assert model.suggestions == ()
-    # The round after the yes is told it was done.
-    assert '"pinned"' in hub.planner.shown(3)
+    assert model.standing_pins == ()
+    assert "approved_actions" not in hub.planner.shown(2)
 
 
-async def test_a_set_profile_runs_on_the_yes_and_the_next_activation_is_in_its_zone() -> None:
-    """§8:5, §3:5: the field is the person's act by the yes; §3:6: the clock follows it."""
+async def test_a_set_profile_is_asked_and_a_yes_sets_nothing() -> None:
+    """§8:5: asked with its exact line; ADR-0353 §11:3: a yes approves nothing, so the
+    field and the clock stay as they were."""
     hub, people = await _hub()
     hub.reader.nothing()
     hub.planner.then(
@@ -192,23 +182,21 @@ async def test_a_set_profile_runs_on_the_yes_and_the_next_activation_is_in_its_z
     shown_before = json.loads(hub.planner.shown(0))
     assert shown_before["time_zone"] == "UTC"
 
-    hub.reader.yes(_ASKING_ZONE)
-    hub.planner.then(_run_approved(), _DONE)
+    hub.reader.yes()
+    hub.planner.then(RoundResponse(text="I'm waiting on your answer above."))
     await hub.turn("Yes.", conversation=conversation, message_id="m-2")
 
     model = await people.store.read(OWNER_PERSON_ID)
     assert model is not None
-    assert model.profile.value(ProfileField.TIME_ZONE) == "Asia/Kolkata"
-    (change,) = model.changes
-    assert change.act.how is PersonActHow.APPROVAL
+    assert model.profile.value(ProfileField.TIME_ZONE) is None
+    assert model.changes == ()
 
     hub.reader.nothing()
     hub.planner.then(_DONE)
     await hub.turn("What time is it?", conversation=conversation, message_id="m-3")
 
-    shown_after = json.loads(hub.planner.shown(4))
-    assert shown_after["time_zone"] == "Asia/Kolkata"
-    assert shown_after["now"].endswith("+05:30")
+    shown_after = json.loads(hub.planner.shown(3))
+    assert shown_after["time_zone"] == "UTC"
 
 
 async def test_a_pin_whose_memory_is_gone_by_the_asking_round_is_not_asked_about() -> None:

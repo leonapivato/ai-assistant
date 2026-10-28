@@ -49,7 +49,6 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportHolder,
     SupportOrigin,
-    UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
@@ -96,7 +95,6 @@ def _understood(version: int, *, relayed: bool) -> ActivationUnderstanding:
         recorded_at=_AT,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning="The user asks about Ana.",
-        meaning_ground=UnderstandingGround.STATED,
         relayed=relayed,
     )
 
@@ -461,7 +459,7 @@ def test_a_version_and_a_joined_input_stored_before_the_fields_mark_nothing() ->
         joined_at=_AT, channel=_LINE, messages=(_note().model_copy(update={"party": _OWNER}),)
     ).model_dump(mode="json")
     del joined["relayed"]
-    proposal = {"meaning": "m", "meaning_ground": "stated"}
+    proposal = {"understanding": "m"}
 
     assert not ActivationUnderstanding.model_validate(version).relayed
     assert not JoinedInput.model_validate(joined).relayed

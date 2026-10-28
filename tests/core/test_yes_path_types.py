@@ -46,7 +46,6 @@ from ai_assistant.core.types import (
     PermissionRuling,
     PlanningLabel,
     PlanningRound,
-    ProposedAnswer,
     QuestionPart,
     Reversibility,
     RiskLevel,
@@ -292,16 +291,6 @@ def test_a_response_names_each_call_its_message_asks_about_once() -> None:
 
 
 # --- the answer pointer (§3:1) ----------------------------------------------------------
-
-
-def test_a_proposed_answer_names_its_question_by_label() -> None:
-    """§3:1, §3:6: a label as understanding was shown it, and the parts; empty is all."""
-    assert ProposedAnswer(question="H3").parts == ()
-    assert ProposedAnswer(question="P2", parts=(2, 1)).parts == (2, 1)
-    with pytest.raises(ValidationError):
-        ProposedAnswer(question=" ")
-    with pytest.raises(ValidationError):
-        ProposedAnswer(question="H3", parts=(0,))
 
 
 @pytest.mark.parametrize(

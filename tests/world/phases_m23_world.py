@@ -139,9 +139,7 @@ AFTER: Final = "I have not sent anything; that needs you."
 SETTLE: Final = 10.0
 
 #: Understanding's proposal: a meaning grounded in the input alone.
-_STATED: Final = json.dumps(
-    {"meaning": "The input means what it says.", "meaning_ground": "stated"}
-)
+_STATED: Final = json.dumps({"understanding": "The input means what it says."})
 
 #: The recall digest's answer, over the one record it read.
 _DIGESTED: Final = json.dumps(

@@ -42,7 +42,6 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     SpokenAudioFormat,
     SpokenReply,
-    UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
@@ -148,7 +147,6 @@ def _understood(meaning: str) -> ActivationUnderstanding:
         recorded_at=AT,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning=meaning,
-        meaning_ground=UnderstandingGround.STATED,
     )
 
 

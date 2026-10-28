@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 _FACT: Final = "The user is allergic to peanuts."
 _ASKED: Final = "remember I'm allergic to peanuts"
-_UNDERSTOOD: Final = json.dumps({"meaning": "As said.", "meaning_ground": "stated"})
+_UNDERSTOOD: Final = json.dumps({"understanding": "As said."})
 #: The observer's steps' calls, told apart by their default's renderings, not words.
 _SCOUT: Final = default_renderings(OBSERVER_SCOUT_PROMPT)
 _FRAMING: Final = default_renderings(OBSERVER_FRAMING_PROMPT)

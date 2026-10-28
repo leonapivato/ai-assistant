@@ -105,11 +105,10 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     SupportHolder,
-    UnderstandingGround,
+    UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
     UnderstandingReferent,
-    UnresolvedMatter,
     Validity,
     WalkPosition,
     WholeTextReply,
@@ -1505,11 +1504,15 @@ class MemoryStoreContract:
             recorded_at=_OCCURRED,
             producer=UnderstandingProducer.INTERPRETATION,
             meaning="the user asked for the exact input again",
-            meaning_ground=UnderstandingGround.SUPPLIED,
             meaning_referents=(
                 UnderstandingReferent(kind="episode", id=" ", source="event", excerpt="exact"),
+                # ADR-0353 §10:1: a running activation, by its episode id.
+                UnderstandingReferent(
+                    kind="running", id="activation:act-r", source="event", excerpt="brief"
+                ),
             ),
-            unresolved=(UnresolvedMatter(matter="which one", why_it_matters="two match"),),
+            # ADR-0353 §9:3: an unclear point, with its readings.
+            unclear=(UnclearPoint(gap="which one", readings=("the first", "the second")),),
             grounding_dropped=1,
         )
         record = understood.processing_record.model_copy(
@@ -1557,7 +1560,6 @@ class MemoryStoreContract:
             recorded_at=_OCCURRED,
             producer=UnderstandingProducer.INTERPRETATION,
             meaning="the canoe is booked for the camping trip",
-            meaning_ground=UnderstandingGround.STATED,
             story_links=links,
         )
         entries = (
@@ -1601,7 +1603,6 @@ class MemoryStoreContract:
                 recorded_at=_OCCURRED,
                 producer=UnderstandingProducer.INTERPRETATION,
                 meaning="make both bookings Sunday",
-                meaning_ground=UnderstandingGround.STATED,
                 continues=continues,
             )
             for number, continues in ((1, ()), (2, ("act-web", "act-line")))
@@ -5841,7 +5842,6 @@ class MemoryStoreContract:
                 recorded_at=_OCCURRED,
                 producer=UnderstandingProducer.INTERPRETATION,
                 meaning="the user pasted an email about the booking",
-                meaning_ground=UnderstandingGround.STATED,
                 relayed=relayed,
             )
 

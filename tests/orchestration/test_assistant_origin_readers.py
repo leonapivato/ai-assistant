@@ -31,7 +31,6 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     StageEntry,
     StageOutcome,
-    UnderstandingGround,
     UnderstandingProducer,
 )
 from ai_assistant.orchestration import matters_pass, planning, story_tidy_up, understanding
@@ -71,7 +70,6 @@ def _scheduled_episode() -> EpisodicMemory:
                     recorded_at=_AT,
                     producer=UnderstandingProducer.INTERPRETATION,
                     meaning="Checking the apartment listing again.",
-                    meaning_ground=UnderstandingGround.STATED,
                 ),
             ),
             stages=(
@@ -105,7 +103,7 @@ def test_understanding_attributes_an_earlier_step_as_work_the_assistant_schedule
         _scheduled_episode(), excerpt_chars=400, admit_outside_input=True
     )
 
-    described = episode.described(understanding._Marks())
+    described = episode.described()
 
     assert "the assistant scheduled" in str(described["item"])
     assert "never something the user said" in str(described["item"])

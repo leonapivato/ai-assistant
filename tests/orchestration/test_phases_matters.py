@@ -85,6 +85,8 @@ if TYPE_CHECKING:
 
 #: What an input lists the words of the work it continues after.
 _CONTINUES: Final = "continues:"
+#: What an input lists the words of the work it cites, and belongs with, after.
+_ABOUT: Final = "about:"
 
 
 # --- the routed models ------------------------------------------------------------------
@@ -93,9 +95,11 @@ _CONTINUES: Final = "continues:"
 class _Understanding(FakeModelProvider):
     """Understanding's model, routed: each input means its own text, and continues work.
 
-    It names in ``continues`` each in-progress entry whose input holds a word the input
-    lists after :data:`_CONTINUES`. :meth:`hold` holds the reply to one input until
-    released, so a case decides the order understandings are recorded in.
+    It names in ``meant_for`` each in-progress entry whose input holds a word the input
+    lists after :data:`_CONTINUES`, and in ``cites`` and ``belongs_to`` each whose input
+    holds a word it lists after :data:`_ABOUT` (ADR-0353 §9:2). :meth:`hold` holds the
+    reply to one input until released, so a case decides the order understandings are
+    recorded in.
     """
 
     def __init__(self) -> None:
@@ -112,15 +116,26 @@ class _Understanding(FakeModelProvider):
         text = str(payload["input"]["text"])
         section = list(payload.get("in_progress") or ())
         self.shown[text] = section
-        named: list[str] = []
-        if _CONTINUES in text:
-            words = [one.strip() for one in text.split(_CONTINUES, 1)[1].split(",")]
-            named = [
+
+        def named(marker: str) -> list[str]:
+            if marker not in text:
+                return []
+            words = [one.strip() for one in text.split(marker, 1)[1].split(",")]
+            return [
                 str(entry["label"])
                 for entry in section
                 if any(word and word in str(entry["input"]) for word in words)
             ]
-        return json.dumps({"meaning": text, "meaning_ground": "stated", "continues": named})
+
+        cited = named(_ABOUT)
+        return json.dumps(
+            {
+                "understanding": text,
+                "cites": cited,
+                "belongs_to": cited,
+                "meant_for": named(_CONTINUES),
+            }
+        )
 
     async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
         text = str(json.loads(messages[1].content)["input"]["text"])
@@ -399,6 +414,37 @@ async def test_separate_work_continues_nothing_and_each_runs_on_its_own() -> Non
         "has_acted": False,
     }
     assert "in_progress" not in planner.requests["what's the weather there?"][0]
+
+
+async def test_running_work_cited_and_belonged_to_alone_is_never_taken_over() -> None:
+    """ADR-0353 §10:4, §16:4: an ``R`` label in ``cites`` and ``belongs_to`` records a
+    ``running`` referent and an activation member, and drives no takeover: the takeover
+    reads ``continues`` alone, which only ``meant_for`` fills, so each runs on its own."""
+    understanding, planner = _Understanding(), _Planner()
+    planner.hold("book Riverside")
+    harness = _harness(understanding, planner)
+    await open_conversation(harness)
+    first, older = await _start(harness, "book Riverside", message_id="a-1")
+    await asyncio.wait_for(planner.hold("book Riverside")[0].wait(), SETTLE)
+
+    second, newer = await _start(harness, "is it sunny, about: Riverside", message_id="b-1")
+    found_weather = await _frozen(harness, 1)
+    planner.hold("book Riverside")[1].set()
+    found = await _frozen(harness, 2)
+
+    assert [processing(one).activation_id for one in found_weather] == [newer]
+    taker = _of(found, newer)
+    (version,) = taker.understanding
+    assert version.continues == ()
+    assert [(one.kind, one.id) for one in version.meaning_referents] == [
+        ("running", f"activation:{older}")
+    ]
+    assert [one.id for one in version.story_links] == [older]
+    assert _ran(taker, ControllerStage.TAKEOVER) == []
+    assert taker.joined == ()
+    assert _of(found, older).joined == ()
+    assert await _assistant(harness, first) == ["done: book Riverside"]
+    assert await _assistant(harness, second) == ["done: is it sunny, about: Riverside"]
 
 
 async def test_one_version_naming_two_absorbs_both_in_one_step() -> None:

@@ -52,8 +52,8 @@ from ai_assistant.core.types import (
     StageEntry,
     StageOutcome,
     ToolOutcome,
-    UnderstandingGround,
     UnderstandingProducer,
+    UnderstandingReferent,
     WholeTextReply,
 )
 from ai_assistant.testing.parties import parties_for
@@ -84,7 +84,6 @@ def _understanding(version: int, meaning: str) -> ActivationUnderstanding:
         recorded_at=_NOW,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning=meaning,
-        meaning_ground=UnderstandingGround.STATED,
     )
 
 
@@ -256,6 +255,30 @@ def test_the_latest_meaning_is_shown() -> None:
     )
 
     assert _peer(_episode(record)).meaning == "find direct flights"
+
+
+def test_a_running_referent_s_excerpt_is_never_shown() -> None:
+    """ADR-0353 §10:6, §16:4: the peer view of an episode whose understanding cites a
+    ``running`` referent shows its meaning and nothing of the referent, its excerpt least
+    of all, so no read chains through it."""
+    excerpt = "RUNNING-EXCERPT book Luigi's for four"
+    cited = ActivationUnderstanding(
+        version=1,
+        recorded_at=_NOW,
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="move the running booking to Saturday",
+        meaning_referents=(
+            UnderstandingReferent(
+                kind="running", id="activation:act-booking", source="c-1", excerpt=excerpt
+            ),
+        ),
+    )
+    for frozen in (False, True):
+        view = _peer(_episode(_record(frozen=frozen, understanding=(cited,))))
+
+        assert view.meaning == "move the running booking to Saturday"
+        assert excerpt not in view.model_dump_json()
+        assert "act-booking" not in view.model_dump_json()
 
 
 def test_no_understanding_shows_no_meaning() -> None:

@@ -37,7 +37,6 @@ from ai_assistant.core.types import (
     SpeechChannelPayload,
     StageEntry,
     StageOutcome,
-    UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
 )
@@ -317,7 +316,6 @@ class FakeActivation:
                 recorded_at=self.at,
                 producer=UnderstandingProducer.INTERPRETATION,
                 meaning="This fake engine understood the input as stated.",
-                meaning_ground=UnderstandingGround.STATED,
             ),
         )
 

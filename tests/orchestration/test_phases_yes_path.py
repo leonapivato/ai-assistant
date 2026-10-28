@@ -1,26 +1,28 @@
-"""ADR-0321 end to end: a question, its answer, and the call run on a yes, over fakes.
+"""ADR-0321 end to end, as ADR-0353 §11 leaves it: a question asked, and a yes that runs nothing.
 
 The phases as the composition root wires them, driven through the engine across
 several activations, for #3058's scenarios. Each case scripts planning's rounds and
 understanding's reading, because the model's own judgment is QA's to test live; what
-these cases pin is what the code owns. That is how a question is asked and recorded,
-how understanding's pointer reaches authorizing and planning, how the facts are checked
-against the records, how a part is spent once, and that every failure ends in another
-question rather than in a call that runs.
+these cases pin is what the code owns: how a question is asked and recorded, and who
+carries the user's authority. Approvals stop until the authority run (ADR-0353 §11):
+understanding is shown no question mark and records no answer pointer whatever its reply
+holds, so authorizing's rules, which stand unchanged, find none, every call that needs
+the user goes back to planning as needing them, and an identical call already asked is
+not asked again (§11:3). The cases a yes ran a call in, ADR-0322 §5's among them, fail
+again until approvals are redesigned, and are not here.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from phases_support import chat_turn, frozen, processing, until, written
-from story_support import CONVERSATION, episode
+from story_support import CONVERSATION
 from telegram_support import CASE_START_WAIT, CHAT, REFERENCE, YieldingTelegram, text
 from test_engine import AT, Harness
 from understanding_support import recall_stage
@@ -28,10 +30,6 @@ from understanding_support import recall_stage
 from ai_assistant.core.errors import ClassifiedToolError, OversizedValueError
 from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
-    ActivationEffect,
-    ActivationUnderstanding,
-    AnsweredQuestion,
-    Approval,
     ApprovalGiver,
     AskedCall,
     CapabilityEffect,
@@ -39,7 +37,6 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ClaimedAuthor,
-    ControllerStage,
     CostBasis,
     DataTier,
     Idempotency,
@@ -53,7 +50,6 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     RoundResponse,
-    StageOutcome,
     StoryActor,
     StoryMember,
     StoryMemberKind,
@@ -66,17 +62,13 @@ from ai_assistant.core.types import (
     ToolDefinition,
     ToolFailure,
     ToolFailureKind,
-    ToolOutcome,
     TranscriptMessage,
-    UnderstandingGround,
-    UnderstandingProducer,
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
-from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.lookups import LookUps
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import (
@@ -84,7 +76,6 @@ from ai_assistant.orchestration.phase_path import (
     Fitted,
     PhasePath,
     PhaseTools,
-    PhaseWorking,
     PlaceTarget,
     place_window,
 )
@@ -128,11 +119,7 @@ if TYPE_CHECKING:
         OfferedTool,
         PermissionDecision,
     )
-    from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.person_block import PersonBlocks
-    from ai_assistant.orchestration.recall import Recalled
-    from ai_assistant.orchestration.story_links import Candidates
-    from ai_assistant.orchestration.understanding import Fetched, Windows
 
 
 def _tool(name: str, properties: Mapping[str, FrozenJson]) -> ToolDefinition:
@@ -259,127 +246,34 @@ class _Planner(FakeToolCallingCompleter):
         return {one.name for one in self.calls[index].tools}
 
 
-def _labelled(content: str, needle: str) -> list[str]:
-    """Every label of an item whose rendering holds ``needle``, in the order shown."""
-    found: list[str] = []
-
-    def walk(value: object) -> None:
-        if isinstance(value, dict):
-            label = value.get("label")
-            if isinstance(label, str) and needle in json.dumps(value, ensure_ascii=False):
-                found.append(label)
-            for one in value.values():
-                walk(one)
-        elif isinstance(value, list):
-            for one in value:
-                walk(one)
-
-    walk(json.loads(content))
-    return found
-
-
-def _marked(content: str, needle: str) -> list[tuple[str, str]]:
-    """Each question mark whose question holds ``needle``, in the order shown.
-
-    As ``(Q label, label of the item that shows it)``: a message of the place window
-    carries its mark as ``question`` (ADR-0322 §4:2), and an episode its questions as
-    ``questions_asked``, each with its message; a mark gives its ``Q`` label as
-    ``answer_label`` (#3081). A story's latest episodes take no label of their own, so
-    the item that shows them is the story.
-    """
-    found: list[tuple[str, str]] = []
-
-    def walk(value: object, holder: str) -> None:
-        if isinstance(value, dict):
-            label = value.get("label")
-            if isinstance(label, str):
-                holder = label
-            mark = value.get("question")
-            if isinstance(mark, dict) and needle in str(value.get("text", "")):
-                found.append((str(mark["answer_label"]), holder))
-            asked = value.get("answer_label")
-            if isinstance(asked, str) and needle in str(value.get("message", "")):
-                found.append((asked, holder))
-            for one in value.values():
-                walk(one, holder)
-        elif isinstance(value, list):
-            for one in value:
-                walk(one, holder)
-
-    walk(json.loads(content), "")
-    return found
-
-
 def _proposal(**fields: object) -> str:
-    return json.dumps({"meaning": "The user answers.", "meaning_ground": "stated"} | fields)
-
-
-@dataclass(frozen=True)
-class _Yes:
-    """One question a reading approves: its text, the parts, and where to find it.
-
-    The pointer names the question's ``Q`` label, found where an item of ``prefer``'s
-    kind shows it, or else wherever it is first shown; ``unmarked`` names instead the
-    ``H`` label of the place-window message holding the text, as a reading that landed
-    on a prose question would (ADR-0322 §4:5).
-    """
-
-    question: str = _ASKING
-    parts: tuple[int, ...] = ()
-    prefer: str = "H"
-    unmarked: bool = False
+    return json.dumps({"understanding": "The user answers."} | fields)
 
 
 class _Reader:
     """Understanding's readings, one per activation, in order.
 
-    A reading is ``None`` for an input that approves nothing, or the questions the input
-    says yes to, each with the parts it approves, and the words of an unresolved matter
-    the reading also records, if any (#3080).
+    A reading approves nothing, or is a yes: a reply in the shape a build before
+    ADR-0353 read, whose ``answers`` points at the first question it was shown. No call
+    renders a ``Q`` label any more, so the pointer names nothing the call rendered, and
+    the drop removes ``answers`` before the parse whatever it holds (§9:14).
     """
 
     def __init__(self) -> None:
-        self._readings: deque[tuple[tuple[_Yes, ...], str | None] | None] = deque()
+        self._readings: deque[bool] = deque()
         self.model = FakeModelProvider(reply=self._reply)
-        #: The label of the item each pointer's question was found on, in order.
-        self.labels: list[str] = []
-        #: The label each pointer named, in order.
-        self.named: list[str] = []
 
     def nothing(self) -> None:
-        self._readings.append(None)
+        self._readings.append(False)
 
-    def yes(
-        self, question: str = _ASKING, *, parts: tuple[int, ...] = (), prefer: str = "H"
-    ) -> None:
-        self._readings.append(((_Yes(question, parts, prefer),), None))
-
-    def several(self, *yeses: _Yes, unresolved: str | None = None) -> None:
-        self._readings.append((yeses, unresolved))
+    def yes(self) -> None:
+        self._readings.append(True)
 
     def _reply(self, messages: Sequence[Message]) -> str:
-        reading = self._readings.popleft() if self._readings else None
-        if reading is None:
-            return _proposal()
-        yeses, unresolved = reading
-        content = messages[-1].content
-        answers: list[dict[str, object]] = []
-        for one in yeses:
-            if one.unmarked:
-                labels = [label for label in _labelled(content, one.question) if label[0] == "H"]
-                assert labels, f"understanding was shown no message holding {one.question!r}"
-                named, holder = labels[0], labels[0]
-            else:
-                marks = _marked(content, one.question)
-                assert marks, f"understanding was shown no question holding {one.question!r}"
-                named, holder = next(
-                    (mark for mark in marks if mark[1].startswith(one.prefer)), marks[0]
-                )
-            self.labels.append(holder)
-            self.named.append(named)
-            answers.append({"question": named, "parts": list(one.parts)})
-        matters = [] if unresolved is None else [{"matter": unresolved, "why_it_matters": "?"}]
-        return _proposal(answers=answers, unresolved=matters)
+        del messages
+        if self._readings and self._readings.popleft():
+            return _proposal(answers=[{"question": "Q1", "parts": [1]}])
+        return _proposal()
 
 
 class _World:
@@ -608,7 +502,10 @@ def _activation(episode: EpisodicMemory) -> str:
 # --- a booking (§8:1) ---------------------------------------------------------------------
 
 
-async def test_a_booking_is_asked_with_its_exact_line_and_a_yes_runs_it_once() -> None:
+async def test_a_booking_is_asked_with_its_exact_line_and_a_yes_runs_nothing() -> None:
+    """ADR-0353 §11:1-§11:3: the question is asked and recorded as before; a yes to it
+    records no pointer, so planning is shown no approved action, and the booking
+    proposed again goes back as needing the user, already asked, and is not asked again."""
     hub = _Hub()
     conversation, asking = await _asked(hub)
 
@@ -620,35 +517,39 @@ async def test_a_booking_is_asked_with_its_exact_line_and_a_yes_runs_it_once() -
     assert "needs the user's yes" in hub.planner.shown(1)
     assert hub.world.of("book") == []
 
+    async def link() -> None:
+        await hub.linked(_activation(asking))
+
     hub.reader.yes()
-    hub.planner.then(_run_approved(), RoundResponse(text="Booked for Friday."))
+    hub.planner.then(
+        _Hooked(link, _book()), RoundResponse(text="I'm waiting on your answer above.")
+    )
     _, yes = await hub.turn("Yes please.", conversation=conversation, message_id="m-2")
 
-    assert hub.world.of("book") == [{"date": "Friday"}]
-    assert "approved_actions" in hub.planner.shown(2)
-    assert APPROVED_ACTION_TOOL in hub.planner.offered(2)
-    (answers,) = processing(yes).understanding[-1].answers
-    assert answers.activation_id == _activation(asking)
-    assert hub.reader.named == ["Q1"]
-    # The decision that ran it names the approval, given in the yes's activation.
-    (ran,) = [
+    assert hub.world.of("book") == []
+    assert "approved_actions" not in hub.planner.shown(2)
+    assert APPROVED_ACTION_TOOL not in hub.planner.offered(2)
+    assert "already asked about" in hub.planner.shown(3)
+    assert _asked_calls(yes) == [(), ()]
+    assert "answers" not in processing(yes).understanding[-1].model_dump()
+    # Understanding was shown the question's message, and no mark on it.
+    shown = hub.reader.model.calls[-1].messages[-1].content
+    assert _ASKING in shown
+    assert "answer_label" not in shown
+    assert not [
         one
         for one in await hub.harness.trail.recent(limit=20)
-        if one.approval is not None and one.ruling.outcome is PermissionOutcome.ALLOW
+        if one.ruling.outcome is PermissionOutcome.ALLOW and one.approval is not None
     ]
-    assert ran.approval is not None
-    assert ran.approval.given.activation_id == _activation(yes)
-    assert ran.resolves is not None, "the confirm ruled fresh is resolved on route (a)"
 
 
 async def test_a_prose_question_in_the_proposing_round_asks_nothing() -> None:
-    """#3071, #3072: only a message that showed the exact line asks, and only it is marked.
+    """#3071, #3072: only a message that showed the exact line asks.
 
     The proposing round writes "Shall I?" and names a reference it guessed: no call has
     come back yet, so the name is dropped and nothing is recorded as asked. The next
     round is shown the call as needing a yes and not yet asked, and its question carries
-    the line. The prose carries no mark, so a pointer naming it is not recorded and the
-    understanding says so (ADR-0322 §4:5); a yes to the question runs it once.
+    the line.
     """
     hub = _Hub()
     hub.reader.nothing()
@@ -667,48 +568,6 @@ async def test_a_prose_question_in_the_proposing_round_asks_nothing() -> None:
         prose,
         _QUESTION,
     ]
-
-    async def link() -> None:
-        await hub.linked(_activation(asking))
-
-    assert _marked(hub.reader.model.calls[-1].messages[-1].content, prose) == []
-    hub.reader.several(_Yes(prose, unmarked=True))
-    hub.planner.then(
-        _Hooked(link, _book()), RoundResponse(text="I'm waiting on your answer above.")
-    )
-    _, pointed = await hub.turn("Yes.", conversation=conversation, message_id="m-2")
-    understood = processing(pointed).understanding[-1]
-    assert understood.answers == ()
-    assert [one.matter for one in understood.unresolved][-1].endswith(
-        "is not the Q label of a question the assistant asked."
-    )
-    assert "approved_actions" not in hub.planner.shown(2)
-    assert "already asked about" in hub.planner.shown(3)
-    assert hub.world.of("book") == []
-
-    hub.reader.yes()
-    hub.planner.then(_run_approved(), _DONE)
-    await hub.turn("Yes, that one.", conversation=conversation, message_id="m-3")
-    assert hub.world.of("book") == [{"date": "Friday"}]
-
-
-async def test_a_second_yes_does_not_run_it_again() -> None:
-    hub = _Hub()
-    conversation, _ = await _asked(hub)
-    hub.reader.yes()
-    hub.planner.then(_run_approved(), _DONE)
-    await hub.turn("Yes.", conversation=conversation, message_id="m-2")
-
-    # The second yes points at the same question, whose part is spent: planning is
-    # shown no approved action, and the call proposed outright needs the user again.
-    hub.reader.yes()
-    hub.planner.then(_book(), RoundResponse(text="That is already booked."))
-    await hub.turn("Yes!", conversation=conversation, message_id="m-3")
-
-    assert hub.world.of("book") == [{"date": "Friday"}]
-    assert "approved_actions" not in hub.planner.shown(4)
-    assert APPROVED_ACTION_TOOL not in hub.planner.offered(4)
-    assert "needs the user's yes" in hub.planner.shown(5)
 
 
 async def test_proposing_it_again_while_it_waits_is_already_asked() -> None:
@@ -738,7 +597,7 @@ async def test_proposing_it_again_while_it_waits_is_already_asked() -> None:
 # --- the other answers (§8:2) -------------------------------------------------------------
 
 
-async def test_a_no_runs_nothing_and_a_later_actually_yes_runs_it() -> None:
+async def test_a_no_runs_nothing() -> None:
     hub = _Hub()
     conversation, _ = await _asked(hub)
 
@@ -747,12 +606,6 @@ async def test_a_no_runs_nothing_and_a_later_actually_yes_runs_it() -> None:
     await hub.turn("No, leave it.", conversation=conversation, message_id="m-2")
     assert hub.world.of("book") == []
     assert "approved_actions" not in hub.planner.shown(2)
-
-    hub.reader.yes()
-    hub.planner.then(_run_approved(), _DONE)
-    await hub.turn("Actually, yes.", conversation=conversation, message_id="m-3")
-
-    assert hub.world.of("book") == [{"date": "Friday"}]
 
 
 async def test_a_change_approves_nothing_and_brings_a_new_question() -> None:
@@ -788,9 +641,9 @@ async def test_an_unclear_reply_runs_nothing() -> None:
 async def test_a_yes_arriving_as_an_event_approves_nothing() -> None:
     """§3:3, §7:3: an email, a timer or any event comes through no chat, so no yes."""
     hub = _Hub()
-    _, asking = await _asked(hub)
+    await _asked(hub)
 
-    hub.reader.yes(prefer="P")
+    hub.reader.yes()
     hub.planner.then(_book(), RoundResponse(text="Noted."))
     result = await hub.harness.engine.receive(
         ChannelInput(
@@ -807,8 +660,7 @@ async def test_a_yes_arriving_as_an_event_approves_nothing() -> None:
     assert result.capture.episode_id is not None
     event = await hub.memory.get(result.capture.episode_id)
     assert event is not None
-    (answers,) = processing(event).understanding[-1].answers  # type: ignore[arg-type]  # an episode
-    assert answers.activation_id == _activation(asking)
+    assert "answers" not in processing(event).understanding[-1].model_dump()  # type: ignore[arg-type]  # an episode
     assert _asked_calls(event) == [(), ()]  # type: ignore[arg-type]  # an episode
 
 
@@ -955,28 +807,6 @@ def test_an_event_never_carries_the_users_authority() -> None:
     assert working.conversation_id is None
 
 
-# --- a yes from elsewhere (§8:4) ----------------------------------------------------------
-
-
-async def test_a_yes_in_another_conversation_through_recall_runs_it() -> None:
-    hub = _Hub(recall=True, aged_out=True)
-    _, asking = await _asked(hub)
-
-    hub.reader.yes(prefer="M")
-    hub.planner.then(_run_approved(), _DONE)
-    other, yes = await hub.turn("Yes, book the table for Friday.")
-
-    assert hub.reader.labels[-1].startswith("M"), "found through recall"
-    (answers,) = processing(yes).understanding[-1].answers
-    assert (answers.activation_id, answers.round) == (
-        _activation(asking),
-        processing(asking).rounds[1].id,
-    )
-    assert hub.world.of("book") == [{"date": "Friday"}]
-    (said,) = await hub.said(other)
-    assert said.text == "Done."
-
-
 async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> None:
     hub = _Hub()
 
@@ -984,33 +814,9 @@ async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> 
     hub.planner.then(RoundResponse(text="Yes to what?"))
     _, bare = await hub.turn("Yes.")
 
-    assert processing(bare).understanding[-1].answers == ()
+    assert "answers" not in processing(bare).understanding[-1].model_dump()
     assert "approved_actions" not in hub.planner.shown(0)
     assert hub.world.ran == []
-
-
-# --- a retry after an unknown outcome (§8:6, §6) ------------------------------------------
-
-
-async def test_a_retry_after_an_unknown_outcome_runs_only_on_a_yes() -> None:
-    hub = _Hub()
-    conversation, _ = await _asked(hub)
-    hub.world.unknown.add("book")
-    retry = "I could not tell whether the booking went through. Shall I try again?"
-
-    hub.reader.yes()
-    hub.planner.then(_run_approved(), _book(deliberate_repeat=True), _ask(retry, "2.1"))
-    _, unknown = await hub.turn("Yes.", conversation=conversation, message_id="m-2")
-
-    assert hub.world.of("book") == [{"date": "Friday"}], "the retry waits on a yes"
-    (asked,) = _asked_calls(unknown)[2]
-    assert asked.deliberate_repeat
-
-    hub.reader.yes(retry)
-    hub.planner.then(_run_approved(), _DONE)
-    await hub.turn("Yes, try again.", conversation=conversation, message_id="m-3")
-
-    assert hub.world.of("book") == [{"date": "Friday"}, {"date": "Friday"}]
 
 
 # --- a deny (§8:7) ------------------------------------------------------------------------
@@ -1035,7 +841,7 @@ async def test_a_deny_is_never_asked_about() -> None:
 # --- email (§8:9) -------------------------------------------------------------------------
 
 
-async def test_an_emails_full_text_is_in_its_exact_line_and_a_yes_sends_it_once() -> None:
+async def test_an_emails_full_text_is_in_its_exact_line() -> None:
     hub = _Hub()
     body = "Running late.\nSee you at 7."
     hub.reader.nothing()
@@ -1049,231 +855,7 @@ async def test_an_emails_full_text_is_in_its_exact_line_and_a_yes_sends_it_once(
     line = question.text.splitlines()[-1]
     assert json.dumps(body) in line
     assert '"sam@example.com"' in line
-
-    hub.reader.yes("Shall I email Sam")
-    hub.planner.then(_run_approved(), RoundResponse(text="Sent."))
-    await hub.turn("Yes, send it.", conversation=conversation, message_id="m-2")
-
-    assert hub.world.of("send_email") == [{"to": "sam@example.com", "body": body}]
-
-
-# --- several questions in one reply (ADR-0322 §5) -----------------------------------------
-
-
-def _run_approved_all(count: int) -> RoundResponse:
-    """A round proposing approved actions ``A1`` to ``A<count>``, each by its label alone."""
-    return RoundResponse(
-        calls=tuple(
-            _call(f"c{index}", APPROVED_ACTION_TOOL, action=f"A{index}")
-            for index in range(1, count + 1)
-        )
-    )
-
-
-async def _approvals(hub: _Hub) -> list[Approval]:
-    """The approval each allowed decision ran under, in the trail's order."""
-    return [
-        one.approval
-        for one in await hub.harness.trail.recent(limit=50)
-        if one.approval is not None and one.ruling.outcome is PermissionOutcome.ALLOW
-    ]
-
-
-async def test_a_change_then_book_both_books_both_nights_once_each() -> None:
-    """§5:1: "make it two nights" while the first night's question waits, then "book both".
-
-    The change proposes both nights. Friday is identical to the call still waiting on
-    the user, so it goes back as already asked (ADR-0321 §4:12), and the new question
-    shows Saturday alone. "Yes, book both" names both questions, each under its own Q
-    label, so each night runs under its own question's approval, once.
-    """
-    hub = _Hub()
-    conversation, friday = await _asked(hub)
-
-    async def link() -> None:
-        await hub.linked(_activation(friday))
-
-    saturday = "Shall I also book Saturday?"
-    hub.reader.nothing()
-    hub.planner.then(
-        _Hooked(
-            link,
-            RoundResponse(
-                calls=(_call("c1", "book", date="Friday"), _call("c2", "book", date="Saturday"))
-            ),
-        ),
-        _ask(saturday, "1.2"),
-    )
-    _, changed = await hub.turn("Make it two nights.", conversation=conversation, message_id="m-2")
-
-    assert "already asked about" in hub.planner.shown(3)
-    assert [[one.values for one in asked] for asked in _asked_calls(changed)] == [
-        [],
-        [{"date": "Saturday"}],
-    ]
-
-    hub.reader.several(_Yes(_ASKING), _Yes(saturday))
-    hub.planner.then(_run_approved_all(2), RoundResponse(text="Both nights are booked."))
-    _, both = await hub.turn("Yes, book both.", conversation=conversation, message_id="m-3")
-
-    assert sorted(str(one["date"]) for one in hub.world.of("book")) == ["Friday", "Saturday"]
-    assert hub.reader.named == ["Q1", "Q2"]
-    answers = processing(both).understanding[-1].answers
-    assert [one.activation_id for one in answers] == [_activation(friday), _activation(changed)]
-    # One approval per question, each covering its own question's part alone.
-    approvals = await _approvals(hub)
-    assert len(approvals) == 2
-    assert {one.how.activation_id for one in approvals} == {
-        _activation(friday),
-        _activation(changed),
-    }
-    assert all(len(one.covers) == 1 for one in approvals)
-
-    # A second "both" runs neither again: each part is spent.
-    hub.reader.several(_Yes(_ASKING), _Yes(saturday))
-    hub.planner.then(RoundResponse(text="Both are already booked."))
-    await hub.turn("Yes, both!", conversation=conversation, message_id="m-4")
-    assert "approved_actions" not in hub.planner.shown(5)
-    assert len(hub.world.of("book")) == 2
-
-
-async def test_both_to_two_waiting_questions_one_seen_only_through_recall_books_both() -> None:
-    """§5:2: "both", given to two waiting questions, books both, once each.
-
-    The booking was asked in one conversation and the email in another. The yes, in the
-    email's conversation, sees the email's question on its message in the place window,
-    and the booking's only through recall, each under its own Q label.
-    """
-    hub = _Hub(recall=True, aged_out=True)
-    _, booking = await _asked(hub)
-    body = "Running late."
-    hub.reader.nothing()
-    hub.planner.then(
-        RoundResponse(calls=(_call("c1", "send_email", to="sam@example.com", body=body),)),
-        _ask("Shall I email Sam that you are running late?"),
-    )
-    conversation, email = await hub.turn("Email Sam that I'm running late.")
-
-    hub.reader.several(_Yes(_ASKING, prefer="M"), _Yes("Shall I email Sam", prefer="H"))
-    hub.planner.then(_run_approved_all(2), _DONE)
-    await hub.turn(
-        "Yes, book a table for Friday and the email.",
-        conversation=conversation,
-        message_id="m-2",
-    )
-
-    assert [label[0] for label in hub.reader.labels] == ["M", "H"]
-    assert hub.world.of("book") == [{"date": "Friday"}]
-    assert hub.world.of("send_email") == [{"to": "sam@example.com", "body": body}]
-    assert {one.how.activation_id for one in await _approvals(hub)} == {
-        _activation(booking),
-        _activation(email),
-    }
-
-
-async def test_both_to_two_waiting_questions_one_seen_only_through_a_story_books_both() -> None:
-    """§5:2, through a story: the booking's episode shows only in the story's short view.
-
-    The story holds both activations, and the yes's place window links to the email's,
-    so the story is a candidate; its latest episodes take no label, so the booking's
-    question takes a Q label of its own.
-    """
-    hub = _Hub(aged_out=True, stories_shown=True)
-    _, booking = await _asked(hub)
-    hub.reader.nothing()
-    hub.planner.then(
-        RoundResponse(calls=(_call("c1", "send_email", to="sam@example.com", body="Late."),)),
-        _ask("Shall I email Sam that you are running late?"),
-    )
-    conversation, email = await hub.turn("Email Sam that I'm running late.")
-    await hub.stories.create(
-        [
-            StoryMember(kind=StoryMemberKind.ACTIVATION, id=_activation(booking)),
-            StoryMember(kind=StoryMemberKind.ACTIVATION, id=_activation(email)),
-        ],
-        actor=StoryActor.OWNER,
-    )
-
-    hub.reader.several(_Yes(_ASKING, prefer="S"), _Yes("Shall I email Sam", prefer="H"))
-    hub.planner.then(_run_approved_all(2), _DONE)
-    await hub.turn("Yes, do both.", conversation=conversation, message_id="m-2")
-
-    assert [label[0] for label in hub.reader.labels] == ["S", "H"]
-    assert hub.world.of("book") == [{"date": "Friday"}]
-    assert hub.world.of("send_email") == [{"to": "sam@example.com", "body": "Late."}]
-
-
-async def test_a_bare_yes_to_two_waiting_questions_runs_neither() -> None:
-    """ADR-0322 §2:3, ADR-0321 §3:5: a bare yes that could fit both records none."""
-    hub = _Hub()
-    conversation, _ = await _asked(hub)
-    hub.reader.nothing()
-    hub.planner.then(
-        RoundResponse(calls=(_call("c1", "send_email", to="sam@example.com", body="Late."),)),
-        _ask("Shall I email Sam that you are running late?"),
-    )
-    await hub.turn("And email Sam that I'm late.", conversation=conversation, message_id="m-2")
-
-    hub.reader.nothing()
-    hub.planner.then(RoundResponse(text="Yes to which: the booking, the email, or both?"))
-    _, bare = await hub.turn("Yes.", conversation=conversation, message_id="m-3")
-
-    assert processing(bare).understanding[-1].answers == ()
-    assert "approved_actions" not in hub.planner.shown(4)
-    assert hub.world.ran == []
-
-
-async def test_a_bare_yes_read_as_fitting_two_but_pointing_runs_neither_then_both_does() -> None:
-    """#3080: the reading says the bare yes fits both questions, and points at one anyway.
-
-    Its own unresolved matter names both questions, so code records no pointer on the
-    reading's own word: nothing runs, and planning is shown the matter to ask "yes to
-    which?" by (ADR-0322 §2:3, ADR-0321 §3:5). "Both" then says which, and books each
-    once (§2:2).
-    """
-    hub = _Hub()
-    conversation, _ = await _asked(hub)
-    hub.reader.nothing()
-    hub.planner.then(
-        RoundResponse(calls=(_call("c1", "send_email", to="sam@example.com", body="Late."),)),
-        _ask("Shall I email Sam that you are running late? Say the word and I'll do both."),
-    )
-    await hub.turn("And email Sam that I'm late.", conversation=conversation, message_id="m-2")
-
-    hub.reader.several(
-        _Yes("Shall I email Sam"), unresolved="The yes could approve Q1, Q2 or both."
-    )
-    hub.planner.then(RoundResponse(text="Yes to which: the booking, the email, or both?"))
-    _, bare = await hub.turn("Yes, go ahead.", conversation=conversation, message_id="m-3")
-
-    understood = processing(bare).understanding[-1]
-    assert understood.answers == ()
-    assert any("does not say which question" in one.matter for one in understood.unresolved)
-    assert "approved_actions" not in hub.planner.shown(4)
-    assert "does not say which question" in hub.planner.shown(4)
-    assert hub.world.ran == []
-
-    hub.reader.several(_Yes(_ASKING), _Yes("Shall I email Sam"))
-    hub.planner.then(_run_approved_all(2), _DONE)
-    await hub.turn("Both, please.", conversation=conversation, message_id="m-4")
-
-    assert hub.world.of("book") == [{"date": "Friday"}]
-    assert hub.world.of("send_email") == [{"to": "sam@example.com", "body": "Late."}]
-
-
-async def test_a_bare_yes_to_the_one_waiting_question_still_runs_it() -> None:
-    """ADR-0321 §3:5 binds several questions: with one shown, a bare yes approves it.
-
-    A matter naming a ``Q`` label the call did not render counts for nothing.
-    """
-    hub = _Hub()
-    conversation, _ = await _asked(hub)
-
-    hub.reader.several(_Yes(_ASKING), unresolved="The yes fits Q1, unless Q2 was meant.")
-    hub.planner.then(_run_approved_all(1), _DONE)
-    await hub.turn("Yes.", conversation=conversation, message_id="m-2")
-
-    assert hub.world.of("book") == [{"date": "Friday"}]
+    assert hub.world.of("send_email") == []
 
 
 # --- a question cut to fit is not shown (§4:4) --------------------------------------------
@@ -1295,10 +877,9 @@ async def test_a_question_cut_to_fit_is_not_approvable_and_is_asked_again_whole(
     assert _FRIDAY_LINE not in question.text
     assert _asked_calls(cut) == [(), ()], "a cut question records no asked call"
 
-    # It carries no mark (ADR-0322 §4:1), so a yes read as naming it approves nothing:
-    # planning is shown no approved action, and the call proposed again is not held back
-    # as already asked, so it is asked again, whole.
-    hub.reader.several(_Yes(unmarked=True))
+    # A yes approves nothing: planning is shown no approved action, and the call
+    # proposed again is not held back as already asked, so it is asked again, whole.
+    hub.reader.yes()
     hub.planner.then(_book(), _ask())
     _, again = await hub.turn("Yes.", conversation=conversation, message_id="m-2")
 
@@ -1403,145 +984,6 @@ def test_a_round_in_a_place_that_takes_no_message_asks_about_nothing() -> None:
     assert path.shown_whole(working, _asking_round("Shall I?")).asked == ()
 
 
-# --- the yes's records are read inside the deadline (ADR-0280 §5) -------------------------
-
-
-class _Stalled(FakePlanStore):
-    """A plan store whose read of an activation's effect records never returns."""
-
-    def __init__(self) -> None:
-        super().__init__(now=lambda: AT)
-        self.entered = asyncio.Event()
-
-    async def activation_effects(
-        self, activation_ids: Sequence[str], /
-    ) -> tuple[ActivationEffect, ...]:
-        self.entered.set()
-        await asyncio.Event().wait()
-        raise AssertionError  # pragma: no cover - the wait above never returns
-
-
-@dataclass(frozen=True)
-class _Given:
-    """A pass's working set as a phase stage reads it (``PhasePass``)."""
-
-    deadline: float
-    phases: PhaseWorking
-    understanding: ActivationUnderstanding | None = None
-    understanding_fetch: Fetched | None = None
-    supply: TurnSupply = field(
-        default_factory=lambda: BoundedAudienceSupply(speakable_attested_sources=frozenset())
-    )
-    windows: Windows | None = None
-    recalled: Recalled | None = None
-    story_candidates: Candidates | None = None
-
-
-async def _asked_in(hub: _Hub, activation_id: str, round_id: str, date: str) -> None:
-    """``activation_id``'s frozen episode, whose round ``round_id`` asked one booking, shown."""
-    stored = episode(activation_id)
-    record = stored.processing_record
-    assert record is not None
-    asked = AskedCall(part=1, tool=_BOOK, values={"date": date})
-    planned = PlanningRound(id=round_id, recorded_at=AT, text="Shall I?", asked=(asked,))
-    await hub.memory.add(
-        stored.model_copy(
-            update={"processing_record": record.model_copy(update={"rounds": (planned,)})}
-        )
-    )
-    effect = ActivationEffect(
-        id=f"e-{activation_id}",
-        activation_id=activation_id,
-        round=round_id,
-        place=f"conversation:{CONVERSATION.instance_id}",
-        claimed_at=AT,
-    )
-    await hub.harness.plans.claim_activation_effect(effect, match=None)
-    await hub.harness.plans.finish_activation_effect(effect.id, ToolOutcome.SUCCEEDED, position=1)
-
-
-@pytest.mark.parametrize(
-    ("rounds", "shown"),
-    [
-        pytest.param(("round:a", "round:b"), ["Friday", "Saturday"], id="two-rounds"),
-        pytest.param(("round:x", "round:x"), [], id="one-round-id-under-two-activations"),
-    ],
-)
-async def test_the_approved_actions_are_gathered_from_every_pointer(
-    rounds: tuple[str, str], shown: list[str]
-) -> None:
-    """ADR-0322 §3:4: every pointer's actions; a part two askers share is shown by neither.
-
-    A part's label names it by its round and number alone, so a part reached from two
-    asking activations could not be told apart when proposed (§3:3), and fails closed.
-    """
-    hub = _Hub()
-    await _asked_in(hub, "a-1", rounds[0], "Friday")
-    await _asked_in(hub, "a-2", rounds[1], "Saturday")
-    path = hub.phases(hub.harness)
-    working = path.begin(
-        activation_id="a-3",
-        window=_window(_from(MessageAuthor.USER)),
-        conversation_id=CONVERSATION.instance_id,
-        trigger_origin=InputOrigin.USER,
-        owner_records=True,
-    )
-    understanding = ActivationUnderstanding(
-        version=1,
-        recorded_at=AT,
-        producer=UnderstandingProducer.INTERPRETATION,
-        meaning="yes to both",
-        meaning_ground=UnderstandingGround.STATED,
-        answers=(
-            AnsweredQuestion(activation_id="a-1", round=rounds[0]),
-            AnsweredQuestion(activation_id="a-2", round=rounds[1]),
-        ),
-    )
-    given = _Given(
-        deadline=asyncio.get_running_loop().time() + 5,
-        phases=working,
-        understanding=understanding,
-    )
-
-    approved = await path._approved(given, working)
-
-    assert [one.call.values["date"] for one in approved] == shown
-
-
-async def test_a_stalled_read_of_the_yes_records_times_the_round_out() -> None:
-    """Planning's round ends ``timed_out`` at the deadline, never waiting on the store."""
-    plans = _Stalled()
-    hub = _Hub(plans=plans)
-    path = hub.phases(hub.harness)
-    working = path.begin(
-        activation_id="a-2",
-        window=_window(_from(MessageAuthor.USER)),
-        conversation_id=CONVERSATION.instance_id,
-        trigger_origin=InputOrigin.USER,
-        owner_records=True,
-    )
-    understanding = ActivationUnderstanding(
-        version=1,
-        recorded_at=AT,
-        producer=UnderstandingProducer.INTERPRETATION,
-        meaning="the user says yes",
-        meaning_ground=UnderstandingGround.STATED,
-        answers=(AnsweredQuestion(activation_id="a-1", round="round:1"),),
-    )
-    given = _Given(
-        deadline=asyncio.get_running_loop().time() + 0.2,
-        phases=working,
-        understanding=understanding,
-    )
-    (planning,) = [one for one in path.stages() if one.name is ControllerStage.PLANNING]
-
-    result = await asyncio.wait_for(planning.run(given), timeout=5)
-
-    assert plans.entered.is_set()
-    assert result.outcome is StageOutcome.TIMED_OUT
-    assert hub.planner.calls == []
-
-
 # --- the Telegram line (ADR-0323 §4:7-§4:9, §7) ---------------------------------------------
 
 
@@ -1584,28 +1026,20 @@ def _reply(update_id: int, words: str, question_id: int, **marks: Any) -> Telegr
     )
 
 
-async def test_a_typed_yes_on_the_line_approves_once_given_through_the_line() -> None:
-    """§4:7-§4:9, §7:2: a typed reply approves under ADR-0321 §3, once, by the line."""
-    hub, fake, question_id, asking = await _asked_on_the_line()
+async def test_a_typed_yes_on_the_line_approves_nothing() -> None:
+    """§4:7-§4:9, §7:2, ADR-0353 §11:3: a typed reply to the question records no pointer,
+    so nothing runs and planning is shown no approved action."""
+    hub, fake, question_id, _ = await _asked_on_the_line()
     assert hub.world.of("book") == []
 
     hub.reader.yes()
-    hub.planner.then(_run_approved(), RoundResponse(text="Booked for Friday."))
+    hub.planner.then(RoundResponse(text="I'm waiting on your answer above."))
     yes = await hub.line_turn(fake, _reply(2, "Yes please.", question_id))
-
-    assert hub.world.of("book") == [{"date": "Friday"}]
-    (answers,) = processing(yes).understanding[-1].answers
-    assert answers.activation_id == _activation(asking)
-    (approval,) = await _approvals(hub)
-    assert approval.who is ApprovalGiver.USER_THROUGH_TELEGRAM, "the line's member (§4:9)"
-    assert approval.given.activation_id == _activation(yes)
-
-    hub.reader.yes()
-    hub.planner.then(_book(), RoundResponse(text="That is already booked."))
-    await hub.line_turn(fake, _reply(3, "Yes!", question_id))
     await hub.harness.engine.aclose()
 
-    assert hub.world.of("book") == [{"date": "Friday"}], "a part is spent once (§4:9)"
+    assert hub.world.of("book") == []
+    assert "approved_actions" not in hub.planner.shown(2)
+    assert "answers" not in processing(yes).understanding[-1].model_dump()
 
 
 async def test_a_forward_saying_yes_on_the_line_approves_nothing() -> None:

@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 
 #: An understanding reply, as the followed call's response in a case.
-MEANING: Final = json.dumps({"meaning": "find a flight " + PRIVATE, "meaning_ground": "stated"})
+MEANING: Final = json.dumps({"understanding": "find a flight " + PRIVATE})
 
 UNDERSTANDING_FLAGS: Final = {"recalled": False, "stories": False, "person": False}
 
@@ -482,7 +482,7 @@ def _understanding_case(directory: Path, samples: int = 2) -> None:
         'prompt = "understanding"\nguards = "label_in_text"\ncame_from = "2026-10-21"\n'
         f'set = "development"\nsamples = {samples}\n\n'
         "[flags]\nrecalled = false\nstories = false\nperson = false\n\n"
-        '[property]\ncheck = "no_label"\nfields = ["meaning"]\nlabels = ["H"]\n\n'
+        '[property]\ncheck = "no_label"\nfields = ["understanding"]\nlabels = ["H"]\n\n'
         "[input]\n"
         f'messages = [{{ role = "user", content = {json.dumps(json.dumps({"in": PRIVATE}))} }}]\n'
     )
@@ -566,7 +566,7 @@ def test_a_malformed_follow_up_case_is_a_defect(
 
 
 def test_a_follow_up_case_takes_a_read_property_alone(tmp_path: Path) -> None:
-    check = 'check = "no_label"\nfields = ["meaning"]\nlabels = ["H"]'
+    check = 'check = "no_label"\nfields = ["understanding"]\nlabels = ["H"]'
 
     (found,) = _read(_case(tmp_path, _follow_up_input(), check=check)).defects
 

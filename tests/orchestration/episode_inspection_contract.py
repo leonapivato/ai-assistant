@@ -12,6 +12,7 @@ import pytest
 
 from ai_assistant.core.errors import OversizedValueError, StaleEpisodeReadError
 from ai_assistant.core.types import (
+    ActivationUnderstanding,
     ChannelContext,
     ChannelIdentity,
     ControllerRule,
@@ -24,7 +25,10 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    UnclearPoint,
     UnderstandingOmission,
+    UnderstandingProducer,
+    UnderstandingReferent,
 )
 from ai_assistant.orchestration.payloads import canonical_payload
 from ai_assistant.testing.activation import ended_pass
@@ -171,6 +175,56 @@ class EpisodeInspectionContract:
         assert final.text == ""
         assert final.next_offset is None
         assert await subject.memory.get(record_id) == stored
+
+    async def test_an_understanding_in_adr_0353s_form_reassembles_exactly(
+        self, episode_inspection: EpisodeInspectionSubject
+    ) -> None:
+        """ADR-0353 §15:2: a version's unclear points and a ``running`` referent cross
+        the surface as stored, and no retired field is carried."""
+        subject = episode_inspection
+        base = _episode("understood", activation=True)
+        assert base.processing_record is not None
+        version = ActivationUnderstanding(
+            version=1,
+            recorded_at=INSPECTION_AT,
+            producer=UnderstandingProducer.INTERPRETATION,
+            meaning="the source moves the running booking",
+            meaning_referents=(
+                UnderstandingReferent(
+                    kind="running", id="activation:act-r", source="source", excerpt="booking"
+                ),
+            ),
+            unclear=(UnclearPoint(gap="which day", readings=("Friday", "Saturday")),),
+        )
+        record = base.model_copy(
+            update={
+                "processing_record": EpisodeProcessingRecord.model_validate(
+                    base.processing_record.model_dump()
+                    | {"understanding": (version,), "understanding_omitted": None}
+                )
+            }
+        )
+        await subject.memory.add(record)
+        stored = await subject.memory.get("understood")
+        assert stored is not None
+        current = await subject.engine.episode_chunk("understood")
+        assert current is not None
+        version_id = current.version
+        parts = [current.text]
+        while current.next_offset is not None:
+            following = await subject.engine.episode_chunk(
+                "understood", version=version_id, offset=current.next_offset
+            )
+            assert following is not None
+            current = following
+            parts.append(current.text)
+        decoded = json.loads("".join(parts))
+        assert decoded == stored.model_dump(mode="json")
+        (shown,) = decoded["processing_record"]["understanding"]
+        assert shown["unclear"] == [{"gap": "which day", "readings": ["Friday", "Saturday"]}]
+        assert shown["meaning_referents"][0]["kind"] == "running"
+        assert "meaning_ground" not in shown
+        assert "answers" not in shown
 
     async def test_episode_detail_rereads_after_annotation_deletion_and_expiry(
         self, episode_inspection: EpisodeInspectionSubject

@@ -315,7 +315,7 @@ async def test_a_turn_links_its_activation_into_the_story_it_named() -> None:
     stories = _stories()
     trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
     assert trip is not None
-    model = FakeModelProvider(_proposal(story_labels=["S1"]))
+    model = FakeModelProvider(_proposal(belongs_to=["S1"]))
     harness = _linked(await _seeded(), stories, model=model)
 
     _, episode = await chat_turn(harness, _TURN)
@@ -342,7 +342,7 @@ async def test_a_turn_links_its_activation_into_the_story_it_named() -> None:
 async def test_an_earlier_episode_in_no_story_starts_one_with_the_activation() -> None:
     stories = _stories()
     harness = _linked(
-        await _seeded(), stories, model=FakeModelProvider(_proposal(story_labels=["P1"]))
+        await _seeded(), stories, model=FakeModelProvider(_proposal(belongs_to=["P1"]))
     )
 
     _, episode = await chat_turn(harness, _TURN)
@@ -359,7 +359,7 @@ async def test_an_earlier_episode_in_no_story_starts_one_with_the_activation() -
 async def test_a_follow_up_links_the_conversation_s_earlier_turn_through_its_h_label() -> None:
     """ADR-0301 §1: the earlier turn reaches the call only as H1, and still starts a story."""
     stories = _stories()
-    model = FakeModelProvider.scripted(STATED_PROPOSAL, _proposal(story_labels=["H1"]))
+    model = FakeModelProvider.scripted(STATED_PROPOSAL, _proposal(belongs_to=["H1"]))
     harness = _linked(FakeMemoryStore(now=lambda: AT), stories, model=model)
     conversation, first = await chat_turn(harness, "Plan the camping trip.")
     earlier = processing(first).activation_id
@@ -407,7 +407,7 @@ async def test_an_event_s_links_are_recorded_before_planning() -> None:
     trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
     assert trip is not None
     harness = _linked(
-        await _seeded(), stories, model=FakeModelProvider(_proposal(story_labels=["S1"]))
+        await _seeded(), stories, model=FakeModelProvider(_proposal(belongs_to=["S1"]))
     )
 
     _, episode = await event(harness)
@@ -430,7 +430,7 @@ async def test_a_story_store_failure_in_the_stage_is_tolerated_and_the_turn_goes
     assert trip is not None
     stories = failing(stories, "link")
     harness = _linked(
-        await _seeded(), stories, model=FakeModelProvider(_proposal(story_labels=["S1"]))
+        await _seeded(), stories, model=FakeModelProvider(_proposal(belongs_to=["S1"]))
     )
 
     conversation, episode = await chat_turn(harness, _TURN)
@@ -485,7 +485,7 @@ async def test_recalls_story_is_recorded_and_joins_the_candidates_after_the_wind
     stories = _stories()
     windowed = await _story(stories, "a-new")
     recalled = await _story(stories, "a-old")
-    model = FakeModelProvider(_proposal(story_labels=["S2"]))
+    model = FakeModelProvider(_proposal(belongs_to=["S2"]))
     harness = _recalling(await _recall_seeded(), stories, model=model)
 
     _, episode = await chat_turn(harness, _TURN)

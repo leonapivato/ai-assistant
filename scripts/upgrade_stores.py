@@ -156,7 +156,6 @@ from ai_assistant.core.types import (
     ToolOutcome,
     TraceKind,
     TraceOutcome,
-    UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
     rests_on_recorded_external_content,
@@ -492,7 +491,6 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
             recorded_at=joined_at,
             producer=UnderstandingProducer.INTERPRETATION,
             meaning="Book Riverside for Saturday, for four.",
-            meaning_ground=UnderstandingGround.STATED,
             continues=continues,
         )
 
@@ -896,6 +894,59 @@ def _memory_parties_carry(records: Records) -> Records:
         assert isinstance(processing, dict)  # noqa: S101  # read above, with its trigger
         kept = {name: one for name, one in trigger.items() if name != "origin"}
         carried[key] = value | {"processing_record": processing | {"trigger": kept}}
+    return carried
+
+
+#: ADR-0353 §9:5's retired fields, which the head's upgrade drops from every version.
+_RETIRED_UNDERSTANDING: Final = (
+    "meaning_ground",
+    "references",
+    "relationships",
+    "unresolved",
+    "answers",
+)
+
+
+def _memory_understood_carry(records: Records) -> Records:
+    """What a memory store read back before ADR-0353 reads back after it (§9:6).
+
+    Each episode's understanding versions read back without their retired fields, by
+    the owner's ruling under ADR-0326 §4:4: the ground, the references, the
+    relationships, the unresolved matters and the answer pointers. The referents of a
+    version's references and relationships read back in its ``meaning_referents``, after
+    its meaning's own, each added once and none it already holds; what each version
+    gains, ``unclear``, the comparison admits as added. Nothing else moves: no memory,
+    the walk and the nearest hits, since an episode's vector embeds its ``content``.
+    """
+    carried: Records = {}
+    for key, value in records.items():
+        processing = value.get("processing_record") if isinstance(value, dict) else None
+        versions = processing.get("understanding") if isinstance(processing, dict) else None
+        if not isinstance(value, dict) or not isinstance(versions, list):
+            carried[key] = value
+            continue
+        understanding: list[Json] = []
+        for version in versions:
+            if not isinstance(version, dict):
+                understanding.append(version)
+                continue
+            own = version.get("meaning_referents")
+            kept: list[Json] = list(own) if isinstance(own, list) else []
+            seen = [json.dumps(one, sort_keys=True) for one in kept]
+            for name in ("references", "relationships"):
+                held = version.get(name)
+                for one in held if isinstance(held, list) else []:
+                    referents = one.get("referents") if isinstance(one, dict) else None
+                    for referent in referents if isinstance(referents, list) else []:
+                        if (text := json.dumps(referent, sort_keys=True)) not in seen:
+                            seen.append(text)
+                            kept.append(referent)
+            reshaped = {
+                name: one for name, one in version.items() if name not in _RETIRED_UNDERSTANDING
+            }
+            understanding.append(reshaped | {"meaning_referents": kept})
+        assert isinstance(processing, dict)  # noqa: S101  # read above, with its versions
+        carried[key] = value | {"processing_record": processing | {"understanding": understanding}}
     return carried
 
 
@@ -1998,12 +2049,13 @@ STORES: Final[tuple[Store, ...]] = (
         ("memory.db",),
         _write_memory,
         _read_memory,
-        shape=5,
+        shape=6,
         carries={
             1: _memory_record_carry,
             2: _memory_placed_carry,
             3: _memory_continuing_carry,
             4: _memory_parties_carry,
+            5: _memory_understood_carry,
         },
     ),
     Store(

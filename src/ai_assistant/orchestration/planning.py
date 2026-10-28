@@ -1637,31 +1637,9 @@ class _Request:
         understanding = self._inputs.understanding
         if understanding is None:
             return _NO_UNDERSTANDING
-        shown: dict[str, object] = {
-            "meaning": understanding.meaning,
-            "ground": understanding.meaning_ground.value,
-        }
+        shown: dict[str, object] = {"meaning": understanding.meaning}
         if understanding.meaning_referents:
             shown["rests_on"] = [self._referent(one) for one in understanding.meaning_referents]
-        if understanding.references:
-            shown["references"] = [
-                {"phrase": one.phrase, "refers_to": [self._referent(r) for r in one.referents]}
-                for one in understanding.references
-            ]
-        if understanding.relationships:
-            shown["relationships"] = [
-                {
-                    "statement": one.statement,
-                    "ground": one.ground.value,
-                    "rests_on": [self._referent(r) for r in one.referents],
-                }
-                for one in understanding.relationships
-            ]
-        if understanding.unresolved:
-            shown["unresolved"] = [
-                {"matter": one.matter, "why_it_matters": one.why_it_matters}
-                for one in understanding.unresolved
-            ]
         if understanding.story_links:
             shown["belongs_to"] = [
                 self._book.label(LabelKind.STORY, one.id)

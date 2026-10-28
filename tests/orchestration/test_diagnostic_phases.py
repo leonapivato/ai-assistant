@@ -75,7 +75,7 @@ _AT: Final = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
 _ACTIVATION: Final = "3f2b8c4e-1d5a-4e7b-9c0d-2a6f8e1b7c35"
 _AUDIENCE: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 _CONVERSATION: Final = ChannelIdentity(channel_type="conversation", instance_id="c-1")
-_PROPOSAL: Final = json.dumps({"meaning": "They mean the dentist.", "meaning_ground": "stated"})
+_PROPOSAL: Final = json.dumps({"understanding": "They mean the dentist."})
 
 
 def _now() -> datetime:

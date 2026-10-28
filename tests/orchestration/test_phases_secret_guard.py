@@ -368,9 +368,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``OfferedTool`` is a capability's name, its description and its argument schema as
     frozen JSON. ``RoundResponse`` is planning's text, its ``ProposedCall``s — a provider
     id, a capability name and arguments as frozen JSON — and its notes.
-    ``ProposedActivationUnderstanding`` with ``ProposedReference`` and
-    ``ProposedRelationship``, and digesting's ``_Proposed`` and ``_ProposedItem``, are
-    the parse of a reply: prose the model wrote and labels it was shown.
+    ``ProposedActivationUnderstanding`` with ``UnclearPoint`` (ADR-0353 §9:2, §9:3), and
+    digesting's ``_Proposed`` and ``_ProposedItem``, are the parse of a reply: prose the
+    model wrote, labels it was shown and a flag; the record keeps the same
+    ``UnclearPoint``s.
 
     **The capabilities planning is offered.** ``ToolDefinition`` with ``ToolCost`` is
     what a tool declares of itself: identifiers, closed values, the tiers it reaches as
@@ -440,9 +441,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``BoundAccount``, is what a call discloses and to whom: destinations in their
     supplied and canonical forms, spans with their provenance and extent, and the
     account's connection reference and identity, which name a connection and are not
-    its credential — that stays in the keyring, read by ``tools/`` alone. The answer
-    pointer, ``ProposedAnswer`` on the parse of understanding's reply and
-    ``AnsweredQuestion`` on the record, is a label or ids, and part numbers. On
+    its credential — that stays in the keyring, read by ``tools/`` alone. No answer
+    pointer is in the graph: understanding records none until the authority run
+    (ADR-0353 §11:2). On
     planning's side (ADR-0321 §2:8, §4:2), ``CallOutcome.request`` is an
     ``ActionRequest``: the ``ToolDefinition`` and ``EgressBinding`` judged here and the
     values as frozen JSON, exactly what the ``AskedCall`` made from it holds.
@@ -471,7 +472,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ActivationLabels",
         "ActivationRecall",
         "ActivationUnderstanding",
-        "AnsweredQuestion",
         "ApprovedAction",
         "AskedCall",
         "Attestation",
@@ -538,10 +538,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PlanningStory",
         "Profile",
         "ProposedActivationUnderstanding",
-        "ProposedAnswer",
         "ProposedCall",
-        "ProposedReference",
-        "ProposedRelationship",
         "Provenance",
         "QuestionPart",
         "RecalledItem",
@@ -587,10 +584,8 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "TranscriptMessage",
         "TranscriptWindow",
         "UnboundedAudienceSupply",
-        "UnderstandingReference",
+        "UnclearPoint",
         "UnderstandingReferent",
-        "UnderstandingRelationship",
-        "UnresolvedMatter",
         "Validity",
         "WholeTextReply",
         "_Proposed",

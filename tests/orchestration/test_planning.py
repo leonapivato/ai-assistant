@@ -65,10 +65,8 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
     TrackRecordEntry,
-    UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
-    UnderstandingReference,
     UnderstandingReferent,
     WholeTextReply,
     band_of,
@@ -295,7 +293,6 @@ def _understanding(**fields: Any) -> ActivationUnderstanding:
         "recorded_at": _AT,
         "producer": UnderstandingProducer.INTERPRETATION,
         "meaning": "the user wants a table for two tonight",
-        "meaning_ground": UnderstandingGround.STATED,
     }
     values.update(fields)
     return ActivationUnderstanding(**values)
@@ -626,13 +623,9 @@ async def test_the_offered_tools_reach_the_model_and_their_names_the_request() -
 
 async def test_what_understanding_names_is_labelled_on_first_show() -> None:
     understanding = _understanding(
-        meaning_ground=UnderstandingGround.SUPPLIED,
-        meaning_referents=(UnderstandingReferent(kind="memory", id="mem-1", excerpt="likes 7pm"),),
-        references=(
-            UnderstandingReference(
-                phrase="that place",
-                referents=(UnderstandingReferent(kind="episode", id="activation:old", excerpt=""),),
-            ),
+        meaning_referents=(
+            UnderstandingReferent(kind="memory", id="mem-1", excerpt="likes 7pm"),
+            UnderstandingReferent(kind="episode", id="activation:old", excerpt=""),
         ),
         story_links=(
             StoryMember(kind=StoryMemberKind.STORY, id="story:dinner"),
@@ -642,8 +635,9 @@ async def test_what_understanding_names_is_labelled_on_first_show() -> None:
     stage, completer, _ = _stage()
     planned = await stage.plan(_inputs(understanding=understanding))
     sent = _sent(completer)["understanding"]
-    assert sent["rests_on"] == ["M1"]
-    assert sent["references"] == [{"phrase": "that place", "refers_to": ["E1"]}]
+    assert sent["rests_on"] == ["M1", "E1"]
+    # ADR-0353 §12, §9:5: no ground and no reference is shown.
+    assert not {"ground", "references", "relationships", "unresolved"} & set(sent)
     assert sent["belongs_to"] == ["S1", "E1"]
     assert [(one.label, one.kind, one.id) for one in planned.labels] == [
         ("M1", LabelKind.MEMORY, "mem-1"),
@@ -1663,7 +1657,6 @@ def test_a_schema_with_a_reference_is_not_changed() -> None:
 
 async def test_a_channel_items_excerpt_never_reaches_planning() -> None:
     understanding = _understanding(
-        meaning_ground=UnderstandingGround.SUPPLIED,
         meaning_referents=(
             UnderstandingReferent(
                 kind="channel_item",
@@ -1684,18 +1677,13 @@ _EARLIER: Final = _AT - timedelta(minutes=5)
 
 
 def _naming(*ids: str | None, excerpt: str = "my father called") -> ActivationUnderstanding:
-    """An understanding whose phrase "him" refers to the channel items ``ids`` name."""
+    """An understanding citing the channel items ``ids`` name."""
     return _understanding(
-        references=(
-            UnderstandingReference(
-                phrase="him",
-                referents=tuple(
-                    UnderstandingReferent(
-                        kind="channel_item", id=one, source="this conversation", excerpt=excerpt
-                    )
-                    for one in ids
-                ),
-            ),
+        meaning_referents=tuple(
+            UnderstandingReferent(
+                kind="channel_item", id=one, source="this conversation", excerpt=excerpt
+            )
+            for one in ids
         ),
     )
 
@@ -1715,7 +1703,7 @@ def _user(text: str, position: int, **fields: Any) -> PlaceItem:
 
 
 def _refers_to(completer: FakeToolCallingCompleter) -> list[str]:
-    refers_to: list[str] = _sent(completer)["understanding"]["references"][0]["refers_to"]
+    refers_to: list[str] = _sent(completer)["understanding"]["rests_on"]
     return refers_to
 
 
@@ -1823,23 +1811,18 @@ async def test_an_item_the_window_does_not_hold_stays_some_item_of_it() -> None:
 
 async def test_story_episode_memory_and_input_referents_are_named_as_before() -> None:
     understanding = _understanding(
-        references=(
-            UnderstandingReference(
-                phrase="all of it",
-                referents=(
-                    UnderstandingReferent(kind="story", id="story:dinner", excerpt="dinner"),
-                    UnderstandingReferent(kind="episode", id="activation:old", excerpt=""),
-                    UnderstandingReferent(kind="memory", id="mem-1", excerpt="likes 7pm"),
-                    UnderstandingReferent(kind="input", excerpt="call him"),
-                    UnderstandingReferent(kind="memory", excerpt="gone"),
-                ),
-            ),
+        meaning_referents=(
+            UnderstandingReferent(kind="story", id="story:dinner", excerpt="dinner"),
+            UnderstandingReferent(kind="episode", id="activation:old", excerpt=""),
+            UnderstandingReferent(kind="memory", id="mem-1", excerpt="likes 7pm"),
+            UnderstandingReferent(kind="input", excerpt="call him"),
+            UnderstandingReferent(kind="memory", excerpt="gone"),
         ),
     )
     place = _window(PlaceItem(PlaceAuthor.USER, "x", at=_EARLIER, referent_id="message:3"))
     stage, completer, _ = _stage()
     await stage.plan(_inputs(place=place, understanding=understanding))
-    assert _sent(completer)["understanding"]["references"][0]["refers_to"] == [
+    assert _sent(completer)["understanding"]["rests_on"] == [
         "S1",
         "E1",
         "M1",
@@ -1850,7 +1833,6 @@ async def test_story_episode_memory_and_input_referents_are_named_as_before() ->
 
 async def test_a_referent_with_a_blank_id_is_still_labelled() -> None:
     understanding = _understanding(
-        meaning_ground=UnderstandingGround.SUPPLIED,
         meaning_referents=(UnderstandingReferent(kind="episode", id="", excerpt=""),),
     )
     stage, completer, _ = _stage()
