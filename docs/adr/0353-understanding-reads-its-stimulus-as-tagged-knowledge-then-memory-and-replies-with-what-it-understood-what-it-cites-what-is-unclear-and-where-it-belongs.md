@@ -253,10 +253,6 @@ or only once as now, is not decided here (§17).
 > **Normative.** Each item the reply may cite carries its label as the attribute `label`.
 > No other item carries one.
 
-> **Normative.** An item that links to no earlier stimulus carries `linkable="no"`: a place
-> window item that links to no activation (ADR-0303 §7:5), and every remembered fact,
-> pinned or recalled (ADR-0305 §3:1).
-
 > **Normative.** A summary, a note or a stimulus in memory that rests on outside content
 > carries `outside="yes"`, by the record's mark and never by its text (ADR-0303 §3:4, §3:7,
 > §3:8). A place window item whose words are outside by its record carries it too
@@ -480,9 +476,10 @@ The reply is one JSON object:
 > repair delays every activation that waits on this one's understanding (ADR-0349 §7:12,
 > §7:15), which is the cost #3461 removes.
 
-> **Normative.** A label in `belongs_to` naming an item marked `linkable="no"`, or a
-> remembered fact, is dropped and counted in `grounding_dropped`, and takes no part in the
-> repair, as ADR-0303 §7:6 and ADR-0305 §3:2 have it.
+> **Normative.** A label in `belongs_to` naming a remembered fact, or a place-window item
+> that links to no activation, is dropped and counted in `grounding_dropped`, never a parse
+> failure, and calls for no repair, as ADR-0303 §7:6 and ADR-0305 §3:2 have it. No item is
+> marked for it: code drops the label as if it had not been put there.
 
 > **Normative.** The reply arrives by the existing text path, read as JSON after one
 > enclosing code fence is removed, until understanding makes ADR-0354's move (ADR-0354 §8:1,
@@ -613,13 +610,12 @@ observer's. Confidence belongs in the understanding's own words, where a reader 
 >   §3:6);
 > - what each section is (§2), and that the lines between the tags are the system's own
 >   (§3:4);
-> - what a matter link says, that one stimulus may belong to several matters and that one
->   belonging to none is linked to none (ADR-0300 §6:9);
+> - what a matter link says: only that the stimulus belongs; that only `belongs_to` links,
+>   and only to a matter or an earlier stimulus; that one stimulus may belong to several
+>   matters; and that one belonging to none is linked to none (ADR-0300 §6:9);
 > - that a matter's label may be cited wherever a label may, that citing it outside
 >   `belongs_to` links nothing, and that a matter's summary and notes are the system's own
 >   memory, provisional (ADR-0304 §8:5);
-> - that `belongs_to` may name any item not marked `linkable="no"` (ADR-0303 §7:8);
-> - that a remembered fact never links (ADR-0305 §3:3);
 > - what concurrent stimuli are, that `meant_for` names the work the stimulus is meant for by
 >   §10:5's test and separate work none, and that only `meant_for` makes the stimulus part of
 >   that work (ADR-0349 §5:2–§5:6, §7:3, and §10);
@@ -777,7 +773,9 @@ The lanes, each after this decision merges `Accepted`:
 > label in `meant_for` naming no shown activation, `R` form or not, and an `R` label in
 > `cites` or `belongs_to` naming no shown concurrent stimulus, are each dropped and counted
 > with no repair call, while any other unresolved label in `cites` or `belongs_to` earns the
-> one repair; the peer view of an episode whose understanding cites a `running` referent
+> one repair; a label in `belongs_to` naming a remembered fact, and one naming a
+> place-window item that links to no activation, are each dropped and counted with no
+> repair call (§9:12); the peer view of an episode whose understanding cites a `running` referent
 > shows no excerpt of it; a version stored before this decision, with a ground,
 > references, relationships, unresolved matters and answers, reopens after the upgrade over a
 > file the previous release wrote with those fields gone, its meaning, story links and
@@ -833,9 +831,9 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0281 | §7:2's *a third section of the prompt, `recalled`*: recalled memories, under long-term memory; §7:3's *its attribution as a report received and its provisional "understood then"* and its attribution by band, *something the user said*, *something the assistant worked out* and *something a connected source reported*, each in its wording alone: a report in a `received` tag, its understanding in an `understood` tag from the system under memory, and the band's words with the person named and the system called "the system"; §7:4's *a reading supported by an `M` label is `supplied`* | §2, §3, §4:1, §4:2, §12 |
 | ADR-0284 | §8:1's *the latest understanding's `meaning`, `meaning_ground` and `unresolved`*: its `meaning` and `unclear` | §14:2 |
 | ADR-0300 | §6:5's *a fourth section of the prompt, `stories`*: matters, under long-term memory; §6:6's `story_labels`: the proposal's `belongs_to`; §6:7, in the addition alone: an `R` label resolves to its running activation | §2, §9:2, §10:3 |
-| ADR-0303 | §7:4, §7:6 and §7:8, each in the field's name alone: `belongs_to` | §9:2 |
+| ADR-0303 | §7:4 and §7:6, each in the field's name alone: `belongs_to`; §7:5 and §7:8, whole: no item is marked as not linkable, and the instruction says nothing of a mark, while §7:6's drop stands | §9:2, §9:12 |
 | ADR-0304 | §8:1's and §8:4's *in `meaning_labels`, in a reference or in a relationship*: in `cites`; §8:2's and §8:5's `story_labels`: `belongs_to`; §8:3, whole | §9, §12 |
-| ADR-0305 | §3:2 and §3:3, each in the field's name alone: `belongs_to` | §9:2 |
+| ADR-0305 | §3:2, in the field's name alone: `belongs_to`; §3:1 and §3:3, whole: a recalled fact is rendered with no mark, and the instruction says nothing of one, while §3:2's drop stands | §9:2, §9:12 |
 | ADR-0308 | §2:2's cues and §2:4's order within a band: each unclear point's gap, in place of each reference's phrase | §14:3, §14:4 |
 | ADR-0321 | §3:1's pointer, and §3:4–§3:11's readings of an answer, until a later decision: understanding records no pointer | §11 |
 | ADR-0322 | §2:1–§2:7, whole; §4:1, §4:2 and §4:4–§4:9, whole, until a later decision: understanding is shown no mark and records no pointer | §11 |
@@ -854,8 +852,8 @@ Read through and not superseded:
 | ADR-0326 §3:4, §4:4 | Nothing in their words: the owner ruled the drop of the retired fields (§9:6), and a fresh data directory on the owner's hub as a fallback alone, which a deploy taking it records on an issue first (§15:5) |
 | ADR-0276 §3:5, §3:6, §3:7, §4:9, §4:13, §7:4, §7:7 | Nothing: one exchange is rendered once (§2:4), attribution is the record's, a missing window is rendered as missing by a note saying why (§8:1), withheld records reach no rendering (§8:2), and an understanding grants nothing |
 | ADR-0350 §6:12, ADR-0351 §5:4 | Nothing: they fix how an input is attributed, not its words; the assistant's words render in a `task` tag from "the system", the name §4:2 gives it |
-| ADR-0303 §3:7, §3:8, §3:11, §7:5, §7:7, §7:10 | Nothing: the marks render as `outside` (§3:8), a page withheld is still said to be, and the line's window is an episode window rendered as memory (§2) |
-| ADR-0305 §3:1, §4:1 | Nothing: every remembered fact renders `linkable="no"`, and withheld notes are absent (§8:2) |
+| ADR-0303 §3:7, §3:8, §3:11, §7:7, §7:10 | Nothing: the marks render as `outside` (§3:7), a page withheld is still said to be, and the line's window is an episode window rendered as memory (§2) |
+| ADR-0305 §4:1 | Nothing: withheld notes are absent (§8:2) |
 | ADR-0307 §6:1 | Nothing: planning is given understanding's record, which §14:1 shows in the new form |
 | ADR-0321 §3:2, §3:3, §4 | Nothing in their words: §4 finds no pointer and asks (§11:3) |
 | ADR-0322 §4:3, §5 | Nothing in their words: the projection keeps a round's asked parts, and §5's acceptance is not met again until approvals are redesigned |
@@ -929,10 +927,9 @@ Nothing else is running.
 Nothing yet: this conversation has just started.
 ```
 
-The example predates three of the clauses above, and where they differ the clauses rule:
-each `memory` carries `linkable="no"` (§3:7); `learned` and a `latest`'s `at` are instants,
-written with their clock time (§5:1); and always in mind also renders the person's other
-fields (§4:5). The understanding text "6 pm today" stays as it was recorded (§5:4).
+The example predates two of the clauses above, and where they differ the clauses rule:
+`learned` and a `latest`'s `at` are instants, written with their clock time (§5:1); and
+always in mind also renders the person's other fields (§4:5). The understanding text "6 pm today" stays as it was recorded (§5:4).
 
 ## Consequences
 
