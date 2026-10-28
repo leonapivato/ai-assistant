@@ -679,10 +679,15 @@ observer's. Confidence belongs in the understanding's own words, where a reader 
 > **Normative.** The observer's scout is shown, of the leaving episode's latest version
 > (ADR-0346 §2:5): the understanding; each cited referent, by its label where the reading
 > holds it and otherwise by its kind and excerpt; and each unclear point with its readings.
-> A `running` referent is shown by its identity alone, never by its excerpt (§10:6), and the
-> observer reads nothing of the other activation's episode through it, open or frozen: that
-> episode as it stood at the leaving episode's time is not held, and what it records later is
-> after that time (ADR-0346 §2:2, §2:3).
+> A `running` referent is shown by its identity alone, never by its excerpt (§10:6).
+
+> **Normative.** Of an episode the leaving episode's record points at, by a referent or by a
+> story link, that was still open when the leaving episode ended, or ended after it, by the
+> two records' `ended_at`, the observer reads nothing and shows it by its identity alone: it
+> is not held as it stood at the leaving episode's time, and what it recorded after is later
+> (ADR-0346 §2:2, §2:3). This covers running work named by an `R` label in `cites` and in
+> `belongs_to` alike, and a place-window item that linked to an activation still running
+> (ADR-0303 §7:7).
 
 > **Normative.** The matters pass and the story tidy-up read the projection's meaning
 > alone.
@@ -796,9 +801,12 @@ The lanes, each after this decision merges `Accepted`:
 
 > **Normative.** U3's tests include: planning's view of a version shows its cited items
 > and unclear points and no ground; recall's second run searches each gap; the observer is
-> shown a version's unclear points; where a leaving episode cited running work that went on
+> shown a version's unclear points; where a leaving episode named running work that went on
 > to record results after the leaving episode ended, the observer is shown that work by its
-> identity alone, with none of its excerpt and none of its later parts; the
+> identity alone, with none of its excerpt and none of its later parts, in each of three
+> cases: the work cited by its `R` label in `cites`, the work named by its `R` label in
+> `belongs_to` alone with `cites` empty, and the work reached through a place-window item's
+> link; the
 > matters pass and the tidy-up show a version's meaning; and episode inspection shows a
 > version's matter links and unclear points.
 
@@ -822,7 +830,7 @@ Superseded in part. Every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0276 | §1:3's *its meaning, the references…, the relationships…, the ground of each…, and the matters the reading leaves unresolved*: the understanding, what it cites, what is unclear, and where it belongs; §1:5's *nothing else*, in the addition alone: the situation; §2:4's copied fields: the record takes the reply by §9's table; §2:5's referent kinds, in the addition alone: `running`; §2:2, for `UnderstandingGround`: it leaves `core`, and the upgrade drops every stored value naming it; §2:6, whole: no ground remains; §3:3's *a reading grounded in the input alone is `stated`*; §6:1's instructed reply and its *`inferred` and not `supplied`*; §6:2's `supplied` check and §6:4's downgrade, whole; §6:2's repair, for a label in `meant_for` and an `R` label anywhere: dropped and counted with none; §7:6's rendering | §9, §9:9, §9:11, §10:1, §12, §6, §14:8 |
+| ADR-0276 | §1:3's *its meaning, the references…, the relationships…, the ground of each…, and the matters the reading leaves unresolved*: the understanding, what it cites, what is unclear, and where it belongs; §1:5's *nothing else*, in the addition alone: the situation; §2:4's copied fields: the record takes the reply by §9's table; §2:5's referent kinds, in the addition alone: `running`; §2:2, for `UnderstandingGround`: it leaves `core`, and the upgrade drops every stored value naming it; §2:6, whole: no ground remains; §3:3's *a reading grounded in the input alone is `stated`*; §6:1's instructed reply and its *`inferred` and not `supplied`*; §6:2's `supplied` check and §6:4's downgrade, whole; §6:2's repair, for a label in `meant_for` and an `R` label anywhere: dropped and counted with none; §7:6's rendering | §9, §9:9, §9:11, §10:1, §12, §6, §14:9 |
 | ADR-0281 | §7:2's *a third section of the prompt, `recalled`*: recalled memories, under long-term memory; §7:4's *a reading supported by an `M` label is `supplied`* | §2, §12 |
 | ADR-0284 | §8:1's *the latest understanding's `meaning`, `meaning_ground` and `unresolved`*: its `meaning` and `unclear` | §14:2 |
 | ADR-0300 | §6:5's *a fourth section of the prompt, `stories`*: matters, under long-term memory; §6:6's `story_labels`: the proposal's `belongs_to`; §6:7, in the addition alone: an `R` label resolves to its running activation | §2, §9:2, §10:3 |
@@ -854,7 +862,7 @@ Read through and not superseded:
 | ADR-0332 | Nothing: its `R` and `continues` clauses were superseded whole by ADR-0349, and `JoinedInput` keeps its shape |
 | ADR-0338 §7:2, §7:6, §7:7 | Nothing: always in mind renders the five fields as the person's own, and its memories take the first `M` labels |
 | ADR-0345, ADR-0348 | Nothing: no support, holder or claim rule reads understanding's fields. A yes to a rendered wording (ADR-0348 §2:4) arises no more while approvals stop (§11) |
-| ADR-0346 §2:1–§2:3, §5:1, §7:7, §7:10 | Nothing in their words: a `running` referent names an episode that is not held as it stood at the leaving episode's time, so §2:3 shows it by its identity alone and nothing later is read (§14:6); and no version keeps an answer pointer, so framing is shown no answered message for a reply |
+| ADR-0346 §2:1–§2:3, §5:1, §7:7, §7:10 | Nothing in their words: an episode the record points at that was open when the leaving episode ended, or ended after it, is not held as it stood at the leaving episode's time, so §2:3 shows it by its identity alone and nothing later is read (§14:6, §14:7); and no version keeps an answer pointer, so framing is shown no answered message for a reply |
 | ADR-0349 §5:2–§5:5, §5:8–§5:10, §6:10, §7:4, §7:17, §10:2, §10:8 | Nothing beyond the rows above: the section, its predicate and its bound stand; no read chains through a `running` referent (§10:6); §10:2's drop of a label naming no shown activation, never a parse failure, stands (§9:11); and the takeover reads `continues` alone |
 | ADR-0351 §5:6–§5:14, §11:4 | Nothing: `relayed` is its relay mark, and §5:12's line is in the new default, whichever of P2 and U2 merges first; P2's cases are written in the format current when it lands |
 | ADR-0352 §8:1 | Its row on #3461, an `R` label outside `continues`, is decided here (§10) |
