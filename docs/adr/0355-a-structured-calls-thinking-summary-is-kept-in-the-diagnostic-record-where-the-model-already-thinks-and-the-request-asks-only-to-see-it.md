@@ -1,6 +1,6 @@
 # 355. A structured call's thinking summary is kept in the diagnostic record where the model already thinks, and the request asks only to see it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-28
 - Scope: what the diagnostic record keeps of the thinking a model does on a structured call (ADR-0354), and what that costs the request. This decides when it applies (§2), the one change to the request and the models it is made for (§3), what comes back (§4), where the summary goes and where it never goes (§5), which stages write it (§6), what the viewer shows (§7), its tests (§8) and its lanes (§9). It answers ADR-0354 §13's first row, "Thinking on a structured call". Milestone 17 ([#3481](https://github.com/leonapivato/ai-assistant/issues/3481)).
 - Dependency: [ADR-0354](0354-a-stage-asks-for-its-replys-shape-through-a-structured-completer-beside-the-model-provider-and-gets-back-a-value-or-a-named-failure.md), [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md) and [ADR-0333](0333-the-observer-writes-diagnostic-entries-in-a-file-of-its-own-beside-the-activation-it-learned-from-and-the-viewer-shows-what-was-learned.md), as their status lines leave them.
