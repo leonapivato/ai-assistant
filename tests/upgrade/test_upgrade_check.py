@@ -617,6 +617,63 @@ def test_the_memory_stores_carry_from_shape_3_is_what_its_upgrade_does(tmp_path:
 
 
 @pytest.mark.integration
+def test_the_memory_stores_carry_from_shape_4_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """ADR-0351 §9: the carry from shape 4 says what the head's upgrade writes.
+
+    Taken over the file the release before ADR-0351 wrote (``tests/memory/legacy``):
+    every record that release read back, carried to shape 5, is read back by this build
+    after opening the file, each trigger's ``origin`` given way to its parties, an
+    uncovered record's and an open episode's included.
+    """
+    import shutil  # noqa: PLC0415
+
+    from ai_assistant.memory import SqliteMemoryStore  # noqa: PLC0415
+    from ai_assistant.models import HashingEmbedder  # noqa: PLC0415
+    from ai_assistant.testing import FakeTraceSink  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "memory" / "legacy"
+    path = tmp_path / "memory.db"
+    shutil.copyfile(legacy / "memory-before-adr-0351.db", path)
+    with sqlite3.connect(path) as conn:
+        base: Records = {
+            f"record/{record_id}": json.loads(data) | {"revision": revision}
+            for record_id, data, revision in conn.execute("SELECT id, data, revision FROM records")
+        }
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=path,
+        embedder=HashingEmbedder(dimensions=8),
+        now=lambda: datetime(2026, 10, 27, 13, tzinfo=UTC),
+    )
+    try:
+        head: Records = {
+            f"record/{record.id}": upgrade_stores.to_json(record)
+            for record in asyncio.run(store.export())
+        }
+    finally:
+        store.close()
+    (memory,) = [one for one in STORES if one.name == "memory"]
+
+    carried = memory.carries[4](base)
+
+    assert set(carried) == set(head)
+    assert {
+        key: first_difference(value, head[key]) for key, value in carried.items()
+    } == dict.fromkeys(carried)
+    # And it is the carry that holds the head to the parties: the base read an origin,
+    # which the head reading back would differ from without it.
+    record = head["record/mem-episode-door"]
+    assert isinstance(record, dict)
+    processing = record["processing_record"]
+    assert isinstance(processing, dict)
+    trigger = processing["trigger"]
+    assert isinstance(trigger, dict)
+    assert "origin" not in trigger
+    assert trigger["parties"] is None
+    assert first_difference(base["record/mem-episode-door"], record) is not None
+
+
+@pytest.mark.integration
 def test_the_plan_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
     """ADR-0329 §16:10: the carry from shape 1 says what the head's upgrade reads back.
 

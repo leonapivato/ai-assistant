@@ -79,6 +79,7 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         MemoryRecord,
         MemoryUpdateProposal,
+        SupportHolder,
     )
 
 #: The instant every case starts at: after §7:5's instant.
@@ -118,8 +119,13 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
     external: bool = False,
     recall: ActivationRecall | None = None,
     stories_position: int | None = None,
+    parties: tuple[SupportHolder, ...] | None = None,
 ) -> EpisodicMemory:
-    """One activation's episode at its own address, frozen unless ``open_``."""
+    """One activation's episode at its own address, frozen unless ``open_``.
+
+    Its input's parties are its messages', as the line declares each (ADR-0351 §2:6),
+    or, with none, ``parties`` where given and else those ``origin`` names.
+    """
     frozen = not open_
     owner = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
     record = EpisodicMemory(
@@ -146,7 +152,7 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
                 reply=WholeTextReply(),
                 # ADR-0351 §2:6: an input of messages carries their parties, each as the
                 # line declares it; one with none, the parties its origin names.
-                parties=line_input(messages)[0] if messages else parties_for(origin),
+                parties=line_input(messages)[0] if messages else parties or parties_for(origin),
                 messages=line_input(messages)[1],
             ),
             status=ProcessingStatus.COMPLETED if frozen else None,

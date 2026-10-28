@@ -17,11 +17,15 @@ from ai_assistant.core.errors import (
     UnderstandingError,
 )
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActivationDigest,
     ActivationUnderstanding,
     ChannelContext,
     ChannelContextItem,
+    ChannelIdentity,
     ChannelInput,
+    ChannelTarget,
+    ClaimedAuthor,
     ControllerRule,
     ControllerStage,
     DigestOutcome,
@@ -32,6 +36,7 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
+    RecordedInputMessage,
     RecordedSpeechInput,
     RecordedTextInput,
     SpeechChannelPayload,
@@ -39,6 +44,8 @@ from ai_assistant.core.types import (
     SpokenAudioFormat,
     SpokenReply,
     StageOutcome,
+    StatementPart,
+    SupportHolder,
     TextChannelPayload,
     UnderstandingGround,
     UnderstandingOmission,
@@ -72,6 +79,46 @@ def _admitted() -> ActivationState:
         clock=lambda: _AT,
         id_factory=lambda: _ID,
     )
+
+
+def test_admission_records_the_parties_each_kind_declares() -> None:
+    """ADR-0351 §2:6-§2:8, §3:1, §3:6: set by code at admission, never ``None``."""
+    owner = SupportHolder.person(OWNER_PERSON_ID)
+    sam = SupportHolder.source("77", claimed=True)
+    line = ChannelIdentity(channel_type="telegram", instance_id="conn-1/42")
+    # A party the sensor brings is replaced by the one the kind declares (§2:8).
+    note = RecordedInputMessage(
+        text="Is this right?", sent_at=_AT, position=1, party=SupportHolder.person("sam")
+    )
+    forward = RecordedInputMessage(
+        text="Ana moved to Porto.",
+        sent_at=_AT,
+        position=2,
+        forwarded_from=ClaimedAuthor(name="Sam", account_id=77),
+    )
+
+    def admitted(target: ChannelTarget, **extra: object) -> RecordedChannelTrigger:
+        return admit_channel(
+            ChannelInput(target=target, payload=TextChannelPayload(text="hi")),
+            None,
+            clock=lambda: _AT,
+            id_factory=lambda: _ID,
+            **extra,  # type: ignore[arg-type]  # the messages or the mark a case varies
+        ).trigger
+
+    taken = admitted(line, messages=(note, forward))
+    assert taken.parties == (owner, sam)
+    assert [one.party for one in taken.messages] == [owner, sam]
+    assert admitted(NewConversation()).parties == (owner,)
+    schedule = ChannelIdentity(channel_type="task_scheduler", instance_id="schedule")
+    statement = SupportHolder.statement(StatementPart.SCHEDULED_INSTRUCTION)
+    assert admitted(schedule).parties == (statement,)
+    assert admitted(schedule, carries_outside_mark=True).parties == (
+        statement,
+        SupportHolder.unknown(),
+    )
+    with pytest.raises(ValueError, match="takes in no forward"):
+        admitted(NewConversation(), messages=(forward,))
 
 
 def test_record_preserves_exact_admitted_material_and_reversed_wall_clock() -> None:
