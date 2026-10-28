@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, Json, JsonValue, RootModel, f
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.reply_shapes import (
     read_reply,
+    recordable,
     reply_schema,
     reply_shape_version,
     schema_version,
@@ -399,3 +400,17 @@ def test_unfenced_removes_one_fence_and_its_info_string() -> None:
     assert unfenced("```python\n{}\n```") == "python\n{}\n"
     assert unfenced("``````") == ""
     assert unfenced("```") == "```"
+
+
+# --- what the exchange records (§2:5, §5:3) ---------------------------------------
+
+
+@pytest.mark.parametrize("text", ["", "plain", "na\u00efve \U0001f600 \u2028 \x00"])
+def test_recordable_leaves_text_with_a_utf8_encoding_as_it_is(text: str) -> None:
+    assert recordable(text) == text
+
+
+def test_recordable_replaces_each_surrogate_and_nothing_else() -> None:
+    assert recordable("a\ud800b\udfffc") == "a\ufffdb\ufffdc"
+    assert recordable("\U0001f600\ud83d") == "\U0001f600\ufffd"
+    assert recordable("a\ud800b").encode("utf-8") == b"a\xef\xbf\xbdb"

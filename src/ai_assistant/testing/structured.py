@@ -31,7 +31,12 @@ from typing import Final, Literal
 from pydantic import BaseModel
 
 from ai_assistant.core.errors import ModelError
-from ai_assistant.core.reply_shapes import read_reply, reply_schema, schema_version
+from ai_assistant.core.reply_shapes import (
+    read_reply,
+    recordable,
+    reply_schema,
+    schema_version,
+)
 from ai_assistant.core.types import (
     Message,
     ReplyExchange,
@@ -194,13 +199,16 @@ class FakeStructuredCompleter:
             raise scripted
         if isinstance(scripted, str):
             scripted = ScriptedReply(text=scripted)
+        # Recorded as every implementation records a response, read as it came.
         exchange = ReplyExchange(
-            reply=scripted.text,
-            model=scripted.model,
+            reply=recordable(scripted.text),
+            model=recordable(scripted.model),
             mode=scripted.mode,
             finish_reason="stop" if scripted.failure is None else _FINISH_REASONS[scripted.failure],
-            refusal=scripted.refusal,
-            refusal_category=scripted.refusal_category,
+            refusal=None if scripted.refusal is None else recordable(scripted.refusal),
+            refusal_category=(
+                None if scripted.refusal_category is None else recordable(scripted.refusal_category)
+            ),
             usage=scripted.usage,
             shape=shape.__name__,
             shape_version=version,
