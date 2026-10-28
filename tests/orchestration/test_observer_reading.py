@@ -57,6 +57,7 @@ from ai_assistant.core.types import (
     StorySummaryDraft,
     StorySummaryLine,
     SupportOrigin,
+    UnclearPoint,
     UnderstandingProducer,
     UnderstandingReferent,
     Validity,
@@ -487,9 +488,150 @@ async def test_the_understanding_is_rendered_with_its_referents_by_label() -> No
         "meaning_rests_on": [
             {"kind": "memory", "label": "M1", "excerpt": "The user prefers window seats."}
         ],
+        "unclear": [],
     }
     (shown,) = reading.memories
     assert shown.handle == "M1"
+
+
+def _understood(
+    *,
+    referents: tuple[UnderstandingReferent, ...] = (),
+    unclear: tuple[UnclearPoint, ...] = (),
+    links: tuple[StoryMember, ...] = (),
+) -> ActivationUnderstanding:
+    return ActivationUnderstanding(
+        version=1,
+        recorded_at=AT,
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="The user changes the booking to five people.",
+        meaning_referents=referents,
+        unclear=unclear,
+        story_links=links,
+    )
+
+
+async def test_the_scout_is_shown_each_unclear_point_with_its_readings() -> None:
+    """ADR-0353 §14:6: the understanding, its cited referents and its unclear points."""
+    harness = Harness()
+    unclear = (
+        UnclearPoint(gap="which booking", readings=("Luigi's on Friday", "the dentist")),
+        UnclearPoint(gap="how many people", readings=("five",)),
+    )
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=3), understanding=(_understood(unclear=unclear),))
+    )
+
+    reading = await _read(harness, "one")
+
+    assert reading.understood is not None
+    assert json.loads(json.dumps(reading.understood))["unclear"] == [
+        {"gap": "which booking", "readings": ["Luigi's on Friday", "the dentist"]},
+        {"gap": "how many people", "readings": ["five"]},
+    ]
+    assert "which booking" in json.dumps(reading.payload())
+
+
+# --- ADR-0353 §14:7, §10:6: running work is shown by its identity alone -----------------------
+
+#: The running work's input, its referent's excerpt, and what it recorded after the
+#: leaving episode ended.
+_BOOKING_INPUT = "book a table for 4 at Luigi's on Friday at 8"
+_BOOKED = "Booked the table for Friday at 8."
+
+
+async def _with_running_work(
+    understood: ActivationUnderstanding, *, ended: timedelta = timedelta(minutes=5)
+) -> Reading:
+    """The leaving episode ended at ``AT - 3m``; the work it named ran on, ending ``ended``
+    from ``AT``, with a round recorded after the leaving episode ended."""
+    harness = Harness()
+    await harness.hold(
+        episode(
+            "booking",
+            at=AT - timedelta(minutes=10),
+            text=_BOOKING_INPUT,
+            rounds=(said("r1", _BOOKED, at=AT + ended),),
+            ended=AT + ended,
+        ),
+        episode(
+            "one", at=AT - timedelta(minutes=3), text="make it five", understanding=(understood,)
+        ),
+    )
+    return await _read(harness, "one")
+
+
+def _by_identity_alone(reading: Reading) -> str:
+    """The running work's one entry, by its identity alone; returns its handle."""
+    (work,) = reading.earlier
+    assert (work.episode, work.record, work.parts, work.excerpt) == (
+        address("booking"),
+        None,
+        (),
+        None,
+    )
+    assert work.rendered() == {"exchange": work.handle, "held": False, "recalled_as": None}
+    shown = json.dumps(reading.payload())
+    assert "Luigi" not in shown, "none of its excerpt"
+    assert _BOOKED not in shown, "none of its later parts"
+    assert Placement.narrowest_of(reading.supplied) == Placement.narrowest_of(
+        (reading.record.placement,)
+    ), "nothing of it read, so it supplies nothing"
+    return work.handle
+
+
+def _running(excerpt: str = _BOOKING_INPUT) -> UnderstandingReferent:
+    return UnderstandingReferent(
+        kind="running", id=address("booking"), source="chat", excerpt=excerpt
+    )
+
+
+async def test_running_work_cited_in_cites_is_shown_by_its_identity_alone() -> None:
+    reading = await _with_running_work(_understood(referents=(_running(),)))
+
+    handle = _by_identity_alone(reading)
+    assert reading.understood is not None
+    assert reading.understood["meaning_rests_on"] == [{"kind": "running", "label": handle}]
+
+
+async def test_running_work_named_in_belongs_to_alone_is_shown_by_its_identity_alone() -> None:
+    linked = (StoryMember(kind=StoryMemberKind.ACTIVATION, id="booking"),)
+    reading = await _with_running_work(_understood(links=linked))
+
+    _by_identity_alone(reading)
+    assert reading.understood is not None
+    assert reading.understood["meaning_rests_on"] == []
+
+
+async def test_running_work_a_place_item_linked_to_is_shown_by_its_identity_alone() -> None:
+    """ADR-0303 §7:7: an ``H`` label in ``belongs_to`` links the activation its item links
+    to, here one still running when the leaving episode ended."""
+    item = UnderstandingReferent(
+        kind="channel_item", id="message:2", source="chat", excerpt="the table on Friday"
+    )
+    linked = (StoryMember(kind=StoryMemberKind.ACTIVATION, id="booking"),)
+    reading = await _with_running_work(_understood(referents=(item,), links=linked))
+
+    _by_identity_alone(reading)
+
+
+async def test_a_running_referent_reads_nothing_even_of_work_that_ended_first() -> None:
+    """ADR-0353 §10:6: no read chains through a running referent, whenever the work ended."""
+    reading = await _with_running_work(
+        _understood(referents=(_running(),)), ended=-timedelta(minutes=5)
+    )
+
+    _by_identity_alone(reading)
+
+
+async def test_linked_work_that_ended_before_the_leaving_episode_is_read_as_it_stood() -> None:
+    """ADR-0346 §2:2: the cut-off is the end, so work that ended first is read whole."""
+    linked = (StoryMember(kind=StoryMemberKind.ACTIVATION, id="booking"),)
+    reading = await _with_running_work(_understood(links=linked), ended=-timedelta(minutes=5))
+
+    (work,) = reading.earlier
+    assert work.record is not None
+    assert [part.text for part in work.parts] == [_BOOKING_INPUT, _BOOKED]
 
 
 async def test_a_candidate_is_a_hint_naming_its_parts_and_memory() -> None:
