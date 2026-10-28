@@ -35,10 +35,6 @@ from observer_support import (
 from ai_assistant.core.errors import MemoryStoreError, ModelError, PlanningError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
-    ActivationUnderstanding,
-    AnsweredQuestion,
-    AskedCall,
-    ConfirmationPart,
     EpisodicMemory,
     FindingUnwritten,
     InputPart,
@@ -48,7 +44,6 @@ from ai_assistant.core.types import (
     MemoryOperation,
     MemoryOperationKind,
     MemorySource,
-    MemoryStanding,
     MemoryStatus,
     MemoryWrite,
     MemoryWriteMode,
@@ -61,20 +56,14 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     PlanningLabel,
-    PlanningRound,
     Provenance,
-    QuestionPart,
-    ReadingCertainty,
     Role,
     SupportHolder,
     SupportOrigin,
-    UnderstandingGround,
-    UnderstandingProducer,
     Validity,
 )
 from ai_assistant.core.types import Message as MessageType
 from ai_assistant.orchestration.observer import RunOutcome
-from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.understanding import RecentEpisodes
 from ai_assistant.testing import FakeModelProvider
 from ai_assistant.testing.memories import memory, said_support
@@ -555,103 +544,6 @@ def _answering(decide: Callable[[dict[str, Any]], str]) -> FakeModelProvider:
         return decide(json.loads(messages[-1].content))
 
     return FakeModelProvider(reply=answer)
-
-
-async def _confirmed_case(harness: Harness) -> str:
-    """An asked candidate and the user's yes, the yes leaving the window; the fact."""
-    fact = "The user prefers window seats."
-    asked = AskedCall(
-        part=1,
-        tool=REMEMBER_CANDIDATE,
-        values={
-            "fact": fact,
-            "why": "travel",
-            "rests_on_input": True,
-            "confirm": True,
-            "episode": address("asking"),
-            "rests_on_outside_content": False,
-        },
-    )
-    yes_at = AT - timedelta(minutes=3)
-    understood = ActivationUnderstanding(
-        version=1,
-        recorded_at=yes_at,
-        producer=UnderstandingProducer.INTERPRETATION,
-        meaning="yes to remembering it",
-        meaning_ground=UnderstandingGround.STATED,
-        answers=(AnsweredQuestion(activation_id="asking", round="r-ask"),),
-    )
-    await harness.hold(
-        episode(
-            "asking",
-            at=AT - timedelta(minutes=4),
-            text="",
-            rounds=(
-                PlanningRound(
-                    id="r-ask",
-                    recorded_at=AT - timedelta(minutes=4),
-                    text="Want me to remember you prefer window seats?",
-                    asked=(asked,),
-                ),
-            ),
-        ),
-        episode("yes", at=yes_at, text="yes", understanding=(understood,)),
-        episode("two", at=AT - timedelta(minutes=2), text="ok"),
-        episode("three", at=AT - timedelta(minutes=1), text="ok"),
-    )
-    await remembered(
-        harness.plans,
-        "yes",
-        "r-yes",
-        {"fact": fact, "why": "travel", "rests_on_input": True, "confirm": True},
-        part=QuestionPart(round="r-ask", part=1),
-    )
-    return fact
-
-
-def _confirming_scout(shown: dict[str, Any]) -> str:
-    """A scout naming the confirmed candidate on a finding resting on the yes."""
-    (candidate,) = shown["exchange"]["candidates"]
-    return scouted(
-        found(
-            "The user likes windows.", *candidate["rests_on"], candidates=[candidate["candidate"]]
-        )
-    )
-
-
-async def test_a_candidate_the_user_confirmed_is_kept_in_the_words_they_approved() -> None:
-    """ADR-0346 §5:3: framed in exactly the approved words, on the yes, sure.
-
-    Framing rewords it, and code refuses that wording and frames the approved one itself.
-    """
-    harness = Harness()
-    fact = await _confirmed_case(harness)
-
-    def reword(shown: dict[str, Any]) -> str:
-        (part,) = [one for one in shown["parts"] if one["from"].startswith("the user's yes")]
-        return framing(framed("User likes windows", part["part"]))
-
-    observer = harness.observer(scout=_answering(_confirming_scout), commit=_answering(reword))
-
-    outcome = await observer.run()
-
-    assert (outcome.skipped, outcome.processed) == (1, 1)
-    (record,) = await harness.plans.observations([address("yes")])
-    (finding,) = record.findings
-    assert finding.candidate == "effect-1"
-    assert finding.outcome is not None
-    (write,) = finding.outcome.writes
-    kept = await harness.memory.get(write.memory)
-    assert isinstance(kept, Memory)
-    assert kept.content == fact
-    assert kept.standing is MemoryStanding.CONFIRMED
-    (support,) = kept.supports
-    assert support.points_at == ConfirmationPart(
-        episode=address("yes"),
-        asking_activation="asking",
-        question=QuestionPart(round="r-ask", part=1),
-    )
-    assert support.how_sure is ReadingCertainty.SURE
 
 
 async def test_an_ask_from_the_floor_raises_nothing_and_is_recorded() -> None:

@@ -25,8 +25,6 @@ from ai_assistant.core.types import (
     ActionRequest,
     ActivationEffect,
     ActivationUnderstanding,
-    AnsweredQuestion,
-    AskedCall,
     ChannelContext,
     ControllerRule,
     EpisodeProcessingRecord,
@@ -42,13 +40,10 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     ProposedCall,
     Provenance,
-    QuestionPart,
     RecordedChannelTrigger,
     RecordedTextInput,
     ToolOutcome,
-    UnderstandingGround,
     UnderstandingOmission,
-    UnderstandingProducer,
     WholeTextReply,
 )
 from ai_assistant.orchestration.authorizer import values_digest
@@ -132,91 +127,6 @@ async def hold_episode(
             await subject.plans.finish_activation_effect(
                 effect.id, ToolOutcome.FAILED, reason="refused"
             )
-    return episode
-
-
-async def hold_approved(  # noqa: PLR0913 — the two activations, the fact, and one knob per case
-    subject: PendingCandidatesSubject,
-    asking: str,
-    yes: str,
-    fact: str,
-    *,
-    age: timedelta = timedelta(minutes=30),
-    digest: str | None = None,
-    proposed_again: bool = False,
-) -> str:
-    """Hold a question asking to remember ``fact``, and the yes that ran it (§3:3, §5:3).
-
-    The asking episode's round records the asked call (ADR-0321 §2:8); the yes's
-    understanding answers that round, and its effect record spends the part, claimed
-    under the asked call's digest unless ``digest`` names another. Where
-    ``proposed_again``, the yes's round also records a ``remember`` call with the same
-    values, which needed the user's yes and was not done.
-
-    Returns:
-        The yes's episode id: the episode the candidate is of.
-    """
-    asking_at = PENDING_AT - age - timedelta(minutes=1)
-    asked = AskedCall(
-        part=1,
-        tool=REMEMBER_CANDIDATE,
-        values={
-            **_arguments(fact),
-            "confirm": True,
-            "episode": f"activation:{asking}",
-            "rests_on_outside_content": False,
-        },
-    )
-    asking_round = f"round:{asking}"
-    await _hold(
-        subject,
-        asking,
-        asking_at,
-        PlanningRound(
-            id=asking_round,
-            recorded_at=asking_at,
-            text=f"Want me to remember that {fact}?",
-            asked=(asked,),
-        ),
-    )
-    at = PENDING_AT - age
-    understanding = ActivationUnderstanding(
-        version=1,
-        recorded_at=at,
-        producer=UnderstandingProducer.INTERPRETATION,
-        meaning="yes, remember it",
-        meaning_ground=UnderstandingGround.STATED,
-        answers=(AnsweredQuestion(activation_id=asking, round=asking_round),),
-    )
-    yes_round = f"round:{yes}"
-    again = (
-        (
-            ProposedCall(
-                call_id="c1", name="remember", arguments={**_arguments(fact), "confirm": True}
-            ),
-        )
-        if proposed_again
-        else ()
-    )
-    episode = await _hold(
-        subject,
-        yes,
-        at,
-        PlanningRound(id=yes_round, recorded_at=at, calls=again),
-        understanding=understanding,
-    )
-    effect = ActivationEffect(
-        id=f"effect:{yes}:approved",
-        activation_id=yes,
-        round=yes_round,
-        capability="remember",
-        values_digest=values_digest(asked.request) if digest is None else digest,
-        decision_id=f"decision:{yes}:approved",
-        claimed_at=at,
-        part=QuestionPart(round=asking_round, part=1),
-    )
-    await subject.plans.claim_activation_effect(effect, match=None)
-    await subject.plans.finish_activation_effect(effect.id, ToolOutcome.SUCCEEDED)
     return episode
 
 
@@ -337,41 +247,6 @@ class PendingCandidatesContract:
 
         assert held == ()
         assert isinstance(held, tuple)
-
-    async def test_a_candidate_recorded_under_an_approval_is_pending_in_the_yess_episode(
-        self, pending_candidates_subject: PendingCandidatesSubject
-    ) -> None:
-        """§3:3: proposed by its approved-action label, it is the asked call the effect
-        record's question part names, and a candidate of the episode that ran it."""
-        subject = pending_candidates_subject
-        yes = await hold_approved(subject, "asking", "yes", "prefers window seats")
-
-        held = await subject.engine.pending_candidates()
-
-        assert held == (PendingCandidate(episode_id=yes, fact="prefers window seats"),)
-
-    async def test_an_approved_effect_is_one_candidate_beside_a_call_with_its_values(
-        self, pending_candidates_subject: PendingCandidatesSubject
-    ) -> None:
-        """§3:3: an effect spending a question part shows the approved call done, and no
-        call the yes's round recorded with the same values, which was not done."""
-        subject = pending_candidates_subject
-        yes = await hold_approved(
-            subject, "asking", "yes", "prefers window seats", proposed_again=True
-        )
-
-        held = await subject.engine.pending_candidates()
-
-        assert held == (PendingCandidate(episode_id=yes, fact="prefers window seats"),)
-
-    async def test_an_approved_effect_whose_digest_is_not_the_asked_calls_is_none(
-        self, pending_candidates_subject: PendingCandidatesSubject
-    ) -> None:
-        """§3:3's join: the effect record shows *that* call done, or no candidate."""
-        subject = pending_candidates_subject
-        await hold_approved(subject, "asking", "yes", "prefers window seats", digest="0" * 64)
-
-        assert await subject.engine.pending_candidates() == ()
 
     async def test_an_episode_behind_a_full_page_of_newer_ones_is_still_read(
         self, pending_candidates_subject: PendingCandidatesSubject

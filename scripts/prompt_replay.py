@@ -2198,10 +2198,14 @@ def _relation_in(reply: Reply, params: Mapping[str, object]) -> Judgement:
 
 
 def _continues_exactly(reply: Reply, params: Mapping[str, object]) -> Judgement:
-    """Understanding's ``continues`` names exactly the named ``R`` labels (ADR-0349 §7:3)."""
+    """Understanding's ``meant_for`` names exactly the named ``R`` labels (ADR-0349 §7:3).
+
+    The reply names the running work its input continues in ``meant_for``, which the
+    stage records as ``continues`` (ADR-0353 §9:2, §10:4).
+    """
     if reply.reading is None:
         return _UNREAD
-    named = reply.reading.get("continues")
+    named = reply.reading.get("meant_for")
     held = set(named) if isinstance(named, list) else set()
     wanted = set(cast("list[str]", params["labels"]))
     if held != wanted:
@@ -2210,10 +2214,10 @@ def _continues_exactly(reply: Reply, params: Mapping[str, object]) -> Judgement:
 
 
 def _continues_nothing(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
-    """Understanding's ``continues`` is empty: the input asks for separate work (§7:3)."""
+    """Understanding's ``meant_for`` is empty: the input asks for separate work (§7:3)."""
     if reply.reading is None:
         return _UNREAD
-    if reply.reading.get("continues"):
+    if reply.reading.get("meant_for"):
         return "the reply continues running work"
     return None
 
@@ -2284,14 +2288,14 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
         ),
         CodeCheck(
             "continues_exactly",
-            "understanding's continues names exactly the named R labels",
+            "understanding's meant_for names exactly the named R labels",
             _UNDERSTANDING,
             {"labels": "strings"},
             _continues_exactly,
         ),
         CodeCheck(
             "continues_nothing",
-            "understanding's continues names nothing",
+            "understanding's meant_for names nothing",
             _UNDERSTANDING,
             {},
             _continues_nothing,

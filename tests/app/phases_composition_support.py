@@ -76,7 +76,7 @@ SETTLE: Final = 10.0
 UNDERSTANDING_INSTRUCTIONS: Final = default_renderings(UNDERSTANDING_PROMPT)
 #: The meaning the substituted understanding states for every input.
 MEANING: Final = "The input means what it says."
-_UNDERSTOOD: Final = json.dumps({"meaning": MEANING, "meaning_ground": "stated"})
+_UNDERSTOOD: Final = json.dumps({"understanding": MEANING})
 
 #: The device every conversation is written from: the owner's own.
 PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)

@@ -1,4 +1,4 @@
-"""The activation-understanding types and the additive record fields of ADR-0276 §2 and §7."""
+"""The activation-understanding types of ADR-0276 §2 and §7, as ADR-0353 §9 and §10 reshape them."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+import ai_assistant.core.types as core_types
 from ai_assistant.core.errors import AssistantError, UnderstandingError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
@@ -19,19 +20,14 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     ProposedActivationUnderstanding,
-    ProposedReference,
-    ProposedRelationship,
     RecordedChannelTrigger,
     RecordedTextInput,
     StoryMember,
     StoryMemberKind,
-    UnderstandingGround,
+    UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
-    UnderstandingReference,
     UnderstandingReferent,
-    UnderstandingRelationship,
-    UnresolvedMatter,
     WholeTextReply,
 )
 from ai_assistant.testing.activation import ended_pass
@@ -50,7 +46,6 @@ def _understanding(**overrides: object) -> ActivationUnderstanding:
         "recorded_at": _NOW,
         "producer": UnderstandingProducer.INTERPRETATION,
         "meaning": "book the dentist appointment",
-        "meaning_ground": UnderstandingGround.STATED,
     }
     fields.update(overrides)
     return ActivationUnderstanding.model_validate(fields)
@@ -78,20 +73,37 @@ def _record(**overrides: object) -> EpisodeProcessingRecord:
     return EpisodeProcessingRecord.model_validate(fields)
 
 
-# --- §2: three closed enumerations ------------------------------------------
+# --- §2: two closed enumerations ---------------------------------------------
 
 
-def test_the_three_enumerations_carry_exactly_the_members_the_adr_lists() -> None:
+def test_the_two_enumerations_carry_exactly_the_members_the_adr_lists() -> None:
     """ADR-0276 §2's tables are complete; a member is valued by its lower-cased name."""
-    assert {member.value for member in UnderstandingGround} == {"stated", "supplied", "inferred"}
     assert {member.value for member in UnderstandingOmission} == {
         "no_text",
         "failed",
         "not_reached",
     }
     assert {member.value for member in UnderstandingProducer} == {"interpretation"}
-    for enum in (UnderstandingGround, UnderstandingOmission, UnderstandingProducer):
+    for enum in (UnderstandingOmission, UnderstandingProducer):
         assert all(member.value == member.name.lower() for member in enum)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ProposedReference",
+        "ProposedRelationship",
+        "ProposedAnswer",
+        "UnderstandingReference",
+        "UnderstandingRelationship",
+        "UnresolvedMatter",
+        "UnderstandingGround",
+    ],
+)
+def test_the_seven_retired_types_leave_core(name: str) -> None:
+    """ADR-0353 §9:9: removed from ``core/types.py``; ``AnsweredQuestion`` stays."""
+    assert not hasattr(core_types, name)
+    assert hasattr(core_types, "AnsweredQuestion")
 
 
 def test_processing_reason_gains_understanding_failed() -> None:
@@ -100,76 +112,26 @@ def test_processing_reason_gains_understanding_failed() -> None:
     assert ProcessingReason("understanding_failed") is ProcessingReason.UNDERSTANDING_FAILED
 
 
-# --- ADR-0322 §2, §6: one pointer per question ------------------------------
+# --- ADR-0353 §11:2: no answer pointer -------------------------------------------
 
 
-def test_a_proposal_carries_one_pointer_per_question_and_refuses_none_named_twice() -> None:
-    """§6: a sequence of pointers, empty where none; two naming one label are the stage's."""
-    proposal = ProposedActivationUnderstanding.model_validate_json(
-        '{"meaning": "yes to both", "meaning_ground": "stated", "answers": ['
-        '{"question": "Q1"}, {"question": "Q2", "parts": [2]}, {"question": "Q1"}]}'
-    )
-
-    assert [one.question for one in proposal.answers] == ["Q1", "Q2", "Q1"]
-    assert proposal.answers[1].parts == (2,)
+def test_neither_the_proposal_nor_the_record_carries_an_answer_pointer() -> None:
+    """§9:1, §9:5: ``answers`` is no field of either; a stored one is refused as extra."""
+    assert "answers" not in ProposedActivationUnderstanding.model_fields
+    assert "answers" not in ActivationUnderstanding.model_fields
     with pytest.raises(ValidationError):
         ProposedActivationUnderstanding.model_validate_json(
-            '{"meaning": "yes", "meaning_ground": "stated", "answers": {"question": "Q1"}}'
+            '{"understanding": "yes", "answers": [{"question": "Q1"}]}'
         )
+    with pytest.raises(ValidationError):
+        _understanding(answers=[{"activation_id": "a-1", "round": "r-1"}])
 
 
-def _understood(*answers: AnsweredQuestion) -> ActivationUnderstanding:
-    return ActivationUnderstanding(
-        version=1,
-        recorded_at=datetime(2026, 1, 1, tzinfo=UTC),
-        producer=UnderstandingProducer.INTERPRETATION,
-        meaning="yes to both",
-        meaning_ground=UnderstandingGround.STATED,
-        answers=answers,
-    )
-
-
-def test_a_recorded_understanding_carries_several_pointers() -> None:
-    """§2:1, §6: one per question the input approves, round trip unchanged."""
-    first = AnsweredQuestion(activation_id="a-1", round="r-1")
-    second = AnsweredQuestion(activation_id="a-2", round="r-2", place="conv-1", position=4)
-    understood = _understood(first, second)
-
-    assert understood.answers == (first, second)
-    assert ActivationUnderstanding.model_validate_json(understood.model_dump_json()) == understood
-    assert _understood().answers == ()
-
-
-@pytest.mark.parametrize(
-    ("first", "second"),
-    [
-        pytest.param(
-            AnsweredQuestion(activation_id="a-1", round="r-1"),
-            AnsweredQuestion(activation_id="a-1", round="r-1", parts=(2,)),
-            id="one-round-twice",
-        ),
-        pytest.param(
-            AnsweredQuestion(activation_id="a-1", place="conv-1", position=4),
-            AnsweredQuestion(activation_id="a-1", round="r-9", place="conv-1", position=4),
-            id="one-message-twice",
-        ),
-    ],
-)
-def test_a_recorded_understanding_names_no_question_twice(
-    first: AnsweredQuestion, second: AnsweredQuestion
-) -> None:
-    """§2:7: two pointers naming one question are never recorded."""
-    with pytest.raises(ValidationError, match="each question it approves once"):
-        _understood(first, second)
-
-
-def test_two_activations_may_each_have_a_round_of_one_name() -> None:
-    """A question is its activation's message: one round id under two activations is two."""
-    understood = _understood(
-        AnsweredQuestion(activation_id="a-1", round="r-1"),
-        AnsweredQuestion(activation_id="a-2", round="r-1"),
-    )
-    assert len(understood.answers) == 2
+def test_an_answered_question_still_names_one_message() -> None:
+    """§9:9: ``AnsweredQuestion`` stays for authorizing's approval rules (§11:3)."""
+    assert AnsweredQuestion(activation_id="a-1", round="r-1").parts == ()
+    with pytest.raises(ValidationError):
+        AnsweredQuestion(activation_id="a-1")
 
 
 def test_understanding_error_is_an_assistant_error_with_the_standard_constructor() -> None:
@@ -180,155 +142,123 @@ def test_understanding_error_is_an_assistant_error_with_the_standard_constructor
     assert not {name for name in vars(error) if name != "details_elided"}
 
 
-# --- §2: the proposed form validates no grounding ---------------------------
+# --- ADR-0353 §9:2: the proposal is the reply ------------------------------------
 
 
-def test_a_proposal_carries_labels_and_no_identity() -> None:
-    """The model's output: labels of §3's scheme, and no id, timestamp, version or producer."""
+def test_a_proposal_is_the_replys_six_keys_and_no_identity() -> None:
+    """§9:2: the reply's own names, and no id, timestamp, version or producer."""
     proposal = ProposedActivationUnderstanding(
-        meaning="compare the two quotes",
-        meaning_ground=UnderstandingGround.SUPPLIED,
-        meaning_labels=("H1", "P2"),
-        references=(ProposedReference(phrase="the two quotes", labels=("H1", "P2")),),
-        relationships=(
-            ProposedRelationship(
-                statement="the second quote followed the first",
-                labels=("P2",),
-                ground=UnderstandingGround.SUPPLIED,
-            ),
-        ),
-        unresolved=(UnresolvedMatter(matter="which currency", why_it_matters="totals differ"),),
+        understanding="Maren asks to compare the two quotes.",
+        cites=("H1", "P2", "R1"),
+        unclear=(UnclearPoint(gap="which currency", readings=("euros", "dollars")),),
+        belongs_to=("S1",),
+        meant_for=("R1",),
     )
     assert set(ProposedActivationUnderstanding.model_fields) == {
-        "meaning",
-        "meaning_ground",
-        "meaning_labels",
-        "references",
-        "relationships",
-        "unresolved",
-        # ADR-0300 §6:6: the labels of the matters the input belongs with.
-        "story_labels",
-        # ADR-0321 §3:1, ADR-0322 §2:1: the proposed answer pointers, each naming its
-        # question by its Q label.
-        "answers",
-        # ADR-0349 §10:1: the R labels of the running activations this input continues.
-        "continues",
-        # ADR-0351 §5:10: the reply's relay mark on the input it reads.
+        "understanding",
+        "cites",
+        "unclear",
+        "belongs_to",
+        "meant_for",
         "relayed",
     }
-    assert proposal.story_labels == ()
-    assert proposal.answers == ()
-    assert proposal.continues == ()
-    assert proposal.references[0].labels == ("H1", "P2")
-    for forbidden in ("version", "recorded_at", "producer", "id"):
+    assert proposal.relayed is False
+    for forbidden in ("version", "recorded_at", "producer", "id", "meaning_ground", "answers"):
         with pytest.raises(ValidationError):
             ProposedActivationUnderstanding.model_validate(
                 {**proposal.model_dump(), forbidden: "x"}
             )
 
 
-def test_a_proposal_accepts_supplied_with_no_label() -> None:
-    """§2: ``supplied`` naming nothing is §6's grounding defect, never a parse failure."""
+def test_every_field_but_the_understanding_may_be_empty() -> None:
+    """§9:2: ``understanding`` is non-blank text, and each sequence may be empty."""
+    proposal = ProposedActivationUnderstanding.model_validate_json('{"understanding": "hi"}')
+    assert (
+        proposal.cites,
+        proposal.unclear,
+        proposal.belongs_to,
+        proposal.meant_for,
+        proposal.relayed,
+    ) == ((), (), (), (), False)
+    for blank in ("", "   "):
+        with pytest.raises(ValidationError):
+            ProposedActivationUnderstanding(understanding=blank)
+    with pytest.raises(ValidationError):
+        ProposedActivationUnderstanding.model_validate_json('{"cites": []}')
+
+
+def test_a_proposal_carries_its_labels_unjudged() -> None:
+    """A label is the stage's to resolve or drop: one naming nothing, or named twice, or
+    an ``R`` label in ``cites`` or ``belongs_to``, is no parse failure (§9:10-§9:12)."""
     proposal = ProposedActivationUnderstanding(
-        meaning="compare the two quotes",
-        meaning_ground=UnderstandingGround.SUPPLIED,
-        relationships=(
-            ProposedRelationship(statement="one follows", ground=UnderstandingGround.SUPPLIED),
-        ),
+        understanding="x",
+        cites=("not a label", "R1", "R1"),
+        belongs_to=("R2", "M1"),
+        meant_for=("H1",),
     )
-    assert proposal.meaning_labels == ()
-    assert proposal.relationships[0].labels == ()
+    assert proposal.cites == ("not a label", "R1", "R1")
+    assert proposal.belongs_to == ("R2", "M1")
+    assert proposal.meant_for == ("H1",)
 
 
-@pytest.mark.parametrize("blank", ["", "   "])
-def test_proposal_texts_are_non_blank(blank: str) -> None:
-    """Every text a proposal carries reuses ``NonBlankEncodableText``."""
+# --- ADR-0353 §9:3: an unclear point ----------------------------------------------------
+
+
+def test_an_unclear_point_holds_a_gap_and_at_least_one_reading() -> None:
+    """§9:3: frozen, ``extra="forbid"``, a non-blank gap, and one reading or more."""
+    point = UnclearPoint(gap="which Friday", readings=("this Friday",))
+    assert point.readings == ("this Friday",)
+    assert point.model_config.get("frozen") is True
     with pytest.raises(ValidationError):
-        ProposedActivationUnderstanding(meaning=blank, meaning_ground=UnderstandingGround.STATED)
+        UnclearPoint(gap="which Friday", readings=())
     with pytest.raises(ValidationError):
-        ProposedReference(phrase=blank)
+        UnclearPoint.model_validate({"gap": "which Friday"})
     with pytest.raises(ValidationError):
-        UnresolvedMatter(matter="x", why_it_matters=blank)
+        UnclearPoint(gap="which Friday", readings=("this Friday", "  "))
+    with pytest.raises(ValidationError):
+        UnclearPoint(gap="", readings=("this Friday",))
+    with pytest.raises(ValidationError):
+        UnclearPoint.model_validate({"gap": "g", "readings": ["r"], "why": "w"})
 
 
-# --- §2: the recorded form names its sources ----------------------------------
-
-
-def test_a_recorded_supplied_meaning_names_a_referent() -> None:
-    """§2: ``meaning_ground=supplied`` with empty ``meaning_referents`` is refused by the type."""
-    with pytest.raises(ValidationError, match="supplied meaning"):
-        _understanding(meaning_ground=UnderstandingGround.SUPPLIED)
-    recorded = _understanding(
-        meaning_ground=UnderstandingGround.SUPPLIED, meaning_referents=(_EPISODE,)
-    )
-    assert recorded.meaning_referents == (_EPISODE,)
-
-
-def test_a_recorded_supplied_relationship_names_a_referent() -> None:
-    """§2: a relationship with ``ground=supplied`` carries a non-empty ``referents``."""
-    with pytest.raises(ValidationError, match="supplied relationship"):
-        _understanding(
-            relationships=(
-                UnderstandingRelationship(
-                    statement="one follows", ground=UnderstandingGround.SUPPLIED
-                ),
-            )
+def test_a_gap_with_no_reading_is_refused_in_the_proposal_and_the_record() -> None:
+    """§9:3, §16:4: both ``unclear`` fields are sequences of the one type."""
+    with pytest.raises(ValidationError):
+        ProposedActivationUnderstanding.model_validate_json(
+            '{"understanding": "x", "unclear": [{"gap": "which day", "readings": []}]}'
         )
-    recorded = _understanding(
-        relationships=(
-            UnderstandingRelationship(
-                statement="one follows", referents=(_EPISODE,), ground=UnderstandingGround.SUPPLIED
-            ),
-        )
-    )
-    assert recorded.relationships[0].referents == (_EPISODE,)
+    with pytest.raises(ValidationError):
+        _understanding(unclear=[{"gap": "which day", "readings": []}])
+    recorded = _understanding(unclear=(UnclearPoint(gap="which day", readings=("Fri", "Sat")),))
+    assert recorded.unclear[0].readings == ("Fri", "Sat")
 
 
-@pytest.mark.parametrize("ground", [UnderstandingGround.STATED, UnderstandingGround.INFERRED])
-def test_stated_and_inferred_need_no_referent(ground: UnderstandingGround) -> None:
-    """Only ``supplied`` names its source; the other two grounds carry none."""
-    recorded = _understanding(
-        meaning_ground=ground,
-        relationships=(UnderstandingRelationship(statement="one follows", ground=ground),),
-    )
-    assert recorded.meaning_referents == ()
-
-
-def test_a_recorded_understanding_carries_no_label() -> None:
-    """§2: the recorded form has referents where the proposal had labels, and nothing else."""
+def test_a_recorded_understanding_carries_no_label_and_no_retired_field() -> None:
+    """§9:4, §9:5: the record keeps its own names, gains ``unclear``, and loses the five."""
     assert set(ActivationUnderstanding.model_fields) == {
         "version",
         "recorded_at",
         "producer",
         "meaning",
-        "meaning_ground",
         "meaning_referents",
-        "references",
-        "relationships",
-        "unresolved",
+        # ADR-0353 §9:4: the reply's unclear points, copied unchanged.
+        "unclear",
         "grounding_dropped",
-        # ADR-0300 §6:7: the story labels, resolved to story members.
+        # ADR-0300 §6:7: the matters it belongs to, resolved to story members.
         "story_links",
-        # ADR-0321 §3:1, ADR-0322 §2:1: the recorded answer pointers, resolved to ids.
-        "answers",
-        # ADR-0349 §10:2: the running activations the continues labels resolved to.
+        # ADR-0349 §10:2: the running activations `meant_for` resolved to.
         "continues",
         # ADR-0351 §5:10: the relay mark this version records on the trigger's input.
         "relayed",
     }
-    for model in (
-        ActivationUnderstanding,
-        UnderstandingReference,
-        UnderstandingRelationship,
-        AnsweredQuestion,
-    ):
-        assert "labels" not in model.model_fields
-        assert "meaning_labels" not in model.model_fields
-        assert "story_labels" not in model.model_fields
+    for retired in ("meaning_ground", "references", "relationships", "unresolved", "answers"):
+        with pytest.raises(ValidationError):
+            _understanding(**{retired: []})
+    assert _understanding().unclear == ()
 
 
 def test_continues_is_empty_by_default_and_names_activations() -> None:
-    """ADR-0349 §10:1, §10:2: labels on the proposal, activation ids on the record.
+    """ADR-0349 §10:2, ADR-0353 §10:4: labels in ``meant_for``, activation ids on the record.
 
     A record written before the field validates unchanged, and the proposal's labels are
     carried unjudged: a label resolving to no shown activation is the stage's to drop,
@@ -341,17 +271,8 @@ def test_continues_is_empty_by_default_and_names_activations() -> None:
         _understanding(continues=("   ",))
     with pytest.raises(ValidationError, match="each activation it continues once"):
         _understanding(continues=("act-1", "act-1"))
-    proposal = ProposedActivationUnderstanding(
-        meaning="and Saturday too",
-        meaning_ground=UnderstandingGround.STATED,
-        continues=("R1", "R2"),
-    )
-    assert proposal.continues == ("R1", "R2")
-    assert ProposedActivationUnderstanding(
-        meaning="x",
-        meaning_ground=UnderstandingGround.STATED,
-        continues=("not a label", "R1", "R1"),
-    ).continues == ("not a label", "R1", "R1")
+    proposal = ProposedActivationUnderstanding(understanding="and Saturday", meant_for=("R1", "R2"))
+    assert proposal.meant_for == ("R1", "R2")
 
 
 def test_continues_is_a_sequence_on_the_wire() -> None:
@@ -385,8 +306,21 @@ def test_a_record_written_before_story_links_validates_unchanged() -> None:
     assert ActivationUnderstanding.model_validate(older).story_links == ()
 
 
+def test_a_referent_may_name_a_running_activation() -> None:
+    """ADR-0353 §10:1: ``running``, by the activation's episode id, its channel and its
+    input in brief, and it round-trips on a version."""
+    running = UnderstandingReferent(
+        kind="running",
+        id="activation:act-booking",
+        source="conversation:chat-1",
+        excerpt="book a table for 4 at Luigi's on Friday at 8",
+    )
+    recorded = _understanding(meaning_referents=(running,))
+    assert ActivationUnderstanding.model_validate_json(recorded.model_dump_json()) == recorded
+
+
 def test_referent_kinds_and_the_exactly_as_stored_episode_id() -> None:
-    """§2: three kinds; an episode ``id`` is carried exactly as stored, blank included."""
+    """§2: an episode ``id`` is carried exactly as stored, blank included."""
     assert UnderstandingReferent(kind="input", excerpt="").id is None
     item = UnderstandingReferent(kind="channel_item", id=None, source="email", excerpt="x")
     assert item.id is None
@@ -420,17 +354,8 @@ def test_version_and_dropped_count_ranges(field: str, value: int) -> None:
 def test_recorded_understanding_round_trips_through_its_dump() -> None:
     """The shape crosses the wire by ``model_dump`` (protocol 58); it decodes to itself."""
     recorded = _understanding(
-        meaning_ground=UnderstandingGround.SUPPLIED,
         meaning_referents=(_INPUT, _EPISODE),
-        references=(UnderstandingReference(phrase="the dentist", referents=(_EPISODE,)),),
-        relationships=(
-            UnderstandingRelationship(
-                statement="same dentist as before",
-                referents=(_EPISODE,),
-                ground=UnderstandingGround.SUPPLIED,
-            ),
-        ),
-        unresolved=(UnresolvedMatter(matter="which day", why_it_matters="two were offered"),),
+        unclear=(UnclearPoint(gap="which day", readings=("Friday", "Saturday")),),
         grounding_dropped=2,
     )
     assert ActivationUnderstanding.model_validate(recorded.model_dump(mode="json")) == recorded
@@ -515,21 +440,11 @@ def test_a_referent_may_name_a_story() -> None:
         )
 
 
-def test_a_supplied_reading_may_rest_on_a_story_alone() -> None:
-    """§8: a reading an ``S`` label supports is ``supplied``, and names that story."""
-    recorded = _understanding(
-        meaning_ground=UnderstandingGround.SUPPLIED,
-        meaning_referents=(_STORY,),
-        references=(UnderstandingReference(phrase="Riverside", referents=(_STORY,)),),
-        relationships=(
-            UnderstandingRelationship(
-                statement="the plan changed for the Riverside trip",
-                referents=(_STORY,),
-                ground=UnderstandingGround.SUPPLIED,
-            ),
-        ),
-    )
+def test_a_reading_may_cite_a_story_alone() -> None:
+    """§8: a story cited in ``cites`` resolves to its referent and links nothing."""
+    recorded = _understanding(meaning_referents=(_STORY,))
     assert recorded.meaning_referents == (_STORY,)
+    assert recorded.story_links == ()
 
 
 def test_a_record_with_a_story_referent_round_trips_at_the_same_schema_version() -> None:

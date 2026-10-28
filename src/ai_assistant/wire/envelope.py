@@ -2736,7 +2736,16 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``origin`` and the new members as extra, and a hub at 121 refuses a trigger with
 #:     no ``parties`` (ADR-0124 §9:2). The method set does not move: no ``Protocol``
 #:     gains a member.
-PROTOCOL_VERSION: Final[int] = 121
+#: 122: ADR-0353 §15:2 advances the version once for its lane U1 (§16:1), on these
+#:     grounds: the wire-carried ``EpisodicMemory.processing_record`` holds understanding
+#:     versions that lose ``meaning_ground``, ``references``, ``relationships``,
+#:     ``unresolved`` and ``answers`` and gain ``unclear`` (``UnclearPoint``, §9:3-§9:5);
+#:     ``UnderstandingReferent.kind`` gains ``running`` on their referents (§10:1); and
+#:     ``RecallCue`` gains ``understood_gap`` on their recall records (§14:4). A peer at
+#:     121 refuses a version without ``meaning_ground``, the new field as extra and the
+#:     new members as unknown, and a hub at 122 refuses a retired field as extra
+#:     (ADR-0124 §9:2). The method set does not move: no ``Protocol`` gains a member.
+PROTOCOL_VERSION: Final[int] = 122
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

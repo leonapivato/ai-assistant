@@ -27,7 +27,6 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
-    UnderstandingGround,
     UnderstandingReferent,
     band_of,
     record_band,
@@ -62,7 +61,7 @@ CUES: Final = (RecallCue.ACTIVATION_INPUT,)
 
 
 def _proposal(**fields: Any) -> str:
-    return json.dumps({"meaning": "They mean the dentist.", "meaning_ground": "stated"} | fields)
+    return json.dumps({"understanding": "They mean the dentist."} | fields)
 
 
 def _fact(
@@ -269,13 +268,10 @@ async def test_a_recall_that_kept_nothing_or_failed_says_so(
 
 
 async def test_m_labels_resolve_to_episode_and_memory_referents() -> None:
-    model = FakeModelProvider.scripted(
-        _proposal(meaning_ground="supplied", meaning_labels=["M1", "M2"])
-    )
+    model = FakeModelProvider.scripted(_proposal(cites=["M1", "M2"]))
     understood = await _understand(
         await _stage(model), _found(_episode("episode"), _fact("  fact id ")), episodes=False
     )
-    assert understood.meaning_ground is UnderstandingGround.SUPPLIED
     assert understood.meaning_referents == (
         UnderstandingReferent(
             kind="episode",
@@ -294,16 +290,14 @@ async def test_m_labels_resolve_to_episode_and_memory_referents() -> None:
 
 
 async def test_a_memory_referents_excerpt_is_bounded() -> None:
-    model = FakeModelProvider.scripted(_proposal(meaning_ground="supplied", meaning_labels=["M1"]))
+    model = FakeModelProvider.scripted(_proposal(cites=["M1"]))
     understood = await _understand(await _stage(model), _found(_fact("fact", "y" * 2500)))
     (referent,) = understood.meaning_referents
     assert referent.excerpt == "y" * UNDERSTANDING_REFERENT_EXCERPT_CHARS
 
 
 async def test_the_repair_statement_names_the_recalled_sequence() -> None:
-    model = FakeModelProvider.scripted(
-        _proposal(meaning_ground="supplied", meaning_labels=["M9"]), _proposal()
-    )
+    model = FakeModelProvider.scripted(_proposal(cites=["M9"]), _proposal())
     await _understand(await _stage(model), _found(_fact("fact")), episodes=False)
     statement = model.calls[1].messages[3].content
     assert "no H labels (the channel window is empty)" in statement

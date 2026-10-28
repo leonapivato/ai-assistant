@@ -43,13 +43,10 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     StageEntry,
     StageOutcome,
-    UnderstandingGround,
+    UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
-    UnderstandingReference,
     UnderstandingReferent,
-    UnderstandingRelationship,
-    UnresolvedMatter,
 )
 from ai_assistant.interfaces import cli, episode_inspection
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
@@ -368,25 +365,14 @@ def _referent(kind: str) -> UnderstandingReferent:
     )
 
 
-def _version(
-    number: int,
-    *,
-    meaning_ground: UnderstandingGround = UnderstandingGround.STATED,
-    **fields: object,
-) -> ActivationUnderstanding:
-    """One recorded version; a ``supplied`` meaning names a channel item, as its type requires."""
+def _version(number: int, **fields: object) -> ActivationUnderstanding:
+    """One recorded version, with no ground (ADR-0353 §9:5)."""
     return ActivationUnderstanding.model_validate(
         {
             "version": number,
             "recorded_at": _AT,
             "producer": UnderstandingProducer.INTERPRETATION,
             "meaning": "compare the two quotes",
-            "meaning_ground": meaning_ground,
-            "meaning_referents": (
-                (_referent("channel_item"),)
-                if meaning_ground is UnderstandingGround.SUPPLIED
-                else ()
-            ),
             **fields,
         }
     )
@@ -407,16 +393,14 @@ def _understanding_section(record: EpisodicMemory) -> list[str]:
 #: Every member of each closed enum, spelled out so that a member added to the enum
 #: fails the coverage tests below until its rendering is looked at (ADR-0276 §2).
 _OMISSIONS = ("no_text", "failed", "not_reached")
-_GROUNDS = ("stated", "supplied", "inferred")
 #: ADR-0281 §7 adds ``memory``; the detail prints each kind's value as it is, so it
 #: renders with no table entry of its own.
-#: ADR-0304 §8 adds ``story``, rendered the same way.
-_REFERENT_KINDS = ("input", "channel_item", "episode", "memory", "story")
+#: ADR-0304 §8 adds ``story``, rendered the same way, and ADR-0353 §10:1 ``running``.
+_REFERENT_KINDS = ("input", "channel_item", "episode", "memory", "story", "running")
 
 
 def test_rendering_tables_cover_every_member_of_each_closed_enum() -> None:
     assert {member.value for member in UnderstandingOmission} == set(_OMISSIONS)
-    assert {member.value for member in UnderstandingGround} == set(_GROUNDS)
     assert {member.value for member in UnderstandingProducer} == {"interpretation"}
     kind = UnderstandingReferent.model_fields["kind"].annotation
     assert set(get_args(kind)) == set(_REFERENT_KINDS)
@@ -428,20 +412,10 @@ def test_json_detail_carries_every_retained_version_complete(
     versions = (
         _version(
             1,
-            references=(UnderstandingReference(phrase="it", referents=(_referent("episode"),)),),
-            unresolved=(UnresolvedMatter(matter="which quote", why_it_matters="two exist"),),
+            meaning_referents=(_referent("episode"),),
+            unclear=(UnclearPoint(gap="which quote", readings=("the first", "the second")),),
         ),
-        _version(
-            4,
-            meaning_ground=UnderstandingGround.SUPPLIED,
-            relationships=(
-                UnderstandingRelationship(
-                    statement="the second supersedes the first",
-                    referents=(_referent("channel_item"), _referent("input")),
-                    ground=UnderstandingGround.SUPPLIED,
-                ),
-            ),
-        ),
+        _version(4, meaning_referents=(_referent("channel_item"), _referent("input"))),
     )
     record = _record("record", response="none", understanding=versions, elided=2)
     engine = _engine(record)
@@ -475,25 +449,13 @@ def test_human_detail_without_processing_record_labels_understanding_unavailable
     assert _understanding_section(_record("record")) == ["Understanding: unavailable"]
 
 
-@pytest.mark.parametrize("ground", _GROUNDS)
-def test_human_detail_names_every_ground_of_meaning_and_relationship(ground: str) -> None:
-    value = UnderstandingGround(ground)
-    version = _version(
-        1,
-        meaning_ground=value,
-        relationships=(
-            UnderstandingRelationship(
-                statement="follows the earlier request",
-                referents=(_referent("episode"),),
-                ground=value,
-            ),
-        ),
-    )
+def test_human_detail_shows_a_versions_meaning_and_no_ground() -> None:
+    """ADR-0353 §9:5, §12: the record carries no ground, so the detail shows none."""
+    version = _version(1, meaning_referents=(_referent("episode"),))
     section = _understanding_section(_record("record", response="none", understanding=(version,)))
     assert section == [
         "Understanding v1 (interpretation)",
-        f'  Meaning ({ground}): "compare the two quotes"',
-        f'  Relationship ({ground}): "follows the earlier request"',
+        '  Meaning: "compare the two quotes"',
     ]
 
 
@@ -507,55 +469,25 @@ def test_human_detail_names_the_elided_count_before_the_retained_versions() -> N
     assert _understanding_section(record) == [
         "Understanding versions elided: 7",
         "Understanding v1 (interpretation)",
-        '  Meaning (stated): "compare the two quotes"',
+        '  Meaning: "compare the two quotes"',
         "Understanding v9 (interpretation)",
-        '  Meaning (stated): "the latest reading"',
+        '  Meaning: "the latest reading"',
     ]
 
 
-def test_human_detail_renders_every_field_of_a_full_version_and_no_referent_detail() -> None:
+def test_human_detail_renders_a_full_version_and_no_referent_detail() -> None:
+    """Its meaning, quoted and escaped; no referent's id, source or excerpt. What U3 adds
+    to the detail (ADR-0353 §14:8) is the readers' lane's."""
     version = _version(
         3,
         meaning="compare [bold]both[/bold] :smile: quotes\nUnderstanding v9 (forged)",
-        meaning_ground=UnderstandingGround.INFERRED,
-        references=(
-            UnderstandingReference(
-                phrase="those two",
-                referents=tuple(_referent(kind) for kind in _REFERENT_KINDS),
-            ),
-            UnderstandingReference(
-                phrase="the earlier one", referents=(_referent("episode"), _referent("episode"))
-            ),
-            UnderstandingReference(phrase="that", referents=()),
-        ),
-        relationships=tuple(
-            UnderstandingRelationship(
-                statement=f"relationship {ground}",
-                referents=(_referent("channel_item"),),
-                ground=UnderstandingGround(ground),
-            )
-            for ground in _GROUNDS
-        ),
-        unresolved=(
-            UnresolvedMatter(matter="which currency", why_it_matters="the totals differ"),
-            UnresolvedMatter(matter="café 🍵 deadline", why_it_matters="nothing says"),
-        ),
+        meaning_referents=tuple(_referent(kind) for kind in _REFERENT_KINDS),
+        unclear=(UnclearPoint(gap="which currency", readings=("euros",)),),
     )
     section = _understanding_section(_record("record", response="none", understanding=(version,)))
     assert section == [
         "Understanding v3 (interpretation)",
-        '  Meaning (inferred): "compare [bold]both[/bold] :smile: quotes\\n'
-        'Understanding v9 (forged)"',
-        '  Reference "those two"; referent kinds: input, channel_item, episode, memory, story',
-        '  Reference "the earlier one"; referent kinds: episode, episode',
-        '  Reference "that"; referent kinds: none',
-        '  Relationship (stated): "relationship stated"',
-        '  Relationship (supplied): "relationship supplied"',
-        '  Relationship (inferred): "relationship inferred"',
-        '  Unresolved: "which currency"',
-        '    Why it matters: "the totals differ"',
-        '  Unresolved: "café 🍵 deadline"',
-        '    Why it matters: "nothing says"',
+        '  Meaning: "compare [bold]both[/bold] :smile: quotes\\nUnderstanding v9 (forged)"',
     ]
     joined = "\n".join(section)
     for withheld in (_REFERENT_ID, _REFERENT_SOURCE, _REFERENT_EXCERPT):
@@ -573,7 +505,7 @@ def test_cli_human_detail_carries_the_understanding_section(
     assert (
         "audio playback. Recall: none recorded Recall (second run): none recorded "
         "Understanding v1 (interpretation) "
-        'Meaning (stated): "compare the two quotes" Retention expiry'
+        'Meaning: "compare the two quotes" Retention expiry'
     ) in rendered
 
 

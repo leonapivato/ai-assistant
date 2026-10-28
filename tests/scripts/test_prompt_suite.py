@@ -46,7 +46,7 @@ pytestmark = pytest.mark.integration
 PRIVATE: Final = "private-words-the-run-must-never-print"
 
 #: An understanding reply its stage reads, carrying :data:`PRIVATE`.
-MEANING: Final = json.dumps({"meaning": PRIVATE, "meaning_ground": "stated"})
+MEANING: Final = json.dumps({"understanding": PRIVATE})
 
 #: The planning flags, every one declared, as a case gives them.
 PLANNING_FLAGS: Final = {
@@ -102,7 +102,7 @@ def _understanding(**changes: Any) -> dict[str, Any]:
         "set": "development",
         "samples": 2,
         "flags": {"recalled": False, "stories": False, "person": False},
-        "property": {"check": "no_label", "fields": ["meaning"], "labels": ["H", "P"]},
+        "property": {"check": "no_label", "fields": ["understanding"], "labels": ["H", "P"]},
         "input": {"messages": [{"role": "user", "content": json.dumps({"input": PRIVATE})}]},
     }
     case.update(changes)
@@ -267,7 +267,10 @@ def test_an_input_may_be_a_json_file_beside_the_case(tmp_path: Path) -> None:
         ),
         (_understanding(property={"check": "guess"}), "no code check"),
         (_understanding(property={"check": "asks_about", "calls": ["1.1"]}), "reads no reply"),
-        (_understanding(property={"check": "no_label", "fields": ["meaning"]}), "takes exactly"),
+        (
+            _understanding(property={"check": "no_label", "fields": ["understanding"]}),
+            "takes exactly",
+        ),
         (
             _understanding(property={"check": "no_label", "fields": [], "labels": ["H"]}),
             "fields is not strings",
@@ -281,10 +284,8 @@ def test_an_input_may_be_a_json_file_beside_the_case(tmp_path: Path) -> None:
             "names fields no understanding reply holds as text: ['meanign']",
         ),
         (
-            _understanding(
-                property={"check": "no_label", "fields": ["references"], "labels": ["H"]}
-            ),
-            "names fields no understanding reply holds as text: ['references']",
+            _understanding(property={"check": "no_label", "fields": ["unclear"], "labels": ["H"]}),
+            "names fields no understanding reply holds as text: ['unclear']",
         ),
         (_understanding(property={"check": "read"}), "a read property"),
         (_understanding(property={"check": "read", "read": " "}), "a read property"),
@@ -441,20 +442,20 @@ def _round(check: str, params: dict[str, object], round_: RoundResponse | None) 
 
 
 def _meaning(**fields: object) -> str:
-    return json.dumps({"meaning": "asks which venue fits", "meaning_ground": "stated", **fields})
+    return json.dumps({"understanding": "asks which venue fits", **fields})
 
 
 def test_no_label_reads_the_named_fields_anywhere_in_the_reply() -> None:
-    params: dict[str, object] = {"fields": ["meaning", "phrase"], "labels": ["H", "P"]}
-    clean = _meaning(references=[{"phrase": "that venue", "labels": ["H1"]}])
-    leaked = _meaning(references=[{"phrase": "the one in H1", "labels": ["H1"]}])
-    elsewhere = _meaning(meaning_labels=["H1"])
+    params: dict[str, object] = {"fields": ["understanding", "gap"], "labels": ["H", "P"]}
+    clean = _meaning(unclear=[{"gap": "which venue", "readings": ["that one"]}], cites=["H1"])
+    leaked = _meaning(unclear=[{"gap": "the one in H1", "readings": ["it"]}], cites=["H1"])
+    elsewhere = _meaning(cites=["H1"])
 
     assert _judge("no_label", params, "understanding", clean) is None
-    assert _judge("no_label", params, "understanding", leaked) == "a label stands in phrase"
+    assert _judge("no_label", params, "understanding", leaked) == "a label stands in gap"
     assert _judge("no_label", params, "understanding", elsewhere) is None
     fenced = "```json\n" + leaked + "\n```"
-    assert _judge("no_label", params, "understanding", fenced) == "a label stands in phrase"
+    assert _judge("no_label", params, "understanding", fenced) == "a label stands in gap"
 
 
 @pytest.mark.parametrize(
@@ -463,8 +464,8 @@ def test_no_label_reads_the_named_fields_anywhere_in_the_reply() -> None:
         ("understanding", "not json"),
         ("understanding", json.dumps(["H1"])),
         ("understanding", "{}"),
-        ("understanding", json.dumps({"meaning": None})),
-        ("understanding", json.dumps({"meaning": "x", "meaning_ground": "guessed"})),
+        ("understanding", json.dumps({"understanding": None})),
+        ("understanding", json.dumps({"understanding": "x", "unclear": [{"gap": "g"}]})),
         ("observer_scout", json.dumps({"findings": [{"rests_on": ["P1"]}]})),
         ("observer_framing", json.dumps({"memories": [{"supports": []}]})),
         ("observer_framing", json.dumps({"memories": "none"})),
@@ -501,7 +502,7 @@ def test_no_label_reads_the_named_fields_anywhere_in_the_reply() -> None:
 def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) -> None:
     checks = [one for one in replay_tool.CODE_CHECKS.values() if prompt in one.prompts]
     params: dict[str, dict[str, object]] = {
-        "no_label": {"fields": ["meaning", "claim", "wording"], "labels": ["H"]},
+        "no_label": {"fields": ["understanding", "claim", "wording"], "labels": ["H"]},
         "frames_nothing": {},
         "relation_in": {"memory": "M1", "relations": ["contained"]},
         "continues_exactly": {"labels": ["R1"]},
@@ -553,15 +554,13 @@ def test_a_key_the_stage_drops_is_not_read() -> None:
 def test_no_label_may_name_a_nested_field_of_the_reply_shape() -> None:
     declared = replay_tool.reply_fields
 
-    assert {"meaning", "phrase", "statement", "matter", "why_it_matters"} <= declared(
-        "understanding"
-    )
+    assert {"understanding", "gap"} <= declared("understanding")
     assert "claim" in declared("observer_scout")
     assert {"claim", "why", "reason"} <= declared("observer_scout")
     assert {"wording", "note", "nothing"} <= declared("observer_framing")
     assert {"note", "relation"} <= declared("observer_placement")
     assert "findings" not in declared("observer_scout")
-    assert {"references", "unresolved", "meaning_labels"}.isdisjoint(declared("understanding"))
+    assert {"unclear", "readings", "cites", "meaning"}.isdisjoint(declared("understanding"))
     assert {"supports", "memories"}.isdisjoint(declared("observer_framing"))
 
 
@@ -795,7 +794,7 @@ def test_the_report_says_where_the_candidate_passes_fewer_samples_than_the_contr
 
     def reply(system: str) -> ModelResponse:
         meaning = "the one in H1" if system == "Candidate." else "the venue"
-        reading = {"meaning": meaning, "meaning_ground": "stated"}
+        reading = {"understanding": meaning}
         return ModelResponse(parts=[TextPart(json.dumps(reading))])
 
     reports: list[str] = []
@@ -1052,23 +1051,23 @@ def test_continues_exactly_reads_the_labels_as_the_stage_does() -> None:
     """The reply names exactly the R labels the case names, in any order."""
     params: dict[str, object] = {"labels": ["R1", "R2"]}
     assert (
-        _judge("continues_exactly", params, "understanding", _meaning(continues=["R2", "R1"]))
+        _judge("continues_exactly", params, "understanding", _meaning(meant_for=["R2", "R1"]))
         is None
     )
     assert (
-        _judge("continues_exactly", params, "understanding", _meaning(continues=["R1"])) is not None
+        _judge("continues_exactly", params, "understanding", _meaning(meant_for=["R1"])) is not None
     )
     assert _judge("continues_exactly", params, "understanding", _meaning()) is not None
     assert (
-        _judge("continues_exactly", params, "understanding", _meaning(continues="R1"))
+        _judge("continues_exactly", params, "understanding", _meaning(meant_for="R1"))
         == "the reply is not one its stage reads"
     ), "the old shape, one label, is no reply the stage reads"
 
 
 def test_continues_nothing_passes_only_an_empty_list() -> None:
-    assert _judge("continues_nothing", {}, "understanding", _meaning(continues=[])) is None
+    assert _judge("continues_nothing", {}, "understanding", _meaning(meant_for=[])) is None
     assert _judge("continues_nothing", {}, "understanding", _meaning()) is None
-    assert _judge("continues_nothing", {}, "understanding", _meaning(continues=["R1"])) is not None
+    assert _judge("continues_nothing", {}, "understanding", _meaning(meant_for=["R1"])) is not None
 
 
 def _calls(*calls: tuple[str, dict[str, object]]) -> RoundResponse:

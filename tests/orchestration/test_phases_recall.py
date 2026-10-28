@@ -289,7 +289,7 @@ async def test_an_event_recalls_under_a_bounded_audience() -> None:
 
 async def test_an_understood_event_is_captured_with_its_meaning_as_content() -> None:
     _, captured = await event(_harness())
-    assert captured.content == json.loads(STATED_PROPOSAL)["meaning"]
+    assert captured.content == json.loads(STATED_PROPOSAL)["understanding"]
     assert "thermostat" not in captured.content
 
 
@@ -321,9 +321,7 @@ async def test_an_understood_event_is_found_by_a_later_activation_that_shares_it
         understood = phases_harness(
             memory=store,
             understanding=understanding_stage(
-                model=FakeModelProvider(
-                    json.dumps({"meaning": meaning, "meaning_ground": "stated"})
-                ),
+                model=FakeModelProvider(json.dumps({"understanding": meaning})),
             ),
         )
         await event(understood, _trail_report())

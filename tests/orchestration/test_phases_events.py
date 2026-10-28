@@ -194,7 +194,7 @@ async def test_overlapping_events_keep_separate_identity_context_and_receipts() 
     def meaning_of(messages: Sequence[Message]) -> str:
         """Understanding's reading names the input it was handed, so it can be traced."""
         text = json.loads(messages[1].content)["input"]["text"]
-        return json.dumps({"meaning": f"It reported {text}.", "meaning_ground": "stated"})
+        return json.dumps({"understanding": f"It reported {text}."})
 
     completer = _Controlled(arrivals=2)
     understood = FakeModelProvider(meaning_of)

@@ -67,7 +67,6 @@ from ai_assistant.orchestration.remembering import (
     REMEMBER_CANDIDATE,
     REMEMBER_CAPABILITY,
 )
-from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -328,19 +327,13 @@ async def _approved_candidates(
 
 
 def _asking(episode: EpisodicMemory) -> tuple[str, ...]:
-    """The addresses of the episodes whose questions an episode's understanding answers."""
-    processing = episode.processing_record
-    if processing is None:
-        return ()
-    return tuple(
-        sorted(
-            {
-                episode_address(answer.activation_id)
-                for version in processing.understanding
-                for answer in version.answers
-            }
-        )
-    )
+    """The addresses of the episodes whose questions an episode's understanding answers.
+
+    None: since ADR-0353 §11:2 no understanding version records an answer pointer, and
+    the upgrade dropped every one stored before (§9:6).
+    """
+    del episode
+    return ()
 
 
 def _approved_fact(effect: ActivationEffect, rounds: Mapping[str, PlanningRound]) -> str | None:

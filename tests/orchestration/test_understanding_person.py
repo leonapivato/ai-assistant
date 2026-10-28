@@ -35,7 +35,6 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     SuggestionKind,
-    UnderstandingGround,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.person_block import KeptInMind, PersonBlock, ShownSuggestion
@@ -92,7 +91,7 @@ BLOCK: Final = PersonBlock(
 
 
 def _proposal(**fields: Any) -> str:
-    return json.dumps({"meaning": "Asks about dinner.", "meaning_ground": "stated"} | fields)
+    return json.dumps({"understanding": "Asks about dinner."} | fields)
 
 
 def _item(record_id: str) -> RecalledItem:
@@ -233,33 +232,20 @@ async def test_everything_recalled_already_shown_above_says_so() -> None:
     assert _payload(model)["recalled"] == "missing: everything recalled is already shown above"
 
 
-async def test_a_pinned_memorys_label_grounds_a_reading_as_supplied() -> None:
-    model = FakeModelProvider(
-        _proposal(
-            meaning_ground="supplied",
-            meaning_labels=["M2"],
-            references=[{"phrase": "my sister", "labels": ["M2"]}],
-        )
-    )
+async def test_a_pinned_memorys_label_resolves_to_its_memory_once() -> None:
+    model = FakeModelProvider(_proposal(cites=["M2", "M2"]))
 
     understood = await _understand(model, person=BLOCK)
-
-    assert understood.meaning_ground is UnderstandingGround.SUPPLIED
     [referent] = understood.meaning_referents
     assert (referent.kind, referent.id) == ("memory", "m:sister")
-    assert understood.references[0].referents == (referent,)
     assert understood.grounding_dropped == 0
 
 
 async def test_a_label_past_the_person_sections_is_repaired_naming_its_sequence() -> None:
-    model = FakeModelProvider.scripted(
-        _proposal(meaning_ground="supplied", meaning_labels=["M3"]), _proposal()
-    )
+    model = FakeModelProvider.scripted(_proposal(cites=["M3"]), _proposal())
 
     await _understand(model, person=BLOCK)
-    alongside = FakeModelProvider.scripted(
-        _proposal(meaning_ground="supplied", meaning_labels=["M9"]), _proposal()
-    )
+    alongside = FakeModelProvider.scripted(_proposal(cites=["M9"]), _proposal())
     await _understand(alongside, person=BLOCK, recalled=(CANOE,))
 
     assert "M1 to M2 (the person section)" in model.calls[1].messages[-1].content

@@ -363,7 +363,7 @@ class _Episode:
         if projection.input is not None:
             rendered["the_users_own_input"] = projection.input.text
             rendered["input_cut_to_first_chars"] = projection.input.cut
-        if projection.meaning is not None and projection.meaning_ground is not None:
+        if projection.meaning is not None:
             rendered["understood_then"] = {
                 "provisional": "what the assistant understood then, not an established fact",
                 "meaning": projection.meaning,

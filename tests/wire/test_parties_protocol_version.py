@@ -34,7 +34,6 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
-    UnderstandingGround,
     UnderstandingProducer,
     WholeTextReply,
 )
@@ -111,7 +110,6 @@ def _episode() -> EpisodicMemory:
                 recorded_at=_AT,
                 producer=UnderstandingProducer.INTERPRETATION,
                 meaning="The user asks whether Ana moved to Porto.",
-                meaning_ground=UnderstandingGround.STATED,
                 relayed=True,
             ),
         ),

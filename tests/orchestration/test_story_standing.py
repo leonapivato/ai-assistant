@@ -38,7 +38,6 @@ from ai_assistant.core.types import (
     StoryStandingEarlier,
     StoryStandingEffect,
     ToolOutcome,
-    UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
@@ -80,7 +79,6 @@ def _understanding(meaning: str, version: int = 1) -> ActivationUnderstanding:
         recorded_at=_AT,
         producer=UnderstandingProducer.INTERPRETATION,
         meaning=meaning,
-        meaning_ground=UnderstandingGround.STATED,
     )
 
 

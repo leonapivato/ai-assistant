@@ -131,11 +131,13 @@ def test_the_recall_enumerations_carry_exactly_the_members_the_adr_lists() -> No
         "failed",
         "timed_out",
     ]
-    # ADR-0308 §7: the second run's two kinds of cue, added and never renamed.
+    # ADR-0308 §7: the second run's kinds of cue, added and never renamed; ADR-0353
+    # §14:4 adds each unclear point's gap, renaming none.
     assert [member.value for member in RecallCue] == [
         "activation_input",
         "understood_meaning",
         "understood_phrase",
+        "understood_gap",
     ]
     assert [member.value for member in RecallProvenance] == ["user", "outside"]
 

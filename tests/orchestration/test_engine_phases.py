@@ -1298,9 +1298,7 @@ async def _recalling_harness(
     )
     for record in records:
         await store.add(record)
-    understanding = FakeModelProvider(
-        reply=json.dumps({"meaning": _DENTIST, "meaning_ground": "stated"})
-    )
+    understanding = FakeModelProvider(reply=json.dumps({"understanding": _DENTIST}))
     harness = Harness(
         understanding=understanding_stage(model=understanding),
         tools=(_BOOK,),
@@ -2268,10 +2266,7 @@ async def _story_harness(
     )
     await stories.append_note(trip, "Next: check the dog policy.", author=StoryNoteAuthor.OWNER)
     understanding = FakeModelProvider(
-        reply=json.dumps(
-            {"meaning": "the user asks about the trip", "meaning_ground": "stated"}
-            | {"story_labels": ["S1"]}
-        )
+        reply=json.dumps({"understanding": "the user asks about the trip"} | {"belongs_to": ["S1"]})
     )
     harness = Harness(
         understanding=understanding_stage(model=understanding),

@@ -34,7 +34,6 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     Memory,
     MemoryRecord,
-    UnderstandingGround,
     UnderstandingProducer,
 )
 from ai_assistant.memory import SqliteMemoryStore
@@ -236,7 +235,6 @@ async def test_an_understanding_continuing_two_round_trips_through_the_upgraded_
             recorded_at=_NOW,
             producer=UnderstandingProducer.INTERPRETATION,
             meaning="Make both Sunday.",
-            meaning_ground=UnderstandingGround.STATED,
             continues=("act-upgrade-line", "act-upgrade-web"),
         )
         both = held.model_copy(

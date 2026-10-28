@@ -308,11 +308,10 @@ def _recall_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
 def _understanding_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
     """Render the retained understanding the record carries (ADR-0276 §7), deriving none.
 
-    Per retained version, in the record's order: its number, producer, meaning and
-    ground, each reference's phrase and referent kinds, each relationship's statement
-    and ground, and each unresolved matter; and the omission value or elided count
-    where the record carries one. Referent ids, sources and excerpts stay in the
-    ``--json`` detail.
+    Per retained version, in the record's order: its number, producer and meaning
+    (ADR-0353 §9:5 retires the ground, references, relationships and unresolved
+    matters); and the omission value or elided count where the record carries one.
+    Referent ids, sources and excerpts stay in the ``--json`` detail.
     """
     if processing is None:
         return ["Understanding: unavailable"]
@@ -336,18 +335,7 @@ def _none_recorded(processing: EpisodeProcessingRecord) -> str:
 
 
 def _version_lines(version: ActivationUnderstanding) -> list[str]:
-    lines = [
+    return [
         f"Understanding v{version.version} ({version.producer.value})",
-        f"  Meaning ({version.meaning_ground.value}): {_quoted(version.meaning)}",
+        f"  Meaning: {_quoted(version.meaning)}",
     ]
-    for reference in version.references:
-        kinds = ", ".join(referent.kind for referent in reference.referents) or "none"
-        lines.append(f"  Reference {_quoted(reference.phrase)}; referent kinds: {kinds}")
-    lines.extend(
-        f"  Relationship ({relationship.ground.value}): {_quoted(relationship.statement)}"
-        for relationship in version.relationships
-    )
-    for matter in version.unresolved:
-        lines.append(f"  Unresolved: {_quoted(matter.matter)}")
-        lines.append(f"    Why it matters: {_quoted(matter.why_it_matters)}")
-    return lines

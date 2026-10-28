@@ -90,6 +90,7 @@ from ai_assistant.memory._episode_format import (
     MEMORIES_RECORD_FORMAT,
     MEMORY_RECORD_FORMAT,
     MEMORY_RECORD_FORMATS,
+    PARTIES_RECORD_FORMAT,
     PINNED_RECORD_FORMAT,
     PLACED_RECORD_FORMAT,
     SCHEDULED_RECORD_FORMAT,
@@ -102,6 +103,7 @@ from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._parties_upgrade import parties_episode
 from ai_assistant.memory._placed_upgrade import placed_memory
 from ai_assistant.memory._transactions import transaction
+from ai_assistant.memory._understanding_upgrade import understood_episode
 from ai_assistant.memory._walk import (
     check_walk_limit,
     check_walk_name,
@@ -592,6 +594,7 @@ class SqliteMemoryStore:
             self._upgrade_to_continuing(conn, existing_format)
             self._upgrade_to_taken_over(conn, existing_format)
             self._upgrade_to_parties(conn, existing_format)
+            self._upgrade_to_understood(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -1297,10 +1300,12 @@ class SqliteMemoryStore:
                     raise MemoryStoreError(msg) from exc
                 if not isinstance(stored, dict) or not continuing_episode(stored):
                     continue
-                # ADR-0351 §9's upgrade, later in the chain, carries the trigger's
-                # parties, which this build reads: carried here first, so the record
-                # decodes, and that upgrade finds it already carried (it is idempotent).
+                # ADR-0351 §9's and ADR-0353 §9:6's upgrades, later in the chain, carry
+                # the trigger's parties and the versions' form, which this build reads:
+                # carried here first, so the record decodes, and those upgrades find it
+                # already carried (each is idempotent).
                 self._carry_parties(stored)
+                understood_episode(stored)
                 episode = self._decode(json.dumps(stored))
                 conn.execute(
                     "UPDATE records SET data = ? WHERE rowid = ?",
@@ -1369,7 +1374,7 @@ class SqliteMemoryStore:
             MemoryStoreError: If a stored episode cannot be upgraded. Nothing is
                 written, and the file is left as it was found.
         """
-        if found is None or found >= MEMORY_RECORD_FORMAT:
+        if found is None or found >= PARTIES_RECORD_FORMAT:
             return
         chunk = conn.execute(
             "SELECT rowid, data FROM records WHERE kind = ? ORDER BY rowid LIMIT ?",
@@ -1383,6 +1388,66 @@ class SqliteMemoryStore:
                     msg = f"an episode stored before ADR-0351 could not be upgraded: {exc}"
                     raise MemoryStoreError(msg) from exc
                 if not isinstance(stored, dict) or not self._carry_parties(stored):
+                    continue
+                # ADR-0353 §9:6's upgrade, next in the chain, carries the versions' form,
+                # which this build reads: carried here first, as above.
+                understood_episode(stored)
+                episode = self._decode(json.dumps(stored))
+                conn.execute(
+                    "UPDATE records SET data = ? WHERE rowid = ?",
+                    (episode.model_dump_json(exclude={"revision"}), int(rowid)),
+                )
+            chunk = conn.execute(
+                "SELECT rowid, data FROM records WHERE kind = ? AND rowid > ? "
+                "ORDER BY rowid LIMIT ?",
+                (MemoryKind.EPISODIC.value, chunk[-1][0], _BACKFILL_CHUNK),
+            ).fetchall()
+        conn.execute("UPDATE episode_record_format SET version = ?", (PARTIES_RECORD_FORMAT,))
+
+    def _upgrade_to_understood(self, conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0353 §9's episode record, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_parties` has carried a file to 20, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+
+        **Every stored episode whose understanding versions hold a retired field is
+        rewritten** by :func:`~ai_assistant.memory._understanding_upgrade.understood_episode`,
+        with no model (ADR-0353 §9:6): each version loses its ground, references,
+        relationships, unresolved matters and answer pointers, by the owner's ruling
+        under ADR-0326 §4:4, and keeps what it drew on, its references' and
+        relationships' referents joining its ``meaning_referents``. Nothing else of the
+        episode moves, and no record is dropped. The rewritten record is decoded whole
+        before it is written, and written as the store writes every record. Its
+        ``revision`` and its vector are kept: the upgrade is no caller's write, and an
+        episode's vector embeds its ``content``, which does not move. An open episode is
+        rewritten as a frozen one is. Every memory is left alone. An earlier upgrade
+        that reads an episode before this one has run reads it through
+        :meth:`_decode_carried`, carried the same way.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+
+        Raises:
+            MemoryStoreError: If a stored episode cannot be upgraded. Nothing is
+                written, and the file is left as it was found.
+        """
+        if found is None or found >= MEMORY_RECORD_FORMAT:
+            return
+        chunk = conn.execute(
+            "SELECT rowid, data FROM records WHERE kind = ? ORDER BY rowid LIMIT ?",
+            (MemoryKind.EPISODIC.value, _BACKFILL_CHUNK),
+        ).fetchall()
+        while chunk:
+            for rowid, data in chunk:
+                try:
+                    stored = json.loads(data)
+                except ValueError as exc:
+                    msg = f"an episode stored before ADR-0353 could not be upgraded: {exc}"
+                    raise MemoryStoreError(msg) from exc
+                if not isinstance(stored, dict) or not understood_episode(stored):
                     continue
                 episode = self._decode(json.dumps(stored))
                 conn.execute(
@@ -2082,12 +2147,13 @@ class SqliteMemoryStore:
 
     @classmethod
     def _decode_carried(cls, data: str) -> MemoryRecord:
-        """Decode a row an upgrade reads, its episode's ``continues`` and parties carried.
+        """Decode a row an upgrade reads, its episode carried by every later upgrade.
 
         An upgrade earlier in the chain than ADR-0349 §10:6's may read a row that a build
         before it wrote, whose understandings hold ``continues`` as one id or ``null``,
         which this build's record refuses; and one earlier than ADR-0351 §9's, a row whose
-        trigger holds an origin in place of its parties. Carried as those upgrades carry
+        trigger holds an origin in place of its parties; and one earlier than ADR-0353
+        §9:6's, a row whose versions hold the retired fields. Carried as those upgrades carry
         it, the row decodes as it will once they have run, and every earlier upgrade
         reads what the chain then holds (ADR-0326 §4:5). Nothing is written here.
 
@@ -2099,7 +2165,9 @@ class SqliteMemoryStore:
         except ValueError as exc:
             msg = f"stored memory could not be decoded: {exc}"
             raise MemoryStoreError(msg) from exc
-        if isinstance(stored, dict) and (continuing_episode(stored) | cls._carry_parties(stored)):
+        if isinstance(stored, dict) and (
+            continuing_episode(stored) | cls._carry_parties(stored) | understood_episode(stored)
+        ):
             data = json.dumps(stored)
         return cls._decode(data)
 
