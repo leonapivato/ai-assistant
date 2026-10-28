@@ -542,6 +542,10 @@ def test_a_bound_that_elides_the_version_marking_the_input_keeps_the_relay_mark(
     held = (version(1, relayed=False), version(4, relayed=True), version(5, relayed=True))
     assert not _extends(marked, _open(understanding=masked, understanding_elided=2))
     assert _extends(marked, _open(understanding=held, understanding_elided=2))
+    # Nor does a version reusing the elided one's number: what is appended is read off
+    # the counts, never off the numbers the versions carry.
+    reused = (version(1, relayed=False), version(2, relayed=False))
+    assert not _extends(stored, _open(understanding=reused, understanding_elided=1))
 
 
 @pytest.mark.parametrize(

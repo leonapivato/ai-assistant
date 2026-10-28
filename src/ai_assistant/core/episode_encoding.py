@@ -579,9 +579,9 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
       ``False``);
     - entries appended at the end of ``understanding`` and of ``stages``, each under
       its bound, with its elided count grown by exactly what the bound dropped; where a
-      stored version records the relay mark, every version of the revision numbered
-      after it records it too, so a bound that elides the version that marked the input
-      never drops the mark (ADR-0351 §5:9);
+      stored version records the relay mark, every version the revision appends records
+      it too, so a bound that elides the version that marked the input never drops the
+      mark (ADR-0351 §5:9);
     - entries appended at the end of ``rounds`` and of ``labels``, every earlier entry
       unchanged; neither is bounded (ADR-0307 §10, superseding §3:3 in the additions
       alone);
@@ -675,17 +675,28 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
 
 
 def _drops_a_relay_mark(before: EpisodeProcessingRecord, after: EpisodeProcessingRecord) -> bool:
-    """Whether a version of ``after`` drops a relay mark ``before`` records (ADR-0351 §5:9).
+    """Whether a version ``after`` appends drops a relay mark ``before`` records (ADR-0351 §5:9).
 
-    The mark holds for the rest of the activation: every version recorded after the
-    first that marks the input marks it too. The record's own validator holds that
-    across the versions a record keeps; this holds it across the versions the bound
-    elides, which the revision no longer carries, by the versions' own numbers.
+    The mark holds for the rest of the activation: every version recorded after one that
+    marks the input marks it too. The record's own validator holds that across the
+    versions a record keeps, and :func:`_appended` holds every version the revision keeps
+    from the stored record as it was; so a stored mark is dropped only by a version the
+    revision appends, which must mark the input. The appended versions are read off the
+    two records' counts, every version either holds or has elided, and never off the
+    numbers the versions carry, which nothing here checks.
     """
-    marked = [one.version for one in before.understanding if one.relayed]
-    if not marked:
+    if not any(one.relayed for one in before.understanding):
         return False
-    return any(one.version > marked[0] and not one.relayed for one in after.understanding)
+    held = len(after.understanding)
+    appended = (
+        held
+        + after.understanding_elided
+        - (len(before.understanding) + before.understanding_elided)
+    )
+    # The bound keeps the first version (``_understanding_head``), so what was appended is
+    # the tail after it, at most.
+    fresh = after.understanding[max(1, held - appended) :] if appended > 0 else ()
+    return not all(one.relayed for one in fresh)
 
 
 def _understanding_head(limit: int) -> int:

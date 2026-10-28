@@ -5862,6 +5862,17 @@ class MemoryStoreContract:
             await _replace(store, dropped, door, companion=door != "add")
         assert await store.get("companion") is None
         assert _unstamped_or_none(await store.get("episode")) == marked
+        # Nor a version reusing the elided one's number: the counts say it is appended.
+        reused = _revised(
+            marked,
+            processing={
+                "understanding": (version(1, relayed=False), version(2, relayed=False)),
+                "understanding_elided": 1,
+            },
+        )
+        with pytest.raises(MemoryStoreError):
+            await _replace(store, reused, door, companion=door != "add")
+        assert _unstamped_or_none(await store.get("episode")) == marked
 
         kept = _revised(
             marked,
