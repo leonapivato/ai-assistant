@@ -3136,8 +3136,19 @@ def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingPr
     for spec in specs:
         ensure_vendor_available(spec)
     policy = RetryPolicy.from_settings(settings)
+    # ADR-0355 §2:3, §2:5: understanding and the digest, the only consumers of this
+    # route, each write a returned entry for every structured call they make, so every
+    # route keeps a structured call's thinking summary wherever the record is on.
+    summaries = settings.diagnostic_record
     return RoutingProvider(
-        [Route(RetryingProvider(PydanticAIProvider(spec), policy=policy)) for spec in specs]
+        [
+            Route(
+                RetryingProvider(
+                    PydanticAIProvider(spec, thinking_summaries=summaries), policy=policy
+                )
+            )
+            for spec in specs
+        ]
     )
 
 
@@ -3223,7 +3234,11 @@ def _build_consolidation_provider(settings: Settings, spec: str) -> RetryingProv
             to have checked already would break the day the two stop coinciding.
     """
     ensure_vendor_available(spec)
-    return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
+    # ADR-0355 §2:4, §2:5: its consumers write no returned entry, so it keeps no summary.
+    return RetryingProvider(
+        PydanticAIProvider(spec, thinking_summaries=False),
+        policy=RetryPolicy.from_settings(settings),
+    )
 
 
 def _observer_scout_spec(settings: Settings) -> str:
@@ -3290,7 +3305,11 @@ def _build_observer_provider(settings: Settings, spec: str) -> RetryingProvider:
     """
     ensure_vendor_available(spec)
     policy = replace(RetryPolicy.from_settings(settings), max_attempts=1)
-    return RetryingProvider(PydanticAIProvider(spec), policy=policy)
+    # ADR-0355 §2:3: the scout's, framing's and placement's returned entries keep a
+    # structured call's thinking summary wherever the record is on.
+    return RetryingProvider(
+        PydanticAIProvider(spec, thinking_summaries=settings.diagnostic_record), policy=policy
+    )
 
 
 def _reconciler_spec(settings: Settings) -> str:
@@ -3355,7 +3374,11 @@ def _build_reconciler_provider(settings: Settings, spec: str) -> RetryingProvide
             have checked already would break the day the two stop coinciding.
     """
     ensure_vendor_available(spec)
-    return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
+    # ADR-0355 §2:4, §2:5: its consumers write no returned entry, so it keeps no summary.
+    return RetryingProvider(
+        PydanticAIProvider(spec, thinking_summaries=False),
+        policy=RetryPolicy.from_settings(settings),
+    )
 
 
 def _build_calendar_reader(settings: Settings) -> CalendarReader | None:

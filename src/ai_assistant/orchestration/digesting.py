@@ -430,7 +430,8 @@ def _exchange_of(
 
     The reply as the model wrote it, the model that answered, the mode, the finish reason,
     a refusal's statement and category, the usage, and the returned failure's kind where
-    there is one.
+    there is one; and the provider's summary of its thinking under ``thinking`` where the
+    exchange holds one, with no such key where it holds none (ADR-0355 §5:1).
     """
     exchange = reply.exchange
     held: dict[str, str | dict[str, int] | None] = {
@@ -447,6 +448,8 @@ def _exchange_of(
             "cache_write_tokens": exchange.usage.cache_write_tokens,
         },
     }
+    if exchange.thinking is not None:
+        held["thinking"] = exchange.thinking
     if reply.failure is not None:
         held["failure"] = reply.failure.value
     return held

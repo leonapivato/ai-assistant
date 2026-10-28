@@ -196,7 +196,9 @@ async def test_only_the_named_route_is_reached_once_when_a_step_fails(
     """
     built: dict[str, _Failing] = {}
     monkeypatch.setattr(
-        composition, "PydanticAIProvider", lambda spec: built.setdefault(spec, _Failing(spec))
+        composition,
+        "PydanticAIProvider",
+        lambda spec, *, thinking_summaries: built.setdefault(spec, _Failing(spec)),
     )
     monkeypatch.setattr(composition, "ensure_vendor_available", lambda spec: None)
     settings = Settings(
