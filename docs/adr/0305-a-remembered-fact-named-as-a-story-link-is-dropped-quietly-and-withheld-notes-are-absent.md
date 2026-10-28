@@ -1,6 +1,6 @@
 # 305. A remembered fact named as a story link is dropped quietly, and withheld notes are absent
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0353 (§3:2 and §3:3, each in the field's name alone: `belongs_to`)
 - Date: 2026-10-09
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), after its focused re-check [#2805](https://github.com/leonapivato/ai-assistant/issues/2805): what becomes of a recalled fact that understanding names among an input's story links, and what understanding is told about a story's notes on a pass that may not be shown them. It decides [#2808](https://github.com/leonapivato/ai-assistant/issues/2808) and [#2807](https://github.com/leonapivato/ai-assistant/issues/2807).
 - Dependency: ADR-0304, implemented at `4f7db56c`.
@@ -8,6 +8,7 @@
 - **Changes no `core` surface.** No Protocol, no type in `core/types.py`, no wire shape and no stored record changes (§5 below).
 - **Partially supersedes** [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md) — **two scopes.** **§6:8's *or a semantic record*, whole**: a story label naming a recalled semantic record is no label defect; it is dropped and counted, and takes no part in the repair completion (§3 below). **§6:2's *its newest pending entries*, for a pass on which a record placed for the owner alone may not be shown**: the short view renders nothing about its notes (§4 below). Every other clause stands, §6:7 and §6:8's other limbs included, as ADR-0301 and ADR-0303 left them.
 - **Partially supersedes** [ADR-0281](0281-recall-runs-before-understanding-and-understanding-reads-what-it-found.md) — **one scope.** **§7:3's rendering of a recalled semantic record, in the addition alone**: it is also rendered marked as not linkable (§3 below). Every other clause stands, §7:4 and §7:5 included.
+- Partially superseded: 2026-10-27 by ADR-0353 — §3:2 and §3:3, each in the field's name alone: the proposal's `story_labels` is `belongs_to` (ADR-0353 §9:2, §9:12). Every other clause stands. This replacement takes effect on ratification of ADR-0353. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
