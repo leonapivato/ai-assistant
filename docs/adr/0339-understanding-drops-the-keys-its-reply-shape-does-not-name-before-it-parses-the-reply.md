@@ -1,12 +1,13 @@
 # 339. Understanding drops the keys its reply shape does not name before it parses the reply
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0354 (§2:1–§2:6 and §4:1–§4:2, for a reply understanding receives as a structured call)
 - Date: 2026-10-21
 - Scope: how the understanding stage reads one completion's reply before ADR-0276 §6:2's checks run, and what it logs about that reading. The problem is [#3246](https://github.com/leonapivato/ai-assistant/issues/3246), and the clauses that make it a decision were found by the stop recorded on it ([comment](https://github.com/leonapivato/ai-assistant/issues/3246#issuecomment-6308698408)). Schema-constrained output, #3246's second option, and the other three stages' readers are not decided here (§5).
 - Dependency: [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md), as its status line leaves it.
 - Authorization: the owner, 2026-10-21: "Dont draw the line who ratifies what, Ill just check in and if I see something wrong I'll give input to you". Under that standing delegation the decision is the dispatcher's, the dispatcher assigned 0339, and the dispatcher ratifies it.
 - **Changes no contract.** No type in `core/types.py` changes, no Protocol changes, nothing the wire carries or a record stores changes, and `PROTOCOL_VERSION` does not move. It amends two clauses of a contract-surface decision, so both review lenses run on it.
 - **Partially supersedes**, in the clauses §6's first table names: ADR-0276.
+- Partially superseded: 2026-10-27 by ADR-0354 — §2:1–§2:6 and §4:1–§4:2, for a reply understanding receives as a structured call: nothing is dropped from it and no count is logged, because the schema it is sent is closed and the reply is read by one rule (ADR-0354 §3:2, §3:4, §10:1). Every other clause stands. This replacement takes effect on ratification of ADR-0354. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
