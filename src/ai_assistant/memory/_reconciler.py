@@ -22,12 +22,14 @@ nothing. The model is consulted only about the residue a string comparison canno
 settle, which is what makes its contribution *additive*: it answers only where
 certainty already failed, and it can never overturn a certain answer.
 
-**Why ``memory`` may hold a ``ModelProvider``.** Egress is a rule about which
-package opens the socket. ADR-0017 §1 permits it "from ``models/`` or from a
-designated integration seam inside ``tools/``", and the ``lint-imports`` contract
-confining network transports names only ``ai_assistant.tools.*``. A caller holding
-the ``ModelProvider`` Protocol is not itself an egress boundary; ``models/`` is.
-This is the sanctioned form, and it is the first time this subsystem takes it.
+**Why ``memory`` may hold a model seam.** Egress is a rule about which package
+opens the socket. ADR-0017 §1 permits it "from ``models/`` or from a designated
+integration seam inside ``tools/``", and the ``lint-imports`` contract confining
+network transports names only ``ai_assistant.tools.*``. A caller holding a ``core``
+Protocol is not itself an egress boundary; ``models/`` is. This is the sanctioned
+form. Since ADR-0354 the Protocol held is ``StructuredCompleter``: the one request
+asks for :class:`ReconcilerReply` and comes back as its value or as a named failure,
+so no text-JSON scan reads the reply here (§9:1, §10:1).
 
 **Nothing here decides whether a reconciler runs.** ADR-0159 §2 puts the
 invocation condition in :class:`~ai_assistant.memory.ingest.MemoryIngestor`,
@@ -44,7 +46,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Annotated, Final, Protocol
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
+)
+from pydantic.json_schema import SkipJsonSchema
 
 from ai_assistant.core.prompts import PromptDeclaration
 from ai_assistant.core.types import ConflictRelation, Message, Role
@@ -54,7 +66,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.prompts import PromptTemplate
-    from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.core.protocols import StructuredCompleter
     from ai_assistant.core.types import MemoryRecord, MemoryUpdateProposal
 
 #: ADR-0159 §3's bound on how many conflict-set members one ingest may ask a model
@@ -70,14 +82,64 @@ if TYPE_CHECKING:
 #: pinned by a test rather than left to a reader noticing two numbers.
 DEFAULT_RECONCILER_MAX_CONFLICTS: Final = 15
 
-#: How many failed decode attempts the envelope scan tolerates before giving up.
-#: Keeps the scan linear on a reply that is mostly prose containing braces.
-_MAX_EXTRACTION_MISSES: Final = 64
-
 #: The reply's spelling for each relation. A closed mapping rather than
 #: ``ConflictRelation(value)``, so an unknown string leaves the member unlabelled
 #: instead of raising inside a component that ADR-0159 §3 forbids to raise.
 _RELATIONS: Final = {relation.value: relation for relation in ConflictRelation}
+
+
+def _entry_or_none(value: object, handler: ValidatorFunctionWrapHandler) -> object:
+    """One entry of the list as :class:`ReconcilerReplyEntry`, or ``None`` if it is not one.
+
+    A malformed **entry** inside a readable list leaves the reply readable (ADR-0164
+    §3): the request plainly reached a model that answered, so the entry is dropped
+    and the rest stand. Without this, one bad entry would make the whole reply
+    ``invalid`` and the call ``FAILED``, an outcome §3 does not give it. The schema
+    sent still names only the entry's own shape (:class:`~pydantic.json_schema.SkipJsonSchema`
+    keeps ``None`` out of it), so a model in native mode writes entries alone.
+    """
+    try:
+        return handler(value)
+    except ValidationError:
+        return None
+
+
+class ReconcilerReplyEntry(BaseModel):
+    """One relation the reply states: a stored belief's id, and how the proposal stands.
+
+    ``relation`` is read as a string and judged after the parse, case and surrounding
+    whitespace aside, so an unknown spelling leaves that member unlabelled rather than
+    refusing the reply (ADR-0354 §9:1: the checks after the parse stay as they are).
+    The schema sent still lists the three spellings the prompt asks for, so a model in
+    native mode writes one of them. An unnamed key is ignored, as it was before the
+    move; the schema sent is closed either way (§10:2).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    id: str
+    relation: Annotated[
+        str, Field(json_schema_extra={"enum": [relation.value for relation in ConflictRelation]})
+    ]
+
+
+class ReconcilerReply(BaseModel):
+    """The reconciler's reply shape (ADR-0354 §9:1): the envelope its prompt asks for.
+
+    The names are the prompt's, ``relations``, ``id`` and ``relation``, because the
+    schema sent carries no text (§3:2) and the prompt, default or override, is what
+    says what each means. A reply that does not validate as this — no ``relations``
+    list, prose around the object, nothing at all — is a returned failure and the call
+    is ``FAILED`` (§9:2, ADR-0164 §3). An entry in the list that is not one is
+    ``None`` here, and :func:`_read` drops it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    relations: list[
+        Annotated[ReconcilerReplyEntry | SkipJsonSchema[None], WrapValidator(_entry_or_none)]
+    ]
+
 
 #: The reconciler's prompt (ADR-0334 §2): the system message of its one request is the
 #: template ``memory_reconciler.txt`` shipped beside this module, or the owner's override
@@ -94,8 +156,10 @@ _RELATIONS: Final = {relation.value: relation for relation in ConflictRelation}
 #: else, similarity included (§1:3); and that two times which differ make no
 #: contradiction unless the claims are incompatible at one time (§3:5). ADR-0159 leaves
 #: the wording itself to the implementing lane. The reply's envelope — one ``relations``
-#: entry per stored belief asked about, named by its id — is what :func:`_read` parses,
-#: and a template that asks for another shape leaves every member unlabelled.
+#: entry per stored belief asked about, named by its id — is :class:`ReconcilerReply`,
+#: the shape the request asks for (ADR-0354 §9:1). Its schema carries no text (§3:2),
+#: so the template is what says what each field means, and a template that asks for
+#: another shape gets replies that do not read: every member unlabelled, ``FAILED``.
 MEMORY_RECONCILER_PROMPT: Final = PromptDeclaration(
     name="memory_reconciler", package="ai_assistant.memory"
 )
@@ -257,7 +321,7 @@ class ModelBackedReconciler:
     def __init__(
         self,
         *,
-        model: ModelProvider,
+        completer: StructuredCompleter,
         route: str,
         prompt: PromptTemplate,
         max_conflicts: int = DEFAULT_RECONCILER_MAX_CONFLICTS,
@@ -265,9 +329,12 @@ class ModelBackedReconciler:
         """Create the reconciler.
 
         Args:
-            model: The seam the request goes through. A ``ModelProvider`` and
-                never a provider SDK — ``memory`` holds the contract, ``models/``
-                opens the socket (golden rule 4, ADR-0017 §1).
+            completer: The seam the request goes through. A
+                ``StructuredCompleter`` and never a provider SDK — ``memory`` holds
+                the contract, ``models/`` opens the socket (golden rule 4, ADR-0017
+                §1). The composition root hands it the object it handed as the
+                reconciler's ``ModelProvider`` before ADR-0354, route and retry
+                policy unchanged (§6:2).
             route: The ``"provider:model"`` spec this reconciler **names** rather
                 than inheriting (ADR-0159 §3). It is passed on every request, so
                 which model reads a pair of stored beliefs is a configured choice
@@ -302,7 +369,7 @@ class ModelBackedReconciler:
             msg = "the reconciler renders the memory_reconciler prompt (ADR-0334 §2)"
             raise ValueError(msg)
         self._prompt = prompt
-        self._model = model
+        self._completer = completer
         self._route = route
         self._max_conflicts = max_conflicts
 
@@ -325,8 +392,8 @@ class ModelBackedReconciler:
             recover them: :attr:`~ReconcilerOutcome.UNCONSULTED` where the guard
             below never ran because no request was due,
             :attr:`~ReconcilerOutcome.FAILED` where a request was made and yielded
-            no readable answer — the broad guard, and a reply carrying no readable
-            envelope, which are the same fact from two directions — and
+            no readable answer — the broad guard, and a reply returned as a failure
+            (ADR-0354 §9:2), which are the same fact from two directions — and
             :attr:`~ReconcilerOutcome.ANSWERED` where it was made and read. A
             readable reply naming no relation is ``ANSWERED`` with an empty
             mapping, **not** ``UNCONSULTED``: the request happened, and a report
@@ -367,8 +434,18 @@ class ModelBackedReconciler:
             Message(role=Role.USER, content=_render(record, consulted)),
         ]
         try:
-            reply = await self._model.complete(conversation, model=self._route)
-            answered = _read(reply.content, {conflict.id for conflict in consulted})
+            reply = await self._completer.complete_structured(
+                conversation, ReconcilerReply, model=self._route
+            )
+            if reply.value is None:
+                # A response came back and is not the shape's value (ADR-0354 §9:2).
+                # `refused` lands where a raised `ModelContentFilterError` lands, the
+                # guard below; `invalid`, `empty` and `cut` where a reply that does not
+                # read lands, here. Both are ADR-0164 §3's "made a request that yielded
+                # no readable answer", `FAILED`, and it is exactly the state a merged
+                # empty mapping cannot be told apart from once it has crossed the seam.
+                return _report(labelled, ReconcilerOutcome.FAILED)
+            answered = _read(reply.value, {conflict.id for conflict in consulted})
         except Exception:
             # Every failure mode collapses to the same *relations*, deliberately: a
             # model error, an exhausted deadline, an unroutable request, a reply
@@ -378,13 +455,6 @@ class ModelBackedReconciler:
             # path; the observable consequence is the relations it does not hold —
             # and, since ADR-0164 §3, the outcome reported beside them, which is a
             # count and never an input to a ruling.
-            return _report(labelled, ReconcilerOutcome.FAILED)
-        if answered is None:
-            # A request was made and came back unreadable: no envelope at all, or
-            # one carrying no `relations` list. ADR-0164 §3 counts that under
-            # `reconciler_failed` — "made a request that yielded no readable
-            # answer" — and it is exactly the state a merged empty mapping cannot
-            # be told apart from once it has crossed the seam.
             return _report(labelled, ReconcilerOutcome.FAILED)
         # The model may not overturn the certain rung, and may not speak for a
         # member nobody asked about: `_read` has already dropped ids outside
@@ -490,92 +560,37 @@ def _render(record: MemoryRecord, consulted: Sequence[MemoryRecord]) -> str:
     return "\n".join(lines)
 
 
-def _read(content: str, consulted: set[str]) -> dict[str, ConflictRelation] | None:
-    """The readable labels of one reply, restricted to ``consulted``, or ``None``.
+def _read(reply: ReconcilerReply, consulted: set[str]) -> dict[str, ConflictRelation]:
+    """The labels of one readable reply, restricted to ``consulted``.
 
-    Total and silent: every malformed shape yields no entry for the member it
+    Total and silent: every malformed entry yields no label for the member it
     concerned rather than an error, because ADR-0159 §3 forbids this path to raise
-    and an unlabelled member is a ruled, safe outcome (§4, §6).
+    and an unlabelled member is a ruled, safe outcome (§4, §6). These are the checks
+    after the parse, unchanged by ADR-0354 (§9:1); the parse itself is the seam's,
+    by §3:4's one rule, and a reply it refuses never reaches here.
 
-    **``None`` and ``{}`` are different answers** (ADR-0164 §3). ``None`` says the
-    reply was not readable *at all* — no JSON envelope, or one carrying no
-    ``relations`` list — which the reconciler reports as
-    :attr:`~ReconcilerOutcome.FAILED`. ``{}`` says the envelope was read and named
-    no relation this call may install, which is a conforming "nothing to add" and
-    is reported as :attr:`~ReconcilerOutcome.ANSWERED`. Both yield the same
-    *relations*, so ADR-0159's rulings are untouched; only the count divides.
-    A **malformed entry inside a readable list** is dropped and leaves the reply
-    readable, because the request plainly reached a model that answered.
+    **A readable reply naming nothing is ``{}``**, which the reconciler reports as
+    :attr:`~ReconcilerOutcome.ANSWERED`: a conforming "nothing to add" (ADR-0164 §3).
+    A **malformed entry inside a readable list** — one :class:`ReconcilerReply` holds
+    as ``None``, an unknown relation, an id nobody asked about — is dropped and leaves
+    the reply readable, because the request plainly reached a model that answered.
 
     Args:
-        content: The reply's text.
+        reply: The reply, read as the shape.
         consulted: The ids this call asked about; anything else is dropped unread.
 
     Returns:
-        The labels read, or ``None`` where the reply was not readable.
+        The labels read.
     """
-    envelope = _extract_object(content)
-    if envelope is None:
-        return None
-    entries = envelope.get("relations")
-    if not isinstance(entries, list):
-        return None
     labels: dict[str, ConflictRelation] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
+    for entry in reply.relations:
+        if entry is None:
             continue
-        record_id = entry.get("id")
-        relation = _RELATIONS.get(str(entry.get("relation", "")).strip().casefold())
-        if relation is None or not isinstance(record_id, str) or record_id not in consulted:
+        relation = _RELATIONS.get(entry.relation.strip().casefold())
+        if relation is None or entry.id not in consulted:
             continue
         # First answer wins. A reply naming one member twice is malformed, and
         # taking the later entry would let a trailing "contradicts" overwrite an
         # earlier "adds" — the direction that destroys a record.
-        labels.setdefault(record_id, relation)
+        labels.setdefault(entry.id, relation)
     return labels
-
-
-def _extract_object(content: str) -> dict[str, object] | None:
-    """Decode the JSON envelope embedded in ``content``, or ``None``.
-
-    ADR-0071's scan, **duplicated** rather than shared: ``memory`` may import no
-    other subsystem's copy (golden rule 1). ADR-0077 §9.5 rules that the helper
-    stays in the producing subsystem and names the *third* model-backed producer
-    as the trigger to promote it; this was that third, and the promotion is a
-    decision of its own reaching more than one subsystem, filed as an issue rather
-    than taken inside ADR-0159's fence.
-
-    Each ``{`` is tried left to right with :meth:`json.JSONDecoder.raw_decode`,
-    which stops at the end of the object and ignores trailing text, so a model
-    that wraps the object in prose or a code fence is tolerated. The **envelope**
-    is preferred over the leftmost object: the first candidate carrying a
-    ``relations`` list wins, so a decoy object in the prose ahead of it is stepped
-    over. A decoded object is advanced *past*, never re-entered, so a nested object
-    is part of its parent rather than a separate candidate. What must not happen is
-    a producer re-deriving ADR-0047 §4 step 1's superseded first-``{``-to-last-``}``
-    slice, which spans a prose brace and the envelope's closer at once (#293).
-    """
-    decoder = json.JSONDecoder()
-    first: dict[str, object] | None = None
-    misses = 0
-    index = 0
-    length = len(content)
-    while index < length:
-        if content[index] != "{":
-            index += 1
-            continue
-        try:
-            candidate, end = decoder.raw_decode(content, index)
-        except ValueError, RecursionError:
-            misses += 1
-            if misses > _MAX_EXTRACTION_MISSES:
-                break
-            index += 1
-            continue
-        if isinstance(candidate, dict):
-            if isinstance(candidate.get("relations"), list):
-                return candidate
-            if first is None:
-                first = candidate
-        index = end
-    return first

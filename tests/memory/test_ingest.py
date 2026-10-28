@@ -48,7 +48,7 @@ from ai_assistant.memory._reconciler import (
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import (
     FakeMemoryPolicy,
-    FakeModelProvider,
+    FakeStructuredCompleter,
     FakeTraceSink,
     default_prompt,
 )
@@ -2396,9 +2396,9 @@ class _CountingReconciler:
     """
 
     def __init__(self, reply: str = '{"relations": []}', *, max_conflicts: int = 3) -> None:
-        self.model = FakeModelProvider(reply=reply)
+        self.model = FakeStructuredCompleter(reply)
         self._inner = ModelBackedReconciler(
-            model=self.model, route=_ROUTE, prompt=_PROMPT, max_conflicts=max_conflicts
+            completer=self.model, route=_ROUTE, prompt=_PROMPT, max_conflicts=max_conflicts
         )
         self.calls = 0
 

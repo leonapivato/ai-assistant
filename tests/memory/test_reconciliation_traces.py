@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from ai_assistant.core.errors import UnresolvedEvidenceError
+from ai_assistant.core.errors import ModelError, UnresolvedEvidenceError
 from ai_assistant.core.types import (
     ConflictRelation,
     DataTier,
@@ -54,7 +54,7 @@ from ai_assistant.memory._reconciler import (
 )
 from ai_assistant.testing import (
     FakeMemoryPolicy,
-    FakeModelProvider,
+    FakeStructuredCompleter,
     FakeTraceSink,
     default_prompt,
 )
@@ -265,25 +265,12 @@ class _NoReport:
         self.relations = dict(labels)
 
 
-class _RaisingProvider:
-    """A provider whose every call fails the way a dead route does."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def complete(self, messages: Sequence[object], *, model: str | None = None) -> object:
-        """Fail, counting the attempt."""
-        self.calls += 1
-        msg = "the route is down"
-        raise RuntimeError(msg)
-
-
-def _labelling(**labels: str) -> FakeModelProvider:
-    """A provider replying with ADR-0159 §3's envelope for ``labels``."""
+def _labelling(**labels: str) -> FakeStructuredCompleter:
+    """A completer replying with ADR-0159 §3's envelope for ``labels``."""
     reply = json.dumps(
         {"relations": [{"id": rid, "relation": value} for rid, value in labels.items()]}
     )
-    return FakeModelProvider(reply=reply)
+    return FakeStructuredCompleter(reply)
 
 
 # --- the rung split, which is the whole point ---------------------------------
@@ -418,8 +405,8 @@ async def test_an_empty_conflict_set_is_reconciled_offers_no_pair_and_asks_nothi
     of keys is what tells the two apart, and neither does it alone.
     """
     store = await _planted()
-    model = FakeModelProvider()
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT)
+    model = FakeStructuredCompleter()
+    reconciler = ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT)
 
     await _writer(store, sink, reconciler=reconciler).ingest(_proposal(_belief("new", _MORNING)))
 
@@ -484,15 +471,15 @@ async def test_a_provider_that_raises_is_counted_through_the_real_reconciler(
     the writer's guard never sees one and a key counted at the writer alone could
     not have distinguished a failed determination from a silent model. That is why
     §3 takes the outcome across the reconciler seam at all, and why this case drives
-    a raising ``ModelProvider`` rather than a reconciler double.
+    a raising ``StructuredCompleter`` rather than a reconciler double.
     """
     store = await _planted(_belief("stale", _MORNING))
-    provider = _RaisingProvider()
-    reconciler = ModelBackedReconciler(model=provider, route=_ROUTE, prompt=_PROMPT)  # type: ignore[arg-type]
+    completer = FakeStructuredCompleter(ModelError("the route is down"))
+    reconciler = ModelBackedReconciler(completer=completer, route=_ROUTE, prompt=_PROMPT)
 
     await _writer(store, sink, reconciler=reconciler).ingest(_proposal(_belief("new", _AFTERNOON)))
 
-    assert provider.calls == 1, "the request was attempted"
+    assert completer.call_count == 1, "the request was attempted"
     counts = _ten(_only(sink))
     assert counts[traces.RECONCILER_FAILED] == 1
     assert counts[traces.RECONCILER_UNCONSULTED] == 0
@@ -511,8 +498,8 @@ async def test_a_readable_empty_answer_carries_no_qualifier_at_all(sink: FakeTra
     no key of its own, being ``reconciled`` less the three.
     """
     store = await _planted(_belief("stale", _MORNING))
-    model = FakeModelProvider(reply='{"relations": []}')
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT)
+    model = FakeStructuredCompleter('{"relations": []}')
+    reconciler = ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT)
 
     await _writer(store, sink, reconciler=reconciler).ingest(_proposal(_belief("new", _AFTERNOON)))
 
@@ -536,8 +523,8 @@ async def test_a_set_the_certain_rung_settled_counts_unconsulted_with_no_request
     nothing to settle", and neither key says it alone.
     """
     store = await _planted(_belief("same", _MORNING), _belief("twin", _MORNING))
-    model = FakeModelProvider()
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT)
+    model = FakeStructuredCompleter()
+    reconciler = ModelBackedReconciler(completer=model, route=_ROUTE, prompt=_PROMPT)
 
     await _writer(store, sink, reconciler=reconciler).ingest(_proposal(_belief("new", _MORNING)))
 
