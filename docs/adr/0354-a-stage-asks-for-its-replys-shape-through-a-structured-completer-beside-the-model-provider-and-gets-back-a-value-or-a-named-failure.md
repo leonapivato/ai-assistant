@@ -78,8 +78,8 @@ returns a `Message`, which carries no usage.
 ADR-0143 §1 settled the fork between (a) and (c) for bulk inference, and ADR-0307 §10 made
 the same call for planning's rounds, on the same ground: a new member on a structural,
 `@runtime_checkable` Protocol "silently unsatisfies every existing structural implementation
-at once". It held there although the capability was offered by the provider stack's own
-classes, and it holds here. (b) would reuse a seam built for something else and change its
+at once". The ground is the Protocol's structure, not the capability, so it holds here.
+(b) would reuse a seam built for something else and change its
 contract to do it, so it is a widening by another route. This decision takes (c).
 
 ### Words
@@ -165,8 +165,8 @@ another subsystem's hands.
 > **Normative.** The schema sent for a shape is its pydantic JSON schema in validation mode,
 > with two changes and no others. Every object in it is closed, admitting no key the shape
 > does not name (`"additionalProperties": false`). It carries no text: every `title`,
-> `description` and `examples` pydantic would write, whether from a docstring or from a
-> field, is removed.
+> `description` and `examples` keyword pydantic would write, whether from a docstring or
+> from a field, is removed. A property the shape names keeps its name, whatever it is.
 
 So what each field means is said by the stage's prompt template, which the owner may
 override (ADR-0334 §3:3), and never by the schema, which is code (ADR-0334 §1:3).
