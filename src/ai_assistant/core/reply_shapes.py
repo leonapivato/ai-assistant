@@ -10,7 +10,9 @@ the regression suite agree on all three (§3:5):
   every ``title``, ``description`` and ``examples`` keyword removed, and no other
   change. A property keeps its name whatever it is, so a field named ``title`` stays.
   A shape whose schema cannot be closed is refused (§2:3): one with a mapping, a
-  schema for further keys, or a position admitting any JSON value.
+  schema for further keys, or a position admitting any JSON value, which is any
+  position that does not settle the JSON type of its value. Every schema the schema
+  holds is a position, a JSON string's ``contentSchema`` included.
 - :func:`reply_shape_version`, its version (§3:3): the first twelve hexadecimal digits
   of the SHA-256 of that schema serialised with sorted keys and no insignificant
   whitespace.
@@ -44,26 +46,18 @@ _VERSION_DIGITS: Final = 12
 #: The keywords that carry text, removed wherever a schema stands (§3:2).
 _TEXT_KEYWORDS: Final = frozenset({"title", "description", "examples"})
 
-#: The keywords that annotate a schema and assert nothing of a value. A schema of
-#: these alone admits any JSON value.
-_ANNOTATIONS: Final = frozenset(
-    {
-        *_TEXT_KEYWORDS,
-        "default",
-        "deprecated",
-        "readOnly",
-        "writeOnly",
-        "$comment",
-        "$schema",
-        "$id",
-    }
-)
+#: The keywords that settle which JSON types a position admits. A position carrying
+#: none of them leaves its value's type open: with nothing but annotations it admits
+#: any JSON value, and with only one type's own constraints (``minLength``,
+#: ``minimum``) it still admits every value of every other type.
+_TYPED_BY: Final = frozenset({"type", "enum", "const", "$ref", "anyOf", "oneOf", "allOf"})
 
 #: The keywords whose value is one schema.
 _ONE_SCHEMA: Final = frozenset(
     {
         "additionalItems",
         "contains",
+        "contentSchema",
         "else",
         "if",
         "items",
@@ -190,9 +184,10 @@ def read_reply[T: BaseModel](shape: type[T], reply: str) -> T | ReplyFailure:
         return ReplyFailure.EMPTY
     try:
         return shape.model_validate_json(body)
-    except ValidationError, ValueError, RecursionError:
-        # A validation failure, JSON the parser refuses, or nesting too deep to walk:
-        # each is a reply that does not validate as the shape.
+    except ValidationError, ValueError, TypeError, RecursionError:
+        # A validation failure, JSON the parser refuses, a shape's own validator
+        # refusing a value of a type it did not expect, or nesting too deep to walk:
+        # each is a reply that does not validate as the shape, and none is raised.
         return ReplyFailure.INVALID
 
 
@@ -231,8 +226,8 @@ def _closed(schema: object, where: str) -> object:
         ModelError: The bare class, if a position admits any JSON value, or an object
             names no properties or gives its further keys a schema.
     """
-    if schema is True or (isinstance(schema, dict) and schema.keys() <= _ANNOTATIONS):
-        msg = f"the reply shape's schema admits any JSON value at {where}"
+    if schema is True or (isinstance(schema, dict) and not schema.keys() & _TYPED_BY):
+        msg = f"the reply shape's schema leaves the type of the value open at {where}"
         raise ModelError(msg)
     if not isinstance(schema, dict):
         return schema

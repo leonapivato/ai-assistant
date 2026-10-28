@@ -7,7 +7,7 @@ import json
 from typing import Annotated, Any, Literal
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel
+from pydantic import BaseModel, ConfigDict, Field, Json, JsonValue, RootModel, field_validator
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.reply_shapes import (
@@ -206,6 +206,30 @@ class _NotAnObject(RootModel[int]):
     pass
 
 
+class _ConstrainedAnything(BaseModel):
+    """A constraint of one type's leaves every other type open (``{"minLength": 1}``)."""
+
+    payload: Any = Field(min_length=1)
+
+
+class _BoundedAnything(BaseModel):
+    payload: Any = Field(ge=0)
+
+
+class _JsonMapping(BaseModel):
+    """A JSON string's content schema is a position too."""
+
+    payload: Json[dict[str, int]]
+
+
+class _JsonAnything(BaseModel):
+    payload: Json[Any]
+
+
+class _JsonLeaf(BaseModel):
+    payload: Json[_Leaf]
+
+
 @pytest.mark.parametrize(
     "shape",
     [
@@ -218,6 +242,10 @@ class _NotAnObject(RootModel[int]):
         pytest.param(_DeepOpen, id="an-open-value-deep-inside"),
         pytest.param(_Unschemable, id="no-json-schema"),
         pytest.param(_NotAnObject, id="not-an-object"),
+        pytest.param(_ConstrainedAnything, id="any-with-a-strings-constraint"),
+        pytest.param(_BoundedAnything, id="any-with-a-numbers-constraint"),
+        pytest.param(_JsonMapping, id="a-mapping-inside-a-json-string"),
+        pytest.param(_JsonAnything, id="anything-inside-a-json-string"),
         pytest.param(dict, id="not-a-model-class"),
         pytest.param(_Simple(answer="a", confidence=1), id="an-instance"),
     ],
@@ -231,8 +259,39 @@ def test_a_shape_that_cannot_be_closed_is_refused_with_no_disposition(shape: obj
 
 
 def test_a_refusal_names_where_the_defect_stands() -> None:
-    with pytest.raises(ModelError, match="admits any JSON value at #/properties/anything"):
+    with pytest.raises(ModelError, match="type of the value open at #/properties/anything"):
         reply_schema(_Anything)
+    with pytest.raises(
+        ModelError, match=r"naming no properties at #/properties/payload/contentSchema"
+    ):
+        reply_schema(_JsonMapping)
+
+
+def test_a_json_strings_content_schema_is_closed_and_text_free_too() -> None:
+    content = reply_schema(_JsonLeaf)["properties"]["payload"]["contentSchema"]  # type: ignore[index]
+    assert content == {"$ref": "#/$defs/_Leaf"}
+    leaf = reply_schema(_JsonLeaf)["$defs"]["_Leaf"]  # type: ignore[index]
+    assert leaf == {
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+        "type": "object",
+        "additionalProperties": False,
+    }
+
+
+def test_a_shapes_validator_refusing_a_type_reads_as_invalid_and_raises_nothing() -> None:
+    class Picky(BaseModel):
+        value: int
+
+        @field_validator("value", mode="before")
+        @classmethod
+        def _only_ints(cls, value: object) -> object:
+            if not isinstance(value, int):
+                raise TypeError
+            return value
+
+    assert read_reply(Picky, '{"value": "x"}') is ReplyFailure.INVALID
+    assert read_reply(Picky, '{"value": 3}') == Picky(value=3)
 
 
 # --- the version (§3:3) ----------------------------------------------------------

@@ -47,12 +47,11 @@ from structured_completer_contract import (
 from ai_assistant.core.errors import (
     ModelError,
     ModelRateLimitError,
-    ModelResponseError,
     ModelUnavailableError,
 )
 from ai_assistant.core.reply_shapes import reply_schema, reply_shape_version
 from ai_assistant.core.types import ReplyFailure, ReplyMode, StructuredReply
-from ai_assistant.models import PydanticAIProvider
+from ai_assistant.models import PydanticAIProvider, Route, RoutingProvider
 from ai_assistant.models.structured import PROMPTED_INSTRUCTION
 
 if TYPE_CHECKING:
@@ -357,12 +356,46 @@ async def test_a_refusals_category_is_carried_where_the_provider_gives_one() -> 
     assert reply.exchange.refusal_category == "cyber"
 
 
-async def test_a_reply_no_record_can_hold_is_a_response_error() -> None:
-    scripted = _Scripted(ModelResponse(parts=[TextPart(content="\ud800")]))
-    with pytest.raises(ModelResponseError):
-        await PydanticAIProvider(FunctionModel(scripted.respond)).complete_structured(
-            request(), Verdict
-        )
+async def test_a_reply_no_record_can_hold_is_returned_with_its_text_made_writable() -> None:
+    scripted = _Scripted(ModelResponse(parts=[TextPart(content="no \ud800 here")]))
+    reply = await PydanticAIProvider(FunctionModel(scripted.respond)).complete_structured(
+        request(), Verdict
+    )
+    assert reply.failure is ReplyFailure.INVALID
+    assert reply.exchange.reply == "no � here"
+
+
+async def test_a_refusal_no_record_can_hold_is_still_returned_refused() -> None:
+    """§2:5, §5:2: the refusal is read off the response, never off the record of it."""
+    response = ModelResponse(
+        parts=[TextPart(content=VALID_REPLY)],
+        finish_reason="content_filter",
+        provider_details={"refusal": "I won't \udc80", "refusal_category": "\ud800"},
+    )
+    reply = await PydanticAIProvider(
+        FunctionModel(_Scripted(response).respond, model_name="claude-\udfff")
+    ).complete_structured(request(), Verdict)
+    assert reply.failure is ReplyFailure.REFUSED
+    assert reply.exchange.refusal == "I won't �"
+    assert reply.exchange.refusal_category == "�"
+    assert reply.exchange.model == "function:claude-�"
+
+
+async def test_such_a_refusal_is_not_routed_to_the_next_provider() -> None:
+    refused = ModelResponse(
+        parts=[], finish_reason="content_filter", provider_details={"refusal": "\ud800"}
+    )
+    primary, secondary = _Scripted(refused), _Scripted(response_for(Answer(VALID_REPLY)))
+    router = RoutingProvider(
+        [
+            Route(PydanticAIProvider(FunctionModel(primary.respond))),
+            Route(PydanticAIProvider(FunctionModel(secondary.respond))),
+        ]
+    )
+    reply = await router.complete_structured(request(), Verdict)
+    assert reply.failure is ReplyFailure.REFUSED
+    assert len(primary.infos) == 1
+    assert secondary.infos == []
 
 
 # --- what is refused before any request, and what is raised (§2:5, §4:4) ---------
