@@ -228,16 +228,22 @@ def _scheduled(name: str) -> EpisodicMemory:
 _LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="owner-line")
 
 
-def _on_line(name: str, *texts: str) -> EpisodicMemory:
+def _on_line(name: str, *texts: str, by: SupportHolder | None = None) -> EpisodicMemory:
     """An episode on :data:`_LINE`, its trigger recording ``texts`` as the user's messages.
 
     The store numbers it as it inserts it (ADR-0283 §1), so the episodes a case adds in
     turn are in the record's order (ADR-0348 §3:2), whatever their clock readings say.
+    ``by`` is another person whose words they are, for a case standing in for a channel
+    that establishes them, which no kind does yet (ADR-0351 §3:2): each message's party
+    and the input's, so a support on it is held by them (§7:1).
     """
     said = texts or (f"what was said in {name}",)
     parties, messages = line_input(
         tuple(RecordedInputMessage(text=one, sent_at=_SAID_AT) for one in said)
     )
+    if by is not None:
+        parties = (by,)
+        messages = tuple(one.model_copy(update={"party": by}) for one in messages)
     return EpisodicMemory(
         id=_address(name),
         content=" ".join(said),
@@ -580,6 +586,7 @@ class PlacedWriterContract:
         store = await self._world()
         await store.add(_forwarded("forward", account=42))
         await store.add(_scheduled("task"))
+        await store.add(_on_line("own", "Ana works at Santa Maria Hospital."))
         yours = _forward("forward").model_copy(
             update={"origin": SupportOrigin.USER_MESSAGE, "holder": _OWNER}
         )
@@ -589,8 +596,10 @@ class PlacedWriterContract:
                 "holder": SupportHolder.unknown(),
             }
         )
+        # ADR-0351 §7:1, §7:5: the owner's own message is the owner's, not another person's.
+        toms = _at_message("own", 0).model_copy(update={"holder": _TOM})
 
-        for support in (yours, task):
+        for support in (yours, task, toms):
             with pytest.raises(MemoryStoreError):
                 await self._write(
                     make_placed_writer,
@@ -2279,7 +2288,7 @@ class PlacedWriterContract:
         self, make_placed_writer: PlacedWriterFactory
     ) -> None:
         """ADR-0348 §3:1 binds a holder's own older word alone: Sam's dispute stands."""
-        store = await self._line(_on_line("e-sam"), _on_line("e-owner"))
+        store = await self._line(_on_line("e-sam", by=_SAM), _on_line("e-owner"))
 
         installed = await self._hold(
             make_placed_writer,

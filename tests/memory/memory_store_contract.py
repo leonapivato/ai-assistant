@@ -5828,6 +5828,52 @@ class MemoryStoreContract:
         assert _unstamped_or_none(await store.get("episode")) == stored_record
 
     @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_the_guard_refuses_a_revision_whose_bound_drops_a_relay_mark(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """ADR-0351 §5:9: the relay mark holds for the activation, across what the bound
+        elides: a revision whose latest version drops it writes nothing, and one whose
+        latest keeps it is admitted."""
+
+        def version(number: int, *, relayed: bool) -> ActivationUnderstanding:
+            return ActivationUnderstanding(
+                version=number,
+                recorded_at=_OCCURRED,
+                producer=UnderstandingProducer.INTERPRETATION,
+                meaning="the user pasted an email about the booking",
+                meaning_ground=UnderstandingGround.STATED,
+                relayed=relayed,
+            )
+
+        marked = _revised(
+            _open_episode("episode", channel=_CONVERSATION_A),
+            processing={"understanding": (version(1, relayed=False), version(2, relayed=True))},
+        )
+        await store.add(marked)
+
+        dropped = _revised(
+            marked,
+            processing={
+                "understanding": (version(1, relayed=False), version(3, relayed=False)),
+                "understanding_elided": 1,
+            },
+        )
+        with pytest.raises(MemoryStoreError):
+            await _replace(store, dropped, door, companion=door != "add")
+        assert await store.get("companion") is None
+        assert _unstamped_or_none(await store.get("episode")) == marked
+
+        kept = _revised(
+            marked,
+            processing={
+                "understanding": (version(1, relayed=False), version(3, relayed=True)),
+                "understanding_elided": 1,
+            },
+        )
+        await _replace(store, kept, door)
+        assert _unstamped_or_none(await store.get("episode")) == kept
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
     async def test_the_guard_admits_planning_rounds_and_labels_appended(
         self, store: MemoryStore, door: str
     ) -> None:

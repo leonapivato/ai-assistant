@@ -578,7 +578,10 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
       addition alone) and ``outcome`` (from ``None``), and ``output_degraded`` (from
       ``False``);
     - entries appended at the end of ``understanding`` and of ``stages``, each under
-      its bound, with its elided count grown by exactly what the bound dropped;
+      its bound, with its elided count grown by exactly what the bound dropped; where a
+      stored version records the relay mark, the revision's latest version records it
+      too, so a bound that elides the version that marked the input never drops the
+      mark (ADR-0351 §5:9);
     - entries appended at the end of ``rounds`` and of ``labels``, every earlier entry
       unchanged; neither is bounded (ADR-0307 §10, superseding §3:3 in the additions
       alone);
@@ -633,7 +636,7 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
         before.stages, before.stages_elided, after.stages, after.stages_elided, head=_stage_head
     ):
         return False
-    if (
+    if _drops_a_relay_mark(before, after) or (
         after.rounds[: len(before.rounds)] != before.rounds
         or after.labels[: len(before.labels)] != before.labels
         or after.digests[: len(before.digests)] != before.digests
@@ -669,6 +672,17 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
         }
     )
     return settled == after
+
+
+def _drops_a_relay_mark(before: EpisodeProcessingRecord, after: EpisodeProcessingRecord) -> bool:
+    """Whether ``after``'s latest version drops a relay mark ``before`` records (ADR-0351 §5:9).
+
+    The mark holds for the rest of the activation. The record's own validator holds it
+    across the versions a record keeps; this holds it across the versions the bound
+    elides, which the revision no longer carries.
+    """
+    marked = any(one.relayed for one in before.understanding)
+    return marked and not (after.understanding and after.understanding[-1].relayed)
 
 
 def _understanding_head(limit: int) -> int:

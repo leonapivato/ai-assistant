@@ -96,7 +96,11 @@ def _event_party(place: object) -> SupportHolder | None:
     instance = place.get("instance_id")
     if not isinstance(instance, str):
         return None
-    return SupportHolder.source(f"{place.get('channel_type')}:{instance}", claimed=False)
+    try:
+        return SupportHolder.source(f"{place.get('channel_type')}:{instance}", claimed=False)
+    except ValidationError:
+        # Not an identity any build wrote: the decode that follows refuses the record.
+        return None
 
 
 def _trigger_parties(
