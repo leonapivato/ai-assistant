@@ -1327,6 +1327,23 @@ def _recalled_after(section: str, kept: int) -> dict[str, Any]:
     return found
 
 
+def test_tagged_content_nesting_past_the_bound_is_not_read_and_the_walk_still_returns() -> None:
+    """ADR-0316 §5:2: a hint not recognised costs itself alone, never the walk."""
+    deep = (
+        '<stimulus label="M1">'
+        + "<stimulus>" * 1_000
+        + '<said from="x">deep</said>'
+        + "</stimulus>" * 1_001
+    )
+    first = _recalled_after(f"### Recalled memories\n{deep}", kept=1)
+    assert first["shown"] is None
+    assert [one["text"] for one in first["kept"]] == [None]
+    body = _tagged(f"# The stimulus\nA stimulus reached the system.\n{deep}")
+    assert viewer.labels_in(body, {"M1"}) == {}
+    lines: list[Any] = [viewer.Entry(0, "understanding", "given", 1.0, "", body)]
+    assert viewer.timeline("a", lines)["arrival"] is None
+
+
 def test_tagged_recalled_memories_saying_why_none_shows_is_their_note() -> None:
     note = "Nothing is shown: everything recall found is already shown above."
     first = _recalled_after(f"### Recalled memories\n{note}", kept=1)

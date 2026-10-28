@@ -434,6 +434,11 @@ _CONTAINERS: Final = frozenset({"stimulus", "matter"})
 #: The text tags a stimulus's own words sit in, by their parties (ADR-0353 §3:2).
 _WORDS_TAGS: Final = frozenset({"said", "received", "task"})
 
+#: How deep the tags read may nest. The format nests two deep, a text tag in a container
+#: (§3:3); a section nesting deeper is not read, so no reading of it recurses without
+#: bound (ADR-0316 §5:2).
+_TAG_DEPTH: Final = 8
+
 
 @dataclass(frozen=True, slots=True)
 class _Tag:
@@ -481,7 +486,7 @@ def _tagged(section: str) -> list[_Tag | str] | None:
 
     A line between the tags is the system's own words (ADR-0353 §3:4), read back unescaped;
     a blank one is left out. The read is a hint (ADR-0316 §5:2): a section whose tags do
-    not balance is ``None``.
+    not balance, or nest deeper than :data:`_TAG_DEPTH`, is ``None``.
     """
     pieces: list[_Tag | str] = []
     held: list[tuple[str, dict[str, str], int, list[_Tag]]] = []
@@ -500,6 +505,8 @@ def _tagged(section: str) -> list[_Tag | str] | None:
             tag = _Tag(name, attributes, text, tuple(inner))
         elif empty:
             tag = _Tag(name, attributes, None)
+        elif len(held) >= _TAG_DEPTH:
+            return None
         else:
             held.append((name, attributes, found.end(), []))
             continue
