@@ -20,9 +20,9 @@ Since ADR-0159 it also holds the **conflict reconciler**
 (:class:`ModelBackedReconciler`) — a ``memory``-internal seam, deliberately not a
 Protocol in ``core``, that labels how a proposal stands to the records a
 similarity search surfaced beside it. It is the first component in this subsystem
-to hold a ``ModelProvider``, which ADR-0017 §1 permits because egress is a rule
-about which package opens the socket and ``models/`` is still the package that
-does.
+to hold a model seam — since ADR-0354 a ``StructuredCompleter`` (§9:1), before it a
+``ModelProvider`` — which ADR-0017 §1 permits because egress is a rule about which
+package opens the socket and ``models/`` is still the package that does.
 
 Since ADR-0289 it also holds the **story store** (:class:`SqliteStoryStore`), whose
 contract is likewise its own Protocol and which reads no other store (§1), and since
