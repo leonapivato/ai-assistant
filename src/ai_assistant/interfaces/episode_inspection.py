@@ -308,10 +308,11 @@ def _recall_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
 def _understanding_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
     """Render the retained understanding the record carries (ADR-0276 §7), deriving none.
 
-    Per retained version, in the record's order: its number, producer and meaning
-    (ADR-0353 §9:5 retires the ground, references, relationships and unresolved
-    matters); and the omission value or elided count where the record carries one.
-    Referent ids, sources and excerpts stay in the ``--json`` detail.
+    Per retained version, in the record's order (ADR-0353 §14:9): its number, producer
+    and meaning, each cited referent's kind, each unclear point with its readings, its
+    matter links (#2755), the activations in ``continues`` and its relay mark; and the
+    omission value or elided count where the record carries one. Referent ids, sources
+    and excerpts stay in the ``--json`` detail.
     """
     if processing is None:
         return ["Understanding: unavailable"]
@@ -335,7 +336,19 @@ def _none_recorded(processing: EpisodeProcessingRecord) -> str:
 
 
 def _version_lines(version: ActivationUnderstanding) -> list[str]:
-    return [
+    lines = [
         f"Understanding v{version.version} ({version.producer.value})",
         f"  Meaning: {_quoted(version.meaning)}",
     ]
+    if version.meaning_referents:
+        kinds = ", ".join(referent.kind for referent in version.meaning_referents)
+        lines.append(f"  Cites referent kinds: {kinds}")
+    for point in version.unclear:
+        lines.append(f"  Unclear: {_quoted(point.gap)}")
+        lines.extend(f"    Reading: {_quoted(reading)}" for reading in point.readings)
+    lines.extend(
+        f"  Belongs to {member.kind.value} {_quoted(member.id)}" for member in version.story_links
+    )
+    lines.extend(f"  Continues activation {_quoted(one)}" for one in version.continues)
+    lines.append(f"  Relayed: {'yes' if version.relayed else 'no'}")
+    return lines
