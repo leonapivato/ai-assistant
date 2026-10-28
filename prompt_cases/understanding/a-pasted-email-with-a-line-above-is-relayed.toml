@@ -1,0 +1,13 @@
+# ADR-0351 §11's first P2 case (§5:12): the person types one line above an email they
+# pasted, so the stimulus carries words its sender did not write themselves.
+prompt = "understanding"
+guards = "relay_missed"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "relayed"
+
+[input]
+file = "a-pasted-email-with-a-line-above-is-relayed.json"

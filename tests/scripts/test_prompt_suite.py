@@ -506,6 +506,7 @@ def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) 
         "understanding_names": {"phrases": ["x"]},
         "says_none_of": {"fields": ["understanding"], "phrases": ["x"]},
         "not_relayed": {},
+        "relayed": {},
     }
 
     for check in checks:
@@ -1142,6 +1143,14 @@ def test_not_relayed_passes_only_where_relayed_is_false() -> None:
     assert _judge("not_relayed", {}, "understanding", _meaning(relayed=True)) == (
         "the reply marks the stimulus relayed"
     )
+
+
+def test_relayed_passes_only_where_relayed_is_true() -> None:
+    assert _judge("relayed", {}, "understanding", _meaning(relayed=True)) is None
+    for unmarked in (_meaning(), _meaning(relayed=False)):
+        assert _judge("relayed", {}, "understanding", unmarked) == (
+            "the reply leaves the stimulus unmarked"
+        )
 
 
 def test_says_none_of_refuses_a_field_no_reply_holds_as_text(tmp_path: Path) -> None:
