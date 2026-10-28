@@ -1508,7 +1508,7 @@ class _Renderer:
             attributes = [("from", one.writer)]
             if one.number is not None and several:
                 attributes.append(("message", str(one.number)))
-            if one.at is not None and several:
+            if one.at is not None:
                 attributes.append(("at", self._at(one.at)))
             if one.replies_to is not None:
                 attributes.append(("replies_to", one.replies_to))

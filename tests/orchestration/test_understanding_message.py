@@ -13,8 +13,10 @@ withheld input as the empty marker (§2:6, §2:7); and the template takes no fla
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from importlib.resources import files
 from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
 
@@ -555,7 +557,7 @@ async def test_an_input_taken_in_from_other_work_is_framed_as_its_own_kind_and_t
     assert taken == (
         "A stimulus reached the system at 3:50 pm on Monday 26 October 2026: a message Maren "
         "typed on Telegram, taken in from other work, which was stopped. It contains this "
-        'text:\n<said from="Maren">for four</said>'
+        'text:\n<said from="Maren" at="Mon 26 Oct 2026, 3:50 pm">for four</said>'
     )
     assert "a-older" not in message.content
 
@@ -599,6 +601,87 @@ async def test_a_joined_input_is_received_where_its_relay_mark_counts_and_only_t
     assert (paste.name, paste.get("from")) == ("received", "Maren")
     assert forward.name == "received"
     assert (note.name, note.get("from")) == ("said", "Maren")
+
+
+# --- each message's own time --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("zone", "own_zone", "expected"),
+    [(NEW_YORK, True, "Mon 26 Oct 2026, 3:31 pm"), (HUB, False, "Mon 26 Oct 2026, 7:31 pm")],
+)
+async def test_a_stimulus_message_carries_at_from_its_sent_at_in_the_calls_zone(
+    zone: ZoneInfo, *, own_zone: bool, expected: str
+) -> None:
+    """ADR-0353 §3:9, §5: one recorded message carries its own time, written in full in
+    the zone every other time of the message is in."""
+    sent = RecordedInputMessage(
+        text="Book Luigi's", sent_at=AT - timedelta(minutes=20), party=OWNER
+    )
+
+    message = await _rendered(
+        "Book Luigi's",
+        channel=LINE,
+        trigger=_trigger(LINE, "Book Luigi's", (OWNER,), (sent,)),
+        zone=zone,
+        own_zone=own_zone,
+    )
+
+    (words,) = message.tags("The stimulus")
+    assert (words.name, words.get("at")) == ("said", expected)
+
+
+async def test_a_message_sent_long_before_the_activation_shows_its_own_time() -> None:
+    """A message written at 11:04 pm and taken in the next afternoon, after a delay, shows
+    when it was written; the framing sentence still says when it reached the system."""
+    sent = RecordedInputMessage(
+        text="remind me tomorrow to call the dentist",
+        sent_at=AT - timedelta(hours=16, minutes=47),
+        party=OWNER,
+    )
+    joined = JoinedInput(
+        joined_at=AT,
+        channel=LINE,
+        messages=(
+            RecordedInputMessage(
+                text="at 6", sent_at=AT - timedelta(hours=16, minutes=46), party=OWNER
+            ),
+        ),
+    )
+
+    message = await _rendered(
+        sent.text,
+        channel=LINE,
+        trigger=_trigger(LINE, sent.text, (OWNER,), (sent,)),
+        joined=(joined,),
+    )
+
+    trigger, _ = message.section("The stimulus").split("\n\n")
+    assert trigger.startswith("A stimulus reached the system at 3:51 pm on Monday 26 October")
+    own, later = message.tags("The stimulus")
+    assert own.get("at") == "Sun 25 Oct 2026, 11:04 pm"
+    assert later.get("at") == "Sun 25 Oct 2026, 11:05 pm"
+
+
+async def test_an_input_that_records_no_messages_renders_no_at() -> None:
+    """An input taken in whole, with no message of its own recorded, has no time but the
+    framing sentence's."""
+    bare = await _rendered()
+    reminder = await _rendered(
+        "Remind Maren to call the dentist.",
+        channel=SCHEDULE,
+        window=SuppliedWindow(ChannelContext()),
+        trigger=_trigger(
+            SCHEDULE,
+            "Remind Maren to call the dentist.",
+            (SupportHolder.statement(StatementPart.SCHEDULED_INSTRUCTION),),
+        ),
+    )
+
+    for message in (bare, reminder):
+        (words,) = message.tags("The stimulus")
+        assert words.get("at") is None
+        assert ' at="' not in message.section("The stimulus")
 
 
 # --- §5, §6: times and the situation ------------------------------------------------------
@@ -929,6 +1012,18 @@ def test_the_prompt_declares_no_flag_and_the_default_renders_with_none() -> None
     assert UNDERSTANDING_PROMPT.flags == frozenset()
     # ADR-0334 §9:2: that it renders, with no flag handed, and nothing of its words.
     assert default_prompt(UNDERSTANDING_PROMPT).rendered(flags={}).flags == {}
+
+
+#: The sha256 of the owner's draft of the shipped default, approved 2026-10-28, whose
+#: origin lines say knowledge is how the origin stands now and memory what the system saw
+#: then. A reviewed change to the default changes this with it (ADR-0334 §7:3).
+_DEFAULT_SHA256: Final = "f1c2746f356268a572e33855e0841183a6f6f9d50c1e864705cdb929be116a33"
+
+
+def test_the_shipped_default_is_the_owners_draft() -> None:
+    data = files(UNDERSTANDING_PROMPT.package).joinpath(UNDERSTANDING_PROMPT.filename).read_bytes()
+
+    assert hashlib.sha256(data).hexdigest() == _DEFAULT_SHA256
 
 
 async def test_every_call_sends_the_one_instruction() -> None:
