@@ -557,3 +557,63 @@ def test_a_reply_owed_a_repair_that_none_followed_resolved_no_label() -> None:
     step = _understanding([_given(), _returned({"cites": ["M1", "M9"]})])
     assert step["resolution"] is None
     assert "M9 in cites" in step["unresolved"]
+
+
+#: The statement a first reply that did not parse earns: its labels were never checked.
+_UNPARSED: Final = (
+    "Your reply did not parse: it was not one JSON object of the required shape, so it "
+    "could not be read (invalid). Reply again with only that JSON object."
+)
+
+
+@pytest.mark.parametrize("controller", ["done", None])
+def test_a_first_reply_that_did_not_parse_says_nothing_of_its_labels(
+    controller: str | None,
+) -> None:
+    """Its returned entry lost, or in a step of its own: only the statement tells."""
+    first = {"understanding": 123, "belongs_to": ["P1"]}
+    rows = [_given(), _repair_request(first, _UNPARSED), _returned({"belongs_to": ["P1"]})]
+    (step,) = [one for one in _understandings(rows, controller) if one["repair"] is not None]
+    assert step["repair"]["labels"] == []
+    assert step["repair"]["earlier"] == []
+    assert [one["outcome"] for one in step["resolution"]["belongs_to"]] == ["unknown"]
+
+
+def test_a_later_run_s_repair_leaves_an_earlier_run_s_resolution_alone() -> None:
+    """Each run in its own step, the later's first request lost: the earlier still stands."""
+
+    def span(start: int, end: int) -> dict[str, Any]:
+        body = {
+            "stage": "understanding",
+            "due": "not_understood",
+            "started_at": iso(start),
+            "ended_at": iso(end),
+            "outcome": "done",
+        }
+        return {"recorded_at": iso(end), "source": "controller", "kind": "step", "body": body}
+
+    written = [
+        {"recorded_at": iso(10), **_given()},
+        {"recorded_at": iso(20), **_returned({"cites": ["M1"]})},
+        span(0, 100),
+        {"recorded_at": iso(210), **_repair_request({"cites": ["M9"]}, _statement(["M9"], []))},
+        {"recorded_at": iso(220), **_returned({"cites": ["M1"]})},
+        span(200, 300),
+    ]
+    lines = [
+        viewer.parse_line(n, json.dumps({"activation_id": "u", **one}).encode())
+        for n, one in enumerate(written)
+    ]
+    earlier, later = [one for one in viewer.walk(lines)["steps"] if one["phase"] == "understanding"]
+    assert earlier["unresolved"] is None
+    assert [one["outcome"] for one in earlier["resolution"]["cites"]] == ["kept"]
+    assert later["repair"]["labels"] == ["M9 in cites"]
+
+    # With no step at all, a repair is the earlier reply's only where it carries that reply.
+    alone = [one for n, one in enumerate(written) if n not in {2, 5}]
+    lines = [
+        viewer.parse_line(n, json.dumps({"activation_id": "u", **one}).encode())
+        for n, one in enumerate(alone)
+    ]
+    earlier, _ = [one for one in viewer.walk(lines)["steps"] if one["phase"] == "understanding"]
+    assert earlier["unresolved"] is None
