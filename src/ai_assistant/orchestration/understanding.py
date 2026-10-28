@@ -1711,6 +1711,14 @@ class _Renderer:
         ADR-0353 §2:4: an episode the episode window holds that is one exchange with this
         item is rendered once, here, as this item, with its latest understanding attached:
         of several items that are one exchange, the first carries it.
+
+        It carries ``outside="yes"`` where its words are outside by its record (§3:7): a
+        forward's or a claimed author's, by the message's own record, or a message of an
+        input that episode's latest understanding marks relayed, where the mark counts
+        (ADR-0351 §5:7, §5:11). It keeps its ``message`` tag and its writer, since an item
+        is one message as the medium holds it, attributed by its record (§3:2, ADR-0351
+        §5:5): the relay mark changes no party (§5:8). An item that is one exchange with
+        no episode the pass holds has no relay mark to read, and renders by its record.
         """
         item = one.item
         attributes = [("label", label)]
@@ -1719,7 +1727,14 @@ class _Renderer:
         attributes.append(("from", self._item_writer(item)))
         if item.at is not None:
             attributes.append(("at", self._at(item.at)))
-        if item.outside:
+        projection = (
+            None
+            if one.also is None
+            else _ProjectedEpisode.of(
+                one.also, excerpt_chars=self._excerpt_chars, admit_outside_input=False
+            ).projection
+        )
+        if item.outside or (projection is not None and _relayed_message(item, projection)):
             attributes.append(("outside", "yes"))
         if item.replies_to is not None and (answered := by_position.get(item.replies_to)):
             attributes.append(("replies_to", answered))
@@ -1729,12 +1744,8 @@ class _Renderer:
             # ADR-0293 §6: written after the stimulus's first message, by its position.
             attributes.append(("after_stimulus", "yes"))
         lines = [_tag("message", attributes, item.text)]
-        if one.also is not None and one.annotated:
-            projection = _ProjectedEpisode.of(
-                one.also, excerpt_chars=self._excerpt_chars, admit_outside_input=False
-            ).projection
-            if projection.meaning is not None:
-                lines.append(_understood(projection.meaning, projection.unclear))
+        if projection is not None and one.annotated and projection.meaning is not None:
+            lines.append(_understood(projection.meaning, projection.unclear))
         return lines
 
     def _item_writer(self, item: _ChannelItem) -> str:
@@ -2245,6 +2256,19 @@ class _ChannelItem:
         if self.link is not None:
             return self.link
         return None if also is None else activation_of(also)
+
+
+def _relayed_message(item: _ChannelItem, projection: EpisodeProjection) -> bool:
+    """Whether ``item`` is a message of an input its episode marks relayed (ADR-0351 §5:7).
+
+    The relay mark is read off the episode's latest understanding version, as the
+    projection carries it (§5:11, §8:4), and counts only where the input's parties are
+    the person's own or the assistant's. A message the system wrote is the exchange's
+    reply, never its input, and is never relayed.
+    """
+    return item.author is not MessageAuthor.ASSISTANT and relay_mark_counts(
+        projection.parties, relayed=projection.relayed
+    )
 
 
 def _channel_items(window: ChannelWindow) -> list[_ChannelItem]:
