@@ -24,6 +24,14 @@ it, or by its identity alone where none did; and a story by its identity alone, 
 the episode records no position, no version lies at or below it, or no text is held for
 that version. Nothing later stands in for it.
 
+**Not held as it stood then** (ADR-0353 §14:7). An episode the record points at that was
+still open when the leaving episode ended, or ended after it, by the two records'
+``ended_at``, is not held as it stood at the leaving episode's time: it is shown by its
+identity alone, with nothing of it read, whether running work understanding named in
+``cites`` or in ``belongs_to``, or the activation a place-window item linked to. A
+``running`` referent is a pointer and no more (§10:6): it names that activation's episode
+by its identity, never by its excerpt, and no read follows from it.
+
 **Parts, not fields** (ADR-0329 §8:6). An episode is rendered by the parts a support may
 point at (ADR-0328 §4's part table): the input or each message it took in, each round's
 message, each evidence item of its digests, and, for a candidate recorded under an
@@ -86,7 +94,7 @@ from ai_assistant.orchestration.authorizer import (
     values_digest,
 )
 from ai_assistant.orchestration.candidates import done_candidates
-from ai_assistant.orchestration.episode_reads import without_open_episodes
+from ai_assistant.orchestration.episode_reads import is_open_episode, without_open_episodes
 from ai_assistant.orchestration.remembering import (
     FACT_ARGUMENT,
     REMEMBER_CAPABILITY,
@@ -633,6 +641,9 @@ class _Pointed:
     notes: dict[str, None] = field(default_factory=dict)
     recalled: dict[str, RecalledItem] = field(default_factory=dict)
     order: list[tuple[str, str]] = field(default_factory=list)
+    #: The episodes ``running`` referents name (ADR-0353 §10:6): shown by their identity
+    #: alone and read only where another pointer names them too.
+    running: dict[str, None] = field(default_factory=dict)
 
     def add(self, kind: str, record_id: str | None) -> None:
         if not record_id:
@@ -672,12 +683,15 @@ def _pointed_at(leaving: EpisodicMemory, processing: EpisodeProcessingRecord) ->
         for referent in _referents(understood):
             if referent.kind in {"episode", "memory", "story"}:
                 pointed.add(referent.kind, referent.id)
+            elif referent.kind == "running" and referent.id:
+                pointed.running[referent.id] = None
         for link in understood.story_links:
             if link.kind is StoryMemberKind.STORY:
                 pointed.add("story", link.id)
             else:
                 pointed.add("episode", episode_address(link.id))
     pointed.episodes.pop(leaving.id, None)
+    pointed.running.pop(leaving.id, None)
     pointed.order = [(kind, one) for kind, one in pointed.order if one != leaving.id]
     return pointed
 
@@ -722,12 +736,20 @@ class EpisodeReader:
             raise ValueError(msg)
         then = processing.started_at
         pointed = _pointed_at(leaving, processing)
-        found = without_open_episodes(await self._memory.get_many(list(pointed.episodes)))
+        pointed_records = await self._memory.get_many(list(pointed.episodes))
+        # ADR-0353 §14:7: one still open when the leaving episode ended, or ended after
+        # it, is not held as it stood then, so nothing of it is read.
+        cut = {
+            one for one, record in pointed_records.items() if _after(record, processing.ended_at)
+        }
+        found = without_open_episodes(pointed_records)
         held = sorted(
             (
                 record
                 for one in pointed.episodes
-                if isinstance(record := found.get(one), EpisodicMemory) and _readable(record)
+                if one not in cut
+                and isinstance(record := found.get(one), EpisodicMemory)
+                and _readable(record)
             ),
             key=lambda record: (record.occurred_at, record.id),
         )
@@ -743,9 +765,11 @@ class EpisodeReader:
         earlier = [shown.episode(one, answers) for one in earlier_records]
         handles = {one.episode: one.handle for one in earlier}
         handles[leaving.id] = read_leaving.handle
-        for episode_id in pointed.episodes:
+        for episode_id in (*pointed.episodes, *pointed.running):
             if episode_id not in handles and episode_id not in later:
-                item = pointed.recalled.get(episode_id)
+                # By its identity alone where it is cut off or only a running referent
+                # names it (§14:7, §10:6); otherwise by what a recall run kept (§2:3).
+                item = None if episode_id in cut else pointed.recalled.get(episode_id)
                 gone = ReadEpisode(
                     handle=labels("E"),
                     episode=episode_id,
@@ -1001,11 +1025,13 @@ def _answers(records: Sequence[EpisodicMemory]) -> dict[str, str]:
 def _understood(
     processing: EpisodeProcessingRecord, handles: Mapping[str, str], leaving: ReadEpisode
 ) -> dict[str, FrozenJson] | None:
-    """The understanding's latest version, rendered (ADR-0346 §2:5).
+    """The understanding's latest version, rendered (ADR-0346 §2:5, ADR-0353 §14:6).
 
-    Its meaning and what it drew on; it records no ground, reference, relationship,
-    unresolved matter or answer pointer (ADR-0353 §9:5). A referent the reading holds
-    is named by its label; any other by its kind and the excerpt the record kept.
+    Its meaning, each cited referent and each unclear point with its readings; it records
+    no ground, reference, relationship, unresolved matter or answer pointer (ADR-0353
+    §9:5). A referent the reading holds is named by its label, and any other by its kind
+    and the excerpt the record kept; a ``running`` one by its identity alone, never by
+    its excerpt (§10:6).
     """
     if not processing.understanding:
         return None
@@ -1017,11 +1043,14 @@ def _understood(
             label = leaving.handle
         elif one.id is not None:
             label = handles.get(one.id)
+        if one.kind == "running":
+            return {"kind": one.kind, "label": label}
         return {"kind": one.kind, "label": label, "excerpt": one.excerpt}
 
     return {
         "meaning": latest.meaning,
         "meaning_rests_on": [referent(one) for one in latest.meaning_referents],
+        "unclear": [{"gap": one.gap, "readings": list(one.readings)} for one in latest.unclear],
     }
 
 
@@ -1124,6 +1153,21 @@ async def _story_notes(stories: StoryStore, story_id: str) -> list[StoryNote]:
         if page.next_cursor is None or page.next_cursor == cursor:
             return held
         cursor = page.next_cursor
+
+
+def _after(record: object, leaving_ended: datetime | None) -> bool:
+    """Whether a stored episode was still open when the leaving one ended, or ended after.
+
+    By the two records' ``ended_at`` (ADR-0353 §14:7). An episode with no processing
+    record has no end to compare and is left to the other rules; a leaving episode with
+    no end, which the stage never reads, cuts off every episode that has one.
+    """
+    if is_open_episode(record):
+        return True
+    if not isinstance(record, EpisodicMemory) or record.processing_record is None:
+        return False
+    ended = record.processing_record.ended_at
+    return ended is None or leaving_ended is None or ended > leaving_ended
 
 
 def _readable(record: EpisodicMemory) -> bool:

@@ -120,8 +120,11 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
     recall: ActivationRecall | None = None,
     stories_position: int | None = None,
     parties: tuple[SupportHolder, ...] | None = None,
+    ended: datetime | None = None,
 ) -> EpisodicMemory:
     """One activation's episode at its own address, frozen unless ``open_``.
+
+    A frozen one ends at ``ended``, by default the instant it started.
 
     Its input's parties are its messages', as the line declares each (ADR-0351 §2:6),
     or, with none, ``parties`` where given and else those ``origin`` names.
@@ -143,7 +146,7 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
         processing_record=EpisodeProcessingRecord(
             activation_id=activation_id,
             started_at=at,
-            ended_at=at if frozen else None,
+            ended_at=(ended or at) if frozen else None,
             trigger=RecordedChannelTrigger(
                 target=channel,
                 channel=channel,
@@ -161,7 +164,7 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
             understanding_omitted=(
                 None if understanding or not frozen else UnderstandingOmission.NOT_REACHED
             ),
-            stages=ended_pass(at) if frozen else (),
+            stages=ended_pass(ended or at) if frozen else (),
             rounds=tuple(rounds),
             labels=tuple(labels),
             digests=tuple(digests),
