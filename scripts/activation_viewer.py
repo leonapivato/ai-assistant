@@ -48,6 +48,15 @@ acting and any digest, the end, and what the observer learned. Each step is a su
 opens its calls and entries in the drawer the timeline opens. Previous and Next, or the
 arrow keys, move; the page's address names the step, as ``#<activation>/walk/<n>``.
 
+A step also says how each of its model calls went: how long it took, its tokens, and a
+cost estimated from the rates :data:`MODEL_RATES` keeps beside each model's id, dated and
+labelled as an estimate; and the thinking summary its returned entry keeps, where it keeps
+one. Recall's step shows what each cue found, the second run's meaning and each gap apart.
+Understanding's shows what code did with each label of its reply, kept or dropped by
+ADR-0353 §9's rules, computed from the labels the message showed since the record keeps no
+resolution; the labels it showed that the reply names in no list; and, where the run was
+repaired, the code's statement of why, read from the repair's own request.
+
 What the observer learned from an activation is in the file beside its own,
 ``<activation_id>.observer.jsonl`` (ADR-0333 §3), joined to it by name and never listed as
 an activation of its own. The activation's page shows it as a learning lane, attempt by
@@ -1949,17 +1958,57 @@ LIST_PATHS: Final = 40
 #: The longest line a block may be and still read as a heading.
 HEADING_CHARS: Final = 80
 
-#: What a returned entry that keeps the reply alone says of its usage (#3090).
+#: What a returned entry that keeps the reply alone says of its usage (#3090). Since
+#: ADR-0354 §7:2 a structured call's returned entry keeps its usage, and this is said only
+#: of an entry written before.
 NO_USAGE: Final = (
     "This entry records no token usage: understanding's and digesting's returned entries "
-    "keep the reply alone (#3090)."
+    "kept the reply alone before ADR-0354 (#3090)."
 )
 
 #: What the observer's returned entry, which keeps the reply alone, says of its usage.
 NO_OBSERVER_USAGE: Final = (
-    "This entry records no token usage: the observer's returned entries keep the reply "
-    "alone (ADR-0333 §2:1)."
+    "This entry records no token usage: the observer's returned entries kept the reply "
+    "alone before ADR-0354 (ADR-0333 §2:1)."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class Rates:
+    """One model's list prices, in US dollars per million tokens, as of a date.
+
+    The basis of an estimate the page labels as one, never a bill: what a call cost is
+    the provider's to say.
+    """
+
+    #: The date the rates were read as current.
+    as_of: str
+    input: float
+    output: float
+    #: Input read from the provider's cache.
+    cache_read: float
+    #: Input written to the provider's cache, for its five-minute duration: the one the
+    #: hub's cache marks ask for, since they name no duration (``models/prompt_cache.py``).
+    cache_write: float
+
+
+#: Each model's rates, by its id, the date it was read beside it: the Anthropic API's
+#: published prices. A model not here shows its tokens alone. Cache writes are 1.25 times
+#: the input rate, as the five-minute duration is priced.
+MODEL_RATES: Final[dict[str, Rates]] = {
+    "claude-sonnet-5-5": Rates(
+        as_of="2026-10-28", input=2.00, output=10.00, cache_read=0.20, cache_write=2.50
+    ),
+    "claude-opus-5-5": Rates(
+        as_of="2026-10-28", input=4.00, output=20.00, cache_read=0.20, cache_write=5.00
+    ),
+}
+
+#: A model id with a snapshot's date after it, as a response may name the model.
+_DATED_MODEL: Final = re.compile(r"(.+)-[0-9]{8}")
+
+#: Tokens to a million, the unit the rates are in.
+_MILLION: Final = 1_000_000
 
 _BLANK_LINE: Final = re.compile(r"\n[ \t]*\n")
 _MARKDOWN_HEADING: Final = re.compile(r"#{1,6}[ \t]+(\S.*?)[ \t#]*")
@@ -2209,9 +2258,81 @@ def _usage(value: object) -> dict[str, int] | None:
     shown: dict[str, int] = {}
     for key, label in _USAGE_KEYS:
         count = usage.get(key)
-        if isinstance(count, int) and not isinstance(count, bool):
+        if isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= _SAFE_INTEGER:
             shown[label] = count
     return shown or None
+
+
+def rates_of(model: str | None) -> tuple[str, Rates] | None:
+    """The rates kept for the model a call names, and the id they are kept under.
+
+    The model is named as ``provider:model`` by a structured call (ADR-0354 §5:3), and by
+    its bare name in a planning round's response; a snapshot's date after the id is read
+    as that id. ``None`` where no rates are kept for it.
+    """
+    if model is None:
+        return None
+    name = model.rsplit(":", 1)[-1]
+    if name not in MODEL_RATES and (dated := _DATED_MODEL.fullmatch(name)) is not None:
+        name = dated.group(1)
+    rates = MODEL_RATES.get(name)
+    return None if rates is None else (name, rates)
+
+
+def estimated_cost(model: str | None, usage: Mapping[str, int] | None) -> dict[str, object] | None:
+    """What a call's tokens cost at its model's kept rates: an estimate, never a bill.
+
+    The input a usage counts holds its cache reads and writes (``ReplyUsage``, and the
+    provider's counts as pydantic-ai reads them), so each is priced at its own rate and
+    the rest of the input at the input rate.
+
+    Args:
+        model: The model the call names.
+        usage: Its usage as :func:`_usage` reads it.
+
+    Returns:
+        The estimate in US dollars, with the model id and the date of the rates it used;
+        ``None`` where the call records no usage or no rates are kept for its model.
+    """
+    found = rates_of(model)
+    if found is None or not usage:
+        return None
+    name, rates = found
+    read, written = usage.get("cache read", 0), usage.get("cache write", 0)
+    uncached = max(0, usage.get("input", 0) - read - written)
+    dollars = (
+        uncached * rates.input
+        + read * rates.cache_read
+        + written * rates.cache_write
+        + usage.get("output", 0) * rates.output
+    ) / _MILLION
+    return {"usd": dollars, "model": name, "as_of": rates.as_of}
+
+
+def thinking_of(body: object) -> str | None:
+    """The thinking summary a returned entry keeps as its own ``thinking``, where it does.
+
+    A planning round's is a part of its response (#2861) and read with the parts; this is
+    the field a structured call's returned entry carries (ADR-0355): text, or a list of
+    texts, one to a thinking block, joined. Empty text is no summary.
+    """
+    held = _mapping(body).get("thinking")
+    if isinstance(held, list):
+        held = "\n\n".join(one for one in held if isinstance(one, str) and one.strip())
+    return held if isinstance(held, str) and held.strip() else None
+
+
+def spent_of(source: str, body: object) -> tuple[dict[str, int] | None, str | None]:
+    """A returned entry's usage and the model that answered, where it keeps them.
+
+    A planning round keeps them in its response (ADR-0314 §8); a structured call beside
+    its reply (ADR-0354 §7:2); a returned entry written before either, neither.
+    """
+    held = _mapping(body)
+    if source == "planning":
+        response = _mapping(held.get("response"))
+        return _usage(response.get("usage")), _text(response.get("model_name"))
+    return _usage(held.get("usage")), _text(held.get("model"))
 
 
 def _arguments_text(raw: object, parsed: object) -> str:
@@ -2257,7 +2378,7 @@ def _response_part(part: object) -> list[dict[str, object]]:
         return [_sized(content, kind="text", title="Text")]
     if kind == "thinking":
         text = content if isinstance(content, str) else ""
-        return [_sized(text, kind="thinking", title="Thinking (the provider's summary)")]
+        return [_sized(text, kind="thinking", title=THINKING_TITLE)]
     if kind == "tool-call":
         name = _text(shown.get("tool_name")) or "?"
         call_id = _text(shown.get("tool_call_id"))
@@ -2277,20 +2398,14 @@ def _did(source: str, body: object) -> dict[str, object]:
     did: dict[str, object] = {"parts": parts}
     if _failed(held):
         did["failure"] = _failure_text(held.get("failure"))
+    usage, model = spent_of(source, body)
+    did["usage"] = usage
+    did["model"] = model
+    did["cost"] = estimated_cost(model, usage)
     if source == "planning":
-        response = _mapping(held.get("response"))
-        listed = response.get("parts")
-        for part in _sequence(listed):
-            parts.extend(_response_part(part))
-        did["usage"] = _usage(response.get("usage"))
-        if did["usage"] is None:
-            did["usage_note"] = "This response records no token usage."
-        did["read_as_round"] = held.get("read_as_round")
-        did["finish_reason"] = _text(response.get("finish_reason"))
-        did["model"] = _text(response.get("model_name"))
-        if not isinstance(listed, list) and not _failed(held):
-            did["odd"] = "This entry holds no response parts to read."
-        return did
+        return _did_round(held, did, parts)
+    did["finish_reason"] = _text(held.get("finish_reason"))
+    _thinking_first(parts, held)
     reply = held.get("reply")
     if isinstance(reply, str):
         parts.append(_sized(_readable(reply), kind="reply", title="Reply"))
@@ -2303,9 +2418,38 @@ def _did(source: str, body: object) -> dict[str, object]:
         )
     if not parts and "failure" not in did:
         did["odd"] = "This entry holds no reply to read."
-    did["usage"] = None
-    did["usage_note"] = NO_OBSERVER_USAGE if source == "observer" else NO_USAGE
+    if usage is None:
+        did["usage_note"] = NO_OBSERVER_USAGE if source == "observer" else NO_USAGE
     return did
+
+
+def _did_round(
+    held: Mapping[str, object], did: dict[str, object], parts: list[dict[str, object]]
+) -> dict[str, object]:
+    """What a planning round did: its response's parts, and how the round read it."""
+    response = _mapping(held.get("response"))
+    listed = response.get("parts")
+    for part in _sequence(listed):
+        parts.extend(_response_part(part))
+    _thinking_first(parts, held)
+    if did["usage"] is None:
+        did["usage_note"] = "This response records no token usage."
+    did["read_as_round"] = held.get("read_as_round")
+    did["finish_reason"] = _text(response.get("finish_reason"))
+    if not isinstance(listed, list) and not _failed(held):
+        did["odd"] = "This entry holds no response parts to read."
+    return did
+
+
+#: A thinking part's title in what a call did.
+THINKING_TITLE: Final = "Thinking (the provider's summary)"
+
+
+def _thinking_first(parts: list[dict[str, object]], body: Mapping[str, object]) -> None:
+    """The entry's own ``thinking`` as the first part, where no part already holds one."""
+    thinking = thinking_of(body)
+    if thinking is not None and not any(one.get("kind") == "thinking" for one in parts):
+        parts.insert(0, _sized(thinking, kind="thinking", title=THINKING_TITLE))
 
 
 def request_parts(body: object) -> dict[str, tuple[str, int]]:
@@ -2790,6 +2934,12 @@ WALK_CHARS: Final = 600
 #: How much of a recalled item's text a step shows: the hub cuts a fact shorter already.
 RECALLED_CHARS: Final = 2_000
 
+#: How much of a thinking summary a step shows; the call, readable, shows it whole.
+THINKING_CHARS: Final = 4_000
+
+#: How many of one cue's finds a recall step lists; the rest are counted.
+CUE_FINDS: Final = 40
+
 #: How much of the text a label names a step shows beside the label.
 LABEL_CHARS: Final = 200
 
@@ -3013,6 +3163,7 @@ def _phase_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
         "step": _step_facts(phase.step),
         "round": number,
         "links": _links(built, phase),
+        "spent": _spent(built, phase),
     }
     if phase.stage == "recall":
         shown |= _recall_step(built, phase)
@@ -3028,6 +3179,59 @@ def _phase_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
     elif phase.stage == "digesting":
         shown |= _digesting_step(built, phase)
     return shown
+
+
+def _spent(built: _Timeline, phase: _Phase) -> list[dict[str, object]]:
+    """Each model call of a step, in order: its time, tokens, cost estimate and thinking.
+
+    How long it took, its tokens, their estimated cost, and the thinking summary its
+    returned entry keeps. A call is its given entry and the returned one paired with it,
+    or a returned entry alone; where either is missing, what it would say is ``None``.
+    """
+    by_line = {one.line: one for one in built.entries}
+    paired = set(built.pairs.values())
+    spent: list[dict[str, object]] = []
+    for one in phase.entries:
+        if one.source not in MODEL_SOURCES:
+            continue
+        if one.kind == "given":
+            back = built.pairs.get(one.line)
+            given, returned = one, None if back is None else by_line.get(back)
+        elif one.kind == "returned" and one.line not in paired:
+            given, returned = None, one
+        else:
+            continue
+        body = None if returned is None else returned.body
+        usage, model = (None, None) if returned is None else spent_of(one.source, body)
+        thinking = _thinking_in(one.source, body)
+        spent.append(
+            {
+                "line": one.line,
+                "took": None if given is None or returned is None else _ms(returned.at - given.at),
+                "returned": returned is not None,
+                "model": model,
+                "usage": usage,
+                "cost": estimated_cost(model, usage),
+                "thinking": None if thinking is None else _cut(thinking, THINKING_CHARS),
+            }
+        )
+    return spent
+
+
+def _thinking_in(source: str, body: object) -> str | None:
+    """A returned entry's thinking summary: its own ``thinking``, or its response's parts'."""
+    own = thinking_of(body)
+    if own is not None or source != "planning":
+        return own
+    parts = _sequence(_mapping(_mapping(body).get("response")).get("parts"))
+    texts = [
+        content
+        for part in map(_mapping, parts)
+        if part.get("part_kind") == "thinking"
+        and isinstance(content := part.get("content"), str)
+        and content.strip()
+    ]
+    return "\n\n".join(texts) if texts else None
 
 
 def _last(phase: _Phase, kind: str) -> Entry | None:
@@ -3101,19 +3305,77 @@ def _recall_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
     ]
     run = _text(asked.get("run"))
     listed = isinstance(body.get("finds"), list)
+    cues = [
+        {"text": _text(cue.get("text")), "kinds": _strings(cue.get("kinds"))}
+        for cue in map(_mapping, _sequence(asked.get("cues")))
+    ]
+    shown = _recalled_shown(built, phase, run, kept)
     return {
         "run": run,
-        "cues": [
-            {"text": _text(cue.get("text")), "kinds": _strings(cue.get("kinds"))}
-            for cue in map(_mapping, _sequence(asked.get("cues")))
-        ],
+        "cues": cues,
         "returned": returned is not None,
         "outcome": _text(body.get("outcome")),
         "found": len(finds) if listed else None,
         "admitted": sum(1 for one in finds if one.get("admitted") is True) if listed else None,
         "kept": kept,
         "failure": _failure_of(body),
-        "shown": _recalled_shown(built, phase, run, kept),
+        "shown": shown,
+        "by_cue": _by_cue(cues, finds, kept) if listed else None,
+    }
+
+
+def _by_cue(
+    cues: Sequence[Mapping[str, object]],
+    finds: Sequence[Mapping[str, object]],
+    kept: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """What each cue's searches found, in the cues' order: each find, and which were kept.
+
+    A find names the cue it was searched by (ADR-0314 §8), so the first run's cue and the
+    second run's meaning and each gap (``understood_gap``) each show their own finds. A
+    find naming a cue the given entry does not list is shown under it after the rest.
+    Each is listed with its band, its score, whether it was admitted and whether the run
+    kept it, by the label the request after it showed it under where that is joined.
+    """
+    labels = {str(one["id"]): one.get("label") for one in kept if isinstance(one.get("id"), str)}
+    order: dict[str, list[str]] = {}
+    for cue in cues:
+        text = cue.get("text")
+        if isinstance(text, str):
+            order.setdefault(text, _strings(cue.get("kinds")))
+    grouped: dict[str, list[Mapping[str, object]]] = {text: [] for text in order}
+    for one in finds:
+        searched = _text(one.get("cue"))
+        if searched is not None:
+            grouped.setdefault(searched, []).append(one)
+    shown: list[dict[str, object]] = []
+    for text, found in grouped.items():
+        found_ids = {found_id for one in found if (found_id := _text(one.get("id"))) is not None}
+        shown.append(
+            {
+                "text": text,
+                "kinds": order.get(text, []),
+                "listed": text in order,
+                "found": len(found),
+                "admitted": sum(1 for one in found if one.get("admitted") is True),
+                "kept": sum(1 for one in found_ids if one in labels),
+                "finds": [_find(one, labels) for one in found[:CUE_FINDS]],
+                "more": max(0, len(found) - CUE_FINDS),
+            }
+        )
+    return shown
+
+
+def _find(one: Mapping[str, object], labels: Mapping[str, object]) -> dict[str, object]:
+    """One find of a cue: its id, band, score, whether admitted, whether kept, its label."""
+    found = _text(one.get("id"))
+    return {
+        "id": found,
+        "band": _text(one.get("band")),
+        "score": _number(one.get("score")),
+        "admitted": one.get("admitted") is True,
+        "kept": found is not None and found in labels,
+        "label": None if found is None else labels.get(found),
     }
 
 
@@ -3350,21 +3612,234 @@ def _tagged_labels(body: object, wanted: set[str]) -> dict[str, str]:
 
 
 def _understanding_step(phase: _Phase) -> dict[str, object]:
-    """Understanding's run: its reading of the input, field by field, with its labels' text."""
-    given, returned = _last(phase, "given"), _last(phase, "returned")
+    """Understanding's run: its reading of the input, field by field, with its labels' text.
+
+    The labels are read from the run's first request: a repair's request carries the same
+    message, and then the reply and the code's statement of what was wrong with it, as its
+    last user message (ADR-0354 §8:3). Beside the reading, what code did with each of its
+    labels (:func:`resolution_of`), the labels the message showed that the reply names in
+    no list, and, where the run was repaired, why.
+    """
+    given, returned = _first(phase, "given"), _last(phase, "returned")
+    calls = sum(1 for one in phase.entries if one.kind == "given")
     body = _mapping(None if returned is None else returned.body)
     reply = _text(body.get("reply"))
     reading = None if reply is None else reading_of(reply)
     labels = (
         {} if reading is None or given is None else labels_in(given.body, _labels_used(reading))
     )
+    shown = [] if given is None else shown_labels(given.body)
+    used = set() if reading is None else _labels_used(reading)
     return {
-        "calls": sum(1 for one in phase.entries if one.kind == "given"),
+        "calls": calls,
         "returned": returned is not None,
         "reading": reading,
         "reply": reply if reading is None else None,
         "labels": labels,
         "failure": _failure_of(body),
+        "resolution": None
+        if reading is None or reading.get("shape") != "reply" or given is None
+        else resolution_of(reading, shown, repaired=calls > 1),
+        "not_cited": None
+        if reading is None or given is None
+        else [one for one in shown if one["label"] not in used],
+        "repair": _repair_of(phase, shown) if calls > 1 else None,
+    }
+
+
+#: The labels of the ``R`` form: a concurrent stimulus's (ADR-0353 §2:2).
+_R_LABEL: Final = re.compile(r"R[0-9]+")
+
+#: What each outcome of a label's resolution says of it, by ADR-0353 §9's rules.
+_RESOLVED: Final = {
+    "shown": "resolves to the item shown under it",
+    "running": "names a concurrent stimulus shown under it: links to that running activation "
+    "(ADR-0353 §10:3)",
+    "matter": "names a matter shown under it: links to that matter",
+    "stimulus": "names a stimulus shown under it: links to its activation, where its episode "
+    "records one",
+    "continues": "names a concurrent stimulus shown under it: this stimulus continues its "
+    "work (ADR-0353 §10:4)",
+    "fact": "names a remembered fact, which links nothing: dropped, with no repair "
+    "(ADR-0353 §9:12)",
+    "item": "names a place-window item: it links only where the item links to an activation, "
+    "which the record does not say; where it does not, it is dropped, with no repair "
+    "(ADR-0353 §9:12)",
+    "untold": "names an item the request does not say the kind of: whether it links is not "
+    "known here",
+    "no_running": "names no concurrent stimulus shown: dropped, with no repair (ADR-0353 §9:11)",
+    "not_running": "is no concurrent stimulus's label: dropped, with no repair (ADR-0353 §9:11)",
+    "after_repair": "names nothing shown, after the one repair: dropped (ADR-0353 §9:10)",
+    "repair": "names nothing shown: the reply earns the one repair (ADR-0353 §9:10), and the "
+    "record shows none",
+    "again": "listed again: recorded once",
+}
+
+
+def shown_labels(body: object) -> list[dict[str, object]]:
+    """Each label a request showed, in the order it rendered them, with what it names.
+
+    The request is read in the form it was recorded in (ADR-0353 §14:10): the tagged
+    message, each labelled tag with its section's heading and its tag's name (§3:6); or
+    the earlier JSON, each labelled value with the top-level key it sits under and no tag.
+
+    Args:
+        body: Understanding's given entry's body.
+
+    Returns:
+        Each label once, the first time it renders: its section, its tag's name or
+        ``None``, and its item's text cut to :data:`LABEL_CHARS`.
+    """
+    document = _user_document(body)
+    if document is not None:
+        return _labels_of_document(document)
+    found: dict[str, dict[str, object]] = {}
+    sections = _tagged_request(body)
+    for heading, section in ({} if sections is None else sections).items():
+        tags = [one for one in _tagged(section) or () if isinstance(one, _Tag)]
+        while tags:
+            tag = tags.pop(0)
+            label = tag.attributes.get("label")
+            if label is not None and label not in found:
+                text = _tag_text(tag, LABEL_CHARS)
+                found[label] = {"label": label, "where": heading, "tag": tag.name, "text": text}
+            tags[:0] = tag.tags
+    return list(found.values())
+
+
+def _labels_of_document(document: Mapping[str, object]) -> list[dict[str, object]]:
+    """Each label the earlier JSON request showed, under the top-level key it sits in."""
+    found: dict[str, dict[str, object]] = {}
+    for key, value in document.items():
+        pending: list[tuple[object, int]] = [(value, 0)]
+        while pending:
+            one, depth = pending.pop()
+            if depth > LABEL_DEPTH:
+                continue
+            if isinstance(one, dict):
+                label = _text(one.get("label"))
+                if label is not None and label not in found:
+                    text = _item_text(one, LABEL_CHARS)
+                    found[label] = {"label": label, "where": key, "tag": None, "text": text}
+                pending.extend((item, depth + 1) for item in reversed(one.values()))
+            elif isinstance(one, list):
+                pending.extend((item, depth + 1) for item in reversed(one))
+    return list(found.values())
+
+
+def resolution_of(
+    reading: Mapping[str, object], shown: Sequence[Mapping[str, object]], *, repaired: bool
+) -> dict[str, list[dict[str, object]]]:
+    """What code did with each label of a reply in ADR-0353 §9:1's shape, computed.
+
+    The record keeps no resolution: the stage resolves each label through the tables it
+    built when it rendered the message, and keeps what resolves in the episode alone. So
+    this is computed from the labels the message showed, by §9's rules: a label in
+    ``cites`` that is shown resolves; an ``R`` label naming no shown concurrent stimulus is
+    dropped with no repair (§9:11); a label in ``belongs_to`` naming a remembered fact is
+    dropped with no repair (§9:12), and one naming a place-window item links only where
+    the item does, which the message does not say; a label in ``meant_for`` resolves only
+    to a shown concurrent stimulus (§9:11); and any other label naming nothing shown earns
+    the one repair, and is dropped where it is still there after it (§9:10).
+
+    Args:
+        reading: The reply, as :func:`reading_of` reads it in the reply's shape.
+        shown: The labels the message showed, as :func:`shown_labels` gives them.
+        repaired: Whether this reply answered the one repair.
+
+    Returns:
+        Each of ``cites``, ``belongs_to`` and ``meant_for``, each label in the reply's
+        order: the text it names, where it was shown, ``kept``, ``dropped``,
+        ``unknown``, ``repair`` or ``again``, and why.
+    """
+    by_label = {str(one["label"]): one for one in shown}
+    resolved: dict[str, list[dict[str, object]]] = {}
+    for key in ("cites", "belongs_to", "meant_for"):
+        rows: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for label in _strings(reading.get(key)):
+            item = by_label.get(label)
+            why = "again" if label in seen else _resolution(key, label, item, repaired=repaired)
+            seen.add(label)
+            rows.append(
+                {
+                    "label": label,
+                    "text": None if item is None else item["text"],
+                    "where": None if item is None else item["where"],
+                    "outcome": _OUTCOMES[why],
+                    "why": _RESOLVED[why],
+                }
+            )
+        resolved[key] = rows
+    return resolved
+
+
+#: Each reason's outcome for the label.
+_OUTCOMES: Final = {
+    "shown": "kept",
+    "running": "kept",
+    "matter": "kept",
+    "stimulus": "kept",
+    "continues": "kept",
+    "fact": "dropped",
+    "item": "unknown",
+    "untold": "unknown",
+    "no_running": "dropped",
+    "not_running": "dropped",
+    "after_repair": "dropped",
+    "repair": "repair",
+    "again": "again",
+}
+
+
+def _resolution(key: str, label: str, item: Mapping[str, object] | None, *, repaired: bool) -> str:
+    """Why one label of one list resolves as it does: a key of :data:`_RESOLVED`."""
+    running = _R_LABEL.fullmatch(label) is not None
+    if key == "meant_for" or (item is None and running):
+        why = "not_running" if not running else "no_running" if item is None else "continues"
+    elif item is None:
+        why = "after_repair" if repaired else "repair"
+    elif key == "cites":
+        why = "shown"
+    elif running:
+        why = "running"
+    else:
+        why = _LINKED_BY_TAG.get(str(item["tag"]), "untold")
+    return why
+
+
+#: What a label in ``belongs_to`` links to, by the tag its item was shown in (ADR-0353
+#: §3:2-§3:3, §9:12).
+_LINKED_BY_TAG: Final = {
+    "matter": "matter",
+    "stimulus": "stimulus",
+    "memory": "fact",
+    "message": "item",
+}
+
+
+def _repair_of(phase: _Phase, shown: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Why a run was repaired: the first reply, its failure, and the code's statement.
+
+    The repair's request carries the first reply as the assistant's turn and the code's
+    statement of what was wrong with it as its last user message (ADR-0354 §8:3), so the
+    statement is read from the record, never computed. The labels of the first reply
+    that named nothing shown are computed, as :func:`resolution_of` computes them.
+    """
+    givens = [one for one in phase.entries if one.kind == "given"]
+    returns = [one for one in phase.entries if one.kind == "returned"]
+    first = _mapping(returns[0].body) if returns else {}
+    reply = _text(first.get("reply"))
+    reading = None if reply is None else reading_of(reply)
+    labels: list[str] = []
+    if reading is not None and reading.get("shape") == "reply":
+        for key, rows in resolution_of(reading, shown, repaired=False).items():
+            labels += [f"{row['label']} in {key}" for row in rows if row["outcome"] == "repair"]
+    return {
+        "statement": _user_content(givens[1].body),
+        "first_failure": _failure_of(first),
+        "first_reply": None if reply is None else _cut(_readable(reply)),
+        "labels": labels,
     }
 
 
@@ -4201,6 +4676,9 @@ details.card[open] > summary { margin-bottom: 8px; }
 }
 .chip.v-allowed { color: var(--acting); } .chip.v-needs_you { color: var(--needs); }
 .chip.v-not_done { color: var(--refused); }
+.chip.o-kept { color: var(--kept); } .chip.o-dropped { color: var(--failed); }
+.chip.o-repair { color: var(--needs); }
+.chip.o-unknown, .chip.o-again { color: var(--muted); }
 .msg-note { font-size: 12px; color: var(--acting); margin-top: 6px; }
 .msg-note.no { color: var(--refused); }
 .entries { font-family: var(--mono); font-size: 12px; }
@@ -5445,7 +5923,46 @@ SCRIPT: Final = r"""
     const walker = WALKERS[s.phase];
     if (walker) walker(root, s, data.owner);
     else walkOther(root, s);
+    spentInto(root, s.spent || []);
     linksInto(root, s, data.owner);
+  }
+  // An estimate of what a call cost, labelled as one, at the rates of the date it names.
+  function costText(cost) {
+    const usd = cost.usd;
+    const shown = usd >= 0.01 ? usd.toFixed(3) : usd >= 0.0001 ? usd.toFixed(5)
+      : usd.toPrecision(2);
+    return "\u2248 $" + shown + " (est., " + cost.model + " rates of " + cost.as_of + ")";
+  }
+  function usageText(usage) {
+    const order = ["input", "cache read", "cache write", "output"];
+    return order.filter((k) => usage[k] !== undefined)
+      .map((k) => num(usage[k]) + " " + k).join(" · ") + " tokens";
+  }
+  // Each model call of a step: its time, tokens and estimated cost, and the thinking
+  // summary its returned entry keeps, where it keeps one (#2861, ADR-0355).
+  function spentInto(root, spent) {
+    if (!spent.length) return;
+    const box = sec(root, spent.length === 1 ? "The call" : "Its calls");
+    spent.forEach((one, index) => {
+      const row = walkItem(box);
+      const facts = [];
+      if (spent.length > 1) facts.push("call " + (index + 1));
+      if (one.took !== null && one.took !== undefined) facts.push("took " + duration(one.took));
+      if (one.model) facts.push(one.model);
+      row.appendChild(el("div", "m", facts.join(" · ")));
+      if (one.usage) {
+        row.appendChild(el("div", "said", usageText(one.usage)));
+        row.appendChild(el("div", "m", one.cost ? costText(one.cost)
+          : "no rates are kept for this model: its tokens alone"));
+      } else {
+        row.appendChild(el("div", "m", one.returned ? "its returned entry records no token "
+          + "usage" : "no returned entry was recorded"));
+      }
+      if (one.thinking) {
+        row.appendChild(el("div", "m", "thinking (the provider\u2019s summary)"));
+        prose(row, one.thinking, "thinking");
+      }
+    });
   }
   // ``owner`` is the activation the step is of: a link opens its lines, whatever is
   // selected when it is clicked.
@@ -5540,6 +6057,31 @@ SCRIPT: Final = r"""
       kept.appendChild(el("p", "note", "No request after it in the record shows the text of "
         + "what was kept."));
     }
+    if (s.by_cue && s.by_cue.length) {
+      const box = sec(root, "What each cue found");
+      for (const cue of s.by_cue) {
+        const one = walkItem(box);
+        one.appendChild(el("div", "said", cue.text));
+        const head = [cue.kinds.length ? cue.kinds.map(words).join(", ")
+          : (cue.listed ? "no kind recorded" : "a cue its given entry does not list")];
+        head.push(plural(cue.found, "find", "finds"), num(cue.admitted) + " admitted",
+          num(cue.kept) + " kept");
+        one.appendChild(el("div", "m", head.join(" · ")));
+        for (const f of cue.finds) {
+          const line = el("div", "walk-label");
+          if (f.label) line.appendChild(el("span", "chip", f.label));
+          line.appendChild(el("span", "id", f.id === null ? "no id" : f.id));
+          const facts = [f.score === null ? "no score" : "score " + f.score.toFixed(3)];
+          if (f.band) facts.push(words(f.band));
+          facts.push(f.admitted ? "admitted" : "not admitted");
+          if (f.kept) facts.push("kept");
+          line.appendChild(el("span", "m", facts.join(" · ")));
+          one.appendChild(line);
+        }
+        if (cue.more) one.appendChild(el("p", "note", "and " + plural(cue.more, "find", "finds")
+          + " more; the entry shows them whole."));
+      }
+    }
     if (s.found !== null && s.found !== undefined && s.found > s.kept.length) {
       root.appendChild(el("p", "note", "The record does not say why a find was not kept."));
     }
@@ -5550,6 +6092,7 @@ SCRIPT: Final = r"""
       root.appendChild(el("p", "note", s.calls + " calls: the reading shown is the last "
         + "reply\u2019s; each call is a click below."));
     }
+    if (s.repair) repairInto(root, s.repair);
     const r = s.reading;
     if (!r) {
       if (s.reply !== null && s.reply !== undefined) {
@@ -5587,6 +6130,7 @@ SCRIPT: Final = r"""
       if (r.other.length) {
         root.appendChild(el("p", "note", "Keys the reply does not name: " + r.other.join(", ")));
       }
+      labelWorkInto(root, s);
       return;
     }
     root.appendChild(el("p", "note", "Written in the reply\u2019s earlier shape, before "
@@ -5621,6 +6165,63 @@ SCRIPT: Final = r"""
     if (r.other.length) {
       root.appendChild(el("p", "note", "Keys the reading does not name: "
         + r.other.join(", ")));
+    }
+    labelWorkInto(root, s);
+  }
+  // Why the run was repaired: the code's statement, read from the repair's request.
+  function repairInto(root, rep) {
+    const box = sec(root, "The repair");
+    box.appendChild(el("p", "note", "The first reply earned the one repair (ADR-0353 "
+      + "\u00a79:10); the reading below is the repaired reply\u2019s."));
+    if (rep.first_failure) box.appendChild(el("div", "m", "the first reply: "
+      + words(rep.first_failure)));
+    if (rep.labels.length) {
+      box.appendChild(el("div", "m", "labels in it that named nothing shown (computed): "
+        + rep.labels.join(", ")));
+    }
+    if (rep.statement !== null) {
+      box.appendChild(el("div", "m", "what the code told it"));
+      box.appendChild(el("div", "said", rep.statement));
+    }
+    if (rep.first_reply !== null) {
+      box.appendChild(el("div", "m", "the first reply"));
+      pre(box, rep.first_reply);
+    }
+  }
+  // What code did with each label, computed from the message's labels, and the labels the
+  // message showed that the reply names in no list.
+  function labelWorkInto(root, s) {
+    const res = s.resolution;
+    if (res) {
+      const box = sec(root, "What code did with its labels");
+      box.appendChild(el("p", "note", "Computed here from the labels the message showed, by "
+        + "ADR-0353 \u00a79\u2019s rules: the record keeps no resolution."));
+      for (const [key, title] of [["cites", "cites"], ["belongs_to", "belongs to"],
+        ["meant_for", "meant for"]]) {
+        const rows = res[key] || [];
+        if (!rows.length) continue;
+        box.appendChild(el("div", "m", title));
+        for (const row of rows) {
+          const one = walkItem(box);
+          const line = el("div", "walk-label");
+          line.appendChild(el("span", "chip", row.label));
+          line.appendChild(el("span", "chip o-" + row.outcome, row.outcome));
+          if (row.text !== null) line.appendChild(el("span", "t", row.text));
+          one.appendChild(line);
+          one.appendChild(el("div", "m", row.why + (row.where ? " · shown in "
+            + row.where : "")));
+        }
+      }
+    }
+    if (s.not_cited) {
+      const box = sec(root, "Shown but named in no list");
+      if (!s.not_cited.length) box.appendChild(el("p", "note", "none: the reply names every "
+        + "label the message showed"));
+      for (const one of s.not_cited) {
+        const row = walkItem(box);
+        labelsInto(row, [one.label], { [one.label]: one.text });
+        if (one.where) row.appendChild(el("div", "m", "shown in " + one.where));
+      }
     }
   }
   function walkPlanning(root, s) {
@@ -5683,7 +6284,9 @@ SCRIPT: Final = r"""
     }
     const flags = [];
     if (s.another_round) flags.push("it asked for another round");
-    if (s.thinking) flags.push("thinking recorded: the readable call shows it");
+    if (s.thinking && !(s.spent || []).some((one) => one.thinking)) {
+      flags.push("thinking recorded, with no summary text");
+    }
     if (s.read_as_round === false) flags.push("not read as a round");
     if (flags.length) root.appendChild(el("p", "note", flags.join(" · ")));
   }
@@ -5999,6 +6602,7 @@ SCRIPT: Final = r"""
     const usage = v.did && v.did.usage;
     if (usage) {
       stat(Object.entries(usage).map(([k, n]) => k + " " + num(n)).join(" \u00b7 ") + " tokens");
+      if (v.did.cost) stat(costText(v.did.cost));
     }
     holder.appendChild(stats);
     const nav = el("nav", "call-nav");
@@ -6157,6 +6761,8 @@ SCRIPT: Final = r"""
     if (did.odd) box.appendChild(el("p", "note", did.odd));
     if (did.usage) {
       kv(box, Object.entries(did.usage).map(([k, n]) => [k + " tokens", num(n)]));
+      box.appendChild(el("p", "note", did.cost ? "estimated cost: " + costText(did.cost)
+        : "No rates are kept for this model: its tokens alone, no estimate."));
     } else if (did.usage_note) {
       box.appendChild(el("p", "note", did.usage_note));
     }
