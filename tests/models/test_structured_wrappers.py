@@ -320,3 +320,48 @@ async def test_retry_inside_routing_is_the_composed_shape() -> None:
     assert reply.value == VALID_VALUE
     assert primary.structured.call_count == 2
     assert secondary.structured.call_count == 1
+
+
+# --- the thinking summary passes through (ADR-0355 §2:6, ADR-0354 §6:1) ----------
+
+_THINKING = "Blue light scatters most."
+
+
+class _Returning(Both):
+    """A provider recording each structured reply it returned."""
+
+    def __init__(self, structured: FakeStructuredCompleter) -> None:
+        """Answer with ``structured``, recording each reply."""
+        super().__init__(structured)
+        self.returned: list[object] = []
+
+    async def complete_structured[T: BaseModel](
+        self, messages: Sequence[Message], shape: type[T], *, model: str | None = None
+    ) -> StructuredReply[T]:
+        """Answer through the fake, and record what was answered."""
+        reply = await super().complete_structured(messages, shape, model=model)
+        self.returned.append(reply)
+        return reply
+
+
+def _thinking_inner(*answers: StructuredAnswer) -> _Returning:
+    return _Returning(FakeStructuredCompleter.scripted(*answers))
+
+
+async def test_retry_returns_the_exchanges_thinking_unchanged() -> None:
+    inner = _thinking_inner(
+        ModelUnavailableError("503"), ScriptedReply(text=VALID_REPLY, thinking=_THINKING)
+    )
+    reply = await RetryingProvider(inner, sleep=_no_sleep).complete_structured(request(), Verdict)
+    assert reply.exchange.thinking == _THINKING
+    assert reply is inner.returned[-1]
+
+
+async def test_routing_returns_the_exchanges_thinking_unchanged() -> None:
+    primary = _thinking_inner(ModelUnavailableError("down"))
+    secondary = _thinking_inner(ScriptedReply(text="nope", thinking=_THINKING))
+    router = RoutingProvider([Route(primary), Route(secondary)])
+    reply = await router.complete_structured(request(), Verdict)
+    assert reply.failure is ReplyFailure.INVALID
+    assert reply.exchange.thinking == _THINKING
+    assert reply is secondary.returned[-1]

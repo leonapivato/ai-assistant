@@ -107,3 +107,14 @@ def test_an_exchange_holds_an_empty_reply_and_no_refusal_by_default() -> None:
 def test_a_reply_that_cannot_be_written_down_is_refused() -> None:
     with pytest.raises(ValidationError):
         _exchange(reply="\ud800")
+
+
+def test_an_exchange_holds_no_thinking_by_default() -> None:
+    """ADR-0355 §4:1."""
+    assert _exchange().thinking is None
+    assert _exchange(thinking="Blue light scatters most.").thinking == "Blue light scatters most."
+
+
+def test_a_thinking_summary_that_cannot_be_written_down_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        _exchange(thinking="\ud800")

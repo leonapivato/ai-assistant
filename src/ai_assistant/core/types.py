@@ -628,6 +628,12 @@ class ReplyExchange(BaseModel):
         usage: The tokens the request spent.
         shape: The shape's class name.
         shape_version: The shape's version (§3:3).
+        thinking: The provider's summary of its thinking, where the provider was
+            built to keep it: the text of the response's thinking parts, in order,
+            those with no text left out, joined by one blank line (ADR-0355 §4:1).
+            ``None`` where no thinking part carries text, and always where the
+            provider was not built to keep it. It is derived from the response, not
+            from the value, and is no part of the reply.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -641,6 +647,7 @@ class ReplyExchange(BaseModel):
     usage: ReplyUsage = Field(default_factory=ReplyUsage)
     shape: NonBlankEncodableText
     shape_version: ReplyShapeVersion
+    thinking: EncodableText | None = None
 
 
 class StructuredReply[T: BaseModel](BaseModel):
