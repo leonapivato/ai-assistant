@@ -537,6 +537,10 @@ def entry_of(state: ActivationState) -> InProgressEntry | None:
     """``state`` as an in-progress entry shows it, read from its episode as stored (§5:6).
 
     ``None`` where its episode was never written, or it was started from no place.
+
+    Its text is read from the episode as stored, and withheld where the activation, as
+    it runs now, holds outside input (ADR-0351 §5:7, §8:5): a relay mark recorded since
+    the stored episode was last written withholds what that episode would still show.
     """
     episode = None if state.capture is None else state.capture.written
     place = state.place
@@ -549,6 +553,9 @@ def entry_of(state: ActivationState) -> InProgressEntry | None:
         return None
     view = project_episode(episode, excerpt_chars=PEER_BRIEF_CHARS, effects=())
     trigger = state.trigger
+    outside = holds_outside(trigger, state.understanding, state.joined)
+    if outside:
+        view = view.model_copy(update={"input": None, "joined": ()})
     # ADR-0353 §2:6: one input per text tag, the trigger's then each joined one, each as
     # the peer view shows it and with its own parties (ADR-0351 §2:6).
     joined = episode.processing_record.joined
@@ -577,7 +584,7 @@ def entry_of(state: ActivationState) -> InProgressEntry | None:
         parties=trigger.parties,
         arrived_at=episode.occurred_at,
         inputs=inputs,
-        outside=holds_outside(trigger, state.understanding, state.joined),
+        outside=outside,
     )
 
 
