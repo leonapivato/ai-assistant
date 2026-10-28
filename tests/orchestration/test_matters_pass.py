@@ -766,10 +766,12 @@ async def _split_flag() -> tuple[FakeStoryStore, MemoryStore, str]:
         json.dumps(
             {"decision": "split", "story": "S1", "episodes": ["E2"], "to": None, "into": None}
         ),
+        # A field of its own kind set to null carries nothing, and takes its default.
+        json.dumps({"decision": "split", "story": "S1", "episodes": ["E2"], "notes": None}),
         # A key no kind names is no field of the shape, and is read past (§10:2).
         json.dumps({"decision": "split", "story": "S1", "episodes": ["E2"], "why_zz": "two"}),
     ],
-    ids=["bare", "fenced", "another-kinds-null", "unnamed-key"],
+    ids=["bare", "fenced", "another-kinds-null", "its-own-null", "unnamed-key"],
 )
 async def test_a_decision_is_the_reply_read_by_the_one_rule(reply: str) -> None:
     """ADR-0354 §3:4, §9:3: one enclosing fence removed, then the shape, then its kind."""
@@ -826,6 +828,11 @@ async def test_a_decision_is_the_reply_read_by_the_one_rule(reply: str) -> None:
             "parse",
             "the reply's decision is not of its kind's shape",
         ),
+        (
+            json.dumps({"decision": "split", "story": "S1", "episodes": None}),
+            "parse",
+            "the reply's decision is not of its kind's shape",
+        ),
     ],
     ids=[
         "prose-alone",
@@ -842,6 +849,7 @@ async def test_a_decision_is_the_reply_read_by_the_one_rule(reply: str) -> None:
         "another-decisions-empty-field",
         "its-kind-lacks-a-field",
         "group-without-under",
+        "a-needed-field-null",
     ],
 )
 async def test_a_refused_reply_writes_nothing_and_logs_why_without_its_text(
@@ -927,13 +935,29 @@ def test_the_shape_is_closed_and_names_the_prompts_fields() -> None:
         "stories",
         "under",
     }
-    assert cast("dict[str, dict[str, object]]", schema["properties"])["decision"]["enum"] == [
-        "leave",
-        "merge",
-        "split",
-        "move",
-        "group",
-    ]
+    properties = cast("dict[str, dict[str, object]]", schema["properties"])
+    assert properties["decision"]["enum"] == ["leave", "merge", "split", "move", "group"]
+    # Null is admitted only where the prompt writes one: a group's ``under``.
+    nullable = [name for name, held in properties.items() if '"null"' in json.dumps(held)]
+    assert nullable == ["under"]
+
+
+async def test_a_group_under_null_reaches_the_checks_as_a_new_story() -> None:
+    """ADR-0304 §9: ``under`` null is a value of the group's, never passed over as nothing.
+
+    Were it passed over, the group would lack ``under`` and fail the parse; it reaches the
+    check a grouping under a new story takes (``test_stories_are_grouped_under_...``
+    writes one).
+    """
+    stories, memory, _trip = await _split_flag()
+    reply = json.dumps({"decision": "group", "stories": ["S1"], "under": None})
+
+    with capture_logs() as logs:
+        await _pass(FakeModelProvider(reply), stories, memory).run()
+
+    assert [
+        (one["failed"], one["problem"]) for one in logs if one["event"] == "matters_pass_refused"
+    ] == [("check", "a grouping under a new story names fewer than two stories")]
 
 
 def test_the_text_json_reader_is_gone() -> None:
