@@ -73,11 +73,6 @@ def copy(tmp_path: Path) -> Path:
         made,
         candidates=(str(candidate), "recorded"),
         activations=frozenset({ACT_A}),
-        flags=(
-            "understanding.recalled=true",
-            "understanding.stories=false",
-            "understanding.person=false",
-        ),
     )
     return made
 
@@ -155,8 +150,9 @@ def test_an_understanding_calls_view_shows_each_candidate_headed_by_its_prompt(
     templated = by_origin["override"]
     assert templated["prompt"] == "understanding"
     assert templated["instruction"]["text"] == CANDIDATE
-    assert templated["flags"] == ["recalled=True", "stories=False", "person=False"]
-    assert templated["flags_from"] == "stated"
+    # ADR-0353 §8:3: understanding declares no flag, so the candidate renders under none.
+    assert templated["flags"] == []
+    assert templated["flags_from"] == "none"
     assert by_origin["recorded"]["instruction"]["text"] == UNDERSTANDING_TOLD
     assert by_origin["recorded"]["did"]["parts"][0]["kind"] == "reply"
 

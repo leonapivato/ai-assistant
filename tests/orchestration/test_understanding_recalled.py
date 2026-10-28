@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from understanding_support import Rendered, Tag, TextAsStructured
 
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
@@ -126,7 +127,9 @@ async def _stage(model: FakeModelProvider, *records: MemoryRecord) -> _Staged:
         [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT) for record in records]
     )
     return _Staged(
-        stage=UnderstandingStage(model=model, excerpt_chars=2000, prompt=_UNDERSTANDING),
+        stage=UnderstandingStage(
+            model=TextAsStructured(model), excerpt_chars=2000, prompt=_UNDERSTANDING
+        ),
         window=await RecentEpisodes(memory=memory, limit=10)(frozenset()),
     )
 
@@ -148,9 +151,18 @@ async def _understand(
     )
 
 
-def _sent(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:
-    payload: dict[str, Any] = json.loads(model.calls[call].messages[1].content)
-    return payload
+def _sent(model: FakeModelProvider, call: int = 0) -> Rendered:
+    return Rendered(model.calls[call].messages[1].content)
+
+
+def _facts(model: FakeModelProvider) -> list[Tag]:
+    """The remembered facts recalled memories render, in order (ADR-0353 §2, §3:2)."""
+    return [one for one in _sent(model).tags("Recalled memories") if one.name == "memory"]
+
+
+def _note(model: FakeModelProvider) -> str:
+    """Recalled memories' note, where they render nothing (ADR-0353 §8:1)."""
+    return _sent(model).section("Recalled memories")
 
 
 # --- rendering --------------------------------------------------------------------------
@@ -159,7 +171,7 @@ def _sent(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:
 async def test_no_recall_decision_renders_no_section_and_keeps_the_instruction() -> None:
     model = FakeModelProvider.scripted(_proposal(), _proposal())
     await _understand(await _stage(model), None)
-    assert "recalled" not in _sent(model)
+    assert _note(model).startswith("The system does not have it")
     # The same instruction a stage built before recall existed renders.
     await _understand(await _stage(model), None)
     assert model.calls[1].messages[0] == model.calls[0].messages[0]
@@ -170,29 +182,33 @@ async def test_recalled_records_render_under_m_labels_in_recalls_order() -> None
     fact = _fact("fact", source=MemorySource.USER_ASSERTED)
     episode = _episode("episode")
     await _understand(await _stage(model), _found(fact, episode), episodes=False)
-    first, second = _sent(model)["recalled"]
-    assert first == {
+    section = _sent(model).section("Recalled memories")
+    (first,) = _facts(model)
+    assert first.attributes == {
         "label": "M1",
-        "item": "a remembered fact: something the user said",
-        "last_updated": EARLIER.isoformat(),
-        "fact": "The dentist is Dr Rao.",
-        "fact_cut_to_first_chars": False,
-        # ADR-0305 §3: on every pass, whether or not a stories section renders beside it.
-        "not_linkable": True,
+        "from": "the system",
+        "kind": "something the owner said",
+        # ADR-0353 §5:1: in full, in the call's zone, UTC where none is handed.
+        "learned": "Sun 1 Mar 2026, 9:30 am",
     }
-    assert second["label"] == "M2"
-    assert "not_linkable" not in second
-    assert second["item"] == "an earlier exchange on capture modality text"
-    assert second["occurred_at"] == EARLIER.isoformat()
-    assert second["response"] == "Booked for Friday."
+    assert first.text == "The dentist is Dr Rao."
+    (second,) = _sent(model).containers("Recalled memories")
+    assert second.attributes == {
+        "label": "M2",
+        "origin": "a text capture",
+        "at": "Sun 1 Mar 2026, 9:30 am",
+    }
+    assert second.tags[-1].text == "Booked for Friday."
+    # Recall's order: the fact, then the episode.
+    assert section.index('label="M1"') < section.index('label="M2"')
 
 
 @pytest.mark.parametrize(
     ("source", "attribution"),
     [
-        (MemorySource.USER_ASSERTED, "something the user said"),
-        (MemorySource.INFERRED, "something the assistant worked out"),
-        (MemorySource.OBSERVED, "something the assistant worked out"),
+        (MemorySource.USER_ASSERTED, "something the owner said"),
+        (MemorySource.INFERRED, "something the system worked out"),
+        (MemorySource.OBSERVED, "something the system worked out"),
     ],
 )
 async def test_a_recalled_fact_is_attributed_by_its_band(
@@ -200,7 +216,7 @@ async def test_a_recalled_fact_is_attributed_by_its_band(
 ) -> None:
     model = FakeModelProvider.scripted(_proposal())
     await _understand(await _stage(model), _found(_fact("fact", source=source)))
-    assert _sent(model)["recalled"][0]["item"] == f"a remembered fact: {attribution}"
+    assert _facts(model)[0].get("kind") == attribution
 
 
 async def test_an_attested_fact_is_attributed_to_its_source() -> None:
@@ -215,9 +231,7 @@ async def test_an_attested_fact_is_attributed_to_its_source() -> None:
     )
     model = FakeModelProvider.scripted(_proposal())
     await _understand(await _stage(model), _found(reported))
-    assert _sent(model)["recalled"][0]["item"] == (
-        "a remembered fact: something from a source, never something the user said"
-    )
+    assert _facts(model)[0].get("kind") == "something from a source, never something the owner said"
 
 
 async def test_a_recalled_record_already_in_a_window_is_not_rendered_twice() -> None:
@@ -225,35 +239,33 @@ async def test_a_recalled_record_already_in_a_window_is_not_rendered_twice() -> 
     model = FakeModelProvider.scripted(_proposal())
     await _understand(await _stage(model, episode), _found(episode, _fact("fact")))
     sent = _sent(model)
-    assert [item["label"] for item in sent["episode_window"]] == ["P1"]
-    assert [item["label"] for item in sent["recalled"]] == ["M1"]
-    assert sent["recalled"][0]["fact"] == "The dentist is Dr Rao."
+    assert sent.labelled("Short-term memory") == ["P1"]
+    assert sent.labelled("Recalled memories") == ["M1"]
+    assert _facts(model)[0].text == "The dentist is Dr Rao."
 
 
 async def test_a_section_whose_every_record_is_in_a_window_says_so() -> None:
     episode = _episode("episode")
     model = FakeModelProvider.scripted(_proposal())
     await _understand(await _stage(model, episode), _found(episode))
-    assert _sent(model)["recalled"] == (
-        "missing: everything recalled is already in the windows above"
-    )
+    assert _note(model) == "Nothing is shown: everything recall found is already shown above."
 
 
 async def test_a_fact_longer_than_the_excerpt_bound_renders_cut_with_the_cut_disclosed() -> None:
     long = "Dr Rao " + "x" * 2500
     model = FakeModelProvider.scripted(_proposal())
     await _understand(await _stage(model), _found(_fact("fact", long)))
-    rendered = _sent(model)["recalled"][0]
-    assert rendered["fact"] == long[:2000]
-    assert rendered["fact_cut_to_first_chars"] is True
+    (rendered,) = _facts(model)
+    assert rendered.text == long[:2000]
+    assert rendered.get("cut") == "yes"
 
 
 @pytest.mark.parametrize(
     ("outcome", "statement"),
     [
-        (RecallOutcome.NOTHING_FOUND, "missing: nothing was recalled for this input"),
-        (RecallOutcome.FAILED, "missing: recall failed, so no memories are shown"),
-        (RecallOutcome.TIMED_OUT, "missing: recall failed, so no memories are shown"),
+        (RecallOutcome.NOTHING_FOUND, "Nothing is shown: recall found no memory"),
+        (RecallOutcome.FAILED, "It could not be read: recall failed"),
+        (RecallOutcome.TIMED_OUT, "It could not be read: recall failed"),
     ],
 )
 async def test_a_recall_that_kept_nothing_or_failed_says_so(
@@ -261,7 +273,7 @@ async def test_a_recall_that_kept_nothing_or_failed_says_so(
 ) -> None:
     model = FakeModelProvider.scripted(_proposal())
     await _understand(await _stage(model), _decided(outcome))
-    assert _sent(model)["recalled"] == statement
+    assert _note(model).startswith(statement)
 
 
 # --- resolution -----------------------------------------------------------------------
@@ -300,6 +312,7 @@ async def test_the_repair_statement_names_the_recalled_sequence() -> None:
     model = FakeModelProvider.scripted(_proposal(cites=["M9"]), _proposal())
     await _understand(await _stage(model), _found(_fact("fact")), episodes=False)
     statement = model.calls[1].messages[3].content
-    assert "no H labels (the channel window is empty)" in statement
-    assert "no P labels (the episode window is empty) and M1 (the recalled section)" in statement
+    assert "no H labels (the origin's messages)" in statement
+    assert "M1 (always in mind and the recalled memories)" in statement
+    assert "no P labels (the stimuli in memory)" in statement
     assert '"M9"' in statement

@@ -1,0 +1,13 @@
+# Round 10, case 2c, the control (#3481): a Christmas present for Ivy shares only a
+# person with the birthday party, which is not enough to belong with it.
+prompt = "understanding"
+guards = "link_overmade"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "belongs_to_nothing"
+
+[input]
+file = "a-christmas-present-shares-only-a-person.json"

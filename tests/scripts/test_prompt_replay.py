@@ -9,6 +9,7 @@ own model layer, so no call leaves the machine and nothing contacts a hub.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import socket
@@ -17,7 +18,7 @@ import stat
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from pydantic_ai.exceptions import ModelHTTPError
@@ -27,7 +28,8 @@ from pydantic_ai.models.function import FunctionModel
 import ai_assistant
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ModelError
-from ai_assistant.core.types import Message, Role
+from ai_assistant.core.reply_shapes import read_reply, reply_shape_version
+from ai_assistant.core.types import Message, ProposedActivationUnderstanding, ReplyFailure, Role
 from ai_assistant.models import PydanticAIProvider, RetryingProvider
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import planning
@@ -61,7 +63,30 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.integration
 
-#: An understanding template that branches on both of its flags.
+#: A prompt that declares flags, for the replay's flag machinery (ADR-0335 §9:1): the
+#: understanding prompt as it declared its three flags before ADR-0353 §8:3 took them
+#: away, so these cases go on exercising rendering under recorded and stated flags over
+#: the record's understanding entries. Only the cases naming :func:`flagged` read it.
+FLAGS: Final = frozenset({"recalled", "stories", "person"})
+
+
+def _flagged() -> dict[str, Any]:
+    declared = dict(_DECLARED())
+    declared["understanding"] = dataclasses.replace(declared["understanding"], flags=FLAGS)
+    return declared
+
+
+_DECLARED: Final = replay_tool.declared_prompts
+
+
+@pytest.fixture
+def flagged(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """The run's declared prompts, understanding's with :data:`FLAGS`."""
+    monkeypatch.setattr(replay_tool, "declared_prompts", _flagged)
+    return _flagged()
+
+
+#: An understanding template that branches on two of :data:`FLAGS`.
 TEMPLATE = (
     "Candidate understanding instruction.\n"
     "$if recalled\n"
@@ -364,6 +389,7 @@ def test_no_call_is_taken_to_replay_from_a_follow_up_file(tmp_path: Path) -> Non
     assert f"{ACT_A}.followup.replay.jsonl" not in _results(copy)
 
 
+@pytest.mark.usefixtures("flagged")
 def test_a_template_is_rendered_under_stated_flags_where_the_entry_records_none(
     tmp_path: Path,
 ) -> None:
@@ -409,6 +435,7 @@ def test_a_template_is_rendered_under_stated_flags_where_the_entry_records_none(
     assert any("entries of the candidates' prompts only: understanding" in one for one in reports)
 
 
+@pytest.mark.usefixtures("flagged")
 def test_a_template_is_left_out_where_no_flags_are_recorded_or_stated(tmp_path: Path) -> None:
     copy = make_copy(tmp_path)
     model = Model()
@@ -421,6 +448,7 @@ def test_a_template_is_left_out_where_no_flags_are_recorded_or_stated(tmp_path: 
     assert _results(copy) == {}
 
 
+@pytest.mark.usefixtures("flagged")
 def test_a_template_is_rendered_under_the_flags_the_entry_records(tmp_path: Path) -> None:
     live = write_live(tmp_path)
     record = live / "diagnostics" / f"{ACT_A}.jsonl"
@@ -470,8 +498,10 @@ def test_a_template_where_its_default_ships_is_a_default() -> None:
     assert candidate.values == planning._PLANNING_VALUES
 
 
-def test_stated_flags_must_name_declared_flags_and_state_every_one(tmp_path: Path) -> None:
-    declared = replay_tool.declared_prompts()
+def test_stated_flags_must_name_declared_flags_and_state_every_one(
+    tmp_path: Path, flagged: dict[str, Any]
+) -> None:
+    declared = flagged
 
     for stated, defect in (
         (["understanding.recalled=true"], "unstated"),
@@ -531,6 +561,7 @@ def test_a_call_the_model_fails_is_recorded_as_failed_and_printed_by_class(
     assert "failed: 1 (ModelError)" in reports
 
 
+@pytest.mark.usefixtures("flagged")
 def test_nothing_printed_comes_from_an_entry_or_a_reply(tmp_path: Path) -> None:
     copy = make_copy(tmp_path)
     reports: list[str] = []
@@ -696,7 +727,7 @@ def test_a_rerun_composes_the_real_package_over_a_copy(
     monkeypatch.setattr(replay_tool.CountedModel, "__init__", noting)
     live = tmp_path / "live"
     (live / "prompts").mkdir(parents=True, mode=0o700)
-    (live / "prompts" / "understanding.txt").write_text(TEMPLATE)
+    (live / "prompts" / "understanding.txt").write_text("Candidate understanding instruction.\n")
     copy = tmp_path / "copy"
     replay_tool.copy_data_dir(live, copy, retention=timedelta(days=1), now=now)
     reports: list[str] = []
@@ -741,10 +772,12 @@ def test_nothing_in_the_package_names_the_tool() -> None:
     assert naming == []
 
 
-def test_the_prompt_key_the_package_writes_is_read_for_its_flags(tmp_path: Path) -> None:
+def test_the_prompt_key_the_package_writes_is_read_for_its_flags(
+    tmp_path: Path, flagged: dict[str, Any]
+) -> None:
     # ADR-0335 §9:1's key as the package itself builds it, for a prompt with flags and
     # for one that declares none, which records an empty object.
-    declared = replay_tool.declared_prompts()
+    declared = flagged
     shipped = {
         name: replay_tool.load_candidate(
             str(Path(planning.__file__).parent / f"{name}.txt"), declared
@@ -871,8 +904,10 @@ def test_entries_are_one_call_only_as_copies_of_the_observers_call_under_other_a
     assert plan.requests == 5
 
 
-def test_no_entry_is_rendered_from_another_entrys_flags(tmp_path: Path) -> None:
-    declared = replay_tool.declared_prompts()
+def test_no_entry_is_rendered_from_another_entrys_flags(
+    tmp_path: Path, flagged: dict[str, Any]
+) -> None:
+    declared = flagged
     flagged = {
         "name": "understanding",
         "version": "v",
@@ -1100,3 +1135,99 @@ def test_a_counted_provider_refuses_a_named_route_once_the_bound_is_reached() ->
         asyncio.run(provider.complete(messages))
 
     assert (meter.made, meter.refused) == (1, 2)
+
+
+# --- ADR-0354 §8:6-§8:7: understanding's structured calls ----------------------------------
+
+
+def _with_reply_shape(tmp_path: Path, name: str, version: str) -> Path:
+    """A copy whose activation A's understanding entry records ``reply_shape`` (§7:1)."""
+    live = write_live(tmp_path)
+    record = live / "diagnostics" / f"{ACT_A}.jsonl"
+    record.write_text(
+        record.read_text().replace(
+            '"prompt":{"name":"understanding","version":"0123456789ab","origin":"default"}',
+            '"prompt":{"name":"understanding","version":"0123456789ab","origin":"default"},'
+            f'"reply_shape":{{"name":"{name}","version":"{version}"}}',
+        )
+    )
+    copy = tmp_path / "copy"
+    replay_tool.copy_data_dir(live, copy, retention=timedelta(days=1), now=now)
+    return copy
+
+
+def test_a_recorded_call_with_no_reply_shape_replays_as_a_plain_completion_marked_so(
+    tmp_path: Path,
+) -> None:
+    """§8:7: written before the move, so sent as it was made, and marked as sent plain."""
+    copy = make_copy(tmp_path)
+
+    _replay(copy, Model(), candidates=("recorded",), sources=frozenset({"understanding"}))
+
+    bodies = [one["body"] for each in _results(copy).values() for one in each]
+    assert len(bodies) == 2
+    assert all(one["sent_plain"] is True for one in bodies)
+    assert all("structured" not in one for one in bodies)
+
+
+def test_a_recorded_structured_call_replays_with_the_packages_shape_and_marks_its_version(
+    tmp_path: Path,
+) -> None:
+    """§8:7: sent as a structured call with the shape of its recorded name, the result
+    marked where the recorded version differs from the package's."""
+    copy = _with_reply_shape(tmp_path, "ProposedActivationUnderstanding", "000000000000")
+    model = Model(reply=json.dumps({"understanding": "Means what it says."}))
+
+    _replay(
+        copy,
+        model,
+        candidates=("recorded",),
+        sources=frozenset({"understanding"}),
+        activations=frozenset({ACT_A}),
+    )
+
+    (only,) = _results(copy)[f"{ACT_A}.replay.jsonl"]
+    body = only["body"]
+    assert body["structured"]["shape"] == "ProposedActivationUnderstanding"
+    assert body["structured"]["version"] == reply_shape_version(ProposedActivationUnderstanding)
+    assert body["structured"]["failure"] is None
+    assert (body["recorded_shape_version"], body["shape_version_differs"]) == (
+        "000000000000",
+        True,
+    )
+    assert "sent_plain" not in body
+
+
+def test_a_recorded_shape_the_package_holds_none_of_fails_that_call_naming_the_defect(
+    tmp_path: Path,
+) -> None:
+    copy = _with_reply_shape(tmp_path, "NoSuchShape", "000000000000")
+    model = Model()
+
+    _replay(
+        copy,
+        model,
+        candidates=("recorded",),
+        sources=frozenset({"understanding"}),
+        activations=frozenset({ACT_A}),
+    )
+
+    (only,) = _results(copy)[f"{ACT_A}.replay.jsonl"]
+    failure = only["body"]["failure"]
+    assert "the recorded reply shape is none the package holds" in failure["message"]
+    assert model.systems == []
+
+
+def test_the_suites_reader_and_the_stage_read_one_reply_alike() -> None:
+    """§8:6, §12:6: both read by ``core``'s one rule with the proposal as the shape."""
+    replies = [
+        json.dumps({"understanding": "Fine.", "cites": ["H1"]}),
+        "```json\n" + json.dumps({"understanding": "Fenced."}) + "\n```",
+        json.dumps({"understanding": "Extra.", "answers": []}),
+        "not json",
+        "",
+    ]
+    for reply in replies:
+        read = read_reply(ProposedActivationUnderstanding, reply)
+        stage = None if isinstance(read, ReplyFailure) else read.model_dump(mode="json")
+        assert replay_tool.completion_reply("understanding", reply).reading == stage

@@ -49,10 +49,11 @@ from typing import TYPE_CHECKING, Final
 
 from pydantic import ValidationError
 
-from ai_assistant.core.channel_validation import establishes_the_user, input_origin
+from ai_assistant.core.channel_validation import establishes_the_user, input_origin, origin_kind
 from ai_assistant.core.types import ChannelIdentity
 
 if TYPE_CHECKING:
+    from ai_assistant.core.channel_validation import OriginKind
     from ai_assistant.core.types import ApprovalGiver, InputOrigin
 
 __all__ = [
@@ -185,6 +186,16 @@ class ChannelKind:
     def establishes_the_user(self) -> bool:
         """Whether the kind establishes the user as an author in its places (§5:4)."""
         return establishes_the_user(self.channel_type)
+
+    @property
+    def origin(self) -> OriginKind | None:
+        """What understanding is told of one of its origins (ADR-0353 §6:3, §7:5).
+
+        Beside :attr:`description`, which is planning's, and read from ``core``'s
+        register, which keys it by channel type so the hub chat, declared in no
+        ``ChannelKind``, declares it too.
+        """
+        return origin_kind(self.channel_type)
 
     @property
     def confirms_delivery(self) -> bool:

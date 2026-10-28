@@ -1,0 +1,15 @@
+# Round 12, D5 (#3481): the car arriving at Ivy's school, an origin no kind declares
+# yet. No advising phrase in the understanding or a reading.
+prompt = "understanding"
+guards = "advice_in_understanding"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "says_none_of"
+fields = ["understanding", "readings"]
+phrases = ["should tell", "should let", "should notify", "should send", "should reply", "should ask", "should alert", "should check", "should remind", "should call", "should contact", "could mention", "could be mentioned", "worth mentioning", "worth checking", "recommend", "suggest"]
+
+[input]
+file = "a-car-arrival-is-read-without-advice.json"

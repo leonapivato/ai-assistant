@@ -1,0 +1,13 @@
+# Round 10, case 1c, the control (#3481): a question about Friday's weather beside the
+# running booking is separate work, so it is meant for none.
+prompt = "understanding"
+guards = "separate_work_merged"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "continues_nothing"
+
+[input]
+file = "the-weather-on-friday-is-separate-work.json"

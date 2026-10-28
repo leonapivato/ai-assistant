@@ -31,6 +31,7 @@ from story_support import (
     memory_of,
     story,
 )
+from understanding_support import Container, Rendered, TextAsStructured
 
 from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.types import (
@@ -69,7 +70,6 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakeStoryStore,
     default_prompt,
-    prompt_from,
 )
 from ai_assistant.testing.memories import memory, remembered_support
 
@@ -87,12 +87,6 @@ WINDOW: Final = SuppliedWindow(
 
 #: Understanding's shipped template, as the composition root hands it the stage.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
-
-#: A template of the test's own that prints which of understanding's flags the stage
-#: handed it, so a test reads the flags and none of the default's words (ADR-0334 §9:2).
-_FLAG_ECHO: Final = prompt_from(
-    UNDERSTANDING_PROMPT, "$if recalled\nrecalled\n$end\n$if stories\nstories\n$end\n"
-)
 
 
 def _proposal(**fields: Any) -> str:
@@ -151,7 +145,7 @@ async def _understand(  # noqa: PLR0913 — the model, then one knob per input a
             items=tuple(_item(record.id, MemoryKind(record.kind)) for record in recalled),
         )
     stage = UnderstandingStage(
-        model=model, excerpt_chars=2000, prompt=prompt, diagnostics=diagnostics
+        model=TextAsStructured(model), excerpt_chars=2000, prompt=prompt, diagnostics=diagnostics
     )
     with diagnosed_activation("a-0", clock=lambda: AT):
         return await stage.understand(
@@ -184,9 +178,13 @@ def _item(record_id: str, kind: MemoryKind) -> RecalledItem:
 _FACT: Final = memory("fact-1", "The canoe holds two.", remembered_support(when=AT, added_at=AT))
 
 
-def _payload(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:
-    loaded: dict[str, Any] = json.loads(model.calls[call].messages[1].content)
-    return loaded
+def _payload(model: FakeModelProvider, call: int = 0) -> Rendered:
+    return Rendered(model.calls[call].messages[1].content)
+
+
+def _matters(model: FakeModelProvider, call: int = 0) -> list[Container]:
+    """The matters the call rendered, each with the tags it holds (ADR-0353 §2, §3:3)."""
+    return _payload(model, call).containers("Matters")
 
 
 def _instruction(model: FakeModelProvider) -> str:
@@ -196,48 +194,38 @@ def _instruction(model: FakeModelProvider) -> str:
 # --- §6:5, §6:9: the fourth section and its instruction ------------------------------
 
 
-async def test_no_candidates_render_no_section() -> None:
+async def test_no_candidates_say_the_system_does_not_have_them() -> None:
     model = FakeModelProvider(_proposal())
 
     understood = await _understand(model, stories=None)
 
-    assert "stories" not in _payload(model)
+    assert _payload(model).section("Matters").startswith("The system does not have it")
     assert understood.story_links == ()
 
 
 @pytest.mark.parametrize(
-    ("recalled", "stories", "handed"),
+    ("recalled", "stories"),
     [
-        ((), None, set()),
-        ((_FACT,), None, {"recalled"}),
-        ((), Candidates(views=()), {"stories"}),
-        ((_FACT,), Candidates(views=(_TRIP,)), {"recalled", "stories"}),
+        ((), None),
+        ((_FACT,), None),
+        ((), Candidates(views=())),
+        ((_FACT,), Candidates(views=(_TRIP,))),
     ],
     ids=["neither", "recalled", "stories", "both"],
 )
-async def test_the_template_is_handed_a_flag_for_each_section_the_message_carries(
-    recalled: tuple[Memory, ...], stories: Candidates | None, handed: set[str]
+async def test_the_template_takes_no_flag_and_every_section_renders(
+    recalled: tuple[Memory, ...], stories: Candidates | None
 ) -> None:
-    """ADR-0334 §2, §4:2: the code computes understanding's two flags for each call.
-
-    ``recalled`` where recall made a decision for the pass (ADR-0281 §7), ``stories``
-    where the phase assembled candidates, even none (ADR-0300 §6), so the instruction
-    speaks of a section exactly where the message carries it.
-    """
+    """ADR-0353 §8:1, §8:3: every section on every call, and one instruction for all."""
     model = FakeModelProvider(_proposal())
     sink = FakeDiagnosticSink()
 
-    await _understand(
-        model, stories=stories, recalled=recalled, prompt=_FLAG_ECHO, diagnostics=sink
-    )
+    await _understand(model, stories=stories, recalled=recalled, diagnostics=sink)
 
-    assert set(_instruction(model).split("\n")) - {""} == handed
-    assert {"recalled", "stories"} & set(_payload(model)) == handed
-    # ADR-0335 §9:1: the given entry records each flag the prompt declares, as the stage
-    # computed it for the call and rendered the instruction under it.
+    assert _instruction(model) == _UNDERSTANDING.render(flags={})
+    assert {"Recalled memories", "Matters"} <= set(_payload(model).headings())
     (given,) = sink.of(DiagnosticSource.UNDERSTANDING, DiagnosticKind.GIVEN)
-    recorded = given.model_dump(mode="json")["body"]["prompt"]["flags"]
-    assert recorded == {flag: flag in handed for flag in ("recalled", "stories", "person")}
+    assert given.model_dump(mode="json")["body"]["prompt"]["flags"] == {}
 
 
 async def test_the_candidates_render_under_s_labels_attributed_by_their_records() -> None:
@@ -245,28 +233,19 @@ async def test_the_candidates_render_under_s_labels_attributed_by_their_records(
 
     await _understand(model, stories=Candidates(views=(_TRIP, _RUNNING)))
 
-    first, second = _payload(model)["stories"]
-    assert (first["label"], second["label"]) == ("S1", "S2")
-    assert [line["text"] for line in first["summary"]] == [
-        "A camping trip to Riverside.",
-        "The park says the lake is closed.",
-    ]
-    # ADR-0303 §3:8: a marked summary or note is shown as outside content, never as the
-    # user's words; a line carries no mark of its own (§2:7).
-    assert all("outside_content" not in line for line in first["summary"])
-    assert "never something the user said" in first["summary_outside_content"]
-    assert "summary_outside_content" not in second
-    owner, outside = first["newest_notes"]
-    assert owner["written_by"] == "the user, writing on this story directly"
-    assert "outside_content" not in owner
-    assert "never something the user said" in outside["outside_content"]
-    # §6:5: the episodes inside a short view take no label.
-    (shown,) = first["latest_episodes"]
-    assert "label" not in shown
-    assert shown["input"] == "Book the canoe for Sunday."
-    assert second["summary"].startswith("missing:")
-    assert second["newest_notes"].startswith("missing:")
-    assert second["latest_episodes"].startswith("missing:")
+    first, second = _matters(model)
+    assert (first.label, second.label) == ("S1", "S2")
+    summary, owner, outside = first.tags
+    assert (summary.name, summary.get("from")) == ("summary", "the system")
+    assert summary.text == "A camping trip to Riverside.\nThe park says the lake is closed."
+    # ADR-0303 §3:8, ADR-0353 §3:7: marked outside by the record's mark, never its text.
+    assert summary.get("outside") == "yes"
+    assert (owner.name, owner.get("from"), owner.get("outside")) == ("note", "the owner", None)
+    assert (outside.get("from"), outside.get("outside")) == ("the system", "yes")
+    # §6:5: a short view's latest episodes take no label; with no meaning, none renders.
+    assert 'label="' not in "".join(str(one.attributes) for one in first.tags)
+    # A story with nothing written holds nothing.
+    assert second.tags == []
 
 
 async def test_a_withheld_summary_is_said_to_be_withheld_and_nothing_of_it_is_rendered() -> None:
@@ -285,15 +264,14 @@ async def test_a_withheld_summary_is_said_to_be_withheld_and_nothing_of_it_is_re
 
     await _understand(model, stories=Candidates(views=(withheld, _RUNNING)))
 
-    first, second = _payload(model)["stories"]
-    assert first["summary"].startswith("missing:")
-    assert "withheld" in first["summary"]
-    assert "this audience may not be shown it" in first["summary"]
-    assert "behind" not in first["summary"]
-    assert "summary_outside_content" not in first
+    first, second = _matters(model)
+    summary, *notes = first.tags
+    # ADR-0304 §4:2: said to be withheld, and nothing of it, its mark included.
+    assert summary.attributes == {"from": "the system", "withheld": "yes"}
+    assert summary.text is None
     # The notes are decided on their own (§3:9), and a story with no summary is not withheld.
-    assert len(first["newest_notes"]) == 2
-    assert "withheld" not in second["summary"]
+    assert len(notes) == 2
+    assert "withheld" not in str([one.attributes for one in second.tags])
 
 
 # --- ADR-0305 §4: notes withheld from an audience are absent -----------------------
@@ -321,11 +299,9 @@ async def test_a_view_that_may_not_show_notes_renders_no_notes_part(
 
     await _understand(model, stories=Candidates(views=(hidden,)), audience=UNBOUNDED)
 
-    (view,) = _payload(model)["stories"]
-    assert "newest_notes" not in view
-    assert "note" not in json.dumps(view)
-    assert "this audience may not be shown it" in view["summary"]
-    assert len(view["latest_episodes"]) == 1
+    (view,) = _matters(model)
+    assert [one.name for one in view.tags] == ["summary"]
+    assert view.tags[0].get("withheld") == "yes"
 
 
 async def test_a_spoken_pass_with_a_pending_owner_note_is_told_nothing_of_notes() -> None:
@@ -358,11 +334,11 @@ async def test_a_spoken_pass_with_a_pending_owner_note_is_told_nothing_of_notes(
     )
     await _understand(bounded, stories=await assembler.assemble(window, audience=BOUNDED))
 
-    (view,) = _payload(spoken)["stories"]
-    assert "newest_notes" not in view
+    (view,) = _matters(spoken)
+    assert [one.name for one in view.tags if one.name == "note"] == []
     assert "Friday evening" not in spoken.calls[0].messages[1].content
-    (note,) = _payload(bounded)["stories"][0]["newest_notes"]
-    assert "Friday evening" in note["text"]
+    (note,) = [one for one in _matters(bounded)[0].tags if one.name == "note"]
+    assert "Friday evening" in (note.text or "")
     # §4: the instruction is the same whether or not the pass may be shown notes.
     assert _instruction(spoken) == _instruction(bounded)
 
@@ -370,8 +346,8 @@ async def test_a_spoken_pass_with_a_pending_owner_note_is_told_nothing_of_notes(
 @pytest.mark.parametrize(
     ("candidates", "said"),
     [
-        (Candidates(unreadable=True), "the stories could not be read"),
-        (Candidates(), "belongs to a story"),
+        (Candidates(unreadable=True), "It could not be read: the matters could not be read"),
+        (Candidates(), "Nothing is shown: no matter is found"),
     ],
 )
 async def test_a_section_with_no_story_says_why(candidates: Candidates, said: str) -> None:
@@ -379,10 +355,7 @@ async def test_a_section_with_no_story_says_why(candidates: Candidates, said: st
 
     await _understand(model, stories=candidates)
 
-    section = _payload(model)["stories"]
-    assert isinstance(section, str)
-    assert section.startswith("missing:")
-    assert said in section
+    assert _payload(model).section("Matters").startswith(said)
 
 
 # --- §6:6, §6:7: story labels resolved -------------------------------------------------
@@ -421,7 +394,7 @@ async def test_a_defective_story_label_is_repaired_once_then_dropped_and_counted
     assert len(model.calls) == 2
     statement = model.calls[1].messages[-1].content
     assert "labels in `belongs_to` name no matter and no earlier stimulus" in statement
-    assert "S1 (the stories section)" in statement
+    assert "S1 (the matters)" in statement
     assert understood.story_links == (story("story:trip"),)
     assert understood.grounding_dropped == 1
 
@@ -496,15 +469,15 @@ async def test_a_fact_s_label_cited_in_cites_still_resolves_to_its_memory() -> N
     assert understood.grounding_dropped == 1
 
 
-async def test_a_recalled_fact_is_marked_not_linkable() -> None:
-    """ADR-0305 §3: the recalled section's mark, on a pass that renders stories."""
+async def test_a_recalled_fact_carries_no_mark() -> None:
+    """ADR-0353 §18 (ADR-0305 §3:1, §3:3): a recalled fact is rendered with no mark, while
+    a label in ``belongs_to`` naming it is still dropped (§9:12)."""
     model = FakeModelProvider(_proposal())
 
     await _understand(model, stories=Candidates(views=(_TRIP,)), recalled=(episode("a-7"), _FACT))
 
-    shown_episode, shown_fact = _payload(model)["recalled"]
-    assert shown_fact["not_linkable"] is True
-    assert "not_linkable" not in shown_episode
+    assert "linkable" not in _payload(model).content
+    assert _payload(model).labelled("Recalled memories") == ["M1", "M2"]
 
 
 # --- ADR-0304 §8: an S label cited as a referent ---------------------------------------
@@ -570,7 +543,7 @@ async def test_a_story_referent_s_excerpt_is_cut_to_the_referent_bound() -> None
 
     (referent,) = understood.meaning_referents
     assert referent.excerpt == first[:UNDERSTANDING_REFERENT_EXCERPT_CHARS]
-    assert _payload(model)["stories"][0]["summary"][0]["text"] == first
+    assert (_matters(model)[0].tags[0].text or "").startswith(first)
 
 
 async def test_an_unrendered_s_label_is_still_a_label_defect() -> None:
@@ -596,7 +569,7 @@ async def test_the_repair_statement_carries_no_rule_on_where_an_s_label_may_be_c
     statement = _statement(model)
     assert '"P9"' in statement
     assert '"S1"' not in statement
-    assert "S1 (the stories section)" in statement
+    assert "S1 (the matters)" in statement
     assert "An S label" not in statement
     assert "belongs_to" not in statement
 
@@ -634,9 +607,9 @@ async def test_a_one_exchange_supplied_item_links_the_window_episode_s_activatio
         model, stories=Candidates(views=()), episodes=(episode("a-2"),), window=window
     )
 
-    (item,) = _payload(model)["channel_window"]
-    assert item["also_in_episode_window"] is True
-    assert _payload(model)["episode_window"].startswith("missing")
+    (item,) = _payload(model).tags("Stimulus origin knowledge", "message")
+    assert item.text == "Trip plans"
+    assert _payload(model).containers("Short-term memory") == []
     assert understood.story_links == (activation("a-2"),)
     assert understood.grounding_dropped == 0
     assert len(model.calls) == 1
@@ -686,26 +659,20 @@ async def test_a_transcript_message_links_the_activation_that_took_it_in() -> No
     assert len(model.calls) == 1
 
 
-async def test_an_item_that_links_to_nothing_is_rendered_not_linkable() -> None:
-    """§7:5: the assistant's message carries the mark; nothing else of the window changes."""
+async def test_an_item_that_links_to_nothing_carries_no_mark() -> None:
+    """ADR-0353 §18 (ADR-0303 §7:5, §7:8): no item is marked as not linkable."""
     model = FakeModelProvider(_proposal())
 
     await _understand(model, stories=Candidates(views=(_TRIP,)), episodes=(), window=_TRANSCRIPT)
 
-    first, reply, second = _payload(model)["channel_window"]
-    assert reply["not_linkable"] is True
-    assert "not_linkable" not in first
-    assert "not_linkable" not in second
-    # The rest of the item is rendered as it was before the mark (§7: "changes no
-    # rendering of it but the mark below").
-    assert {key: value for key, value in reply.items() if key != "not_linkable"} == {
+    _, reply, _ = _payload(model).tags("Stimulus origin knowledge", "message")
+    assert reply.attributes == {
         "label": "H2",
-        "item": "a recent message of this conversation",
-        "position": 2,
-        "author": "the assistant",
-        "written_at": AT.isoformat(),
-        "text": "Riverside has space.",
+        "from": "the system",
+        "at": "Thu 8 Oct 2026, 12:00 pm",
     }
+    assert reply.text == "Riverside has space."
+    assert "linkable" not in _payload(model).content
 
 
 async def test_a_story_label_naming_an_unlinkable_item_is_dropped_and_counted_unrepaired() -> None:
@@ -749,8 +716,8 @@ async def test_a_message_the_bookkeeping_records_no_activation_for_links_to_noth
         window=TranscriptWindow(CONVERSATION, (_message(1, "Plan the camping trip."),)),
     )
 
-    (item,) = _payload(model)["channel_window"]
-    assert item["not_linkable"] is True
+    (item,) = _payload(model).tags("Stimulus origin knowledge", "message")
+    assert item.get("label") == "H1"
     assert len(model.calls) == 1
     assert understood.story_links == ()
     assert understood.grounding_dropped == 1
@@ -769,9 +736,8 @@ async def test_a_supplied_item_naming_an_episode_the_window_does_not_hold_links_
         model, stories=Candidates(views=()), episodes=(episode("a-2"),), window=window
     )
 
-    (item,) = _payload(model)["channel_window"]
-    assert "also_in_episode_window" not in item
-    assert item["not_linkable"] is True
+    (item,) = _payload(model).tags("Stimulus origin knowledge")
+    assert item.name == "message"
     assert len(model.calls) == 1
     assert understood.story_links == ()
     assert understood.grounding_dropped == 1
@@ -787,7 +753,7 @@ async def test_a_linkable_item_carries_no_mark() -> None:
         model, stories=Candidates(views=()), episodes=(episode("a-2"),), window=window
     )
 
-    assert all("not_linkable" not in item for item in _payload(model)["channel_window"])
+    assert "linkable" not in _payload(model).content
 
 
 # --- ADR-0303 §7:9: the place window's links, newest item first -------------------------

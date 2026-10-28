@@ -36,6 +36,15 @@ it sends any and sends none past its bound, 100 unless ``--bound`` says otherwis
 (§6:1). ``--samples N`` sends each call N times for each candidate, one line for each
 sample, naming it (ADR-0337 §5:4); every sample counts against the bound.
 
+**Understanding's calls are structured** (ADR-0354 §8:6-§8:8). A recorded understanding
+call whose given entry carries ``reply_shape`` is sent as a structured call with the
+package's shape of that name, and its result is marked where the recorded version differs
+from the package's; one recorded before the move, with no ``reply_shape``, is sent as it
+was made, a plain completion, and marked as sent plain. A recorded shape the package
+holds no shape for fails that call, naming the defect. A suite case of understanding is
+sent as a structured call with the shape, and its reply read by ``core``'s one reading
+rule (ADR-0354 §3:4), as the stage reads it.
+
 ``--follow-up`` on ``replay`` or ``suite`` asks the follow-up question after every
 response the run records (ADR-0337 §7): the call's request exactly as that sample sent
 it, its system message the candidate's or the control's, then the response, then the
@@ -116,7 +125,15 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.diagnostics import failure_body
 from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.prompts import PromptOrigin, PromptTemplate
-from ai_assistant.core.types import Message, OfferedTool, ProposedActivationUnderstanding, Role
+from ai_assistant.core.reply_shapes import read_reply, reply_shape_version
+from ai_assistant.core.types import (
+    Message,
+    OfferedTool,
+    ProposedActivationUnderstanding,
+    ReplyFailure,
+    Role,
+    StructuredReply,
+)
 from ai_assistant.evaluation.diagnostic_record import FOLLOW_UP_SUFFIX, OBSERVER_SUFFIX, SUFFIX
 from ai_assistant.models import (
     PydanticAIProvider,
@@ -130,10 +147,6 @@ from ai_assistant.orchestration.observer.framing import FramingReply
 from ai_assistant.orchestration.observer.placement import PlacementReply
 from ai_assistant.orchestration.observer.replies import parsed
 from ai_assistant.orchestration.observer.scout import ScoutReply
-
-# Understanding's own reading of its reply, so the suite reads a reply as the hub does
-# rather than as a copy of that reading that could drift from it.
-from ai_assistant.orchestration.understanding import _parsed as understanding_parsed
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 
@@ -176,6 +189,19 @@ RECORDED: Final = "recorded"
 
 #: The sources whose given entries are replayed (§4:1).
 SOURCES: Final = ("understanding", "planning", "digesting", "observer")
+
+#: The prompts whose stage asks for its reply as a shape, by prompt (ADR-0354 §8, §9:8):
+#: a suite case of one is sent as a structured call, and a recorded call of one written
+#: before the move is marked as sent plain.
+STRUCTURED: Final[dict[str, type[BaseModel]]] = {
+    "understanding": ProposedActivationUnderstanding,
+}
+
+#: The package's shapes, by the class name a given entry's ``reply_shape`` records
+#: (ADR-0354 §7:1, §8:7).
+REPLY_SHAPES_BY_NAME: Final[dict[str, type[BaseModel]]] = {
+    shape.__name__: shape for shape in STRUCTURED.values()
+}
 
 #: The observer's steps that make a model call (ADR-0333 §2:2, ADR-0346 §10:1). The
 #: retired commit step's calls are still read from an older record, and replay only where
@@ -843,6 +869,9 @@ class Planned:
             entry records no flags.
         messages: The request, its system message the candidate's.
         tools: The tools a planning round offered, as recorded; ``None`` for a completion.
+        shape: The package's shape a recorded structured call is sent with, or ``None``
+            where it is sent as it was made (ADR-0354 §8:7).
+        recorded_shape: The ``reply_shape`` its given entry records, or ``None``.
     """
 
     givens: tuple[Given, ...]
@@ -853,6 +882,8 @@ class Planned:
     flags_from: str | None
     messages: tuple[Message, ...]
     tools: tuple[OfferedTool, ...] | None
+    shape: type[BaseModel] | None = None
+    recorded_shape: Mapping[str, object] | None = None
 
 
 @dataclass(slots=True)
@@ -1019,6 +1050,7 @@ def _planned(
         instruction, flags, flags_from = rendered
     messages = list(request.messages)
     messages[request.system] = Message(role=Role.SYSTEM, content=instruction, name=original.name)
+    recorded_shape = recorded_reply_shape(givens[0])
     return Planned(
         givens=givens,
         candidate=candidate,
@@ -1028,7 +1060,17 @@ def _planned(
         flags_from=flags_from,
         messages=tuple(messages),
         tools=request.tools,
+        shape=None
+        if recorded_shape is None
+        else REPLY_SHAPES_BY_NAME.get(str(recorded_shape.get("name"))),
+        recorded_shape=recorded_shape,
     )
+
+
+def recorded_reply_shape(given: Given) -> Mapping[str, object] | None:
+    """The ``reply_shape`` a given entry carries (ADR-0354 §7:1), where it carries one."""
+    held = given.body.get("reply_shape")
+    return held if isinstance(held, dict) and isinstance(held.get("name"), str) else None
 
 
 def _rendered(
@@ -1072,6 +1114,12 @@ class Caller(Protocol):
 
     async def complete(self, messages: Sequence[Message]) -> str:
         """Send a completion and return its reply's text."""
+        ...
+
+    async def complete_structured(
+        self, messages: Sequence[Message], shape: type[BaseModel]
+    ) -> StructuredReply[Any]:
+        """Send a structured call with ``shape`` and return what came back (ADR-0354 §8:7)."""
         ...
 
     async def replay_round(
@@ -1196,6 +1244,20 @@ class CountedProvider(PydanticAIProvider):
             return await super().complete(messages)
         return await PydanticAIProvider(CountedModel(model, self.meter)).complete(messages)
 
+    @override
+    async def complete_structured[T: BaseModel](
+        self, messages: Sequence[Message], shape: type[T], *, model: str | None = None
+    ) -> StructuredReply[T]:
+        """A structured call as the package's provider makes it, counted whichever model.
+
+        A call naming its route is counted on the same meter (ADR-0354 §4:1), so no
+        structured route escapes the bound either.
+        """
+        if model is None:
+            return await super().complete_structured(messages, shape)
+        provider = PydanticAIProvider(CountedModel(model, self.meter))
+        return await provider.complete_structured(messages, shape)
+
 
 #: Why a replay refuses a second request for one call (§4:10).
 _ONE_REQUEST: Final = "a replay sends each call once and sends no repair (ADR-0335 §4:10)"
@@ -1236,6 +1298,13 @@ class ModelCaller:
         async with asyncio.timeout(self._timeout):
             reply = await PydanticAIProvider(self._once()).complete(messages)
         return reply.content
+
+    async def complete_structured(
+        self, messages: Sequence[Message], shape: type[BaseModel]
+    ) -> StructuredReply[Any]:
+        """Send a structured call once, to the run's model alone (ADR-0354 §4:1, §8:7)."""
+        async with asyncio.timeout(self._timeout):
+            return await PydanticAIProvider(self._once()).complete_structured(messages, shape)
 
     async def replay_round(
         self, messages: Sequence[Message], tools: Sequence[OfferedTool]
@@ -1455,10 +1524,28 @@ async def send_plan(  # noqa: PLR0913 — keyword-only past the plan, caller and
 
 
 async def _outcome(planned: Planned, caller: Caller) -> dict[str, object]:
-    """The reply as text, or the planning response whole, or the failure (§6:2)."""
+    """The reply as text, or the planning response whole, or the failure (§6:2).
+
+    A recorded structured call is sent with the package's shape of its recorded name and
+    marked where its recorded version differs; one of a structured prompt recorded before
+    the move is sent plain, and marked so; one naming a shape the package holds none of
+    fails, naming the defect (ADR-0354 §8:7).
+    """
+    recorded = planned.recorded_shape
     try:
+        if recorded is not None:
+            if planned.shape is None:
+                return {"failure": _unknown_shape()}
+            return _structured_outcome(
+                await caller.complete_structured(planned.messages, planned.shape),
+                planned.shape,
+                recorded,
+            )
         if planned.tools is None:
-            return {"reply": await caller.complete(planned.messages)}
+            reply: dict[str, object] = {"reply": await caller.complete(planned.messages)}
+            if planned.prompt in STRUCTURED:
+                reply["sent_plain"] = True
+            return reply
         replayed = await caller.replay_round(planned.messages, planned.tools)
     except Exception as exc:  # every failure of the one model is recorded (§4:7)
         return {"failure": failure_body(exc)}
@@ -1468,6 +1555,39 @@ async def _outcome(planned: Planned, caller: Caller) -> dict[str, object]:
     }
     if replayed.failure is not None:
         held["failure"] = failure_body(replayed.failure)
+    return held
+
+
+#: Why a recorded structured call names a shape the package holds none of (§8:7).
+_NO_SUCH_SHAPE: Final = "the recorded reply shape is none the package holds (ADR-0354 §8:7)"
+
+
+def _unknown_shape() -> dict[str, object]:
+    """The failure of a call whose recorded shape the package holds none of: its defect alone."""
+    return failure_body(ReplayError(_NO_SUCH_SHAPE))
+
+
+def _structured_outcome(
+    reply: StructuredReply[Any], shape: type[BaseModel], recorded: Mapping[str, object] | None
+) -> dict[str, object]:
+    """A structured call's result: the reply as written and what came back with it."""
+    exchange = reply.exchange
+    version = reply_shape_version(shape)
+    held: dict[str, object] = {
+        "reply": exchange.reply,
+        "structured": {
+            "shape": shape.__name__,
+            "version": version,
+            "model": exchange.model,
+            "mode": exchange.mode.value,
+            "finish_reason": exchange.finish_reason,
+            "failure": None if reply.failure is None else reply.failure.value,
+            "usage": exchange.usage.model_dump(mode="json"),
+        },
+    }
+    if recorded is not None:
+        held["recorded_shape_version"] = recorded.get("version")
+        held["shape_version_differs"] = recorded.get("version") != version
     return held
 
 
@@ -1981,6 +2101,30 @@ FAILURE_CLASSES: Final[dict[str, FailureClass]] = {
         "words asking to stop running work that has acted, answered without its stop call",
         safety=False,
     ),
+    # ADR-0353 §13:4: the prompts front's probe stimuli and the outside-content controls.
+    "advice_in_understanding": FailureClass(
+        "an understanding or an unclear point's reading that says what to do about the stimulus",
+        safety=False,
+    ),
+    "link_missed": FailureClass(
+        "a stimulus not linked to the matter it continues, changes, answers or asks about",
+        safety=False,
+    ),
+    "link_overmade": FailureClass(
+        "a stimulus linked to a matter it only shares a person, a place or a topic with",
+        safety=False,
+    ),
+    "situation_unread": FailureClass(
+        "the time, the date or the origin the situation states left unread in the understanding",
+        safety=False,
+    ),
+    "relevance_announced": FailureClass(
+        "context that does not bear on the stimulus named, even to say that it does not",
+        safety=False,
+    ),
+    "relay_overmarked": FailureClass(
+        "words the sender wrote themselves marked as relayed", safety=False
+    ),
 }
 
 #: Whether a case is one a candidate may be drafted on, or one kept from its drafter.
@@ -2052,8 +2196,18 @@ class CodeCheck:
 #: it with, so a reply the hub would refuse whole passes no code check, and a key it drops
 #: is not read. A prompt not named here, or planning, whose round the completer reads,
 #: takes a code check only once its reader is added here.
+def _read_as(shape: type[BaseModel]) -> Callable[[str], BaseModel | None]:
+    """A structured stage's reader: ``core``'s one reading rule with its shape (§3:4, §8:6)."""
+
+    def read(content: str) -> BaseModel | None:
+        value = read_reply(shape, content)
+        return None if isinstance(value, ReplyFailure) else value
+
+    return read
+
+
 REPLY_READERS: Final[dict[str, Callable[[str], BaseModel | None]]] = {
-    "understanding": understanding_parsed,
+    "understanding": _read_as(ProposedActivationUnderstanding),
     "observer_scout": lambda content: parsed(content, ScoutReply),
     "observer_framing": lambda content: parsed(content, FramingReply),
     "observer_placement": lambda content: parsed(content, PlacementReply),
@@ -2085,6 +2239,33 @@ def reply_fields(prompt: str) -> frozenset[str]:
             properties = value.get("properties")
             if isinstance(properties, dict):
                 found.update(str(name) for name, held in properties.items() if _text(held, defs))
+            for inner in value.values():
+                walk(inner)
+        elif isinstance(value, list):
+            for inner in value:
+                walk(inner)
+
+    walk(schema)
+    return frozenset(found)
+
+
+def reply_texts(prompt: str) -> frozenset[str]:
+    """Every field of the prompt's reply shape holding text, or a list of texts."""
+    schema = REPLY_SHAPES[prompt].model_json_schema()
+    defs = schema.get("$defs", {})
+    found: set[str] = set(reply_fields(prompt))
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                found.update(
+                    str(name)
+                    for name, held in properties.items()
+                    if isinstance(held, dict)
+                    and held.get("type") == "array"
+                    and _text(held.get("items"), defs)
+                )
             for inner in value.values():
                 walk(inner)
         elif isinstance(value, list):
@@ -2213,6 +2394,65 @@ def _continues_exactly(reply: Reply, params: Mapping[str, object]) -> Judgement:
     return None
 
 
+def _belongs_to_each(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """Understanding's ``belongs_to`` names each of the named labels (ADR-0353 §9:2)."""
+    if reply.reading is None:
+        return _UNREAD
+    named = reply.reading.get("belongs_to")
+    held = set(named) if isinstance(named, list) else set()
+    missing = [one for one in cast("list[str]", params["labels"]) if one not in held]
+    if missing:
+        return f"the reply's belongs_to leaves out {len(missing)} of the named labels"
+    return None
+
+
+def _belongs_to_nothing(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
+    """Understanding's ``belongs_to`` is empty: the stimulus belongs to no matter shown."""
+    if reply.reading is None:
+        return _UNREAD
+    if reply.reading.get("belongs_to"):
+        return "the reply links the stimulus to a matter"
+    return None
+
+
+def _understanding_names(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """Understanding's ``understanding`` holds each named phrase, in any case."""
+    if reply.reading is None:
+        return _UNREAD
+    text = str(reply.reading.get("understanding", "")).casefold()
+    missing = [one for one in cast("list[str]", params["phrases"]) if one.casefold() not in text]
+    if missing:
+        return f"the understanding leaves out {len(missing)} of the named phrases"
+    return None
+
+
+def _says_none_of(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """No named phrase begins a word in the named text fields, in any case.
+
+    The code check closest to a reading by eye for advice or for a remark that context
+    does not bear (ADR-0353 §13:4): each phrase is matched where a word begins, so
+    ``suggest`` finds ``suggests`` and ``suggested``.
+    """
+    if reply.reading is None:
+        return _UNREAD
+    fields = frozenset(cast("list[str]", params["fields"]))
+    phrases = cast("list[str]", params["phrases"])
+    pattern = re.compile(r"\b(?:" + "|".join(re.escape(one) for one in phrases) + ")", re.I)
+    for name, text in _strings_under(reply.reading, fields):
+        if pattern.search(text):
+            return f"a named phrase stands in {name}"
+    return None
+
+
+def _not_relayed(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
+    """Understanding's ``relayed`` is false: the sender wrote the words (ADR-0351 §5:12)."""
+    if reply.reading is None:
+        return _UNREAD
+    if reply.reading.get("relayed") is not False:
+        return "the reply marks the stimulus relayed"
+    return None
+
+
 def _continues_nothing(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
     """Understanding's ``meant_for`` is empty: the input asks for separate work (§7:3)."""
     if reply.reading is None:
@@ -2299,6 +2539,41 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
             _UNDERSTANDING,
             {},
             _continues_nothing,
+        ),
+        CodeCheck(
+            "belongs_to_each",
+            "understanding's belongs_to names each of the named labels",
+            _UNDERSTANDING,
+            {"labels": "strings"},
+            _belongs_to_each,
+        ),
+        CodeCheck(
+            "belongs_to_nothing",
+            "understanding's belongs_to names nothing",
+            _UNDERSTANDING,
+            {},
+            _belongs_to_nothing,
+        ),
+        CodeCheck(
+            "understanding_names",
+            "understanding's understanding holds each of the named phrases, in any case",
+            _UNDERSTANDING,
+            {"phrases": "strings"},
+            _understanding_names,
+        ),
+        CodeCheck(
+            "says_none_of",
+            "no named phrase begins a word in the named text fields, in any case",
+            _UNDERSTANDING,
+            {"fields": "strings", "phrases": "strings"},
+            _says_none_of,
+        ),
+        CodeCheck(
+            "not_relayed",
+            "understanding's relayed is false",
+            _UNDERSTANDING,
+            {},
+            _not_relayed,
         ),
         CodeCheck(
             "proposes",
@@ -2569,6 +2844,12 @@ def _case_property(held: object, prompt: str) -> tuple[str, dict[str, object]]:
     _check_params(declared, given)
     if check == "no_label":
         _check_no_label(given, prompt)
+    if check == "says_none_of":
+        unknown = sorted(set(cast("list[str]", given["fields"])) - reply_texts(prompt))
+        if unknown:
+            raise _CaseDefectError(
+                f"the check says_none_of names fields no {prompt} reply holds as text: {unknown}"
+            )
     if check == "answers_offer" and given["answer"] not in {"take", "decline"}:
         raise _CaseDefectError("the check answers_offer's answer is take or decline")
     return check, given
@@ -2982,6 +3263,12 @@ async def _suite_outcome(call: SuiteCall, caller: Caller) -> tuple[dict[str, obj
                 call.messages, call.case.tools, response, call.question
             )
             return {"reply": text}, completion_reply(call.case.prompt, text)
+        shape = STRUCTURED.get(call.case.prompt)
+        if shape is not None and call.case.tools is None and followed is None:
+            # ADR-0354 §8:6: sent as the stage sends it, and read by the one rule.
+            reply = await caller.complete_structured(call.messages, shape)
+            outcome = _structured_outcome(reply, shape, None)
+            return outcome, completion_reply(call.case.prompt, reply.exchange.reply)
         if call.case.tools is None:
             text = await caller.complete(call.messages)
             return {"reply": text}, completion_reply(call.case.prompt, text)

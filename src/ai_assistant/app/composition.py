@@ -1920,8 +1920,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             reads=reads,
             # ADR-0276's understanding stage, over the **same** model seam the phases
             # reach through — the routing-over-retrying provider built
-            # above, which carries ADR-0011's retry policy. The stage reads no store
-            # and receives no goal, plan, memory retrieval or context state.
+            # above, which carries ADR-0011's retry policy. It is handed that object as
+            # its `StructuredCompleter` (ADR-0354 §6:2, §8:1), so its route, retries and
+            # fallback order stay as they are. The stage reads no store and receives no
+            # goal, plan, memory retrieval or context state.
             understanding=UnderstandingStage(
                 model=model,
                 excerpt_chars=UNDERSTANDING_EXCERPT_CHARS,

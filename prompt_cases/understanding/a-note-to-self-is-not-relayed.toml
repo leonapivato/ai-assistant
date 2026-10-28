@@ -1,0 +1,13 @@
+# The outside-content front's control (ADR-0353 §13:4): a note the person writes to
+# themselves carries no relay mark.
+prompt = "understanding"
+guards = "relay_overmarked"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "not_relayed"
+
+[input]
+file = "a-note-to-self-is-not-relayed.json"

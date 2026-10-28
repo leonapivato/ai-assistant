@@ -1,16 +1,11 @@
-# ADR-0349 §7:3: a question about the weather where a hotel search runs for the same
-# trip is separate work on the same matter, so it continues none: kept separate, the
-# weather comes back first.
+# ADR-0349 §7:3, ADR-0353 §10:5: a question about the weather where a hotel search runs
+# for the same trip is separate work on the same matter, so it is meant for none.
+# Re-rendered in ADR-0353's format (§13:4).
 prompt = "understanding"
 guards = "separate_work_merged"
 came_from = "2026-10-26"
 set = "development"
 samples = 2
-
-[flags]
-recalled = false
-stories = false
-person = false
 
 [property]
 check = "continues_nothing"

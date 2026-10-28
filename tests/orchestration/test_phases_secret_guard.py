@@ -32,6 +32,7 @@ import datetime
 import decimal
 import sys
 import typing
+import zoneinfo
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from typing import (
@@ -93,6 +94,9 @@ _LEAVES: frozenset[type] = frozenset(
         datetime.datetime,
         datetime.timedelta,
         decimal.Decimal,
+        # ADR-0353 §5:2: the zone understanding renders its times in, a key of the tz
+        # database and its rules, read from the person's profile or the hub's settings.
+        zoneinfo.ZoneInfo,
     }
 )
 
@@ -141,8 +145,9 @@ def _hints(owner: Callable[..., object] | type) -> dict[str, object]:
 #: read off the code rather than restated from memory.
 #:
 #: - **Understanding's request** — what :meth:`UnderstandingStage.understand` is handed,
-#:   and the record it returns, which the episode captures; ``ModelProvider.complete``,
-#:   which its request goes through; and the parse of its reply.
+#:   and the record it returns, which the episode captures; and the check of the
+#:   structured reply its request comes back as (ADR-0354 §8:2), whose shape is the
+#:   proposal.
 #: - **Planning's request** — :meth:`PlanningStage.plan`'s inputs, from which the
 #:   rendered request is built, and its decision; ``ToolCallingCompleter.respond``,
 #:   which takes the rendered messages and the offered tools and returns the round; and
@@ -153,7 +158,7 @@ def _hints(owner: Callable[..., object] | type) -> dict[str, object]:
 _SEAMS: tuple[Callable[..., object], ...] = (
     UnderstandingStage.understand,
     ModelProvider.complete,
-    understanding._parsed,  # the parse of understanding's reply
+    understanding._returned,  # what understanding reads of its structured reply
     PlanningStage.plan,
     ToolCallingCompleter.respond,
     RoundRecorder.record,
@@ -371,7 +376,11 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``ProposedActivationUnderstanding`` with ``UnclearPoint`` (ADR-0353 §9:2, §9:3), and
     digesting's ``_Proposed`` and ``_ProposedItem``, are the parse of a reply: prose the
     model wrote, labels it was shown and a flag; the record keeps the same
-    ``UnclearPoint``s.
+    ``UnclearPoint``s. Understanding's comes back as a
+    ``StructuredReply[ProposedActivationUnderstanding]`` (ADR-0354 §5:1): that value or a
+    closed failure, and a ``ReplyExchange`` with ``ReplyUsage``, which hold the reply as
+    the model wrote it, the model's name, closed values, a finish reason, a provider's
+    statement of a refusal and token counts: prose a model wrote and counts, no carrier.
 
     **The capabilities planning is offered.** ``ToolDefinition`` with ``ToolCost`` is
     what a tool declares of itself: identifiers, closed values, the tiers it reaches as
@@ -414,7 +423,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     the activation it was taken from: the user's words and identifiers, with no carrier.
     An in-progress entry (ADR-0349 §5:6), ``InProgressEntry``, and its planning-side
     ``RunningShown``, are an identifier, the ``ChannelIdentity`` that caused it, its input
-    in brief read through the peer view, a flag and a closed origin; an offer shown,
+    in brief read through the peer view, a flag and a closed origin, with when it arrived
+    and each of its inputs as an ``EntryInput``, that brief or none and the input's
+    parties (ADR-0353 §2:5-§2:7); an offer shown,
     ``OfferShown``, is an identifier, that brief input and the meaning understanding
     wrote. Another activation's own work, ``PeerView`` with ``PeerNotes``,
     ``PeerEffect``, ``ProjectedText`` and ``ProjectedEvidence``, held for planning as
@@ -538,6 +549,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PlanningStory",
         "Profile",
         "ProposedActivationUnderstanding",
+        "StructuredReply[ProposedActivationUnderstanding]",
+        "ReplyExchange",
+        "ReplyUsage",
         "ProposedCall",
         "Provenance",
         "QuestionPart",
@@ -555,6 +569,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         # ADR-0349 §5:6, §6:7-§6:10, §7:19: in-progress entries, an offer and another
         # activation's own work, judged in the docstring above.
         "InProgressEntry",
+        "EntryInput",
         "OfferShown",
         "PeerEffect",
         "PeerNotes",

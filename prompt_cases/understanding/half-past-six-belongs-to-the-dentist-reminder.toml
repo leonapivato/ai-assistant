@@ -1,0 +1,15 @@
+# Round 10, case 2b (#3481): "make it 6:30 instead" changes the earlier stimulus that
+# set the dentist reminder, so it belongs with it; nothing runs, so it is meant for
+# nothing.
+prompt = "understanding"
+guards = "link_missed"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "belongs_to_each"
+labels = ["P2"]
+
+[input]
+file = "half-past-six-belongs-to-the-dentist-reminder.json"

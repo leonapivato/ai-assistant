@@ -44,15 +44,16 @@ declares none, and its property is `read`. Its input, best held in a JSON file b
 
 ```json
 {
-  "followed": {"prompt": "understanding", "flags": {"recalled": false, "stories": false}},
+  "followed": {"prompt": "understanding"},
   "messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
   "response": "<the followed call's reply as text>"
 }
 ```
 
 `followed` names the followed call's prompt and, only as a record of where the case came
-from, its flags. `messages` is its request whole, with its one system message. For a
-planning round, `tools` holds the tools it offered, and `response` its whole response as
+from, its flags where its prompt declares any (understanding declares none). `messages` is
+its request whole, with its one system message. For a planning round, `tools` holds the
+tools it offered, and `response` its whole response as
 pydantic-ai serialises it, the form planning's returned entry keeps it in: the run sends it
 back whole, and closes each call it proposed with a result saying it was not run (§6:4).
 An invented round's response cannot carry thinking a provider accepts, since a provider

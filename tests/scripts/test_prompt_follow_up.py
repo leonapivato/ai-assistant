@@ -56,7 +56,8 @@ pytestmark = pytest.mark.integration
 #: An understanding reply, as the followed call's response in a case.
 MEANING: Final = json.dumps({"understanding": "find a flight " + PRIVATE})
 
-UNDERSTANDING_FLAGS: Final = {"recalled": False, "stories": False, "person": False}
+#: Understanding's flags: none, since ADR-0353 §8:3.
+UNDERSTANDING_FLAGS: Final[dict[str, bool]] = {}
 
 WEB_SEARCH: Final = {
     "name": "web_search",
@@ -213,11 +214,6 @@ def test_each_follow_up_carries_its_own_samples_system_message(tmp_path: Path) -
         candidates=(str(template), "recorded"),
         activations=frozenset({ACT_A}),
         sources=frozenset({"understanding"}),
-        flags=(
-            "understanding.recalled=false",
-            "understanding.stories=false",
-            "understanding.person=false",
-        ),
         samples=2,
         follow_up="",
     )
@@ -318,6 +314,9 @@ class _Cut:
     async def complete(self, messages: Any) -> str:
         reply: str = await self.inner.complete(messages)
         return reply
+
+    async def complete_structured(self, messages: Any, shape: Any) -> Any:
+        return await self.inner.complete_structured(messages, shape)
 
     async def replay_round(self, messages: Any, tools: Any) -> Any:
         return await self.inner.replay_round(messages, tools)
@@ -481,7 +480,6 @@ def _understanding_case(directory: Path, samples: int = 2) -> None:
     (folder / "plain.toml").write_text(
         'prompt = "understanding"\nguards = "label_in_text"\ncame_from = "2026-10-21"\n'
         f'set = "development"\nsamples = {samples}\n\n'
-        "[flags]\nrecalled = false\nstories = false\nperson = false\n\n"
         '[property]\ncheck = "no_label"\nfields = ["understanding"]\nlabels = ["H"]\n\n'
         "[input]\n"
         f'messages = [{{ role = "user", content = {json.dumps(json.dumps({"in": PRIVATE}))} }}]\n'

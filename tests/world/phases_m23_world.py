@@ -60,6 +60,7 @@ from m23_harness import (
     _Records,
     plant,
 )
+from understanding_support import TextAsStructured
 
 from ai_assistant.core.types import (
     ChatDevice,
@@ -387,7 +388,7 @@ def build_phases_world(
         ),
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),
         understanding=UnderstandingStage(
-            model=FakeModelProvider(reply=_STATED),
+            model=TextAsStructured(FakeModelProvider(reply=_STATED)),
             excerpt_chars=2000,
             prompt=default_prompt(UNDERSTANDING_PROMPT),
         ),

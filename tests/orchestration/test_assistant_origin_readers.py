@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActivationUnderstanding,
     ChannelContext,
     ChannelIdentity,
@@ -89,25 +91,47 @@ def _projection() -> EpisodeProjection:
     return project_episode(_scheduled_episode(), excerpt_chars=400)
 
 
-def test_understanding_attributes_the_input_it_reads_as_the_assistants_instruction() -> None:
-    """The activation's own input: an instruction the assistant wrote, never the user's."""
-    rendered = understanding._input_rendering(_INSTRUCTION, _SCHEDULE, InputOrigin.ASSISTANT)
+def _renderer() -> understanding._Renderer:
+    """Understanding's renderer for one pass on the schedule, for the owner, named."""
+    return understanding._Renderer(
+        excerpt_chars=400,
+        zone=ZoneInfo("UTC"),
+        own_zone=False,
+        naming=understanding._Naming(person_id=OWNER_PERSON_ID, name="Maren"),
+        channel=_SCHEDULE,
+        now=_AT,
+        received_at=_AT,
+        profiled=True,
+    )
 
-    assert "never something the user said" in str(rendered["received_as"])
-    assert _USERS not in str(rendered["received_as"])
-    assert rendered["text"] == _INSTRUCTION
+
+def test_understanding_attributes_the_input_it_reads_as_the_assistants_instruction() -> None:
+    """The activation's own input: the system's task, never the person's words.
+
+    ADR-0353 §3:2, §7:1: a ``task`` tag from the system, framed as scheduled work.
+    """
+    sentence, tag = _renderer()._stimulus(
+        _INSTRUCTION,
+        window=understanding.SuppliedWindow(ChannelContext()),
+        parties=parties_for(InputOrigin.ASSISTANT),
+        trigger=None,
+        joined=(),
+        by_position={},
+    )
+
+    assert "a step of scheduled work came due" in sentence
+    assert tag == f'<task from="the system">{_INSTRUCTION}</task>'
+    assert "Maren" not in sentence + tag
 
 
 def test_understanding_attributes_an_earlier_step_as_work_the_assistant_scheduled() -> None:
-    episode = understanding._ProjectedEpisode.of(
-        _scheduled_episode(), excerpt_chars=400, admit_outside_input=True
-    )
+    """An earlier step in memory: the system's task, its text not shown (ADR-0284 §8:1)."""
+    rendered = "\n".join(_renderer()._remembered(_scheduled_episode(), admit_outside=True))
 
-    described = episode.described()
-
-    assert "the assistant scheduled" in str(described["item"])
-    assert "never something the user said" in str(described["item"])
-    assert _INSTRUCTION not in json.dumps(described, default=str)
+    assert 'origin="the schedule"' in rendered
+    assert '<task from="the system" withheld="yes"/>' in rendered
+    assert "Maren" not in rendered
+    assert _INSTRUCTION not in rendered
 
 
 def test_the_matters_pass_and_the_tidy_up_attribute_it_and_never_show_it_as_the_users() -> None:

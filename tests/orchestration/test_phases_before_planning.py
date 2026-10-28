@@ -23,7 +23,10 @@ from test_engine import AT
 from understanding_support import (
     EPISODE_LIMIT,
     STATED_PROPOSAL,
+    Container,
+    Rendered,
     recall_stage,
+    rendered,
     understanding_stage,
 )
 
@@ -72,14 +75,14 @@ _WINDOWED: Final = "Plan the drive to Riverside."
 _SEEDED: Final = (address("a-old"), address("a-new"))
 
 
-def _sent(model: FakeModelProvider, call: int = -1) -> dict[str, Any]:
-    """What understanding's call ``call`` was sent."""
-    payload: dict[str, Any] = json.loads(model.calls[call].messages[1].content)
-    return payload
+def _sent(model: FakeModelProvider, call: int = -1) -> Rendered:
+    """What understanding's call ``call`` was sent, read back by its sections."""
+    return rendered(model.calls[call].messages)
 
 
-def _episode_window(model: FakeModelProvider, call: int) -> Any:
-    return _sent(model, call)["episode_window"]
+def _origin_memory(model: FakeModelProvider, call: int) -> list[Container]:
+    """The stimuli in memory recorded at the stimulus's origin (ADR-0353 §2)."""
+    return _sent(model, call).containers("Stimulus origin memory")
 
 
 def _proposal(**fields: Any) -> str:
@@ -109,10 +112,6 @@ async def _story(stories: FakeStoryStore, activation_id: str) -> str:
     story_id = (await stories.create([activation(activation_id)], actor=StoryActor.OWNER)).story_id
     assert story_id is not None
     return story_id
-
-
-def _texts(view: dict[str, Any]) -> str:
-    return json.dumps(view["latest_episodes"])
 
 
 async def _members(stories: FakeStoryStore, story_id: str) -> list[tuple[StoryMember, StoryActor]]:
@@ -185,7 +184,7 @@ async def test_a_turn_records_version_one_understood_before_it_was_planned() -> 
     )
     _, episode = await chat_turn(harness, _UTTERANCE)
     assert order.seen == ["understand", "plan"]
-    assert _sent(model)["input"]["text"] == _UTTERANCE
+    assert _sent(model).stimulus == _UTTERANCE
     record = processing(episode)
     (understood,) = record.understanding
     assert understood.version == 1
@@ -205,8 +204,10 @@ async def test_an_event_is_understood_before_planning_over_its_supplied_window()
     assert result.capture.state == "recorded"
     assert order.seen == ["understand", "plan"]
     sent = _sent(model)
-    assert sent["input"]["received_as"].startswith("a report received on informational_event")
-    assert [item["label"] for item in sent["channel_window"]] == ["H1"]
+    (words,) = sent.tags("The stimulus")
+    assert (words.name, words.get("from")) == ("received", "informational_event:thermostat-1")
+    assert "a report from informational_event:thermostat-1" in sent.section("The stimulus")
+    assert sent.labelled("Stimulus origin knowledge") == ["H1"]
     record = processing(episode)
     assert [u.version for u in record.understanding] == [1]
     assert record.understanding_omitted is None
@@ -218,11 +219,14 @@ async def test_an_event_captured_on_one_channel_is_in_a_conversations_episode_wi
     harness = phases_harness(understanding=understanding_stage(model=model))
     await event(harness)
     await chat_turn(harness, _UTTERANCE)
-    (episode,) = _sent(model)["episode_window"]
-    assert episode["label"] == "P1"
-    assert episode["input"] == "The thermostat entered eco mode at 18:00."
-    assert episode["item"].startswith("a report received on informational_event:thermostat-1")
-    assert episode["understood_then"]["meaning"] == "The input means what it says."
+    (episode,) = _sent(model).containers("Short-term memory")
+    assert episode.label == "P1"
+    assert episode.get("origin") == "a connected source"
+    assert episode.get("outside") == "yes"
+    words, understood, _ = episode.tags
+    assert (words.name, words.get("from")) == ("received", "informational_event:thermostat-1")
+    assert words.text == "The thermostat entered eco mode at 18:00."
+    assert understood.text == "The input means what it says."
 
 
 async def test_a_second_turn_sees_the_first_under_h_and_not_again_under_p() -> None:
@@ -238,15 +242,13 @@ async def test_a_second_turn_sees_the_first_under_h_and_not_again_under_p() -> N
     await chat_turn(harness, _UTTERANCE, conversation=conversation, message_id="m-2")
     sent = _sent(model)
     # The window is the transcript: the first message, then the reply planning wrote.
-    asked, replied = sent["channel_window"]
-    assert [asked["label"], replied["label"]] == ["H1", "H2"]
-    assert (asked["author"], replied["author"]) == ("the user", "the assistant")
-    # The first message carries what the episode window would have added about it.
-    assert asked["also_in_episode_window"] is True
-    assert asked["understood_then"]["meaning"] == "The input means what it says."
-    assert replied["also_in_episode_window"] is True
-    assert "understood_then" not in replied
-    assert sent["episode_window"].startswith("missing")
+    asked, understood, replied = sent.tags("Stimulus origin knowledge")
+    assert [asked.get("label"), replied.get("label")] == ["H1", "H2"]
+    assert (asked.get("from"), replied.get("from")) == ("the owner", "the system")
+    # ADR-0353 §2:4: the first message carries its episode's latest understanding, once.
+    assert (understood.name, understood.text) == ("understood", "The input means what it says.")
+    assert sent.containers("Short-term memory") == []
+    assert sent.containers("Stimulus origin memory") == []
 
 
 # --- the windows (ADR-0282) ----------------------------------------------------------------
@@ -258,9 +260,10 @@ async def test_understanding_renders_the_episodes_the_windows_stage_chose() -> N
     harness = phases_harness(memory=memory, understanding=understanding_stage(model=model))
     await chat_turn(harness, "My dentist is Dr Rao.")
     await chat_turn(harness, "Who is my dentist?")
-    (shown,) = _episode_window(model, 1)
-    assert shown["label"] == "P1"
-    assert shown["input"] == "My dentist is Dr Rao."
+    # The earlier turn is another conversation of the hub chat, so another origin.
+    (shown,) = _sent(model, 1).containers("Short-term memory")
+    assert shown.label == "P1"
+    assert shown.tags[0].text == "My dentist is Dr Rao."
 
 
 async def test_a_window_episode_forgotten_before_understanding_is_not_rendered() -> None:
@@ -281,7 +284,7 @@ async def test_a_window_episode_forgotten_before_understanding_is_not_rendered()
     (chosen,) = windows.chosen
     assert chosen is not None
     assert len(chosen) == 1
-    assert _episode_window(model, 1) == "missing: there are no other recent episodes to show"
+    assert _sent(model, 1).section("Short-term memory").startswith("Nothing is shown")
     (fetch,) = [
         log for log in logs if log["event"] == "stage_fetch" and log["stage"] == "understanding"
     ]
@@ -335,8 +338,8 @@ async def test_a_turn_links_its_activation_into_the_story_it_named() -> None:
         record.activation_id,
     )
     # §6:5: the candidate was shown under its label.
-    (shown,) = json.loads(model.calls[0].messages[1].content)["stories"]
-    assert shown["label"] == "S1"
+    (shown,) = _sent(model, 0).containers("Matters")
+    assert shown.label == "S1"
 
 
 async def test_an_earlier_episode_in_no_story_starts_one_with_the_activation() -> None:
@@ -366,8 +369,8 @@ async def test_a_follow_up_links_the_conversation_s_earlier_turn_through_its_h_l
 
     _, episode = await chat_turn(harness, _TURN, conversation=conversation, message_id="m-2")
 
-    item, *_ = json.loads(model.calls[1].messages[1].content)["channel_window"]
-    assert item["label"] == "H1"
+    item, *_ = _sent(model, 1).tags("Stimulus origin knowledge")
+    assert item.get("label") == "H1"
     record = processing(episode)
     assert record.understanding[-1].story_links == (activation(earlier),)
     (started,) = (await stories.stories()).stories
@@ -399,7 +402,8 @@ async def test_a_deployment_without_the_story_pieces_runs_as_before() -> None:
     _, episode = await chat_turn(harness, _TURN)
 
     assert _S.STORY_LINKS not in [entry.stage for entry in processing(episode).stages]
-    assert "stories" not in json.loads(model.calls[0].messages[1].content)
+    # ADR-0353 §8:1: the section is always rendered, and says the system has none.
+    assert _sent(model, 0).section("Matters").startswith("The system does not have it")
 
 
 async def test_an_event_s_links_are_recorded_before_planning() -> None:
@@ -448,8 +452,8 @@ async def test_unreadable_candidates_say_so_and_understanding_proceeds() -> None
 
     _, episode = await chat_turn(harness, _TURN)
 
-    section = json.loads(model.calls[0].messages[1].content)["stories"]
-    assert section == "missing: the stories could not be read, so none is shown"
+    section = _sent(model, 0).section("Matters")
+    assert section.startswith("It could not be read")
     assert (_S.STORY_LINKS, _R.STORY_LINKS_UNRECORDED, _DONE) in entries(processing(episode))
 
 
@@ -477,8 +481,8 @@ def _recalling(
     )
 
 
-def _shown(model: FakeModelProvider) -> Any:
-    return json.loads(model.calls[0].messages[1].content)
+def _shown(model: FakeModelProvider) -> list[Container]:
+    return _sent(model, 0).containers("Matters")
 
 
 async def test_recalls_story_is_recorded_and_joins_the_candidates_after_the_windows() -> None:
@@ -499,10 +503,11 @@ async def test_recalls_story_is_recorded_and_joins_the_candidates_after_the_wind
     assert kept[address("a-old")] == (recalled,)
     assert address("a-new") not in kept
     # §6:1: the window's story first, then recall's.
-    first, second = _shown(model)["stories"]
-    assert (first["label"], second["label"]) == ("S1", "S2")
-    assert _WINDOWED in _texts(first)
-    assert _TURN in _texts(second)
+    first, second = _shown(model)
+    assert (first.label, second.label) == ("S1", "S2")
+    # ADR-0353 §3:2: a matter's latest stimuli render as their meaning, and neither
+    # seeded episode has one, so which is which is read off the label's resolution below.
+    assert (first.tags, second.tags) == ([], [])
     # The S2 label resolves to recall's story, and the stage links the activation there.
     assert record.understanding[-1].story_links == (story(recalled),)
     view = await stories.view(recalled)
@@ -525,8 +530,8 @@ async def test_a_story_already_a_candidate_through_the_window_is_not_repeated() 
     record = processing(episode)
     assert record.recall is not None
     assert {item.id: item.stories for item in record.recall.items}[address("a-old")] == (both,)
-    (only,) = _shown(model)["stories"]
-    assert only["label"] == "S1"
+    (only,) = _shown(model)
+    assert only.label == "S1"
 
 
 async def test_a_story_store_failure_in_recall_is_tolerated_and_the_turn_goes_on() -> None:
@@ -551,6 +556,5 @@ async def test_a_story_store_failure_in_recall_is_tolerated_and_the_turn_goes_on
     assert (_S.RECALL, _R.NOT_RECALLED, StageOutcome.FAILED) in stages
     assert (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE) in stages
     # Recall's failure brings no candidate, and the window's episode is in no story.
-    assert _shown(model)["stories"] == (
-        "missing: none of the earlier episodes shown belongs to a story"
-    )
+    assert _shown(model) == []
+    assert _sent(model, 0).section("Matters").startswith("Nothing is shown")

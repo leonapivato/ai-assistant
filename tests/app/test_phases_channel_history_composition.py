@@ -11,7 +11,6 @@ state is the engine's, and an episode records where its input came from.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -26,6 +25,7 @@ from phases_composition_support import (
     phased,
 )
 from structlog.testing import capture_logs
+from understanding_support import Rendered
 
 from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.types import (
@@ -425,11 +425,15 @@ async def test_a_later_activation_renders_the_event_as_a_report_received(
         if call.messages[0].content in UNDERSTANDING_INSTRUCTIONS
     ]
     assert understanding, "the later activation reached the understanding stage"
-    sent = json.loads(understanding[0])
+    sent = Rendered(understanding[0])
     (report,) = [
-        item
-        for item in sent["episode_window"]
-        if "report received on informational_event:sensor" in item["item"]
+        one
+        for one in sent.containers("Short-term memory")
+        if one.get("origin") == "a connected source"
     ]
-    assert "never something the user said" in report["item"]
-    assert report["input"] == _REPORTED
+    # ADR-0353 §3:2, §3:7: the report's own words, in a received tag from its source,
+    # marked outside, and never said by the person.
+    assert report.get("outside") == "yes"
+    words = report.tags[0]
+    assert (words.name, words.get("from")) == ("received", "informational_event:sensor")
+    assert words.text == _REPORTED

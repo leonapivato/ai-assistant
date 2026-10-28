@@ -1,0 +1,14 @@
+# Round 10, case 3a, an untagged line (#3481): "can you text me instead?" is read
+# against the situation's origin, the hub chat, which the understanding names.
+prompt = "understanding"
+guards = "situation_unread"
+came_from = "#3481"
+set = "development"
+samples = 3
+
+[property]
+check = "understanding_names"
+phrases = ["hub chat"]
+
+[input]
+file = "text-me-instead-reads-the-origin.json"

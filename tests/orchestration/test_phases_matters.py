@@ -56,6 +56,7 @@ from phases_support import (
     written,
 )
 from task_support import AT, seams
+from understanding_support import rendered
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
@@ -112,9 +113,9 @@ class _Understanding(FakeModelProvider):
         return self._gates.setdefault(text, (asyncio.Event(), asyncio.Event()))
 
     def _reply(self, messages: Sequence[Message]) -> str:
-        payload: dict[str, Any] = json.loads(messages[1].content)
-        text = str(payload["input"]["text"])
-        section = list(payload.get("in_progress") or ())
+        message = rendered(messages)
+        text = message.stimulus
+        section = message.concurrent()
         self.shown[text] = section
 
         def named(marker: str) -> list[str]:
@@ -138,7 +139,7 @@ class _Understanding(FakeModelProvider):
         )
 
     async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
-        text = str(json.loads(messages[1].content)["input"]["text"])
+        text = rendered(messages).stimulus
         gate = self._gates.get(text)
         if gate is not None:
             gate[0].set()
@@ -407,12 +408,13 @@ async def test_separate_work_continues_nothing_and_each_runs_on_its_own() -> Non
     # The in-progress section showed the running work, newest first, exactly as §5:6 has
     # it, and planning was shown no section (§5:9).
     (entry,) = understanding.shown["what's the weather there?"]
-    assert entry == {
+    assert {key: entry[key] for key in ("label", "origin", "acted", "input")} == {
         "label": "R1",
-        "place": f"conversation:{first}",
+        "origin": "the hub chat",
         "input": "book Riverside",
-        "has_acted": False,
+        "acted": "no",
     }
+    assert entry["at"], "ADR-0353 §2:5: when its input arrived"
     assert "in_progress" not in planner.requests["what's the weather there?"][0]
 
 

@@ -14,7 +14,6 @@ phases wired, so it stays pinned once the switch lands.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -36,7 +35,7 @@ from phases_support import (
 )
 from structlog.testing import capture_logs
 from test_engine import AT, Harness
-from understanding_support import STATED_PROPOSAL, understanding_stage
+from understanding_support import STATED_PROPOSAL, rendered, understanding_stage
 
 from ai_assistant.core.errors import ConversationStoreError, ModelError
 from ai_assistant.core.types import (
@@ -240,12 +239,12 @@ async def test_a_reply_written_during_a_messages_start_wait_is_marked_as_after_i
     await answered(harness, conversation, 1)
     over.set()
     await answered(harness, conversation, 2)
-    payload = json.loads(model.calls[-1].messages[1].content)
-    assert payload["input"]["text"] == "meanwhile"
-    window = payload["channel_window"]
-    assert [(item["position"], item.get("written_after_the_input_began")) for item in window] == [
-        (1, None),
-        (3, True),
+    message = rendered(model.calls[-1].messages)
+    assert message.stimulus == "meanwhile"
+    window = message.tags("Stimulus origin knowledge", "message")
+    assert [(item.text, item.get("after_stimulus")) for item in window] == [
+        ("first", None),
+        (window[1].text, "yes"),
     ]
 
 
@@ -541,12 +540,14 @@ async def test_the_window_is_the_recent_transcript_each_message_keeping_its_auth
         conversation, message=said("m-2", "Who is it?", replies_to=1)
     )
     await answered(harness, conversation, 2)
-    payload = json.loads(model.calls[-1].messages[1].content)
-    assert payload["input"]["text"] == "Who is it?"
-    window = payload["channel_window"]
-    assert [(item["label"], item["author"], item["text"]) for item in window] == [
-        ("H1", "the user", "My dentist is Rao."),
-        ("H2", "the assistant", DEFAULT_ROUND_TEXT),
+    message = rendered(model.calls[-1].messages)
+    assert message.stimulus == "Who is it?"
+    window = message.tags("Stimulus origin knowledge", "message")
+    assert [(item.get("label"), item.get("from"), item.text) for item in window] == [
+        ("H1", "the owner", "My dentist is Rao."),
+        ("H2", "the system", DEFAULT_ROUND_TEXT),
     ]
-    assert [item["position"] for item in window] == [1, 2]
-    assert all("written_after_the_input_began" not in item for item in window)
+    # §4:5: the input names the message it replies to by its label.
+    (words,) = message.tags("The stimulus")
+    assert words.get("replies_to") == "H1"
+    assert all(item.get("after_stimulus") is None for item in window)

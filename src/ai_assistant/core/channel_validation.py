@@ -32,10 +32,20 @@ its connected source's, established, named by the channel's identity (§3:5); an
 Task Scheduler's the assistant's statement (§3:6). The one person a party names is the
 owner (§3:2). A kind not built, a mail channel or a spoke that tells who is talking,
 declares nothing here until it is, and a channel type with no declaration is refused.
+
+**What understanding is told of an origin** (ADR-0353 §6:3, §7:5). Beside the parties,
+each kind declares how understanding names one of its origins, what the origin is and who
+is there, in the system's words, and how a stimulus from it is framed: what a person does
+to send one, the preposition its origin takes, and what its content is called
+(:class:`OriginKind`). It is keyed by channel type, as the parties are, so the hub chat,
+which no ``ChannelKind`` declares in code, declares it here too, and a declared kind reads
+it rather than restating it. A kind with no row is rendered with the fallback ADR-0353
+§6:3 and §7:5 give it.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from pydantic import TypeAdapter, ValidationError
@@ -310,3 +320,81 @@ def establishes_the_user(channel_type: str) -> bool:
         ``True`` exactly for a type whose kind declares it.
     """
     return channel_type in _ESTABLISHES_THE_USER
+
+
+@dataclass(frozen=True, slots=True)
+class OriginKind:
+    """What understanding is told of an origin of one channel type (ADR-0353 §6:3, §7:5).
+
+    Every value is the system's own words, never a record's (§3:4), and none says how a
+    reply is shown there, which is planning's (§6:3, ADR-0292 §8:1).
+
+    Attributes:
+        name: How an origin of the kind is named, as ``origin=`` and the situation write
+            it (§4:4): ``the hub chat``.
+        where: The name with the preposition a stimulus's place takes: ``in the hub chat``.
+        described: What the origin is and who is there, after its name in the situation's
+            line (§6:1), with ``{person}`` standing for the person it is for, named.
+        act: What the person does to send a message there, in the framing sentence (§7:1):
+            ``typed``; empty for a kind whose input no person sends.
+        content: What its input's content is called in the framing sentence's
+            ``{content}`` slot (§7:1): ``this text`` or ``this report``.
+        remembered: Whether its place window is built from the episodes the system
+            recorded there, rather than read from the medium, so that understanding renders
+            it as memory and says that the origin provides no history (ADR-0353 §2, §8:1;
+            ADR-0323 §10:1).
+    """
+
+    name: str
+    where: str
+    described: str
+    act: str
+    content: str
+    remembered: bool = False
+
+
+#: ADR-0353 §6:3, §7:5: each kind's origin, as understanding is told of it.
+_ORIGINS: Final = {
+    "conversation": OriginKind(
+        name="the hub chat",
+        where="in the hub chat",
+        described="{person}'s private chat with the system",
+        act="typed",
+        content="this text",
+    ),
+    "telegram": OriginKind(
+        name="Telegram",
+        where="on Telegram",
+        described="{person}'s private chat with the system on Telegram",
+        act="typed",
+        content="this text",
+        remembered=True,
+    ),
+    "informational_event": OriginKind(
+        name="a connected source",
+        where="from a connected source",
+        described="a source connected to the system that reports to it; no one there talks with it",
+        act="",
+        content="this report",
+    ),
+    TASK_SCHEDULER: OriginKind(
+        name="the schedule",
+        where="on the schedule",
+        described="the system's schedule of the work set to run later; no one is there",
+        act="",
+        content="this text",
+    ),
+}
+
+
+def origin_kind(channel_type: str) -> OriginKind | None:
+    """What understanding is told of an origin of ``channel_type`` (ADR-0353 §6:3, §7:5).
+
+    Args:
+        channel_type: The channel type; a new conversation's is the hub chat's.
+
+    Returns:
+        The kind's declaration, or ``None`` where it declares none, which understanding
+        renders with the fallback that says only what the record establishes.
+    """
+    return _ORIGINS.get(channel_type)

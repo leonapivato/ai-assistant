@@ -19,7 +19,9 @@ from test_engine import AT
 from understanding_support import (
     ON_DEVICE_RECALL_THRESHOLD,
     STATED_PROPOSAL,
+    Tag,
     recall_stage,
+    rendered,
     understanding_stage,
 )
 
@@ -102,9 +104,14 @@ def _entries(record: EpisodeProcessingRecord) -> list[tuple[ControllerStage, Con
     return entries(record)
 
 
-def _shown(model: FakeModelProvider) -> Any:
-    """What the understanding stage's one call rendered as its recalled section."""
-    return json.loads(model.calls[0].messages[1].content)["recalled"]
+def _shown(model: FakeModelProvider) -> list[Tag]:
+    """What the understanding stage's one call rendered as recalled memories."""
+    return rendered(model.calls[0].messages).tags("Recalled memories")
+
+
+def _note(model: FakeModelProvider) -> str:
+    """Recalled memories' note, where it renders none (ADR-0353 §8:1)."""
+    return rendered(model.calls[0].messages).section("Recalled memories")
 
 
 class _Slow(FakeMemoryStore):
@@ -196,8 +203,8 @@ async def test_a_found_recall_is_recorded_and_shown_to_understanding() -> None:
     assert record.recall.outcome is RecallOutcome.FOUND
     assert [item.id for item in record.recall.items] == ["fact-booked"]
     (shown,) = _shown(model)
-    assert shown["label"] == "M1"
-    assert shown["fact"] == _BOOKED.content
+    assert shown.get("label") == "M1"
+    assert shown.text == _BOOKED.content
 
 
 async def test_a_recall_that_found_nothing_is_recorded_and_said() -> None:
@@ -207,7 +214,7 @@ async def test_a_recall_that_found_nothing_is_recorded_and_said() -> None:
     record = await _record(harness)
     assert record.recall is not None
     assert (record.recall.outcome, record.recall.items) == (RecallOutcome.NOTHING_FOUND, ())
-    assert _shown(model) == "missing: nothing was recalled for this input"
+    assert _note(model) == "Nothing is shown: recall found no memory for this stimulus."
 
 
 async def test_a_turn_with_recall_unwired_renders_no_recalled_section() -> None:
@@ -219,7 +226,8 @@ async def test_a_turn_with_recall_unwired_renders_no_recalled_section() -> None:
     record = await _record(harness)
     assert record.recall is None
     assert _S.RECALL not in [entry.stage for entry in record.stages]
-    assert "recalled" not in json.loads(model.calls[0].messages[1].content)
+    # ADR-0353 §8:1: the section is rendered, saying the system does not have it.
+    assert _note(model).startswith("The system does not have it")
 
 
 # --- §5: failure-tolerant --------------------------------------------------------------------
@@ -239,7 +247,7 @@ async def test_a_store_failure_is_tolerated_and_understanding_runs() -> None:
     assert _entries(record)[-1] == (_S.END, _R.NOTHING_DUE, _DONE)
     assert record.recall is not None
     assert record.recall.outcome is RecallOutcome.FAILED
-    assert _shown(model) == "missing: recall failed, so no memories are shown"
+    assert _note(model).startswith("It could not be read: recall failed")
     # The activation still answered.
     assert [one.text for one in await written(harness, conversation)][-1] == DEFAULT_ROUND_TEXT
 
@@ -370,7 +378,7 @@ async def test_a_recalled_record_forgotten_before_understanding_is_not_rendered(
     assert record.recall is not None
     assert {item.id for item in record.recall.items} == {"fact-booked", "fact-permit"}
     (shown,) = _shown(model)
-    assert (shown["label"], shown["fact"]) == ("M1", _PERMIT.content)
+    assert (shown.get("label"), shown.text) == ("M1", _PERMIT.content)
     # Understanding's fetch is the first; planning fetches what recall kept after it.
     (fetch, *_) = [log for log in logs if log["event"] == "stage_fetch"]
     assert (fetch["fetched"], fetch["missing"]) == (2, 1)
@@ -383,7 +391,7 @@ async def test_everything_recalled_forgotten_before_understanding_is_said() -> N
     record = await _record(harness)
     assert record.recall is not None
     assert record.recall.outcome is RecallOutcome.FOUND
-    assert _shown(model) == "missing: what was recalled is no longer in memory"
+    assert _note(model) == "Nothing is shown: what recall found is no longer in memory."
 
 
 # --- recall searches past the windows (ADR-0282 §4) --------------------------------------
@@ -407,4 +415,4 @@ async def test_an_episode_the_window_holds_is_not_recalled() -> None:
     assert record.recall is not None
     assert [item.id for item in record.recall.items] == ["fact-eco"]
     (shown,) = _shown(model)
-    assert (shown["label"], shown["fact"]) == ("M1", text)
+    assert (shown.get("label"), shown.text) == ("M1", text)
