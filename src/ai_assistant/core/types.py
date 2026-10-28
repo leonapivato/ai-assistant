@@ -6057,11 +6057,13 @@ def stamped_support(support: MemorySupport, episode: EpisodicMemory | None) -> M
     one :func:`input_support_origin` gives the part (ADR-0351 §7:2, §7:6), whatever holder
     the producer named, so no producer calls a forward ``user_message`` or your own words
     ``outside_input``. A support with no holder gains the one :func:`support_holder`
-    computes; one a producer named a holder for keeps it where it is that holder, and
-    where both are people, since which person sent a part is the channel's to establish
-    (ADR-0323 §4:2) and producer code names them. Nothing else is admitted: no producer
-    names an outside source, the assistant's statement or an unknown holder other than
-    the record does.
+    computes; one a producer named a holder for keeps it where it is that holder. On a
+    part whose record names no party, a yes or an input whose episode is not held, it
+    keeps it too where both are people, since which person sent a part is the channel's
+    to establish (ADR-0323 §4:2) and producer code names them; on a part of an input
+    whose episode resolves, the party the channel recorded is that person (ADR-0351 §7:1,
+    §7:5). Nothing else is admitted: no producer names an outside source, the assistant's
+    statement or an unknown holder other than the record does.
 
     **No support points at an input whose parties are empty or include the
     assistant's statement** (ADR-0351 §7:3, in place of ADR-0350 §6:11's ``assistant``
@@ -6093,8 +6095,13 @@ def stamped_support(support: MemorySupport, episode: EpisodicMemory | None) -> M
     recorded = support.holder
     if recorded is None:
         return support.model_copy(update={"holder": computed})
+    # ADR-0351 §7:1, §7:5: a part of an input whose episode resolves is held by its
+    # party, so a producer naming another person for it is refused as any other holder.
+    resolved_input = isinstance(support.points_at, InputPart) and processing is not None
     if recorded == computed or (
-        recorded.kind is HolderKind.PERSON and computed.kind is HolderKind.PERSON
+        not resolved_input
+        and recorded.kind is HolderKind.PERSON
+        and computed.kind is HolderKind.PERSON
     ):
         return support
     msg = (

@@ -513,6 +513,25 @@ def test_the_understanding_bound_keeps_version_one_and_the_latest() -> None:
     )
 
 
+def test_a_bound_that_elides_the_version_marking_the_input_keeps_the_relay_mark() -> None:
+    """ADR-0351 §5:9: the mark holds for the activation, whatever the bound elides.
+
+    The version that marked the input relayed is the one the bound drops, so the record's
+    own validator, which reads the versions it keeps, cannot see it; the extension rule
+    holds the mark on the revision's latest version.
+    """
+
+    def version(number: int, *, relayed: bool) -> ActivationUnderstanding:
+        return _understanding(number).model_copy(update={"relayed": relayed})
+
+    stored = _open(understanding=(version(1, relayed=False), version(2, relayed=True)))
+    dropped = (version(1, relayed=False), version(3, relayed=False))
+    kept = (version(1, relayed=False), version(3, relayed=True))
+
+    assert not _extends(stored, _open(understanding=dropped, understanding_elided=1))
+    assert _extends(stored, _open(understanding=kept, understanding_elided=1))
+
+
 @pytest.mark.parametrize(
     ("revision", "elided"),
     [

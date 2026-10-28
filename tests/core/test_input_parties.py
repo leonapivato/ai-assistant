@@ -205,6 +205,12 @@ def test_a_write_naming_another_origin_for_a_part_is_refused() -> None:
     named = _support(SupportOrigin.USER_MESSAGE, 1).model_copy(update={"holder": _OWNER})
     with pytest.raises(ValueError, match="takes outside_input, not user_message"):
         stamped_support(named, episode)
+    # §7:1, §7:5: nor does naming another person for your note.
+    sams = _support(SupportOrigin.USER_MESSAGE, 0).model_copy(
+        update={"holder": SupportHolder.person("sam")}
+    )
+    with pytest.raises(ValueError, match="does not give it"):
+        stamped_support(sams, episode)
 
 
 @pytest.mark.parametrize("marked", [False, True], ids=["task", "marked-task"])

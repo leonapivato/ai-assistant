@@ -325,6 +325,43 @@ def test_a_record_the_upgrade_cannot_read_leaves_the_file_as_it_was_found(legacy
         probe.close()
 
 
+def test_a_record_an_earlier_upgrade_carries_and_cannot_read_is_refused_cleanly(
+    tmp_path: Path,
+) -> None:
+    """ADR-0326 §4:3, §4:5: ADR-0349 §10:6's upgrade carries a record's parties before it
+    decodes it, so a record no build wrote is refused there as the store's error too, and
+    the file is left as it was found, with no lock held."""
+    path = tmp_path / "memory.db"
+    shutil.copyfile(Path(__file__).parent / "legacy" / "memory-before-adr-0349.db", path)
+    with sqlite3.connect(path) as conn:
+        (data,) = conn.execute(
+            "SELECT data FROM records WHERE id = ?", ("mem-episode-joined",)
+        ).fetchone()
+        stored = json.loads(data)
+        # An informational event whose identity no encoding carries: §3:5 names no
+        # source by it, and the decode refuses the record.
+        place = {"kind": "channel", "channel_type": "informational_event", "instance_id": "\ud800"}
+        trigger = stored["processing_record"]["trigger"]
+        trigger["target"] = trigger["channel"] = place
+        conn.execute(
+            "UPDATE records SET data = ? WHERE id = ?", (json.dumps(stored), "mem-episode-joined")
+        )
+    conn.close()
+    before = _raw_rows(path)
+
+    with pytest.raises(MemoryStoreError):
+        _open(path)
+
+    assert _label(path) == SCHEDULED_RECORD_FORMAT
+    assert _raw_rows(path) == before
+    probe = sqlite3.connect(path, timeout=0, isolation_level=None)
+    try:
+        probe.execute("BEGIN IMMEDIATE")
+        probe.execute("ROLLBACK")
+    finally:
+        probe.close()
+
+
 async def test_a_second_open_changes_nothing(legacy: Path) -> None:
     """The upgrade runs once: a file already at the new label is not upgraded again."""
     await _exported(legacy)

@@ -1300,7 +1300,7 @@ class SqliteMemoryStore:
                 # ADR-0351 §9's upgrade, later in the chain, carries the trigger's
                 # parties, which this build reads: carried here first, so the record
                 # decodes, and that upgrade finds it already carried (it is idempotent).
-                parties_episode(stored)
+                self._carry_parties(stored)
                 episode = self._decode(json.dumps(stored))
                 conn.execute(
                     "UPDATE records SET data = ? WHERE rowid = ?",
@@ -1379,11 +1379,10 @@ class SqliteMemoryStore:
             for rowid, data in chunk:
                 try:
                     stored = json.loads(data)
-                    carried = isinstance(stored, dict) and parties_episode(stored)
-                except (ValueError, TypeError) as exc:
+                except ValueError as exc:
                     msg = f"an episode stored before ADR-0351 could not be upgraded: {exc}"
                     raise MemoryStoreError(msg) from exc
-                if not carried:
+                if not isinstance(stored, dict) or not self._carry_parties(stored):
                     continue
                 episode = self._decode(json.dumps(stored))
                 conn.execute(
@@ -1396,6 +1395,24 @@ class SqliteMemoryStore:
                 (MemoryKind.EPISODIC.value, chunk[-1][0], _BACKFILL_CHUNK),
             ).fetchall()
         conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
+
+    @staticmethod
+    def _carry_parties(stored: dict[str, Any]) -> bool:
+        """ADR-0351 §9's carry of one stored record, its failure the store's own error.
+
+        Every upgrade in the chain that carries a record's parties carries it through
+        here, so a record the carry cannot read is refused as a ``MemoryStoreError``,
+        which :meth:`_setup` closes and rolls back on (ADR-0326 §4:3), never as a raw
+        exception that would leave its transaction open.
+
+        Raises:
+            MemoryStoreError: If the carry fails on the record.
+        """
+        try:
+            return parties_episode(stored)
+        except (ValueError, TypeError, KeyError) as exc:
+            msg = f"an episode stored before ADR-0351 could not be upgraded: {exc}"
+            raise MemoryStoreError(msg) from exc
 
     def _upgrade_row(
         self, conn: sqlite3.Connection, rowid: int, kind: str, data: str, now: datetime
@@ -2082,7 +2099,7 @@ class SqliteMemoryStore:
         except ValueError as exc:
             msg = f"stored memory could not be decoded: {exc}"
             raise MemoryStoreError(msg) from exc
-        if isinstance(stored, dict) and (continuing_episode(stored) | parties_episode(stored)):
+        if isinstance(stored, dict) and (continuing_episode(stored) | cls._carry_parties(stored)):
             data = json.dumps(stored)
         return cls._decode(data)
 
