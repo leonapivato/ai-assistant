@@ -100,10 +100,12 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Final, Literal
+from types import NoneType
+from typing import TYPE_CHECKING, Annotated, Final, Literal, get_args
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic.json_schema import SkipJsonSchema
 
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.errors import ModelContentFilterError
@@ -360,19 +362,35 @@ class MattersPassReply(BaseModel):
     ``decision`` names the kind, and each kind's fields are optional here, under the
     names the prompt asks for: the kinds are told apart by ``decision``, and each kind's
     fields are read as its own shape after the parse (:func:`_decided`). The schema sent
-    for it names these fields and no other, and carries no text (§3:2).
+    for it names these fields and no other, and carries no text (§3:2). It admits null
+    only where the prompt writes one, a group's ``under``; a field left out is unset.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
     decision: Literal["leave", "merge", "split", "move", "group"]
-    story: str | None = None
-    into: str | None = None
-    episodes: tuple[str, ...] | None = None
-    notes: tuple[str, ...] | None = None
-    source: str | None = Field(default=None, alias="from")
-    to: str | None = None
-    stories: tuple[str, ...] | None = None
+    story: str | SkipJsonSchema[None] = None
+    into: str | SkipJsonSchema[None] = None
+    episodes: tuple[str, ...] | SkipJsonSchema[None] = None
+    notes: tuple[str, ...] | SkipJsonSchema[None] = None
+    source: str | SkipJsonSchema[None] = Field(default=None, alias="from")
+    to: str | SkipJsonSchema[None] = None
+    stories: tuple[str, ...] | SkipJsonSchema[None] = None
     under: str | None = None
+
+
+def _holds_null(shape: type[BaseModel]) -> frozenset[str]:
+    """The keys ``shape`` reads null as a value of, rather than as nothing."""
+    return frozenset(
+        field.alias or name
+        for name, field in shape.model_fields.items()
+        if NoneType in get_args(field.annotation)
+    )
+
+
+#: The keys each kind reads null as a value of: a group's ``under``, a new story.
+_NULL_VALUES: Final[Mapping[str, frozenset[str]]] = {
+    decision: _holds_null(shape) for decision, shape in _KINDS.items()
+}
 
 
 class _Refused(Exception):  # noqa: N818 — a control-flow signal inside the checks, never raised out
@@ -390,19 +408,21 @@ def _decided(reply: MattersPassReply) -> _Leave | _Merge | _Split | _Move | _Gro
     One that kind's shape does not name is another kind's, such as a split naming a story
     to move ``to`` or a merge naming notes (ADR-0303 §6:3), and makes the reply no
     decision, as an object mixing two decisions always has been, so a field is never
-    dropped to turn one decision into another. Another kind's field set to null carries
-    nothing of that kind and is passed over: a provider that writes every property it
-    was sent writes null in the fields a kind does not read.
+    dropped to turn one decision into another. A field set to null carries nothing and is
+    passed over, unless the kind reads null as a value, as a group's ``under`` names a
+    new story: a provider that writes every property it was sent writes null in the
+    fields a kind leaves out.
 
     Raises:
         _Unparsed: If the reply carries another kind's field, or its kind's shape refuses
             what it set.
     """
     own = shape_keys(_KINDS[reply.decision])
+    nulls = _NULL_VALUES[reply.decision]
     carried = {
         key: value
         for key, value in reply.model_dump(mode="json", by_alias=True, exclude_unset=True).items()
-        if key in own or value is not None
+        if value is not None or key in nulls
     }
     if carried.keys() - own:
         msg = "the reply's decision carries another decision's field"
