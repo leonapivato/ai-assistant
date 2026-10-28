@@ -47,6 +47,9 @@ from _follow_up_record import ACT_F as FOLLOWED_F
 from _follow_up_record import ANSWER as FOLLOW_UP_ANSWER
 from _follow_up_record import MODEL_NAME as FOLLOW_UP_MODEL
 from _follow_up_record import write_followed
+from _insight_record import GAP as INSIGHT_GAP
+from _insight_record import INSIGHT, write_insight
+from _insight_record import THINKING as INSIGHT_THINKING
 from _learning_record import (
     ALONE_CLAIM,
     EVIDENCE_CLAIM,
@@ -1082,3 +1085,59 @@ async def test_a_change_of_activation_never_shows_the_last_ones_walk(
         )
         await step.locator(".jump", has_text="Its entry, whole").click()
         await expect(page.locator("#drawer-body")).to_contain_text("asks first")
+
+
+@pytest.fixture
+def insight(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over an activation whose understanding was repaired (``_insight_record``)."""
+    with serving(write_insight(write_record(tmp_path))) as bound:
+        yield bound
+
+
+async def test_understanding_shows_its_repair_its_labels_fate_and_each_call_s_cost(
+    insight: Any, gateway_browser: Browser
+) -> None:
+    """What code did with each label, computed and said so; each call's tokens and estimate."""
+    async with _page(gateway_browser, width=390) as page:
+        await page.goto(f"http://127.0.0.1:{insight.port}/#{INSIGHT}/walk/3")
+        step = page.locator("#walk-step")
+        await expect(step.locator(".walk-head h2")).to_have_text("Understanding", timeout=_SHOWN)
+        repair = step.locator(".sec", has_text="The repair")
+        await expect(repair).to_contain_text("M9 in cites")
+        labels = step.locator(".sec", has_text="What code did with its labels")
+        await expect(labels).to_contain_text("the record keeps no resolution")
+        await expect(labels.locator(".chip.o-dropped")).to_have_count(3)
+        await expect(labels.locator(".chip.o-kept")).to_have_count(1)
+        await expect(step.locator(".sec", has_text="Shown but named in no list")).to_contain_text(
+            "M3"
+        )
+        calls = step.locator(".sec", has_text="Its calls")
+        await expect(calls).to_contain_text("12,345 input")
+        await expect(calls).to_contain_text("est., claude-sonnet-5-5 rates of 2026-10-28")
+        await expect(calls.locator(".part-text.thinking")).to_have_text(INSIGHT_THINKING)
+        overflow = await page.evaluate(
+            "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+        )
+        assert overflow <= 0
+        await page.goto(f"http://127.0.0.1:{insight.port}/#{INSIGHT}/walk/4")
+        await expect(step.locator(".walk-head h2")).to_have_text(
+            "Recall · second run", timeout=_SHOWN
+        )
+        cues = step.locator(".sec", has_text="What each cue found")
+        await expect(cues).to_contain_text(INSIGHT_GAP)
+        await expect(cues).to_contain_text("understood gap")
+
+
+async def test_a_structured_call_opens_readable_with_its_estimate_and_thinking(
+    insight: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        await page.goto(f"http://127.0.0.1:{insight.port}/#{INSIGHT}/walk/3")
+        step = page.locator("#walk-step")
+        await expect(step.locator(".walk-head h2")).to_have_text("Understanding", timeout=_SHOWN)
+        await step.locator(".jump", has_text="Call 2, readable").click()
+        readable = page.locator("#drawer-read")
+        did = readable.locator("#call-did")
+        await expect(did).to_contain_text("estimated cost:", timeout=_SHOWN)
+        await expect(did.locator(".part-text.thinking")).to_have_text(INSIGHT_THINKING)
+        await expect(readable.locator(".call-stats")).to_contain_text("est.")

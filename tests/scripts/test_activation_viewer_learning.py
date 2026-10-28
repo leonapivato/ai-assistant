@@ -208,7 +208,11 @@ def test_an_observer_call_reads_as_told_given_and_done(server: Any, record: Path
     assert view["input"][0]["keys"][0]["key"] == "claim"
     (reply,) = view["did"]["parts"]
     assert NOT_KEPT_NOTE in reply["text"]
-    assert "observer" in view["did"]["usage_note"]
+    # Since ADR-0354 §7:2 the observer's returned entry keeps its usage and model; the
+    # test double names a model no rates are kept for, so no cost is estimated.
+    assert view["did"]["usage"] == {"input": 0, "output": 0, "cache read": 0, "cache write": 0}
+    assert (view["did"]["model"], view["did"]["cost"]) == ("fake:structured", None)
+    assert "usage_note" not in view["did"]
     entry = _json(server.port, f"/api/entry?id=a-kept&file=observer&line={line}")
     assert (entry["source"], entry["kind"]) == ("observer", "given")
     # Without ``file=observer`` a line is the activation's own file's.
