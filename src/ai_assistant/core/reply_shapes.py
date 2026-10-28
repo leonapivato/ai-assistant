@@ -21,6 +21,10 @@ the regression suite agree on all three (§3:5):
   ``model_validate_json`` under its own configuration. Nothing else is done to it: no
   prose is cut away, no key is dropped and no value is repaired.
 
+Beside the three, :func:`recordable` is how every implementation records a reply's
+text in the exchange, so that a lone surrogate, which no record can hold, is recorded
+alike everywhere and never stops a response from being returned (§2:5).
+
 It does no I/O and keeps nothing between calls, so it holds no reference to a shape
 once a call returns.
 """
@@ -189,6 +193,36 @@ def read_reply[T: BaseModel](shape: type[T], reply: str) -> T | ReplyFailure:
         # refusing a value of a type it did not expect, or nesting too deep to walk:
         # each is a reply that does not validate as the shape, and none is raised.
         return ReplyFailure.INVALID
+
+
+def recordable(text: str) -> str:
+    """``text`` as the exchange can hold it: each surrogate code point made U+FFFD.
+
+    A provider's JSON may decode to a ``str`` holding a lone surrogate, which has no
+    UTF-8 encoding, and every text an exchange holds is ``EncodableText`` (ADR-0087
+    §2b), so no exchange can hold it as it came. Every response that comes back is
+    still returned (ADR-0354 §2:5): the response is read as it came, and its record
+    holds this, every other character unchanged. Every implementation records a reply
+    through this, so the seam, the canonical fake and the suite record one alike.
+
+    Args:
+        text: A reply, a refusal's statement or category, or a model's name, as the
+            provider gave it.
+
+    Returns:
+        ``text`` itself where it holds no surrogate, which is every text a provider
+        writes as UTF-8.
+    """
+    if text.isascii():
+        return text
+    return "".join(
+        _REPLACEMENT if _SURROGATES[0] <= ord(char) <= _SURROGATES[1] else char for char in text
+    )
+
+
+#: The surrogate code points, U+D800 to U+DFFF, and what stands in a record for each.
+_SURROGATES: Final = (0xD800, 0xDFFF)
+_REPLACEMENT: Final = "\N{REPLACEMENT CHARACTER}"
 
 
 def _is_model_class(candidate: object) -> bool:

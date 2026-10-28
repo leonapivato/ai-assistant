@@ -356,15 +356,6 @@ async def test_a_refusals_category_is_carried_where_the_provider_gives_one() -> 
     assert reply.exchange.refusal_category == "cyber"
 
 
-async def test_a_reply_no_record_can_hold_is_returned_with_its_text_made_writable() -> None:
-    scripted = _Scripted(ModelResponse(parts=[TextPart(content="no \ud800 here")]))
-    reply = await PydanticAIProvider(FunctionModel(scripted.respond)).complete_structured(
-        request(), Verdict
-    )
-    assert reply.failure is ReplyFailure.INVALID
-    assert reply.exchange.reply == "no � here"
-
-
 async def test_a_refusal_no_record_can_hold_is_still_returned_refused() -> None:
     """§2:5, §5:2: the refusal is read off the response, never off the record of it."""
     response = ModelResponse(
@@ -376,9 +367,9 @@ async def test_a_refusal_no_record_can_hold_is_still_returned_refused() -> None:
         FunctionModel(_Scripted(response).respond, model_name="claude-\udfff")
     ).complete_structured(request(), Verdict)
     assert reply.failure is ReplyFailure.REFUSED
-    assert reply.exchange.refusal == "I won't �"
-    assert reply.exchange.refusal_category == "�"
-    assert reply.exchange.model == "function:claude-�"
+    assert reply.exchange.refusal == "I won't \ufffd"
+    assert reply.exchange.refusal_category == "\ufffd"
+    assert reply.exchange.model == "function:claude-\ufffd"
 
 
 async def test_such_a_refusal_is_not_routed_to_the_next_provider() -> None:

@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, Json, JsonValue
 
 from ai_assistant.core.errors import ModelError, ModelUnavailableError
 from ai_assistant.core.protocols import StructuredCompleter
-from ai_assistant.core.reply_shapes import reply_shape_version
+from ai_assistant.core.reply_shapes import recordable, reply_shape_version
 from ai_assistant.core.types import (
     Message,
     ReplyFailure,
@@ -469,6 +469,23 @@ class StructuredCompleterContract:
             reply = await scripted.completer.complete_structured(request(), Verdict)
         assert reply.failure is ReplyFailure.REFUSED
         assert reply.exchange.refusal == REFUSAL
+
+    async def test_a_reply_no_record_can_hold_is_returned_with_its_record_made_writable(
+        self,
+    ) -> None:
+        """§2:5: a lone surrogate, which no exchange can hold, stops no response."""
+        async with self.world(Answer("no \ud800 here")) as scripted:
+            reply = await scripted.completer.complete_structured(request(), Verdict)
+        assert reply.failure is ReplyFailure.INVALID
+        assert reply.exchange.reply == recordable("no \ud800 here") == "no \ufffd here"
+
+    async def test_a_refusal_no_record_can_hold_is_still_returned_refused(self) -> None:
+        """§5:2, §5:4: read off the response as it came, so it is refused and never raised."""
+        answer = Answer("", ending="refused", refusal="I won't \udc80")
+        async with self.world(answer) as scripted:
+            reply = await scripted.completer.complete_structured(request(), Verdict)
+        assert reply.failure is ReplyFailure.REFUSED
+        assert reply.exchange.refusal == "I won't \ufffd"
 
     @pytest.mark.parametrize(("answer", "failure"), EVERY_KIND)
     async def test_one_call_is_one_request_whatever_comes_back(

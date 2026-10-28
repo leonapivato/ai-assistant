@@ -127,9 +127,12 @@ def openai_answer(answer: Answer) -> dict[str, Any]:
 
 def _answering(vendor: VendorStack, answer: Answer) -> Handler:
     body = anthropic_answer(answer) if vendor is ANTHROPIC else openai_answer(answer)
+    # Serialised with JSON's own escapes, so a lone surrogate the case scripts reaches
+    # the vendor SDK as the escape a provider would send, and decodes back to itself.
+    content = json.dumps(body).encode("ascii")
 
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=body)
+        return httpx.Response(200, content=content, headers={"content-type": "application/json"})
 
     return handler
 

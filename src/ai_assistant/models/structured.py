@@ -41,7 +41,7 @@ from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.output import OutputObjectDefinition
 
-from ai_assistant.core.reply_shapes import read_reply
+from ai_assistant.core.reply_shapes import read_reply, recordable
 from ai_assistant.core.types import (
     ReplyExchange,
     ReplyFailure,
@@ -146,8 +146,8 @@ def structured_reply[T: BaseModel](
     reply = "".join(part.content for part in response.parts if isinstance(part, TextPart))
     details: Mapping[str, object] = response.provider_details or {}
     exchange = ReplyExchange(
-        reply=writable(reply),
-        model=writable(answered_by(response, model)),
+        reply=recordable(reply),
+        model=recordable(answered_by(response, model)),
         mode=mode,
         finish_reason=_stated(response.finish_reason),
         refusal=_stated(details.get("refusal")),
@@ -194,25 +194,8 @@ def _read[T: BaseModel](response: ModelResponse, shape: type[T], reply: str) -> 
     return read
 
 
-def writable(text: str) -> str:
-    """``text`` as a record can hold it: each surrogate code point replaced by U+FFFD.
-
-    A vendor's JSON may decode to a ``str`` holding a lone surrogate, which has no
-    UTF-8 encoding and which no record of the exchange can hold (``EncodableText``).
-    Replacing it keeps the response returnable, as §2:5 requires of every response
-    that came back, and leaves every other character as the provider sent it.
-    """
-    if text.isascii():
-        return text
-    return "".join("�" if _SURROGATES[0] <= ord(c) <= _SURROGATES[1] else c for c in text)
-
-
-#: The surrogate code points: U+D800 to U+DFFF.
-_SURROGATES: Final = (0xD800, 0xDFFF)
-
-
 def _stated(value: object) -> str | None:
     """A response's statement, as text a record can hold, or ``None`` where none was given."""
     if value is None:
         return None
-    return writable(value if isinstance(value, str) else str(value))
+    return recordable(value if isinstance(value, str) else str(value))
