@@ -1379,10 +1379,11 @@ class SqliteMemoryStore:
             for rowid, data in chunk:
                 try:
                     stored = json.loads(data)
-                except ValueError as exc:
+                    carried = isinstance(stored, dict) and parties_episode(stored)
+                except (ValueError, TypeError) as exc:
                     msg = f"an episode stored before ADR-0351 could not be upgraded: {exc}"
                     raise MemoryStoreError(msg) from exc
-                if not isinstance(stored, dict) or not parties_episode(stored):
+                if not carried:
                     continue
                 episode = self._decode(json.dumps(stored))
                 conn.execute(

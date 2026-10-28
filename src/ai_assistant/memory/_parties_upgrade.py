@@ -34,6 +34,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
+
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ClaimedAuthor,
@@ -68,7 +70,13 @@ def _message_party(kind: str | None, message: dict[str, Any]) -> SupportHolder |
         return _owner()
     if kind != "telegram":
         return None
-    return forward_party(ClaimedAuthor.model_validate(sender))
+    try:
+        author = ClaimedAuthor.model_validate(sender)
+    except ValidationError:
+        # Not a sender any build wrote: the rule does not cover it, and the store's
+        # decode, which follows, refuses the record (ADR-0326 §4:3).
+        return None
+    return forward_party(author)
 
 
 def _kind(place: object) -> str | None:
@@ -126,6 +134,9 @@ def parties_episode(stored: dict[str, Any]) -> bool:
 
     Returns:
         Whether anything changed, so the store rewrites only a record that moved.
+
+    It raises nothing for a malformed record: a part it cannot read is one the rule
+    does not cover, and the decode that follows judges the record.
     """
     processing = stored.get("processing_record")
     trigger = processing.get("trigger") if isinstance(processing, dict) else None

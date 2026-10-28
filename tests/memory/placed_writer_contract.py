@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import pytest
 
+from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -181,6 +182,39 @@ def _forwarded(name: str, account: int) -> EpisodicMemory:
                 reply=WholeTextReply(),
                 parties=parties,
                 messages=messages,
+            ),
+            status=ProcessingStatus.COMPLETED,
+            reason=ProcessingReason.RETURNED,
+            understanding_omitted=UnderstandingOmission.NOT_REACHED,
+            stages=ended_pass(_SAID_AT),
+        ),
+    )
+
+
+def _scheduled(name: str) -> EpisodicMemory:
+    """An episode a marked task's occurrence started: the assistant's words and unknown.
+
+    ADR-0351 §3:6: the parties the Task Scheduler declares for a task carrying the
+    outside-content mark, so no part of its input backs anything (§7:3).
+    """
+    schedule = ChannelIdentity(channel_type="task_scheduler", instance_id="schedule")
+    parties, _ = declared_input(schedule, carries_outside_mark=True)
+    return EpisodicMemory(
+        id=_address(name),
+        content="checked the listing",
+        occurred_at=_SAID_AT,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_SAID_AT),
+        processing_record=EpisodeProcessingRecord(
+            activation_id=name,
+            started_at=_SAID_AT,
+            ended_at=_SAID_AT,
+            trigger=RecordedChannelTrigger(
+                target=schedule,
+                channel=schedule,
+                payload=RecordedTextInput(text="Check whether the listing is still up."),
+                context=ChannelContext(),
+                reply=None,
+                parties=parties,
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
@@ -537,6 +571,34 @@ class PlacedWriterContract:
         held = await _all(store)
         assert held["m-page"].status is MemoryStatus.CURRENT
         assert held["m-forward"].holders == (SupportHolder.source("42", claimed=True),)
+
+    async def test_no_holder_a_producer_names_lets_a_part_take_an_origin_its_parties_refuse(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0351 §7:2, §7:3: whatever holder it names, a forward is not your saying,
+        and no part of a marked task's input backs anything."""
+        store = await self._world()
+        await store.add(_forwarded("forward", account=42))
+        await store.add(_scheduled("task"))
+        yours = _forward("forward").model_copy(
+            update={"origin": SupportOrigin.USER_MESSAGE, "holder": _OWNER}
+        )
+        task = _forward("task").model_copy(
+            update={
+                "points_at": InputPart(episode=_address("task")),
+                "holder": SupportHolder.unknown(),
+            }
+        )
+
+        for support in (yours, task):
+            with pytest.raises(MemoryStoreError):
+                await self._write(
+                    make_placed_writer,
+                    store,
+                    _placed(memory("m-ana", "Ana works at Santa Maria Hospital", support)),
+                )
+
+        assert await _all(store) == {}
 
     async def test_a_part_saying_what_another_believes_is_held_by_its_sender(
         self, make_placed_writer: PlacedWriterFactory
