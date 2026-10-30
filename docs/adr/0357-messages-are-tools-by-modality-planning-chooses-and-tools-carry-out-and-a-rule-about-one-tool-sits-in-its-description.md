@@ -225,8 +225,13 @@ an argument of the `text` call that asks it.
 ### 6. Act, or come back with what's needed
 
 > **Normative.** Where a tool can carry a call out, it acts and reports what it did. Where it
-> cannot, it does nothing: it changes nothing and sends nothing, and its result is *not done*,
-> saying why and what is needed to call it again, such as the valid options or the live facts.
+> finds, before it acts, that it cannot, it does nothing: it changes nothing and sends nothing,
+> and its result is *not done*, saying why and what is needed to call it again, such as the
+> valid options or the live facts.
+
+> **Normative.** Once a tool has begun to act, a failure is reported as ADR-0306 §5:1 reports
+> it, and an outcome it cannot establish, such as a send whose acknowledgement was lost, is
+> *unknown*, never *not done*, and is never retried (ADR-0306 §5:13).
 
 > **Normative.** A tool comes back in each of these cases: an argument that is missing, wrong,
 > or needed because of the others, which it never guesses; values that cannot go together; a
@@ -234,8 +239,9 @@ an argument of the `text` call that asks it.
 > person who cannot be reached. A call that needs the person's yes goes back as needing them,
 > as ADR-0306 §4:8 and ADR-0321 §2:10 decide.
 
-> **Normative.** A tool with effects does not repeat an action already done. ADR-0306 §5:9's
-> check refuses the repeat as *already done*, and the result says so.
+> **Normative.** A call to a capability that is not safe to repeat, whose values match an
+> earlier effect, is refused as *already done* exactly where ADR-0306 §5:9–§5:11 refuse it,
+> and passes where they let a deliberate repeat through. The result says which.
 
 ### 7. Rules beside their tools
 
@@ -324,7 +330,9 @@ built:
 > **Normative.** Tests check: that a `text` with `exact` delivers its words unchanged apart
 > from the exact lines; that the exact lines follow any rewording and are never reworded; that
 > a second asking message in a round runs nothing; that an email from the person's address
-> never runs without their yes; that a call that comes back changed and sent nothing; that each
+> never runs without their yes; that a call that comes back changed and sent nothing; that a
+> send whose acknowledgement is lost is reported *unknown*; that an accidental repeat is
+> refused as *already done* and a deliberate repeat ADR-0306 §5:9 allows runs; that each
 > message call's result carries the delivered text, where it went and how; that no offered
 > capability's parameters schema encodes a conditional requirement; and that each offered
 > capability's description says whether it is safe to repeat, matching its declaration.
@@ -345,7 +353,7 @@ Read through and not superseded, each a stacked addition under ADR-0082 §1 or n
 
 | Earlier decision | What changes |
 | --- | --- |
-| ADR-0306 §2, §5:1, §5:9 | Nothing: §5 and §6 add rules beside the declaration's, and no sentence of ADR-0306 becomes false. The safe-to-repeat line is written from the declaration (§5:9); coming back is ADR-0306's *not done* with its reason (§6:1); the repeat check is §5:9's. A tool that asks a model to decide a choice (§5:4) is no model in acting, as a tidy-up's call is not (ADR-0300 §10:4) |
+| ADR-0306 §2, §5:1, §5:9 | Nothing: §5 and §6 add rules beside the declaration's, and no sentence of ADR-0306 becomes false. The safe-to-repeat line is written from the declaration (§5:9); coming back is ADR-0306's *not done* with its reason (§6:1), an outcome not established after acting stays *unknown* (§6:2), and the repeat check is §5:9–§5:11's, deliberate repeat included (§6:4). A tool that asks a model to decide a choice (§5:4) is no model in acting, as a tidy-up's call is not (ADR-0300 §10:4) |
 | ADR-0306 §4, ADR-0350 §6:7–§6:8, ADR-0349 §7:18 | Nothing: no place is widened (§1:4). `via` carries the place label §6:7 requires, as ADR-0356 leaves it (§2:4) |
 | ADR-0148 §1, §5 | Nothing: an email's address is resolved from a source §5 allows, before the ruling (§2:7) |
 | ADR-0323 §4:7, §6 | Nothing: the line's writer is the route `text` takes to Telegram, and an email's yes still approves nothing (§8:1) |
