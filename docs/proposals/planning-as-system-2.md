@@ -155,7 +155,8 @@ This is one rule for every tool.
 Since the system briefs planning (change 1), planning's text is its reply to the
 system. That reply is planning's notes:
 - its later rounds see the text in the exchange;
-- later work sees the work's last text, in the episode's short view;
+- later work sees them all, in the episode's short view, capped for an unusually
+  long work, whose full record stays available by episode look-up;
 - no person sees it.
 
 The people the system works for see only what the calls do, and the instruction
@@ -181,7 +182,7 @@ of the episode's own recorded parts, made by code, never a summary:
 - the meaning understanding recorded;
 - the messages as sent;
 - what was done: each call with an effect, with its outcome;
-- the work's last text, which is its last note;
+- the work's notes, which is all its text, capped for a long work;
 - how it ended.
 
 Today's view shows no calls and no outcomes. So a later stimulus cannot tell
@@ -338,6 +339,10 @@ model's trained habits pull against the design:
   - one for the tools: changes 4, 5 and 9.
 
   The instruction would ship with the first one's implementation, as
-  understanding's did with its renderer. The same change aligns understanding's
-  wording ("the system briefs you with" in place of "provides you with"), with an
-  understanding suite run, and changes nothing else there.
+  understanding's did with its renderer. The same change aligns two pieces of
+  understanding's wording, with an understanding suite run, and changes nothing
+  else there:
+  - "the system briefs you with", in place of "provides you with";
+  - always in mind covers "how they like things done", which is where
+    preferences live (ADR-0338's person block). Their default values wait for the
+    user model and persistent identity.
