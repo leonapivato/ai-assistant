@@ -5,8 +5,8 @@
 - Scope: planning's exchange with its model. The system briefs planning (§2) with tagged text in a fixed order, the stimulus first (§3). Every section is always present, every tool is offered on every round, and the instruction takes no flag (§4). A work's rounds are one continuing exchange, appended to and never re-rendered, with what changed arriving as news (§5), and a provider's own response, its thinking included, is handed back to it (§6). Planning's text is its reply to the system, kept as its notes and written to no one, and a message is a call, checked, claimed and recorded as the round's message was (§7). The episode records one entry for each call (§8), and other work sees an episode through its short view (§9). The instruction and its required wording (§10), how it is judged (§11), understanding's two phrases (§12), the code it binds (§13) and the lanes (§14). This is the first of three decisions converted from proposal [#3526](https://github.com/leonapivato/ai-assistant/pull/3526): the tools decision decides planning's tools, and the memory decision what planning remembers and can look up (§Words).
 - Dependency: [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md) and [ADR-0315](0315-a-round-that-made-a-call-brings-another-round-and-the-mark-asking-for-one-retires.md), whose rounds this decision continues; [ADR-0353](0353-understanding-reads-its-stimulus-as-tagged-knowledge-then-memory-and-replies-with-what-it-understood-what-it-cites-what-is-unclear-and-where-it-belongs.md), whose tagged format §3 reuses; [ADR-0334](0334-a-prompt-is-a-template-the-hub-loads-at-start-the-owners-hub-may-override-it-from-its-data-directory-and-each-model-call-records-the-version-it-sent.md) and [ADR-0337](0337-a-prompt-change-is-judged-on-a-regression-suite-with-repeated-samples-each-recorded-call-is-asked-what-it-had-to-guess-and-a-candidate-is-promoted-after-three-clean-days.md), which govern the instruction and its suite; and [ADR-0349](0349-a-place-is-only-what-caused-an-activation-a-stop-is-reached-three-ways-running-work-is-shared-by-reading-it-and-the-newest-absorbs-what-it-continues.md), whose offers and waits §5 delivers as news. All Accepted, as their status lines leave them.
 - Authorization: the owner and the prompts front rewrote planning's instruction section by section from 2026-10-28, with invented data throughout, and the design changes it needs were set out in proposal [#3526](https://github.com/leonapivato/ai-assistant/pull/3526). On 2026-10-30 the owner accepted it at `06018f611`, verbatim: "accept it, convert to the ADRs", split three ways as its acceptance comment records. The owner's words on the points this decision turns on, verbatim: on planning's text and the notes tool, "yes make it, drop the notes tool" (§7); on what the short view shows of a work's notes, "maybe it should see all of it… not that much" (§9:4); that planning reads what it writes, "not meant for any person" (§7:2); and, after the caching explanation, that the stimulus stays first in the context (§3:1). The dispatcher assigned 0356. Ratification is the dispatcher's, under the owner's delegation, once the reviews are green (§1:1).
-- **Contract-surface decision, and a breaking change under golden rule 5.** It changes `core/protocols.py`: `ToolCallingCompleter.respond` takes a `PlanningExchange` in place of a `Message` sequence, and its reserved notes tool goes (§5, §13). It changes `core/types.py`: `RoundResponse` loses `notes` and `asks` and gains `continuation`; `PlanningExchange`, `ExchangeStep`, `RoundReport`, `CallResult`, `RoundContinuation`, `RecordedCall`, `RecordedDelivery`, `CallOutcomeKind`, `DeliveryStatus`, `ProjectedCall`, `ProjectedJoin` and `MessageCallPart` are added; `EpisodeProcessingRecord` gains `call_records`, one entry per call, which the memory decision extends; `EpisodeProjection` gains the calls and the inputs taken in; and `SupportPart` gains a message call (§6, §8, §9, §13). `ActivationEffect` is unchanged. `EpisodeProcessingRecord` crosses the wire, so `PROTOCOL_VERSION` advances, and the episode store ships an upgrade (§13:3, §13:4). `Message`, `Role` and `ModelProvider` are unchanged.
-- **Partially supersedes**, in the clauses §16's first table names: ADR-0284, ADR-0306, ADR-0307, ADR-0314, ADR-0315, ADR-0317, ADR-0321, ADR-0328, ADR-0334, ADR-0337, ADR-0338, ADR-0349 and ADR-0350.
+- **Contract-surface decision, and a breaking change under golden rule 5.** It changes `core/protocols.py`: `ToolCallingCompleter.respond` takes a `PlanningExchange` in place of a `Message` sequence, and its reserved notes tool goes (§5, §13). It changes `core/types.py`: `RoundResponse` loses `notes` and `asks` and gains `continuation`; `PlanningExchange`, `ExchangeStep`, `RoundReport`, `CallResult`, `RoundContinuation`, `RecordedCall`, `RecordedDelivery`, `CallOutcomeKind`, `DeliveryStatus`, `ProjectedCall`, `ProjectedJoin` and `MessageCallPart` are added, and `ProjectedRound` and `StatementCitation` each gain a field; `EpisodeProcessingRecord` gains `call_records`, one entry per call, which the memory decision extends; `EpisodeProjection` gains the calls and the inputs taken in; and `SupportPart` gains a message call (§6, §8, §9, §13). `ActivationEffect` is unchanged. `EpisodeProcessingRecord` crosses the wire, so `PROTOCOL_VERSION` advances, and the episode store ships an upgrade (§13:4, §13:5). `Message`, `Role` and `ModelProvider` are unchanged.
+- **Partially supersedes**, in the clauses §16's first table names: ADR-0284, ADR-0306, ADR-0307, ADR-0314, ADR-0315, ADR-0317, ADR-0321, ADR-0328, ADR-0334, ADR-0337, ADR-0338, ADR-0345, ADR-0349 and ADR-0350.
 
 ## Context
 
@@ -268,8 +268,9 @@ round 2        ...
 
 > **Normative.** A report follows every round that a later round follows. It holds one
 > result for each call of that round, in the round's order and under the call's id, and then
-> the news. A tidy-up's result says only that it started, since no round waits for it
-> (ADR-0307 §7:2).
+> the news. A tidy-up that started has a result saying only that it started, since no round
+> waits for it (ADR-0307 §7:2); one refused before it ran has its refusal and reason, as any
+> refused call does (ADR-0307 §5:3).
 
 > **Normative.** A call's result is code's rendering of what came of it. A result resting on
 > outside content is its digest's evidence, marked outside, and never the raw content
@@ -402,8 +403,9 @@ is a notes tool, with stray text sent back as news (Alternatives).
 
 > **Normative.** An entry is appended once its call's outcome is known, before the next
 > round's request and whether or not another round runs, and every earlier entry is
-> unchanged. A tidy-up's entry is appended when it starts, with no outcome, and its outcome
-> stays in the story's version log (ADR-0307 §7:1). A call whose outcome is not known when the
+> unchanged. A tidy-up that starts has its entry appended when it starts, with no outcome, and
+> its outcome stays in the story's version log (ADR-0307 §7:1); one refused before it ran is
+> recorded refused, as any call is. A call whose outcome is not known when the
 > episode freezes has its entry appended with the freezing revision, with no outcome, and its
 > outcome stays on its effect record (ADR-0306 §6). An append is recorded as a round's is
 > (ADR-0307 §2:4): a failure is a capture failure that holds nothing back.
@@ -609,11 +611,13 @@ keeps what changed the world; the look-up has the rest.
 | `RecordedDelivery`, `DeliveryStatus` | New frozen record: `words`, non-blank; `went`, the platform and the place; `status: DeliveryStatus`; and `reason`, non-blank or `None`. New closed enumeration: `sent`, `delivered`, `read`, `failed`, `unknown` |
 | `EpisodeProcessingRecord` | Gains `call_records: tuple[RecordedCall, ...]`, empty by default; `schema_version` advances by one. Its validator refuses an entry naming a round it does not hold, or a call that round did not propose, and two entries for one call |
 | `core: episode_extends` | Also admits entries appended at the end of `call_records`, every earlier entry unchanged (ADR-0286 §3:2–§3:3) |
-| `ProjectedCall` | New frozen record: one entry as a reader is shown it: its round's position, the capability, the arguments its round recorded, cut to the projection's excerpt bound, `effect`, the outcome and reason, the delivery and `marked` |
-| `ProjectedJoin` | New frozen record: one input the episode took in (ADR-0349 §7:7), attributed and withheld as the projection's input is, with the position of the round before which it was taken |
+| `ProjectedRound` | Gains `position`, the round's index among every round the episode recorded, so a round the projection omits for having nothing to show still keeps the others in order |
+| `ProjectedCall` | New frozen record: one entry as a reader is shown it: its round's position, in `ProjectedRound.position`'s numbering, the capability, the arguments its round recorded, cut to the projection's excerpt bound, `effect`, the outcome and reason, the delivery and `marked` |
+| `ProjectedJoin` | New frozen record: one input the episode took in (ADR-0349 §7:7), attributed and withheld as the projection's input is, with the position, in the same numbering, of the round before which it was taken |
 | `EpisodeProjection` | Gains `calls: tuple[ProjectedCall, ...]` and `joined: tuple[ProjectedJoin, ...]`, empty by default |
 | `core/episode_encoding.py: project_episode` | Fills `calls` and `joined` where `owner_records` admits episode notes, and leaves them empty otherwise (§9:5); a round recorded before this decision projects its `text` as its message, as now |
 | `MessageCallPart` | New member of `SupportPart`: `episode`, `round` and `call_id`, the message one message call sent, resolved to its entry's words. `RoundMessagePart` stays, for rounds recorded before this decision |
+| `StatementCitation`, `statement_citations` | `StatementCitation` gains `call_id: Identifier \| None`; `statement_citations` cites a support at either message part (§13:3) |
 | `ActivationEffect` | Unchanged: a `text` call's record is a message's, and an `email` call's a call's (§7:7–§7:9) |
 | `PLANNING_PROMPT` | Declares no flag and no value (§4:2); its required-wording list is §10:2's |
 | `PydanticAIToolCallingCompleter` | Translates the exchange into the provider's messages: the instruction as the system part, the briefing as a user part, each response handed back as the provider returned it from its continuation, each report as the provider's tool-result parts followed by the news; marks the newest report for the cache; and returns the response's continuation. `ROUND_TOOL` goes |
@@ -627,6 +631,13 @@ keeps what changed the world; the look-up has the rest.
 > origin table gives a round's message, by the same fact (ADR-0328 §4:3), and resolves to
 > nothing where the entry holds no delivery. A support pointing at a `RoundMessagePart`
 > resolves as before.
+
+> **Normative.** Every rule and reader that reads a support pointing at a round's message
+> reads one pointing at a `MessageCallPart` as the same kind of part: the writer's check for
+> a memory marked `assistant_statement` (ADR-0345 §8:3), the citation every projection
+> conveys (ADR-0345 §12:4), `statement_citations`, and the resolution of a part's text.
+> `StatementCitation` gains `call_id`, set where the message is a call's, so two messages
+> of one round are cited apart.
 
 > **Normative.** `PROTOCOL_VERSION` advances in the lane that adds `call_records` to
 > `EpisodeProcessingRecord`, in that change (ADR-0124 §9), with the wire surface and type
@@ -658,7 +669,7 @@ The lanes, each after this decision merges `Accepted`:
    records (§7:7–§7:9), each call's entry recorded with the episode (§8), the projection's
    `calls` and `joined` (§13), `MessageCallPart` with its resolution,
    the stable tool set and the refusals of §4:4–§4:6, and the episode store's upgrade with
-   `PROTOCOL_VERSION`'s advance (§13:3, §13:4).
+   `PROTOCOL_VERSION`'s advance (§13:4, §13:5).
 3. **P3, the briefing and the instruction**, briefed against merged P2, whose projection the
    short view reads, and against
    the tools decision's merged message tools: §3's briefing, the short view (§9), the default prompt
@@ -678,8 +689,9 @@ The lanes, each after this decision merges `Accepted`:
 
 > **Normative.** P2 may touch `core` for §13's `EpisodeProcessingRecord`, `RecordedCall`,
 > `RecordedDelivery`, `DeliveryStatus`, `CallOutcomeKind`, `episode_extends`, projection and
-> `MessageCallPart` rows, `orchestration/support_parts.py`, `testing` for the canonical
-> fakes' supports, `memory` and `wire` for the store's upgrade and the wire shape,
+> `MessageCallPart` and `StatementCitation` rows, `orchestration/support_parts.py`,
+> `memory` and `testing` where they read a support's part or for the store's upgrade,
+> `wire` for the wire shape,
 > `orchestration/planning.py`, `orchestration/phase_path.py`, `orchestration/held_results.py`,
 > `scripts/upgrade_stores.py`, and their tests.
 
@@ -722,10 +734,15 @@ The lanes, each after this decision merges `Accepted`:
 > message call's entry holds its delivered words, where they went and how; two entries for
 > one call are refused by the type; a `text` call naming a place it was never shown records
 > an entry, refused, with no delivery; a tidy-up's entry is recorded at its start with no
-> outcome and the next round does not wait for it; a call still running when the episode
+> outcome and the next round does not wait for it, while a tidy-up naming a story it was
+> never shown, beside a look-up, is reported and recorded refused with its reason; a call
+> still running when the episode
 > freezes is recorded with no outcome; the projection carries an episode's calls and joined
-> inputs where owner-only records are admitted and none otherwise; a support at a
-> `MessageCallPart` resolves to the words sent, and to nothing for a call that sent none; and
+> inputs where owner-only records are admitted and none otherwise, and a short view of an
+> episode whose call-only round precedes a round with notes shows the call first; a support at a
+> `MessageCallPart` resolves to the words sent, and to nothing for a call that sent none; a
+> memory marked `assistant_statement` resting on a `MessageCallPart` is written, and cited
+> with its call, apart from another message of the same round; and
 > an episode stored before the upgrade reopens with `call_records` empty and every other
 > record whole.
 
@@ -787,8 +804,9 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0317 | §2:2, in its subject alone: an activation that made no message call writes nothing, where it said *with every round's text empty*; §3:4's *a message a round wrote*, in its subject alone: a message call | §7:3 |
 | ADR-0321 | §2:3, in the response's carrying of the naming alone: `RoundResponse` carries none, and where the calls are named is the tools decision's | §7:5 |
 | ADR-0328 | §4:1's points-at field and §4:2's origin table, in the additions alone: a message call, as `MessageCallPart`, taking a round's message's origin | §13:2 |
+| ADR-0345 | §8:3's and §12:4's *a round's message*, in the addition alone: a message call's message, as `MessageCallPart`, cited with its call | §13:3 |
 | ADR-0334 | §2:1's table, planning's row, in its flags and values: none | §4:2 |
-| ADR-0337 | §9:1 and §4:3, for P3's default alone; §9:1, for understanding's two phrases alone; §6:6's *and nothing else*, in the addition alone: the later rounds of its own work | §11:5, §11:6, §12:2, §13:5 |
+| ADR-0337 | §9:1 and §4:3, for P3's default alone; §9:1, for understanding's two phrases alone; §6:6's *and nothing else*, in the addition alone: the later rounds of its own work | §11:5, §11:6, §12:2, §13:6 |
 | ADR-0338 | §3:10's *planning's instruction says that a field outweighs any memory stating another value for it*: the block says it; §5:6's second sentence: the data line and the message tools carry it; §7:8, whole | §10:5, §10:6, §10:7 |
 | ADR-0349 | §4:6 and §7:26, each in what is offered alone: the stop call and the stable set are offered on every round, and a call whose condition fails comes back refused | §4:3, §4:5 |
 | ADR-0350 | §3:4, in what is offered alone: spawn is offered on every round, and a spawn ADR-0350 §3:4's activation does not admit comes back refused; §6:7's *each of its messages names, by its place label, the one place on the list it goes into* and *as ADR-0307 §3:8 keeps the text*: a round's text is no message, and a message call names where it goes, as the tools decision decides, under the same list and the same check | §4:3, §4:5, §7:3 |
@@ -805,7 +823,7 @@ Read through and not superseded:
 | ADR-0321 §2:4–§2:12, §4 | The tools decision's where it moves them: the asking message and the exact line; the rest stand, and approvals stay stopped (ADR-0353 §11) |
 | ADR-0329 §7:1 | Nothing: the observer reads an episode once it leaves the episode window, and reads its notes and entries as the episode keeps them |
 | ADR-0334 §4, §5, §7 | Nothing: a template with no flag renders under the one combination; an override naming a flag stops the hub (§11:7) |
-| ADR-0335 §4:6, §4:8, §4:10 | Nothing in their words: a planning call's recorded request is its exchange (§13:5), and a replay still sends once and continues nothing |
+| ADR-0335 §4:6, §4:8, §4:10 | Nothing in their words: a planning call's recorded request is its exchange (§13:6), and a replay still sends once and continues nothing |
 | ADR-0337 §3:4, §9:2 | Nothing in their words: a planning case's input is its exchange as the given entry records it (§11:4) |
 | ADR-0338 §7:2, §7:6, §7:7 | Nothing: the block is data, rendered always in mind, its memories labelled `M` |
 | ADR-0349 §7:10, §7:19, §7:27 | Nothing in their words: what they show at every round reaches planning at its first round in the briefing and after it as news (§5:5) |
@@ -815,7 +833,7 @@ Read through and not superseded:
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
 > dated header note of ADR-0284, ADR-0306, ADR-0307, ADR-0314, ADR-0315, ADR-0317, ADR-0321,
-> ADR-0328, ADR-0334, ADR-0337, ADR-0338, ADR-0349 and ADR-0350, atomically with this ADR under ADR-0070 and ADR-0082,
+> ADR-0328, ADR-0334, ADR-0337, ADR-0338, ADR-0345, ADR-0349 and ADR-0350, atomically with this ADR under ADR-0070 and ADR-0082,
 > preserving their ratified bodies. The replacements take effect on this ADR's ratification.
 
 ### 17. The format, worked
