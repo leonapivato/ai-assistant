@@ -439,11 +439,19 @@ model's trained habits pull against the design:
     - On a yes, the system runs the call exactly as held, and planning gets the
       outcome.
     - No model decides authority, but it needs buttons or a strict reply.
-  - **c. The hybrid, the current lean.**
+  - **c. The hybrid.**
     - The system holds the call and renders the question itself, as in b.
     - The answer comes back as conversation, as in a. A plain yes runs the held
       call mechanically, and anything else ("yes, but at 7:45", a question) goes
       to planning as a new stimulus.
+
+  **The owner's choice for now is a,** as the cheapest, with stronger protection
+  added later if it proves needed.
+  - It still needs one piece rebuilt: recognising a reply as the yes to a
+    particular question. The old way, Q labels, is gone. Understanding's
+    `belongs_to` can now link the reply to the episode that asked instead.
+  - Because a's question already shows the exact call, moving to the hybrid later
+    is an addition, not a rewrite.
 - **The observer fork's part in change 8:** confirming that its scout does not
   depend on planning's candidates. The memory ADR is written here, and the
   observer fork reviews it.
