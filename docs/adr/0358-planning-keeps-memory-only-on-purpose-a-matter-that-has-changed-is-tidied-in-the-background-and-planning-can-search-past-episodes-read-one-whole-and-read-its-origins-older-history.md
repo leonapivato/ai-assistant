@@ -160,8 +160,9 @@ is the matters pass's (ADR-0300 §9:3), fed by §4. The words that carry §3:1 s
 
 > **Normative.** A run takes the due stories in the order of their oldest pending note or
 > episode, oldest first, except that a story whose tidy-up failed earlier in this process goes
-> after every story that has not, so a reply that never parses does not hold the front of the
-> queue on every run.
+> after every story that has not, and among those the story whose last failed attempt is
+> oldest goes first, so a reply that never parses holds neither the front of the queue nor
+> every retry on every run.
 
 > **Normative.** Each tidy-up a run makes is the operation ADR-0300 §5, ADR-0303 §5 and
 > ADR-0304 decide, on consolidation's route as planning's call already uses it (ADR-0285 §5),
@@ -226,8 +227,10 @@ outside the work, are the instruction's, ADR-0356's.
 > content (ADR-0306 §4:5).
 
 > **Normative.** Each thing a look-up shows takes the activation's label for it the first
-> time it is shown (ADR-0307 §5:1). A thing planning already holds a label for is named by
-> that label and not shown again.
+> time it is shown (ADR-0307 §5:1). A thing a result shows in passing, beside what the call
+> asked for, is named by its label alone where planning already holds one. What the call asked
+> for is always shown: the episode a full-record look-up names, the story a read names, and
+> every page of either.
 
 > **Normative.** A result longer than a page, a composition-root constant, comes in pages:
 > the call names a page, the first where it names none, and the result says whether there are
@@ -383,7 +386,9 @@ The lanes, each after this decision merges `Accepted`, and §1:4's after ADR-035
 The behaviour §2 and §3 rule ships in the words ADR-0356's instruction and ADR-0357's
 descriptions carry, and has no lane of its own.
 
-> **Normative.** M1 may touch `core/types.py` and its tests, and no other file.
+> **Normative.** M1 may touch `core/types.py`, `core/episode_encoding.py`, which holds
+> `project_episode`, `wire/envelope.py` for `PROTOCOL_VERSION` alone, and their tests, and
+> no other file.
 
 > **Normative.** M2 may touch `orchestration/` outside `orchestration/observer/`,
 > `app/composition.py` for the look-ups' constants alone, and their tests.
