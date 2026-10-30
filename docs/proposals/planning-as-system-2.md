@@ -467,9 +467,11 @@ model's trained habits pull against the design:
 - **Whose side planning takes in a household,** when one person's stimulus
   affects another. It is deferred while the owner holds full control.
 - **How the change splits into ADRs.** A suggestion:
-  - one for the exchange: changes 1–7, with ADR-0338's amendment;
-  - one for memory: changes 8, 10 and 11;
-  - one for the tools: changes 4, 5 and 9.
+  - one for the exchange, the contract change: changes 1, 2, 3, 6, 7's short view
+    and 12, with the instruction and its suite cases;
+  - one for the tools: changes 4, 5 and 9, with the asking message approvals
+    need;
+  - one for memory: changes 8, 10 and 11, with 7's episode look-up.
 
   The instruction would ship with the first one's implementation, as
   understanding's did with its renderer. The same change aligns two pieces of
