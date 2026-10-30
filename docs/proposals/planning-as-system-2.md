@@ -216,22 +216,50 @@ tool, with stray text bounced back as news (see the options).
 
 Short-term memory and recall show an episode's **short view**. It is a selection
 of the episode's own recorded parts, made by code, never a summary:
-- the input;
-- the meaning understanding recorded;
-- the messages as sent;
-- what was done: each call with an effect, with its outcome;
-- the work's notes, which is all its text, capped for a long work;
-- how it ended.
+1. the input, and the meaning understanding recorded;
+2. then, in the order they happened:
+   - planning's notes;
+   - each call with an effect, with its outcome. Messages are calls too, so they
+     appear with the text delivered;
+   - each offer taken in;
+3. how it ended.
+
+Calls from one round sit together. Look-ups are left out, since they changed
+nothing. A long work's notes are capped.
 
 Today's view shows no calls and no outcomes. So a later stimulus cannot tell
 whether an email was already sent, unless a message happened to say so.
 
-A new **episode look-up**, like reading a story, gives the full record. It is
-filtered by the reader's audience, removes memories since forgotten, and keeps
-outside content withheld.
+An **episode look-up**, like reading a story, reads one episode's full record by
+its E label, wherever planning saw it: in short-term memory, in recall, or in a
+matter.
+- It holds everything the short view leaves out, such as what a search found,
+  what a matter view showed, and each result in full.
+- A long record comes in pages.
+- Change 11's episode search is how planning finds an episode it was not shown.
 
-Raw thinking is never shown outside its own work. ADR-0355's summaries stay in
-the diagnostic record. Planning's notes are the thinking it chooses to keep.
+**Both views apply the same filters, part by part:**
+- **The reader's audience.** A part placed for someone else is left out, silently,
+  with no marker, since its existence would leak.
+- **Forgetting.** Memories forgotten since the episode are left out.
+- **Outside content.** It is never shown raw: a part resting on it appears through
+  its digest, or is marked as withheld.
+
+So nothing is visible in the short view and hidden in the full one; the full one
+just has more parts to filter.
+
+The one difference is retention. The system can purge an episode's full detail
+while its short view remains, and the look-up then says the full record is no
+longer kept.
+
+Raw thinking is never shown outside its own work, not even in the look-up.
+- It is a stream, not conclusions.
+- It is unreliable across models.
+- It is large.
+
+ADR-0355's summaries stay in the diagnostic record. Planning's notes are the
+thinking it chooses to keep. Thinking summaries in the look-up, clearly marked,
+are an option for later, if planning needs its old reasoning.
 
 ### 8. Memory planning keeps only on purpose
 
