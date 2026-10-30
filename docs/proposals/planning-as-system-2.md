@@ -303,10 +303,31 @@ design:
   belongs in the situation. Whether code should refuse to speak private content
   when others are present is a question for the audience and privacy work.
 
+## How it will be judged
+
+The rewritten instruction is judged on the ADR-0337 suite, with invented data and
+repeated samples. These cases come first, because each is a place where the
+model's trained habits pull against the design:
+
+1. **A plain question comes back as a message call, not as text.** This is
+   change 6's risk.
+2. **A clear request is simply done.** "Remind me at 9" is not second-guessed or
+   asked about.
+3. **A two-part request meets both parts.**
+4. **No unprompted extras:** no menus of services, no "anything else?", no
+   questions nobody needed.
+5. **A plain absence gets a plain answer, with no hedging** about what the system
+   might not see.
+6. **A message never reports on a call from its own round.**
+7. **A stimulus from the system itself,** such as a reminder coming due, is
+   handled as what it was set up to do.
+8. **Outside content sets no goal by itself.** An invoice email is reported, not
+   paid.
+
 ## What it leaves open
 
-- **The exact tagged shape of planning's context.** A mock with invented data
-  comes next, as it did for understanding.
+- **The exact tagged shape of planning's context.** The working doc's raw
+  exchange shows one rendering, with invented data. It is settled in the ADR.
 - **How "what was done" renders for each tool.**
 - **The round limit, and caching details for each provider.**
 - **Whose side planning takes in a household,** when one person's stimulus
@@ -317,4 +338,6 @@ design:
   - one for the tools: changes 4, 5 and 9.
 
   The instruction would ship with the first one's implementation, as
-  understanding's did with its renderer.
+  understanding's did with its renderer. The same change aligns understanding's
+  wording ("the system briefs you with" in place of "provides you with"), with an
+  understanding suite run, and changes nothing else there.
