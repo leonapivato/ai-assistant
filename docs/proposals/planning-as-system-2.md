@@ -114,19 +114,27 @@ way people think of them:
 
 | Tool | What it is |
 | --- | --- |
-| `text` | A short written message. iMessage, WhatsApp, Telegram and the hub chat are the same action, and code picks the platform. |
+| `text` | A short written message. iMessage, WhatsApp, Telegram and the hub chat are the same action, with the platform an argument. |
 | `email` | Subject, attachments, slower and more formal. |
 | `speak` | Voice, when that interface exists. |
 
-- **Whose voice.** `text` and `speak` are always in the system's own voice.
-  `email` may be sent from the system's address or from the person's, and the
-  person's address is gated.
-- **A person, not an address.** Each tool takes a person, and code resolves how
-  to reach them. A person it cannot tell apart from another comes back asking which.
-- **Exact words.** Each tool can send its words exactly as written.
-- **The result.** Each tool's result returns what was actually delivered, where
-  it went, and whether it was sent, delivered, read, failed or unknown, with the
-  reason.
+- **Whose voice.** For now, `text` and `speak` are always in the system's own
+  voice. That is a present limit, not a permanent one. `email` may be sent from
+  the system's address or from the person's, and the person's address is gated.
+- **Who and where are planning's choice.** Planning names the person and where to
+  reach them. Code resolves the address there and handles the platform's
+  mechanics. A person it cannot tell apart from another, or a place where the
+  person can't be reached, comes back saying so.
+- **Rephrased by default, exact on request.** Planning gives what to say. By
+  default a wording step renders it for the person and the medium: their
+  preferences, the system's personality, written or spoken. Planning can instead
+  send its words exactly as written, for a quote, a relayed message, an address
+  or anything else where the wording matters. Until the wording step is built,
+  words pass through unchanged.
+- **The result.** Each tool's result returns what was actually delivered, after
+  any rewording, where it went, and whether it was sent, delivered, read, failed
+  or unknown, with the reason. So planning can check that the wording kept its
+  meaning.
 
 So a message can wait for the results it reports. The rule that a message never
 claims how its own round's calls went becomes general: a call that needs
@@ -265,7 +273,10 @@ instruction still carries them.
 - **One wide `say` tool,** with who, where and in whose name as arguments. The
   "whose name" argument changes the stakes, the permission and the style, which
   makes it a different act. Splitting by modality matches how people think, and
-  lets planning write for the medium it chose.
+  lets planning choose the medium.
+- **Planning names only the person, and code picks how to reach them.** It's
+  simpler for planning, but it takes a real choice out of its hands. Planning
+  names who and where (change 4).
 - **A "final" flag on a message that ends the work.** It loses failures: a round
   holding a booking and a final "Booked!" ends even if the booking failed.
   Dropped for one cheap round after each message. A later option is a "last
@@ -299,7 +310,11 @@ design:
 - **Lessons from corrections.**
 - **The system's own promises, kept as obligations.**
 - **A System 1 pathway.**
-- **A wording phase** that renders planning's content for its medium.
+- **How the wording step is built.** Change 4 makes rewording the default, so the
+  interface is part of this proposal: planning gives what to say, with an "exactly
+  as written" switch, and the result shows what was delivered. The step itself is
+  its own design: which model, how preferences and personality reach it, and what
+  it may never change, such as times, names and claims.
 - **For `speak`: presence, and the question of private content.** Who is around
   belongs in the situation. Whether code should refuse to speak private content
   when others are present is a question for the audience and privacy work.
