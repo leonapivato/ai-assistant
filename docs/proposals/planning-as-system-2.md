@@ -66,7 +66,6 @@ A core of tools is offered on every round, the same set each time:
 - the message tools;
 - the look-ups;
 - answering an offer;
-- the scratchpad;
 - remembering;
 - reminders.
 
@@ -101,8 +100,9 @@ depends on the model, and nothing relies on it.
 
 ### 4. Saying something is a call
 
-Text written outside a call reaches no one, and a round with no calls ends the
-work. Messages are tools, split by modality the way people think of them:
+The people the system works for see only what planning's calls do, never its
+text (see change 6). A round with no calls ends the work. Messages are tools,
+split by modality the way people think of them:
 
 | Tool | What it is |
 | --- | --- |
@@ -142,13 +142,25 @@ This is one rule for every tool.
   already done. It comes back saying so. Each tool's description says whether it
   is safe to repeat.
 
-### 6. Notes become a scratchpad
+### 6. Planning's text is its own notes
 
-The tool that carries episode notes is kept, as a tool that runs nothing.
-- Its description makes it a scratchpad for long work: the plan, what was decided
-  and why, and what is still open.
-- Each write holds the whole current plan.
-- The instruction does not name it.
+The tool that carries episode notes goes. Any text planning writes outside a
+call is its notes:
+- its later rounds see the notes, since the exchange keeps them;
+- later work sees the work's last note, in the episode's short view;
+- nobody else does.
+
+The people the system works for see only what the calls do. The instruction says
+so plainly.
+
+Text needs no tool, so this reuses the habit models already have of writing text.
+And text in the exchange survives from round to round on every provider, where a
+model's own thinking may not.
+
+**The risk:** a model trained to answer users in text may write its reply as a
+note and call no message tool, and the person then gets nothing. The first suite
+case for this design checks it: a plain question must come back as a message
+call.
 
 ### 7. What an episode shows
 
@@ -158,7 +170,7 @@ of the episode's own recorded parts, made by code, never a summary:
 - the meaning understanding recorded;
 - the messages as sent;
 - what was done: each call with an effect, with its outcome;
-- the last scratchpad write;
+- the work's last note;
 - how it ended.
 
 Today's view shows no calls and no outcomes. So a later stimulus cannot tell
@@ -169,7 +181,7 @@ filtered by the reader's audience, removes memories since forgotten, and keeps
 outside content withheld.
 
 Raw thinking is never shown outside its own work. ADR-0355's summaries stay in
-the diagnostic record. The scratchpad is the thinking planning chooses to keep.
+the diagnostic record. Planning's notes are the thinking it chooses to keep.
 
 ### 8. Memory planning keeps only on purpose
 
@@ -252,6 +264,9 @@ instruction still carries them.
   shows the short view, with a look-up for the rest.
 - **Keep an explicit "remember this" for sure.** Declined by the owner: whether
   to keep it is the observer's call, which sees duplicates and provenance.
+- **A scratchpad tool for notes:** a tool that runs nothing, each write holding
+  the whole plan. It works, but it adds a tool for something text already does
+  once rounds are appended. Change 6 uses text instead.
 - **Offer every tool on every round.** It is simple while the tools are few, but
   it doesn't scale: models choose worse among dozens of tools, and each one costs
   tokens. Change 2 offers a stable core instead, and leaves the rest to memory.
