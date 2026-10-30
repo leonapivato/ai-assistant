@@ -3,9 +3,9 @@
 - Status: Proposed
 - Date: 2026-10-30
 - Scope: what planning keeps and reorganises on its own account, and what it can look up. Planning records a candidate only on purpose (§2) and reorganises a matter only when asked (§3). A matter that has changed is tidied by a scheduled run (§4). A person's preferences have the person block as their home, and their defaults wait (§5). Planning gains three look-ups and a reading of a matter it was not shown (§6–§10). ADR-0356's per-call entry on the episode record also keeps what each call showed (§11). These are changes 8, 10 and 11 of proposal [#3526](https://github.com/leonapivato/ai-assistant/pull/3526), with change 7's episode look-up. ADR-0356 converts its changes 1, 2, 3, 6, 7's short view and 12, and ADR-0357 its changes 4, 5 and 9.
-- Dependency: [ADR-0329](0329-the-observer-is-memorys-one-writer-it-commits-what-an-episode-leaving-the-window-shows-and-planning-records-candidates-for-it.md), [ADR-0346](0346-the-observer-reads-only-the-episode-keeps-then-corrects-and-frames-each-memory-before-placing-it-among-what-is-stored.md), [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md), [ADR-0302](0302-the-matters-pass-records-what-it-decides-and-a-page-write-refuses-what-its-story-does-not-hold.md), [ADR-0303](0303-a-storys-page-is-free-notes-rewritten-whole-and-the-place-window-links-each-item-to-its-activation.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md) and [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md), as their status lines leave them; ADR-0356, for the short view and the core of tools, and ADR-0357, for where a tool's rules are worded.
+- Dependency: [ADR-0329](0329-the-observer-is-memorys-one-writer-it-commits-what-an-episode-leaving-the-window-shows-and-planning-records-candidates-for-it.md), [ADR-0346](0346-the-observer-reads-only-the-episode-keeps-then-corrects-and-frames-each-memory-before-placing-it-among-what-is-stored.md), [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md), [ADR-0302](0302-the-matters-pass-records-what-it-decides-and-a-page-write-refuses-what-its-story-does-not-hold.md), [ADR-0303](0303-a-storys-page-is-free-notes-rewritten-whole-and-the-place-window-links-each-item-to-its-activation.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md) and [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md), as their status lines leave them; [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md), Accepted, for the per-call entry, the short view and the core of tools; and ADR-0357, for where a tool's rules are worded.
 - Authorization: the owner accepted proposal #3526 on 2026-10-30, verbatim: "accept it, convert to the ADRs". On `remember`, the owner's ruling of 2026-10-30, verbatim: "it shouldnt be kept for sure, thats observers choice because it may already be there or other reasons… saying things like saved or ill remember is fine, since it will effectively remember." The owner agreed that the observer side reviews this decision, which is written here. The coordinator assigned 0358 and ratifies it under the owner's delegation once its reviews are green. §4's trigger and its figures, which are tunable defaults, §7's and §9's shapes and §11's addition are this lane's choices within the proposal, not owner rulings. The coordinator ruled on 2026-10-30 that ADR-0356 defines the per-call entry and this decision extends it (§11:1).
-- **Changes `core`, so it is a contract-surface decision. No `Protocol` changes,** so it is not a breaking change under golden rule 5. In `core/types.py`, the per-call entry ADR-0356 adds to `EpisodeProcessingRecord` also holds what each call showed (§11:2), and `project_episode` gains the full view behind one keyword (§11:5). The record crosses the wire, so `PROTOCOL_VERSION` advances (§11:7). No `StoryStore`, `MemoryStore` or `AssistantEngine` member changes.
+- **Changes `core`, so it is a contract-surface decision. No `Protocol` changes,** so it is not a breaking change under golden rule 5. In `core/types.py`, ADR-0356's per-call entry, `RecordedCall` in `EpisodeProcessingRecord.call_records`, also holds what each call showed (§11:2), and `project_episode` gains the full view behind one keyword, under which `ProjectedCall` carries it (§11:5). It is a schema change of the episode store (§11:8), and the record crosses the wire, so `PROTOCOL_VERSION` advances (§11:7). No `StoryStore`, `MemoryStore` or `AssistantEngine` member changes.
 - **Partially supersedes**, in the clauses §13's first table names: ADR-0284, ADR-0300, ADR-0307 and ADR-0329.
 
 ## Context
@@ -34,7 +34,7 @@ up more (ADR-0356). For that to be true it needs look-ups it lacks.
 
 ### What is there today
 
-Checked against `main` at `58987ea15`.
+Checked against `main` at `58987ea15`, and against ADR-0356 as merged at `f9e68f725`, which no lane has built yet.
 
 - **The observer gathers what is worth keeping without planning.** An episode is due to it
   once it has left the episode window (ADR-0329 §7:1). The scout reads the episode's record
@@ -66,7 +66,8 @@ Checked against `main` at `58987ea15`.
   effect record (ADR-0306 §5), a result with outside text is never saved (ADR-0308 §6:4), and
   nothing records the result of a call with no effect, such as a look-up. The labels
   planning was shown are on the record (`EpisodeProcessingRecord.labels`), but not which call
-  showed them.
+  showed them. ADR-0356 §8:2 adds `call_records`, one `RecordedCall` per call with its
+  outcome, and leaves what each call showed to this decision (ADR-0356 §8:5, §14:9).
 - **A person's style already has a home.** ADR-0338 §5 keeps a style preference as a memory
   the observer learns and marks, §6 shows the marked ones in the kept-in-mind slot of the
   person block, and §7:3 gives the whole slot to every planning round. No field, setting or
@@ -103,8 +104,8 @@ which the episode record's per-call entry, ADR-0356's, also keeps what each call
 > keeps the gate green.
 
 > **Normative.** No lane of this decision that renders an episode's short view, or touches
-> `EpisodeProcessingRecord` or `project_episode`, is briefed before ADR-0356 merges
-> `Accepted`.
+> `RecordedCall`, `ProjectedCall` or `project_episode`, is briefed before ADR-0356's P2 lane,
+> which builds them (ADR-0356 §14:2), has merged.
 
 ### 2. What planning keeps
 
@@ -310,7 +311,10 @@ story like another (ADR-0303 §5:7), and read whole by the call that reads any o
 > short view.
 
 > **Normative.** A part placed for someone other than the reader is left out, with nothing
-> said about it, as ADR-0307 §6:4 leaves out what an audience may not be shown.
+> said about it, as ADR-0307 §6:4 leaves out what an audience may not be shown; on a pass
+> where records placed for the owner alone may not be shown, the full view, like the short
+> view (ADR-0356 §9:5), shows the input, the meaning and how the work ended, and nothing of
+> its notes or its calls.
 
 > **Normative.** A record the episode shows by reference, a memory, a story or another
 > episode, is read again when the look-up runs, its current version (ADR-0282 §2:6) under §6:3,
@@ -322,7 +326,8 @@ story like another (ADR-0303 §5:7), and read whole by the call that reads any o
 
 > **Normative.** Outside content is never shown raw: an outside input is withheld as the short
 > view withholds it, beside its understood meaning; a result that carried outside text appears
-> only through its digests; and digested evidence and marked notes are shown marked.
+> only through its digests; and digested evidence, marked notes and marked entries
+> (ADR-0356 §8:7) are shown marked.
 
 > **Normative.** Where the record no longer keeps a part the full view would show, because it
 > was recorded before §11:2's addition, was elided when it was recorded, or was purged by a later
@@ -338,13 +343,14 @@ on no episode record (ADR-0329 §8:4). ADR-0355's summaries stay in the diagnost
 
 ### 11. What the record keeps of each call
 
-ADR-0356 gives the episode record one entry per call, the call with its outcome, and that
-entry is what the short view's account of what was done reads. This decision adds to it what
-the episode look-up needs.
+ADR-0356 §8 gives the episode record one entry per call, `RecordedCall` in `call_records`:
+the call's capability, whether it had an effect, its outcome and reason, and a message's
+delivery. That entry is what the short view's `did` reads (ADR-0356 §9:2), and ADR-0356 §8:5
+holds no result's body in it. This decision adds to it what the episode look-up needs.
 
-> **Normative.** The per-call entry ADR-0356 adds to `EpisodeProcessingRecord` is the one
-> this decision extends, and this decision defines no second entry and no other field for a
-> call.
+> **Normative.** `RecordedCall`, the per-call entry ADR-0356 §8:2 adds to
+> `EpisodeProcessingRecord`, is the one this decision extends, and this decision defines no
+> second entry and no other field for a call.
 
 > **Normative.** For a call that was done and whose result carries no outside text, the
 > entry also holds what the result showed, as planning was shown it, in which each record the
@@ -359,13 +365,20 @@ the episode look-up needs.
 > is carried on the entry.
 
 > **Normative.** `project_episode` (ADR-0284 §8:1) gains one keyword, false by default, under
-> which the projection also carries the parts §10:3 names, and only the episode look-up sets
-> it.
+> which the projection also carries the parts §10:3 names, each `ProjectedCall` among them
+> with what its entry showed, and only the episode look-up sets it.
 
 > **Normative.** A record or an entry written before §11:2's addition validates unchanged, and
 > its full view says what its calls showed was not kept (§10:9).
 
-> **Normative.** `PROTOCOL_VERSION` advances in the lane that makes §11:2's addition.
+> **Normative.** `PROTOCOL_VERSION` advances in the lane that makes §11:2's addition, in
+> that change (ADR-0124 §9), with the wire surface and the memory and engine conformance
+> suites extended to the shape.
+
+> **Normative.** §11:2's addition is a schema change of the episode store (ADR-0326 §2:3), and
+> the lane that makes it ships ADR-0326 §4:1–§4:2's upgrade and its test, carrying every
+> stored entry whole with the addition empty, unless it lands in the same pull request as the
+> schema change that adds `call_records`, which then carries both.
 
 Keeping a record by id rather than by copy is ADR-0282 §2:3's rule for a stage's part, applied
 to what a call showed. It is what lets §10:6 hold: a memory forgotten since the episode cannot
@@ -373,7 +386,7 @@ come back through an old result, because the old result never held its words.
 
 ### 12. Delivery
 
-The lanes, each after this decision merges `Accepted`, and §1:4's after ADR-0356's:
+The lanes, each after this decision merges `Accepted`, and §1:4's after ADR-0356's P2:
 
 1. **M1, the record and the projection** (§11): the entry's addition and the projection's
    keyword, with their tests.
@@ -381,14 +394,17 @@ The lanes, each after this decision merges `Accepted`, and §1:4's after ADR-035
    addition where acting's outcomes are known (§11:2–§11:4), the look-ups (§6–§10), and their
    composition-root constants.
 3. **M3, the scheduled tidy-up** (§4): the engine's operation, the scheduler's row and its
-   constants. It depends on nothing else here and may run beside M1.
+   constants. It depends on nothing else here and may run beside M1. ADR-0356's P4 also
+   touches `orchestration/story_tidy_up.py` (ADR-0356 §14:4), so whichever merges second
+   rebases across the other.
 
 The behaviour §2 and §3 rule ships in the words ADR-0356's instruction and ADR-0357's
 descriptions carry, and has no lane of its own.
 
-> **Normative.** M1 may touch `core/types.py`, `core/episode_encoding.py`, which holds
-> `project_episode`, `wire/envelope.py` for `PROTOCOL_VERSION` alone, and their tests, and
-> no other file.
+> **Normative.** M1 may touch `core/types.py` and `core/episode_encoding.py` for §11's
+> rows, `wire` for the wire shape and `PROTOCOL_VERSION`, `memory` and `testing` for the
+> episode store's upgrade and the conformance suites, `scripts/upgrade_stores.py`, and their
+> tests.
 
 > **Normative.** M2 may touch `orchestration/` outside `orchestration/observer/`,
 > `app/composition.py` for the look-ups' constants alone, and their tests.
@@ -421,6 +437,7 @@ Read through and not superseded:
 | ADR-0308 §6:4 | Nothing: a held result is still never saved |
 | ADR-0314 §3:1 | Nothing: no look-up reads the diagnostic record |
 | ADR-0338 §5, §6, §7 | Nothing: they are the home §5:1 names |
+| ADR-0356 §8:2, §8:5, §9:8, §13, §14:9 | Nothing: `RecordedCall` is the entry they name, this decision makes the addition §8:5 leaves to it, and §10 is the look-up §9:8 points at |
 | ADR-0349 | Nothing: its look-up of a running activation's findings is the one §10:2 points at |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
