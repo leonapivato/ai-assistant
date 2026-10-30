@@ -66,6 +66,7 @@ A core of tools is offered on every round, the same set each time:
 - the message tools;
 - the look-ups;
 - answering an offer;
+- notes;
 - remembering;
 - reminders.
 
@@ -100,9 +101,10 @@ depends on the model, and nothing relies on it.
 
 ### 4. Saying something is a call
 
-The people the system works for see only what planning's calls do, never its
-text (see change 6). A round with no calls ends the work. Messages are tools,
-split by modality the way people think of them:
+Everything planning does is a call. Text written outside a call reaches no one
+(see change 6), and the people the system works for see only what the calls do.
+A round with no calls ends the work. Messages are tools, split by modality the
+way people think of them:
 
 | Tool | What it is |
 | --- | --- |
@@ -142,25 +144,25 @@ This is one rule for every tool.
   already done. It comes back saying so. Each tool's description says whether it
   is safe to repeat.
 
-### 6. Planning's text is its own notes
+### 6. Notes are a tool, and text has no use
 
-The tool that carries episode notes goes. Any text planning writes outside a
-call is its notes:
-- its later rounds see the notes, since the exchange keeps them;
-- later work sees the work's last note, in the episode's short view;
-- nobody else does.
+The tool that carries episode notes stays, as a core tool that runs nothing.
+- Its description makes it planning's notes for itself: the plan, what was
+  decided and why, and what is still open.
+- Each write holds the whole current note.
+- Later rounds see it in the exchange, and later work sees the last write in the
+  episode's short view.
 
-The people the system works for see only what the calls do. The instruction says
-so plainly.
-
-Text needs no tool, so this reuses the habit models already have of writing text.
-And text in the exchange survives from round to round on every provider, where a
-model's own thinking may not.
-
-**The risk:** a model trained to answer users in text may write its reply as a
-note and call no message tool, and the person then gets nothing. The first suite
-case for this design checks it: a plain question must come back as a message
-call.
+So text outside a call has no legitimate use. That makes any text a sign of a
+mistake, most likely a reply written as text instead of a message call, and
+the system can catch it:
+- **It is dropped from the exchange,** so it does not quietly act as notes, and
+  is kept only in the diagnostic record.
+- **The next round's news says so:** text was written outside a call, and no one
+  received it.
+- **A round that wrote text but made no calls does not end the work.** One more
+  round follows, carrying that news, so a reply lost this way gets its chance. A
+  round with no calls and no text then ends it.
 
 ### 7. What an episode shows
 
@@ -264,9 +266,10 @@ instruction still carries them.
   shows the short view, with a look-up for the rest.
 - **Keep an explicit "remember this" for sure.** Declined by the owner: whether
   to keep it is the observer's call, which sees duplicates and provenance.
-- **A scratchpad tool for notes:** a tool that runs nothing, each write holding
-  the whole plan. It works, but it adds a tool for something text already does
-  once rounds are appended. Change 6 uses text instead.
+- **Text as planning's notes.** Once rounds are appended, text already persists,
+  and it needs no tool. But a reply written as text looks exactly like a note, so
+  the person gets nothing and nothing can tell. With a notes tool, text has no
+  use, so stray text is detectable and can be bounced back (change 6).
 - **Offer every tool on every round.** It is simple while the tools are few, but
   it doesn't scale: models choose worse among dozens of tools, and each one costs
   tokens. Change 2 offers a stable core instead, and leaves the rest to memory.
