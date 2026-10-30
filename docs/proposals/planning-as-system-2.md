@@ -447,9 +447,14 @@ model's trained habits pull against the design:
 
   **The owner's choice for now is a,** as the cheapest, with stronger protection
   added later if it proves needed.
-  - It still needs one piece rebuilt: recognising a reply as the yes to a
-    particular question. The old way, Q labels, is gone. Understanding's
-    `belongs_to` can now link the reply to the episode that asked instead.
+  - Recognising the yes needs no special path. It is understanding's ordinary
+    work: what the reply means, what it belongs to (`belongs_to`, or `meant_for`
+    while the asking work still runs), and what is unclear, such as a bare "yes"
+    with two questions open. The old Q labels stay gone.
+  - Only two pieces are mechanical:
+    - the asking message names the call it asks about, and the system adds its
+      own rendering of that call, so what is approved is exactly that text;
+    - invoking the approved call fills in exactly the values shown.
   - Because a's question already shows the exact call, moving to the hybrid later
     is an addition, not a rewrite.
 - **The observer fork's part in change 8:** confirming that its scout does not
