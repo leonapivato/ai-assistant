@@ -272,7 +272,24 @@ ends.
   against saying "saved" goes.
 - **Matter notes.** Planning still notes on a matter what the matter needs now.
 - **Reorganising matters.** Planning still reorganises a matter when asked.
-  Reorganisation nobody asked for goes to the observer.
+  Reorganisation nobody asked for is left to background work.
+
+Most of this already holds in today's code, so the change is smaller than it
+sounds:
+- **The observer already gathers incidental memory.** It reads every exchange
+  after it ends and proposes what is worth keeping, with planning's candidates
+  only as hints. So planning recording fewer candidates needs no observer change;
+  it is the `remember` tool's description. The observer side only needs to
+  confirm that its scout does not depend on those candidates.
+- **Unrequested reorganising already runs in the background.** The matters pass
+  is a scheduled job, on consolidation's interval. It decides merges, splits,
+  moves and groupings.
+- **What is new: an automatic tidy-up.** The matters pass acts only on flags that
+  tidy-ups raise, and today a tidy-up runs only when planning calls it. If
+  planning stops tidying, the flags stop, and the background reorganising starves
+  with them. So the scheduler gains a tidy-up trigger, such as tidying a matter
+  once enough has changed since its last tidy-up. Planning keeps the tidy-up
+  call for when someone asks.
 
 ### 9. Rules beside their tools
 
@@ -407,6 +424,29 @@ model's trained habits pull against the design:
 
 ## What it leaves open
 
+- **Approvals,** which are the authority run's. Change 5 says a call that needs a
+  yes comes back, but not how the yes is asked for and recorded. Three options:
+  - **a. Today's shape, carried over (ADR-0321).**
+    - Planning asks in a message, and the reply arrives as a new stimulus that
+      understanding reads as a yes to that question.
+    - The next work re-proposes the call by its approval label, with the approved
+      values pinned by code.
+    - It's conversational, and works on any channel. But a model decides that a
+      reply counts as a yes.
+  - **b. Held calls, approved mechanically.**
+    - The tool holds the call, and the system asks, showing the call as it will
+      run, with Approve and Decline where the channel has buttons.
+    - On a yes, the system runs the call exactly as held, and planning gets the
+      outcome.
+    - No model decides authority, but it needs buttons or a strict reply.
+  - **c. The hybrid, the current lean.**
+    - The system holds the call and renders the question itself, as in b.
+    - The answer comes back as conversation, as in a. A plain yes runs the held
+      call mechanically, and anything else ("yes, but at 7:45", a question) goes
+      to planning as a new stimulus.
+- **The observer fork's part in change 8:** confirming that its scout does not
+  depend on planning's candidates. The memory ADR is written here, and the
+  observer fork reviews it.
 - **The exact tagged shape of planning's context.** The working doc's raw
   exchange shows one rendering, with invented data. It is settled in the ADR.
 - **How "what was done" renders for each tool.**
