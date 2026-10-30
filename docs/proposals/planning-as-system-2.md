@@ -107,9 +107,9 @@ depends on the model, and nothing relies on it.
 
 ### 4. Saying something is a call
 
-Speaking to anyone is a call. Planning's text goes only to the system, as its
-notes (see change 6), and the people the system works for see only what the calls
-do. A round with no calls ends the work. Messages are tools, split by modality the
+Speaking to anyone is a call. Planning's text is meant for the system, as its
+notes (see change 6), and what people receive comes only from the calls. A round
+with no calls ends the work. Messages are tools, split by modality the
 way people think of them:
 
 | Tool | What it is |
@@ -187,15 +187,18 @@ This is one rule for every tool.
 
 ### 6. Planning's text is its report to the system
 
-Since the system briefs planning (change 1), planning's text is its reply to the
-system. That reply is planning's notes:
+In the model's own terms the system is the `user`: every `user` turn is the system
+briefing planning or reporting back (change 1), and people appear only as tagged
+content inside those turns. So planning's text is its reply to the system, and
+that reply is planning's notes:
 - its later rounds see the text in the exchange;
 - later work sees them all, in the episode's short view, capped for an unusually
   long work, whose full record stays available by episode look-up;
-- no person sees it.
+- it is not meant for any person. Those who inspect the system, such as the
+  owner in the activation viewer, can still read it.
 
-The people the system works for see only what the calls do, and the instruction
-says so plainly. The tool that carries episode notes goes.
+What people receive comes only from the calls, and the instruction says so
+plainly. The tool that carries episode notes goes.
 
 This works with the model's habits, not against them:
 - **The model answers in text whoever addresses it,** and here that is the
