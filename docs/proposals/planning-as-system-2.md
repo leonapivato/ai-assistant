@@ -57,6 +57,13 @@ Planning is shown its context the way understanding is since ADR-0353:
 Every item is wrapped in a tag that says who or what it is from. Planning is told
 its context is only part of what the system knows, and that it can look up more.
 
+The model expects someone to be talking to it in the `user` turn, so the framing
+names that speaker: the system briefs planning.
+- The context is the system's briefing.
+- Results and news are the system reporting back.
+- A person's words arrive inside that briefing, tagged as theirs, never as the
+  briefer's.
+
 ### 2. No switches, and a stable core of tools
 
 Every section is always present, and an empty one says why. That is the rule
@@ -66,7 +73,6 @@ A core of tools is offered on every round, the same set each time:
 - the message tools;
 - the look-ups;
 - answering an offer;
-- notes;
 - remembering;
 - reminders.
 
@@ -101,9 +107,9 @@ depends on the model, and nothing relies on it.
 
 ### 4. Saying something is a call
 
-Everything planning does is a call. Text written outside a call reaches no one
-(see change 6), and the people the system works for see only what the calls do.
-A round with no calls ends the work. Messages are tools, split by modality the
+Speaking to anyone is a call. Planning's text goes only to the system, as its
+notes (see change 6), and the people the system works for see only what the calls
+do. A round with no calls ends the work. Messages are tools, split by modality the
 way people think of them:
 
 | Tool | What it is |
@@ -144,25 +150,28 @@ This is one rule for every tool.
   already done. It comes back saying so. Each tool's description says whether it
   is safe to repeat.
 
-### 6. Notes are a tool, and text has no use
+### 6. Planning's text is its report to the system
 
-The tool that carries episode notes stays, as a core tool that runs nothing.
-- Its description makes it planning's notes for itself: the plan, what was
-  decided and why, and what is still open.
-- Each write holds the whole current note.
-- Later rounds see it in the exchange, and later work sees the last write in the
-  episode's short view.
+Since the system briefs planning (change 1), planning's text is its reply to the
+system. That reply is planning's notes:
+- its later rounds see the text in the exchange;
+- later work sees the work's last text, in the episode's short view;
+- no person sees it.
 
-So text outside a call has no legitimate use. That makes any text a sign of a
-mistake, most likely a reply written as text instead of a message call, and
-the system can catch it:
-- **It is dropped from the exchange,** so it does not quietly act as notes, and
-  is kept only in the diagnostic record.
-- **The next round's news says so:** text was written outside a call, and no one
-  received it.
-- **A round that wrote text but made no calls does not end the work.** One more
-  round follows, carrying that news, so a reply lost this way gets its chance. A
-  round with no calls and no text then ends it.
+The people the system works for see only what the calls do, and the instruction
+says so plainly. The tool that carries episode notes goes.
+
+This works with the model's habits, not against them:
+- **The model answers in text whoever addresses it,** and here that is the
+  system.
+- **Text survives from round to round on every provider,** where a model's own
+  thinking may not.
+
+**The risk:** a reply meant for a person, written as text, would be kept as a note
+and never sent. The framing makes it unlikely, because the model knows who reads
+its text. The first suite case for this design still checks it: a plain question
+must come back as a message call. If that fails often, the fallback is a notes
+tool, with stray text bounced back as news (see the options).
 
 ### 7. What an episode shows
 
@@ -172,7 +181,7 @@ of the episode's own recorded parts, made by code, never a summary:
 - the meaning understanding recorded;
 - the messages as sent;
 - what was done: each call with an effect, with its outcome;
-- the work's last note;
+- the work's last text, which is its last note;
 - how it ended.
 
 Today's view shows no calls and no outcomes. So a later stimulus cannot tell
@@ -266,10 +275,12 @@ instruction still carries them.
   shows the short view, with a look-up for the rest.
 - **Keep an explicit "remember this" for sure.** Declined by the owner: whether
   to keep it is the observer's call, which sees duplicates and provenance.
-- **Text as planning's notes.** Once rounds are appended, text already persists,
-  and it needs no tool. But a reply written as text looks exactly like a note, so
-  the person gets nothing and nothing can tell. With a notes tool, text has no
-  use, so stray text is detectable and can be bounced back (change 6).
+- **A notes tool, with text given no use.** Any text is then a mistake, so it can
+  be caught: dropped from the exchange and bounced back as news, with one more
+  round so a lost reply gets its chance. That makes a reply written as text
+  detectable. But once the system is the briefer, bouncing planning's reply to
+  that system is odd, and the mistake is less likely anyway. It is kept as the
+  fallback if the suite shows replies written as text.
 - **Offer every tool on every round.** It is simple while the tools are few, but
   it doesn't scale: models choose worse among dozens of tools, and each one costs
   tokens. Change 2 offers a stable core instead, and leaves the rest to memory.
