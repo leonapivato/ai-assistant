@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-10-30
 - Scope: what planning keeps and reorganises on its own account, and what it can look up. Planning records a candidate only on purpose (§2) and reorganises a matter only when asked (§3). A matter that has changed is tidied by a scheduled run (§4). A person's preferences have the person block as their home, and their defaults wait (§5). Planning gains three look-ups and a reading of a matter it was not shown (§6–§10). ADR-0356's per-call entry on the episode record also keeps what each call showed (§11). These are changes 8, 10 and 11 of proposal [#3526](https://github.com/leonapivato/ai-assistant/pull/3526), with change 7's episode look-up. ADR-0356 converts its changes 1, 2, 3, 6, 7's short view and 12, and ADR-0357 its changes 4, 5 and 9.
-- Dependency: [ADR-0329](0329-the-observer-is-memorys-one-writer-it-commits-what-an-episode-leaving-the-window-shows-and-planning-records-candidates-for-it.md), [ADR-0346](0346-the-observer-reads-only-the-episode-keeps-then-corrects-and-frames-each-memory-before-placing-it-among-what-is-stored.md), [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md), [ADR-0302](0302-the-matters-pass-records-what-it-decides-and-a-page-write-refuses-what-its-story-does-not-hold.md), [ADR-0303](0303-a-storys-page-is-free-notes-rewritten-whole-and-the-place-window-links-each-item-to-its-activation.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md) and [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md), as their status lines leave them; [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md), Accepted, for the per-call entry, the short view and the core of tools; and ADR-0357, for where a tool's rules are worded.
+- Dependency: [ADR-0329](0329-the-observer-is-memorys-one-writer-it-commits-what-an-episode-leaving-the-window-shows-and-planning-records-candidates-for-it.md), [ADR-0346](0346-the-observer-reads-only-the-episode-keeps-then-corrects-and-frames-each-memory-before-placing-it-among-what-is-stored.md), [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md), [ADR-0302](0302-the-matters-pass-records-what-it-decides-and-a-page-write-refuses-what-its-story-does-not-hold.md), [ADR-0303](0303-a-storys-page-is-free-notes-rewritten-whole-and-the-place-window-links-each-item-to-its-activation.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md) and [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md), as their status lines leave them; [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md), Accepted, for the per-call entry, the short view and the core of tools; and [ADR-0357](0357-messages-are-tools-by-modality-planning-chooses-and-tools-carry-out-and-a-rule-about-one-tool-sits-in-its-description.md), Accepted, for where a tool's rules are said.
 - Authorization: the owner accepted proposal #3526 on 2026-10-30, verbatim: "accept it, convert to the ADRs". On `remember`, the owner's ruling of 2026-10-30, verbatim: "it shouldnt be kept for sure, thats observers choice because it may already be there or other reasons… saying things like saved or ill remember is fine, since it will effectively remember." The owner agreed that the observer side reviews this decision, which is written here. The coordinator assigned 0358 and ratifies it under the owner's delegation once its reviews are green. §4's trigger and its figures, which are tunable defaults, §7's and §9's shapes and §11's addition are this lane's choices within the proposal, not owner rulings. The coordinator ruled on 2026-10-30 that ADR-0356 defines the per-call entry and this decision extends it (§11:1).
 - **Changes `core`, so it is a contract-surface decision. No `Protocol` changes,** so it is not a breaking change under golden rule 5. In `core/types.py`, ADR-0356's per-call entry, `RecordedCall` in `EpisodeProcessingRecord.call_records`, also holds what each call showed (§11:2), and `project_episode` gains the full view behind one keyword, under which `ProjectedCall` carries it (§11:5). It is a schema change of the episode store (§11:8), and the record crosses the wire, so `PROTOCOL_VERSION` advances (§11:7). No `StoryStore`, `MemoryStore` or `AssistantEngine` member changes.
 - **Partially supersedes**, in the clauses §13's first table names: ADR-0284, ADR-0292, ADR-0300, ADR-0307 and ADR-0329.
@@ -132,9 +132,11 @@ window.
 
 > **Normative.** No lane of this decision changes the observer, its prompts or what it reads.
 
-The words that carry §2:1–§2:3 to planning sit where ADR-0357 places `remember`'s rules, in
-the tool's description or the instruction. This decision rules what they say, not where they
-sit, and `remember`'s declaration, lookup and confirmation (ADR-0329 §3–§5) do not change.
+The words that carry §2:1–§2:3 to planning are `remember`'s description's, where ADR-0357
+§7:2 moves `remember`'s rules out of the instruction, and what a moved rule says is the deciding
+ADR's as its status line leaves it (ADR-0357 §7:3). So this decision rules what they say, and
+ADR-0357 where they are said. `remember`'s declaration, lookup and confirmation (ADR-0329
+§3–§5) do not change.
 
 ### 3. Reorganising a matter
 
@@ -143,7 +145,8 @@ sit, and `remember`'s declaration, lookup and confirmation (ADR-0329 §3–§5) 
 
 Starting a matter, noting on one and linking to one stay planning's ordinary calls, and every
 story call keeps its declaration (ADR-0300 §10:5, ADR-0303 §9:2). Reorganising nobody asked for
-is the matters pass's (ADR-0300 §9:3), fed by §4. The words that carry §3:1 sit as §2's do.
+is the matters pass's (ADR-0300 §9:3), fed by §4. The words that carry §3:1 are the
+descriptions of `tidy_story` and of the matter calls, each the part about it (ADR-0357 §7:2).
 
 ### 4. The scheduled tidy-up
 
@@ -238,8 +241,9 @@ outside the work, are the instruction's, ADR-0356's.
 > the call names a page, the first where it names none, and the result says whether there are
 > more.
 
-The look-ups are part of the core of tools ADR-0356 offers every round, and their names and
-descriptions are ADR-0357's.
+The look-ups are part of the set ADR-0356 §4:3 offers on every round, as ADR-0357 §9:1 names
+the look-ups this decision settles among its core. Their names are the lanes' that build them,
+and their descriptions' words are routed as ADR-0357 §7:5 routes every description's.
 
 ### 7. Searching past episodes
 
@@ -401,8 +405,8 @@ The lanes, each after this decision merges `Accepted`, and §1:4's after ADR-035
    touches `orchestration/story_tidy_up.py` (ADR-0356 §14:4), so whichever merges second
    rebases across the other.
 
-The behaviour §2 and §3 rule ships in the words ADR-0356's instruction and ADR-0357's
-descriptions carry, and has no lane of its own.
+The behaviour §2 and §3 rule ships in the descriptions ADR-0357 §7:2 names, in ADR-0356's P3
+pull request (ADR-0357 §7:4), and has no lane of its own.
 
 > **Normative.** M1 may touch `core/types.py` and `core/episode_encoding.py` for §11's
 > rows, `wire` for the wire shape and `PROTOCOL_VERSION`, `memory` and `testing` for the
@@ -442,6 +446,7 @@ Read through and not superseded:
 | ADR-0314 §3:1 | Nothing: no look-up reads the diagnostic record |
 | ADR-0338 §5, §6, §7 | Nothing: they are the home §5:1 names |
 | ADR-0356 §8:2, §8:5, §9:8, §13, §14:9 | Nothing: `RecordedCall` is the entry they name, this decision makes the addition §8:5 leaves to it, and §10 is the look-up §9:8 points at |
+| ADR-0357 §7:2, §7:3, §9:1 | Nothing: they move `remember`'s, `tidy_story`'s and the matter calls' rules into their descriptions, and §2 and §3 change what those rules say; the look-ups §6–§10 add are the ones §9:1 names |
 | ADR-0349 | Nothing: its look-up of a running activation's findings is the one §10:2 points at |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
@@ -459,7 +464,7 @@ Read through and not superseded:
 | Thinking summaries in the full view, clearly marked | A later decision, if planning needs its old reasoning |
 | A retention rule that purges an episode's full detail while its short view remains | A later decision; §10:9 says only what the look-up shows once one exists |
 | Whether planning is still shown when a matter was last tidied and how many changes came since | ADR-0356, which decides what planning's context holds |
-| The look-ups' names and the wording of every rule §2 and §3 give planning | ADR-0357 |
+| The look-ups' names, and the exact words of every rule §2 and §3 give planning | The lanes that build them, with the words routed as ADR-0357 §7:5 has them |
 
 > **Normative.** Each item the table names takes a decision of its own before any lane builds
 > it.
@@ -482,9 +487,9 @@ it until then. The scheduled tidy-up, like the matters pass, runs only where
 `consolidation_interval` is set, and it is unset by default, so a hub that leaves it unset gets
 neither, and a matter nobody asks about is then never tidied or reorganised.
 
-**Follow-on.** M1, then M2; M3 beside them (§12). The words §2 and §3 rule ship with ADR-0356's
-instruction and ADR-0357's descriptions. The coordinator confirmed for the observer side, on 2026-10-30,
-that the scout does not depend on candidates for what it finds (ADR-0329 §9:1).
+**Follow-on.** M1, then M2; M3 beside them (§12). The words §2 and §3 rule ship in the descriptions
+ADR-0357 §7:2 names. The coordinator confirmed for the observer side, on 2026-10-30, that the
+scout does not depend on candidates for what it finds (ADR-0329 §9:1).
 
 **Revisit when** the observer misses what a person asked to keep more often than it did with
 planning's candidates, a scheduled tidy-up's cost shows in consolidation's spend, or planning
