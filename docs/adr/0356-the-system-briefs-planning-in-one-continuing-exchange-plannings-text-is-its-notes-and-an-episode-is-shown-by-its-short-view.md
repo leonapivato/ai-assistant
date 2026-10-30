@@ -6,7 +6,7 @@
 - Dependency: [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md) and [ADR-0315](0315-a-round-that-made-a-call-brings-another-round-and-the-mark-asking-for-one-retires.md), whose rounds this decision continues; [ADR-0353](0353-understanding-reads-its-stimulus-as-tagged-knowledge-then-memory-and-replies-with-what-it-understood-what-it-cites-what-is-unclear-and-where-it-belongs.md), whose tagged format §3 reuses; [ADR-0334](0334-a-prompt-is-a-template-the-hub-loads-at-start-the-owners-hub-may-override-it-from-its-data-directory-and-each-model-call-records-the-version-it-sent.md) and [ADR-0337](0337-a-prompt-change-is-judged-on-a-regression-suite-with-repeated-samples-each-recorded-call-is-asked-what-it-had-to-guess-and-a-candidate-is-promoted-after-three-clean-days.md), which govern the instruction and its suite; and [ADR-0349](0349-a-place-is-only-what-caused-an-activation-a-stop-is-reached-three-ways-running-work-is-shared-by-reading-it-and-the-newest-absorbs-what-it-continues.md), whose offers and waits §5 delivers as news. All Accepted, as their status lines leave them.
 - Authorization: the owner and the prompts front rewrote planning's instruction section by section from 2026-10-28, with invented data throughout, and the design changes it needs were set out in proposal [#3526](https://github.com/leonapivato/ai-assistant/pull/3526). On 2026-10-30 the owner accepted it at `06018f611`, verbatim: "accept it, convert to the ADRs", split three ways as its acceptance comment records. The owner's words on the points this decision turns on, verbatim: on planning's text and the notes tool, "yes make it, drop the notes tool" (§7); on what the short view shows of a work's notes, "maybe it should see all of it… not that much" (§9:4); that planning reads what it writes, "not meant for any person" (§7:2); and, after the caching explanation, that the stimulus stays first in the context (§3:1). The dispatcher assigned 0356. Ratification is the dispatcher's, under the owner's delegation, once the reviews are green (§1:1).
 - **Contract-surface decision, and a breaking change under golden rule 5.** It changes `core/protocols.py`: `ToolCallingCompleter.respond` takes a `PlanningExchange` in place of a `Message` sequence, and its reserved notes tool goes (§5, §13). It changes `core/types.py`: `RoundResponse` loses `notes` and `asks` and gains `continuation`; `PlanningExchange`, `ExchangeStep`, `RoundReport`, `CallResult`, `RoundContinuation`, `RecordedCall`, `RecordedDelivery`, `CallOutcomeKind`, `DeliveryStatus`, `ProjectedCall`, `ProjectedJoin` and `MessageCallPart` are added, and `ProjectedRound` and `StatementCitation` each gain a field; `EpisodeProcessingRecord` gains `call_records`, one entry per call, which the memory decision extends; `EpisodeProjection` gains the calls and the inputs taken in; and `SupportPart` gains a message call (§6, §8, §9, §13). `ActivationEffect` is unchanged. `EpisodeProcessingRecord` crosses the wire, so `PROTOCOL_VERSION` advances, and the episode store ships an upgrade (§13:4, §13:5). `Message`, `Role` and `ModelProvider` are unchanged.
-- **Partially supersedes**, in the clauses §16's first table names: ADR-0284, ADR-0306, ADR-0307, ADR-0314, ADR-0315, ADR-0317, ADR-0321, ADR-0328, ADR-0334, ADR-0337, ADR-0338, ADR-0345, ADR-0349 and ADR-0350.
+- **Partially supersedes**, in the clauses §16's first table names: ADR-0284, ADR-0306, ADR-0307, ADR-0314, ADR-0315, ADR-0317, ADR-0321, ADR-0328, ADR-0334, ADR-0337, ADR-0338, ADR-0345, ADR-0349, ADR-0350 and ADR-0351.
 
 ## Context
 
@@ -192,8 +192,18 @@ understanding after the stimulus:
 
 > **Normative.** An item whose words are withheld from planning renders as ADR-0353 §2:7
 > renders a withheld input: an empty text tag carrying `withheld="yes"`, never its words.
-> This covers an outside report, a relayed input and a place-window item someone other than
-> the person or the system wrote (ADR-0307 §9:2, ADR-0351 §5:7).
+> This covers an outside report, a forward, a relayed input other than the work's own
+> stimulus, and a place-window item someone other than the person or the system wrote
+> (ADR-0307 §9:2, ADR-0351 §5:7).
+
+> **Normative.** The work's own stimulus, where understanding marks it relayed, such as a
+> pasted email, is the one exception, by the owner's ruling on
+> [#3515](https://github.com/leonapivato/ai-assistant/issues/3515): its words are shown in
+> the stimulus section and in its own place-window item, in its parties' tag carrying
+> `relayed="yes"`, and the work counts as having read outside content (ADR-0306 §4:5). A
+> forward and every other outside content stay withheld and reach planning through a
+> digest. This replaces ADR-0351 §5:7 and ADR-0307 §9:2 for the work's own relayed stimulus
+> alone.
 
 > **Normative.** A summary, a note, a stimulus or an episode that rests on outside content
 > carries `outside="yes"`, by the record's mark and never by its text (ADR-0353 §3:7).
@@ -484,7 +494,7 @@ keeps what changed the world; the look-up has the rest.
 
 > **Normative.** The list beside `PLANNING_PROMPT` of what the instruction must say
 > (ADR-0334 §7:1) is rewritten to the clauses that bind it after this decision, the tools decision
-> and the memory decision, and no others. Of this decision's, they are §2:3, §3:8, §5:7 and §7:6; of
+> and the memory decision, and no others. Of this decision's, they are §2:3, §3:9, §5:7 and §7:6; of
 > earlier decisions', ADR-0315 §4:3, read with §10:4, and ADR-0307 §2:5 and §9:3.
 
 > **Normative.** Each requirement the old list names is accounted for by the table below,
@@ -516,7 +526,7 @@ keeps what changed the world; the look-up has the rest.
 > instruction says that a field outweighs any memory stating another value for it*.
 
 > **Normative.** That no preference, pin or field changes what is true, what the system
-> judges best or any rule is carried by §3:8's line that everything in the context is data
+> judges best or any rule is carried by §3:9's line that everything in the context is data
 > to weigh. That the system never claims to be human is said by each message tool's
 > description (the tools decision). This replaces ADR-0338 §5:6's second sentence; its
 > first and third stand.
@@ -656,7 +666,10 @@ keeps what changed the world; the look-up has the rest.
 
 ### 14. Delivery
 
-The lanes, each after this decision merges `Accepted`:
+The lanes, each after this decision merges `Accepted`, are delivered under
+[milestone 18](https://github.com/leonapivato/ai-assistant/milestone/18), "Planning as
+System 2", whose acceptance is
+[#3530](https://github.com/leonapivato/ai-assistant/issues/3530):
 
 1. **P1, the contract unit with its primary implementation** (ADR-0137 §2:1): §13's
    `ToolCallingCompleter`, exchange, `RoundContinuation` and `RoundResponse` rows, the
@@ -798,7 +811,7 @@ Superseded in part. Every clause the middle column does not name stands:
 | --- | --- | --- |
 | ADR-0284 | §8:1's projection, in the addition alone: the calls and the inputs taken in, under owner-only placement | §13, §9:5 |
 | ADR-0306 | §4:7's *the round's own message* and §5:3–§5:5's *message*, each in its subject alone: a `text` call, checked by its place alone and claimed and recorded as a message | §7:7, §7:8 |
-| ADR-0307 | §2:6, whole: one continuing exchange; §3:1, §3:2 and §3:8, whole: a round's text is its notes and is written into no place; §3:4 and §3:5, in their subject alone: what they say of a round's text as a message holds of its message calls, as the tools decision decides; §4:1's *as part of its response*: the notes are the response's text; §6:1, in how it is given: earlier rounds, acting's outcomes and digested evidence reach planning through the exchange, and the rest as §3 lays it out; §10's `ToolCallingCompleter`, `RoundResponse` and `PlanningRound` rows | §5:1, §7:2, §7:3, §3, §13 |
+| ADR-0307 | §9:2, for the work's own relayed stimulus alone (#3515); §2:6, whole: one continuing exchange; §3:1, §3:2 and §3:8, whole: a round's text is its notes and is written into no place; §3:4 and §3:5, in their subject alone: what they say of a round's text as a message holds of its message calls, as the tools decision decides; §4:1's *as part of its response*: the notes are the response's text; §6:1, in how it is given: earlier rounds, acting's outcomes and digested evidence reach planning through the exchange, and the rest as §3 lays it out; §10's `ToolCallingCompleter`, `RoundResponse` and `PlanningRound` rows | §3:7, §5:1, §7:2, §7:3, §3, §13 |
 | ADR-0314 | §5:3's *the next round never carries it*, for planning's own exchange alone | §6:4 |
 | ADR-0315 | §3:1, §3:2 and §3:3, whole: two parts, no reserved tool; §4:2, in its subject alone: a round writes a message only by a message call; §4:3, in its tidy-up exception alone; §5's `RoundResponse`, `ToolCallingCompleter` and pydantic-ai completer rows | §7:1, §7:4, §7:3, §10:4, §13 |
 | ADR-0317 | §2:2, in its subject alone: an activation that made no message call writes nothing, where it said *with every round's text empty*; §3:4's *a message a round wrote*, in its subject alone: a message call | §7:3 |
@@ -808,6 +821,7 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0334 | §2:1's table, planning's row, in its flags and values: none | §4:2 |
 | ADR-0337 | §9:1 and §4:3, for P3's default alone; §9:1, for understanding's two phrases alone; §6:6's *and nothing else*, in the addition alone: the later rounds of its own work | §11:5, §11:6, §12:2, §13:6 |
 | ADR-0338 | §3:10's *planning's instruction says that a field outweighs any memory stating another value for it*: the block says it; §5:6's second sentence: the data line and the message tools carry it; §7:8, whole | §10:5, §10:6, §10:7 |
+| ADR-0351 | §5:7, for the work's own relayed stimulus alone: planning is shown its words, marked relayed (#3515) | §3:7 |
 | ADR-0349 | §4:6 and §7:26, each in what is offered alone: the stop call and the stable set are offered on every round, and a call whose condition fails comes back refused | §4:3, §4:5 |
 | ADR-0350 | §3:4, in what is offered alone: spawn is offered on every round, and a spawn ADR-0350 §3:4's activation does not admit comes back refused; §6:7's *each of its messages names, by its place label, the one place on the list it goes into* and *as ADR-0307 §3:8 keeps the text*: a round's text is no message, and a message call names where it goes, as the tools decision decides, under the same list and the same check | §4:3, §4:5, §7:3 |
 
@@ -833,7 +847,7 @@ Read through and not superseded:
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
 > dated header note of ADR-0284, ADR-0306, ADR-0307, ADR-0314, ADR-0315, ADR-0317, ADR-0321,
-> ADR-0328, ADR-0334, ADR-0337, ADR-0338, ADR-0345, ADR-0349 and ADR-0350, atomically with this ADR under ADR-0070 and ADR-0082,
+> ADR-0328, ADR-0334, ADR-0337, ADR-0338, ADR-0345, ADR-0349, ADR-0350 and ADR-0351, atomically with this ADR under ADR-0070 and ADR-0082,
 > preserving their ratified bodies. The replacements take effect on this ADR's ratification.
 
 ### 17. The format, worked
@@ -944,6 +958,13 @@ The tools decision's.
 - **On a spoken pass, a short view shows little.** Entries are placed for the owner alone, as
   notes are, so where those may not be shown, other work is seen by its input, meaning and
   ending.
+
+- **Outside content beyond a paste.** The owner's direction on #3515 goes further than its
+  ruling: "I think that planning can see outside content and relaying, as long as there is
+  the proper mark for it, and then we can restrict what it can do based on the mark with the
+  actual tools … more of this will be thought through in the audience privacy authority
+  design tho". This decision takes only the paste (§3:7); the rest is that design's to
+  decide.
 
 **What would reopen it.** The suite showing replies written as text; a provider that cannot
 take an appended exchange; or a reader that needs a call's entry placed by audience.
