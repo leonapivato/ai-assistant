@@ -6,7 +6,7 @@
 - Dependency: [ADR-0329](0329-the-observer-is-memorys-one-writer-it-commits-what-an-episode-leaving-the-window-shows-and-planning-records-candidates-for-it.md), [ADR-0346](0346-the-observer-reads-only-the-episode-keeps-then-corrects-and-frames-each-memory-before-placing-it-among-what-is-stored.md), [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md), [ADR-0302](0302-the-matters-pass-records-what-it-decides-and-a-page-write-refuses-what-its-story-does-not-hold.md), [ADR-0303](0303-a-storys-page-is-free-notes-rewritten-whole-and-the-place-window-links-each-item-to-its-activation.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md) and [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md), as their status lines leave them; [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md), Accepted, for the per-call entry, the short view and the core of tools; and ADR-0357, for where a tool's rules are worded.
 - Authorization: the owner accepted proposal #3526 on 2026-10-30, verbatim: "accept it, convert to the ADRs". On `remember`, the owner's ruling of 2026-10-30, verbatim: "it shouldnt be kept for sure, thats observers choice because it may already be there or other reasons… saying things like saved or ill remember is fine, since it will effectively remember." The owner agreed that the observer side reviews this decision, which is written here. The coordinator assigned 0358 and ratifies it under the owner's delegation once its reviews are green. §4's trigger and its figures, which are tunable defaults, §7's and §9's shapes and §11's addition are this lane's choices within the proposal, not owner rulings. The coordinator ruled on 2026-10-30 that ADR-0356 defines the per-call entry and this decision extends it (§11:1).
 - **Changes `core`, so it is a contract-surface decision. No `Protocol` changes,** so it is not a breaking change under golden rule 5. In `core/types.py`, ADR-0356's per-call entry, `RecordedCall` in `EpisodeProcessingRecord.call_records`, also holds what each call showed (§11:2), and `project_episode` gains the full view behind one keyword, under which `ProjectedCall` carries it (§11:5). It is a schema change of the episode store (§11:8), and the record crosses the wire, so `PROTOCOL_VERSION` advances (§11:7). No `StoryStore`, `MemoryStore` or `AssistantEngine` member changes.
-- **Partially supersedes**, in the clauses §13's first table names: ADR-0284, ADR-0300, ADR-0307 and ADR-0329.
+- **Partially supersedes**, in the clauses §13's first table names: ADR-0284, ADR-0292, ADR-0300, ADR-0307 and ADR-0329.
 
 ## Context
 
@@ -174,8 +174,9 @@ is the matters pass's (ADR-0300 §9:3), fed by §4. The words that carry §3:1 s
 > passed over and does not count toward the run's bound.
 
 > **Normative.** A scheduled tidy-up is background maintenance, as the matters pass's changes
-> are, not an action under ADR-0292 §12:1–§12:2: it starts no activation, records no episode,
-> and tells nobody.
+> are, not an action under ADR-0292 §12:1–§12:2: planning does not choose it, authorizing
+> does not check it, it runs directly on no channel, it starts no activation, records no
+> episode, and tells nobody.
 
 > **Normative.** The run reads the stories and what is pending on them through the members
 > `StoryStore` already has. Its operation is a public method of the concrete `Engine` taking no
@@ -325,8 +326,8 @@ story like another (ADR-0303 §5:7), and read whole by the call that reads any o
 > line, and an episode by its label alone.
 
 > **Normative.** Outside content is never shown raw: an outside input is withheld as the short
-> view withholds it, beside its understood meaning; a result that carried outside text appears
-> only through its digests; and digested evidence, marked notes and marked entries
+> view withholds it, beside its understood meaning; what a result carried as outside text
+> appears only through its digests; and digested evidence, marked notes and marked entries
 > (ADR-0356 §8:7) are shown marked.
 
 > **Normative.** Where the record no longer keeps a part the full view would show, because it
@@ -352,14 +353,16 @@ holds no result's body in it. This decision adds to it what the episode look-up 
 > `EpisodeProcessingRecord`, is the one this decision extends, and this decision defines no
 > second entry and no other field for a call.
 
-> **Normative.** For a call that was done and whose result carries no outside text, the
-> entry also holds what the result showed, as planning was shown it, in which each record the
-> result showed is held by its kind and id, and a story also by the summary version it showed,
-> never by a copy of its content.
+> **Normative.** For a call that was done, the entry also holds what its result showed
+> planning directly, as planning was shown it, in which each record the result showed is held
+> by its kind and id, and a story also by the summary version it showed, never by a copy of
+> its content.
 
-> **Normative.** For a call whose result carries outside text, the entry holds nothing more
-> of the result: the digests that answered it are on the record already, and the held result is
-> never saved (ADR-0308 §6:4).
+> **Normative.** Of what a result carried as outside text, held for a digest rather than shown
+> to planning, the entry holds nothing: the digests that answered it are on the record already,
+> and the held result is never saved (ADR-0308 §6:4). The rule is applied record by record, so
+> a memory search that showed one record directly and held another for its digest keeps the
+> first by reference and nothing of the second.
 
 > **Normative.** What §11:2 adds to an entry is cut to a composition-root bound, and the cut
 > is carried on the entry.
@@ -421,6 +424,7 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0329 | §6:1's *record a candidate for what would still be true and useful if the matter ended or were forgotten*: a candidate is recorded only as §2:1 says, and the story-note limb stands. §6:2, whole. §6:3's *when using a memory reveals anything new about it, record a candidate naming it by its `M` label*: what a memory's use revealed is the observer's to find. §6:5's *and never that it is saved*: a reply may say a fact is saved | §2:1, §2:2, §2:3 |
 | ADR-0307 | §6:6, in the addition alone: planning may also search past episodes, read an episode's full record by its `E` label and read its origin's older history, and its read of a story's full view reaches any story it holds a label for. §7:1's first sentence, *made from when the summary was last tidied and how many changes have come since*: planning makes the call only as §3:1 says, and a scheduled run also tidies | §3:1, §4:1, §7:1, §8:2, §9:1, §10:1 |
 | ADR-0300 | §10:4's first sentence, *The tidy-up is a call planning chooses*, in the addition alone: a scheduled run also starts it | §4:1, §4:5 |
+| ADR-0292 | §12:1's and §12:2's reach, for the scheduled tidy-up: like the matters pass's changes (ADR-0300's header), it is background maintenance of the assistant's records, not an action; planning does not choose it, authorizing does not check it, and it runs directly on no channel. Planning's tidy-up call stays an inside action as written | §4:7 |
 | ADR-0284 | §8:1's projection, in the addition alone: under one keyword, false by default, it also carries the full view's parts, for the episode look-up alone | §11:5 |
 
 Read through and not superseded:
@@ -441,9 +445,9 @@ Read through and not superseded:
 | ADR-0349 | Nothing: its look-up of a running activation's findings is the one §10:2 points at |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
-> dated header note of ADR-0284, ADR-0300, ADR-0307 and ADR-0329, atomically with this ADR
-> under ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect
-> on this ADR's ratification.
+> dated header note of ADR-0284, ADR-0292, ADR-0300, ADR-0307 and ADR-0329, atomically with
+> this ADR under ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements
+> take effect on this ADR's ratification.
 
 ### 14. What this decision does not decide
 
