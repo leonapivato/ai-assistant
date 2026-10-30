@@ -57,17 +57,31 @@ Planning is shown its context the way understanding is since ADR-0353:
 Every item is wrapped in a tag that says who or what it is from. Planning is told
 its context is only part of what the system knows, and that it can look up more.
 
-### 2. No switches, and every tool every round
+### 2. No switches, and a stable core of tools
 
 Every section is always present, and an empty one says why. That is the rule
 ADR-0353 gave understanding.
 
-Every tool is offered on every round. A call with nothing to act on comes back
-saying why, for example "no offer is open". Two reasons:
+A core of tools is offered on every round, the same set each time:
+- the message tools;
+- the look-ups;
+- answering an offer;
+- the scratchpad;
+- remembering;
+- reminders.
+
+A core tool called with nothing to act on comes back saying why, for example
+"no offer is open". Two reasons:
 - **Caching.** The tools head the cached prefix, so a tool set that varies from
   round to round breaks the cache every time.
 - **Planning's `$if` flags go,** and with them the conditional parts of its
   template.
+
+Tools beyond the core are not switched in and out by round. Today almost every
+tool is core. As integrations grow, the rest are reached through memory: recall
+brings them to mind, or planning searches for them (see "Direction"). They are
+called through one fixed `use_tool(name, arguments)`, so the offered set never
+changes.
 
 ### 3. One continuing exchange
 
@@ -238,18 +252,18 @@ instruction still carries them.
   shows the short view, with a look-up for the rest.
 - **Keep an explicit "remember this" for sure.** Declined by the owner: whether
   to keep it is the observer's call, which sees duplicates and provenance.
-- **Too many tools.** Not needed yet. The planned answer:
-  - a stable core is always offered;
-  - integrations are found by search;
-  - they are called through one fixed `use_tool(name, arguments)`, so the tool list never changes and the cache holds.
+- **Offer every tool on every round.** It is simple while the tools are few, but
+  it doesn't scale: models choose worse among dozens of tools, and each one costs
+  tokens. Change 2 offers a stable core instead, and leaves the rest to memory.
 
 ## Direction, not proposed here
 
 Each of these spans recall, memory and the observer, so each would be its own
 design:
-- **Tools and skills recalled as procedural memory.** Recall brings to mind the
+- **Tools and skills held in memory, beyond the core.** Recall brings to mind the
   tools and the know-how a stimulus calls for, the observer learns per-person
-  procedures, and deliberate search is the fallback. Skills give procedures that
+  procedures, and planning can deliberately search for a tool, as it searches for
+  a fact. Tools found that way are called through `use_tool`. Skills give procedures that
   span several tools a home, so they never return to the instruction.
 - **Intentions tied to an event, not a time.**
 - **Lessons from corrections.**
