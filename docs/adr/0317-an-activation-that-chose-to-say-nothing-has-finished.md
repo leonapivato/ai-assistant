@@ -1,6 +1,6 @@
 # 317. An activation that chose to say nothing has finished
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0356 (§2:2, in its subject alone: an activation that made no message call writes nothing; §3:4's *a message a round wrote*, in its subject alone: a message call)
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): how an activation started from a conversation ends when planning chose to write nothing, and where the *couldn't finish* message is written ([#2943](https://github.com/leonapivato/ai-assistant/issues/2943)).
 - Authorization: the owner ruled this decision's content on 2026-10-13 in #2943, option A: silence is a normal ending. The dispatcher assigned 0317 and authorized ratifying it once its reviews are green.
@@ -12,6 +12,7 @@
   [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md)
   (§3:7, in the addition alone: a stage's failure that ends the activation also writes *couldn't finish*, whatever
   earlier rounds wrote).
+- Partially superseded: 2026-10-30 by ADR-0356 — §2:2, in its subject alone: an activation that made no message call writes nothing into the conversation, where it said *with every round's text empty*, since a round's text is no message (ADR-0356 §7:3). §3:4's *a message a round wrote*, in its subject alone: a message call the round proposed. Every other clause stands. This replacement takes effect on ratification of ADR-0356. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
