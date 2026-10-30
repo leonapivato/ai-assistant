@@ -2,11 +2,11 @@
 
 - Status: Proposed
 - Date: 2026-10-30
-- Scope: planning's tools, the second of the three decisions the planning proposal ([#3526](https://github.com/leonapivato/ai-assistant/pull/3526)) converts into. It decides the message tools, their arguments and what they return (§§2–4); one rule for how every tool divides a call between planning's choices and the tool's own work (§5), and what a tool does when it cannot carry a call out (§6); which rules move out of planning's instruction into which tool's description (§7); how a question names the calls it asks about, now that a message is a call (§8); and which tools make up the core that ADR-0356 offers on every round (§9). It is the proposal's changes 4, 5 and 9, with the asking message that approvals need. ADR-0356 decides the exchange, and the third, the memory decision, decides memory and the look-ups.
-- Dependency: [ADR-0356](https://github.com/leonapivato/ai-assistant/pull/3526), the exchange, which makes saying something a call, makes text outside a call planning's notes, keeps the offered tool set stable from round to round, and takes `asks` out of `RoundResponse`. This decision is drafted beside it and merges after it.
+- Scope: planning's tools, the second of the three decisions the planning proposal ([#3526](https://github.com/leonapivato/ai-assistant/pull/3526)) converts into. It decides the message tools, their arguments and what they return (§§2–4); one rule for how every tool divides a call between planning's choices and the tool's own work (§5), and what a tool does when it cannot carry a call out (§6); which rules move out of planning's instruction into which tool's description (§7); how a question names the calls it asks about, now that a message is a call (§8); where the place list renders (§2:13); and how the proposal's core sits in the set ADR-0356 offers on every round (§9). It is the proposal's changes 4, 5 and 9, with the asking message that approvals need. ADR-0356 decides the exchange, and the third, the memory decision, decides memory and the look-ups.
+- Dependency: [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md), Accepted and merged at `f9e68f725`: the exchange, which makes text outside a call planning's notes and a message a call (§7), offers every capability on every round (§4:3), and takes `asks` out of `RoundResponse` (§7:5). It leaves to this decision the message tools, the asking message, where a message call names its place, where the place list renders and the moved rules (ADR-0356 §15).
 - Authorization: the owner accepted the planning proposal on 2026-10-30, at `06018f611`, verbatim: "accept it, convert to the ADRs". The acceptance comment on #3526 records the three-way split and that approvals take option a for now. The owner's rulings on the message tools, given the same day, are recorded in the proposal's change 4 and in "What it leaves open". The coordinator assigned 0357 and ratifies it once its reviews are green. The argument names of §2, the one-asking-message rule of §8:3, the lanes of §10, and putting `asks` on `text` alone (§8:1) are this lane's choices, not owner rulings.
-- **Not a contract-surface decision.** No Protocol and no `core` type changes. A message call's result is the call's own result as ADR-0356 shapes a message call's (§3); the calls a question asks about stay recorded in `PlanningRound.asked`, keyed by `QuestionPart`'s round and part, because a round has at most one asking message (§8:3); and every argument this decision names is in a capability's parameters schema, which `ToolDefinition` already carries. `PROTOCOL_VERSION` does not move under it.
-- **Partially supersedes**, in the clauses §11's first table names: ADR-0321, ADR-0329, ADR-0349, ADR-0350 and ADR-0352.
+- **Not a contract-surface decision.** No Protocol and no `core` type changes. A message call's result is the call's own result, which the call's episode entry holds as ADR-0356 §8:4 has it (§3); the calls a question asks about stay recorded in `PlanningRound.asked`, keyed by `QuestionPart`'s round and part, because a round has at most one asking message (§8:3); and every argument this decision names is in a capability's parameters schema, which `ToolDefinition` already carries. The place list's line in the briefing (§2:13) is rendered text. `PROTOCOL_VERSION` does not move under it.
+- **Partially supersedes**, in the clauses §11's first table names: ADR-0321, ADR-0329, ADR-0349, ADR-0350, ADR-0352 and ADR-0356.
 
 ## Context
 
@@ -44,7 +44,8 @@ instruction carry a line about a single tool:
 
 Others are not in any ADR and are the instruction's own lines, such as when to start, note
 or link a matter. ADR-0338 §5:6 has the instruction say that the assistant never claims to be
-human, which ADR-0356 amends with the rest of ADR-0338's instruction lines. Every one of these
+human, which ADR-0356 §10:6 moves into the message tools' descriptions with the rest of
+ADR-0338's instruction lines. Every one of these
 lines is in front of planning on every round, whatever the stimulus, and each matters only
 when its tool is called. The proposal's principle is that the instruction carries only what
 applies to every stimulus, and that a rule about one tool sits beside that tool.
@@ -81,15 +82,14 @@ an argument of the `text` call that asks it.
 > "Finishing an ADR PR" requires have returned green on one tree and the authorization to
 > ratify stands. An assigned number or a green review alone does not change its status.
 
-> **Normative.** This decision merges only after ADR-0356 has merged `Accepted`, and no lane
-> implements it before it merges `Accepted` itself (ADR-0015 §5).
+> **Normative.** No lane implements this decision before it merges `Accepted` (ADR-0015 §5).
 
 > **Normative.** The implementation is the lanes §10 sets out, and each keeps the gate green.
 
 > **Normative.** Nothing in this decision widens where the assistant may send a message, who
 > it may send one to, or what any call is allowed to do. Which places a message may go into
-> and how a message call is checked, claimed and recorded are ADR-0306 §4 and §5's, as
-> ADR-0350 and ADR-0356 leave them; whether a call needs the person is the policy's.
+> and how a message call is checked, claimed and recorded are ADR-0356 §7:7–§7:10's; whether
+> a call needs the person is the policy's.
 
 ### 2. The message tools
 
@@ -106,11 +106,12 @@ an argument of the `text` call that asks it.
 > address on the platform is the tool's, and a name that fits no one, or more than one person,
 > comes back with who it could be (§6), never a guess.
 
-> **Normative.** `via` names where the message goes: a place by the label planning was shown
-> it under, or a platform by name. Left out, the tool chooses, and the result says what it
-> chose (§3:1). Where ADR-0350 §6:7, as ADR-0356 leaves it, requires a message to name its
-> place, a `text` with no `via` is refused there as naming none, and comes back with the
-> places it may name.
+> **Normative.** `via` names where the message goes: a place on the activation's place list,
+> by its `L` label (ADR-0350 §5:13), or a platform by name. Left out, the tool chooses, and
+> the result says what it chose (§3:1): the place the input came from; or, for an activation
+> the Task Scheduler started, the one place its task suggests, or the line's chat where it
+> suggests none. Where no such place is on the list, or the task suggests more than one, the
+> call runs nothing and comes back with the places it may name (§6:2).
 
 > **Normative.** A `text` naming a place or platform that the message place check (ADR-0306
 > §4:1) does not allow runs nothing and comes back with the places it may use.
@@ -145,6 +146,12 @@ an argument of the `text` call that asks it.
 > device as the tool's mechanics, and coming back when others are present as its safe default
 > (§5:8).
 
+> **Normative.** The place list (ADR-0350 §5:10) renders in the situation section of
+> planning's briefing (ADR-0356 §3:2), after the origin's line: its places under their channel
+> headings, each carrying its `L` label as the attribute `label` (ADR-0356 §3:5), so that
+> `via` can name one. It renders on every briefing, since spawn is offered on every round
+> (ADR-0356 §4:3).
+
 ### 3. What a message call returns
 
 > **Normative.** Every message call's result says: the text delivered, after any rewording
@@ -159,14 +166,15 @@ an argument of the `text` call that asks it.
 > done* and *unknown* its *unknown* (ADR-0306 §5:1). An unknown is never reported as sent, and
 > is never retried (ADR-0306 §5:13).
 
-> **Normative.** The result is the call's result as ADR-0356 has a message call return one,
-> and this decision adds no `core` type for it.
+> **Normative.** The call's episode entry holds what §3:1 says, as ADR-0356 §8:4 has it, and
+> this decision adds no `core` type for the result.
 
 ### 4. Rephrased by default, exact on request
 
-> **Normative.** By default a message call's words are what planning means to say, and a
-> wording step renders them for the person and the medium before they are sent: their
-> preferences, the assistant's personality, written or spoken.
+> **Normative.** A message call's words are what planning means to say, written by planning
+> in the call (ADR-0307 §3:3). Once the decision §4:5 names builds it, a wording step renders
+> them by default for the person and the medium before they are sent: their preferences, the
+> assistant's personality, written or spoken.
 
 > **Normative.** With `exact`, the words are sent exactly as written, for a quote, a relayed
 > message, an address or anything else where the wording itself matters.
@@ -256,18 +264,21 @@ an argument of the `text` call that asks it.
 > | When to take or decline an offer (ADR-0349 §7:19), and to answer it in the round it comes | `answer_offer` |
 > | Replacing, cancelling and snoozing reminders, and asking which where the words could mean more than one (ADR-0350 §9:3) | `spawn`, `cancel_task` and `list_tasks`, each the part about it |
 > | A stop or a cancel reaches only what the person's words cover (ADR-0352 §3:8) | `stop_activation` and `cancel_task` |
-> | When to start, note or link a matter, and the page-or-memory test (ADR-0329 §6:1) | `start_story`, `note_story` and `link_story` |
-> | When to remember, and what to say about it (ADR-0329 §6:1–§6:5) | `remember` |
+> | When and how to start, note, link, unlink, move, merge, split or group matters, and the page-or-memory test (ADR-0300 §10, ADR-0303 §9, ADR-0307 §5:3–§5:5, ADR-0329 §6:1) | the matter calls, `start_story`, `note_story`, `link_story`, `unlink_story`, `move_story`, `merge_stories`, `split_story` and `group_stories`, each the part about it |
+> | When to tidy a matter, and that a tidy-up brings no round (ADR-0307 §7, ADR-0356 §10:4) | `tidy_story` |
+> | When to remember, what `confirm` is for, and what to say about it (ADR-0329 §5:1, §6:1–§6:5) | `remember` |
 > | When to note the memories relied on (ADR-0329 §6:8) | `note_reliance` |
 > | How messages behave: whose voice, rephrased unless `exact`, and what the result reports | `text` and `email` |
-> | That the assistant never claims to be human | `text`, `email` and, when built, `speak` |
+> | That the assistant never claims to be human (ADR-0356 §10:6) | `text`, `email` and, when built, `speak` |
+> | That a suggestion is raised only where it bears on what is being done, and only by asking (ADR-0356 §10:7) | `set_profile` and `pin` |
 > | How approval works, and to explain in the message's own words each action it asks about and the arguments that matter (ADR-0321 §2:4, §2:9) | `text`'s `asks` argument |
 
 > **Normative.** What a moved rule says is the deciding ADR's as its status line leaves it.
 > This decision moves where it is said, and changes what it says only as §§2–8 do.
 
-> **Normative.** A rule moves into its description in the same change that removes it from
-> planning's instruction, so that no shipped build carries neither.
+> **Normative.** The descriptions §7:2 names ship in ADR-0356's P3 pull request (ADR-0356
+> §14:10), so that every rule leaves the instruction in the change that puts it in its
+> description, and no build carries neither.
 
 > **Normative.** The exact words of each description are not decided here. The lane that
 > builds them ships the words the coordinator routes from the owner's prompts front.
@@ -275,7 +286,8 @@ an argument of the `text` call that asks it.
 ### 8. The asking message
 
 > **Normative.** A question names the calls it asks about in the `asks` argument of the
-> `text` call that asks it, each by the reference planning was shown it under. `email` takes
+> `text` call that asks it, each by the reference planning was shown it under, since no part
+> of a response names them (ADR-0356 §7:5). `email` takes
 > no `asks`, because an email's yes approves nothing (ADR-0323 §4:7), and `speak`'s is its
 > own decision's.
 
@@ -303,29 +315,26 @@ an argument of the `text` call that asks it.
 
 ### 9. The core tool set
 
-> **Normative.** The core ADR-0356 offers on every round holds: the message tools, `text`
-> and, where configured, `email`, and `speak` once built; the look-ups the memory decision
-> settles, among them `search_memory`, `read_story`, `follow_up`, `look_up_activation` and
-> `list_tasks`;
-> `answer_offer`; `run_approved_action`; `remember`; and the reminder calls, `spawn` and
-> `cancel_task`.
+> **Normative.** The core the planning proposal names, the message tools, the look-ups the
+> memory decision settles, `answer_offer`, `remember` and the reminder calls, is part of the
+> set ADR-0356 §4:3 offers on every round, which holds every capability planning may call.
+> `speak` joins it when built, and `email` where an account is configured.
 
-> **Normative.** No capability planning is offered when this decision merges leaves the
-> offered set except by the decision that builds `use_tool` (§12).
+> **Normative.** No capability leaves that set except by the decision that builds `use_tool`
+> (§12).
 
 ### 10. Delivery
 
-The lanes, each after this decision merges `Accepted` and after ADR-0356's message calls are
-built:
+The lanes, each after this decision merges `Accepted`:
 
 1. **T1, the message tools** (§§2–4, §8): `text` and `email` as calls, their arguments and
-   results, the pass-through wording step, and `asks` on `text` with the exact lines appended
-   after it.
+   results, the pass-through wording step, `asks` on `text` with the exact lines appended
+   after it, and the place list in the situation (§2:13). It merges before ADR-0356's P1
+   reaches a hub (ADR-0356 §14:11).
 2. **T2, every tool under one rule** (§§5–6): bringing the capabilities built before this
    decision into line, the safe-to-repeat line written from each declaration, and §5:6's
    schema test.
-3. **T3, rules beside their tools** (§7), shipped in the change that ships ADR-0356's
-   instruction, so each rule leaves the instruction as it arrives in its description.
+3. **The moved rules** (§7) are not a lane of their own: they ship in ADR-0356's P3 (§7:4).
 
 > **Normative.** Tests check: that a `text` with `exact` delivers its words unchanged apart
 > from the exact lines; that the exact lines follow any rewording and are never reworded; that
@@ -343,27 +352,31 @@ Superseded in part. Every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0321 | §2:3's *in its response*, *The naming is a part of the response and never a call* and *how the provider's native shape carries it is the `models/` implementation's*: the calls are named in the `asks` argument of the round's asking `text` call. §2:4's *its instruction tells it*, and §2:9's *Planning's standing instructions say*, each in where it is said alone: `text`'s `asks` argument's description says it. §2:5's *Code appends to the message*: to the asking `text` call's words, after any rewording. §2:8's *its message*: the round's one asking message | §7:2, §8:1–§8:4 |
+| ADR-0321 | §2:3, in where the calls are named alone, ADR-0356 §7:5 having taken the response's carrying of the naming: the calls are named in the `asks` argument of the round's asking `text` call. §2:4's *its instruction tells it*, and §2:9's *Planning's standing instructions say*, each in where it is said alone: `text`'s `asks` argument's description says it. §2:5's *Code appends to the message*: to the asking `text` call's words, after any rewording. §2:8's *its message*: the round's one asking message | §7:2, §8:1–§8:4 |
 | ADR-0329 | §6:1–§6:5 and §6:8, each in where the line is said alone: in the descriptions of `remember`, of the story calls for §6:1's story note, and of `note_reliance`, not in planning's instruction | §7:1–§7:3 |
 | ADR-0349 | §7:19's *Planning's instruction says, in one line*, in where it is said alone: `answer_offer`'s description says it | §7:1–§7:3 |
 | ADR-0350 | §9:3's *Planning's instruction says four things*, in where they are said alone: the descriptions of `spawn`, `cancel_task` and `list_tasks` say them | §7:1–§7:3 |
 | ADR-0352 | §3:8's *Planning's instruction says, in one line*, in where it is said alone: the descriptions of `stop_activation` and `cancel_task` say it | §7:1–§7:3 |
+| ADR-0356 | §3:2's table, its situation row, in the addition alone: the situation also renders the place list, each place with its `L` label | §2:13 |
 
 Read through and not superseded, each a stacked addition under ADR-0082 §1 or no change:
 
 | Earlier decision | What changes |
 | --- | --- |
 | ADR-0306 §2, §5:1, §5:9 | Nothing: §5 and §6 add rules beside the declaration's, and no sentence of ADR-0306 becomes false. The safe-to-repeat line is written from the declaration (§5:9); coming back is ADR-0306's *not done* with its reason (§6:1), an outcome not established after acting stays *unknown* (§6:2), and the repeat check is §5:9–§5:11's, deliberate repeat included (§6:4). A tool that asks a model to decide a choice (§5:4) is no model in acting, as a tidy-up's call is not (ADR-0300 §10:4) |
-| ADR-0306 §4, ADR-0350 §6:7–§6:8, ADR-0349 §7:18 | Nothing: no place is widened (§1:4). `via` carries the place label §6:7 requires, as ADR-0356 leaves it (§2:4) |
+| ADR-0306 §4, ADR-0350 §6:7–§6:8, ADR-0349 §7:18, ADR-0356 §7:7–§7:10 | Nothing: no place is widened (§1:4). `via` is how a message call names where it goes, under the same list and the same check, as ADR-0356's record on ADR-0350 §6:7 leaves to this decision (§2:4) |
+| ADR-0307 §3:3 | Nothing: planning writes a message's words, in the call, and no compose step runs until the decision on the wording step (§4:1, §4:5) |
 | ADR-0148 §1, §5 | Nothing: an email's address is resolved from a source §5 allows, before the ruling (§2:7) |
 | ADR-0323 §4:7, §6 | Nothing: the line's writer is the route `text` takes to Telegram, and an email's yes still approves nothing (§8:1) |
-| ADR-0300 §10, ADR-0303 §9 | Nothing: no clause has planning's instruction carry a story call's rule. The instruction's own lines about matters move into the story calls' descriptions (§7:2) |
+| ADR-0300 §10, ADR-0303 §9, ADR-0307 §5:3–§5:5, §7 | Nothing: no clause has planning's instruction carry a story call's rule. The instruction's lines about them, which ADR-0356 §10's table sends here, move into the matter calls' descriptions (§7:2) |
 | ADR-0321 §2:6, §2:12, §4 | Nothing: the exact lines are numbered as before, a question is an ordinary message call, and authorizing's approval rules stand |
-| ADR-0338 §5:6 | Nothing here: the message tools' descriptions also say that the assistant never claims to be human (§7:2), and ADR-0356 amends the instruction's line |
+| ADR-0338 §5:6, §7:8, ADR-0356 §10:6, §10:7 | Nothing: ADR-0356 replaced the instruction's lines, and the descriptions they name say them (§7:2) |
+| ADR-0356 §4:3–§4:6 | Nothing: every capability stays offered on every round (§9) |
 | ADR-0353 §11 | Nothing: no yes approves anything until the decision §12 names |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
-> dated header note of ADR-0321, ADR-0329, ADR-0349, ADR-0350 and ADR-0352, atomically with
+> dated header note of ADR-0321, ADR-0329, ADR-0349, ADR-0350, ADR-0352 and ADR-0356,
+> atomically with
 > this ADR under ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take
 > effect on this ADR's ratification.
 
@@ -371,11 +384,11 @@ Read through and not superseded, each a stacked addition under ADR-0082 §1 or n
 
 | Not decided here | Where it goes |
 | --- | --- |
-| A recognised yes approving the call again: what authorizing reads in place of ADR-0321 §3:1's pointer, now that understanding records none (ADR-0353 §11:3) | The authority decision that redesigns approvals, under option a |
+| A recognised yes approving the call again: what authorizing reads in place of ADR-0321 §3:1's pointer, now that understanding records none (ADR-0353 §11:3), and where approved actions render (ADR-0356 §15) | The authority decision that redesigns approvals, under option a |
 | How the wording step is built (§4:5) | A decision of its own |
 | `speak`: presence, and whether private content may be spoken where others are present | The decision that builds voice, with the audience and privacy work |
 | Texting or speaking in the person's name (§2:9) | A later decision |
-| Messaging a place or person beyond those ADR-0306 §4 and ADR-0350 §6:7 allow | A decision on where the assistant may speak |
+| Messaging a place or person beyond those ADR-0356 §7:7 and §7:10 allow | A decision on where the assistant may speak |
 | `use_tool(name, arguments)` with tool search, for tools beyond the core | The decision on tools and skills held in memory, which is direction only |
 | *Delivered* and *read* arriving after the call returns | A later decision, as news under ADR-0356 |
 
@@ -398,8 +411,7 @@ Read through and not superseded, each a stacked addition under ADR-0082 §1 or n
   stopped (ADR-0353 §11) no such email runs at all.
 - A round can ask only one question. Two questions the person must answer go in one message,
   with numbered parts.
-- Moving a rule and removing it from the instruction must ship together, which ties T3 to
-  ADR-0356's instruction lane.
+- Moving a rule and removing it from the instruction ship together, in ADR-0356's P3.
 
 ## Alternatives considered
 
