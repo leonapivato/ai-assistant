@@ -121,10 +121,9 @@ way people think of them:
 - **Whose voice.** For now, `text` and `speak` are always in the system's own
   voice. That is a present limit, not a permanent one. `email` may be sent from
   the system's address or from the person's, and the person's address is gated.
-- **Who and where are planning's choice.** Planning names the person and where to
-  reach them. Code resolves the address there and handles the platform's
-  mechanics. A person it cannot tell apart from another, or a place where the
-  person can't be reached, comes back saying so.
+- **Choices and mechanics (change 5).** Who, where and what to say are choices:
+  `via` is optional, since the tool can use how the person likes to be reached.
+  The address and the sending are mechanics.
 - **Rephrased by default, exact on request.** Planning gives what to say. By
   default a wording step renders it for the person and the medium: their
   preferences, the system's personality, written or spoken. Planning can instead
@@ -143,14 +142,42 @@ another's result, or tells of it, goes in a later round.
 Every message brings one more round, which sees how the message went and ends
 the work. With caching, that round costs little.
 
-### 5. Act, or come back with what's needed
+### 5. Planning chooses, tools carry out
 
 This is one rule for every tool.
-- **When the tool can resolve the details itself,** it acts and reports what it did.
-- **When it cannot, it does not act.** It returns why, and what is needed to call
-  it again: the valid options, or the live facts. This covers an argument that is
-  missing or wrong (never guessed), a choice with no way to decide it, a condition
-  that failed, a call that needs a yes, and a person who can't be reached.
+- **Choices are arguments.** A choice is anything that changes what the action
+  means or what it leads to: who, what, where, when, how much. The test is whether
+  the person could care which way it went.
+  - Planning can name every choice that matters.
+  - **Required arguments** are the choices that can't be delegated. The tool's
+    schema says which, so whoever builds a tool decides what planning must always
+    choose.
+  - **An optional argument left out is the tool's to decide,** by a default, by
+    the person's known preferences, or by asking a model. How it decides is not
+    planning's concern.
+- **Mechanics are always the tool's,** never arguments: addresses, APIs,
+  protocols, formats, retries.
+- **The result says what was used for anything left out,** such as "sent by
+  Telegram" or "the terrace table". Planning can then check the outcome against
+  the goal, and report it truthfully.
+- **Schemas stay simple. A requirement that depends on other arguments is the
+  tool's check, not the schema's:**
+  - an amount is needed to pay a person, but not to pay a named invoice;
+  - a large booking needs a contact number;
+  - an email needs an address when none is known.
+
+  The description names the common cases. When planning misses one, the tool
+  comes back. That costs one round, not a mistake.
+- **Act, or come back with what's needed.** When the tool can carry the call out,
+  it acts and reports what it did. When it cannot, it does not act. It returns
+  why, and what is needed to call it again: the valid options, or the live facts.
+  This covers:
+  - an argument that is missing, wrong, or needed by the others (never guessed);
+  - values that cannot go together;
+  - a choice with no way to decide it;
+  - a condition that failed;
+  - a call that needs a yes;
+  - a person who can't be reached.
 - **Planning can state conditions in the call,** such as "only if she's alone".
   Without one, the tool takes the safe default, which for speech means coming back
   when others are present.
@@ -274,9 +301,16 @@ instruction still carries them.
   "whose name" argument changes the stakes, the permission and the style, which
   makes it a different act. Splitting by modality matches how people think, and
   lets planning choose the medium.
-- **Planning names only the person, and code picks how to reach them.** It's
-  simpler for planning, but it takes a real choice out of its hands. Planning
-  names who and where (change 4).
+- **Fixed rules for which choices a tool may make.** An earlier version let a
+  tool fill a missing choice only from known preferences, and never pick
+  otherwise. Change 5 instead lets planning name any choice that matters, and
+  leaves an optional one to the tool, however it decides, as long as the result
+  says what was used. That is how people delegate, and it lets tools get smarter
+  without planning changing.
+- **Requirements that depend on other arguments, encoded in the schema**
+  (`if`/`then`, `oneOf`). Models fill complex schemas less reliably, and
+  providers' strict modes support only part of it. Change 5 keeps schemas simple
+  and lets the tool come back.
 - **A "final" flag on a message that ends the work.** It loses failures: a round
   holding a booking and a final "Booked!" ends even if the booking failed.
   Dropped for one cheap round after each message. A later option is a "last
