@@ -48,6 +48,8 @@ _SEARCH: Final = {"query": "Lisbon flights May"}
 _RESULT: Final = "TP 1351 departs 09:40, 212 EUR."
 _SENT: Final = "sent"
 _NEWS: Final = "nothing has changed since your last round"
+#: ADR-0356 §7:4: no name is reserved since, so a capability may be called this.
+_NAMED_SO: Final = {"notes": "an argument, not notes", "another_round": True}
 
 _ROUND_1: Final = RoundResponse(
     text=_NOTES_1,
@@ -113,7 +115,11 @@ _ENTRIES: Final[list[tuple[DiagnosticSource, DiagnosticKind, int, dict[str, Any]
         DiagnosticSource.PLANNING,
         DiagnosticKind.RETURNED,
         1600,
-        _returned(_NOTES_2, ("text", '{"words": "' + _SAID_2 + '"}', "c3")),
+        _returned(
+            _NOTES_2,
+            ("text", '{"words": "' + _SAID_2 + '"}', "c3"),
+            ("planning_round", _NAMED_SO, "c4"),
+        ),
     ),
     (
         DiagnosticSource.CONTROLLER,
@@ -210,3 +216,28 @@ def test_the_timeline_marks_an_exchange_round_and_its_message_calls(lines: list[
         (True, _NOTES_1, [_SAID_1]),
         (True, _NOTES_2, [_SAID_2]),
     ]
+
+
+def test_a_call_named_as_the_retired_round_tool_is_a_call_like_any_other(
+    lines: list[Any],
+) -> None:
+    """§7:4, §14:5: in a work's exchange no tool name is reserved, so a call named
+    ``planning_round`` is shown as a call, and its arguments are never read as notes."""
+    _, second = _planning(viewer.walk(lines))
+    assert [one["name"] for one in second["calls"]] == ["text", "planning_round"]
+    assert (second["notes"], second["asks"], second["another_round"]) == (_NOTES_2, None, False)
+    timeline = viewer.timeline(_ID, lines)["rounds"][1]
+    assert [one["name"] for one in timeline["calls"]] == ["text", "planning_round"]
+    assert timeline["marked"] is False
+
+    alone = _returned("", ("planning_round", _NAMED_SO, "c1"))
+    proposed = viewer._proposed(alone, exchange=True)
+    assert [one["name"] for one in proposed["calls"]] == ["planning_round"]
+    assert (proposed["notes"], proposed["another_round"]) == (None, False)
+    did = viewer._did("planning", alone, exchange=True)
+    assert [(one["kind"], one["title"]) for one in did["parts"]] == [
+        ("text", "Text"),
+        ("call", "Call · planning_round"),
+    ]
+    # A round recorded before reads the reserved tool as it was written.
+    assert viewer._proposed(alone)["notes"] == "an argument, not notes"
