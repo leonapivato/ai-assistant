@@ -392,6 +392,20 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     each a ``ShownText``, code's or the result's own words with no record's content and
     no outside text held for a digest (§11:3), or a ``ShownRecord``, a closed kind, a
     record's id and a version: no carrier.
+    The episode look-ups' results (ADR-0358 §7-§10), on ``CallOutcome``, are planning's
+    own shapes: ``EpisodesFound``, a page of ``EpisodeShown``, each an ``EpisodicMemory``
+    judged above and the ``MatterShown`` it belongs to, a story's id, a version, its
+    summary's first line the tidy-up's model wrote and two flags; ``OlderHistory``, the
+    ``PlaceItem`` and ``EpisodicMemory`` records judged above, a page and flags; and
+    ``EpisodeRead``, the episode, the ``Memory`` records and ``MatterShown``s it names read
+    again, and its full view: an ``EpisodeProjection``, which the windows' episodes already
+    project to, with ``ProjectedRound``, ``ProjectedCall``, ``ProjectedProposal``,
+    ``ProjectedUnderstanding``, ``ProjectedRecall`` and ``ProjectedJoin``, each positions,
+    a capability's name, its recorded arguments as ``ProjectedText``, closed outcomes,
+    code's reasons, a ``RecordedDelivery`` and a ``CallShowed`` judged above, the meanings
+    and ``UnclearPoint``s understanding wrote, the ids recall kept, and an input's
+    ``ChannelIdentity``, parties and words: what the same person's activations read and
+    wrote, with no carrier.
     ``ProposedActivationUnderstanding`` with ``UnclearPoint`` (ADR-0353 §9:2, §9:3), and
     digesting's ``DigestReply`` and ``_ProposedItem``, are the parse of a reply: prose the
     model wrote, labels it was shown and a flag; the record keeps the same
@@ -604,6 +618,19 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "CallShowed",
         "ShownRecord",
         "ShownText",
+        # ADR-0358 §7-§10: the episode look-ups' results, judged in the docstring above.
+        "EpisodeProjection",
+        "EpisodeRead",
+        "EpisodeShown",
+        "EpisodesFound",
+        "MatterShown",
+        "OlderHistory",
+        "ProjectedCall",
+        "ProjectedJoin",
+        "ProjectedProposal",
+        "ProjectedRecall",
+        "ProjectedRound",
+        "ProjectedUnderstanding",
         # ADR-0349 §5:6, §6:7-§6:10, §7:19: in-progress entries, an offer and another
         # activation's own work, judged in the docstring above.
         "InProgressEntry",

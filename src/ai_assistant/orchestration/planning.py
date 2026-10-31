@@ -169,6 +169,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     CallOutcomeKind,
     CallResult,
+    CallShowed,
     CapabilityResult,
     DiagnosticKind,
     DiagnosticSource,
@@ -184,11 +185,21 @@ from ai_assistant.core.types import (
     PlanningLabel,
     PlanningRound,
     ProfileField,
+    ProjectedCall,
+    ProjectedEvidence,
+    ProjectedJoin,
+    ProjectedProposal,
+    ProjectedRecall,
+    ProjectedRound,
+    ProjectedUnderstanding,
     ProposedCall,
     ReadingCertainty,
     RecordedTextInput,
     Role,
     RoundReport,
+    ShownRecord,
+    ShownRecordKind,
+    ShownText,
     StoryEffectState,
     StoryMemberKind,
     StoryNoteAuthor,
@@ -241,7 +252,6 @@ if TYPE_CHECKING:
         Memory,
         PeerEffect,
         PeerView,
-        ProjectedRound,
         ProjectedText,
         QuestionPart,
         RecordedDelivery,
@@ -271,6 +281,7 @@ __all__ = [
     "LOOKING_FOR",
     "NOTHING_NEW",
     "OLDER_NOTES_PAGE_ARGUMENT",
+    "PAGE_ARGUMENT",
     "PLANNING_PROMPT",
     "WAITING_ROUND",
     "ApprovedAction",
@@ -278,8 +289,14 @@ __all__ = [
     "CallOutcomeKind",
     "DigestItem",
     "DigestedEvidence",
+    "EpisodeRead",
+    "EpisodeShown",
+    "EpisodesFound",
+    "FullViewPart",
+    "MatterShown",
     "NewsShown",
     "OfferShown",
+    "OlderHistory",
     "PeerShown",
     "PlaceAuthor",
     "PlaceItem",
@@ -296,8 +313,11 @@ __all__ = [
     "RoundRecorder",
     "RunningShown",
     "answer_fact",
+    "call_showed",
     "exact_line",
+    "full_view_parts",
     "offered_tools",
+    "shown_within",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -309,6 +329,11 @@ LOOKING_FOR: Final = "looking_for"
 #: newest page 1 (#2893). Defined here, where the page saying how to ask for the next is
 #: rendered, and declared by :data:`~ai_assistant.orchestration.lookups.READ_STORY`.
 OLDER_NOTES_PAGE_ARGUMENT: Final = "older_notes_page"
+
+#: The episode look-ups' optional argument: which page of the result to show, the first 1
+#: (ADR-0358 §6:6). Defined here, where the line saying how to ask for the next page is
+#: rendered, and declared by :mod:`~ai_assistant.orchestration.lookups`.
+PAGE_ARGUMENT: Final = "page"
 
 #: The story read's capability, :mod:`~ai_assistant.orchestration.lookups`'
 #: ``READ_STORY_CAPABILITY``, which planning cannot import: the look-ups reach acting,
@@ -515,6 +540,12 @@ class CallOutcome:
             §4:11, §6:5-§6:6); ``None`` for any other call.
         delivered: For a message call that sent something, or tried to, what it sent,
             where it went and how (ADR-0356 §8:4); ``None`` for any other call.
+        episodes: For a search of past episodes, what it found (ADR-0358 §7); ``None``
+            for any other call.
+        history: For a read of the origin's older history, the page it read (§9);
+            ``None`` for any other call.
+        full: For the episode look-up, the full record it read (§10); ``None`` for any
+            other call.
 
     Raises:
         ValueError: If it carries a result, or says one was digested, without the
@@ -541,6 +572,9 @@ class CallOutcome:
     tasks: TaskListing | None = None
     peer: PeerShown | None = None
     delivered: RecordedDelivery | None = None
+    episodes: EpisodesFound | None = None
+    history: OlderHistory | None = None
+    full: EpisodeRead | None = None
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
@@ -565,6 +599,9 @@ class CallOutcome:
             or self.story is not None
             or self.candidate is not None
             or self.tasks is not None
+            or self.episodes is not None
+            or self.history is not None
+            or self.full is not None
         )
         if (self.result is not None or self.digested or looked_up) and self.result_id is None:
             msg = "a call's result carries the id acting minted for it (ADR-0308 §6:1)"
@@ -656,6 +693,8 @@ class PlanningStory:
         latest: Its latest episodes that the audience admits, newest first.
         inherited: The short views of the stories it is part of (ADR-0300 §8).
         standing: Where its matter stands, for this pass's reader.
+        summary_version: The version that wrote its summary, or ``None`` where none
+            has been written, by which a call that showed it keeps it (ADR-0358 §11:2).
     """
 
     story_id: str
@@ -674,6 +713,7 @@ class PlanningStory:
     latest: tuple[EpisodicMemory, ...] = ()
     inherited: tuple[ShortView, ...] = ()
     standing: StoryStanding | None = None
+    summary_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -692,6 +732,353 @@ class PlanningStories:
     stories: tuple[PlanningStory, ...] = ()
     cited: tuple[ShortView, ...] = ()
     unreadable: bool = False
+
+
+# --- what the episode look-ups bring (ADR-0358 §6-§10) ------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class MatterShown:
+    """A matter an episode a look-up showed belongs to, as planning may be shown it.
+
+    ADR-0358 §8:1: read by ``StoryStore.stories_of``, shown by its ``S`` label and, the
+    first time it is shown, its summary's first line, under ADR-0307 §6:4's rules for
+    what an audience may be shown of a story. A story read again in the full view is
+    shown the same way (§10:7).
+
+    Attributes:
+        story_id: The story.
+        summary_version: The version that wrote its summary, or ``None`` where it has none.
+        first_line: Its summary's first line, where the summary may be shown and has one.
+        outside: The summary's mark, where the summary is shown (ADR-0303 §3:4).
+        withheld: A summary was written and may not be shown (ADR-0304 §4:2).
+    """
+
+    story_id: str
+    summary_version: int | None = None
+    first_line: str | None = None
+    outside: bool = False
+    withheld: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeShown:
+    """One episode a look-up found, with the matters it belongs to (ADR-0358 §7:2, §8:1).
+
+    Attributes:
+        record: The episode, admitted by the pass's audience as it is held now.
+        matters: The matters it belongs to, in the order the story store returned them.
+    """
+
+    record: EpisodicMemory
+    matters: tuple[MatterShown, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodesFound:
+    """What one search of past episodes found, one page of it (ADR-0358 §7, §6:6).
+
+    Attributes:
+        episodes: The page's episodes, best first.
+        page: Which page this is, the first 1.
+        more: Whether the search found more past this page.
+        unbounded: The pass's audience is unbounded, so the search asked for no episode
+            (§7:3).
+    """
+
+    episodes: tuple[EpisodeShown, ...] = ()
+    page: int = 1
+    more: bool = False
+    unbounded: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class OlderHistory:
+    """One page of the origin's older history (ADR-0358 §9), newest page first.
+
+    Attributes:
+        readable: Whether the place's older history can be read here: ``False`` where
+            the place's kind has no window, or no member its store has reads it (§9:4).
+        items: Where the window is read from the medium, the page's items, oldest first,
+            each as the place window shows an item (§9:3).
+        episodes: Where the window is the place's recent episodes, the page's earlier
+            episodes, newest first, each admitted by the pass's audience (§9:2).
+        page: Which page this is, the newest 1.
+        more: Whether there is older history past this page.
+    """
+
+    readable: bool
+    items: tuple[PlaceItem, ...] = ()
+    episodes: tuple[EpisodicMemory, ...] = ()
+    page: int = 1
+    more: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeRead:
+    """One episode's full record as the episode look-up read it (ADR-0358 §10).
+
+    The projection is :func:`~ai_assistant.core.episode_encoding.project_episode`'s full
+    view, under the pass's audience; every record it names by reference is read again
+    when the look-up runs, as it is held now (§10:6), and one the store no longer holds,
+    or the audience refuses, is absent from ``memories``, ``stories`` and ``episodes``.
+
+    Attributes:
+        episode_id: The episode the call named.
+        record: The episode as held; ``None`` where the store no longer holds it, or it
+            is still open and ``running`` says so.
+        running: The episode is still open: its work is still running (§10:2).
+        projection: Its full view, where ``record`` is held.
+        memories: The memories the full view names, as held now, by id.
+        stories: The stories the full view names, as held now, by id.
+        episodes: The other episodes the full view names that are still held.
+        page: Which page of the full view this is, the first 1.
+        page_size: How many of the full view's parts one page shows.
+    """
+
+    episode_id: str
+    record: EpisodicMemory | None = None
+    running: bool = False
+    projection: EpisodeProjection | None = None
+    memories: Mapping[str, Memory] = field(default_factory=dict)
+    stories: Mapping[str, MatterShown] = field(default_factory=dict)
+    episodes: frozenset[str] = frozenset()
+    page: int = 1
+    page_size: int = 1
+
+    def __post_init__(self) -> None:
+        """A full view is read only of an episode held and frozen."""
+        if (self.projection is None) != (self.record is None or self.running):
+            msg = "a full view is carried exactly where a frozen episode is held"
+            raise ValueError(msg)
+        if self.page < 1 or self.page_size < 1:
+            msg = "a full view's page and page size are at least 1"
+            raise ValueError(msg)
+
+    def parts(self) -> tuple[FullViewPart, ...]:
+        """Every part of the full view, in the order they happened (§10:3)."""
+        return () if self.projection is None else full_view_parts(self.projection)
+
+    def page_parts(self) -> tuple[FullViewPart, ...]:
+        """The parts this page shows."""
+        start = (self.page - 1) * self.page_size
+        return self.parts()[start : start + self.page_size]
+
+    @property
+    def more(self) -> bool:
+        """Whether the full view has parts past this page."""
+        return len(self.parts()) > self.page * self.page_size
+
+
+type FullViewPart = (
+    ProjectedRecall
+    | ProjectedUnderstanding
+    | ProjectedEvidence
+    | ProjectedJoin
+    | ProjectedRound
+    | ProjectedCall
+    | ProjectedProposal
+)
+"""One part of an episode's full view (ADR-0358 §10:3)."""
+
+
+#: Where each kind of part goes among the parts placed before the same round, so the full
+#: view shows them in the order they happened (ADR-0358 §10:3, ADR-0309 §3): recall's first
+#: run before understanding's first version, its second run after it, then the digests'
+#: evidence, an input taken in, a later understanding version, the round's notes, and its
+#: calls by their index among the round's.
+_AT_FIRST_RECALL: Final = 0
+_AT_FIRST_VERSION: Final = 1
+_AT_SECOND_RECALL: Final = 2
+_AT_EVIDENCE: Final = 3
+_AT_JOINED: Final = 4
+_AT_LATER_VERSION: Final = 5
+_AT_ROUND: Final = 6
+_AT_CALL: Final = 7
+
+
+def full_view_parts(projection: EpisodeProjection) -> tuple[FullViewPart, ...]:
+    """An episode's full view's parts, in the order they happened (ADR-0358 §10:3).
+
+    Each part is placed by the round before which it happened, as the projection
+    numbers them, then by the phases' order within that place (ADR-0309 §3), and a
+    round's calls, recorded or not, by their index among its calls. Empty for a
+    projection that is not the full view, or that holds none of its parts, as on a
+    pass that may not be shown a record placed for the owner alone (§10:5).
+
+    Args:
+        projection: The episode's full view.
+
+    Returns:
+        The parts, in order.
+    """
+    placed: list[tuple[tuple[int, int, int], FullViewPart]] = []
+    for recall in projection.recalled:
+        placed.append(((0, _AT_SECOND_RECALL if recall.second else _AT_FIRST_RECALL, 0), recall))
+    for version in projection.understood:
+        rank = _AT_FIRST_VERSION if version.version == 1 else _AT_LATER_VERSION
+        placed.append(((version.position, rank, version.version), version))
+    for at, item in enumerate(projection.evidence):
+        placed.append(((item.position, _AT_EVIDENCE, at), item))
+    for at, joined in enumerate(projection.joined):
+        placed.append(((joined.position, _AT_JOINED, at), joined))
+    for one in projection.rounds:
+        placed.append(((one.position, _AT_ROUND, 0), one))
+    for call in projection.calls:
+        placed.append(((call.position, _AT_CALL, call.index), call))
+    for proposal in projection.unrecorded:
+        placed.append(((proposal.position, _AT_CALL, proposal.index), proposal))
+    # A stable sort, so parts placed alike keep the order the record holds them in.
+    placed.sort(key=lambda one: one[0])
+    return tuple(part for _, part in placed)
+
+
+def call_showed(
+    outcome: CallOutcome, *, bound: int, raw: FrozenJsonValue = None
+) -> CallShowed | None:
+    """What a done call's result showed planning directly, as its entry keeps it.
+
+    ADR-0358 §11:2-§11:4, read off what planning renders of the result (:meth:`_call`):
+    each record it showed held by its kind and its id, and a story also by its summary
+    version, never by a copy; its own words, for a result that goes to planning whole,
+    as text. Of what it held for a digest, as outside text, nothing, record by record
+    (§11:3): a memory search keeps the records it showed and nothing of those its digest
+    read. Each record is kept once, where first shown. What is kept is cut to ``bound``
+    characters, a record counting its id's, and the cut is carried.
+
+    Args:
+        outcome: What came of the call, carrying what its look-up found.
+        bound: The composition root's bound on what an entry keeps (§11:4).
+        raw: What the call returned for planning before what it looked up replaced
+            it, as for a call on the Task Scheduler or on running work, whose result
+            planning is shown rendered.
+
+    Returns:
+        What it showed, or ``None`` for a call that was not done (§11:2).
+
+    Raises:
+        ValueError: If ``bound`` is below 1.
+    """
+    if bound < 1:
+        msg = "an entry keeps at least one character of what its call showed"
+        raise ValueError(msg)
+    if outcome.kind is not CallOutcomeKind.DONE:
+        return None
+    showing = _Showing()
+    if outcome.records is not None:
+        showing.memories(outcome.records)
+    elif outcome.candidate is not None:
+        showing.memories(outcome.candidate.similar or ())
+    elif outcome.story is not None:
+        showing.story(outcome.story)
+    elif outcome.episodes is not None:
+        showing.found(outcome.episodes)
+    elif outcome.history is not None:
+        showing.history(outcome.history)
+    elif outcome.full is not None:
+        showing.full(outcome.full)
+    elif not outcome.digested:
+        showing.text(outcome.result if outcome.result is not None else raw)
+    return shown_within(showing.parts, bound)
+
+
+class _Showing:
+    """What one result showed, gathered in the order shown, each record once (§11:2)."""
+
+    def __init__(self) -> None:
+        self.parts: list[ShownText | ShownRecord] = []
+        self._seen: set[tuple[ShownRecordKind, str]] = set()
+
+    def record(self, kind: ShownRecordKind, record_id: str, version: int | None = None) -> None:
+        """A record, by its kind and id, and a story's by its summary version."""
+        if (kind, record_id) not in self._seen:
+            self._seen.add((kind, record_id))
+            self.parts.append(ShownRecord(kind=kind, id=record_id, summary_version=version))
+
+    def text(self, value: FrozenJsonValue | dict[str, str]) -> None:
+        """A result's own words, as canonical JSON; nothing for none."""
+        if value is None:
+            return
+        self.parts.append(
+            ShownText(text=json.dumps(_thawed(value), ensure_ascii=False, sort_keys=True))
+        )
+
+    def memories(self, memories: Iterable[Memory]) -> None:
+        """Each memory shown, one resting on outside content left out as it is rendered."""
+        for memory in memories:
+            if not memory.rests_on_outside_content:
+                self.record(ShownRecordKind.MEMORY, memory.id)
+
+    def story(self, story: PlanningStory) -> None:
+        """A story read: the story, by the summary version it showed, and its episodes."""
+        self.record(ShownRecordKind.STORY, story.story_id, story.summary_version)
+        for episode in (*story.newer, *story.latest):
+            self.record(ShownRecordKind.EPISODE, episode.id)
+
+    def found(self, found: EpisodesFound) -> None:
+        """A search of episodes: each episode, then the matters it belongs to."""
+        for one in found.episodes:
+            self.record(ShownRecordKind.EPISODE, one.record.id)
+            for matter in one.matters:
+                self.record(ShownRecordKind.STORY, matter.story_id, matter.summary_version)
+
+    def history(self, history: OlderHistory) -> None:
+        """The older history: each item's words, none of an item never shown, and episodes."""
+        for item in history.items:
+            if item.author is not PlaceAuthor.OTHER:
+                self.text({"from": item.author.value, "text": item.text})
+        for episode in history.episodes:
+            self.record(ShownRecordKind.EPISODE, episode.id)
+
+    def full(self, read: EpisodeRead) -> None:
+        """A full view's page: the episode, then each record it showed again as held now."""
+        if read.projection is None:
+            return
+        self.record(ShownRecordKind.EPISODE, read.episode_id)
+        for part in read.page_parts():
+            if isinstance(part, ProjectedRecall):
+                named: Iterable[ShownRecord] = part.found
+            elif isinstance(part, ProjectedCall) and part.showed is not None:
+                named = (one for one in part.showed.parts if isinstance(one, ShownRecord))
+            else:
+                continue
+            for one in named:
+                self.again(one, read)
+
+    def again(self, one: ShownRecord, read: EpisodeRead) -> None:
+        """A record the full view showed again, where it showed it (§10:6, §6:3)."""
+        if one.kind is ShownRecordKind.MEMORY:
+            memory = read.memories.get(one.id)
+            if memory is not None and not memory.rests_on_outside_content:
+                self.record(ShownRecordKind.MEMORY, one.id)
+        elif one.kind is ShownRecordKind.STORY:
+            story = read.stories.get(one.id)
+            if story is not None:
+                self.record(ShownRecordKind.STORY, one.id, story.summary_version)
+        elif one.id in read.episodes:
+            self.record(ShownRecordKind.EPISODE, one.id)
+
+
+def shown_within(parts: Sequence[ShownText | ShownRecord], bound: int) -> CallShowed:
+    """What a call showed, ``parts``, cut to ``bound`` characters, the cut carried.
+
+    ADR-0358 §11:4, the one cut every entry's addition takes.
+
+    A text counts its characters and a record its id's, at least one; a text that does
+    not fit whole keeps the prefix that does, where any of it does.
+    """
+    kept: list[ShownText | ShownRecord] = []
+    left = bound
+    for part in parts:
+        cost = len(part.text) if isinstance(part, ShownText) else max(1, len(part.id))
+        if cost <= left:
+            kept.append(part)
+            left -= cost
+            continue
+        if isinstance(part, ShownText) and part.text[:left].strip():
+            kept.append(ShownText(text=part.text[:left]))
+        return CallShowed(parts=tuple(kept), cut=True)
+    return CallShowed(parts=tuple(kept))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2813,22 +3200,278 @@ class _Request:
         if outcome.kind is not CallOutcomeKind.DONE or outcome.result_id is None:
             return shown
         result: dict[str, object] = {"label": self._book.label(LabelKind.RESULT, outcome.result_id)}
-        if outcome.story is not None:
-            # ADR-0300 §10:6: a story's full view, its marks with it; a marked line is
-            # outside content read, which rendering it counts.
-            result["value"] = self._story(outcome.story)
-        elif outcome.records is not None:
-            result["value"] = self._searched(outcome)
-        elif outcome.candidate is not None:
-            result["value"] = self._candidate(outcome.candidate)
-        elif outcome.tasks is not None:
-            result["value"] = self._listing(outcome.tasks)
-        elif outcome.peer is not None:
-            result["value"] = self._peer(outcome.peer)
-        else:
-            result["value"] = _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
+        result["value"] = self._result_value(outcome)
         shown["result"] = result
         return shown
+
+    def _result_value(self, outcome: CallOutcome) -> object:
+        """What a done call's result shows: what it looked up, or what it returned.
+
+        A story read's view, its marks with it, a marked line outside content read,
+        which rendering it counts (ADR-0300 §10:6); a memory search's records; a
+        candidate's lookup; a call on the Task Scheduler or on running work; an episode
+        look-up's (ADR-0358 §7-§10); or the result itself, a digested one as read for
+        planning by its digest.
+        """
+        looked: tuple[tuple[object, Callable[[Any], object]], ...] = (
+            (outcome.story, self._story),
+            (outcome.records, lambda _: self._searched(outcome)),
+            (outcome.candidate, self._candidate),
+            (outcome.tasks, self._listing),
+            (outcome.peer, self._peer),
+            (outcome.episodes, self._found_episodes),
+            (outcome.history, self._older_history),
+            (outcome.full, self._full_episode),
+        )
+        for found, rendered in looked:
+            if found is not None:
+                return rendered(found)
+        return _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
+
+    # --- the episode look-ups' results (ADR-0358 §7-§10) ---
+
+    def _found_episodes(self, found: EpisodesFound) -> dict[str, object]:
+        """A search of past episodes: one page of what it found, each as its short view.
+
+        ADR-0358 §7:2: each episode found is rendered as short-term memory renders an
+        episode, through :meth:`_episode` over its projection under the reader's
+        audience; §8:1: with the matters it belongs to. §7:3: a pass of unbounded
+        audience found none.
+        """
+        shown: dict[str, object] = {
+            "page": found.page,
+            "episodes": [self._found_episode(one) for one in found.episodes] or _NONE_FOUND,
+        }
+        if found.more:
+            shown["more"] = _next_page(found.page)
+        return shown
+
+    def _found_episode(self, one: EpisodeShown) -> dict[str, object]:
+        """One episode a look-up found, as its short view, with the matters it is in."""
+        shown = self._shown_episode(one.record)
+        if one.matters:
+            shown["in_matters"] = [self._matter(matter) for matter in one.matters]
+        return shown
+
+    def _shown_episode(self, record: EpisodicMemory) -> dict[str, object]:
+        """An episode a look-up shows, as the episode window shows one (ADR-0358 §7:2, §9:2)."""
+        projection = project_episode(
+            record, excerpt_chars=self._excerpt_chars, owner_records=self._inputs.owner_records
+        )
+        label = self._book.label(LabelKind.EPISODE, record.id)
+        self._rendered.add(record.id)
+        return self._episode(label, projection, record)
+
+    def _matter(self, matter: MatterShown, *, again: bool = False) -> dict[str, object] | str:
+        """A matter by its S label and, the first time it is shown, its summary's first line.
+
+        ADR-0358 §8:1, under ADR-0307 §6:4's rules for what an audience may be shown of a
+        story: a summary that may not be shown is withheld, and a marked one shown is
+        outside content read (ADR-0303 §3:6). ``again`` is the full view's reading of it
+        as it is held now, which always shows the first line (§10:7).
+        """
+        held = self._book.held(LabelKind.STORY, matter.story_id) is not None
+        label = self._book.label(LabelKind.STORY, matter.story_id)
+        if held and not again:
+            return label
+        shown: dict[str, object] = {"label": label}
+        if matter.withheld:
+            shown["summary"] = _SUMMARY_WITHHELD
+        elif matter.summary_version is None:
+            shown["summary"] = _NO_SUMMARY
+        elif matter.first_line is None:
+            shown["summary"] = _NO_LINES
+        else:
+            shown["summary"] = matter.first_line
+            if matter.outside:
+                shown["summary_outside_content"] = _OUTSIDE
+                self.shown.marked = True
+        return shown
+
+    def _older_history(self, history: OlderHistory) -> dict[str, object] | str:
+        """One page of the origin's older history, or why none is shown (ADR-0358 §9).
+
+        Each item as the place window shows an item (§9:3), and each earlier episode by
+        its label and short view (§9:2).
+        """
+        if not history.readable:
+            return _HISTORY_UNREADABLE
+        if not history.items and not history.episodes and not history.more:
+            return _NOTHING_OLDER if history.page == 1 else _NO_OLDER
+        shown: dict[str, object] = {"page": history.page}
+        if history.items or not history.episodes:
+            # A page whose every message was deleted, or already shown, shows none.
+            shown["items"] = [self._item(item) for item in history.items] or _NO_OLDER
+        if history.episodes:
+            shown["episodes"] = [self._shown_episode(record) for record in history.episodes]
+        if history.more:
+            shown["more"] = _next_page(history.page)
+        return shown
+
+    def _full_episode(self, read: EpisodeRead) -> dict[str, object]:
+        """One page of an episode's full record, its parts in the order they happened.
+
+        ADR-0358 §10:3-§10:11. The input, the meaning, the response and how the work
+        ended head every page, as the short view shows them, and the parts follow:
+        on a pass that may not be shown a record placed for the owner alone there are
+        none, and nothing is said of them (§10:5). A record shown again is read as it
+        is held now and says so (§10:6-§10:7). A part the record no longer keeps says
+        so (§10:9).
+        """
+        label = self._book.label(LabelKind.EPISODE, read.episode_id)
+        shown: dict[str, object] = {"label": label}
+        projection = read.projection
+        if read.running:
+            shown["full_record"] = _STILL_RUNNING
+            return shown
+        if read.record is None or projection is None:
+            shown["full_record"] = _RECORD_GONE
+            return shown
+        self._rendered.add(read.episode_id)
+        shown |= self._full_head(projection)
+        if not self._inputs.owner_records:
+            return shown
+        shown["page"] = read.page
+        if projection.understood_elided and read.page == 1:
+            shown["earlier_understanding"] = _elided(projection.understood_elided)
+        shown["parts"] = [self._full_part(part, read) for part in read.page_parts()] or (
+            _NONE_FOUND if read.page == 1 else _NO_OLDER
+        )
+        if read.more:
+            shown["more"] = _next_page(read.page)
+        return shown
+
+    def _full_head(self, projection: EpisodeProjection) -> dict[str, object]:
+        """What heads every page of a full view: what the short view shows of the episode."""
+        shown: dict[str, object] = {"at": projection.occurred_at.isoformat()}
+        given = self._episode_input(projection, in_place=False)
+        if given is not None:
+            shown["input"] = given
+        if projection.meaning is not None:
+            shown["understood_then"] = projection.meaning
+        if projection.response is not None:
+            shown["response"] = _text(projection.response)
+        if projection.derived_from_external:
+            shown["outside_content"] = _OUTSIDE
+            self.shown.marked = True
+        if projection.status is not None and projection.reason is not None:
+            shown["ended"] = f"{projection.status.value}: {projection.reason.value}"
+        return shown
+
+    def _full_part(self, part: FullViewPart, read: EpisodeRead) -> dict[str, object]:
+        """One part of an episode's full view (ADR-0358 §10:3)."""
+        if isinstance(part, ProjectedCall):
+            return self._full_call(part, read)
+        if isinstance(part, ProjectedRecall):
+            return {
+                "recall": "second run" if part.second else "first run",
+                "outcome": part.outcome.value,
+                "found": self._shown_again(part.found, read) or _NONE_FOUND,
+            }
+        if isinstance(part, ProjectedRound):
+            return {"round": part.position + 1} | self._episode_round(part, in_place=False)
+        return self._full_record_part(part)
+
+    def _full_record_part(
+        self,
+        part: ProjectedUnderstanding | ProjectedEvidence | ProjectedJoin | ProjectedProposal,
+    ) -> dict[str, object]:
+        """A full view's part that names no record: understanding, evidence, an input."""
+        if isinstance(part, ProjectedUnderstanding):
+            understood: dict[str, object] = {"understood": part.meaning, "version": part.version}
+            if part.unclear:
+                understood["unclear"] = [
+                    {"gap": one.gap, "readings": list(one.readings)} for one in part.unclear
+                ]
+            return understood
+        if isinstance(part, ProjectedEvidence):
+            # ADR-0358 §10:8: digested evidence is shown marked, and read outside content.
+            self.shown.marked = True
+            return {"evidence": _text(part.text), "outside_content": _OUTSIDE}
+        if isinstance(part, ProjectedJoin):
+            return {
+                "took_in": _JOIN_WITHHELD if part.input is None else _text(part.input),
+                "from": _place_text(part.channel),
+            }
+        # §10:9: a call whose entry the record does not hold keeps only its arguments.
+        return {
+            "round": part.position + 1,
+            "capability": part.capability,
+            "arguments": _text(part.arguments),
+            "outcome": _NOT_KEPT,
+        }
+
+    def _full_call(self, call: ProjectedCall, read: EpisodeRead) -> dict[str, object]:
+        """One call's entry in the full view: what came of it and what it showed."""
+        shown: dict[str, object] = {
+            "round": call.position + 1,
+            "capability": call.capability,
+            "arguments": _text(call.arguments),
+        }
+        if call.outcome is None:
+            shown["outcome"] = (
+                _TIDY_STARTED if call.capability == TIDY_STORY_CAPABILITY else _NO_OUTCOME
+            )
+        else:
+            text = _FULL_OUTCOME_TEXT[call.outcome]
+            shown["outcome"] = text if call.reason is None else f"{text}: {call.reason}"
+        shown |= self._delivered(call.delivered)
+        if call.marked:
+            # ADR-0356 §8:7, ADR-0358 §10:8: a marked entry is shown marked.
+            shown["outside_content"] = _OUTSIDE
+            self.shown.marked = True
+        if call.outcome is not CallOutcomeKind.DONE:
+            return shown
+        showed = call.showed
+        if showed is None:
+            shown["showed"] = _NOT_KEPT
+            return shown
+        parts: list[object] = []
+        for part in showed.parts:
+            if isinstance(part, ShownText):
+                parts.append({"text": part.text})
+            else:
+                parts.extend(self._shown_again((part,), read))
+        if showed.cut:
+            parts.append(_REST_NOT_KEPT)
+        shown["showed"] = parts or _NOTHING_SHOWN
+        return shown
+
+    def _shown_again(
+        self, records: Sequence[ShownRecord], read: EpisodeRead
+    ) -> list[dict[str, object]]:
+        """Records the full view shows again, each as it is held now (ADR-0358 §10:6-§10:7).
+
+        A memory as planning is shown any memory, one resting on outside content left
+        out as a found one is (ADR-0307 §9:2); a story by its label and its summary's
+        first line; an episode by its label alone. One no longer held, or that the
+        audience refuses, is left out with nothing said (§6:3).
+        """
+        shown: list[dict[str, object]] = []
+        for record in records:
+            if record.kind is ShownRecordKind.MEMORY:
+                memory = read.memories.get(record.id)
+                if memory is None or memory.rests_on_outside_content:
+                    continue
+                shown.append(self._memory(memory) | {"shown": _AS_HELD_NOW})
+            elif record.kind is ShownRecordKind.STORY:
+                story = read.stories.get(record.id)
+                if story is not None:
+                    shown.append(self._matter_again(story))
+            elif record.id in read.episodes:
+                shown.append(
+                    {
+                        "label": self._book.label(LabelKind.EPISODE, record.id),
+                        "shown": _AS_HELD_NOW,
+                    }
+                )
+        return shown
+
+    def _matter_again(self, story: MatterShown) -> dict[str, object]:
+        """A story the full view shows again: its label and its summary's first line."""
+        matter = self._matter(story, again=True)
+        shown: dict[str, object] = {"label": matter} if isinstance(matter, str) else matter
+        return shown | {"shown": _AS_HELD_NOW}
 
     def _delivered(self, delivered: RecordedDelivery | None) -> dict[str, object]:
         """What a message call sent, where it went and how (ADR-0356 §8:4), or nothing.
@@ -3170,6 +3813,41 @@ def _messages_in_place(
 def _offers_story_reads(offered: Sequence[OfferedTool]) -> bool:
     """Whether a story read is among the round's offered tools (#2893, #2944)."""
     return any(tool.name == _READ_STORY for tool in offered)
+
+
+#: What the episode look-ups' results say (ADR-0358 §6-§10).
+_HISTORY_UNREADABLE: Final = "this place's older history cannot be read here"
+_NOTHING_OLDER: Final = "nothing older: the place window already showed all this place holds"
+_STILL_RUNNING: Final = (
+    "the work is still running, so its record is not frozen: look up the running "
+    "activation's findings instead"
+)
+_RECORD_GONE: Final = "its record is no longer kept"
+_NOT_KEPT: Final = "no longer kept"
+_REST_NOT_KEPT: Final = "the rest of what it showed is no longer kept"
+_NOTHING_SHOWN: Final = "nothing"
+_NO_OUTCOME: Final = "no outcome recorded"
+_AS_HELD_NOW: Final = "as it is held now, not as it was then"
+_JOIN_WITHHELD: Final = "an outside report, not shown"
+
+#: What came of another episode's call, in its full view (ADR-0358 §10:3).
+_FULL_OUTCOME_TEXT: Final = {
+    CallOutcomeKind.DONE: "done",
+    CallOutcomeKind.NOT_DONE: "not done",
+    CallOutcomeKind.UNKNOWN: "unknown: it may or may not have happened",
+    CallOutcomeKind.REFUSED: "refused before it ran",
+    CallOutcomeKind.NEEDS_YOU: "needed the user's yes",
+}
+
+
+def _next_page(page: int) -> str:
+    """What a look-up's result says where there is more past the page it shows (§6:6)."""
+    return f"there is more: call again with {PAGE_ARGUMENT} {page + 1} for the next page"
+
+
+def _elided(count: int) -> str:
+    """What the full view says of the understanding versions the record elided (§10:9)."""
+    return f"{count} earlier version{'s' if count != 1 else ''} of understanding no longer kept"
 
 
 def _more_older(count: int, page: int) -> str:

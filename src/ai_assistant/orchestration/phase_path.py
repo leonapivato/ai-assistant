@@ -274,6 +274,7 @@ from ai_assistant.core.types import (
     ActivationEffect,
     ActivationRecall,
     ApprovalGiver,
+    CallShowed,
     CapabilityEffect,
     CapabilityResult,
     ChannelIdentity,
@@ -299,6 +300,8 @@ from ai_assistant.core.types import (
     RecordedCall,
     RecordedDelivery,
     SendOutcome,
+    ShownRecord,
+    ShownRecordKind,
     StageOutcome,
     StoryMember,
     StoryMemberKind,
@@ -345,6 +348,7 @@ from ai_assistant.orchestration.controller import (
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.defects import ToleratedStageError, is_defect, log_defect
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
+from ai_assistant.orchestration.episode_lookups import OlderSource
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.lookups import (
@@ -402,7 +406,10 @@ from ai_assistant.orchestration.planning import (
     CallOutcomeKind,
     DigestedEvidence,
     DigestItem,
+    EpisodeRead,
+    EpisodesFound,
     OfferShown,
+    OlderHistory,
     PeerShown,
     PlaceAuthor,
     PlaceItem,
@@ -417,6 +424,8 @@ from ai_assistant.orchestration.planning import (
     RefusedCall,
     RunningShown,
     answer_fact,
+    call_showed,
+    shown_within,
 )
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.reliance import noted
@@ -489,7 +498,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
-    from ai_assistant.orchestration.lookups import LookUps
+    from ai_assistant.orchestration.lookups import EpisodeLookedUp, LookUps
     from ai_assistant.orchestration.matters import Matters
     from ai_assistant.orchestration.person_block import PersonBlock, PersonBlocks
     from ai_assistant.orchestration.recall import RecallStage
@@ -507,6 +516,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CHAT_DESCRIPTION",
     "EVENT_DESCRIPTION",
+    "SHOWED_CHARS",
     "Delivery",
     "Fitted",
     "MessageWriter",
@@ -544,6 +554,11 @@ EVENT_DESCRIPTION: Final = (
     "An event a source reported to the hub, such as a device changing state. No one is "
     "waiting on a reply, and nothing you write here reaches the user."
 )
+
+#: The bound on what a call's entry keeps of what its result showed, in characters
+#: (ADR-0358 §11:4), where the composition root names none, as a test's path does; the
+#: composition root sets its own.
+SHOWED_CHARS: Final = 4000
 
 _PLANNING_EXPIRED: Final = "the activation's deadline passed before the next round"
 _AUTHORIZING_EXPIRED: Final = "the activation's deadline passed before the round was checked"
@@ -1441,6 +1456,7 @@ class StoryReads:
             latest=tuple(record for address in latest if (record := fetched.get(address))),
             inherited=inherited,
             standing=standing,
+            summary_version=None if summary is None else summary.version,
         )
 
     async def _older(
@@ -1595,6 +1611,51 @@ def _story_records(given: PlanningStories) -> tuple[EpisodicMemory, ...]:
         *(record for story in given.stories for record in (*story.newer, *story.latest)),
         *(record for one in shorts for record in one.episodes),
     )
+
+
+def _read(found: EpisodeLookedUp) -> tuple[MemoryRecord, ...]:
+    """Every record an episode look-up read and shows (ADR-0309 §5:10)."""
+    if isinstance(found, EpisodesFound):
+        return tuple(one.record for one in found.episodes)
+    if isinstance(found, OlderHistory):
+        return found.episodes
+    if found.record is None:
+        return ()
+    return (
+        found.record,
+        *(one for one in found.memories.values() if not one.rests_on_outside_content),
+    )
+
+
+def _looked_outside(found: EpisodeLookedUp) -> tuple[str, ...]:
+    """What an episode look-up shows that rests on outside content (ADR-0358 §6:4).
+
+    An episode resting on outside content, as the episode window's are counted; a marked
+    summary shown, by its story; and, of a full view, its evidence, a marked note or a
+    marked entry, by the episode.
+    """
+    if isinstance(found, EpisodesFound):
+        return (
+            *(one.record.id for one in found.episodes if rests_on_outside_content(one.record)),
+            *(
+                matter.story_id
+                for one in found.episodes
+                for matter in one.matters
+                if matter.outside and matter.first_line is not None
+            ),
+        )
+    if isinstance(found, OlderHistory):
+        return tuple(one.id for one in found.episodes if rests_on_outside_content(one))
+    projection = found.projection
+    if found.record is None or projection is None:
+        return ()
+    marked = (
+        rests_on_outside_content(found.record)
+        or bool(projection.evidence)
+        or any(one.notes_marked for one in projection.rounds)
+        or any(one.marked for one in projection.calls)
+    )
+    return (found.episode_id,) if marked else ()
 
 
 # --- the working set ---------------------------------------------------------------------
@@ -1938,6 +1999,10 @@ class PhaseWorking:
         # entries the episode already records, by their round and id (§8:6).
         self.work: PlanningWork | None = None
         self._entered: set[tuple[str, str]] = set()
+        # ADR-0358 §7-§10: what each done episode look-up read, by its result's id; and
+        # where the place window came from, which the older history is read from (§9:2).
+        self.looked: dict[str, EpisodeLookedUp] = {}
+        self.older: OlderSource | None = None
 
     # --- what the rules read (PhaseFacts) ---
 
@@ -2319,12 +2384,9 @@ class PhaseWorking:
         result_id = outcome.result_id
         if result_id is None:
             return outcome
-        page = self.pages.get(result_id)
-        if page is not None and capability == READ_STORY_CAPABILITY:
-            return replace(outcome, result=None, story=page)
-        searched = self.searched.get(result_id)
-        if searched is not None and capability == SEARCH_MEMORY_CAPABILITY:
-            return replace(outcome, result=None, records=searched)
+        found = self._found(outcome, result_id, capability)
+        if found is not None:
+            return found
         if capability in TASK_SCHEDULER_CAPABILITIES or capability in MATTER_CAPABILITIES:
             return self._labelled(outcome, result_id)
         if capability == REMEMBER_CAPABILITY and is_candidate_result(outcome.result):
@@ -2337,6 +2399,29 @@ class PhaseWorking:
             )
             return replace(outcome, result=None, candidate=RecordedCandidate(similar=similar))
         return outcome
+
+    def _found(
+        self, outcome: CallOutcome, result_id: str, capability: str | None
+    ) -> CallOutcome | None:
+        """``outcome``, carrying what its look-up found, or ``None`` where it found none.
+
+        A story read's view, a memory search's records as fetched, and what an episode
+        look-up read (ADR-0358 §7-§10).
+        """
+        page = self.pages.get(result_id)
+        if page is not None and capability == READ_STORY_CAPABILITY:
+            return replace(outcome, result=None, story=page)
+        searched = self.searched.get(result_id)
+        if searched is not None and capability == SEARCH_MEMORY_CAPABILITY:
+            return replace(outcome, result=None, records=searched)
+        looked = self.looked.get(result_id)
+        if isinstance(looked, EpisodesFound):
+            return replace(outcome, result=None, episodes=looked)
+        if isinstance(looked, OlderHistory):
+            return replace(outcome, result=None, history=looked)
+        if isinstance(looked, EpisodeRead):
+            return replace(outcome, result=None, full=looked)
+        return None
 
     def unfetched_searches(self) -> dict[str, tuple[str, ...]]:
         """Each done look-up's ids for planning, by result id, not yet fetched.
@@ -2368,7 +2453,9 @@ class PhaseWorking:
         """Every round, as planning recorded it or as it would have been."""
         return tuple(one.planned.round for one in self._rounds)
 
-    def call_entries(self, at: datetime, *, freezing: bool = False) -> tuple[RecordedCall, ...]:
+    def call_entries(
+        self, at: datetime, *, freezing: bool = False, showed: int = SHOWED_CHARS
+    ) -> tuple[RecordedCall, ...]:
         """Each call's entry the episode does not yet record, as of now (ADR-0356 §8).
 
         One for each call a round proposed, refused calls and look-ups included, once
@@ -2377,9 +2464,19 @@ class PhaseWorking:
         freeze (``freezing``), every call still without one gets one, with no outcome.
         Each entry is made once: the calls it is made for are held as entered.
 
+        **A done call's entry also holds what its result showed planning** (ADR-0358
+        §11:2-§11:4), read off what planning renders of it
+        (:func:`~ai_assistant.orchestration.planning.call_showed`): each record by its
+        kind and id, never by a copy, nothing of what was held for a digest, cut to
+        ``showed`` characters. A memory search whose records the next round has not
+        fetched, because no round followed, keeps the records it listed for planning,
+        by id.
+
         Args:
             at: When the entries are appended.
             freezing: Whether the episode is freezing.
+            showed: The composition root's bound on what an entry keeps of what its
+                call showed (§11:4).
 
         Returns:
             The new entries, in the order the rounds proposed their calls.
@@ -2409,6 +2506,7 @@ class PhaseWorking:
                     continue
                 capability = named.get(call.call_id, call.name)
                 sent = one.sent.get(call.call_id)
+                shown = None if outcome is None else self._showed(outcome, capability, showed)
                 entries.append(
                     RecordedCall(
                         round=round_id,
@@ -2427,10 +2525,27 @@ class PhaseWorking:
                         recorded_at=at,
                         marked=one.planned.read_outside
                         or (outcome is not None and outcome.digested),
+                        showed=shown,
                     )
                 )
                 self._entered.add((round_id, call.call_id))
         return tuple(entries)
+
+    def _showed(self, outcome: CallOutcome, capability: str, bound: int) -> CallShowed | None:
+        """What a call's result showed planning, as its entry keeps it (ADR-0358 §11:2)."""
+        looked = self._looked_up(outcome, capability)
+        if (
+            capability == SEARCH_MEMORY_CAPABILITY
+            and looked.records is None
+            and outcome.kind is CallOutcomeKind.DONE
+        ):
+            # No round followed to fetch them: the records it listed, by id (§11:2).
+            listed = tuple(
+                ShownRecord(kind=ShownRecordKind.MEMORY, id=one)
+                for one in searched_ids(outcome.result)
+            )
+            return shown_within(listed, bound)
+        return call_showed(looked, bound=bound, raw=outcome.result)
 
     def acted_rounds(self) -> tuple[ActedRound, ...]:
         """Every acting decision, in round order."""
@@ -3397,6 +3512,7 @@ class PhasePath:
         label_arguments: Mapping[str, Mapping[str, LabelKind]] | None = None,
         story_calls: StoryCalls | None = None,
         look_ups: LookUps | None = None,
+        showed_chars: int = SHOWED_CHARS,
         now: Callable[[], datetime] = _utcnow,
         timezone: str = "UTC",
         new_effect_id: Callable[[], str] = _new_effect_id,
@@ -3448,6 +3564,8 @@ class PhasePath:
                 own-records seam, whose scope this path opens around acting so a
                 look-up reads under the pass's audience (ADR-0307 §6:6); ``None``
                 where no look-up is offered.
+            showed_chars: The bound, in characters, on what a call's entry keeps of what
+                its result showed (ADR-0358 §11:4).
             now: The clock a step's start and an effect's claim are read from.
             timezone: The IANA name of the zone planning is shown the current time in
                 (#2964), handed on to planning: ``Settings.timezone``.
@@ -3458,9 +3576,12 @@ class PhasePath:
 
         Raises:
             ValueError: If ``round_limit`` is below 1, ``round_wait`` or
-                ``recall_digest_wait`` not positive, or ``recall_cap`` below 1 or above
-                ``RECALLED_ITEMS_MAX``.
+                ``recall_digest_wait`` not positive, ``recall_cap`` below 1 or above
+                ``RECALLED_ITEMS_MAX``, or ``showed_chars`` below 1.
         """
+        if showed_chars < 1:
+            msg = "an entry keeps at least one character of what its call showed"
+            raise ValueError(msg)
         if round_limit < 1:
             msg = "the round limit is at least one round (ADR-0307 §8:4)"
             raise ValueError(msg)
@@ -3513,6 +3634,7 @@ class PhasePath:
         # judge's label check, which would refuse a platform.
         self._story_calls = story_calls
         self._look_ups = look_ups
+        self._showed_chars = showed_chars
         # ADR-0338 §11:2: the person model's calls, attached only where a store is wired.
         self._person_calls: PersonModelCalls | None = None
         # ADR-0350 §4: the Task Scheduler's calls, attached only where it is wired.
@@ -3673,7 +3795,7 @@ class PhasePath:
             The working set, which the engine holds on the pass.
         """
         taken = window.input_messages
-        return PhaseWorking(
+        working = PhaseWorking(
             activation_id=activation_id,
             place=place_window(window),
             conversation_id=conversation_id,
@@ -3689,6 +3811,14 @@ class PhasePath:
             ),
             given_at=max((one.written_at for one in taken), default=None),
         )
+        # ADR-0358 §9:2: the chat's window is read from its transcript, so its older
+        # history is the transcript before the oldest recent message the window showed.
+        working.older = OlderSource(
+            conversation_id=conversation_id,
+            before=min((one.position for one in (*window.messages, *taken)), default=None),
+            shown=frozenset(one.position for one in (*window.messages, *taken, *window.replied_to)),
+        )
+        return working
 
     def begin_line(  # noqa: PLR0913 — the activation, its window, its place, its kind's two facts, its trigger, its audience and its recorded labels
         self,
@@ -3731,7 +3861,7 @@ class PhasePath:
             The working set, which the engine holds on the pass.
         """
         taken = window.input_messages
-        return PhaseWorking(
+        working = PhaseWorking(
             activation_id=activation_id,
             place=place_window(window, description=description),
             conversation_id=None,
@@ -3752,6 +3882,15 @@ class PhasePath:
             target=target,
             giver=giver,
         )
+        # ADR-0358 §9:2, ADR-0323 §10:1: a line's window is its recent episodes on the
+        # channel and place, so its older history is the earlier episodes there.
+        working.older = OlderSource(
+            channel=window.conversation,
+            episodes=frozenset(
+                item.episode_id for item in working.place.items if item.episode_id is not None
+            ),
+        )
+        return working
 
     def begin_event(
         self,
@@ -4042,7 +4181,9 @@ class PhasePath:
                 state.response = working.outcome()
                 # ADR-0356 §8:6: every call's entry not yet appended, its outcome where it
                 # is now known and none where it is not, carried by the freezing revision.
-                state.recorded_calls(working.call_entries(self._now(), freezing=True))
+                state.recorded_calls(
+                    working.call_entries(self._now(), freezing=True, showed=self._showed_chars)
+                )
                 # ADR-0309 §5:10: taken once, here, over every round. The windows are
                 # held again in case no round was planned to hold them.
                 _hold_given(given, working, state)
@@ -4126,9 +4267,6 @@ class PhasePath:
         working = _working(given)
         fetched = given.understanding_fetch
         state = active_state()
-        # ADR-0356 §8:6: each call's entry is appended once its outcome is known, before
-        # the next round's request.
-        await self._entries(working)
         if state is not None:
             await self._wait_on_older(state, working)
             if state.stopped:
@@ -4160,6 +4298,10 @@ class PhasePath:
                 earlier = await self._earlier_work(state, working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
+        # ADR-0356 §8:6: each call's entry is appended once its outcome is known, before
+        # the next round's request; after the reads, so a memory search's entry keeps the
+        # records the round is shown, as fetched (ADR-0358 §11:2).
+        await self._entries(working)
         outside = (
             *_fetched_outside(fetched),
             *_found_outside(found),
@@ -4512,7 +4654,7 @@ class PhasePath:
         state = active_state()
         if state is None:
             return
-        entries = working.call_entries(self._now())
+        entries = working.call_entries(self._now(), showed=self._showed_chars)
         if entries:
             state.recorded_calls(entries)
             await _extended(state, self.append)
@@ -5286,19 +5428,24 @@ class PhasePath:
                 self._peers(working, acted, caller)
                 return acted
             with self._look_ups.scope(
-                audience=given.supply, owner_records=working.owner_records
+                audience=given.supply, owner_records=working.owner_records, older=working.older
             ) as scope:
                 try:
                     acted = await self._acting.act(
                         authorized, held=working.held, on_acted=acted_one
                     )
                 finally:
-                    # Every view a story read read was obtained, whatever became of
-                    # the round's other calls (ADR-0309 §5:10).
+                    # Every view a story read read, and every record an episode look-up
+                    # read, was obtained, whatever became of the round's other calls
+                    # (ADR-0309 §5:10).
                     working.supplied.obtained(
                         _story_records(PlanningStories(stories=tuple(scope.views.values())))
                     )
+                    working.supplied.obtained(
+                        tuple(record for found in scope.found.values() for record in _read(found))
+                    )
         self._pages(working, acted, scope.views)
+        self._looked(working, acted, scope.found)
         self._peers(working, acted, caller)
         return acted
 
@@ -5378,6 +5525,23 @@ class PhasePath:
             shown = PlanningStories(stories=(view,))
             working.notes.update((note.note_id, note) for note in _shown_notes(shown))
             working.fetched_resting_on_outside(_stories_outside(shown))
+
+    @staticmethod
+    def _looked(
+        working: PhaseWorking, acted: ActedRound, found: Mapping[str, EpisodeLookedUp]
+    ) -> None:
+        """Hold what each done episode look-up read, under its call's result (ADR-0358 §6).
+
+        An outside episode, an episode with evidence or a marked note, and a marked
+        summary shown set ``fetched_outside``, named by what set it, as the story views'
+        do (§6:4, ADR-0306 §4:5).
+        """
+        for one in acted.calls:
+            looked = found.get(one.call.call.decision.id)
+            if looked is None or one.outcome is not ActedOutcome.DONE or one.result_id is None:
+                continue
+            working.looked[one.result_id] = looked
+            working.fetched_resting_on_outside(_looked_outside(looked))
 
     def _start_tidies(
         self,

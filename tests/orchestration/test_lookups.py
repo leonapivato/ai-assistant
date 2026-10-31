@@ -123,7 +123,15 @@ def _failed(answer: OwnRecordsAnswer, kind: ToolFailureKind) -> None:
 def test_each_look_up_reads_the_assistants_own_records_and_writes_nothing() -> None:
     """ADR-0306 §3:1, ADR-0308 §6:6: own records, never leaving the hub, never unknown."""
     assert [str(one.capability) for one in LOOK_UPS] == list(LOOK_UP_CAPABILITIES)
-    assert LOOK_UP_CAPABILITIES == ("search_memory", "read_story", "follow_up")
+    assert LOOK_UP_CAPABILITIES == (
+        "search_memory",
+        "read_story",
+        "follow_up",
+        # ADR-0358 §6:1: the episode look-ups, each a read of the assistant's own records.
+        "search_episodes",
+        "read_episode",
+        "read_older_history",
+    )
     for one in LOOK_UPS:
         assert one.effect is CapabilityEffect.OWN_RECORDS
         assert one.leaves_hub is False
@@ -160,6 +168,8 @@ def test_a_story_read_names_a_story_and_a_follow_up_a_result_by_label() -> None:
     assert LOOK_UP_LABEL_ARGUMENTS == {
         READ_STORY_CAPABILITY: {"story": LabelKind.STORY},
         FOLLOW_UP_CAPABILITY: {"result": LabelKind.RESULT},
+        # ADR-0358 §10:1: the episode look-up names its episode by its E label.
+        "read_episode": {"episode": LabelKind.EPISODE},
     }
     assert set(FOLLOW_UP.model_dump()["parameters_schema"]["properties"]) == {"result"}
 

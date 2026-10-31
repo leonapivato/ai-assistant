@@ -1,4 +1,4 @@
-"""Planning's look-ups: a memory search, a story's full view, and the follow-up.
+"""Planning's look-ups: memory and episode searches, a story or an episode whole, and more.
 
 ADR-0307 §6:6: "Planning may look up for itself a memory search, the full view of any
 story it has been shown, and pulls. Raw outside content reaches it only through
@@ -16,6 +16,9 @@ declarations (:data:`LOOK_UPS`), which of their arguments name things by label
 | :data:`SEARCH_MEMORY` | a query | may carry outside text |
 | :data:`READ_STORY` | a story, by its ``S`` label; a page | no outside text, marks shown |
 | :data:`FOLLOW_UP` | a result, by its ``R`` label; a new *looking for* | may carry outside text |
+| :data:`SEARCH_EPISODES` | a query; a page | no outside text, marks shown |
+| :data:`READ_EPISODE` | an episode, by its ``E`` label; a page | no outside text, marks shown |
+| :data:`READ_OLDER_HISTORY` | a page | no outside text, marks shown |
 
 Each declares the assistant's own records as its effect, as reading a story does
 (ADR-0306 §3:1, ADR-0308 §6:6), never leaves the hub, never has an unknown outcome, is
@@ -58,6 +61,17 @@ new question. The runner answers the result it names
 held results, so a digest answers the new question from the result as held, and naming a
 result with nothing held comes back not done, with the reason.
 
+**The episode look-ups** (ADR-0358 §6-§10): a search of past episodes, each found
+shown as its short view with the matters it belongs to (§7, §8:1); one episode's full
+record by its ``E`` label (§10); and the origin's older history (§9). Each is read by
+:class:`~ai_assistant.orchestration.episode_lookups.EpisodeLookUpReads` when the call runs, under
+the pass's audience, and held by the call's decision in the scope for the glue, which
+shows it under the call's result, as a story read's view is. None returns raw outside
+content: an outside episode is shown withheld, and a marked note, digested evidence or an
+outside episode shown is outside content read (§6:4). A result longer than a page comes in
+pages: the call names one by :data:`PAGE_ARGUMENT`, the first where it names none (§6:6).
+Each is in the set offered on every round (ADR-0356 §4:3, ADR-0357 §9:1).
+
 **What a look-up reads under.** The memory search and the story's view read under the
 pass's audience, which a call does not carry, so the phases' glue opens a
 :meth:`LookUps.scope` around acting for the round. A look-up run outside one reads
@@ -84,7 +98,12 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
-from ai_assistant.core.errors import MemoryStoreError, PlanningError, StoryStoreError
+from ai_assistant.core.errors import (
+    ConversationStoreError,
+    MemoryStoreError,
+    PlanningError,
+    StoryStoreError,
+)
 from ai_assistant.core.types import (
     BeliefBand,
     CapabilityEffect,
@@ -106,7 +125,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.acting import HeldByIds, NamedResult
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
-from ai_assistant.orchestration.planning import OLDER_NOTES_PAGE_ARGUMENT
+from ai_assistant.orchestration.planning import OLDER_NOTES_PAGE_ARGUMENT, PAGE_ARGUMENT
 from ai_assistant.orchestration.story_calls import STORY_ARGUMENT
 
 if TYPE_CHECKING:
@@ -116,9 +135,16 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import FrozenJson, ToolCall
     from ai_assistant.orchestration.acting import OwnRecordsAnswer
     from ai_assistant.orchestration.disclosure import TurnSupply
-    from ai_assistant.orchestration.planning import PlanningStory
+    from ai_assistant.orchestration.episode_lookups import EpisodeLookUpReads, OlderSource
+    from ai_assistant.orchestration.planning import (
+        EpisodeRead,
+        EpisodesFound,
+        OlderHistory,
+        PlanningStory,
+    )
 
 __all__ = [
+    "EPISODE_ARGUMENT",
     "FOLLOW_UP",
     "FOLLOW_UP_CAPABILITY",
     "LOOK_UPS",
@@ -126,14 +152,22 @@ __all__ = [
     "LOOK_UP_LABEL_ARGUMENTS",
     "OLDER_NOTES_PAGE",
     "OLDER_NOTES_PAGE_ARGUMENT",
+    "PAGE_ARGUMENT",
     "QUERY_ARGUMENT",
     "QUERY_MAX_CHARS",
+    "READ_EPISODE",
+    "READ_EPISODE_CAPABILITY",
+    "READ_OLDER_HISTORY",
+    "READ_OLDER_HISTORY_CAPABILITY",
     "READ_STORY",
     "READ_STORY_CAPABILITY",
     "RECORDS_KEY",
     "RESULT_ARGUMENT",
+    "SEARCH_EPISODES",
+    "SEARCH_EPISODES_CAPABILITY",
     "SEARCH_MEMORY",
     "SEARCH_MEMORY_CAPABILITY",
+    "EpisodeLookedUp",
     "LookUpScope",
     "LookUps",
     "StoryViews",
@@ -146,6 +180,12 @@ _log = structlog.get_logger(__name__)
 SEARCH_MEMORY_CAPABILITY: Final = "search_memory"
 READ_STORY_CAPABILITY: Final = "read_story"
 FOLLOW_UP_CAPABILITY: Final = "follow_up"
+SEARCH_EPISODES_CAPABILITY: Final = "search_episodes"
+READ_EPISODE_CAPABILITY: Final = "read_episode"
+READ_OLDER_HISTORY_CAPABILITY: Final = "read_older_history"
+
+#: The episode look-up's one planner argument: the episode, by its ``E`` label.
+EPISODE_ARGUMENT: Final = "episode"
 
 #: The memory search's one argument: what to search for.
 QUERY_ARGUMENT: Final = "query"
@@ -170,6 +210,27 @@ _NOT_IN_SCOPE: Final = "a look-up reads under the pass's audience, and none was 
 
 #: ADR-0072 §5's consumer-side precedence, the order the bands are searched in.
 _BANDS: Final = (BeliefBand.ASSERTED, BeliefBand.ATTESTED, BeliefBand.DERIVED)
+
+#: The episode look-ups (ADR-0358 §7-§10), which read through the episode reads.
+_EPISODE_LOOK_UPS: Final = frozenset(
+    {SEARCH_EPISODES_CAPABILITY, READ_EPISODE_CAPABILITY, READ_OLDER_HISTORY_CAPABILITY}
+)
+
+#: The argument each episode look-up that names something names it by, and what it says
+#: where the call names nothing.
+_NAMED: Final = {
+    SEARCH_EPISODES_CAPABILITY: QUERY_ARGUMENT,
+    READ_EPISODE_CAPABILITY: EPISODE_ARGUMENT,
+}
+_UNNAMED: Final = {
+    SEARCH_EPISODES_CAPABILITY: "the query is blank",
+    READ_EPISODE_CAPABILITY: "the call names no episode",
+    READ_OLDER_HISTORY_CAPABILITY: "the call names nothing",
+}
+
+#: The key an episode look-up's result names what it looked up under; what it read is
+#: held in the scope and shown in its place.
+_LOOKED_UP_KEY: Final = "looked_up"
 
 
 def _declared(
@@ -288,8 +349,81 @@ FOLLOW_UP: Final = _declared(
 """The follow-up (ADR-0308 §6:6): one planner argument, a result's R label, and the
 *looking for* the hub adds carries the new question."""
 
+_PAGE: Final[FrozenJson] = {
+    "type": "integer",
+    "minimum": 1,
+    "description": "Which page to show, the first 1; leave it out for the first.",
+}
+
+SEARCH_EPISODES: Final = _declared(
+    SEARCH_EPISODES_CAPABILITY,
+    (
+        "Search past episodes, the work done on earlier inputs, for a query. Returns one "
+        "page of the episodes found, best first, each as its short view under its E label, "
+        "with the matters it belongs to by their S labels."
+    ),
+    properties={
+        QUERY_ARGUMENT: {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": QUERY_MAX_CHARS,
+            "description": "What to search for, in a few words.",
+        },
+        PAGE_ARGUMENT: _PAGE,
+    },
+    required=(QUERY_ARGUMENT,),
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+)
+"""Search past episodes (ADR-0358 §7): each episode found as its short view, outside
+content withheld, so its result carries no outside text and shows its marks."""
+
+READ_EPISODE: Final = _declared(
+    READ_EPISODE_CAPABILITY,
+    (
+        "Read one past episode's full record by its E label. Returns one page of it, in "
+        "the order it happened: each understanding, what recall found, each round's notes, "
+        "each call with its arguments, what came of it and what it showed, the evidence, "
+        "what it took in, and how it ended. Records it shows again are shown as they are "
+        "held now."
+    ),
+    properties={
+        EPISODE_ARGUMENT: {
+            "type": "string",
+            "minLength": 1,
+            "description": "The episode, by the E label you were shown it under.",
+        },
+        PAGE_ARGUMENT: _PAGE,
+    },
+    required=(EPISODE_ARGUMENT,),
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+)
+"""Read an episode's full record (ADR-0358 §10): outside content shown only through its
+digests or withheld, and marked parts shown marked, so its result carries no outside
+text and shows its marks."""
+
+READ_OLDER_HISTORY: Final = _declared(
+    READ_OLDER_HISTORY_CAPABILITY,
+    (
+        "Read this place's history older than the place window shows. Returns one page, "
+        "newest page first: its older messages, or its earlier episodes, each as its short "
+        "view under its E label."
+    ),
+    properties={PAGE_ARGUMENT: _PAGE},
+    required=(),
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+)
+"""Read the origin's older history (ADR-0358 §9): each item as the place window shows
+one, someone else's withheld, so its result carries no outside text."""
+
 #: Every look-up's declaration.
-LOOK_UPS: Final = (SEARCH_MEMORY, READ_STORY, FOLLOW_UP)
+LOOK_UPS: Final = (
+    SEARCH_MEMORY,
+    READ_STORY,
+    FOLLOW_UP,
+    SEARCH_EPISODES,
+    READ_EPISODE,
+    READ_OLDER_HISTORY,
+)
 
 #: Every look-up's capability, in :data:`LOOK_UPS`' order.
 LOOK_UP_CAPABILITIES: Final = tuple(str(one.capability) for one in LOOK_UPS)
@@ -299,7 +433,11 @@ LOOK_UP_CAPABILITIES: Final = tuple(str(one.capability) for one in LOOK_UPS)
 LOOK_UP_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind]]] = {
     READ_STORY_CAPABILITY: {STORY_ARGUMENT: LabelKind.STORY},
     FOLLOW_UP_CAPABILITY: {RESULT_ARGUMENT: LabelKind.RESULT},
+    READ_EPISODE_CAPABILITY: {EPISODE_ARGUMENT: LabelKind.EPISODE},
 }
+
+type EpisodeLookedUp = EpisodesFound | EpisodeRead | OlderHistory
+"""What an episode look-up read, held in the scope by its call's decision (ADR-0358 §7-§10)."""
 
 
 def searched_ids(output: object) -> tuple[str, ...]:
@@ -353,11 +491,16 @@ class LookUpScope:
             pass, which decides a story view's summary and notes (ADR-0307 §6:4).
         views: The story views the round's story reads read, by the deciding decision's
             id, which names the call within the activation.
+        older: Where the activation's place window came from, which its older history
+            is read from (ADR-0358 §9:2); ``None`` for a place with no window.
+        found: What the round's episode look-ups read, by the deciding decision's id.
     """
 
     audience: TurnSupply
     owner_records: bool
     views: dict[str, PlanningStory] = field(default_factory=dict)
+    older: OlderSource | None = None
+    found: dict[str, EpisodeLookedUp] = field(default_factory=dict)
 
 
 #: The scope a round's look-ups run under, opened by :meth:`LookUps.scope` around acting.
@@ -375,7 +518,14 @@ class LookUps:
     kind where a call cannot run, never ``indeterminate``.
     """
 
-    def __init__(self, *, memory: MemoryStore, views: StoryViews | None, search_limit: int) -> None:
+    def __init__(
+        self,
+        *,
+        memory: MemoryStore,
+        views: StoryViews | None,
+        search_limit: int,
+        episodes: EpisodeLookUpReads | None = None,
+    ) -> None:
         """Wire the runner to the stores it reads.
 
         Args:
@@ -383,6 +533,8 @@ class LookUps:
             views: The story views a story read reads, or ``None`` where no story store
                 is wired, which makes every story read not done.
             search_limit: The most records one memory search keeps (#2589's number).
+            episodes: The episode look-ups' reads (ADR-0358 §7-§10), or ``None`` where
+                none are wired, which makes every episode look-up not done.
 
         Raises:
             ValueError: If ``search_limit`` is below 1.
@@ -393,20 +545,25 @@ class LookUps:
         self._memory = memory
         self._views = views
         self._search_limit = search_limit
+        self._episodes = episodes
 
     @staticmethod
     @contextlib.contextmanager
-    def scope(*, audience: TurnSupply, owner_records: bool) -> Iterator[LookUpScope]:
+    def scope(
+        *, audience: TurnSupply, owner_records: bool, older: OlderSource | None = None
+    ) -> Iterator[LookUpScope]:
         """Open the scope a round's look-ups run under, around acting.
 
         Args:
             audience: The pass's audience posture.
             owner_records: Whether a record placed for the owner alone may be shown.
+            older: Where the place window came from, which the older history reads.
 
         Yields:
-            The scope, whose ``views`` hold the story views read inside it.
+            The scope, whose ``views`` hold the story views read inside it, and whose
+            ``found`` holds what the episode look-ups read.
         """
-        opened = LookUpScope(audience=audience, owner_records=owner_records)
+        opened = LookUpScope(audience=audience, owner_records=owner_records, older=older)
         token = _SCOPE.set(opened)
         try:
             yield opened
@@ -422,10 +579,13 @@ class LookUps:
         Returns:
             For a memory search, what goes to planning and the outside ids acting holds;
             for a story read, the story read, its view held in the scope; for a
-            follow-up, the result it names; ``failed`` where the call cannot run.
+            follow-up, the result it names; for an episode look-up, what it read, held
+            in the scope; ``failed`` where the call cannot run.
         """
         capability = str(call.request.tool.capability)
         parameters = call.request.parameters
+        if capability in _EPISODE_LOOK_UPS:
+            return await self._episode_look_up(capability, parameters, call.decision.id)
         if capability == SEARCH_MEMORY_CAPABILITY:
             return await self._search(parameters.get(QUERY_ARGUMENT))
         if capability == READ_STORY_CAPABILITY:
@@ -523,6 +683,45 @@ class LookUps:
             for record in admitted_to_understanding(scope.audience, found.records)
             if isinstance(record, Memory) and not record.rests_on_outside_content
         )[:limit]
+
+    async def _episode_look_up(
+        self, capability: str, parameters: Mapping[str, object], decision_id: str
+    ) -> ToolResult:
+        """Run one episode look-up under the scope, and hold what it read for the glue.
+
+        ADR-0358 §6:2: run outside a scope, or with no reads wired, it reads nothing and
+        is not done.
+        """
+        page = parameters.get(PAGE_ARGUMENT, 1)
+        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+            _log.info("look_up_not_done", stage="acting", reason="malformed")
+            return _not_done(ToolFailureKind.INVALID_REQUEST, "the page is not 1 or more")
+        named = parameters.get(_NAMED[capability]) if capability in _NAMED else ""
+        if not isinstance(named, str) or (capability in _NAMED and not named.strip()):
+            _log.info("look_up_not_done", stage="acting", reason="malformed")
+            return _not_done(ToolFailureKind.INVALID_REQUEST, _UNNAMED[capability])
+        scope = _SCOPE.get()
+        if scope is None or self._episodes is None:
+            _log.warning("look_up_not_done", stage="acting", reason="no_scope")
+            return _not_done(ToolFailureKind.INTERNAL, _NOT_IN_SCOPE)
+        reads = self._episodes
+        try:
+            if capability == SEARCH_EPISODES_CAPABILITY:
+                found: EpisodeLookedUp = await reads.search(
+                    named, page, audience=scope.audience, owner_records=scope.owner_records
+                )
+            elif capability == READ_EPISODE_CAPABILITY:
+                found = await reads.full(
+                    named, page, audience=scope.audience, owner_records=scope.owner_records
+                )
+            else:
+                found = await reads.older(scope.older, page, audience=scope.audience)
+        except MemoryStoreError, StoryStoreError, ConversationStoreError:
+            _log.warning("look_up_not_done", stage="acting", reason="unreadable")
+            return _not_done(ToolFailureKind.UNAVAILABLE, "the records could not be read")
+        scope.found[decision_id] = found
+        _log.info("look_up_read", stage="acting", look_up=capability)
+        return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={_LOOKED_UP_KEY: capability})
 
     async def _read(self, story_id: object, older_page: object, decision_id: str) -> ToolResult:
         """Read one story's full view under the scope, and hold it for the glue."""
