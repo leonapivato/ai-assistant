@@ -112,6 +112,9 @@ def _parse(text: str, start: int, closing: str | None = None) -> tuple[list[Tag]
         if closing is not None and close_at != -1 and (opened is None or close_at < opened.start()):
             return found, close_at + len(closing) + 3
         if opened is None:
+            if closing is not None:
+                msg = f"<{closing}> is never closed"
+                raise AssertionError(msg)
             return found, len(text)
         name, written, empty = opened.group(1), opened.group(2), opened.group(3)
         attributes = {key: html.unescape(value) for key, value in _ATTRIBUTE.findall(written)}
@@ -120,6 +123,9 @@ def _parse(text: str, start: int, closing: str | None = None) -> tuple[list[Tag]
             at = opened.end()
             continue
         end = text.find(f"</{name}>", opened.end())
+        if end == -1:
+            msg = f"<{name}> is never closed"
+            raise AssertionError(msg)
         inner = text[opened.end() : end]
         if _OPEN.search(inner) is not None:
             held, at = _parse(text, opened.end(), name)

@@ -10,6 +10,7 @@ record the news brings is held among what the activation was given (ADR-0309 §5
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -17,14 +18,16 @@ import pytest
 from test_planning import _episode
 
 from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.types import ChannelIdentity, Profile
 from ai_assistant.orchestration.disclosure import UnboundedAudienceSupply
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.planning import NewsShown, PlanningWork
+from ai_assistant.testing.memories import memory
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from ai_assistant.core.types import EpisodicMemory
+    from ai_assistant.core.types import EpisodicMemory, Memory
 
 pytestmark = pytest.mark.anyio
 
@@ -106,6 +109,92 @@ async def test_a_store_that_cannot_be_read_names_no_work_ended() -> None:
 
     assert reread.ended == {}
     assert working.supplied.obtained_records == []
+
+
+@dataclass
+class _Blocks:
+    """The person blocks: one person, whose pins reach ``ends``, and the slot's budget."""
+
+    pins: Sequence[object]
+    ends: dict[str, Memory]
+    budget_chars: int = 1600
+
+    @property
+    def store(self) -> Any:
+        async def read(person_id: str) -> object:
+            del person_id
+            return SimpleNamespace(standing_pins=self.pins, profile=Profile(name="Leo"))
+
+        return SimpleNamespace(read=read)
+
+    async def current_ends(self, memory_ids: Iterable[str]) -> dict[str, Memory]:
+        return {one: self.ends[one] for one in memory_ids if one in self.ends}
+
+
+async def test_a_pin_past_the_slots_budget_is_not_shown_and_still_reached() -> None:
+    """ADR-0360 §4:1, ADR-0338 §6:1-§6:2, review round 3: what the slot would now show.
+
+    Pins of 800 and 700 characters fit 1,600; the first superseded by one of 1,700, the
+    slot stops before it, so neither shows, and both are still reached, not unpinned.
+    """
+    grown = memory("m:grown", "x" * 1700)
+    kept = memory("m:kept", "y" * 700)
+    at = datetime(2026, 10, 1, tzinfo=UTC)
+    pins = [
+        SimpleNamespace(memory_id="m:first", pinned_at=at),
+        SimpleNamespace(memory_id="m:kept", pinned_at=at + timedelta(days=1)),
+    ]
+    path = _path(_Memory())
+    path._person_blocks = cast("Any", _Blocks(pins, {"m:first": grown, "m:kept": kept}))
+    state = SimpleNamespace(
+        person_block=object(),
+        trigger=SimpleNamespace(
+            channel=ChannelIdentity(channel_type="conversation", instance_id="chat"), target=None
+        ),
+    )
+
+    person = await path._person_now(
+        cast("Any", state), cast("Any", SimpleNamespace(supply=_SUPPLY))
+    )
+
+    assert person is not None
+    assert person.pinned == ()
+    assert person.reached == frozenset({"m:grown", "m:kept"})
+
+
+@dataclass
+class _StoryReads:
+    """The story reads: which stories were read whole, each held with no summary."""
+
+    read: list[str] = field(default_factory=list)
+
+    async def states(self, story_ids: Sequence[str]) -> dict[str, None]:
+        self.read.extend(story_ids)
+        return dict.fromkeys(story_ids)
+
+    async def members(self, story_ids: Sequence[str]) -> dict[str, int]:
+        return dict.fromkeys(story_ids, 1)
+
+
+async def test_a_matter_a_short_view_shows_is_read_whole_beside_the_briefing() -> None:
+    """ADR-0359 §2:2, review round 3: a bounded view's baseline is the store's whole."""
+    path = _path(_Memory())
+    reads = _StoryReads()
+    path._story_reads = cast("Any", reads)
+    view = SimpleNamespace(story_id="story:cited")
+    stories = SimpleNamespace(
+        stories=(SimpleNamespace(story_id="story:own", inherited=()),), cited=(view,)
+    )
+
+    reread = await path._shown_now(
+        cast("Any", SimpleNamespace(work=None, supplied=_Supplied())),
+        cast("Any", object()),
+        cast("Any", SimpleNamespace(supply=_SUPPLY)),
+        cast("Any", stories),
+    )
+
+    assert reads.read == ["story:cited"]
+    assert reread.matters == {"story:cited": None}
 
 
 async def test_an_ended_work_whose_episode_is_not_frozen_is_read_again() -> None:
