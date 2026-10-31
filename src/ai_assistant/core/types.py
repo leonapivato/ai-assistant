@@ -5659,8 +5659,9 @@ class ProjectedEvidence(BaseModel):
             round before which its digest was recorded, so the full view shows it in the
             order it happened (ADR-0358 §10:3): ``0`` for recall's digest, which the
             phases make before planning (ADR-0309 §3), and for a result's digest the
-            number of rounds recorded at or before it, since a result is read only by a
-            call a round proposed. The record keeps instants and no sequence across its
+            number of rounds recorded at or before it, and never before the first round
+            whatever the clock read, since a result is read only by a call a round
+            proposed. The record keeps instants and no sequence across its
             rounds and digests, so where a digest's instant ties a later round's, as
             under a stopped clock, it is placed after that round too. ``0`` in a peer
             view, which places nothing among rounds.

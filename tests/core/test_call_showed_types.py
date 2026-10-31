@@ -481,6 +481,30 @@ def test_a_fixed_clock_still_places_what_the_phases_order() -> None:
     assert all(one.position >= 1 for one in results)
 
 
+def test_a_clock_moved_back_never_places_a_results_digest_before_every_round() -> None:
+    """§10:3, ADR-0309 §3: a result's digest recorded after the clock moved back, at an
+    instant before every round's, still follows the first round, while recall's digest
+    and the first understanding version keep their place before it."""
+    record = _ordered(timedelta(seconds=2))
+    moved = EpisodeProcessingRecord.model_validate(
+        record.model_dump()
+        | {
+            "digests": (
+                _digest(None, timedelta(seconds=-5), "recalled").model_dump(),
+                _digest("R1", timedelta(seconds=-1), "moved back").model_dump(),
+            )
+        }
+    )
+    projection = project_episode(
+        _episode(moved), excerpt_chars=50, owner_records=True, full_view=True
+    )
+    assert [(one.text.text, one.position) for one in projection.evidence] == [
+        ("recalled", 0),
+        ("moved back", 1),
+    ]
+    assert projection.understood[0].position == 0
+
+
 def test_each_call_keeps_its_place_among_its_rounds_calls_recorded_or_not() -> None:
     """§10:3: a round proposing three calls whose middle entry failed to append still
     shows them in the order proposed."""

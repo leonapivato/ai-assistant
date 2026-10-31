@@ -822,10 +822,14 @@ def _projected_evidence(
 
 
 def _digest_position(digest: ActivationDigest, rounds: tuple[PlanningRound, ...]) -> int:
-    """Where a digest falls among the rounds, in their positions' numbering (§10:3)."""
-    if digest.result is None:
+    """Where a digest falls among the rounds, in their positions' numbering (§10:3).
+
+    A result's digest follows at least the first round, whatever the clock read, since
+    only a round's call reads a result (ADR-0309 §3); the clock places it past that.
+    """
+    if digest.result is None or not rounds:
         return 0
-    return sum(1 for one in rounds if one.recorded_at <= digest.recorded_at)
+    return max(1, sum(1 for one in rounds if one.recorded_at <= digest.recorded_at))
 
 
 # --- a revision of an open episode (ADR-0286 §3) -------------------------------
