@@ -207,6 +207,7 @@ if TYPE_CHECKING:
         MessageReceipt,
         OfferedTool,
         PermissionDecision,
+        PlanningExchange,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.story_links import Candidates
@@ -313,7 +314,7 @@ class _GatedCompleter(FakeToolCallingCompleter):
         queue = list(responses)
 
         def next_response(
-            _messages: Sequence[Message], _tools: Sequence[OfferedTool]
+            _exchange: PlanningExchange, _tools: Sequence[OfferedTool]
         ) -> RoundResponse:
             return queue.pop(0)
 
@@ -324,7 +325,7 @@ class _GatedCompleter(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
@@ -332,7 +333,7 @@ class _GatedCompleter(FakeToolCallingCompleter):
         if len(self.calls) + 1 == self._gated:
             self.entered.set()
             await self.gate.wait()
-        return await super().respond(messages, tools, model=model)
+        return await super().respond(exchange, tools, model=model)
 
 
 def _phases(  # noqa: PLR0913 — one knob per seam a case varies
@@ -661,9 +662,9 @@ async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
     assert [(one.label, one.kind) for one in record.labels] == [("R1", LabelKind.RESULT)]
     # The second round was shown the evidence under the result's label, never the
     # raw result.
-    shown = json.loads(completer.calls[1].messages[1].content)
+    shown = json.loads(completer.calls[1].exchange.briefing)
     assert shown["evidence"][0]["digest_of"] == "R1"
-    assert "Open daily" not in completer.calls[1].messages[1].content
+    assert "Open daily" not in completer.calls[1].exchange.briefing
     assert episode.outcome == "Let me look that up.\n\nIt opens at nine."
 
 
@@ -790,7 +791,7 @@ async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answe
     assert "2026-09-05" in record["text"]
     assert "2026-09-05" not in record["from"]
     # Planning saw evidence under the result's label, never the forecast itself.
-    shown = completer.calls[1].messages[1].content
+    shown = completer.calls[1].exchange.briefing
     assert json.loads(shown)["evidence"][0]["digest_of"] == "R1"
     assert "2026-09-05" not in shown
     # The pull marks the activation (§9:1), and the records it returned were held by
@@ -909,7 +910,7 @@ async def test_a_remember_records_a_candidate_through_the_assistants_own_records
     # Done: a second round, shown it done, and then the end.
     assert episode.processing_record is not None
     assert len(episode.processing_record.rounds) == 2
-    (call,) = json.loads(completer.calls[1].messages[1].content)["rounds"][0]["calls"]
+    (call,) = json.loads(completer.calls[1].exchange.briefing)["rounds"][0]["calls"]
     assert call["outcome"] == "done"
     assert _stages(episode)[-2:] == [
         (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
@@ -938,7 +939,7 @@ async def test_a_booking_that_needs_you_is_answered_cannot_be_done_yet() -> None
     # The second round was shown the call as needing the user. Until the glue hands
     # planning the request authorizing ruled on, it cannot be asked about (ADR-0321
     # §2:10).
-    shown = json.loads(completer.calls[1].messages[1].content)
+    shown = json.loads(completer.calls[1].exchange.briefing)
     (call,) = shown["rounds"][0]["calls"]
     assert call["outcome"].startswith("needs the user")
     # Nothing ran: no effect record for the booking, and the invoker was not reached.
@@ -1194,12 +1195,12 @@ class _TimesOut(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        del messages, tools, model
+        del exchange, tools, model
         msg = "the activation's deadline passed"
         raise ModelTimeoutError(msg)
 
@@ -1369,7 +1370,7 @@ async def test_a_found_episode_reaches_planning_after_recall_runs_again() -> Non
 
     # Planning was shown the episode by its records and the user's fact, and never the
     # fact a source reported (§3:1, §3:3).
-    request = completer.calls[0].messages[1].content
+    request = completer.calls[0].exchange.briefing
     # In band order: the user's fact is asserted, the episode observed.
     found_fact, found_episode = json.loads(request)["recalled"]
     assert found_episode["label"] == "E1"
@@ -1440,7 +1441,7 @@ async def test_a_failed_second_run_is_recorded_and_planning_goes_on() -> None:
         (ControllerStage.RECALL, ControllerRule.UNDERSTOOD_NOT_RECALLED),
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
     ]
-    assert json.loads(completer.calls[0].messages[1].content)["recalled"] == []
+    assert json.loads(completer.calls[0].exchange.briefing)["recalled"] == []
     assert _said(await _messages(harness, conversation))[-1] == (
         MessageAuthor.ASSISTANT,
         "I could not check.",
@@ -1469,7 +1470,7 @@ async def test_what_the_first_run_kept_is_passed_over_and_both_runs_reach_planni
     shown_to_understanding = " ".join(one.content for one in understanding.calls[0].messages)
     assert "Dr Rao" in shown_to_understanding
     assert "Booked it for Friday." not in shown_to_understanding
-    recalled = json.loads(completer.calls[0].messages[1].content)["recalled"]
+    recalled = json.loads(completer.calls[0].exchange.briefing)["recalled"]
     assert [one["label"] for one in recalled] == ["M1", "E1"]
     assert recalled[0]["fact"] == f"{_DENTIST} with Dr Rao"
 
@@ -1498,9 +1499,7 @@ async def test_both_runs_outside_records_go_into_one_digest_answering_the_meanin
     one digest answering the meaning, after the second run and before planning, which is
     shown its evidence under the record's own label and never the facts themselves.
     """
-    completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(text="Dr Rao, at three.", notes="the time moved")
-    )
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Dr Rao, at three."))
     digests = FakeModelProvider(reply=_RECALL_DIGESTED)
     harness, understanding = await _recalling_harness(
         completer, digests=digests, extra=(_RAO_CALLED,)
@@ -1550,7 +1549,7 @@ async def test_both_runs_outside_records_go_into_one_digest_answering_the_meanin
 
     # Planning is shown the evidence as outside content under that label, and neither
     # reported fact (§3:3, §4:13, §5:5).
-    request = completer.calls[0].messages[1].content
+    request = completer.calls[0].exchange.briefing
     (shown,) = json.loads(request)["evidence"]
     assert shown["digest_of"] == "the outside memories recall found"
     (item,) = shown["digest"]["evidence"]
@@ -1586,7 +1585,7 @@ async def test_a_failed_recall_digest_tells_planning_it_could_not_read_and_shows
     assert [(one.due, one.outcome) for one in digesting] == [
         (ControllerRule.RECALL_UNDIGESTED, StageOutcome.FAILED)
     ]
-    request = completer.calls[0].messages[1].content
+    request = completer.calls[0].exchange.briefing
     (shown,) = json.loads(request)["evidence"]
     assert shown["digest_of"] == "the outside memories recall found"
     assert shown["digest"].startswith("could not be read")
@@ -1888,7 +1887,7 @@ async def test_a_found_episode_with_marked_notes_counts_as_the_episode_windows_d
     label, as it counts an episode-window episode, and the round's notes are marked.
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "book", date="2026-10-12"),), notes="a note")
+        RoundResponse(calls=(_call("c1", "book", date="2026-10-12"),), text="a note")
     )
     harness = _harness(completer)
     await harness.memory.add(_episode())
@@ -1991,7 +1990,7 @@ async def test_planning_fetches_what_recall_found_once_for_every_round() -> None
     assert held is not None
     assert held.missing == ("activation:gone",)
     for call in completer.calls:
-        (shown,) = json.loads(call.messages[1].content)["recalled"]
+        (shown,) = json.loads(call.exchange.briefing)["recalled"]
         assert shown["label"] == "E1"
 
 
@@ -2147,7 +2146,7 @@ async def test_a_later_activation_sees_what_an_earlier_one_wrote_under_its_episo
     await harness.engine.write_message(conversation, message=again)
     await _all_settled(harness, conversation, 2)
 
-    shown = json.loads(completer.calls[1].messages[1].content)["place_window"]
+    shown = json.loads(completer.calls[1].exchange.briefing)["place_window"]
     assert [one["text"] for one in shown] == ["old", "Old reply.", "hi", "Hello!", "again"]
     old_item, old_reply, taken, wrote, _input = shown
     assert "episode" in old_item
@@ -2164,9 +2163,10 @@ async def test_planning_is_shown_an_earlier_exchange_once_with_its_notes() -> No
     The second message's planning is shown the first exchange as its two messages in
     the place window, under the first activation's episode label, and that episode in
     the episode window by its label and its notes, its texts said to be in the window.
+    The round's notes are its text (ADR-0356 §7:2), so they repeat the message's words.
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(text="Hello!", notes="they opened with a greeting"),
+        RoundResponse(text="Hello!"),
         RoundResponse(text="Again."),
     )
     harness = _harness(completer)
@@ -2178,7 +2178,7 @@ async def test_planning_is_shown_an_earlier_exchange_once_with_its_notes() -> No
     await harness.engine.write_message(conversation, message=again)
     await _all_settled(harness, conversation, 2)
 
-    rendered = completer.calls[1].messages[1].content
+    rendered = completer.calls[1].exchange.briefing
     sent = json.loads(rendered)
     taken, wrote, _input = sent["place_window"]
     assert (taken["text"], wrote["text"]) == ("hi", "Hello!")
@@ -2186,8 +2186,10 @@ async def test_planning_is_shown_an_earlier_exchange_once_with_its_notes() -> No
     assert taken["episode"] == wrote["episode"] == episode["label"]
     in_place = "shown in the place window under this label, not repeated here"
     assert (episode["input"], episode["response"]) == (in_place, in_place)
-    assert episode["rounds"] == [{"message": in_place, "notes": "they opened with a greeting"}]
-    assert rendered.count('"Hello!"') == 1
+    assert episode["rounds"] == [{"message": in_place, "notes": "Hello!"}]
+    # Once as the place window's message, and once as the round's notes, which are its
+    # text (ADR-0356 §7:2): the episode window never repeats the message itself.
+    assert rendered.count('"Hello!"') == 2
 
 
 async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() -> None:
@@ -2363,7 +2365,7 @@ async def test_an_activation_in_a_story_is_shown_its_story_and_labels_what_it_sa
     linked = StoryMember(kind=StoryMemberKind.ACTIVATION, id=record.activation_id)
     assert [one.story_id for one in await stories.stories_of(linked)] == [trip]
 
-    request = json.loads(completer.calls[0].messages[1].content)
+    request = json.loads(completer.calls[0].exchange.briefing)
     (shown,) = request["stories"]
     labels = {one.label: (one.kind, one.id) for one in record.labels}
     assert labels[shown["label"]] == (LabelKind.STORY, trip)
@@ -2418,7 +2420,7 @@ async def test_a_marked_story_summary_reaches_the_first_ruling() -> None:
     for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
         assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
 
-    request = json.loads(completer.calls[0].messages[1].content)
+    request = json.loads(completer.calls[0].exchange.briefing)
     assert request["stories"][0]["summary"] == ["A reply came."]
     assert working.fetched_outside
     decided = working.latest.authorization
@@ -2432,7 +2434,7 @@ async def test_an_outside_episode_of_an_inherited_story_is_outside_content_read(
     Its provenance carries no mark and it holds no digest; only its origin says it rests
     on outside content, and the working set counts it before the first round.
     """
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="ok", notes="noted"))
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="ok"))
     harness = _harness(completer)
     await harness.memory.add(_episode())
     await harness.memory.add(_past_episode("activation:report", parties=UNIDENTIFIED_WORDS))
@@ -2457,7 +2459,7 @@ async def test_an_outside_episode_of_an_inherited_story_is_outside_content_read(
 
     assert (await planning.run(given)).outcome is StageOutcome.DONE
 
-    (shown,) = json.loads(completer.calls[0].messages[1].content)["stories"]
+    (shown,) = json.loads(completer.calls[0].exchange.briefing)["stories"]
     (parent,) = shown["part_of"]
     assert parent["latest_episodes"][0]["input"] == "an outside report, not shown"
     assert working.fetched_outside
@@ -2489,7 +2491,7 @@ async def test_the_story_views_are_read_again_for_each_round() -> None:
     await stories.append_note(trip, "Written meanwhile.", author=StoryNoteAuthor.OWNER)
     assert (await stages[ControllerStage.PLANNING].run(given)).outcome is StageOutcome.DONE
 
-    first, second = (json.loads(one.messages[1].content)["stories"][0] for one in completer.calls)
+    first, second = (json.loads(one.exchange.briefing)["stories"][0] for one in completer.calls)
     assert first["notes_since_tidied"] == "none"
     assert [one["text"] for one in second["notes_since_tidied"]] == ["Written meanwhile."]
 
@@ -2571,7 +2573,7 @@ def _look_and_remember() -> FakeToolCallingCompleter:
                 _call("c1", "lookup", place="Riverside"),
                 _remember("c2", "The user prefers the morning."),
             ),
-            notes="checking the weather",
+            text="checking the weather",
         )
     )
 
@@ -2614,7 +2616,7 @@ async def test_a_story_note_counts_as_outside_content_by_its_mark(
         completer, memory=FakeMemoryStore(now=lambda: AT), stories=stories
     )
 
-    shown = json.loads(completer.calls[0].messages[1].content)["stories"][0]
+    shown = json.loads(completer.calls[0].exchange.briefing)["stories"][0]
     if note is not None:
         # Shown under its label, which authorizing reads the mark of.
         (shown_note,) = shown["notes_since_tidied"]
@@ -2763,7 +2765,7 @@ async def test_a_story_is_started_and_then_noted_end_to_end() -> None:
         ("Waiting on the campground's reply.", StoryNoteAuthor.PLANNING, activation, False),
     ]
     # The second round was shown the new story under the label it then named.
-    (shown,) = json.loads(completer.calls[1].messages[1].content)["stories"]
+    (shown,) = json.loads(completer.calls[1].exchange.briefing)["stories"]
     assert shown["label"] == "S1"
     assert [one["text"] for one in shown["notes_since_tidied"]] == ["A camping trip to Riverside."]
     assert (LabelKind.STORY, story) in {(one.kind, one.id) for one in record.labels}
@@ -3240,7 +3242,7 @@ async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_diges
 
     # The second round: the user's fact under its own label, the outside one only as
     # evidence, never its text (ADR-0307 §9:2).
-    second = completer.calls[1].messages[1].content
+    second = completer.calls[1].exchange.briefing
     (search,) = json.loads(second)["rounds"][0]["calls"]
     assert search["result"]["label"] == "R1"
     value = search["result"]["value"]
@@ -3254,7 +3256,7 @@ async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_diges
 
     # The third: the follow-up's result is the result it named, under the same label,
     # and its digest is told apart by its question.
-    third = json.loads(completer.calls[2].messages[1].content)
+    third = json.loads(completer.calls[2].exchange.briefing)
     (follow_up,) = third["rounds"][1]["calls"]
     assert follow_up["result"] == {
         "label": "R1",
@@ -3285,7 +3287,7 @@ async def test_a_follow_up_naming_a_result_with_nothing_held_comes_back_not_done
     await _say(harness, conversation, "when is the dentist?")
     episode = await _settled(harness, conversation, seeded=frozenset({"said"}))
 
-    third = json.loads(completer.calls[2].messages[1].content)
+    third = json.loads(completer.calls[2].exchange.briefing)
     (follow_up,) = third["rounds"][1]["calls"]
     assert follow_up["outcome"].startswith("not done")
     assert "nothing is held" in follow_up["outcome"]
@@ -3347,7 +3349,7 @@ async def test_a_search_applies_the_audience_predicate_at_the_search_and_at_the_
     assert [record.id for record in working.searched[one.result_id]] == ["said"]
     (fetched,) = working.search_fetches
     assert fetched.missing == ("later",)
-    request = completer.calls[1].messages[1].content
+    request = completer.calls[1].exchange.briefing
     assert "reminder" not in request
 
 
@@ -3362,7 +3364,7 @@ async def _page_read(
     stories = FakeStoryStore(now=lambda: AT)
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(calls=(_call("c1", "read_story", story="S1"),)),
-        RoundResponse(text="Saturday.", notes="the venue answered"),
+        RoundResponse(text="Saturday."),
     )
     harness = _harness(completer)
     await harness.memory.add(_episode())
@@ -3416,7 +3418,7 @@ async def test_a_storys_full_view_is_read_and_its_marks_counted(outside: bool) -
 
     for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
         assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
-    request = json.loads(completer.calls[1].messages[1].content)
+    request = json.loads(completer.calls[1].exchange.briefing)
     (read,) = request["rounds"][0]["calls"]
     assert read["result"]["label"] == "R1"
     shown = read["result"]["value"]
@@ -3441,10 +3443,10 @@ async def test_a_storys_full_view_follows_the_owner_only_placement() -> None:
     assert view.notes_withheld
     assert working.notes == {}
     assert (await stages[ControllerStage.PLANNING].run(given)).outcome is StageOutcome.DONE
-    request = json.loads(completer.calls[1].messages[1].content)
+    request = json.loads(completer.calls[1].exchange.briefing)
     shown = request["rounds"][0]["calls"][0]["result"]["value"]
     assert "notes_since_tidied" not in shown
-    assert "The venue says Saturday." not in completer.calls[1].messages[1].content
+    assert "The venue says Saturday." not in completer.calls[1].exchange.briefing
 
 
 async def test_a_story_read_naming_a_story_never_shown_is_refused_whole() -> None:
@@ -3459,7 +3461,7 @@ async def test_a_story_read_naming_a_story_never_shown_is_refused_whole() -> Non
     await _say(harness, conversation, "what about the trip?")
     await _settled(harness, conversation)
 
-    request = json.loads(completer.calls[1].messages[1].content)
+    request = json.loads(completer.calls[1].exchange.briefing)
     (read,) = request["rounds"][0]["calls"]
     assert read["outcome"].startswith("refused")
     assert "S9" in read["outcome"]
@@ -3584,9 +3586,7 @@ async def _wrote_nothing(harness: Harness, episode: EpisodicMemory) -> None:
 async def test_an_event_runs_the_phases_in_a_place_that_takes_no_message() -> None:
     """§4:3: one activation, its place takes no message, and its text is kept, not written."""
     text = "The thermostat is in eco mode; nothing needs doing."
-    completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(text=text, notes="Eco mode since 18:00.")
-    )
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text=text))
     harness = _harness(completer)
 
     result, episode = await _event(harness)
@@ -3603,16 +3603,15 @@ async def test_an_event_runs_the_phases_in_a_place_that_takes_no_message() -> No
     ]
     # Planning is shown that the place takes no message (ADR-0307 §3:8).
     (asked,) = completer.calls
-    _, request = asked.messages
-    place = json.loads(request.content)["place"]
+    place = json.loads(asked.exchange.briefing)["place"]
     assert place["takes_message"] is False
     assert place["description"] == EVENT_DESCRIPTION
     assert place["input"].startswith("an outside report")
-    # Its text is kept with the episode, its notes beside it, and written nowhere.
+    # Its text is kept with the episode, as its notes too, and written nowhere.
     record = episode.processing_record
     assert record is not None
     (planning_round,) = record.rounds
-    assert (planning_round.text, planning_round.notes) == (text, "Eco mode since 18:00.")
+    assert (planning_round.text, planning_round.notes) == (text, text)
     assert planning_round.notes_marked
     await _wrote_nothing(harness, episode)
     assert _classified(episode) == (ProcessingStatus.COMPLETED, ProcessingReason.RETURNED)
@@ -3648,7 +3647,7 @@ async def test_an_event_remembers_starts_a_story_and_notes_it() -> None:
     record = episode.processing_record
     assert record is not None
     activation = record.activation_id
-    shown = json.loads(completer.calls[1].messages[1].content)["rounds"][0]["calls"]
+    shown = json.loads(completer.calls[1].exchange.briefing)["rounds"][0]["calls"]
     assert [(one["capability"], one["outcome"].split(":")[0]) for one in shown] == [
         ("remember", "done"),
         ("start_story", "done"),
@@ -3703,12 +3702,12 @@ class _Fails(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        del messages, tools, model
+        del exchange, tools, model
         msg = "the provider failed"
         raise ModelError(msg)
 

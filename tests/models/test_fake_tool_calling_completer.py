@@ -12,10 +12,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
-from tool_calling_completer_contract import SeenTool, ToolCallingCompleterContract, Turn
+from tool_calling_completer_contract import (
+    SeenTool,
+    ToolCallingCompleterContract,
+    Turn,
+    exchange_turns,
+)
 
 from ai_assistant.core.errors import ModelError
-from ai_assistant.core.types import Message, OfferedTool, Role, RoundResponse
+from ai_assistant.core.types import OfferedTool, PlanningExchange, RoundResponse
 from ai_assistant.testing import DEFAULT_ROUND_TEXT, FakeToolCallingCompleter
 
 if TYPE_CHECKING:
@@ -38,10 +43,7 @@ class _FakeWorld:
 
     @property
     def observed(self) -> tuple[tuple[Turn, ...], ...]:
-        return tuple(
-            tuple((message.role, message.content) for message in call.messages)
-            for call in self.subject.calls
-        )
+        return tuple(exchange_turns(call.exchange) for call in self.subject.calls)
 
     @property
     def offered(self) -> tuple[tuple[SeenTool, ...], ...]:
@@ -65,8 +67,8 @@ class TestFakeToolCallingCompleterContract(ToolCallingCompleterContract):
         return _FakeWorld(subject=FakeToolCallingCompleter(response))
 
 
-def _hi() -> list[Message]:
-    return [Message(role=Role.USER, content="hi")]
+def _hi() -> PlanningExchange:
+    return PlanningExchange(instruction="Plan.", briefing="hi")
 
 
 class TestTheFakeBeyondTheContract:
@@ -87,14 +89,15 @@ class TestTheFakeBeyondTheContract:
 
     async def test_a_refused_call_consumes_no_scripted_round(self) -> None:
         fake = FakeToolCallingCompleter.scripted(RoundResponse(text="the only round"))
+        tool = OfferedTool(name="t", description="d", parameters={"type": "object"})
         with pytest.raises(ModelError):
-            await fake.respond([], [])
+            await fake.respond(_hi(), [tool, tool])
         assert (await fake.respond(_hi(), [])).text == "the only round"
         assert fake.call_count == 1
 
     async def test_a_callable_sees_the_request_and_its_failure_is_a_model_error(self) -> None:
-        def answer(messages: object, tools: object) -> RoundResponse:
-            del messages, tools
+        def answer(exchange: object, tools: object) -> RoundResponse:
+            del exchange, tools
             msg = "boom"
             raise RuntimeError(msg)
 
@@ -107,3 +110,4 @@ class TestTheFakeBeyondTheContract:
         await fake.respond(_hi(), [tool], model="test:model")
         assert fake.last_call.model == "test:model"
         assert fake.last_call.tools == (tool,)
+        assert fake.last_call.exchange == _hi()

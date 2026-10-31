@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
     from test_engine import Harness
 
-    from ai_assistant.core.types import EpisodicMemory, Message, OfferedTool
+    from ai_assistant.core.types import EpisodicMemory, Message, OfferedTool, PlanningExchange
     from ai_assistant.orchestration.chat import ChatWriter
 
 #: Words a failure's message carries, which no log line may.
@@ -67,12 +67,12 @@ class _Raising(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        del messages, tools, model
+        del exchange, tools, model
         raise self._error
 
 

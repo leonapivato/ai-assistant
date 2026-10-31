@@ -10,13 +10,15 @@ hub (§6:1), which is this one: the hub-side asker of ADR-0337 §8:5 is to live 
 
 **A planning round's follow-up** goes through :func:`follow_up_round`, the follow-up's
 sibling of the completer's seam for the owner's replay tool (ADR-0335 §4:8), which
-ADR-0337 §7:3 sends it through. Its request is the round's own, built exactly as
-:class:`~ai_assistant.models.tool_calling.PydanticAIToolCallingCompleter` builds a round
-with the record on, summarised thinking included, so the offered tools stay in it; then
-the followed response whole, its thinking and the thinking's signatures included, so
-that the provider accepts the request (§6:6); then one request closing each call the
-response proposed, the reserved notes tool's included, with a result saying it was not
-run because the request is for review only (§6:4), and holding the question last. It is
+ADR-0337 §7:3 sends it through. Its request is the round's own whole exchange, built
+exactly as :class:`~ai_assistant.models.tool_calling.PydanticAIToolCallingCompleter`
+builds a round with the record on, summarised thinking included, so the offered tools
+stay in it (ADR-0356 §13); then the followed response whole, its thinking and the
+thinking's signatures included, so that the provider accepts the request (§6:6); then
+one request closing each call the response proposed with a result saying it was not run
+because the request is for review only (§6:4), and holding the question last. Under a
+candidate's instruction, earlier responses go back without their continuations
+(ADR-0356 §13). It is
 sent once to the one model it is named, which may not fall back to another, and it
 returns the answer as text (§6:5): no call the answer proposes is run or returned. It
 writes no entry, binds no activation and is on no Protocol, and no stage calls it
@@ -79,6 +81,7 @@ from ai_assistant.core.types import (
     DiagnosticSource,
     Message,
     OfferedTool,
+    PlanningExchange,
     Role,
     fault_class_of,
 )
@@ -86,8 +89,11 @@ from ai_assistant.models.provider import PydanticAIProvider, _classify
 from ai_assistant.models.tool_calling import (
     DEFAULT_THINKING,
     _falls_back,
-    _round_request,
+    _round_parameters,
     _settings,
+    candidate_exchange,
+    exchange_history,
+    model_id,
 )
 
 if TYPE_CHECKING:
@@ -117,39 +123,41 @@ FOLLOW_UP_PROMPT: Final = PromptDeclaration(name="follow_up", package="ai_assist
 NOT_RUN: Final = "Not run: this request is for review only."
 
 
-async def follow_up_round(  # noqa: PLR0913 — the round's request, its response and the question; keyword-only, the model and the thinking
-    messages: Sequence[Message],
+async def follow_up_round(  # noqa: PLR0913 — the round's exchange, its response and the question; keyword-only, the model, the thinking and a candidate's instruction
+    exchange: PlanningExchange,
     tools: Sequence[OfferedTool],
     response: Mapping[str, object],
     question: str,
     *,
     model: models.Model | str,
     thinking: ThinkingLevel = DEFAULT_THINKING,
+    instruction: str | None = None,
 ) -> str:
     """Ask the follow-up of a planning round that has completed (ADR-0337 §6:3-§6:6).
 
     Args:
-        messages: The followed round's request as it was sent, oldest first, its system
-            message the one it was sent with.
-        tools: The capabilities it offered, as planning's given entry records them: the
-            reserved notes tool is added here and may not be among them.
+        exchange: The followed round's exchange as it was sent, oldest first.
+        tools: The capabilities it offered, as planning's given entry records them.
         response: The followed round's whole response, as pydantic-ai serialises it to
             JSON: the form planning's returned entry keeps it in.
         question: The ``follow_up`` template, rendered.
         model: The one model the follow-up goes to, which may not be a fallback model,
             wrapped or not.
         thinking: The thinking the request asks for, as the completer's own.
+        instruction: A candidate's instruction, sent in place of the exchange's own;
+            where it differs, earlier responses go back without their continuations.
 
     Returns:
         The answer's text, its text parts joined; empty where it wrote none.
 
     Raises:
         ModelError: The bare class, before any model is contacted, where the round's
-            request would be refused, ``response`` is not one model response, the
-            question is blank, or ``model`` is a fallback model. A failure sending the
-            request is narrowed as a round's is.
+            tools would be refused, ``instruction`` is blank, ``response`` is not one
+            model response, the question is blank, or ``model`` is a fallback model. A
+            failure sending the request is narrowed as a round's is.
     """
-    history, parameters = _round_request(messages, tools, caller="follow_up_round()")
+    parameters = _round_parameters(tools, caller="follow_up_round()")
+    sent = candidate_exchange(exchange, instruction, caller="follow_up_round()")
     followed = _followed(response)
     if not question.strip():
         msg = "a follow-up asks a question"
@@ -160,12 +168,17 @@ async def follow_up_round(  # noqa: PLR0913 — the round's request, its respons
         if isinstance(part, ToolCallPart)
     ]
     closing.append(UserPromptPart(content=question))
-    history = [*history, followed, ModelRequest(parts=closing)]
     try:
         chosen = infer_model(model)
     except Exception as exc:
         # As a round's: resolving a string model may fail, and is classified.
         raise _classify(exc) from exc
+    # The follow-up's request ends on its question, so no report of it is the newest.
+    history = [
+        *exchange_history(sent, model_id(chosen), cache_point=False),
+        followed,
+        ModelRequest(parts=closing),
+    ]
     if _falls_back(chosen):
         msg = "a follow-up goes to the one model it names, which a fallback model may not be"
         raise ModelError(msg)
@@ -715,13 +728,14 @@ class FollowUpAsker:
         """The follow-up's one request, to the route's one model (§6:3-§6:6, §8:8)."""
         given = call.given.model_dump(mode="json")["body"]
         returned = call.returned.model_dump(mode="json")["body"]
-        messages = [Message.model_validate(one) for one in given["messages"]]
         once = _Once(await self._model(call.model))
         async with asyncio.timeout(self._timeout) as deadline:
             if call.given.source is DiagnosticSource.PLANNING:
+                # ADR-0356 §13:6: planning's given entry records the work's exchange.
+                exchange = PlanningExchange.model_validate(given["exchange"])
                 tools = [OfferedTool.model_validate(one) for one in given["tools"]]
                 answer = await follow_up_round(
-                    messages,
+                    exchange,
                     tools,
                     returned["response"],
                     self._question,
@@ -729,6 +743,7 @@ class FollowUpAsker:
                     thinking=self._thinking,
                 )
             else:
+                messages = [Message.model_validate(one) for one in given["messages"]]
                 reply = await PydanticAIProvider(once).complete(
                     [
                         *messages,

@@ -26,11 +26,14 @@ from ai_assistant.core.types import (
     ChatDevice,
     DeviceAccess,
     EpisodicMemory,
+    Message,
     MessageAuthor,
     NewMessage,
+    PlanningExchange,
     ProcessingStatus,
     RecordedChannelTrigger,
     RecordedTextInput,
+    Role,
     RoundResponse,
     TranscriptMessage,
     UserMessage,
@@ -55,7 +58,7 @@ if TYPE_CHECKING:
 
     import pytest
 
-    from ai_assistant.core.types import Message, OfferedTool
+    from ai_assistant.core.types import OfferedTool
     from ai_assistant.orchestration.understanding import TranscriptWindow
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
@@ -101,13 +104,18 @@ class _Composing(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        await super().respond(messages, tools, model=model)
-        answer = await self.composer.complete(messages)
+        await super().respond(exchange, tools, model=model)
+        answer = await self.composer.complete(
+            (
+                Message(role=Role.SYSTEM, content=exchange.instruction),
+                Message(role=Role.USER, content=exchange.briefing),
+            )
+        )
         return RoundResponse(text=answer.content)
 
 

@@ -145,7 +145,9 @@ async def _drive(  # noqa: PLR0913 — one keyword per axis a scenario varies on
         # digest, never raw, so the first round was not shown the planted address; a
         # later round is shown the call the first proposed, which is planning's own.
         (first, *_) = world.planner.calls
-        assert not any(ATTACKER in message.content for message in first.messages)
+        assert not any(
+            ATTACKER in text for text in (first.exchange.instruction, first.exchange.briefing)
+        )
     return observed
 
 

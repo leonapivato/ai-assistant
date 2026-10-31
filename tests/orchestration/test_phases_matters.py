@@ -82,6 +82,7 @@ if TYPE_CHECKING:
         EpisodicMemory,
         Message,
         OfferedTool,
+        PlanningExchange,
     )
 
 #: What an input lists the words of the work it continues after.
@@ -190,13 +191,13 @@ class _Planner(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
         del model
-        request: dict[str, Any] = json.loads(messages[-1].content)
+        request: dict[str, Any] = json.loads(exchange.briefing)
         understanding = request.get("understanding")
         key = str(understanding["meaning"]) if isinstance(understanding, dict) else ""
         key = next((one for one in self._within if one in key), key)
@@ -229,10 +230,10 @@ class _Counting(Gated):
         self.calls_waiting = 0
 
     async def respond(
-        self, messages: Any, tools: Any, *, model: str | None = None
+        self, exchange: Any, tools: Any, *, model: str | None = None
     ) -> RoundResponse:
         self.calls_waiting += 1
-        return await super().respond(messages, tools, model=model)
+        return await super().respond(exchange, tools, model=model)
 
 
 def _routed() -> FakeModelProvider:
@@ -626,6 +627,15 @@ async def test_an_activation_that_has_acted_waits_for_nothing_on_another_place()
     await _frozen(harness, 2)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "ADR-0356 P1's interim (the coordinator's ruling A): a round's text is its notes "
+        "and still its message, so A cannot keep notes without having written, and work "
+        "that wrote is waited on, not absorbed. P3 makes the text notes alone (§7:3), and "
+        "this case passes again; strict, so P3 must drop this mark."
+    ),
+)
 async def test_the_absorbers_planning_is_shown_what_it_took_over_read_from_the_source() -> None:
     """§7:10, §1:5's case: A's findings reach C through B, read fresh from A's own episode."""
     understanding, planner = _Understanding(), _Planner()
@@ -633,7 +643,7 @@ async def test_the_absorbers_planning_is_shown_what_it_took_over_read_from_the_s
         "find a hotel",
         RoundResponse(
             calls=(_call("c1", "search_memory", query="hotels", looking_for="past stays"),),
-            notes="The Grand had a view last time.",
+            text="The Grand had a view last time.",
         ),
     )
     planner.hold("find a hotel", from_round=2)
@@ -1199,7 +1209,7 @@ async def test_a_look_up_shows_what_running_work_has_found_so_far() -> None:
         older_text,
         RoundResponse(
             calls=(_call("c1", "search_memory", query="hotels", looking_for="past stays"),),
-            notes="The Grand is 180 a night.",
+            text="The Grand is 180 a night.",
         ),
     )
     planner.hold(older_text, from_round=2)

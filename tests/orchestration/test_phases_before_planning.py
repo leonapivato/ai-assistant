@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         Message,
         OfferedTool,
+        PlanningExchange,
         RoundResponse,
         StoryMember,
     )
@@ -166,13 +167,13 @@ class _OrderedCompleter(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
         self._order.seen.append("plan")
-        return await super().respond(messages, tools, model=model)
+        return await super().respond(exchange, tools, model=model)
 
 
 async def test_a_turn_records_version_one_understood_before_it_was_planned() -> None:

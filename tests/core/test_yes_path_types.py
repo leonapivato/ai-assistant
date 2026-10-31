@@ -280,14 +280,10 @@ def test_no_model_is_left_incomplete_by_the_asked_calls_forward_reference() -> N
 # --- the naming (§2:3) ------------------------------------------------------------------
 
 
-def test_a_response_names_each_call_its_message_asks_about_once() -> None:
-    """§2:3: the naming is a part of the response, generic, each name once."""
-    assert RoundResponse().asks == ()
-    assert RoundResponse(text="May I?", asks=("R2", "call:7")).asks == ("R2", "call:7")
-    with pytest.raises(ValidationError, match="once"):
-        RoundResponse(asks=("R1", "R1"))
-    with pytest.raises(ValidationError):
-        RoundResponse(asks=("  ",))
+def test_a_response_no_longer_names_the_calls_its_message_asks_about() -> None:
+    """ADR-0356 §7:5 replaces §2:3's naming: no part of a response carries it."""
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        RoundResponse.model_validate({"text": "May I?", "asks": ["R2"]})
 
 
 # --- the answer pointer (§3:1) ----------------------------------------------------------

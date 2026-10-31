@@ -126,7 +126,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.protocols import ActionPolicy
-    from ai_assistant.core.types import Message, OfferedTool
+    from ai_assistant.core.types import OfferedTool, PlanningExchange
 
 #: The capability the obeying planner proposes, offered as this module's doc says.
 SEND: Final = "send_email"
@@ -168,7 +168,7 @@ class ObeyingPlanner(FakeToolCallingCompleter):
         self.to = to
         proposed = [False]
 
-        def respond(_messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
+        def respond(_exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
             if proposed[0]:
                 return RoundResponse(text=AFTER)
             proposed[0] = True
@@ -206,8 +206,8 @@ class RememberingPlanner(FakeToolCallingCompleter):
         self.statement = statement
         proposed = count(1)
 
-        def respond(messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
-            if shown_rounds(messages):
+        def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
+            if shown_rounds(exchange):
                 return RoundResponse(text=AFTER)
             return RoundResponse(
                 calls=(
@@ -226,19 +226,19 @@ class RememberingPlanner(FakeToolCallingCompleter):
         super().__init__(response=respond)
 
 
-def shown_rounds(messages: Sequence[Message]) -> list[dict[str, object]]:
+def shown_rounds(exchange: PlanningExchange) -> list[dict[str, object]]:
     """The earlier rounds of its activation one planning call was shown.
 
-    Planning's last message is the round's JSON input, whose ``rounds`` holds each
-    earlier round with its calls and their outcomes (ADR-0307 §2:3).
+    Planning's briefing is the round's JSON input, whose ``rounds`` holds each earlier
+    round with its calls and their outcomes (ADR-0307 §2:3).
 
     Args:
-        messages: One planning call's messages.
+        exchange: One planning call's exchange.
 
     Returns:
         The rounds, empty for an activation's first round.
     """
-    shown = json.loads(messages[-1].content)
+    shown = json.loads(exchange.briefing)
     rounds: list[dict[str, object]] = shown["rounds"]
     return rounds
 

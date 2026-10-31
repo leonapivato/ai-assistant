@@ -77,6 +77,13 @@ def _round(activation_id: str, user: str, ms: int) -> list[DiagnosticEntry]:
             DiagnosticKind.GIVEN,
             ms,
             {
+                # ADR-0356 §13:6: planning's given entry records the exchange, beside the
+                # same request as its two messages.
+                "exchange": {
+                    "instruction": "Planning's instruction.",
+                    "briefing": user,
+                    "steps": [],
+                },
                 "messages": _messages("Planning's instruction.", user),
                 "tools": [],
                 "prompt": _prompt("planning"),

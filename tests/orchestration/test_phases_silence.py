@@ -72,10 +72,10 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         EpisodicMemory,
-        Message,
         MessageReceipt,
         NewMessage,
         OfferedTool,
+        PlanningExchange,
     )
     from ai_assistant.orchestration.phase_path import PhasePass
 
@@ -208,12 +208,12 @@ class _ThenFails(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        del messages, tools, model
+        del exchange, tools, model
         first, self._first = self._first, None
         if first is None:
             raise self._error

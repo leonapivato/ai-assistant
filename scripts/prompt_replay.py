@@ -131,6 +131,7 @@ from ai_assistant.core.reply_shapes import read_reply, reply_shape_version
 from ai_assistant.core.types import (
     Message,
     OfferedTool,
+    PlanningExchange,
     ProposedActivationUnderstanding,
     ReplyFailure,
     Role,
@@ -144,7 +145,6 @@ from ai_assistant.models import (
     ensure_vendor_available,
 )
 from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT, follow_up_round
-from ai_assistant.models.tool_calling import ROUND_TOOL
 from ai_assistant.orchestration.digesting import DigestReply
 from ai_assistant.orchestration.matters_pass import MattersPassReply
 from ai_assistant.orchestration.observer.prompts import PERSON_FLAG
@@ -1355,7 +1355,7 @@ class ModelCaller:
         once = self._once()
         async with asyncio.timeout(self._timeout):
             return await PydanticAIToolCallingCompleter(once).replay_round(
-                messages, tools, model=once
+                _briefing_only(messages), tools, model=once
             )
 
     async def follow_up(self, messages: Sequence[Message], reply: str, question: str) -> str:
@@ -1378,7 +1378,25 @@ class ModelCaller:
         """Ask a planning round's follow-up once, to the run's model alone (§7:3)."""
         once = self._once()
         async with asyncio.timeout(self._timeout):
-            return await follow_up_round(messages, tools, response, question, model=once)
+            return await follow_up_round(
+                _briefing_only(messages), tools, response, question, model=once
+            )
+
+
+def _briefing_only(messages: Sequence[Message]) -> PlanningExchange:
+    """A recorded planning request's ``[system, user]`` messages as its exchange.
+
+    The seams send a round's exchange (ADR-0356 §13); a request recorded as two messages
+    is the exchange of its instruction and its briefing alone.
+
+    Raises:
+        ModelError: If the request is not one system message and one user message.
+    """
+    roles = [one.role for one in messages]
+    if roles != [Role.SYSTEM, Role.USER]:
+        msg = "a planning round's recorded request is one system and one user message"
+        raise ModelError(msg)
+    return PlanningExchange(instruction=messages[0].content, briefing=messages[1].content)
 
 
 # --- the follow-up question (ADR-0337 §6, §7) -------------------------------------------------
@@ -2372,7 +2390,7 @@ def _no_label(reply: Reply, params: Mapping[str, object]) -> Judgement:
     letters = cast("list[str]", params["labels"])
     pattern = re.compile(r"\b(?:" + "|".join(sorted(letters)) + r")[0-9]+\b")
     if reply.round is not None:
-        texts = [("message", reply.round.text), ("notes", reply.round.notes or "")]
+        texts = [("message", reply.round.text)]
         held = [(name, text) for name, text in texts if name in fields]
     elif reply.reading is not None:
         held = list(_strings_under(reply.reading, fields))
@@ -2384,15 +2402,17 @@ def _no_label(reply: Reply, params: Mapping[str, object]) -> Judgement:
     return None
 
 
-def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:
-    """The round writes a message and names every call it needs a yes for in ``asks``."""
+def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
+    """The round writes a message.
+
+    It also checked that the round named each call needing a yes in its ``asks``; a
+    response names none now (ADR-0356 §7:5), and P3 rewrites or retires the case
+    (§11:3).
+    """
     if reply.round is None:
         return "the response reads as no round"
     if not reply.round.text.strip():
         return "the round writes no message"
-    missing = [one for one in cast("list[str]", params["calls"]) if one not in reply.round.asks]
-    if missing:
-        return f"the round's asks leave out {len(missing)} of the calls that need a yes"
     return None
 
 
@@ -3066,8 +3086,6 @@ def _case_tools(held: object) -> tuple[OfferedTool, ...]:
     names = [one.name for one in tools]
     if len(set(names)) != len(names):
         raise _CaseDefectError("input.tools names one tool twice")
-    if ROUND_TOOL in names:
-        raise _CaseDefectError(f"input.tools offers {ROUND_TOOL}, which the completer adds itself")
     return tools
 
 

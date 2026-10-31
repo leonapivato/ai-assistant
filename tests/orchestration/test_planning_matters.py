@@ -137,7 +137,7 @@ async def test_an_offer_is_shown_under_the_offering_activations_label() -> None:
 
     planned = await stage.plan(_inputs(**_matters(offers=(offer,))))
 
-    (shown,) = json.loads(completer.last_call.messages[1].content)["offers"]
+    (shown,) = json.loads(completer.last_call.exchange.briefing)["offers"]
     assert shown["offer"].startswith("E")
     assert (shown["input"], shown["understood_as"]) == ("only two bedrooms", "Only two beds.")
     assert {"offers", "running_work"} <= _flags(completer)
@@ -149,7 +149,7 @@ async def test_an_answer_naming_the_offers_label_maps_to_its_episode() -> None:
     offer = OfferShown(activation_id=_B, input="only two bedrooms", meaning="Only two beds.")
     first, completer, _ = _stage(RoundResponse(text=""))
     await first.plan(_inputs(**_matters(offers=(offer,))))
-    label = json.loads(completer.last_call.messages[1].content)["offers"][0]["offer"]
+    label = json.loads(completer.last_call.exchange.briefing)["offers"][0]["offer"]
     answering, _, _ = _stage(
         RoundResponse(
             calls=(
@@ -179,7 +179,7 @@ async def test_a_waiting_round_is_shown_what_it_waits_on_and_why_it_was_declined
 
     await stage.plan(_inputs(**_matters(waiting=(waited,), declined=((_A, "already booked"),))))
 
-    (shown,) = json.loads(completer.last_call.messages[1].content)["waiting_on"]
+    (shown,) = json.loads(completer.last_call.exchange.briefing)["waiting_on"]
     assert shown["place"] == "telegram:ref/42"
     assert (shown["input"], shown["has_acted"]) == ("book Saturday", True)
     assert shown["declined_this_input"] == "already booked"
@@ -188,7 +188,7 @@ async def test_a_waiting_round_is_shown_what_it_waits_on_and_why_it_was_declined
 
 async def test_earlier_work_is_the_peer_view_read_as_provisional_with_its_marks() -> None:
     """§6:9-§6:13, §7:10: input, meaning as provisional, notes with marks, what it did."""
-    stage, completer, _ = _stage(RoundResponse(text="", notes="kept"), prompt=FLAG_ECHO)
+    stage, completer, _ = _stage(RoundResponse(text="kept"), prompt=FLAG_ECHO)
     view = _view(
         notes=(PeerNotes(notes=_text("Three in Leith.")), PeerNotes(notes=_text("x"), marked=True)),
         did=(
@@ -202,7 +202,7 @@ async def test_earlier_work_is_the_peer_view_read_as_provisional_with_its_marks(
         _inputs(earlier_work=(PeerShown(activation_id=_A, view=view, ended=True),))
     )
 
-    (shown,) = json.loads(completer.last_call.messages[1].content)["earlier_work"]
+    (shown,) = json.loads(completer.last_call.exchange.briefing)["earlier_work"]
     assert shown["status"] == "ended"
     assert shown["input"] == "search flats"
     assert shown["doing"].startswith("provisional")
@@ -232,7 +232,7 @@ async def test_a_failed_activations_couldnt_finish_is_a_fixed_line() -> None:
 
     await stage.plan(_inputs(earlier_work=(PeerShown(activation_id=_A, view=view, ended=True),)))
 
-    (shown,) = json.loads(completer.last_call.messages[1].content)["earlier_work"]
+    (shown,) = json.loads(completer.last_call.exchange.briefing)["earlier_work"]
     assert shown["did"] == [PEER_COULDNT_FINISH_LINE]
     assert "outside" in shown["input"]
     assert "doing" not in shown

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
     from test_engine import Harness
 
-    from ai_assistant.core.types import Message, OfferedTool, RoundResponse
+    from ai_assistant.core.types import OfferedTool, PlanningExchange, RoundResponse
 
 
 async def _running(harness: Harness, entered: asyncio.Event) -> str:
@@ -154,13 +154,13 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
     class _SlowToUnwind(NeverFinishing):
         async def respond(
             self,
-            messages: Sequence[Message],
+            exchange: PlanningExchange,
             tools: Sequence[OfferedTool],
             *,
             model: str | None = None,
         ) -> RoundResponse:
             try:
-                return await super().respond(messages, tools, model=model)
+                return await super().respond(exchange, tools, model=model)
             except asyncio.CancelledError:
                 unwinding.set()
                 await finish_unwinding.wait()
@@ -331,13 +331,13 @@ class _Witness(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
         self.seen.append(current_requesting_device())
-        return await super().respond(messages, tools, model=model)
+        return await super().respond(exchange, tools, model=model)
 
 
 async def test_the_activation_a_message_starts_does_not_run_as_its_device() -> None:

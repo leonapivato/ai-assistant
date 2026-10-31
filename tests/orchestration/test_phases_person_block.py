@@ -93,7 +93,7 @@ def _understood(model: FakeModelProvider) -> str:
 
 
 def _planned(completer: FakeToolCallingCompleter) -> dict[str, Any]:
-    loaded: dict[str, Any] = json.loads(completer.last_call.messages[1].content)
+    loaded: dict[str, Any] = json.loads(completer.last_call.exchange.briefing)
     return loaded
 
 

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import MemoryWrite, Message, OfferedTool
+    from ai_assistant.core.types import MemoryWrite, OfferedTool, PlanningExchange
 
 pytestmark = pytest.mark.integration
 
@@ -68,7 +68,7 @@ class _FailsOn(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
@@ -77,7 +77,7 @@ class _FailsOn(FakeToolCallingCompleter):
             self.fail_next = False
             msg = "the planner is down"
             raise RuntimeError(msg)
-        return await super().respond(messages, tools, model=model)
+        return await super().respond(exchange, tools, model=model)
 
 
 async def _started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **settings: Any) -> Phased:

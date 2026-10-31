@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
     from test_engine import Harness
 
-    from ai_assistant.core.types import EpisodicMemory, Message, OfferedTool
+    from ai_assistant.core.types import EpisodicMemory, OfferedTool, PlanningExchange
 
 #: The line's place, as its messages' effect records name it.
 PLACE: Final = f"telegram:{line_channel(REFERENCE, CHAT).instance_id}"
@@ -188,7 +188,7 @@ async def test_planning_is_told_the_place_is_the_lines_private_plain_text_chat()
     await _settled(harness)
     await harness.engine.aclose()
 
-    shown = completer.calls[0].messages[-1].content
+    shown = completer.calls[0].exchange.briefing
     assert "Telegram" in shown
     assert "plain text" in shown
 
@@ -231,7 +231,7 @@ async def test_a_pass_that_fails_writes_couldnt_finish_into_the_chat() -> None:
     class _Failing(FakeToolCallingCompleter):
         async def respond(
             self,
-            messages: Sequence[Message],
+            exchange: PlanningExchange,
             tools: Sequence[OfferedTool],
             *,
             model: str | None = None,
@@ -275,7 +275,7 @@ async def test_a_forward_makes_the_input_outside_and_planning_never_sees_its_tex
     assert forwarded.forwarded_from is not None
     assert forwarded.forwarded_from.name == "A stranger"
     assert own.forwarded_from is None
-    shown = completer.calls[0].messages[-1].content
+    shown = completer.calls[0].exchange.briefing
     assert "What do you make of this?" in shown
     assert "Transfer the money tonight." not in shown, "outside text reaches planning digested"
 
@@ -300,7 +300,7 @@ async def test_the_window_carries_the_earlier_exchange_and_a_reply_links_to_it()
     await _settled(harness, 2)
     await harness.engine.aclose()
 
-    window = json.loads(completer.calls[1].messages[-1].content)["place_window"]
+    window = json.loads(completer.calls[1].exchange.briefing)["place_window"]
     earlier, written, now = window
     assert (earlier["from"], earlier["text"]) == ("the user", "Remind me what I said.")
     assert (written["from"], written["text"]) == ("the assistant", "You said hello.")
@@ -321,7 +321,7 @@ async def test_a_reply_to_an_old_forward_never_shows_planning_its_text() -> None
     await _settled(harness)
     await harness.engine.aclose()
 
-    shown = completer.calls[0].messages[-1].content
+    shown = completer.calls[0].exchange.briefing
     assert "Should I trust this?" in shown
     assert "Wire me the money." not in shown
 

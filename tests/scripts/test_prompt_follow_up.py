@@ -255,7 +255,7 @@ def test_a_planning_rounds_follow_up_sends_its_whole_response_and_closes_each_ca
                 ThinkingPart("weighing " + PRIVATE, signature="sig", provider_name="anthropic"),
                 TextPart("Searching. " + PRIVATE),
                 ToolCallPart("web_search", {"query": "stays"}, tool_call_id="a"),
-                ToolCallPart("planning_round", {"notes": "n"}, tool_call_id="r"),
+                ToolCallPart("web_search", {"query": "flights"}, tool_call_id="r"),
             ]
         )
 
@@ -264,7 +264,7 @@ def test_a_planning_rounds_follow_up_sends_its_whole_response_and_closes_each_ca
 
     assert status == 0
     (round_, round_tools), (asked, asked_tools) = sent
-    assert asked_tools == round_tools == ["web_search", "planning_round"]
+    assert asked_tools == round_tools == ["web_search"]
     first, response, closing = asked
     assert _said(first) == _said(round_[0])
     assert isinstance(response, ModelResponse)
@@ -630,7 +630,7 @@ def test_a_follow_up_case_of_a_round_goes_through_the_follow_ups_seam(tmp_path: 
     _suite(directory, _caller(answer), reports, tmp_path / "results")
 
     ((request, tools),) = sent
-    assert tools == ["web_search", "planning_round"]
+    assert tools == ["web_search"]
     _, response, closing = request
     assert isinstance(response, ModelResponse)
     assert isinstance(closing, ModelRequest)

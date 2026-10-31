@@ -304,7 +304,7 @@ def test_the_recorded_instruction_replays_every_model_call_as_recorded(tmp_path:
         [UNDERSTANDING_TOLD, UNDERSTANDING_TOLD, PLANNING_TOLD, DIGEST_TOLD, SCOUT_TOLD]
     )
     assert {UNDERSTANDING_INPUT, OLD_INPUT, PLANNING_INPUT} <= set(model.users)
-    assert ["web_search", "planning_round"] in model.tools
+    assert ["web_search"] in model.tools
     results = _results(copy)
     assert set(results) == {f"{ACT_A}.replay.jsonl", f"{ACT_B}.replay.jsonl"}
     for line in (one for each in results.values() for one in each):

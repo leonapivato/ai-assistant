@@ -67,7 +67,7 @@ async def test_a_searchs_records_are_shown_under_their_own_m_labels() -> None:
 
     planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
 
-    request = completer.last_call.messages[1].content
+    request = completer.last_call.exchange.briefing
     (call,) = _sent(completer)["rounds"][0]["calls"]
     assert call["result"]["label"] == "R1"
     value = call["result"]["value"]
@@ -108,7 +108,7 @@ async def test_a_storys_full_view_is_shown_under_the_result_with_its_marks() -> 
     outcome = CallOutcome(
         earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:page", story=view
     )
-    stage, completer, _ = _stage(RoundResponse(text="ok", notes="Saturday it is"))
+    stage, completer, _ = _stage(RoundResponse(text="ok"))
 
     planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
 
@@ -132,7 +132,7 @@ async def test_an_unmarked_full_view_marks_nothing() -> None:
     outcome = CallOutcome(
         earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:page", story=view
     )
-    stage, _, _ = _stage(RoundResponse(text="ok", notes="Saturday it is"))
+    stage, _, _ = _stage(RoundResponse(text="ok"))
 
     planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
 
@@ -237,7 +237,7 @@ async def test_a_marked_older_note_is_outside_content_read() -> None:
     """ADR-0303 §3:6: a marked older note is rendered as a marked note is, and read."""
     view = _story(older=(_note(3, "the venue wrote back: Saturday", outside=True),))
     earlier, outcome = _read(view)
-    stage, completer, _ = _stage(RoundResponse(text="ok", notes="Saturday it is"))
+    stage, completer, _ = _stage(RoundResponse(text="ok"))
 
     planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
 

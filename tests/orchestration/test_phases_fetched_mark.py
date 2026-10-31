@@ -111,8 +111,12 @@ async def _read_as_the_observer(memory: MemoryStore, episode: EpisodicMemory) ->
 
 
 async def test_an_activation_whose_one_ground_is_a_fetched_record_freezes_marked() -> None:
-    """ADR-0286 §4:2-§4:3: the frozen episode carries the mark, and reads as outside."""
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="It is on Friday."))
+    """ADR-0286 §4:2-§4:3: the frozen episode carries the mark, and reads as outside.
+
+    The round writes no text, so it has no notes to carry a mark of their own (ADR-0356
+    §7:2): the fetched record is the one ground.
+    """
+    completer = FakeToolCallingCompleter.scripted(RoundResponse())
     harness = await _harness(completer)
     conversation = await _conversation(harness)
 
@@ -246,7 +250,7 @@ async def test_an_activation_cut_off_after_a_story_read_of_a_marked_note_is_clos
     assert record.is_open
     # The first round was shown the story, with nothing of it outside content, and
     # nothing else this pass was given rests on any.
-    request = json.loads(completer.calls[0].messages[1].content)
+    request = json.loads(completer.calls[0].exchange.briefing)
     (shown,) = request["stories"]
     assert shown["summary"] == ["A trip to Porto."]
     assert shown["notes_since_tidied"] == "none"

@@ -13,10 +13,12 @@ then the messages, and caches the prefix up to each marked block. Two marks are 
 after the last tool, and after the system prompt. Tools and instructions are what
 repeat from one request to the next; the first mark keeps the tools cached where the
 instructions vary (planning's do, a little, with what the round offers) and the
-second caches both where neither does. The messages are not marked: each stage sends
-one user turn rendered afresh per request, so a mark on it would be written, at a
-quarter more than the plain input price, and never read. Anthropic's automatic
-breakpoint (``anthropic_cache``) is that mark, and is not set for the same reason.
+second caches both where neither does. Where a stage sends one user turn rendered afresh
+per request, the messages are not marked: a mark on it would be written, at a quarter
+more than the plain input price, and never read. Anthropic's automatic breakpoint
+(``anthropic_cache``) is that mark, and is not set for the same reason. A planning
+round's exchange only grows, so its newest report is marked
+(:func:`marks_the_newest_report`).
 
 **Anthropic only, and model-agnostic for everything else** (ADR-0061). The marks are
 pydantic-ai's Anthropic settings, given only where the request goes to pydantic-ai's
@@ -36,6 +38,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, Final, cast
 
+from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.wrapper import WrapperModel
 
 if TYPE_CHECKING:
@@ -81,6 +84,32 @@ def prompt_cache_settings(model: models.Model) -> ModelSettings:
         return cast("ModelSettings", {})
     # Anthropic's own settings keys, which ``ModelSettings`` does not declare.
     return cast("ModelSettings", dict(_MARKS))
+
+
+def marks_the_newest_report(model: models.Model) -> bool:
+    """Whether a planning round to ``model`` ends its newest report on a cache point.
+
+    A planning work's exchange is appended to and never re-rendered (ADR-0356 §5:2), so
+    the request up to its newest report is the prefix of the next round's: a point there
+    is written once and read back on the next round. It is pydantic-ai's
+    model-agnostic :class:`~pydantic_ai.messages.CachePoint`, which a model that caches
+    nothing drops. A model whose own settings configure caching is given none, for the
+    reason the marks above are not (a five-minute point before its own one-hour mark
+    would be refused), and so is a fallback model, which keeps the request it had.
+
+    Args:
+        model: The model the request goes to, as pydantic-ai resolved it.
+
+    Returns:
+        ``True`` where the point is set.
+    """
+    inner = model
+    while isinstance(inner, WrapperModel):
+        inner = inner.wrapped
+    if isinstance(inner, FallbackModel):
+        return False
+    configured: Mapping[str, object] = inner.settings or {}
+    return not _CACHE_SETTINGS & configured.keys()
 
 
 def _is_anthropic(model: models.Model) -> bool:

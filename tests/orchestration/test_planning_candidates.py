@@ -141,7 +141,7 @@ async def test_a_candidates_result_says_pending_and_shows_similar_memories_by_m_
         _inputs(capabilities=(REMEMBER_CANDIDATE,), rounds=(earlier,), outcomes=(outcome,))
     )
 
-    request = completer.last_call.messages[1].content
+    request = completer.last_call.exchange.briefing
     (call,) = _sent(completer)["rounds"][0]["calls"]
     assert call["outcome"] == "done"
     value = call["result"]["value"]

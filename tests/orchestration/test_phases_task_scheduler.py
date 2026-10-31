@@ -54,13 +54,18 @@ if TYPE_CHECKING:
     from test_engine import Harness
 
     from ai_assistant.core.protocols import ConversationStore
-    from ai_assistant.core.types import Conversation, Message, OfferedTool, ScheduledTask
+    from ai_assistant.core.types import (
+        Conversation,
+        OfferedTool,
+        PlanningExchange,
+        ScheduledTask,
+    )
     from ai_assistant.testing import FakeConversationStore
 
 
-def _request(messages: Sequence[Message]) -> dict[str, Any]:
+def _request(exchange: PlanningExchange) -> dict[str, Any]:
     """The round's rendered request, as planning's model reads it."""
-    loaded: dict[str, Any] = json.loads(messages[-1].content)
+    loaded: dict[str, Any] = json.loads(exchange.briefing)
     return loaded
 
 
@@ -77,8 +82,8 @@ def _responder(
     person: Callable[[dict[str, Any]], RoundResponse],
     task: Callable[[dict[str, Any]], RoundResponse],
 ) -> FakeToolCallingCompleter:
-    def respond(messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
-        request = _request(messages)
+    def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
+        request = _request(exchange)
         return task(request) if _started_by_a_task(request) else person(request)
 
     return FakeToolCallingCompleter(response=respond)
@@ -335,9 +340,9 @@ async def test_a_stop_command_leaves_what_its_activation_spawned_and_it_still_fa
 
     class _Held(FakeToolCallingCompleter):
         async def respond(
-            self, messages: Sequence[Message], tools: Sequence[OfferedTool], **_: Any
+            self, exchange: PlanningExchange, tools: Sequence[OfferedTool], **_: Any
         ) -> RoundResponse:
-            request = _request(messages)
+            request = _request(exchange)
             if _started_by_a_task(request):
                 reminded.append("ran")
                 return RoundResponse(text="")
@@ -601,9 +606,9 @@ async def test_a_child_that_ends_before_its_scheduled_parent_is_removed_with_it(
 
     class _Parent(FakeToolCallingCompleter):
         async def respond(
-            self, messages: Sequence[Message], tools: Sequence[OfferedTool], **_: Any
+            self, exchange: PlanningExchange, tools: Sequence[OfferedTool], **_: Any
         ) -> RoundResponse:
-            request = _request(messages)
+            request = _request(exchange)
             window = json.dumps(request["place_window"])
             if "the child step" in window:
                 child_done.set()
@@ -757,9 +762,9 @@ class _Step(FakeToolCallingCompleter):
         self.release = asyncio.Event()
 
     async def respond(
-        self, messages: Sequence[Message], tools: Sequence[OfferedTool], **_: Any
+        self, exchange: PlanningExchange, tools: Sequence[OfferedTool], **_: Any
     ) -> RoundResponse:
-        request = _request(messages)
+        request = _request(exchange)
         if not request["rounds"]:
             return RoundResponse(
                 calls=(

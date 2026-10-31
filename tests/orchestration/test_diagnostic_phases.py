@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     Message,
     OfferedTool,
     Placement,
+    PlanningExchange,
     PlanningLabel,
     PlanningRound,
     ProposedActivationUnderstanding,
@@ -350,7 +351,13 @@ async def test_planning_writes_its_rendered_request_and_offered_tools_before_the
     (given,) = sink.of(DiagnosticSource.PLANNING, DiagnosticKind.GIVEN)
     sent = completer.last_call
     assert _body(given) == {
-        "messages": [one.model_dump(mode="json") for one in sent.messages],
+        # ADR-0356 §13:6: the exchange as handed in, and beside it the same request as
+        # the system and user messages it is sent as, which the replay tool reads.
+        "exchange": sent.exchange.model_dump(mode="json"),
+        "messages": [
+            Message(role=Role.SYSTEM, content=sent.exchange.instruction).model_dump(mode="json"),
+            Message(role=Role.USER, content=sent.exchange.briefing).model_dump(mode="json"),
+        ],
         "tools": [one.model_dump(mode="json") for one in sent.tools],
         # ADR-0334 §8:2: the template the system message was rendered from, and ADR-0335
         # §9:1: every flag it declares, as the stage computed it for this round.
@@ -384,7 +391,7 @@ async def test_planning_writes_its_rendered_request_and_offered_tools_before_the
 async def test_where_no_response_came_back_planning_writes_the_failure() -> None:
     """§5:2: the completer wrote nothing, so planning's module writes the entry."""
 
-    def down(_messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
+    def down(_exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
         msg = "the provider is down"
         raise ModelError(msg)
 
@@ -408,12 +415,12 @@ async def test_where_the_completer_wrote_the_response_planning_writes_no_second(
 
         async def respond(
             self,
-            messages: Sequence[Message],
+            exchange: PlanningExchange,
             tools: Sequence[OfferedTool],
             *,
             model: str | None = None,
         ) -> RoundResponse:
-            del messages, tools, model
+            del exchange, tools, model
             await write_diagnostic(
                 self._sink,
                 DiagnosticSource.PLANNING,

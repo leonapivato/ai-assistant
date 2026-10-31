@@ -1,9 +1,8 @@
 """``PydanticAIToolCallingCompleter``: the shared contract, and what it adds.
 
 The binding runs the suite over a pydantic-ai ``FunctionModel``, which is the world:
-it plays the scripted round back in the provider's native shape (text, tool calls and
-the reserved round tool) and records what each request carried. Everything is
-offline.
+it plays the scripted round back in the provider's native shape (text and tool calls)
+and records what each request carried. Everything is offline.
 
 Where a vendor decides the shape, as for the thinking a round asks for (#2861), the
 request is read off the wire of that vendor's real SDK over a mock transport, with the
@@ -27,12 +26,15 @@ from openai import AsyncOpenAI
 from pydantic_ai.concurrency import ConcurrencyLimiter
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
+    CachePoint,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
@@ -46,21 +48,30 @@ from pydantic_ai.profiles import JsonSchemaTransformer, ModelProfile
 from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
-from tool_calling_completer_contract import SeenTool, ToolCallingCompleterContract, Turn
+from tool_calling_completer_contract import (
+    SeenTool,
+    ToolCallingCompleterContract,
+    Turn,
+    call_turn,
+)
 from vendor_stacks import RequestRecorder, anthropic_success, openai_success
 
 from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.errors import ModelError, ModelRateLimitError, ModelResponseError
 from ai_assistant.core.types import (
+    CallResult,
     DiagnosticKind,
     DiagnosticSource,
-    Message,
+    ExchangeStep,
     OfferedTool,
-    Role,
+    PlanningExchange,
+    ProposedCall,
+    RoundContinuation,
+    RoundReport,
     RoundResponse,
 )
 from ai_assistant.models import PydanticAIToolCallingCompleter, tool_calling
-from ai_assistant.models.tool_calling import DEFAULT_THINKING, ROUND_TOOL
+from ai_assistant.models.tool_calling import DEFAULT_THINKING
 from ai_assistant.testing import FakeDiagnosticSink
 
 if TYPE_CHECKING:
@@ -77,21 +88,33 @@ if TYPE_CHECKING:
 
 
 def _turns(messages: list[ModelMessage]) -> tuple[Turn, ...]:
-    """The request as our roles, read back off pydantic-ai's history."""
+    """The request as the suite's turns, read back off pydantic-ai's history.
+
+    A cache point is no turn, and neither is a thinking part: each is read apart.
+    """
     turns: list[Turn] = []
     for message in messages:
         if isinstance(message, ModelRequest):
             for part in message.parts:
                 if isinstance(part, SystemPromptPart):
-                    turns.append((Role.SYSTEM, part.content))
-                elif isinstance(part, UserPromptPart) and isinstance(part.content, str):
-                    turns.append((Role.USER, part.content))
+                    turns.append(("system", part.content))
+                elif isinstance(part, UserPromptPart):
+                    content = part.content
+                    texts = [content] if isinstance(content, str) else list(content)
+                    turns.extend(("user", one) for one in texts if isinstance(one, str))
+                elif isinstance(part, ToolReturnPart):
+                    turns.append(("result", part.tool_call_id, str(part.content)))
         else:
-            turns.extend(
-                (Role.ASSISTANT, part.content)
-                for part in message.parts
-                if isinstance(part, TextPart)
-            )
+            for answered in message.parts:
+                if isinstance(answered, TextPart):
+                    turns.append(("text", answered.content))
+                elif isinstance(answered, ToolCallPart):
+                    proposed = ProposedCall(
+                        call_id=answered.tool_call_id,
+                        name=answered.tool_name,
+                        arguments=answered.args_as_dict(),
+                    )
+                    turns.append(call_turn(proposed))
     return tuple(turns)
 
 
@@ -104,14 +127,12 @@ def _native(response: RoundResponse) -> ModelResponse:
         ToolCallPart(call.name, call.model_dump()["arguments"], tool_call_id=call.call_id)
         for call in response.calls
     )
-    if response.notes is not None or response.asks:
-        arguments: dict[str, Any] = {}
-        if response.notes is not None:
-            arguments["notes"] = response.notes
-        if response.asks:
-            arguments["asks"] = list(response.asks)
-        parts.append(ToolCallPart(ROUND_TOOL, arguments, tool_call_id="round"))
     return ModelResponse(parts=parts)
+
+
+def _bare(response: RoundResponse) -> RoundResponse:
+    """``response`` without its continuation, which every round now carries."""
+    return response.model_copy(update={"continuation": None})
 
 
 @dataclass
@@ -121,7 +142,6 @@ class _ModelWorld:
     script: Callable[[], ModelResponse]
     requests: list[tuple[Turn, ...]] = field(default_factory=list)
     tools: list[tuple[SeenTool, ...]] = field(default_factory=list)
-    round_tools: list[int] = field(default_factory=list)
 
     def answer(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         self.requests.append(_turns(messages))
@@ -129,10 +149,8 @@ class _ModelWorld:
             tuple(
                 (tool.name, tool.description or "", tool.parameters_json_schema)
                 for tool in info.function_tools
-                if tool.name != ROUND_TOOL
             )
         )
-        self.round_tools.append(sum(tool.name == ROUND_TOOL for tool in info.function_tools))
         return self.script()
 
     @property
@@ -167,11 +185,8 @@ class TestPydanticAIToolCallingCompleterContract(ToolCallingCompleterContract):
         return _world(response)
 
 
-def _request() -> list[Message]:
-    return [
-        Message(role=Role.SYSTEM, content="You plan one round."),
-        Message(role=Role.USER, content="what now?"),
-    ]
+def _request() -> PlanningExchange:
+    return PlanningExchange(instruction="You plan one round.", briefing="what now?")
 
 
 def _tool(name: str = "web_search") -> OfferedTool:
@@ -184,78 +199,6 @@ def _tool(name: str = "web_search") -> OfferedTool:
 
 def _scripted(*parts: ModelResponsePart) -> _ModelWorld:
     return _ModelWorld(script=lambda: ModelResponse(parts=list(parts)))
-
-
-async def test_the_round_tool_is_offered_once_beside_the_capabilities() -> None:
-    world = _world(RoundResponse(text="ok"))
-    await world.completer.respond(_request(), [_tool()])
-    assert world.round_tools == [1]
-
-
-async def test_a_capability_taking_the_reserved_name_is_refused_before_the_model() -> None:
-    world = _world(RoundResponse(text="ok"))
-    with pytest.raises(ModelError) as caught:
-        await world.completer.respond(_request(), [_tool(ROUND_TOOL)])
-    assert type(caught.value) is ModelError
-    assert world.attempts == 0
-
-
-async def test_several_round_tool_calls_join_their_notes() -> None:
-    world = _scripted(
-        ToolCallPart(ROUND_TOOL, {"notes": "first"}, tool_call_id="a"),
-        ToolCallPart(ROUND_TOOL, {"notes": "second"}, tool_call_id="b"),
-        ToolCallPart(ROUND_TOOL, {}, tool_call_id="c"),
-    )
-    response = await world.completer.respond(_request(), [])
-    assert response == RoundResponse(notes="first\n\nsecond")
-
-
-async def test_the_round_tool_offers_the_notes_and_the_naming_alone() -> None:
-    """ADR-0315 §3:3, ADR-0321 §2:3: the reserved tool carries the notes and the naming of
-    the calls the message asks about, and no mark."""
-    seen: list[dict[str, Any]] = []
-
-    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        del messages
-        seen.extend(
-            tool.parameters_json_schema for tool in info.function_tools if tool.name == ROUND_TOOL
-        )
-        return ModelResponse(parts=[TextPart("ok")])
-
-    await PydanticAIToolCallingCompleter(FunctionModel(answer)).respond(_request(), [])
-    (schema,) = seen
-    assert set(schema["properties"]) == {"notes", "asks"}
-    assert schema["properties"]["asks"]["type"] == "array"
-    assert schema["properties"]["asks"]["items"] == {"type": "string"}
-    assert schema["additionalProperties"] is False
-
-
-async def test_several_round_tool_calls_join_their_naming_each_name_once() -> None:
-    """ADR-0321 §2:3: every name, once, in the order first given; a blank one dropped."""
-    world = _scripted(
-        ToolCallPart(ROUND_TOOL, {"asks": ["R2", "R1"]}, tool_call_id="a"),
-        ToolCallPart(ROUND_TOOL, {"notes": "n", "asks": ["R1", "  ", "R3"]}, tool_call_id="b"),
-        ToolCallPart(ROUND_TOOL, {"asks": []}, tool_call_id="c"),
-    )
-    response = await world.completer.respond(_request(), [])
-    assert response == RoundResponse(notes="n", asks=("R2", "R1", "R3"))
-
-
-async def test_the_naming_is_never_a_call() -> None:
-    """ADR-0321 §2:3: the naming is a part of the response and never a call."""
-    world = _scripted(
-        TextPart("May I book it?"),
-        ToolCallPart(ROUND_TOOL, {"asks": ["R1"]}, tool_call_id="a"),
-    )
-    response = await world.completer.respond(_request(), [_tool()])
-    assert response.calls == ()
-    assert response.asks == ("R1",)
-    assert response.notes is None
-
-
-async def test_blank_notes_are_no_notes() -> None:
-    world = _scripted(ToolCallPart(ROUND_TOOL, {"notes": "   "}, tool_call_id="a"))
-    assert (await world.completer.respond(_request(), [])).notes is None
 
 
 async def test_text_either_side_of_a_call_is_kept_apart() -> None:
@@ -280,18 +223,6 @@ async def test_a_call_named_for_a_tool_not_offered_is_returned_as_proposed() -> 
     [
         pytest.param(ToolCallPart("web_search", "{not json", tool_call_id="a"), id="bad-json"),
         pytest.param(ToolCallPart("web_search", "[1, 2]", tool_call_id="a"), id="not-object"),
-        pytest.param(ToolCallPart(ROUND_TOOL, {"notes": 3}, tool_call_id="a"), id="notes-not-text"),
-        pytest.param(
-            ToolCallPart(ROUND_TOOL, {"notes": "n", "another_round": True}, tool_call_id="a"),
-            id="retired-mark",
-        ),
-        pytest.param(ToolCallPart(ROUND_TOOL, {"other": 1}, tool_call_id="a"), id="extra-key"),
-        pytest.param(
-            ToolCallPart(ROUND_TOOL, {"asks": "R1"}, tool_call_id="a"), id="asks-not-list"
-        ),
-        pytest.param(
-            ToolCallPart(ROUND_TOOL, {"asks": ["R1", 2]}, tool_call_id="a"), id="asks-not-text"
-        ),
         pytest.param(TextPart("\ud800"), id="unencodable-text"),
     ],
 )
@@ -395,7 +326,7 @@ async def test_a_model_without_thinking_keeps_the_request_it_had() -> None:
     )
     assert seen.thinking == [None]
     assert seen.max_tokens == [None]
-    assert response == RoundResponse(text="ok")
+    assert _bare(response) == RoundResponse(text="ok")
 
 
 async def test_thinking_parts_are_dropped_and_the_text_is_the_text_parts_alone() -> None:
@@ -404,12 +335,10 @@ async def test_thinking_parts_are_dropped_and_the_text_is_the_text_parts_alone()
         TextPart("I'll book Watchman for the night of November 14."),
         ThinkingPart("", id="redacted_thinking", signature="opaque"),
         ToolCallPart("web_search", {"query": "q"}, tool_call_id="a"),
-        ToolCallPart(ROUND_TOOL, {"notes": "booking"}, tool_call_id="b"),
     )
     response = await world.completer.respond(_request(), [_tool()])
     assert response.text == "I'll book Watchman for the night of November 14."
     assert [call.call_id for call in response.calls] == ["a"]
-    assert response.notes == "booking"
 
 
 async def test_a_round_that_only_thought_and_called_writes_no_text() -> None:
@@ -529,7 +458,6 @@ async def test_an_anthropic_response_with_thinking_yields_a_round_without_it() -
     response, _ = await _anthropic_round("claude-opus-4-8", _thinking_then_text_and_a_call)
     assert response.text == "I'll book Watchman for the night of November 14."
     assert [(call.call_id, call.name) for call in response.calls] == [("toolu_1", "web_search")]
-    assert response.notes is None
 
 
 async def test_an_openai_model_without_thinking_keeps_the_request_it_had() -> None:
@@ -605,7 +533,7 @@ async def test_a_fallback_model_keeps_the_request_it_had(
     response = await PydanticAIToolCallingCompleter(fallback, thinking=level).respond(
         _request(), [_tool()]
     )
-    assert response == RoundResponse(text="ok")
+    assert _bare(response) == RoundResponse(text="ok")
     assert seen.thinking == [None]
     assert seen.max_tokens == [None]
 
@@ -673,7 +601,7 @@ async def test_the_completer_writes_the_whole_response_thinking_included() -> No
     with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
         response = await completer.respond(_request(), [_tool()])
 
-    assert response == RoundResponse(text="Booking it now.", calls=(response.calls[0],), notes=None)
+    assert _bare(response) == RoundResponse(text="Booking it now.", calls=(response.calls[0],))
     (entry,) = sink.recorded
     assert (entry.activation_id, entry.source, entry.kind) == (
         _DIAGNOSED,
@@ -688,7 +616,7 @@ async def test_the_completer_writes_the_whole_response_thinking_included() -> No
 
 
 async def test_the_returned_entry_shows_every_tool_the_provider_was_offered() -> None:
-    """#2894: the reserved tool and its description reach the record, after the capabilities.
+    """#2894: every tool reaches the record, and no reserved one is added (ADR-0356 §7:4).
 
     Each tool is kept as planning's given entry keeps an offered one, so the two read alike.
     """
@@ -716,11 +644,7 @@ async def test_the_returned_entry_shows_every_tool_the_provider_was_offered() ->
         }
         for tool in sent
     ]
-    assert body["offered_tools"][:2] == [tool.model_dump(mode="json") for tool in offered]
-    (reserved,) = body["offered_tools"][2:]
-    assert reserved["name"] == ROUND_TOOL
-    assert "runs nothing" in reserved["description"]
-    assert set(reserved["parameters"]["properties"]) == {"notes", "asks"}
+    assert body["offered_tools"] == [tool.model_dump(mode="json") for tool in offered]
 
 
 async def test_a_response_that_is_no_round_is_written_before_the_completer_raises() -> None:
@@ -734,7 +658,7 @@ async def test_a_response_that_is_no_round_is_written_before_the_completer_raise
     assert body["read_as_round"] is False
     assert body["failure"]["class"] == "ModelResponseError"
     assert body["response"]["parts"][0]["content"] == "Weighing it…"
-    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search", ROUND_TOOL]
+    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search"]
 
 
 async def test_where_no_response_came_back_the_completer_writes_nothing() -> None:
@@ -790,7 +714,7 @@ async def test_an_openai_models_rewritten_schemas_are_recorded_as_sent() -> None
     assert [
         {key: tool[key] for key in ("name", "description", "parameters")} for tool in wire
     ] == recorded
-    assert [tool["name"] for tool in recorded] == ["web_search", "book_stay", ROUND_TOOL]
+    assert [tool["name"] for tool in recorded] == ["web_search", "book_stay"]
     assert [tool["description"] for tool in recorded[:2]] == [t.description for t in offered]
     # A restriction the round did not write is recorded, as the provider was sent it.
     assert "additionalProperties" not in _tool().parameters
@@ -899,7 +823,7 @@ async def test_a_wrapper_that_waits_before_the_model_prepares_is_not_replayed() 
     wire = [tool["function"] for tool in cast("list[dict[str, Any]]", recorder.only["tools"])]
     assert "additionalProperties" not in wire[0]["parameters"]
     assert body["offered_tools"][0] == _tool().model_dump(mode="json")
-    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search", ROUND_TOOL]
+    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search"]
     assert "may wait before" in body["offered_tools_unprepared"]["message"]
 
 
@@ -919,7 +843,7 @@ async def test_an_anthropic_models_tools_are_recorded_as_sent() -> None:
         }
         for tool in wire
     ] == recorded
-    assert [tool["name"] for tool in recorded] == ["web_search", ROUND_TOOL]
+    assert [tool["name"] for tool in recorded] == ["web_search"]
     assert recorded[0] == _tool().model_dump(mode="json")
 
 
@@ -1057,11 +981,11 @@ async def test_tools_whose_preparation_cannot_be_computed_are_recorded_as_built_
     with diagnosed_activation(_DIAGNOSED, clock=_diagnosed_now):
         response = await completer.respond(_request(), [_tool()])
 
-    assert response == RoundResponse(text="ok")
+    assert _bare(response) == RoundResponse(text="ok")
     body = sink.recorded[0].model_dump(mode="json")["body"]
     assert body["read_as_round"] is True
     assert body["offered_tools"][0] == _tool().model_dump(mode="json")
-    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search", ROUND_TOOL]
+    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search"]
     assert why in body["offered_tools_unprepared"]["message"]
 
 
@@ -1084,7 +1008,7 @@ async def test_a_preparation_that_raises_for_the_record_still_writes_the_entry_m
     body = sink.recorded[0].model_dump(mode="json")["body"]
     assert body["read_as_round"] is False
     assert body["offered_tools"][0] == _tool().model_dump(mode="json")
-    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search", ROUND_TOOL]
+    assert [tool["name"] for tool in body["offered_tools"]] == ["web_search"]
     assert body["offered_tools_unprepared"] == {
         "class": "RuntimeError",
         "message": "cannot prepare",
@@ -1100,8 +1024,7 @@ async def test_an_anthropic_round_marks_its_tools_and_instructions_for_caching()
     """The mark after the last tool caches the tools; the one after the system prompt both."""
     _, body = await _anthropic_round("claude-sonnet-5-5", anthropic_success)
     tools = cast("list[dict[str, Any]]", body["tools"])
-    assert [tool["name"] for tool in tools] == ["web_search", ROUND_TOOL]
-    assert "cache_control" not in tools[0]
+    assert [tool["name"] for tool in tools] == ["web_search"]
     assert tools[-1]["cache_control"] == _FIVE_MINUTES
     assert body["system"] == [
         {"type": "text", "text": "You plan one round.", "cache_control": _FIVE_MINUTES}
@@ -1205,3 +1128,248 @@ async def test_the_returned_entry_keeps_the_cache_read_and_write_tokens() -> Non
     assert usage["cache_write_tokens"] == 120
     assert usage["input_tokens"] == 900 + 120 + 6800
     assert usage["output_tokens"] == 40
+
+
+# --- the continuing exchange (ADR-0356 §5, §6, §14) --------------------------------------
+
+
+@dataclass
+class _Capturing:
+    """A ``FunctionModel`` answering each request in turn, and every history it was sent."""
+
+    answers: list[ModelResponse]
+    sent: list[list[ModelMessage]] = field(default_factory=list)
+
+    def answer(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        self.sent.append(list(messages))
+        return self.answers[len(self.sent) - 1]
+
+    @property
+    def model(self) -> FunctionModel:
+        return FunctionModel(self.answer)
+
+
+def _signed_round() -> ModelResponse:
+    """A round with signed thinking, text and two calls, as a provider returns it."""
+    return ModelResponse(
+        parts=[
+            ThinkingPart("Search both days first.", signature="sig-1"),
+            TextPart("Checking two days."),
+            ToolCallPart("web_search", {"query": "saturday"}, tool_call_id="a"),
+            ToolCallPart("web_search", {"query": "sunday"}, tool_call_id="b"),
+        ]
+    )
+
+
+def _report(*results: tuple[str, str], news: str = "Nothing has changed.") -> RoundReport:
+    return RoundReport(
+        results=tuple(CallResult(call_id=one, text=text) for one, text in results), news=news
+    )
+
+
+def _two_results() -> RoundReport:
+    return _report(("a", "Saturday: rain."), ("b", "Sunday: sun."))
+
+
+async def test_a_briefing_alone_is_the_system_part_and_one_user_part() -> None:
+    capturing = _Capturing([ModelResponse(parts=[TextPart("ok")])])
+    await PydanticAIToolCallingCompleter(capturing.model).respond(_request(), [_tool()])
+    ((opening,),) = capturing.sent
+    assert isinstance(opening, ModelRequest)
+    assert opening.parts == [
+        SystemPromptPart("You plan one round.", timestamp=opening.parts[0].timestamp),
+        UserPromptPart("what now?", timestamp=opening.parts[1].timestamp),
+    ]
+
+
+async def test_a_round_carries_its_whole_response_as_its_continuation() -> None:
+    capturing = _Capturing([_signed_round()])
+    model = capturing.model
+    response = await PydanticAIToolCallingCompleter(model).respond(_request(), [_tool()])
+    assert response.text == "Checking two days."
+    assert [call.call_id for call in response.calls] == ["a", "b"]
+    assert response.continuation is not None
+    assert response.continuation.model == tool_calling.model_id(model)
+    (rebuilt,) = ModelMessagesTypeAdapter.validate_python(
+        [response.continuation.model_dump(mode="json")["parts"]]
+    )
+    assert rebuilt.parts[0] == ThinkingPart("Search both days first.", signature="sig-1")
+
+
+async def test_each_earlier_response_goes_back_as_returned_then_its_results_then_its_news() -> None:
+    """§6:2, §5:3: the response as the provider returned it, thinking and signature included;
+    its results under their ids in its order; then the news, ending on the cache point."""
+    capturing = _Capturing([_signed_round(), ModelResponse(parts=[TextPart("done")])])
+    completer = PydanticAIToolCallingCompleter(capturing.model)
+    first = await completer.respond(_request(), [_tool()])
+    exchange = _request().model_copy(
+        update={"steps": (ExchangeStep(response=first, report=_two_results()),)}
+    )
+    await completer.respond(exchange, [_tool()])
+    opening, handed, report = capturing.sent[1]
+    assert _turns([opening]) == _turns([capturing.sent[0][0]])
+    assert isinstance(handed, ModelResponse)
+    assert handed.parts == _signed_round().parts
+    assert isinstance(report, ModelRequest)
+    returns = [part for part in report.parts if isinstance(part, ToolReturnPart)]
+    assert [(part.tool_call_id, part.tool_name, part.content) for part in returns] == [
+        ("a", "web_search", "Saturday: rain."),
+        ("b", "web_search", "Sunday: sun."),
+    ]
+    news = report.parts[-1]
+    assert isinstance(news, UserPromptPart)
+    assert news.content == ["Nothing has changed.", CachePoint()]
+
+
+async def test_only_the_newest_report_carries_the_cache_point() -> None:
+    capturing = _Capturing([ModelResponse(parts=[TextPart("ok")])])
+    steps = tuple(
+        ExchangeStep(
+            response=RoundResponse(
+                calls=(ProposedCall(call_id=f"c{index}", name="web_search", arguments={}),)
+            ),
+            report=_report((f"c{index}", "found"), news=f"news {index}"),
+        )
+        for index in (1, 2)
+    )
+    exchange = _request().model_copy(update={"steps": steps})
+    await PydanticAIToolCallingCompleter(capturing.model).respond(exchange, [_tool()])
+    contents = [
+        part.content
+        for message in capturing.sent[0]
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, UserPromptPart)
+    ]
+    assert contents == ["what now?", "news 1", ["news 2", CachePoint()]]
+
+
+def _step(continuation: RoundContinuation | None) -> ExchangeStep:
+    return ExchangeStep(
+        response=RoundResponse(
+            text="Checking two days.",
+            calls=(
+                ProposedCall(call_id="a", name="web_search", arguments={"query": "saturday"}),
+                ProposedCall(call_id="b", name="web_search", arguments={"query": "sunday"}),
+            ),
+            continuation=continuation,
+        ),
+        report=_two_results(),
+    )
+
+
+def _whole(response: ModelResponse) -> dict[str, Any]:
+    dumped: dict[str, Any] = ModelMessagesTypeAdapter.dump_python([response], mode="json")[0]
+    return dumped
+
+
+def _no_continuation(model: str) -> RoundContinuation | None:
+    del model
+    return None
+
+
+def _another_models(model: str) -> RoundContinuation | None:
+    del model
+    return RoundContinuation(model="anthropic:another-model", parts=_whole(_signed_round()))
+
+
+def _not_this_response(model: str) -> RoundContinuation | None:
+    other = ModelResponse(
+        parts=[ThinkingPart("other", signature="x"), TextPart("Checking two days.")]
+    )
+    return RoundContinuation(model=model, parts=_whole(other))
+
+
+def _unreadable(model: str) -> RoundContinuation | None:
+    return RoundContinuation(model=model, parts={"not": "a response"})
+
+
+@pytest.mark.parametrize(
+    "continuation",
+    [
+        pytest.param(_no_continuation, id="none"),
+        pytest.param(_another_models, id="another-model"),
+        pytest.param(_not_this_response, id="not-this-response"),
+        pytest.param(_unreadable, id="unreadable"),
+    ],
+)
+async def test_a_response_with_no_usable_continuation_goes_back_as_its_text_and_calls(
+    continuation: Callable[[str], RoundContinuation | None],
+) -> None:
+    """§6:3: sent and answered, with no thinking another model could refuse."""
+    capturing = _Capturing([ModelResponse(parts=[TextPart("done")])])
+    model = capturing.model
+    exchange = _request().model_copy(
+        update={"steps": (_step(continuation(tool_calling.model_id(model))),)}
+    )
+    response = await PydanticAIToolCallingCompleter(model).respond(exchange, [_tool()])
+    assert response.text == "done"
+    handed = capturing.sent[0][1]
+    assert isinstance(handed, ModelResponse)
+    assert handed.parts == [
+        TextPart("Checking two days."),
+        ToolCallPart("web_search", {"query": "saturday"}, tool_call_id="a"),
+        ToolCallPart("web_search", {"query": "sunday"}, tool_call_id="b"),
+    ]
+
+
+async def test_a_response_of_nothing_is_left_out_and_its_report_still_goes() -> None:
+    capturing = _Capturing([ModelResponse(parts=[TextPart("ok")])])
+    step = ExchangeStep(response=RoundResponse(), report=_report(news="An offer opened."))
+    exchange = _request().model_copy(update={"steps": (step,)})
+    await PydanticAIToolCallingCompleter(capturing.model).respond(exchange, [_tool()])
+    assert all(isinstance(message, ModelRequest) for message in capturing.sent[0])
+    assert _turns(capturing.sent[0])[-1] == ("user", "An offer opened.")
+
+
+async def test_a_models_own_cache_settings_leave_the_newest_report_unmarked() -> None:
+    """A five-minute point before a model's own one-hour mark would be refused."""
+    seen: list[list[ModelMessage]] = []
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        seen.append(list(messages))
+        return ModelResponse(parts=[TextPart("ok")])
+
+    model = FunctionModel(answer, settings=AnthropicModelSettings(anthropic_cache_messages="1h"))
+    exchange = _request().model_copy(update={"steps": (_step(None),)})
+    await PydanticAIToolCallingCompleter(model).respond(exchange, [_tool()])
+    last = seen[0][-1]
+    assert isinstance(last, ModelRequest)
+    news = last.parts[-1]
+    assert isinstance(news, UserPromptPart)
+    assert news.content == "Nothing has changed."
+
+
+async def test_on_anthropics_wire_the_thinking_goes_back_signed_and_the_report_is_marked() -> None:
+    """The round trip through Anthropic's real SDK: §6:2's thinking, §13's cache mark."""
+    recorder = RequestRecorder(_thinking_then_text_and_a_call)
+    answered = RequestRecorder(anthropic_success)
+    with network_denied():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as first_client:
+            first = await PydanticAIToolCallingCompleter(
+                _anthropic("claude-opus-4-8", first_client)
+            ).respond(_request(), [_tool()])
+        step = ExchangeStep(response=first, report=_report(("toolu_1", "Watchman: booked.")))
+        exchange = _request().model_copy(update={"steps": (step,)})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(answered)) as second_client:
+            await PydanticAIToolCallingCompleter(
+                _anthropic("claude-opus-4-8", second_client)
+            ).respond(exchange, [_tool()])
+    messages = cast("list[dict[str, Any]]", answered.only["messages"])
+    assert [turn["role"] for turn in messages] == ["user", "assistant", "user"]
+    assistant = messages[1]["content"]
+    assert assistant[0] == {
+        "type": "thinking",
+        "thinking": "The user has answered my question; book Watchman.",
+        "signature": "sig",
+    }
+    assert assistant[1] == {"type": "redacted_thinking", "data": "opaque"}
+    assert [block["type"] for block in assistant[2:]] == ["text", "tool_use"]
+    report = messages[2]["content"]
+    assert report[0]["type"] == "tool_result"
+    assert report[0]["tool_use_id"] == "toolu_1"
+    assert report[-1]["text"] == "Nothing has changed."
+    assert report[-1]["cache_control"] == _FIVE_MINUTES
+    assert all("cache_control" not in block for block in messages[0]["content"])

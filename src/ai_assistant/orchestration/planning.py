@@ -8,10 +8,12 @@ step and one round (§2:3): it assembles planning's inputs, asks the model once,
 the round, and judges the round's calls. It runs nothing, writes no message and
 decides nothing about whether a call may run (§9:1).
 
-**A round is asked afresh** (§2:6). The request is two messages, the instruction and
-one JSON object rendering planning's inputs, earlier rounds and acting's outcomes
-among them, as quoted data. No earlier tool exchange is replayed in the provider's
-native form, so the request never carries an assistant or a tool turn.
+**A round is asked with one briefing** (ADR-0356 §14:1). The request is a
+:class:`~ai_assistant.core.types.PlanningExchange` of the instruction and a briefing of
+one JSON object rendering planning's inputs, earlier rounds and acting's outcomes among
+them, as quoted data, with no earlier step: the work's exchange held across rounds, the
+reports and the news are the next lane's (§14:2). The round's text is kept as its notes
+(§7:2) and, until a message is a call (ADR-0357), is still also the round's message.
 
 **What it is given** (§6, as ADR-0312 §4 corrects it). Understanding's record and its
 story links; the place window and the episode window; what both recall runs found
@@ -94,15 +96,9 @@ taken out of its arguments (ADR-0306 §2:10). Whether a note a move names is sti
 is the story store's half, in the lane that builds planning's story calls.
 
 **Asking** (ADR-0321 §2). A call that came back needing the user's yes is shown with a
-reference, and planning decides whether a later round's message asks about it, naming
-it by that reference in the response's ``asks``. A name that resolves to no such call is
-dropped, and so is every name where the place takes no message (§7:3). For each call the
-message asks about, code appends one exact line, written by :func:`exact_line` for every
-capability alike, and records the call in the round's ``asked``, its part the line's
-number. The lines go under one fixed ``Needs your yes:`` line, whether or not planning
-wrote text (#3094), and a copy of that line ending planning's text is dropped, so it
-appears once (#3103). The exact lines are the message's last lines, so a cut that loses
-any of them loses the end of the message.
+reference and its exact line, written by :func:`exact_line` for every capability alike.
+No part of a response names the calls a message asks about (ADR-0356 §7:5), so a round
+records no asked call: where the calls are named is ADR-0357's, on its message call.
 
 **Approved actions** (§4:2). The actions the activation's yes approved are shown under A
 labels and proposed through :data:`APPROVED_ACTION_TOOL` by label alone. The judge fills
@@ -166,6 +162,7 @@ from ai_assistant.core.types import (
     MemoryStanding,
     Message,
     OfferedTool,
+    PlanningExchange,
     PlanningLabel,
     PlanningRound,
     ProfileField,
@@ -3026,106 +3023,6 @@ def _approved_id(part: QuestionPart) -> str:
     return f"{part.round}#{part.part}"
 
 
-@dataclass(frozen=True, slots=True)
-class _Asked:
-    """One call a round's message asks about, and what its question shows beside it.
-
-    ``replacing`` is the assertions it replaces; ``worded`` the wording an argument
-    naming a memory is shown by (ADR-0338 §8:6).
-    """
-
-    call: AskedCall
-    replacing: tuple[str, ...] = ()
-    worded: tuple[tuple[str, str], ...] = ()
-
-
-def _asked_calls(names: Sequence[str], askable: Mapping[str, CallOutcome]) -> tuple[_Asked, ...]:
-    """The calls a round's message asks about, from the names its response gave.
-
-    In the order named, each part its place in that order (§2:6). A name that resolves
-    to no call this round may ask about is dropped (§2:3), and so is one naming the same
-    call, by tool, values and binding, as a name before it: the question shows a call
-    once. A call whose values and binding make no request its declaration admits cannot
-    be recorded as asked about (§2:8), and is dropped as well. A remember's replaced
-    assertions are recorded by id and shown by statement, exactly the same ones (§5:5),
-    which are those :func:`_shown_replaced` keeps.
-    """
-    chosen: list[tuple[ActionRequest, CallOutcome]] = []
-    for name in names:
-        outcome = askable.get(name.strip())
-        request = None if outcome is None else outcome.request
-        if outcome is None or request is None:
-            _log.info("planning_ask_dropped", stage="planning", reason="names_nothing")
-            continue
-        if any(_same_request(earlier, request) for earlier, _ in chosen):
-            _log.info("planning_ask_dropped", stage="planning", reason="named_twice")
-            continue
-        chosen.append((request, outcome))
-    asked: list[_Asked] = []
-    for request, outcome in chosen:
-        replaced = {record.id: record.content for record in _shown_replaced(outcome.replaces)}
-        try:
-            call = AskedCall(
-                part=len(asked) + 1,
-                tool=request.tool,
-                values=request.parameters,
-                binding=request.egress_binding,
-                deliberate_repeat=outcome.deliberate_repeat,
-                replaces=tuple(replaced),
-            )
-        except ValueError:
-            _log.info("planning_ask_dropped", stage="planning", reason="unrecordable")
-            continue
-        asked.append(_Asked(call, tuple(replaced.values()), outcome.worded))
-    return tuple(asked)
-
-
-def _bare_line(line: str) -> str:
-    """A line as :func:`_without_fixed_line` compares it: no whitespace, colon or case."""
-    return line.strip().removesuffix(":").rstrip().casefold()
-
-
-def _without_fixed_line(text: str) -> str:
-    """Planning's text without a :data:`_NEEDS_YOUR_YES` line of its own at its end (#3103).
-
-    Planning is told it never writes the fixed line, and code is the backstop: a last
-    line that is the fixed line, whatever its case, surrounding whitespace or missing
-    colon, is dropped. Only the last line: a mention anywhere else is left as written.
-    """
-    lines = text.rstrip().splitlines(keepends=True)
-    if lines and _bare_line(lines[-1]) == _bare_line(_NEEDS_YOUR_YES):
-        return "".join(lines[:-1])
-    return text
-
-
-def _with_questions(
-    text: str, asked: Sequence[_Asked], capabilities: Sequence[ToolDefinition]
-) -> str:
-    """The round's message with an exact line for each call it asks about (§2:5-§2:6).
-
-    The lines come last, under the fixed :data:`_NEEDS_YOUR_YES` line, which follows
-    planning's text after a blank line, so a message cut to fit loses them first. The
-    fixed line is there whether or not planning wrote text, so the lines never go out
-    as a bare line that does not read as a question (#3094). Where planning's text ends
-    with that line itself, its copy is dropped, so the line appears once (#3103).
-    """
-    if not asked:
-        return text
-    text = _without_fixed_line(text)
-    lines = "\n".join(
-        exact_line(
-            one.call,
-            filled=_filled(capabilities, one.call),
-            numbered=len(asked) > 1,
-            replacing=one.replacing,
-            worded=dict(one.worded),
-        )
-        for one in asked
-    )
-    question = f"{_NEEDS_YOUR_YES}\n{lines}"
-    return f"{text.rstrip()}\n\n{question}" if text.strip() else question
-
-
 def _approved_tool(
     approved: Mapping[str, ApprovedAction], offered: Sequence[OfferedTool]
 ) -> OfferedTool | None:
@@ -3435,16 +3332,16 @@ class PlanningStage:
             },
             values=_PLANNING_VALUES,
         )
-        messages = (
-            Message(role=Role.SYSTEM, content=instruction.text),
-            Message(role=Role.USER, content=rendered),
-        )
-        response = await self._responded(messages, offered_here, instruction)
+        # ADR-0356 §14:1: one briefing of today's rendered context, the round asked
+        # afresh with it; the work's exchange held across rounds is P2's.
+        exchange = PlanningExchange(instruction=instruction.text, briefing=rendered)
+        response = await self._responded(exchange, offered_here, instruction)
         read_outside = inputs.outside_content_read or inputs.outside_trigger or request.shown.marked
-        # ADR-0321 §2:3, §2:5-§2:8: the calls the message asks about, each with its exact
-        # line appended to the message and recorded with the round. Where the place
-        # takes no message nothing is askable, so every name is dropped (§7:3).
-        asked = _asked_calls(response.asks, request.askable)
+        # ADR-0356 §7:2, §14:1: the round's text is kept as its notes. Until a message is
+        # a call (ADR-0357), the text is also still the round's message, as the least
+        # that keeps every reader of a reply working; nothing is read of what a message
+        # asks about (§7:5), so a round records no asked call.
+        notes = response.text if response.text.strip() else None
         # ADR-0350 §6:7, §12:8: a message of an activation the Task Scheduler started
         # names, by its place label, the one place on its list it goes into.
         text, place = (
@@ -3454,12 +3351,11 @@ class PlanningStage:
             id=self._new_id(),
             follows=inputs.rounds[-1].id if inputs.rounds else None,
             recorded_at=self._now(),
-            text=_with_questions(text, asked, inputs.capabilities),
+            text=text,
             place=place if text.strip() else None,
             calls=response.calls,
-            notes=response.notes,
-            notes_marked=response.notes is not None and read_outside,
-            asked=tuple(one.call for one in asked),
+            notes=notes,
+            notes_marked=notes is not None and read_outside,
         )
         labels = tuple(book.minted)
         recorded = await self._record(planning_round, labels)
@@ -3494,7 +3390,7 @@ class PlanningStage:
 
     async def _responded(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         offered: Sequence[OfferedTool],
         instruction: RenderedPrompt,
     ) -> RoundResponse:
@@ -3503,7 +3399,10 @@ class PlanningStage:
         The completer writes planning's returned entry from the provider's response,
         whether or not it reads as a round (§5:2). Where it wrote none because no
         response came back, this module writes it, with the failure; the failure is
-        re-raised unchanged. The given entry names the template the system message was
+        re-raised unchanged. The given entry records the exchange as handed in
+        (ADR-0356 §13:6), and beside it the same request as the system and user
+        messages it is sent as while the exchange is its briefing alone, which the
+        owner's replay tool and viewer read; it names the template the instruction was
         rendered from and the flags it was rendered under (ADR-0334 §8:2, ADR-0335 §9:1).
         """
         await write_diagnostic(
@@ -3511,14 +3410,18 @@ class PlanningStage:
             DiagnosticSource.PLANNING,
             DiagnosticKind.GIVEN,
             lambda: {
-                "messages": [one.model_dump(mode="json") for one in messages],
+                "exchange": exchange.model_dump(mode="json"),
+                "messages": [
+                    Message(role=Role.SYSTEM, content=exchange.instruction).model_dump(mode="json"),
+                    Message(role=Role.USER, content=exchange.briefing).model_dump(mode="json"),
+                ],
                 "tools": [tool.model_dump(mode="json") for tool in offered],
                 "prompt": instruction.provenance(),
             },
         )
         written = returned_written(DiagnosticSource.PLANNING)
         try:
-            return await self._completer.respond(messages, offered, model=self._model)
+            return await self._completer.respond(exchange, offered, model=self._model)
         except Exception as exc:
             if returned_written(DiagnosticSource.PLANNING) == written:
                 await write_failure(self._diagnostics, DiagnosticSource.PLANNING, exc)
