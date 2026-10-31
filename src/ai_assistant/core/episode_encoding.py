@@ -337,10 +337,13 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
     (§10:9). Each version, and each item of evidence in every view, is placed among the
     rounds by the phases' order and then the clock, as
     :class:`~ai_assistant.core.types.ProjectedUnderstanding` and
-    :class:`~ai_assistant.core.types.ProjectedEvidence` say. Every part is cut to
-    ``excerpt_chars`` as the others are; nothing of a record is read here, so the caller
-    reads each referenced record again, as it is now held, under its own audience
-    (§10:6, §6:3).
+    :class:`~ai_assistant.core.types.ProjectedEvidence` say, and each call, recorded
+    or not, by its index among its round's calls. An unrecorded call's arguments are cut
+    to ``excerpt_chars`` as every call's are; each version's meaning is carried whole,
+    as the latest one's is; and what a call showed is carried as its entry keeps it,
+    already cut to the bound it was recorded under (§11:4), with no record's content in
+    it. Nothing of a record is read here, so the caller reads each referenced record
+    again, as it is now held, under its own audience (§10:6, §6:3).
 
     **An episode's pending candidates** (ADR-0329 §6:9) are the facts the caller
     hands in ``candidates``: which of the episode's ``remember`` calls are candidates
@@ -489,13 +492,18 @@ def _projected_calls(
     In the full view each also carries what its result showed (ADR-0358 §11:5).
     """
     positions = {one.id: index for index, one in enumerate(processing.rounds)}
-    proposed = {(one.id, call.call_id): call for one in processing.rounds for call in one.calls}
+    proposed = {
+        (one.id, call.call_id): (index, call)
+        for one in processing.rounds
+        for index, call in enumerate(one.calls)
+    }
     projected: list[ProjectedCall] = []
     for entry in processing.call_records:
-        call = proposed[(entry.round, entry.call_id)]  # the record's validator holds it
+        index, call = proposed[(entry.round, entry.call_id)]  # the record's validator holds it
         projected.append(
             ProjectedCall(
                 position=positions[entry.round],
+                index=index,
                 capability=entry.capability,
                 arguments=_projected_arguments(call, bound),
                 effect=entry.effect,
@@ -563,11 +571,12 @@ def _full_view_parts(
     unrecorded = tuple(
         ProjectedProposal(
             position=position,
+            index=index,
             capability=call.name,
             arguments=_projected_arguments(call, bound),
         )
         for position, one in enumerate(processing.rounds)
-        for call in one.calls
+        for index, call in enumerate(one.calls)
         if (one.id, call.call_id) not in entered
     )
     return understood, recalled, unrecorded
