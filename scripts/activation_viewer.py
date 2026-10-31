@@ -44,9 +44,15 @@ the raw entries are one tab away.
 An activation also walks, a step at a time, in its own order: what arrived, each run of
 recall with what it kept, understanding's reading field by field, each planning round
 with what came back from the round before and what it proposed, authorizing's verdicts,
-acting and any digest, the end, and what the observer learned. Each step is a summary, and
-opens its calls and entries in the drawer the timeline opens. Previous and Next, or the
-arrow keys, move; the page's address names the step, as ``#<activation>/walk/<n>``.
+acting and any digest, the end, and what the observer learned. A planning round recorded
+since ADR-0356 is read from the work's exchange its request records: its text is its
+notes, written to no one, and what people received is its message calls'; what came of
+its calls is the next round's report on it, and the last round's calls, which no request
+reports and acting records no entry for, say so. One recorded before reads as it was
+written: its text is its message and its own tool carries its notes. Each step is a
+summary, and opens its calls and entries in the drawer the timeline opens. Previous and
+Next, or the arrow keys, move; the page's address names the step, as
+``#<activation>/walk/<n>``.
 
 A step also says how each of its model calls went: how long it took, its tokens, and a
 cost estimated from the rates :data:`MODEL_RATES` keeps beside each model's id, dated and
@@ -172,6 +178,17 @@ INPUT_CHARS: Final = 160
 
 #: The planning tool that carries a round's notes and mark, not a capability call.
 ROUND_TOOL: Final = "planning_round"
+
+#: The message call, and the argument holding its words (ADR-0356 §7:7): since ADR-0356 a
+#: round's text is its notes, and what people receive comes from these calls.
+MESSAGE_CALL: Final = "text"
+MESSAGE_WORDS: Final = "words"
+
+#: What the walk says of a round's calls where no later round's request reports them.
+NO_CALL_ENTRY: Final = (
+    "The record holds no entry for what came of these calls: acting writes none, and no "
+    "later round's request reports them."
+)
 
 #: Headers every response carries (ADR-0316 §6:5-§6:6).
 SECURITY_HEADERS: Final = (
@@ -1027,6 +1044,9 @@ class _Timeline:
             number = self.round_of(given.at)
             if number is not None:
                 self.rounds[number]["given"] = given.line
+                # ADR-0356 §5: a request since is the work's exchange, and the round's
+                # text is its notes (§7:2); one before is the rendered context.
+                self.rounds[number]["exchange"] = _exchange_of(given.body) is not None
             if returned is not None:
                 self._round_response(returned)
 
@@ -1041,6 +1061,7 @@ class _Timeline:
             held["failure"] = _failure_text(body.get("failure"))
         texts: list[str] = []
         calls: list[dict[str, object]] = []
+        messages: list[str] = []
         thinking = False
         marked = False
         for part in _sequence(_mapping(body.get("response")).get("parts")):
@@ -1058,8 +1079,13 @@ class _Timeline:
                     marked = marked or arguments.get("another_round") is True
                 else:
                     calls.append({"id": _text(shown.get("tool_call_id")), "name": name})
+                    if name == MESSAGE_CALL:
+                        words = _words_of(shown.get("args"))
+                        if words is not None:
+                            messages.append(words)
         held["marked"] = marked
         held["text"] = "".join(texts)
+        held["messages"] = messages
         held["thinking"] = thinking
         held["calls"] = calls
 
@@ -3052,10 +3078,36 @@ def walk(
             }
         )
         steps += [_phase_step(built, one) for one in phases]
+        _came_of(steps)
         steps.append(_end_step(built, ended, tally))
     if learned is not None:
         steps += _learning_steps(learning_lane("", learned))
     return {"start": tally.summary()["start"], "own": own, "steps": steps}
+
+
+def _came_of(steps: Sequence[dict[str, object]]) -> None:
+    """Set on each exchange round what came of its calls, from the next round's report.
+
+    The record holds no entry for a call (acting writes none, ADR-0314 §4:3): what came
+    of a round's calls is in the next round's request alone, its exchange's report on
+    that round (ADR-0356 §5:3, §8:3). So each planning round recorded since ADR-0356 is
+    given, by call id, the result the next one's request shows for it, and the last,
+    which no request follows, is marked as holding none.
+    """
+    planning = [one for one in steps if one.get("phase") == "planning"]
+    for this, after in itertools.zip_longest(planning, planning[1:]):
+        if this is None or this.get("exchange") is not True:
+            continue
+        before = None if after is None else _mapping(after.get("before"))
+        if not before:
+            this["came_of"] = None
+            this["came_of_note"] = NO_CALL_ENTRY
+            continue
+        this["came_of"] = {
+            str(call["id"]): call["result"]
+            for call in map(_mapping, _sequence(before.get("calls")))
+            if isinstance(call.get("id"), str)
+        }
 
 
 def _phases(built: _Timeline) -> tuple[list[_Phase], Entry | None]:
@@ -4063,14 +4115,88 @@ def _result_in_short(value: object) -> dict[str, object] | None:
     return {"label": _text(held.get("label")), "text": _cut(text)}
 
 
+def _exchange_of(body: object) -> Mapping[str, object] | None:
+    """The work's exchange a planning request records, where it is one (ADR-0356 §13:6)."""
+    exchange = _mapping(body).get("exchange")
+    return exchange if isinstance(exchange, dict) else None
+
+
+def _words_of(raw: object) -> str | None:
+    """A message call's words, from its arguments as the response wrote them."""
+    words = _mapping(_arguments(raw)).get(MESSAGE_WORDS)
+    return words if isinstance(words, str) else None
+
+
+def _exchanged_before(steps: Sequence[object]) -> dict[str, object] | None:
+    """What came back from the round before, as the work's exchange reports it (§5).
+
+    The last step's response, as the round before returned it: its notes, its text
+    (§7:2), and each call it made; and the system's report on it: each call's result by
+    its id, code's rendering of what came of it as planning was shown it (§8:3), and the
+    news. A message call also shows the words it asked to send.
+    """
+    if not steps:
+        return None
+    last = _mapping(steps[-1])
+    response, report = _mapping(last.get("response")), _mapping(last.get("report"))
+    results = {
+        _text(one.get("call_id")): _text(one.get("text"))
+        for one in map(_mapping, _sequence(report.get("results")))
+    }
+    calls: list[dict[str, object]] = []
+    for one in map(_mapping, _sequence(response.get("calls"))):
+        name, call_id = _text(one.get("name")), _text(one.get("call_id"))
+        result = results.get(call_id)
+        words = _mapping(one.get("arguments")).get(MESSAGE_WORDS)
+        calls.append(
+            {
+                "id": call_id,
+                "capability": name,
+                "outcome": None,
+                "because": None,
+                "result": None if result is None else {"label": None, "text": _cut(result)},
+                "message": words if name == MESSAGE_CALL and isinstance(words, str) else None,
+            }
+        )
+    return {
+        "round": len(steps),
+        "text": None,
+        "notes": _text(response.get("text")),
+        "text_was": None,
+        "calls": calls,
+        "news": _text(report.get("news")),
+    }
+
+
 def _planning_step(phase: _Phase) -> dict[str, object]:
-    """A planning round: what came back from the round before, and what this one proposed."""
+    """A planning round: what came back from the round before, and what this one proposed.
+
+    A request recorded since ADR-0356 is the work's exchange (§13:6), read from its
+    steps; one recorded before is the rendered context, read from its user message.
+    """
     given, returned = _first(phase, "given"), _last(phase, "returned")
+    exchange = None if given is None else _exchange_of(given.body)
+    if exchange is not None:
+        steps = _sequence(exchange.get("steps"))
+        answered = _mapping(None if returned is None else returned.body)
+        return {
+            "exchange": True,
+            "request": True,
+            "first": not steps,
+            "before": _exchanged_before(steps),
+            "evidence": [],
+            "returned": returned is not None,
+            "failure": _failure_of(answered),
+            "read_as_round": answered.get("read_as_round")
+            if isinstance(answered.get("read_as_round"), bool)
+            else None,
+        } | _proposed(answered, exchange=True)
     document = None if given is None else _user_document(given.body)
     rounds = _sequence(_mapping(document).get("rounds"))
     before = _mapping(rounds[-1]) if rounds else None
     body = _mapping(None if returned is None else returned.body)
     shown: dict[str, object] = {
+        "exchange": False,
         "request": document is not None,
         "first": document is not None and isinstance(document.get("rounds"), list) and not rounds,
         "before": None
@@ -4106,10 +4232,17 @@ def _planning_step(phase: _Phase) -> dict[str, object]:
     return shown | _proposed(body)
 
 
-def _proposed(body: Mapping[str, object]) -> dict[str, object]:
-    """What a round's response proposed: its calls, its message, its notes and asks."""
+def _proposed(body: Mapping[str, object], *, exchange: bool = False) -> dict[str, object]:
+    """What a round's response proposed: its calls, its message, its notes and asks.
+
+    Before ADR-0356 a round's text is its message and the round's own tool carries its
+    notes. Since, in a work's exchange, its text is its notes, written to no one (§7:2),
+    and what people receive comes from its message calls (§7:3), each listed with its
+    words.
+    """
     texts: list[str] = []
     calls: list[dict[str, object]] = []
+    messages: list[dict[str, object]] = []
     notes: str | None = None
     asks: list[str] | None = None
     another = False
@@ -4133,16 +4266,21 @@ def _proposed(body: Mapping[str, object]) -> dict[str, object]:
                 asks = _strings(asked) if isinstance(asked, list) else asks
                 another = another or held.get("another_round") is True
             else:
+                call_id = _text(part.get("tool_call_id"))
                 calls.append(
-                    {
-                        "name": name,
-                        "id": _text(part.get("tool_call_id")),
-                        "arguments": _arguments_text(raw, parsed),
-                    }
+                    {"name": name, "id": call_id, "arguments": _arguments_text(raw, parsed)}
                 )
+                words = _words_of(raw) if name == MESSAGE_CALL else None
+                if words is not None:
+                    messages.append({"id": call_id, "words": words})
+    text = "".join(texts)
+    if exchange:
+        notes = text or notes
+        text = ""
     return {
         "calls": calls,
-        "message": "".join(texts),
+        "message": text,
+        "message_calls": messages,
         "notes": notes,
         "asks": asks,
         "another_round": another,
@@ -5640,6 +5778,14 @@ SCRIPT: Final = r"""
         box.appendChild(el("div", "round-text none", "failed: " + r.failure));
       } else if (r.returned === undefined) {
         box.appendChild(el("div", "round-text none", "no response recorded yet"));
+      } else if (r.exchange) {
+        // ADR-0356 §7:2: since, a round's text is its notes, written to no one; what
+        // people receive comes from its message calls.
+        box.appendChild(el("div", "round-text" + (r.text ? "" : " none"),
+          r.text ? "notes: " + r.text : "no notes"));
+        for (const one of r.messages || []) {
+          box.appendChild(el("div", "round-text", "message call: " + one));
+        }
       } else {
         box.appendChild(el("div", "round-text" + (r.text ? "" : " none"), r.text || "no text"));
       }
@@ -6449,17 +6595,29 @@ SCRIPT: Final = r"""
           + (s.before.text_was ? " · " + s.before.text_was : "")));
         before.appendChild(el("div", "said", s.before.text));
       }
+      if (s.before.notes) {
+        before.appendChild(el("div", "m", "its notes"));
+        before.appendChild(el("div", "said", s.before.notes));
+      }
       if (!s.before.calls.length) before.appendChild(el("p", "note", "It proposed no call."));
       for (const call of s.before.calls) {
         const one = walkItem(before);
         one.appendChild(el("div", "said", (call.capability || "?") + " · "
           + (call.outcome || "no outcome shown")));
         if (call.because) one.appendChild(el("div", "m", "because: " + call.because));
+        if (call.message) {
+          one.appendChild(el("div", "m", "the message it asked to send"));
+          one.appendChild(el("div", "said", call.message));
+        }
         if (call.result) {
           one.appendChild(el("div", "m", "result" + (call.result.label ? " "
             + call.result.label : "")));
           pre(one, call.result.text);
         }
+      }
+      if (s.before.news) {
+        before.appendChild(el("div", "m", "the news"));
+        pre(before, s.before.news);
       }
     } else {
       before.appendChild(el("p", "note", s.first ? "The first round: none came before it."
@@ -6486,11 +6644,31 @@ SCRIPT: Final = r"""
       const one = walkItem(calls);
       one.appendChild(el("div", "said", call.name + (call.id ? " · " + call.id : "")));
       pre(one, call.arguments);
+      const came = s.came_of && call.id ? s.came_of[call.id] : null;
+      if (came) {
+        one.appendChild(el("div", "m", "what came of it, as the next round was told"));
+        pre(one, came.text);
+      }
     }
-    const message = sec(root, "Its message");
-    message.appendChild(s.message ? el("div", "said", s.message)
-      : el("p", "note", "No message text."));
-    if (s.notes !== null) sec(root, "Episode notes").appendChild(el("div", "said", s.notes));
+    if (s.calls.length && s.came_of_note) calls.appendChild(el("p", "note", s.came_of_note));
+    if (s.exchange) {
+      // ADR-0356 §7:3: a round writes no message; what people receive is its calls'.
+      const sent = sec(root, "Its messages");
+      if (!s.message_calls.length) sent.appendChild(el("p", "note", "No message call."));
+      for (const one of s.message_calls) {
+        const row = walkItem(sent);
+        if (one.id) row.appendChild(el("div", "m", one.id));
+        row.appendChild(el("div", "said", one.words));
+      }
+    } else {
+      const message = sec(root, "Its message");
+      message.appendChild(s.message ? el("div", "said", s.message)
+        : el("p", "note", "No message text."));
+    }
+    if (s.notes !== null) {
+      sec(root, s.exchange ? "Its notes (its text)" : "Episode notes")
+        .appendChild(el("div", "said", s.notes));
+    }
     if (s.asks !== null) {
       const chips = el("div", "chips");
       for (const one of s.asks) chips.appendChild(el("span", "chip", one));
