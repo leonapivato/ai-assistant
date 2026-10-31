@@ -2542,6 +2542,44 @@ def _calls_include(reply: Reply, params: Mapping[str, object]) -> Judgement:
     return None
 
 
+def _no_message(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
+    """The round sends no message: no ``text`` or ``email`` call (ADR-0357 §2)."""
+    if reply.round is None:
+        return "the response reads as no round"
+    sent = [one for one in reply.round.calls if one.name in _MESSAGE_CALLS]
+    if sent:
+        return f"the round sends {len(sent)} message(s)"
+    return None
+
+
+def _none_of(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """The round calls none of the named capabilities, and sends at most one message."""
+    if reply.round is None:
+        return "the response reads as no round"
+    named = set(cast("list[str]", params["capabilities"]))
+    if any(one.name in named for one in reply.round.calls):
+        return "the round calls a named capability"
+    if len(_said(reply.round)) > 1:
+        return "the round sends more than one message"
+    return None
+
+
+def _calls_within(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """Every call is to one of the named capabilities, its named argument the value."""
+    if reply.round is None:
+        return "the response reads as no round"
+    calls = reply.round.calls
+    if not calls:
+        return "the round makes no call"
+    named = set(cast("list[str]", params["capabilities"]))
+    for one in calls:
+        if one.name not in named:
+            return "the round makes a call to a capability not named"
+        if one.arguments.get(str(params["argument"])) != params["value"]:
+            return "a call names another value, or none"
+    return None
+
+
 def _no_call(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
     """The round makes no call, so it ends the work (ADR-0315 §4:3)."""
     if reply.round is None:
@@ -2744,6 +2782,27 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
             frozenset({PLANNING}),
             {"capabilities": "strings"},
             _calls_include,
+        ),
+        CodeCheck(
+            "no_message",
+            "the round sends no message",
+            frozenset({PLANNING}),
+            {},
+            _no_message,
+        ),
+        CodeCheck(
+            "none_of",
+            "the round calls none of the named capabilities, and sends at most one message",
+            frozenset({PLANNING}),
+            {"capabilities": "strings"},
+            _none_of,
+        ),
+        CodeCheck(
+            "calls_within",
+            "every call is to a named capability, its named argument the value",
+            frozenset({PLANNING}),
+            {"capabilities": "strings", "argument": "string", "value": "string"},
+            _calls_within,
         ),
         CodeCheck(
             "no_call",
