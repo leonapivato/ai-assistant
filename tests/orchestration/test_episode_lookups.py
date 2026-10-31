@@ -691,3 +691,16 @@ async def test_a_lines_older_history_where_the_window_showed_none_started_before
     assert [one.id for one in older.episodes] == ["activation:old"]
     assert not older.more
     assert unknown == OlderHistory(readable=False)
+
+
+async def test_a_whole_channel_of_the_largest_page_is_read_whole() -> None:
+    """§9:1: a read holding every live episode on the channel is the whole channel, even
+    at the largest page the store reads."""
+    channel = [_at(_episode(f"activation:{at}"), at - 1000) for at in range(1000)]
+    source = OlderSource(channel=LINE, started=_AT)
+
+    older = await _reads(_Memory(channel=channel)).older(source, 1, audience=BOUNDED)
+
+    assert older.readable
+    assert [one.id for one in older.episodes] == ["activation:999", "activation:998"]
+    assert older.more

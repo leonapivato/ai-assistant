@@ -132,6 +132,29 @@ def test_an_episode_search_keeps_each_episode_it_showed() -> None:
     )
 
 
+def test_a_matter_planning_already_labelled_keeps_no_summary_version() -> None:
+    """§8:1, §11:2: a matter the activation already labelled is rendered by its label
+    alone, so its entry keeps no summary version, whatever version it is at now."""
+    from ai_assistant.core.types import LabelKind, PlanningLabel  # noqa: PLC0415
+    from ai_assistant.orchestration.planning import MatterShown  # noqa: PLC0415
+
+    working = _acted(SEARCH_EPISODES, output={"looked_up": "search_episodes"}, query="dentist")
+    working.labels.add((PlanningLabel(label="S9", kind=LabelKind.STORY, id="story:dentist"),))
+    matter = MatterShown(story_id="story:dentist", summary_version=2, first_line="Version two.")
+    working.looked["result:1"] = EpisodesFound(
+        episodes=(EpisodeShown(record=_episode("activation:one"), matters=(matter,)),)
+    )
+
+    (entry,) = working.call_entries(_AT)
+
+    assert entry.showed == CallShowed(
+        parts=(
+            ShownRecord(kind=ShownRecordKind.EPISODE, id="activation:one"),
+            ShownRecord(kind=ShownRecordKind.STORY, id="story:dentist"),
+        )
+    )
+
+
 def test_what_an_entry_keeps_is_cut_to_the_bound_and_the_cut_carried() -> None:
     """§11:4: past the composition root's bound the rest is left out, and the entry says so."""
     working = _acted(SEARCH_MEMORY, output={"records": ["aaaa", "bbbb"]}, query="dentist")

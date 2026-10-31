@@ -948,7 +948,11 @@ def full_view_parts(projection: EpisodeProjection) -> tuple[FullViewPart, ...]:
 
 
 def call_showed(
-    outcome: CallOutcome, *, bound: int, owner_records: bool = True
+    outcome: CallOutcome,
+    *,
+    bound: int,
+    owner_records: bool = True,
+    held: Collection[str] = frozenset(),
 ) -> CallShowed | None:
     """What a done call's result showed planning directly, as its entry keeps it.
 
@@ -965,11 +969,15 @@ def call_showed(
     planning was shown them. What is kept is cut to ``bound`` characters, a record
     counting its id's, and the cut is carried (§11:4).
 
+    A matter planning already held a label for when the result was rendered is shown
+    by that label alone, with no summary (§8:1), so it keeps no summary version.
+
     Args:
         outcome: What came of the call, carrying what its look-up found.
         bound: The composition root's bound on what an entry keeps (§11:4).
         owner_records: Whether the pass may be shown a record placed for the owner
             alone, which decides what a full view's page shows (§10:5).
+        held: The stories planning held a label for before the result was rendered.
 
     Returns:
         What it showed, or ``None`` for a call that was not done (§11:2).
@@ -1006,7 +1014,7 @@ def call_showed(
             for item in history.items
             if not history.withheld(item)
         )
-    versions = _summary_versions(outcome)
+    versions = _summary_versions(outcome, held)
     parts.extend(
         ShownRecord(
             kind=_SHOWN_KINDS[one.kind],
@@ -1051,7 +1059,7 @@ def _labelled(outcome: CallOutcome, *, owner_records: bool) -> tuple[PlanningLab
     return tuple(book.minted)
 
 
-def _summary_versions(outcome: CallOutcome) -> dict[str, int]:
+def _summary_versions(outcome: CallOutcome, held: Collection[str]) -> dict[str, int]:
     """The summary version each story a result's rendering first shows was shown at.
 
     ADR-0358 §11:2, in the rendering's order, so a story shown twice keeps the version
@@ -1059,7 +1067,8 @@ def _summary_versions(outcome: CallOutcome) -> dict[str, int]:
     story's short view beside it; each matter an episode search names, episode by
     episode; and a full view's matters, which head it, then each story it shows again. A
     story whose summary is withheld, or named by its label alone, showed none, and
-    keeps none.
+    keeps none: a matter is named by its label alone where planning held that label
+    before the result was rendered (``held``), as :meth:`_Request._matter` renders it.
     """
     shown: list[tuple[str, int | None, bool]] = []
     story = outcome.story
@@ -1071,10 +1080,15 @@ def _summary_versions(outcome: CallOutcome) -> dict[str, int]:
             (matter.story_id, matter.summary_version, matter.withheld)
             for found in outcome.episodes.episodes
             for matter in found.matters
+            if matter.story_id not in held
         )
     full = outcome.full
     if full is not None:
-        shown.extend((one.story_id, one.summary_version, one.withheld) for one in full.matters)
+        shown.extend(
+            (one.story_id, one.summary_version, one.withheld)
+            for one in full.matters
+            if one.story_id not in held
+        )
         shown.extend(
             (one.story_id, one.summary_version, one.withheld) for one in full.stories.values()
         )

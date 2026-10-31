@@ -783,3 +783,22 @@ def test_a_story_shown_twice_keeps_the_version_it_was_first_shown_at() -> None:
         if isinstance(one, ShownRecord) and one.kind is ShownRecordKind.STORY
     ]
     assert stories == [("story:dentist", 1), ("story:hidden", None)]
+
+
+def test_a_matter_planning_held_a_label_for_keeps_no_summary_version() -> None:
+    """§8:1, §11:2: a matter already labelled is shown by its label alone, so it showed
+    no summary, though its summary moved on since it was labelled."""
+    matter = MatterShown(story_id="story:dentist", summary_version=2, first_line="Version two.")
+    found = EpisodesFound(
+        episodes=(EpisodeShown(record=_episode("activation:one"), matters=(matter,)),)
+    )
+    outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", episodes=found)
+
+    showed = call_showed(outcome, bound=1000, held=frozenset({"story:dentist"}))
+
+    assert showed == CallShowed(
+        parts=(
+            ShownRecord(kind=ShownRecordKind.EPISODE, id="activation:one"),
+            ShownRecord(kind=ShownRecordKind.STORY, id="story:dentist"),
+        )
+    )
