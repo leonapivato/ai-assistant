@@ -115,6 +115,9 @@ class ShortView:
             any was withheld (ADR-0305 §4).
         written: A summary has been written, whether or not it is shown, so a reader
             can tell a summary of no line from one not written yet.
+        summary_version: The version that wrote its summary, or ``None`` where none has
+            been written, by which a call whose result showed it keeps it (ADR-0358
+            §11:2).
     """
 
     story_id: str
@@ -125,6 +128,7 @@ class ShortView:
     withheld: bool = False
     notes_withheld: bool = False
     written: bool = False
+    summary_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +166,7 @@ class _Read:
     notes: tuple[StoryNote, ...]
     members: tuple[str, ...]
     written: bool
+    summary_version: int | None = None
 
     def addresses(self) -> list[str]:
         """The episodes this view's choice of episodes reads, in link order."""
@@ -201,6 +206,7 @@ class _Read:
             notes_withheld=not visibility.owner_records,
             episodes=tuple(record for id_ in latest if (record := fetched.get(id_)) is not None),
             written=self.written,
+            summary_version=self.summary_version,
         )
 
 
@@ -394,6 +400,7 @@ class StoryCandidates:
             notes=newest,
             members=await self._members(story_id, state),
             written=summary is not None,
+            summary_version=None if summary is None else summary.version,
         )
 
     async def _members(self, story_id: str, state: StorySummaryState) -> tuple[str, ...]:

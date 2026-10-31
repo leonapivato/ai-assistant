@@ -14,7 +14,7 @@ from datetime import timedelta
 from typing import Any
 
 from test_planning import _AT, _TOOLS, _earlier, _episode, _inputs, _remembered, _sent, _stage
-from test_planning_stories import _story
+from test_planning_stories import _short, _story
 
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
@@ -492,7 +492,10 @@ async def test_an_older_item_of_a_relayed_input_is_withheld_and_kept_by_nothing(
     showed = call_showed(outcome, bound=1000)
     assert showed is not None
     assert "the dentist's own words" not in showed.model_dump_json()
-    assert len(showed.parts) == 1
+    assert showed.parts == (
+        ShownText(text='{"from": "assistant", "text": "noted"}'),
+        ShownRecord(kind=ShownRecordKind.EPISODE, id="activation:r"),
+    )
 
 
 async def test_a_full_view_names_the_matters_its_episode_belongs_to() -> None:
@@ -587,3 +590,172 @@ def test_every_episode_a_stop_or_a_listing_labelled_is_kept() -> None:
         )
         assert "Remind them" not in showed.model_dump_json()
         assert "private appointment" not in showed.model_dump_json()
+
+
+# --- the probe: what an entry keeps is what the rendering labels (diagnosis at R4) -----------
+
+
+def _probe_cases() -> list[tuple[str, dict[str, Any]]]:
+    """One result of each shape whose rendering names records under labels."""
+    from ai_assistant.core.types import (  # noqa: PLC0415
+        StoryHeader,
+        StoryRelated,
+        StoryRelation,
+        StoryStanding,
+        StoryStandingEpisode,
+    )
+    from ai_assistant.orchestration.planning import PeerShown  # noqa: PLC0415
+    from ai_assistant.orchestration.task_scheduler import (  # noqa: PLC0415
+        ActivationEntry,
+        StillLive,
+        TaskEntry,
+        TaskListing,
+    )
+
+    def task(task_id: str, parent: str) -> TaskEntry:
+        return TaskEntry(
+            task_id=task_id,
+            state="pending",
+            falls_due="tomorrow",
+            instruction="remind them",
+            outside=False,
+            places=(),
+            parent=parent,
+            parent_text="a reminder",
+            author="the user",
+        )
+
+    def running(activation_id: str) -> ActivationEntry:
+        return ActivationEntry(
+            activation_id=activation_id,
+            started="09:00",
+            place="the hub chat",
+            status="running",
+            input="their words",
+            outside=False,
+        )
+
+    standing = StoryStanding(
+        story=StoryHeader(story_id="story:trip", created_at=_AT, merged_into=None),
+        recent=(
+            StoryStandingEpisode(
+                activation_id="moment",
+                occurred_at=_AT,
+                meaning="went",
+                in_progress=False,
+                outside=False,
+            ),
+        ),
+        related=(
+            StoryRelated(relation=StoryRelation.PART_OF, story_id="story:year", member_count=2),
+        ),
+    )
+    view = _story(
+        summary_version=3,
+        newer=(_episode("activation:newer"),),
+        inherited=(
+            _short("story:summer", episodes=(_episode("activation:inherited"),), summary_version=2),
+        ),
+        standing=standing,
+    )
+    said = _remembered("said", MemorySource.USER_ASSERTED, "dentist with Dr Rao")
+    matter = MatterShown(story_id="story:dentist", summary_version=2, first_line="The dentist.")
+    return [
+        ("read_story", {"story": view}),
+        (
+            "list_tasks",
+            {
+                "tasks": TaskListing(
+                    running=(running("busy"),),
+                    scheduled=(task("t1", "asker"),),
+                    recent=(running("done"),),
+                    listed=True,
+                )
+            },
+        ),
+        (
+            "stop_activation",
+            {
+                "peer": PeerShown(
+                    activation_id="parent",
+                    stopped=True,
+                    set_up=StillLive(
+                        tasks=(task("t2", "planner"),), activations=(running("child"),)
+                    ),
+                )
+            },
+        ),
+        (
+            "search_episodes",
+            {
+                "episodes": EpisodesFound(
+                    episodes=(EpisodeShown(record=_episode("activation:one"), matters=(matter,)),)
+                )
+            },
+        ),
+        (
+            "read_older_history",
+            {
+                "history": OlderHistory(
+                    readable=True,
+                    items=(
+                        PlaceItem(author=PlaceAuthor.USER, text="hi", episode_id="activation:old"),
+                    ),
+                    episodes=(_episode("activation:earlier"),),
+                )
+            },
+        ),
+        (
+            "read_episode",
+            {
+                "full": _read(
+                    _full_record(),
+                    memories={"said": said},
+                    stories={"story:dentist": matter},
+                    episodes=frozenset({"activation:other"}),
+                    matters=(
+                        MatterShown(story_id="story:in", summary_version=1, first_line="In."),
+                    ),
+                )
+            },
+        ),
+    ]
+
+
+async def test_an_entry_keeps_exactly_the_records_its_result_is_shown_under_labels() -> None:
+    """§11:2: for every shape, the records kept are those the briefing labels in the result."""
+    for name, fields in _probe_cases():
+        _, planned = await _shown(name, fields, owner_records=True)
+        earlier, _ = _looked(name)
+        outcome = CallOutcome(
+            earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:1", **fields
+        )
+        labelled = {
+            (one.kind.value, one.id)
+            for one in planned.labels
+            if one.kind in (LabelKind.MEMORY, LabelKind.EPISODE, LabelKind.STORY)
+        }
+
+        showed = call_showed(outcome, bound=10_000)
+
+        assert showed is not None, name
+        kept = {(one.kind.value, one.id) for one in showed.parts if isinstance(one, ShownRecord)}
+        assert labelled, name
+        assert kept == labelled, name
+        assert not showed.cut, name
+
+
+def test_a_story_read_keeps_each_story_by_the_version_its_view_showed() -> None:
+    """§11:2: the story read and each larger story's short view, by their versions."""
+    view = _story(summary_version=3, inherited=(_short("story:summer", summary_version=2),))
+    outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", story=view)
+
+    showed = call_showed(outcome, bound=1000)
+
+    assert showed is not None
+    versions = {
+        one.id: one.summary_version
+        for one in showed.parts
+        if isinstance(one, ShownRecord) and one.kind is ShownRecordKind.STORY
+    }
+    assert versions == {view.story_id: 3, "story:summer": 2}
