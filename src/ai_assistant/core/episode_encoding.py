@@ -719,8 +719,9 @@ def _peer_effects(
     one for every call (§8:6), so a frozen episode holding none, frozen other than by a
     restart's close, was recorded before: each of its message effects shows the round's
     text, as it always has (§8:1). Otherwise the text is the round's own message only
-    once the round is settled, every call it proposed holding an entry with an
-    outcome, so every message call claimed holds its delivery: then one effect more
+    once the round is settled, every call it proposed holding an entry with an outcome,
+    so every message call claimed holds its delivery (:func:`_round_messages`): then
+    one effect more
     than the deliveries makes the first the round's own, and as many makes each a
     call's.
 
@@ -772,7 +773,7 @@ def _message_words(
         messages: list[str] | None = (
             [one.text] * len(held)
             if shows and before
-            else _round_messages(processing, one, len(held), shows=shows)
+            else _round_messages(processing, one, held, shows=shows)
         )
         if messages is None:
             continue
@@ -782,12 +783,28 @@ def _message_words(
 
 
 def _round_messages(
-    processing: EpisodeProcessingRecord, planned: PlanningRound, claimed: int, *, shows: bool
+    processing: EpisodeProcessingRecord,
+    planned: PlanningRound,
+    claimed: Sequence[ActivationEffect],
+    *,
+    shows: bool,
 ) -> list[str] | None:
-    """A round's messages in the order written, where ``claimed`` effects pair with them.
+    """A round's messages in the order written, where its ``claimed`` effects pair with them.
 
-    ``None`` where they do not: the counts differ, or the round's text shows and the round
-    is not settled, so a claimed message call may still lack its delivery.
+    ``None`` where they do not: the counts differ, or the round's text shows and which
+    effect is its own message is not settled. A round showing no text writes no message
+    of its own (ADR-0356 §7:3): a delivery is held exactly by a message call whose write
+    returned or raised, so as many effects as deliveries pair each with its call, and a
+    write cut off leaves one effect over, which pairs none.
+
+    A round whose text shows, under ADR-0356's interim, writes its own message first,
+    then each message call in the round's order; but no record names which effect is the
+    round's own (§13 keeps :class:`ActivationEffect` unchanged), and a message call
+    whose write was cut off holds neither its outcome nor its delivery. So the text pairs
+    with the first effect only once the round is settled: every call it proposed holds
+    its entry, each with an outcome. A round with a started tidy-up, whose entry holds
+    none by design (§8:6), so stays unsettled, and its messages show no words: no text a
+    round never sent is shown as sent (ADR-0349 §6:8), and the interim ends with P3.
     """
     entries = {
         entry.call_id: entry for entry in processing.call_records if entry.round == planned.id
@@ -798,16 +815,14 @@ def _round_messages(
         if (entry := entries.get(call.call_id)) is not None and entry.delivered is not None
     ]
     if not shows:
-        return sent if claimed == len(sent) else None
-    settled = all(
-        (entry := entries.get(call.call_id)) is not None and entry.outcome is not None
-        for call in planned.calls
-    )
-    if not settled:
+        return sent if len(claimed) == len(sent) else None
+    if any(call.call_id not in entries for call in planned.calls):
         return None
-    if claimed == len(sent) + 1:
+    if any(entry.outcome is None for entry in entries.values()):
+        return None
+    if len(claimed) == len(sent) + 1:
         return [planned.text, *sent]
-    return sent if claimed == len(sent) else None
+    return sent if len(claimed) == len(sent) else None
 
 
 def _projected_rounds(
