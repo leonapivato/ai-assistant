@@ -1,22 +1,25 @@
 """What planning is told and shown once ``remember`` records candidates (ADR-0329 §6).
 
 Driven directly over the planning stage, each outcome built by hand as the phases' glue
-hands it over: the instruction's flags (§6:1-§6:5, §6:8), a candidate's result (§4:1,
-§4:4, §6:5), open questions beside a memory (§6:6) and an unprocessed episode's pending
-candidates in the episode window (§6:9). ADR-0328 §13's interim, and the switch that
-kept its instruction, are retired.
+hands it over: the instruction, which takes no flag (ADR-0356 §4:2), a candidate's result
+(§4:1, §4:4, §6:5) in the report after the round that called ``remember`` (ADR-0356 §5:4),
+open questions beside a memory (§6:6) and an unprocessed episode's pending candidates in
+the episode window (§6:9). ADR-0328 §13's interim, and the switch that kept its
+instruction, are retired.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from exchange_support import reported, section, tag, tags
 from test_planning import (
     _TOOLS,
     FLAG_ECHO,
-    _earlier,
+    FLAG_ECHO_TEXT,
     _echoed,
     _episode,
     _inputs,
@@ -57,6 +60,7 @@ from ai_assistant.testing import FakeDiagnosticSink, FakeToolCallingCompleter, d
 if TYPE_CHECKING:
     from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.types import ToolDefinition
+    from ai_assistant.orchestration.planning import PlannedRound, PlanningInputs
 from ai_assistant.testing.memories import memory, message_support, said_support
 
 _AT: Final = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
@@ -84,29 +88,34 @@ def _stage(
     return stage, completer
 
 
-# --- the instruction's flags (§6:1-§6:5, §6:8) -----------------------------------------------
+# --- the instruction takes no flag (ADR-0356 §4:2) --------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("offered", "handed"),
-    [
-        ((REMEMBER_CANDIDATE, NOTE_RELIANCE), {"candidates", "reliance"}),
-        ((REMEMBER_CANDIDATE,), {"candidates"}),
-        ((NOTE_RELIANCE,), {"reliance"}),
-        ((), set()),
-    ],
+    "offered",
+    [(REMEMBER_CANDIDATE, NOTE_RELIANCE), (REMEMBER_CANDIDATE,), (NOTE_RELIANCE,), ()],
     ids=["both", "candidates", "reliance", "neither"],
 )
-async def test_the_template_is_handed_candidates_and_reliance_where_each_is_offered(
-    offered: tuple[ToolDefinition, ...], handed: set[str]
+async def test_the_instruction_is_the_same_whichever_of_candidates_and_reliance_is_offered(
+    offered: tuple[ToolDefinition, ...],
 ) -> None:
-    """ADR-0334 §4:2; §6:1-§6:5, §6:8: each flag where its capability is offered."""
+    """ADR-0356 §4:2: no flag; what each tool is for is in its description (ADR-0357 §7:1).
+
+    The tool reaches the model where it is offered, and the instruction is the same.
+    """
     sink = FakeDiagnosticSink()
     stage, completer = _stage(prompt=FLAG_ECHO, diagnostics=sink)
 
     flags = await _echoed(stage, completer, sink, _inputs(capabilities=(*_OTHERS, *offered)))
 
-    assert {"candidates", "reliance"} & flags == handed
+    assert flags == set()
+    assert completer.last_call.exchange.instruction == FLAG_ECHO_TEXT
+    names = {one.name for one in completer.last_call.tools}
+    assert {one.capability for one in offered} <= names
+    assert names.isdisjoint(
+        {one.capability for one in (REMEMBER_CANDIDATE, NOTE_RELIANCE)}
+        - {one.capability for one in offered}
+    )
 
 
 # --- a candidate's result (§4:1, §4:4, §6:5) -----------------------------------------------
@@ -120,75 +129,75 @@ def _remember(call_id: str = "c1") -> ProposedCall:
     )
 
 
-async def test_a_candidates_result_says_pending_and_shows_similar_memories_by_m_label() -> None:
-    """§6:5: recorded and pending; §4:1: each similar memory under its own M label.
-
-    §4:2: one whose current version rests on outside content is withheld.
-    """
-    earlier = _earlier(calls=(_remember(),))
-    aisle = _remembered("aisle", MemorySource.USER_ASSERTED, "prefers aisle seats")
-    reported = _remembered("reported", MemorySource.EXTERNAL, "window seat booked by airline")
+async def _after_remember(
+    candidate: RecordedCandidate, **fields: Any
+) -> tuple[PlannedRound, FakeToolCallingCompleter]:
+    """A round that calls ``remember``, then the next, reported what came of it (§5:4)."""
+    stage, completer = _stage(
+        RoundResponse(text="", calls=(_remember(),)), RoundResponse(text="ok")
+    )
+    inputs: PlanningInputs = _inputs(**fields)
+    first = await stage.plan(inputs)
     outcome = CallOutcome(
-        earlier.id,
+        first.round.id,
         "c1",
         CallOutcomeKind.DONE,
         result_id="result:candidate",
-        candidate=RecordedCandidate(similar=(aisle, reported)),
+        candidate=candidate,
     )
-    stage, completer = _stage()
-
     planned = await stage.plan(
-        _inputs(capabilities=(REMEMBER_CANDIDATE,), rounds=(earlier,), outcomes=(outcome,))
+        replace(
+            inputs,
+            work=first.work,
+            rounds=(first.round,),
+            labels=first.labels,
+            outcomes=(outcome,),
+        )
+    )
+    return planned, completer
+
+
+async def test_a_candidates_result_says_pending_and_shows_similar_memories_by_m_label() -> None:
+    """§6:5: recorded and pending; §4:1: each similar memory under its own M label.
+
+    §4:2: one whose current version rests on outside content is withheld. ADR-0358 §2:3:
+    the result no longer tells planning never to say the fact is saved.
+    """
+    aisle = _remembered("aisle", MemorySource.USER_ASSERTED, "prefers aisle seats")
+    outside = _remembered("reported", MemorySource.EXTERNAL, "window seat booked by airline")
+
+    planned, completer = await _after_remember(
+        RecordedCandidate(similar=(aisle, outside)), capabilities=(REMEMBER_CANDIDATE,)
     )
 
-    request = completer.last_call.exchange.briefing
-    (call,) = _sent(completer)["rounds"][0]["calls"]
+    (call,) = reported(completer.last_call)
     assert call["outcome"] == "done"
     value = call["result"]["value"]
-    assert value["candidate"].startswith("recorded as a candidate, and pending")
-    assert "never that it is saved" in value["candidate"]
-    assert [(one["label"], one["fact"]) for one in value["similar_memories"]] == [
-        ("M1", "prefers aisle seats")
-    ]
-    assert "booked by airline" not in request
+    assert value["candidate"].startswith("recorded as a candidate for long-term memory")
+    assert "the observer decides whether and how it is kept" in value["candidate"]
+    assert "never that it is saved" not in value["candidate"]
+    (similar,) = value["similar_memories"]
+    shown = tag(similar, "memory")
+    assert (shown.get("label"), shown.text) == ("M1", "prefers aisle seats")
+    assert "booked by airline" not in completer.last_call.exchange.steps[-1].report.results[0].text
     assert [one.label for one in planned.labels] == ["R1", "M1"]
 
 
 async def test_a_candidate_with_nothing_similar_says_none() -> None:
-    earlier = _earlier(calls=(_remember(),))
-    outcome = CallOutcome(
-        earlier.id,
-        "c1",
-        CallOutcomeKind.DONE,
-        result_id="result:candidate",
-        candidate=RecordedCandidate(similar=()),
-    )
-    stage, completer = _stage()
+    _, completer = await _after_remember(RecordedCandidate(similar=()))
 
-    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
-
-    (call,) = _sent(completer)["rounds"][0]["calls"]
+    (call,) = reported(completer.last_call)
     assert call["result"]["value"]["similar_memories"] == "none"
 
 
 async def test_a_failed_lookup_is_said_and_the_candidate_is_still_recorded() -> None:
     """§4:4: the result says the similar memories could not be read; the call is done."""
-    earlier = _earlier(calls=(_remember(),))
-    outcome = CallOutcome(
-        earlier.id,
-        "c1",
-        CallOutcomeKind.DONE,
-        result_id="result:candidate",
-        candidate=RecordedCandidate(similar=None),
-    )
-    stage, completer = _stage()
+    _, completer = await _after_remember(RecordedCandidate(similar=None))
 
-    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
-
-    (call,) = _sent(completer)["rounds"][0]["calls"]
+    (call,) = reported(completer.last_call)
     assert call["outcome"] == "done"
     value = call["result"]["value"]
-    assert value["candidate"].startswith("recorded as a candidate, and pending")
+    assert value["candidate"].startswith("recorded as a candidate for long-term memory")
     assert value["similar_memories"] == "could not be read; the candidate is still recorded"
 
 
@@ -260,9 +269,9 @@ async def test_each_unresolved_open_question_goes_beside_its_memory() -> None:
 
     await stage.plan(_inputs(recalled=(_questioned(),)))
 
-    (shown,) = _sent(completer)["recalled"]
-    assert shown["label"] == "M1"
-    assert shown["open_questions"] == ["Is the dentist still Dr Rao?"]
+    shown = _recalled(completer)
+    assert shown.get("label") == "M1"
+    assert shown.get("open_questions") == "Is the dentist still Dr Rao?"
 
 
 async def test_a_memory_with_no_open_question_shows_none() -> None:
@@ -272,8 +281,7 @@ async def test_a_memory_with_no_open_question_shows_none() -> None:
         _inputs(recalled=(_remembered("m1", MemorySource.USER_ASSERTED, "likes tea"),))
     )
 
-    (shown,) = _sent(completer)["recalled"]
-    assert "open_questions" not in shown
+    assert _recalled(completer).get("open_questions") is None
 
 
 # --- ADR-0345 §12:3, §12:4: holders, disputes, a future end, and what the assistant said ---
@@ -292,15 +300,20 @@ def _by(episode: str, holder: SupportHolder, **update: Any) -> MemorySupport:
 _USER: Final = SupportHolder.person(OWNER_PERSON_ID)
 
 
+def _recalled(completer: FakeToolCallingCompleter) -> Any:
+    """The one memory the recalled-memories section shows, as its tag."""
+    return tag(section(_sent(completer), "### Recalled memories"), "memory")
+
+
 async def test_a_memory_the_user_alone_holds_names_no_holder() -> None:
     """§12:3: the holders are conveyed wherever they are not the owner alone."""
     stage, completer = _stage()
 
     await stage.plan(_inputs(recalled=(_held(_by("activation:a", _USER)),)))
 
-    (shown,) = _sent(completer)["recalled"]
-    assert "held_by" not in shown
-    assert "disputed_by" not in shown
+    shown = _recalled(completer)
+    assert shown.get("held_by") is None
+    assert shown.get("disputed_by") is None
 
 
 async def test_another_holder_and_a_dispute_are_conveyed() -> None:
@@ -313,9 +326,9 @@ async def test_another_holder_and_a_dispute_are_conveyed() -> None:
 
     await stage.plan(_inputs(recalled=(held,)))
 
-    (shown,) = _sent(completer)["recalled"]
-    assert shown["held_by"] == ["another person (tom)"]
-    assert shown["disputed_by"] == ["the user"]
+    shown = _recalled(completer)
+    assert shown.get("held_by") == "a person the system knows"
+    assert shown.get("disputed_by") == "the owner"
 
 
 async def test_a_future_validity_end_is_conveyed() -> None:
@@ -326,8 +339,7 @@ async def test_a_future_validity_end_is_conveyed() -> None:
 
     await stage.plan(_inputs(recalled=(held,)))
 
-    (shown,) = _sent(completer)["recalled"]
-    assert shown["holds_until"] == end.isoformat()
+    assert _recalled(completer).get("holds_until") == "Mon 18 Oct 2027, 12:00 pm"
 
 
 async def test_an_assistant_statement_is_conveyed_as_what_the_assistant_said() -> None:
@@ -344,12 +356,14 @@ async def test_an_assistant_statement_is_conveyed_as_what_the_assistant_said() -
 
     await stage.plan(_inputs(recalled=(held,)))
 
-    (shown,) = _sent(completer)["recalled"]
-    assert shown["standing"] == "the assistant said it"
-    assert "never what the user said" in str(shown["item"])
-    assert shown["said"] == [{"in": "an earlier exchange", "at": _AT.isoformat()}]
-    assert shown["kept_by"] == ["the user"]
-    assert "held_by" not in shown
+    shown = _recalled(completer)
+    assert shown.get("kind") == (
+        "what the system itself said, never what the owner said or a source reported"
+    )
+    assert shown.get("standing") is None
+    assert shown.get("said_in") == "an earlier exchange at Sun 18 Oct 2026, 12:00 pm"
+    assert shown.get("kept_by") == "the owner"
+    assert shown.get("held_by") is None
 
 
 # --- the episode window's pending candidates (§6:9) ----------------------------------------
@@ -367,17 +381,15 @@ async def test_an_unprocessed_episodes_candidates_are_shown_with_it_marked_pendi
         )
     )
 
-    (shown,) = _sent(completer)["episode_window"]
-    assert shown["candidates"] == [
-        {
-            "fact": "prefers window seats",
-            "status": "pending: recorded for long-term memory, not yet kept",
-        },
-        {
-            "fact": "flies to Lisbon in May",
-            "status": "pending: recorded for long-term memory, not yet kept",
-        },
-    ]
+    episode = tag(section(_sent(completer), "## Short-term memory"), "episode", label="E1")
+    assert episode.text is not None
+    # ADR-0329 §6:9, which ADR-0356 leaves standing: each candidate by its fact, marked
+    # pending, in the order recorded, inside the episode's short view.
+    held = episode.text
+    assert "prefers window seats" in held
+    assert "flies to Lisbon in May" in held
+    assert held.index("prefers window seats") < held.index("flies to Lisbon in May")
+    assert "pending" in held
 
 
 async def test_no_other_rendering_shows_a_candidate() -> None:
@@ -389,8 +401,9 @@ async def test_no_other_rendering_shows_a_candidate() -> None:
         _inputs(recalled=(found,), pending={"activation:found": ("prefers window seats",)})
     )
 
-    (shown,) = _sent(completer)["recalled"]
-    assert "candidates" not in shown
+    recalled = section(_sent(completer), "### Recalled memories")
+    assert [one.get("label") for one in tags(recalled, "episode")] == ["E1"]
+    assert "prefers window seats" not in _sent(completer)
 
 
 async def test_an_episode_with_nothing_pending_shows_no_candidates() -> None:
@@ -398,5 +411,5 @@ async def test_an_episode_with_nothing_pending_shows_no_candidates() -> None:
 
     await stage.plan(_inputs(episodes=(_episode("activation:past"),)))
 
-    (shown,) = _sent(completer)["episode_window"]
-    assert "candidates" not in shown
+    episode = tag(section(_sent(completer), "## Short-term memory"), "episode", label="E1")
+    assert "pending" not in (episode.text or "")

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from exchange_support import says
 from phases_support import (
     SETTLE,
     Gated,
@@ -97,7 +98,9 @@ async def test_a_correction_after_a_stop_starts_its_own_activation() -> None:
     No place waits (ADR-0349 §8:1): the correction starts its own activation once its
     start wait has passed, whatever still runs on the place, and is taken in by it.
     """
-    completer = Gated(RoundResponse(text="Saturday it is."), RoundResponse(text="Sunday it is."))
+    completer = Gated(
+        says("Saturday it is.", call_id="saturday"), says("Sunday it is."), RoundResponse()
+    )
     harness = phases_harness(completer)
     conversation = await open_conversation(harness)
     await harness.engine.write_message(conversation, message=said("m-1", "book it Saturday"))

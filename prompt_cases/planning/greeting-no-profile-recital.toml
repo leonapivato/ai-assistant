@@ -1,6 +1,6 @@
-# The user only says good morning. The person block shows their name, how they like to be
-# addressed, their zone and language, and three memories they keep in mind. Someone who
-# knows them greets them back as a person would, and recites none of it (ADR-0338 §7:8,
+# Leo only says good morning. Always in mind shows his name, how he likes to be
+# addressed, his zone and language, and three memories he keeps in mind. Someone who
+# knows him greets him back as a person would, and recites none of it (ADR-0338 §7:8,
 # §11:3).
 prompt = "planning"
 guards = "profile_recited"
@@ -8,28 +8,9 @@ came_from = "2026-10-21"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = true
-suggestions = false
-spawn = false
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The message greets the user back, briefly, and may call them Tomás. It recites \
-nothing of what the person block holds: not their full name, zone or language, not that \
-they are vegetarian or live with their sister, and nothing about their preferences or how \
-the assistant was told to speak to them."""
+read = """A text call greets Leo back, briefly, and may call him Leo. Its words recite nothing of what always in mind holds: not his full name, zone or language, not that he is vegetarian or that Maren is his partner, and nothing about how he likes replies or how the system was told to speak to him."""
 
 [input]
 file = "greeting-no-profile-recital.json"

@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 8's variant: Leo keeps in mind that his water bill is paid
+# automatically, so the round attempts the payment, which comes back needing his yes.
+prompt = "planning"
+guards = "preference_ignored"
+came_from = "2026-10-31"
+set = "development"
+samples = 2
+
+[property]
+check = "calls_include"
+capabilities = ["pay_bill"]
+
+[input]
+file = "invoice-email-paid-where-leo-asked-for-it.json"

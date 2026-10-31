@@ -120,27 +120,9 @@ def test_the_ten_prompts_carry_their_flags_and_values() -> None:
     # ADR-0353 §8:3: understanding's template takes no flag.
     assert UNDERSTANDING_PROMPT.flags == frozenset()
     assert UNDERSTANDING_PROMPT.values == frozenset()
-    assert PLANNING_PROMPT.flags == frozenset(
-        {
-            "takes_message",
-            "story_calls",
-            "story_reads",
-            "approved",
-            "candidates",
-            "reliance",
-            "person",
-            "suggestions",
-            "spawn",
-            "scheduled",
-            "running_work",
-            "offers",
-            "waiting",
-            "earlier_work",
-        }
-    )
-    assert PLANNING_PROMPT.values == frozenset(
-        {"approved_action_tool", "note_reliance_capability", "needs_your_yes"}
-    )
+    # ADR-0356 §4:2: nor does planning's: every part of its instruction is sent each round.
+    assert PLANNING_PROMPT.flags == frozenset()
+    assert PLANNING_PROMPT.values == frozenset()
     assert STORY_TIDY_UP_PROMPT.values == frozenset({"story_summary_cap_chars"})
     # ADR-0338 §9:1-§9:3: the scout, given a person's fields or not; framing and
     # placement declare no flag (ADR-0346 §10:1).

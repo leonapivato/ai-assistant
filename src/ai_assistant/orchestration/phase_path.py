@@ -264,6 +264,7 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreError,
     ModelTimeoutError,
+    PersonModelStoreError,
     PlanningError,
     StoryStoreError,
 )
@@ -352,6 +353,7 @@ from ai_assistant.orchestration.controller import (
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.defects import ToleratedStageError, is_defect, log_defect
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
+from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_lookups import OlderSource
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
@@ -395,7 +397,7 @@ from ai_assistant.orchestration.message_tools import (
     with_question,
 )
 from ai_assistant.orchestration.outside_content import rests_on_outside_content
-from ai_assistant.orchestration.person_block import still_held
+from ai_assistant.orchestration.person_block import activation_person, still_held
 from ai_assistant.orchestration.person_calls import (
     PERSON_MODEL_CALLS,
     PERSON_MODEL_CAPABILITIES,
@@ -415,6 +417,7 @@ from ai_assistant.orchestration.planning import (
     OfferShown,
     OlderHistory,
     PeerShown,
+    PersonNow,
     PlaceAuthor,
     PlaceItem,
     PlaceWindow,
@@ -505,7 +508,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.lookups import EpisodeLookedUp, LookUps
-    from ai_assistant.orchestration.matters import Matters
+    from ai_assistant.orchestration.matters import InProgressEntry, Matters
     from ai_assistant.orchestration.person_block import PersonBlock, PersonBlocks
     from ai_assistant.orchestration.planning import FullViewPart
     from ai_assistant.orchestration.recall import RecallStage
@@ -1269,6 +1272,17 @@ def _searched(outcome: SearchOutcome) -> ToolResult:
 # --- the story views ---------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _Reread:
+    """What a work's exchange showed, read again before a report (ADR-0359, ADR-0360)."""
+
+    still_held: frozenset[str] | None = None
+    matters: dict[str, StorySummaryState | None] = field(default_factory=dict)
+    meanings: dict[str, str] = field(default_factory=dict)
+    ended: dict[str, EpisodicMemory | None] = field(default_factory=dict)
+    person: PersonNow | None = None
+
+
 class StoryReads:
     """What planning is shown of stories, read under the pass's audience (ADR-0307 §6:1).
 
@@ -1357,6 +1371,17 @@ class StoryReads:
             return PlanningStories(unreadable=True)
         _log.info("planning_stories", stage="planning", stories=len(views), cited=len(cited))
         return PlanningStories(stories=tuple(views), cited=cited)
+
+    async def states(self, story_ids: Sequence[str]) -> dict[str, StorySummaryState | None]:
+        """Each story's summary state as the store holds it now, or ``None`` where it is gone.
+
+        What the news compares a matter planning was shown against (ADR-0356 §5:5, as the
+        owner's ruling widens it). It reads the store and nothing else.
+
+        Raises:
+            StoryStoreError: If the story store cannot be read.
+        """
+        return {story_id: await self._stories.current_summary(story_id) for story_id in story_ids}
 
     async def view(
         self, story_id: str, *, audience: TurnSupply, owner_records: bool, older_page: int = 1
@@ -3726,6 +3751,7 @@ class PhasePath:
         self._showed_chars = showed_chars
         # ADR-0338 §11:2: the person model's calls, attached only where a store is wired.
         self._person_calls: PersonModelCalls | None = None
+        self._person_blocks: PersonBlocks | None = None
         # ADR-0350 §4: the Task Scheduler's calls, attached only where it is wired.
         self._task_calls: ScheduledTaskCalls | None = None
         # ADR-0349 §4-§7: what crosses the engine's activations, attached by the engine.
@@ -3787,6 +3813,8 @@ class PhasePath:
         self._acting.add_own_records(dict.fromkeys(PERSON_MODEL_CAPABILITIES, calls))
         self._label_arguments.update(PERSON_MODEL_LABEL_ARGUMENTS)
         self._person_calls = calls
+        # ADR-0360: the block is assembled again before each report, for the news.
+        self._person_blocks = blocks
 
     def attach_task_scheduler(self, calls: ScheduledTaskCalls) -> None:
         """Offer planning the Task Scheduler's three calls, run by ``calls`` (ADR-0350 §4).
@@ -4386,8 +4414,13 @@ class PhasePath:
                 # ADR-0350 §5:8, §9:1: the place list built as it is shown, and the
                 # scheduled task each linked activation ran.
                 await self._scheduled(working)
-                # ADR-0349 §7:10, §7:27: what this one took over or waited on, read now.
-                earlier = await self._earlier_work(state, working)
+                # ADR-0349 §7:10, §7:27: what this one took over or waited on, read now;
+                # and ADR-0356 §5:5, as the owner's rulings widen it (#3536): what the
+                # work was shown of memories and matters, re-read before each report.
+                earlier, reread = (
+                    await self._earlier_work(state, working),
+                    await self._shown_now(working, state, given),
+                )
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         # ADR-0356 §8:6: each call's entry is appended once its outcome is known, before
@@ -4445,13 +4478,26 @@ class PhasePath:
             not_taken=working.not_taken(),
             person=person,
             places=None if working.scheduling is None else working.scheduling.places,
-            speaks_by_label=working.scheduling is not None and working.scheduling.speaks_by_label,
             offers=offers,
             waiting=waiting,
             declined=() if state is None else state.declined,
             earlier_work=earlier,
             work=working.work,
             not_here=not_here,
+            # ADR-0356 §3:2, ADR-0353 §4, §6, §7: whose stimulus it is, its inputs as
+            # recorded, and the running work its concurrent stimuli show.
+            person_id=None if state is None else activation_person(state.trigger),
+            trigger=working.trigger,
+            joined=() if state is None else tuple(state.joined),
+            received_at=None if state is None else state.started_at,
+            running=(concurrent := self._in_progress(state, given))[0],
+            running_more=concurrent[1],
+            episodes_read=fetched is not None and fetched.episodes is not None,
+            still_held=reread.still_held,
+            matters_now=reread.matters,
+            meanings=reread.meanings,
+            ended=reread.ended,
+            person_now=reread.person,
         )
         # The round is recorded inside planning's call, so the recorder reads what it
         # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
@@ -4477,6 +4523,108 @@ class PhasePath:
         )
         if waiting:
             working.waiting_round_planned = True
+
+    def _in_progress(
+        self, state: ActivationState | None, given: PhasePass
+    ) -> tuple[tuple[InProgressEntry, ...], int]:
+        """The in-progress section, as understanding reads it (ADR-0353 §2:5, ADR-0356 §3:2)."""
+        if self._matters is None or state is None:
+            return (), 0
+        return self._matters.in_progress(state, supply=given.supply)
+
+    async def _shown_now(
+        self, working: PhaseWorking, state: ActivationState | None, given: PhasePass
+    ) -> _Reread:
+        """What the work's exchange showed, as the stores and the engine hold it now.
+
+        ADR-0356 §5:5, with ADR-0359 and ADR-0360's news: before each report, each memory
+        the exchange named by an ``M`` label is looked up, each matter it showed is read
+        again, each running work is read for its meaning, each work it showed running is
+        checked for having ended, and the person block is assembled again, so the news can
+        say what changed. Nothing is read for a work's first round. A store that cannot be
+        read says nothing: no memory is named forgotten, and no matter changed.
+        """
+        work = working.work
+        if work is None:
+            return _Reread()
+        held: frozenset[str] | None = None
+        ids = sorted(work.shown.memories)
+        if ids:
+            try:
+                held = frozenset(await self._memory.get_history(ids))
+            except MemoryStoreError:
+                _log.warning("planning_memories_unread", stage="planning")
+        matters: dict[str, StorySummaryState | None] = {}
+        if self._story_reads is not None and work.shown.matters:
+            try:
+                matters = await self._story_reads.states(sorted(work.shown.matters))
+            except StoryStoreError:
+                _log.warning("planning_stories_unreadable", stage="planning")
+        meanings, ended = await self._works_now(work.shown.running, state, given)
+        person = await self._person_now(state, given)
+        return _Reread(held, matters, meanings, ended, person)
+
+    async def _person_now(
+        self, state: ActivationState | None, given: PhasePass
+    ) -> PersonNow | None:
+        """The person's profile and pins as the person-model store holds them (ADR-0360 §4:4).
+
+        One read of the store, with no model call, beside ADR-0338 §7:10's check; the
+        block is not reassembled. Each pin is resolved to the current memory its chain
+        reaches, each memory once (§4:2), under the slot's rules: none resting on outside
+        content, and the pass's audience applied (ADR-0338 §6:4-§6:5). ``None`` for an
+        activation the block does not reach, or a store that could not be read.
+        """
+        blocks = self._person_blocks
+        person_id = None if state is None else activation_person(state.trigger)
+        if blocks is None or person_id is None or state is None or state.person_block is None:
+            return None
+        try:
+            model = await blocks.store.read(person_id)
+            if model is None:
+                return None
+            reached = await blocks.current_ends(pin.memory_id for pin in model.standing_pins)
+        except PersonModelStoreError, MemoryStoreError:
+            _log.warning("planning_person_unread", stage="planning")
+            return None
+        pinned: dict[str, Memory] = {}
+        for pin in model.standing_pins:
+            memory = reached.get(pin.memory_id)
+            if memory is not None and not memory.rests_on_outside_content:
+                pinned.setdefault(memory.id, memory)
+        admitted = admitted_to_understanding(given.supply, list(pinned.values()))
+        return PersonNow(profile=model.profile, pinned=tuple(admitted))
+
+    async def _works_now(
+        self, shown: frozenset[str], state: ActivationState | None, given: PhasePass
+    ) -> tuple[dict[str, str], dict[str, EpisodicMemory | None]]:
+        """Each running work's meaning, and each work shown running that has ended (ADR-0360).
+
+        By the concurrent stimuli section's own selection (ADR-0349 §5): a work the
+        section shows now is read for its latest meaning, and one the exchange showed that
+        the engine no longer runs is read as its frozen episode, under the pass's audience,
+        as short-term memory's episodes are (ADR-0282 §2:8), or ``None`` where its episode
+        is not yet frozen or the audience does not admit it.
+        """
+        matters = self._matters
+        if matters is None or state is None:
+            return {}, {}
+        running, _ = matters.in_progress(state, supply=given.supply)
+        meanings: dict[str, str] = {}
+        for entry in running:
+            held = matters.state_of(entry.activation_id)
+            if held is not None and held.understanding:
+                meanings[entry.activation_id] = held.understanding[-1].meaning
+        gone = sorted(one for one in shown if matters.state_of(one) is None)
+        found: dict[str, EpisodicMemory] = {}
+        if gone:
+            try:
+                found = await admitted_episodes(
+                    self._memory, [episode_address(one) for one in gone], given.supply
+                )
+            except MemoryStoreError:
+                _log.warning("planning_episodes_unread", stage="planning")
+        return meanings, {one: found.get(episode_address(one)) for one in gone}
 
     async def _wait_on_older(self, state: ActivationState, working: PhaseWorking) -> None:
         """ADR-0349 §7:25-§7:28: wait on an older activation before a round.

@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
+from exchange_support import reported
 from structured_support import structured
 
 from ai_assistant.core.errors import StoryStoreError
@@ -777,13 +779,15 @@ def _proposed(call_id: str, name: str, **arguments: Any) -> ProposedCall:
 
 
 async def test_an_earlier_tidy_up_is_shown_as_started_and_nothing_more() -> None:
-    """ADR-0307 §7:1: its outcome is the story's version log's, never the episode's."""
-    earlier = PlanningRound(
-        id="round:0",
-        recorded_at=_AT,
-        calls=(_proposed("c0", "tidy_story", story="story:trip"),),
+    """ADR-0307 §7:1: its outcome is the story's version log's, never the episode's.
+
+    The round after the one that started it is shown, in its report, that it started
+    and nothing more (ADR-0356 §5:4).
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_proposed("c0", "tidy_story", story="story:trip"),)),
+        RoundResponse(text="ok"),
     )
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="ok"))
     stage = PlanningStage(
         prompt=default_prompt(PLANNING_PROMPT),
         completer=completer,
@@ -791,18 +795,17 @@ async def test_an_earlier_tidy_up_is_shown_as_started_and_nothing_more() -> None
         excerpt_chars=200,
         now=_now,
     )
-
-    await stage.plan(
-        PlanningInputs(
-            activation_id=_ACTIVATION,
-            place=PlaceWindow(takes_message=True),
-            rounds=(earlier,),
-            capabilities=STORY_CALLS,
-            label_arguments=STORY_LABEL_ARGUMENTS,
-        )
+    inputs = PlanningInputs(
+        activation_id=_ACTIVATION,
+        place=PlaceWindow(takes_message=True),
+        capabilities=STORY_CALLS,
+        label_arguments=STORY_LABEL_ARGUMENTS,
     )
+    first = await stage.plan(inputs)
 
-    (shown,) = json.loads(completer.last_call.exchange.briefing)["rounds"][0]["calls"]
+    await stage.plan(replace(inputs, rounds=(first.round,), labels=first.labels, work=first.work))
+
+    (shown,) = reported(completer.last_call)
     assert shown["outcome"].startswith("started: it runs on its own")
 
 

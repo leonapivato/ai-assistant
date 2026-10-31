@@ -16,6 +16,7 @@ import asyncio
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+from exchange_support import says
 from phases_support import hold_start_waits, phases_harness
 from test_engine import AT, Harness
 from understanding_support import STATED_PROPOSAL, Rendered, rendered, understanding_stage
@@ -91,11 +92,13 @@ class _FailingModel(FakeModelProvider):
 
 
 class _Composing(FakeToolCallingCompleter):
-    """Planning whose one round writes what ``composer`` answers, and proposes nothing.
+    """Planning whose first round sends what ``composer`` answers, and whose next ends it.
 
     The reader runs every activation through the phases (ADR-0309 §2:6), so the reply a
-    case scripts on ``composer`` is planning's message: a gate on it holds planning, a
-    failure fails it, and an empty answer writes nothing.
+    case scripts on ``composer`` is planning's message, sent by a ``text`` call (a
+    round's own text is its notes alone, ADR-0356 §7:3): a gate on it holds planning, a
+    failure fails it, and an empty answer sends nothing. A round after the first, which
+    the text call's report asks for, proposes nothing and asks the composer nothing.
     """
 
     def __init__(self, composer: FakeModelProvider) -> None:
@@ -110,13 +113,15 @@ class _Composing(FakeToolCallingCompleter):
         model: str | None = None,
     ) -> RoundResponse:
         await super().respond(exchange, tools, model=model)
+        if exchange.steps:
+            return RoundResponse()
         answer = await self.composer.complete(
             (
                 Message(role=Role.SYSTEM, content=exchange.instruction),
                 Message(role=Role.USER, content=exchange.briefing),
             )
         )
-        return RoundResponse(text=answer.content)
+        return says(answer.content) if answer.content else RoundResponse()
 
 
 def _harness(

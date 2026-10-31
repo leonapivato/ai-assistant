@@ -364,28 +364,12 @@ async def test_planning_writes_its_rendered_request_and_offered_tools_before_the
         ],
         "tools": [one.model_dump(mode="json") for one in sent.tools],
         # ADR-0334 §8:2: the template the system message was rendered from, and ADR-0335
-        # §9:1: every flag it declares, as the stage computed it for this round.
+        # §9:1: every flag it declares, which is none (ADR-0356 §4:2).
         "prompt": {
             "name": "planning",
             "version": _PLANNING.version,
             "origin": "default",
-            "flags": {
-                "approved": False,
-                "candidates": False,
-                # ADR-0356 §5:2: held to one value for the whole work.
-                "earlier_work": True,
-                "offers": True,
-                "person": False,
-                "reliance": False,
-                "running_work": False,
-                "story_calls": False,
-                "story_reads": False,
-                "scheduled": False,
-                "spawn": False,
-                "suggestions": False,
-                "takes_message": True,
-                "waiting": False,
-            },
+            "flags": {},
         },
     }
     # A response came back, and the completer is the one that writes it (§5:2); this

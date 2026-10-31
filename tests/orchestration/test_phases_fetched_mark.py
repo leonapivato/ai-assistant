@@ -23,6 +23,7 @@ import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
+from exchange_support import section, tag
 from test_engine import AT, Harness
 from test_engine_phases import (
     _BOOK,
@@ -250,10 +251,11 @@ async def test_an_activation_cut_off_after_a_story_read_of_a_marked_note_is_clos
     assert record.is_open
     # The first round was shown the story, with nothing of it outside content, and
     # nothing else this pass was given rests on any.
-    request = json.loads(completer.calls[0].exchange.briefing)
-    (shown,) = request["stories"]
-    assert shown["summary"] == ["A trip to Porto."]
-    assert shown["notes_since_tidied"] == "none"
+    shown = tag(section(completer.calls[0].exchange.briefing, "### Matters"), "matter")
+    assert [(one.text, one.get("outside")) for one in shown.held("summary")] == [
+        ("A trip to Porto.", None)
+    ]
+    assert shown.held("note") == []
     (first,) = record.rounds
     assert not first.notes_marked
     assert record.recall_second_run is None

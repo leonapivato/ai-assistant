@@ -20,9 +20,9 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final
 
-from exchange_support import reported
+from exchange_support import Tag, reported, section, tag
 from phases_support import chat_turn, phases_harness, processing, stopped
 from telegram_support import SETTLE, text
 from test_matters import _matters, _running, _version
@@ -137,10 +137,9 @@ def _offered(planner: FakeToolCallingCompleter) -> set[str]:
     return {one.name for one in call.tools}
 
 
-def _request(planner: FakeToolCallingCompleter) -> dict[str, Any]:
-    call = planner.calls[0]
-    shown: dict[str, Any] = json.loads(call.exchange.briefing)
-    return shown
+def _stimulus(planner: FakeToolCallingCompleter) -> Tag:
+    """The work's own stimulus, as the first round's briefing shows it (ADR-0356 §3:7)."""
+    return tag(section(planner.calls[0].exchange.briefing, "# The stimulus"), "said")
 
 
 def _support(episode: EpisodicMemory, origin: SupportOrigin) -> MemorySupport:
@@ -179,7 +178,9 @@ async def test_a_pasted_email_marked_relayed_carries_no_authority_and_is_read_as
     (refused,) = reported(planner.calls[1], 0)
     assert refused["outcome"].startswith("refused"), "its stop call is refused (§6:5)"
     assert "authority" in refused["outcome"]
-    assert str(_request(planner)["place"]["input"]).startswith("an outside report")
+    # Shown, marked relayed: its words are the owner's, carrying no authority (ADR-0356
+    # §3:7).
+    assert _stimulus(planner).get("relayed") == "yes"
     assert from_outside(episode), "it has read outside content (§5:13)"
     assert episode.content == record.understanding[-1].meaning, (
         "its input is not searched as the owner's words (ADR-0284 §7:2)"
@@ -196,7 +197,7 @@ async def test_an_unmarked_typed_message_keeps_its_authority_its_standing_and_it
     record = processing(episode)
     assert [one.relayed for one in record.understanding] == [False]
     assert {LOOK_UP_ACTIVATION_CAPABILITY, STOP_ACTIVATION_CAPABILITY} <= _offered(planner)
-    assert "input" not in _request(planner)["place"]
+    assert _stimulus(planner).get("relayed") is None
     assert not from_outside(episode)
     origin = input_support_origin(record, None)
     assert origin is SupportOrigin.USER_MESSAGE

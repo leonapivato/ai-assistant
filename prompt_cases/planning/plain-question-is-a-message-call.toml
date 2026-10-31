@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 1, §11:2: a plain question comes back as a text call answering
+# it, and not as the round's text, which reaches no one.
+prompt = "planning"
+guards = "reply_as_note"
+came_from = "2026-10-31"
+set = "development"
+samples = 3
+
+[property]
+check = "only_says"
+phrases = ["10:30"]
+
+[input]
+file = "plain-question-is-a-message-call.json"

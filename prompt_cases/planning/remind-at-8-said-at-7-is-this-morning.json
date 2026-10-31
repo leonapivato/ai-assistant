@@ -1,15 +1,41 @@
 {
-  "messages": [
-    {
-      "role": "user",
-      "content": "{\"now\": \"2026-11-10T07:00:00-06:00\", \"time_zone\": \"America/Chicago\", \"place\": {\"takes_message\": true, \"description\": \"The hub's chat: a conversation with the user, on the devices they chose for it. A message you write is added to this conversation for the user to read.\"}, \"understanding\": {\"meaning\": \"The user asks to be reminded at 8 to call their mother.\", \"ground\": \"stated\"}, \"places\": [{\"channel\": \"The hub's chat\", \"places\": [{\"label\": \"L1\", \"is\": \"the conversation this activation's input came from\"}]}, {\"channel\": \"Telegram\", \"places\": [{\"label\": \"L2\", \"is\": \"the person's Telegram chat with their assistant\"}]}], \"place_window\": [{\"from\": \"the user\", \"at\": \"2026-11-10T13:00:00+00:00\", \"is_the_input\": true, \"text\": \"remind me at 8 to call Mom\"}], \"episode_window\": [], \"recalled\": [], \"capabilities\": [\"cancel_task\", \"list_tasks\", \"spawn\"], \"rounds\": [], \"evidence\": []}",
-      "name": null
-    }
-  ],
+  "exchange": {
+    "briefing": "# The stimulus\nA stimulus reached the system at 7:00 am on Thursday 29 October 2026: a message Leo typed on Telegram. It contains this text:\n<said from=\"Leo\" at=\"Thu 29 Oct 2026, 7:00 am\">remind me at 8 to call Mom</said>\n\n# Understanding\n<understanding from=\"the system\">Leo asks to be reminded at 8 to call his mother.</understanding>\n- Belongs to: nothing yet; it starts something new.\n\n# Knowledge\n\n## The situation\n- Now: Thursday 29 October 2026, 7:00 am, in Leo's time zone (Europe/Lisbon). Every time below is in this zone.\n- Leo's last stimulus: the system holds none earlier than this one.\n- The origin: Telegram, Leo's private chat with the system on Telegram. A reply can be written there.\n- What the origin's kind says of it: Leo's Telegram chat\n- Places a message can be sent by its label:\n  - Telegram:\n    <place label=\"L1\" from=\"the system\">the person's Telegram chat with their assistant, where this activation's input came from</place>\n\n## Stimulus origin knowledge\nThe origin does not provide it: Telegram gives the system no history of this chat, so what the system remembers of it is under stimulus origin memory.\n\n## Concurrent stimuli\nNothing is shown: no other stimulus is running that can be shown here.\n\n# Memory\n\n## Always in mind\n- Leo is the one the system serves, and calls it Aether.\n- Leo has not set how they like to be addressed.\n- Leo has not set the language they write in.\n- These fields are Leo's current choice, and outweigh any memory stating another value for them.\n- <memory label=\"M1\" from=\"the system\" pinned=\"yes\" kind=\"something Leo said\" standing=\"as said\" learned=\"Sat 19 Sep 2026, 6:40 pm\" as_of=\"Sat 19 Sep 2026, 6:40 pm\" reading_certainty=\"not judged\">Maren is Leo's partner.</memory>\n\n## Short-term memory\nNothing is shown: no other recent stimulus is shown here.\n\n## Long-term memory\n### Recalled memories\nNothing is shown: no memory was recalled for this stimulus that can be shown here.\n\n### Matters\nNothing is shown: this stimulus belongs to no matter yet, and none was cited.\n\n## Stimulus origin memory\n<message from=\"Leo\" at=\"Thu 29 Oct 2026, 7:00 am\" shown_in=\"the stimulus\"/>",
+    "steps": []
+  },
   "tools": [
     {
+      "name": "answer_offer",
+      "description": "Answer newer input offered to this work, in the round it is offered. Take it unless this work has already done something it would change that cannot be undone, and then carry it out as part of this work. Otherwise decline it, with the reason in a few words, and it is done once this work ends.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "offer": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The offer, by its E label."
+          },
+          "take": {
+            "type": "boolean",
+            "description": "Whether you take it."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "description": "Why you decline it, in a few words."
+          }
+        },
+        "required": [
+          "offer",
+          "take"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "cancel_task",
-      "description": "Cancel what is still pending of a scheduled task. It stops nothing already running.",
+      "description": "Cancel what is still pending of a scheduled task. It stops nothing already running. A task you were shown by its T label is cancelled by one call; find any other with list_tasks first. Skipping a one-off task is its cancel. \"Done\" or \"I already took it\" before a task's message is that skip, and after its message is no call. Cancel exactly what the person's words cover, by the labels you were shown, and keep the rest; where the words could mean more than one task, ask which.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -26,8 +52,188 @@
       }
     },
     {
+      "name": "email",
+      "description": "Send an email to the recipients, each a person as you were shown them or an address, from the system's own address or the person's, as from says; one from the person's address goes in their name, and never runs without their yes. Its words are sent as you write them; set exact where the wording itself must not change. The result says what was sent, to whom and how. Never claim to be human.",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              }
+            ],
+            "x-egress-destination": "smtp",
+            "x-egress-tier": "personal"
+          },
+          "cc": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "x-egress-destination": "smtp",
+            "x-egress-tier": "personal"
+          },
+          "bcc": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "x-egress-destination": "smtp",
+            "x-egress-tier": "personal"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "words": {
+            "type": "string",
+            "description": "What the email says."
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Things you were shown to attach, each by how you were shown it."
+          },
+          "from": {
+            "type": "string",
+            "enum": [
+              "assistant",
+              "user"
+            ],
+            "description": "Whose address it is sent from: the assistant's, or the user's, which needs their yes."
+          },
+          "exact": {
+            "type": "boolean",
+            "description": "Send the words exactly as written."
+          },
+          "deliberate_repeat": {
+            "type": "boolean",
+            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+          }
+        },
+        "required": [
+          "to",
+          "subject",
+          "words"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "follow_up",
+      "description": "Ask a new question of a result that was read for you, by its R label: say the new question in looking_for. The result as it came back is read again for it; nothing is called again.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "result": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The result, by the R label you were shown it under."
+          },
+          "looking_for": {
+            "type": "string",
+            "description": "What you are looking for in this call's result. Its result may carry text someone else wrote, which is read for you against what you say here."
+          }
+        },
+        "required": [
+          "result",
+          "looking_for"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "group_stories",
+      "description": "Group stories under a new, larger story, where they are parts of one bigger matter. Do it only where someone asked for it, or the work in hand needs it now.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "stories": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "description": "The stories grouped, by their S labels.",
+            "minItems": 1
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "maxItems": 8,
+            "description": "The larger story's first notes, if any: what the bigger matter is."
+          },
+          "deliberate_repeat": {
+            "type": "boolean",
+            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "stories"
+        ]
+      }
+    },
+    {
+      "name": "link_story",
+      "description": "Link this activation, another activation or a story into a story, where it belongs to that matter.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story, by the S label you were shown it under."
+          },
+          "member_story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A story as the member, by its S label. Name this or member_episode."
+          },
+          "member_episode": {
+            "type": "string",
+            "minLength": 1,
+            "description": "An activation as the member, by its episode's E label. Name this or member_story; name neither for this activation."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "story"
+        ]
+      }
+    },
+    {
       "name": "list_tasks",
-      "description": "List the person's work: what is running, the scheduled tasks still pending, and the scheduled work that ended most recently.",
+      "description": "List the person's work: what is running, the scheduled tasks still pending, and the scheduled work that ended most recently. Use it to find a task you were not shown by its T label before you replace or cancel it.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -35,8 +241,321 @@
       }
     },
     {
+      "name": "look_up_activation",
+      "description": "See what running work you were shown as running has found and done so far.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "activation": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The running work, by its E label."
+          }
+        },
+        "required": [
+          "activation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "merge_stories",
+      "description": "Merge one story into another when they are one matter: its activations, stories and every note join the other. Do it only where someone asked for it, or the work in hand needs it now.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story absorbed, by its S label."
+          },
+          "into": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story it joins, by its S label."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "story",
+          "into"
+        ]
+      }
+    },
+    {
+      "name": "move_story",
+      "description": "Move activations, notes, or both, from one story to another, where they belong to the other matter. Do it only where someone asked for it, or the work in hand needs it now. It carries only the notes you name by their N labels, each on the story it leaves; one naming a note that story does not hold is refused whole. To move something a story's summary holds, read the story, find the note it came from, if one did, and name that note rather than restating it as a new note; then note on the story it left where that went, and tidy that story.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story they leave, by its S label."
+          },
+          "to": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story they go to, by its S label."
+          },
+          "episodes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "description": "The activations that go, by their episodes' E labels."
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "description": "The story's notes that go with it, by their N labels; each must be on the story it leaves. Name none to leave every note where it is."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "story",
+          "to"
+        ]
+      }
+    },
+    {
+      "name": "note_reliance",
+      "description": "Note the memories you relied on, by their M labels, and say what the reliance shaped: a suggestion, an answer or an action. Note only a memory that shaped one, never one only mentioned in passing. Nothing runs; the note is kept with this round.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "memories": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "description": "The memories you relied on, by their M labels."
+          },
+          "shaped": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "What relying on them shaped, in a few words."
+          }
+        },
+        "required": [
+          "memories",
+          "shaped"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "note_story",
+      "description": "Write a note on a story's page: what its records cannot show and the matter needs, such as what is open, what you are waiting on, who will do what, why something was decided, or what comes next. Your text outside a call stays with this episode and never reaches a story.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story, by the S label you were shown it under."
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "The note, as it should read later."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "story",
+          "note"
+        ]
+      }
+    },
+    {
+      "name": "pin",
+      "description": "Pin one memory, so it is kept in mind in every conversation with the person; pinning confirms its wording. It runs only once they say yes to the question that shows it. Raise a suggestion the system noticed only where it bears on what is being done, and only by asking with this call, never as a change already made.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "memory": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The memory to pin, by its M label."
+          }
+        },
+        "required": [
+          "memory"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_story",
+      "description": "Read the full view of a story you were shown: its summary, its notes and episodes since, its older notes, newest first a page at a time, its latest episodes, the larger stories it is part of, and where its matter stands.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story, by the S label you were shown it under."
+          },
+          "older_notes_page": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Which page of the story's older notes to show, the newest page 1; leave it out for the newest."
+          }
+        },
+        "required": [
+          "story"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "remember",
+      "description": "Record a candidate for long-term memory: one fact, in your own words, what it rests on, and briefly why it is worth keeping. Record one only where someone asked for something to be kept, or the work in hand needs something kept now, such as a fact a task it sets for later will rely on; anything else said or seen is found later from the episode. A candidate is not yet a memory: whether and how it is kept is decided later. The result shows the memories already held that are similar to its fact; ask about one in the moment only where it conflicts with the candidate and the conflict matters to what is being done.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "fact": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "One fact, in your own words, that will still make sense on its own later."
+          },
+          "rests_on_input": {
+            "type": "boolean",
+            "description": "True where the fact rests on this activation's input."
+          },
+          "rests_on_user_messages": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "The earlier exchanges, by their E labels, whose user's message the fact rests on."
+          },
+          "rests_on_assistant_messages": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "The earlier exchanges, by their E labels, whose assistant's message the fact rests on."
+          },
+          "rests_on_results": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "The results, by their R labels, the fact rests on."
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Why it is worth keeping, in a few words."
+          },
+          "memory": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A memory you were shown that the fact bears on, by its M label."
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Required with memory: how the fact bears on that memory, in words."
+          },
+          "confirm": {
+            "type": "boolean",
+            "description": "True to ask the user's yes to the fact's wording before it is kept."
+          },
+          "deliberate_repeat": {
+            "type": "boolean",
+            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+          }
+        },
+        "required": [
+          "fact",
+          "why"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "search_memory",
+      "description": "Search what you remember about the user and their world for a query. What rests on what a source reported is read for you against what you are looking for; the rest is shown to you.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "What to search for, in a few words."
+          },
+          "looking_for": {
+            "type": "string",
+            "description": "What you are looking for in this call's result. Its result may carry text someone else wrote, which is read for you against what you say here."
+          }
+        },
+        "required": [
+          "query",
+          "looking_for"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_profile",
+      "description": "Set one field of the person's profile to a value, or clear it. It runs only once they say yes to the question that shows it. Raise a suggestion the system noticed only where it bears on what is being done, and only by asking with this call, never as a change already made.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "field": {
+            "type": "string",
+            "enum": [
+              "name",
+              "address",
+              "assistant_name",
+              "time_zone",
+              "language"
+            ],
+            "description": "The field to set."
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its new value, as the person gave it; null clears it."
+          }
+        },
+        "required": [
+          "field",
+          "value"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "spawn",
-      "description": "Set up work that runs later or separately: a scheduled task, which starts an activation of its own when it falls due, reading what it carries. Give at most one of at, delay_minutes, after and rule; with none it falls due now.",
+      "description": "Set up work that runs later or separately: a scheduled task, which starts an activation of its own when it falls due, reading what it carries. Spawn only work that runs later or separately. Give at most one of at, delay_minutes, after and rule; with none it falls due now. A task suggests only places on your place list. A task you were shown by its T label is replaced by one spawn naming it in replaces; find any other with list_tasks first. \"Snooze 10 minutes\" or \"again tomorrow\", after a task's message, is a new spawn: a one-off task with the same instruction, written from what you were shown of the episode that wrote the message, suggesting the place the person said it in. Skipping a rule's next occurrence (\"skip tomorrow's\") is a spawn replacing it with the same rule from the local date after the skipped one, or its cancel where none would follow before its until. \"Tomorrow at 9 instead\" is that skip and a one-off task at the new time, in the same round. Write a local time with no UTC offset unless the person named one, and give a zone only where the person named one. Say a task back from its read_back, never from your own reckoning of the time. Where the words could mean more than one task, ask which.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -142,6 +661,208 @@
         },
         "required": [
           "instruction"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "split_story",
+      "description": "Split activations or stories off a story into a new story of their own, where they are a matter apart. Do it only where someone asked for it, or the work in hand needs it now. It carries only the notes you name by their N labels, each on the story it leaves; one naming a note that story does not hold is refused whole.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story split, by its S label."
+          },
+          "episodes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "description": "The activations that leave, by their episodes' E labels."
+          },
+          "stories": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "description": "The stories it holds that leave, by their S labels."
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "description": "The story's notes that go with it, by their N labels; each must be on the story it leaves. Name none to leave every note where it is."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "story"
+        ]
+      }
+    },
+    {
+      "name": "start_story",
+      "description": "Start a story when someone takes up a matter that will come up again, with its first notes. This activation joins it. Name the story it sits inside, if the person frames it so.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "minItems": 1,
+            "maxItems": 8,
+            "description": "The story's first notes: what the matter is, and what is open."
+          },
+          "inside": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The larger story it sits inside, by its S label."
+          },
+          "deliberate_repeat": {
+            "type": "boolean",
+            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "notes"
+        ]
+      }
+    },
+    {
+      "name": "stop_activation",
+      "description": "Stop running work you were shown as running, and that work alone. Nothing it already did is undone, and what it set up stays. The result shows what it had finished and what it set up that is still live, so say that. Stop work only where the person asks for it, such as \"never mind the booking\" after it has booked, or means to take over work this work waits on. Stop exactly what their words cover, including what a stop's result lists, and keep the rest; where it is unclear what the words cover, ask which.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "activation": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The running work, by its E label."
+          }
+        },
+        "required": [
+          "activation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "text",
+      "description": "Send a short written message to someone, in the system's own voice. It goes into the place the stimulus came from unless via names another, and the result says what was sent, where it went and how. Its words are sent as you write them; set exact where the wording itself must not change, such as a quote or a relayed message. Never claim to be human.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Who it is for, as you were shown them: the person the system serves by their name, or 'the user'."
+          },
+          "words": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What to say."
+          },
+          "via": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Where it goes: a place on your place list, by its L label, or a platform: hub_chat or telegram."
+          },
+          "exact": {
+            "type": "boolean",
+            "description": "Send the words exactly as written."
+          },
+          "asks": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "description": "The calls this message asks about, each by the ask_as reference its result showed: an action that needs a yes before it runs. Explain each in the message's own words, with the details that matter to the person; the system adds its exact details after your words, so never write them yourself, and never send them alone. One message a round asks. Never approve anything on anyone's behalf: there is no other route, no confirmation email, no link or code, and no step on the person's end."
+          }
+        },
+        "required": [
+          "to",
+          "words"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "tidy_story",
+      "description": "Tidy a story's summary: rewrite it from its notes and episodes since it was last tidied. Do it only where someone asked for it, or the work in hand needs it now. It runs on its own, brings no further round, and how it went is not shown to you. A tidy-up reads only what came since the last, so after moving a note away, tidy the story it left so its summary drops it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story, by the S label you were shown it under."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "story"
+        ]
+      }
+    },
+    {
+      "name": "unlink_story",
+      "description": "Remove this activation, another activation or a story from a story it is in, where it does not belong to that matter. Do it only where someone asked for it, or the work in hand needs it now.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The story, by the S label you were shown it under."
+          },
+          "member_story": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A story as the member, by its S label. Name this or member_episode."
+          },
+          "member_episode": {
+            "type": "string",
+            "minLength": 1,
+            "description": "An activation as the member, by its episode's E label. Name this or member_story; name neither for this activation."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "story"
+        ]
+      }
+    },
+    {
+      "name": "unpin",
+      "description": "Unpin one memory the person keeps in mind; the memory itself stays as it is. It runs only once they say yes to the question that shows it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "memory": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The pinned memory, by its M label."
+          }
+        },
+        "required": [
+          "memory"
         ],
         "additionalProperties": false
       }

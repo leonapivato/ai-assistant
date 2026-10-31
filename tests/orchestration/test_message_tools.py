@@ -80,8 +80,11 @@ def test_texts_schema_encodes_no_conditional_requirement() -> None:
 
 
 def test_texts_description_says_it_is_sent_as_the_assistant() -> None:
-    """§2:9: text is always sent as the assistant, and takes no argument naming whose voice."""
-    assert "as the assistant" in TEXT_CALL.description
+    """§2:9: text is always sent in the system's own voice, and takes no argument naming whose.
+
+    The assistant is named "the system" everywhere planning reads (ADR-0353 §4:2).
+    """
+    assert "in the system's own voice" in TEXT_CALL.description
     assert FROM_ARGUMENT not in _schema(TEXT_CALL)["properties"]
 
 

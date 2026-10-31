@@ -1,27 +1,11 @@
 # ADR-0349 §4:6-§4:7: "never mind the booking" after the booking work has acted on the
-# hub's chat. The round before pulled the list, which shows that work running and having
-# acted, so this round stops it by its label with stop_activation.
+# hub's chat. Concurrent stimuli show that work running and having acted, so this round
+# stops it by its label with stop_activation.
 prompt = "planning"
 guards = "stop_missed"
 came_from = "2026-10-26"
 set = "development"
 samples = 2
-
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = false
-scheduled = false
-running_work = true
-offers = false
-waiting = false
-earlier_work = false
 
 [property]
 check = "proposes"

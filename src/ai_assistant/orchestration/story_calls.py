@@ -332,8 +332,9 @@ _MEMBER_PROPERTIES: Final[dict[str, FrozenJson]] = {
 START_STORY: Final = _declared(
     START_STORY_CAPABILITY,
     (
-        "Start a story for a matter that will come up again, with its first notes. This "
-        "activation joins it. Name the story it sits inside, if the user frames it so."
+        "Start a story when someone takes up a matter that will come up again, with "
+        "its first notes. This activation joins it. Name the story it sits inside, if "
+        "the person frames it so."
     ),
     properties={
         NOTES_ARGUMENT: {
@@ -362,8 +363,10 @@ second identical start in the matter as already done (ADR-0306 §3:1, §5:9)."""
 NOTE_STORY: Final = _declared(
     NOTE_STORY_CAPABILITY,
     (
-        "Write a note on a story's page: what is open, what you are waiting on, who will "
-        "do what, why something was decided, or what comes next."
+        "Write a note on a story's page: what its records cannot show and the matter "
+        "needs, such as what is open, what you are waiting on, who will do what, why "
+        "something was decided, or what comes next. Your text outside a call stays "
+        "with this episode and never reaches a story."
     ),
     properties={
         STORY_ARGUMENT: _STORY_SCHEMA,
@@ -380,7 +383,10 @@ NOTE_STORY: Final = _declared(
 
 LINK_STORY: Final = _declared(
     LINK_STORY_CAPABILITY,
-    "Link this activation, another activation or a story into a story, as one matter.",
+    (
+        "Link this activation, another activation or a story into a story, where it "
+        "belongs to that matter."
+    ),
     properties=_MEMBER_PROPERTIES,
     required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
     system_supplied=(EPISODE_ARGUMENT,),
@@ -391,7 +397,11 @@ LINK_STORY: Final = _declared(
 
 UNLINK_STORY: Final = _declared(
     UNLINK_STORY_CAPABILITY,
-    "Remove this activation, another activation or a story from a story it is in.",
+    (
+        "Remove this activation, another activation or a story from a story it is in, "
+        "where it does not belong to that matter. Do it only where someone asked for "
+        "it, or the work in hand needs it now."
+    ),
     properties=_MEMBER_PROPERTIES,
     required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
     system_supplied=(EPISODE_ARGUMENT,),
@@ -404,8 +414,11 @@ over, and no note moves (§6:4)."""
 TIDY_STORY: Final = _declared(
     TIDY_STORY_CAPABILITY,
     (
-        "Tidy a story's summary: rewrite it from its notes and episodes since it was last "
-        "tidied. It runs on its own, and brings no further round."
+        "Tidy a story's summary: rewrite it from its notes and episodes since it was "
+        "last tidied. Do it only where someone asked for it, or the work in hand "
+        "needs it now. It runs on its own, brings no further round, and how it went "
+        "is not shown to you. A tidy-up reads only what came since the last, so after "
+        "moving a note away, tidy the story it left so its summary drops it."
     ),
     properties={STORY_ARGUMENT: _STORY_SCHEMA},
     required=(STORY_ARGUMENT,),
@@ -419,8 +432,14 @@ rule."""
 MOVE_STORY: Final = _declared(
     MOVE_STORY_CAPABILITY,
     (
-        "Move activations, notes, or both, from one story to another, where they belong to "
-        "the other matter."
+        "Move activations, notes, or both, from one story to another, where they "
+        "belong to the other matter. Do it only where someone asked for it, or the "
+        "work in hand needs it now. It carries only the notes you name by their N "
+        "labels, each on the story it leaves; one naming a note that story does not "
+        "hold is refused whole. To move something a story's summary holds, read the "
+        "story, find the note it came from, if one did, and name that note rather "
+        "than restating it as a new note; then note on the story it left where that "
+        "went, and tidy that story."
     ),
     properties={
         STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The story they leave, by its S label."},
@@ -440,8 +459,9 @@ and is refused, changing nothing."""
 MERGE_STORY: Final = _declared(
     MERGE_STORY_CAPABILITY,
     (
-        "Merge one story into another when they are one matter: its activations, stories "
-        "and every note join the other."
+        "Merge one story into another when they are one matter: its activations, "
+        "stories and every note join the other. Do it only where someone asked for "
+        "it, or the work in hand needs it now."
     ),
     properties={
         STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The story absorbed, by its S label."},
@@ -459,8 +479,11 @@ nothing."""
 SPLIT_STORY: Final = _declared(
     SPLIT_STORY_CAPABILITY,
     (
-        "Split activations or stories off a story into a new story of their own, where they "
-        "are a matter apart."
+        "Split activations or stories off a story into a new story of their own, "
+        "where they are a matter apart. Do it only where someone asked for it, or the "
+        "work in hand needs it now. It carries only the notes you name by their N "
+        "labels, each on the story it leaves; one naming a note that story does not "
+        "hold is refused whole."
     ),
     properties={
         STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The story split, by its S label."},
@@ -479,7 +502,11 @@ refused, changing nothing."""
 
 GROUP_STORY: Final = _declared(
     GROUP_STORY_CAPABILITY,
-    "Group stories under a new, larger story, where they are parts of one bigger matter.",
+    (
+        "Group stories under a new, larger story, where they are parts of one bigger "
+        "matter. Do it only where someone asked for it, or the work in hand needs it "
+        "now."
+    ),
     properties={
         STORIES_ARGUMENT: _labels("The stories grouped, by their S labels.", min_items=1),
         NOTES_ARGUMENT: {

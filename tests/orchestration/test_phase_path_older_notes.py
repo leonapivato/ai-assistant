@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Final
 
-from exchange_support import reported
+from exchange_support import reported, shown_text, tag
 from test_authorizer import _ACTIVATION
 from test_authorizer import _episode as _own_episode
 from test_engine import AT
@@ -217,10 +217,10 @@ async def test_on_a_pass_that_may_not_show_owner_records_a_read_shows_no_older_n
     assert view.older is None
     # The round after the read is shown its result: the story, and nothing of its notes.
     (call,) = reported(completer.last_call, 0)
-    shown = call["result"]["value"]
-    assert shown["label"] == "S1"
-    assert not {"notes_since_tidied", "older_notes", "more_older_notes"} & set(shown)
-    assert "Dana" not in completer.last_call.exchange.briefing
+    shown = tag(call["result"]["value"], "matter")
+    assert shown.get("label") == "S1"
+    assert shown.held("note") == []
+    assert "Dana" not in shown_text(completer.last_call)
 
 
 async def test_a_marked_older_note_a_read_shows_is_named_once_in_authorizings_grounds() -> None:

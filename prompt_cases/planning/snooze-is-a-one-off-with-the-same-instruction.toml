@@ -6,25 +6,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes one spawn to remind them to stretch their legs, falling due ten minutes from now (delay_minutes 10, or at 2026-11-10T15:11), whose places name L1. It names no task in replaces, no rule, and cancels nothing."""
+read = """The round makes one spawn to remind Leo to stretch his legs, falling due ten minutes from now (delay_minutes 10, or at 2026-10-29T17:50), whose places name L1. It names no task in replaces, no rule, and cancels nothing."""
 
 [input]
 file = "snooze-is-a-one-off-with-the-same-instruction.json"

@@ -26,6 +26,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from exchange_support import says, text_call
 from structlog.testing import capture_logs
 from test_engine import AT
 from test_engine_phases import (
@@ -101,7 +102,13 @@ def _remember() -> RoundResponse:
 
 
 def _filler() -> RoundResponse:
-    return _remember().model_copy(update={"text": _FILLER})
+    """The remember, beside a ``text`` call sending :data:`_FILLER` (ADR-0356 §7:3)."""
+    return RoundResponse(calls=(text_call(_FILLER, call_id="filler"), *_remember().calls))
+
+
+def _answer() -> RoundResponse:
+    """A round sending :data:`_ANSWER`, which brings one more round (ADR-0315 §2:1)."""
+    return says(_ANSWER, call_id="answer")
 
 
 async def _turn(harness: Harness, text: str = "hi") -> tuple[str, EpisodicMemory]:
@@ -181,12 +188,20 @@ async def test_a_tolerated_failure_then_a_silent_end_writes_nothing() -> None:
 async def test_the_round_limit_writes_couldnt_finish_whatever_earlier_rounds_wrote(
     text: str,
 ) -> None:
-    """§3:2: a loop of refused calls, silent or not, is ended by the round limit.
+    """§3:2: a loop of refused calls, silent or sending a message, is ended by the limit.
 
     Each round's call carries an id of its own: a work's exchange holds every call id
     once across its rounds (ADR-0356 §13), as a provider mints them.
     """
-    refused = [RoundResponse(text=text, calls=(_call(f"c{n}", "nowhere"),)) for n in (1, 2, 3)]
+    refused = [
+        RoundResponse(
+            calls=(
+                *((text_call(text, call_id=f"t{n}"),) if text else ()),
+                _call(f"c{n}", "nowhere"),
+            )
+        )
+        for n in (1, 2, 3)
+    ]
     harness = _harness(FakeToolCallingCompleter.scripted(*refused))
 
     conversation, episode = await _turn(harness)
@@ -298,15 +313,23 @@ async def test_an_event_the_loop_guard_ends_couldnt_finish_and_writes_nothing() 
 
 
 def _refusing(texts: frozenset[str]) -> type[AuthorizingStage]:
-    """Authorizing that refuses a round's message whose text is one of ``texts``."""
+    """Authorizing that refuses a ``text`` call whose words are one of ``texts``."""
 
     class _Refusing(AuthorizingStage):
         async def authorize(self, given: RoundToAuthorize) -> RoundAuthorization:
             decided = await super().authorize(given)
-            if decided.message is None or given.message is None or given.message.text not in texts:
-                return decided
-            refused = MessageVerdict(place=decided.message.place, allowed=False, reason="refused")
-            return replace(decided, message=refused)
+            held = {one.call_id for one in given.call_messages if one.text in texts}
+            return replace(
+                decided,
+                call_messages=tuple(
+                    MessageVerdict(
+                        place=one.place, allowed=False, reason="refused", call_id=one.call_id
+                    )
+                    if one.call_id in held
+                    else one
+                    for one in decided.call_messages
+                ),
+            )
 
     return _Refusing
 
@@ -351,7 +374,7 @@ async def test_an_undelivered_message_with_nothing_after_it_writes_couldnt_finis
     how: str,
 ) -> None:
     """§3:4: the only message did not reach the conversation."""
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text=_ANSWER))
+    completer = FakeToolCallingCompleter.scripted(_answer(), RoundResponse())
     harness = _harness(completer, **_undelivering(how, _ANSWER))
 
     conversation, episode = await _turn(harness)
@@ -369,7 +392,7 @@ async def test_an_undelivered_answer_after_delivered_filler_writes_couldnt_finis
     how: str,
 ) -> None:
     """§3:4: "Let me check…" reached the user, and the answer that would follow did not."""
-    completer = FakeToolCallingCompleter.scripted(_filler(), RoundResponse(text=_ANSWER))
+    completer = FakeToolCallingCompleter.scripted(_filler(), _answer(), RoundResponse())
     harness = _harness(completer, **_undelivering(how, _ANSWER))
 
     conversation, episode = await _turn(harness)
@@ -386,7 +409,7 @@ async def test_an_undelivered_message_a_later_one_answered_writes_nothing_more(
     how: str,
 ) -> None:
     """§3:4: a later round that wrote again has answered, and §2:1 decides the ending."""
-    completer = FakeToolCallingCompleter.scripted(_filler(), RoundResponse(text=_ANSWER))
+    completer = FakeToolCallingCompleter.scripted(_filler(), _answer(), RoundResponse())
     harness = _harness(completer, **_undelivering(how, _FILLER))
 
     conversation, episode = await _turn(harness)

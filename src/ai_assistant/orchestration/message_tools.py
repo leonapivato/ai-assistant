@@ -122,9 +122,11 @@ TEXT_CALL: Final = ToolDefinition(
     id=TEXT_CAPABILITY,
     capability=TEXT_CAPABILITY,
     description=(
-        "Send a short written message to someone, as the assistant. It goes into the place "
-        "your input came from unless via names another, and the result says what was "
-        "sent, where it went and how."
+        "Send a short written message to someone, in the system's own voice. It goes "
+        "into the place the stimulus came from unless via names another, and the "
+        "result says what was sent, where it went and how. Its words are sent as you "
+        "write them; set exact where the wording itself must not change, such as a "
+        "quote or a relayed message. Never claim to be human."
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.IRREVERSIBLE,
@@ -145,7 +147,10 @@ TEXT_CALL: Final = ToolDefinition(
             TO_ARGUMENT: {
                 "type": "string",
                 "minLength": 1,
-                "description": f"Who it is for, as you were shown them, such as {THE_USER!r}.",
+                "description": (
+                    "Who it is for, as you were shown them: the person the system serves "
+                    f"by their name, or {THE_USER!r}."
+                ),
             },
             WORDS_ARGUMENT: {"type": "string", "minLength": 1, "description": "What to say."},
             VIA_ARGUMENT: {
@@ -165,8 +170,14 @@ TEXT_CALL: Final = ToolDefinition(
                 "items": {"type": "string", "minLength": 1},
                 "minItems": 1,
                 "description": (
-                    "The calls this message asks the user about, each by the ask_as "
-                    "reference its outcome showed. One message a round asks."
+                    "The calls this message asks about, each by the ask_as reference its "
+                    "result showed: an action that needs a yes before it runs. Explain "
+                    "each in the message's own words, with the details that matter to "
+                    "the person; the system adds its exact details after your words, so "
+                    "never write them yourself, and never send them alone. One message a "
+                    "round asks. Never approve anything on anyone's behalf: there is no "
+                    "other route, no confirmation email, no link or code, and no step on "
+                    "the person's end."
                 ),
             },
         },

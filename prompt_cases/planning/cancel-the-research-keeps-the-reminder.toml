@@ -2,32 +2,16 @@
 # meanwhile research blenders" in the hub's chat, then "cancel the blenders research" on
 # Telegram. No offer goes across places, so this activation waited on the research, and
 # its waiting round stopped it. The stop's result lists the reminder as still set. This
-# round stops and cancels nothing more, and tells the person the reminder is still set.
+# round stops and cancels nothing more, and tells Leo the reminder is still set.
 prompt = "planning"
 guards = "ambiguous_task_guessed"
 came_from = "2026-10-26"
 set = "development"
 samples = 3
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = true
-offers = false
-waiting = false
-earlier_work = true
-
 [property]
 check = "read"
-read = """The round proposes no cancel_task call and no stop_activation call. Its message tells the user the blender research is stopped and that the reminder to check the project notes is still set, and uses no T, E or R label."""
+read = """The round makes no cancel_task call and no stop_activation call. A text call tells Leo the blender research is stopped and that the reminder to check the project notes is still set, and its words use no T, E or R label."""
 
 [input]
 file = "cancel-the-research-keeps-the-reminder.json"

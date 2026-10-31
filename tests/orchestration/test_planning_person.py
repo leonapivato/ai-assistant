@@ -5,21 +5,23 @@ the block comes first in the request, before everything that changes from round 
 round; it carries the five fields as the person's own choices, a field not set said to
 be not set and a zone not set shown beside the hub's default; the whole kept-in-mind
 slot, each memory by its label and why it is kept, with the count left out; and the
-suggestions, each marked as one. A found memory the block shows is named by its label
-alone. The template's ``person`` and ``suggestions`` flags are set exactly where there is
-a block, and where it shows a suggestion; what the instruction says under them is the
-template's, which no test reads (ADR-0334 §9:1-§9:2). With no block, nothing of the
-person model is shown.
+suggestions, each marked as one. A found memory the block shows is not shown again
+under recalled memories (ADR-0356 §3:2). The instruction declares no flag (ADR-0356
+§4:2), so it renders the same text whatever the block holds. With no block, nothing of
+the person model is shown.
+
+The block renders under the briefing's "always in mind" heading (ADR-0356 §3:2), in
+tagged text, read here through ``exchange_support``.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from exchange_support import section, tag, tags
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -49,10 +51,8 @@ pytestmark = pytest.mark.anyio
 AT: Final = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
 CHAT: Final = PlaceWindow(takes_message=True, description="the hub chat")
 
-FLAG_ECHO: Final = prompt_from(
-    PLANNING_PROMPT,
-    "".join(f"$if {flag}\n{flag}\n$end\n" for flag in sorted(PLANNING_PROMPT.flags)),
-)
+INSTRUCTION: Final = "an instruction of the test's own"
+FLAG_ECHO: Final = prompt_from(PLANNING_PROMPT, f"{INSTRUCTION}\n")
 
 DIET: Final = memory("m:diet", "Eats no meat.", said_support(when=AT, added_at=AT))
 BRIEF: Final = memory("m:brief", "Likes short answers.", said_support(when=AT, added_at=AT))
@@ -117,13 +117,14 @@ def _inputs(**fields: Any) -> PlanningInputs:
     return PlanningInputs(**values)
 
 
-def _sent(completer: FakeToolCallingCompleter) -> dict[str, Any]:
-    rendered: dict[str, Any] = json.loads(completer.last_call.exchange.briefing)
-    return rendered
+def _sent(completer: FakeToolCallingCompleter) -> str:
+    """The briefing the round was asked with."""
+    return completer.last_call.exchange.briefing
 
 
-def _flags(completer: FakeToolCallingCompleter) -> set[str]:
-    return set(completer.last_call.exchange.instruction.split("\n")) - {""}
+def _always(completer: FakeToolCallingCompleter) -> str:
+    """The briefing's always-in-mind section, where the block renders (ADR-0356 §3:2)."""
+    return section(_sent(completer), "## Always in mind")
 
 
 async def test_no_block_shows_nothing_of_the_person_model() -> None:
@@ -131,17 +132,23 @@ async def test_no_block_shows_nothing_of_the_person_model() -> None:
 
     await stage.plan(_inputs())
 
-    assert "person" not in _sent(completer)
+    always = _always(completer)
+    assert always.startswith("The system does not have it")
+    assert tags(always, "memory") == []
+    assert "Aether" not in always
 
 
-async def test_the_block_comes_first_before_what_changes_from_round_to_round() -> None:
+async def test_the_block_is_briefed_once_and_nothing_that_changes_is_in_it() -> None:
+    """ADR-0356 §3:1, §5:3: the block is part of the briefing, rendered once; a later
+    round's changes come as news after it, never by re-rendering the briefing."""
     stage, completer, _ = _stage()
 
     await stage.plan(_inputs(person=BLOCK))
 
-    keys = list(_sent(completer))
-    assert keys[0] == "person"
-    assert keys.index("person") < keys.index("now")
+    exchange = completer.last_call.exchange
+    assert exchange.steps == ()
+    always = _always(completer)
+    assert [one.get("label") for one in tags(always, "memory")] == ["M1", "M2", "M3"]
 
 
 async def test_the_fields_are_the_persons_own_choices_and_unset_ones_say_so() -> None:
@@ -149,19 +156,23 @@ async def test_the_fields_are_the_persons_own_choices_and_unset_ones_say_so() ->
 
     await stage.plan(_inputs(person=BLOCK))
 
-    shown = _sent(completer)["person"]
-    assert "own current choice" in shown["item"]
-    assert "never an instruction" in shown["item"]
-    profile = shown["profile"]
-    assert list(profile) == [one.value for one in ProfileField]
-    assert profile["name"]["value"] == "Robin Vale"
-    assert profile["language"]["value"] == "not set"
-    assert profile["language"]["is"] == "the language you write to them in"
+    lines = _always(completer).split("\n")
+    assert lines[:4] == [
+        "- Robin Vale is the one the system serves, and has not set a name for it, so it "
+        "is called Aether.",
+        "- How Robin Vale likes to be addressed: Robin.",
+        "- Robin Vale has not set the language they write in.",
+        "- These fields are Robin Vale's current choice, and outweigh any memory stating "
+        "another value for them.",
+    ]
     # §3:9: a zone not set is shown as not set, beside the default the time is given in.
-    assert profile["time_zone"]["value"] == (
-        "not set: the current time is given in the hub's default zone, Europe/Lisbon"
-    )
-    assert profile["assistant_name"]["value"] == "not set, so you are called Aether"
+    (now,) = [
+        line
+        for line in section(_sent(completer), "## The situation").split("\n")
+        if line.startswith("- Now:")
+    ]
+    assert "in the hub's time zone (Europe/Lisbon)" in now
+    assert "Robin Vale has not set a time zone" in now
 
 
 async def test_the_whole_slot_is_shown_by_label_with_why_each_is_kept() -> None:
@@ -169,12 +180,17 @@ async def test_the_whole_slot_is_shown_by_label_with_why_each_is_kept() -> None:
 
     await stage.plan(_inputs(person=BLOCK))
 
-    shown = _sent(completer)["person"]
-    assert [(one["label"], one["fact"], one["kept_as"]) for one in shown["kept_in_mind"]] == [
-        ("M1", "Eats no meat.", "pinned by them, to be kept in mind"),
-        ("M2", "Likes short answers.", "how they want you to speak to them, as learned"),
+    always = _always(completer)
+    kept = [one for one in tags(always, "memory") if one.get("suggested") is None]
+    assert [
+        (one.get("label"), one.text, one.get("pinned"), one.get("preference")) for one in kept
+    ] == [
+        ("M1", "Eats no meat.", "yes", None),
+        ("M2", "Likes short answers.", None, "yes"),
     ]
-    assert shown["left_out"] == "1 more memory they keep in mind, left out to keep this short"
+    assert "- 1 more memory Robin Vale keeps in mind, left out to keep this short." in (
+        always.split("\n")
+    )
     # §7:7: each memory takes its label the first time planning is shown it, recorded
     # with the round, so a later round and a call name it by that label.
     (_, labels) = recorder.recorded[0]
@@ -189,21 +205,28 @@ async def test_suggestions_are_marked_as_suggestions_and_a_pins_memory_is_labell
 
     await stage.plan(_inputs(person=BLOCK))
 
-    pin, field = _sent(completer)["person"]["suggestions"]
-    assert "not their profile" in pin["item"]
-    assert (pin["pin"]["label"], pin["pin"]["fact"]) == ("M3", "Has a sister called Ada.")
-    assert (field["field"], field["value"]) == ("language", "Português")
-    assert "not their profile" in field["item"]
+    always = _always(completer)
+    pin = tag(always, "memory", suggested="pin")
+    assert (pin.get("label"), pin.text) == ("M3", "Has a sister called Ada.")
+    assert pin.get("pinned") is None
+    (field,) = [line for line in always.split("\n") if "Português" in line]
+    assert field == (
+        "- A suggestion the system noticed on Wed 21 Oct 2026, 10:00 am, which Robin Vale "
+        "has not taken up: their language set to Português."
+    )
 
 
-async def test_a_found_memory_the_block_shows_is_named_by_its_label_alone() -> None:
+async def test_a_found_memory_the_block_shows_is_not_shown_again() -> None:
+    """ADR-0356 §3:2: recalled memories render what no other section renders."""
     stage, completer, _ = _stage()
 
     await stage.plan(_inputs(person=BLOCK, recalled=(DIET,)))
 
-    assert _sent(completer)["recalled"] == [
-        {"label": "M1", "shown": "shown above under this label"}
-    ]
+    sent = _sent(completer)
+    recalled = section(sent, "### Recalled memories")
+    assert tags(recalled, "memory") == []
+    assert recalled.startswith("Nothing is shown")
+    assert sent.count("Eats no meat.") == 1
 
 
 async def test_labels_recorded_in_an_earlier_round_are_kept() -> None:
@@ -226,34 +249,31 @@ async def test_labels_recorded_in_an_earlier_round_are_kept() -> None:
 
     await stage.plan(_inputs(person=dropped, labels=labels, recalled=(NEW,)))
 
-    sent = _sent(completer)
-    assert [(one["label"], one["fact"]) for one in sent["person"]["kept_in_mind"]] == [
-        ("M2", "Likes short answers.")
-    ]
-    assert sent["person"]["suggestions"][0]["pin"]["label"] == "M3"
-    [found] = sent["recalled"]
-    assert (found["label"], found["fact"]) == ("M4", NEW.content)
+    always = _always(completer)
+    kept = [one for one in tags(always, "memory") if one.get("suggested") is None]
+    assert [(one.get("label"), one.text) for one in kept] == [("M2", "Likes short answers.")]
+    assert tag(always, "memory", suggested="pin").get("label") == "M3"
+    found = tag(section(_sent(completer), "### Recalled memories"), "memory")
+    assert (found.get("label"), found.text) == ("M4", NEW.content)
     (_, minted) = recorder.recorded[0]
     assert [(one.label, one.id) for one in minted] == [("M4", "m:new")]
 
 
 @pytest.mark.parametrize(
-    ("person", "handed"),
-    [
-        (None, set()),
-        (PersonBlock(person_id=OWNER_PERSON_ID, profile=Profile()), {"person"}),
-        (BLOCK, {"person", "suggestions"}),
-    ],
+    "person",
+    [None, PersonBlock(person_id=OWNER_PERSON_ID, profile=Profile()), BLOCK],
     ids=["no-block", "block", "block-with-suggestions"],
 )
-async def test_the_person_flags_follow_the_block(
-    person: PersonBlock | None, handed: set[str]
+async def test_the_instruction_renders_under_no_flag_whatever_the_block(
+    person: PersonBlock | None,
 ) -> None:
+    """ADR-0356 §4:2: the instruction declares no flag, so the block sets none."""
     stage, completer, _ = _stage(FLAG_ECHO)
 
     await stage.plan(_inputs(person=person))
 
-    assert _flags(completer) & {"person", "suggestions"} == handed
+    assert PLANNING_PROMPT.flags == frozenset()
+    assert completer.last_call.exchange.instruction == INSTRUCTION
 
 
 async def test_a_kept_memory_is_shown_whole_however_long_beside_the_excerpt_bound() -> None:
@@ -268,5 +288,5 @@ async def test_a_kept_memory_is_shown_whole_however_long_beside_the_excerpt_boun
 
     await stage.plan(_inputs(person=block))
 
-    [kept] = _sent(completer)["person"]["kept_in_mind"]
-    assert kept["fact"] == long.content
+    kept = tag(_always(completer), "memory", pinned="yes")
+    assert kept.text == long.content

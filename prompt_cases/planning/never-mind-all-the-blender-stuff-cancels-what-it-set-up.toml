@@ -10,25 +10,9 @@ came_from = "2026-10-26"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = true
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes stop_activation naming E2 and cancel_task naming T2, and no call naming T1, so the reminder to check the project notes stays. Any message it writes says nothing is done yet and uses no T, E or R label."""
+read = """The round makes a stop_activation naming E2 and a cancel_task naming T2, and no call naming T1, so the reminder to check the project notes stays. Any text call it makes says nothing is done yet and its words use no T, E or R label."""
 
 [input]
 file = "never-mind-all-the-blender-stuff-cancels-what-it-set-up.json"

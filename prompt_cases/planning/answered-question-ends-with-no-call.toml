@@ -1,0 +1,13 @@
+# ADR-0356 §11:1 case 1: once the answer was delivered, the next round makes no call
+# and ends the work.
+prompt = "planning"
+guards = "ungrounded_extra"
+came_from = "2026-10-31"
+set = "development"
+samples = 2
+
+[property]
+check = "no_call"
+
+[input]
+file = "answered-question-ends-with-no-call.json"

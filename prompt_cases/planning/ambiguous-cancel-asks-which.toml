@@ -1,5 +1,5 @@
 # ADR-0350 §13:4, §9:3: a cancel whose words could mean either of two tasks. The round
-# before listed the person's tasks: two pending reminders, each about a call. Where the
+# before listed Leo's tasks: two pending reminders, each about a call. Where the
 # words could mean more than one task, planning asks which, and cancels neither.
 prompt = "planning"
 guards = "ambiguous_task_guessed"
@@ -7,25 +7,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 3
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes no cancel_task call. Its message asks the user which reminder they mean, naming both: the call to the dentist on Tuesday and the call to the vet on Wednesday, and uses no T label in the message."""
+read = """The round makes no cancel_task call. A text call asks Leo which reminder he means, naming both: the call to the dentist on Tuesday and the call to the vet on Wednesday, and its words use no T label."""
 
 [input]
 file = "ambiguous-cancel-asks-which.json"

@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 2: "remind me at 9" is set as asked, with no question, and no
+# message claims it before the result comes back.
+prompt = "planning"
+guards = "second_guessed"
+came_from = "2026-10-31"
+set = "development"
+samples = 3
+
+[property]
+check = "calls_are"
+capabilities = ["spawn"]
+
+[input]
+file = "clear-request-is-simply-set.json"

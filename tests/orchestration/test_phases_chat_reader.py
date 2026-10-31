@@ -28,6 +28,7 @@ from phases_support import (
     input_of,
     open_conversation,
     phases_harness,
+    replying,
     said,
     until,
     working,
@@ -331,7 +332,7 @@ async def test_a_message_deleted_before_it_is_marked_never_reaches_the_activatio
     await before.engine.write_message(conversation, message=said("m-1", "DELETED ORDER"))
     await before.engine.write_message(conversation, message=said("m-2", "kept"))
     await before.engine.aclose()
-    completer = FakeToolCallingCompleter()
+    completer = replying()
     after = phases_harness(completer, conversation_store=store, memory=memory)
     await after.engine.start()
     await answered(after, conversation, 1)

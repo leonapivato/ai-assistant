@@ -472,9 +472,17 @@ async def test_a_look_up_reads_nothing_of_what_the_work_set_up() -> None:
 
 
 def test_the_stop_calls_declaration_is_the_routed_text() -> None:
-    """ADR-0352 §3:9-§3:10: it stops that work alone, and its result lists what is live."""
+    """ADR-0352 §3:9-§3:10: it stops that work alone, and its result lists what is live.
+
+    ADR-0357 §7:1: ADR-0352 §3:8's line, that a stop reaches only what the person's words
+    cover, is said in this description, not in planning's instruction.
+    """
     assert STOP_ACTIVATION.description == (
         "Stop running work you were shown as running, and that work alone. Nothing it "
-        "already did is undone, and what it set up stays. The result shows what it had "
-        "finished and what it set up that is still live."
+        "already did is undone, and what it set up stays. The result shows what it "
+        "had finished and what it set up that is still live, so say that. Stop work "
+        'only where the person asks for it, such as "never mind the booking" after it '
+        "has booked, or means to take over work this work waits on. Stop exactly what "
+        "their words cover, including what a stop's result lists, and keep the rest; "
+        "where it is unclear what the words cover, ask which."
     )

@@ -13,7 +13,6 @@ activations on two conversations finishing in reverse keep their records apart.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -149,8 +148,8 @@ async def test_an_event_over_the_hub_socket_runs_the_phases_and_starts_no_conver
     ]
     assert understanding
     assert hub.phased.completer.calls, "planning ran"
-    asked = json.loads(hub.phased.completer.calls[0].exchange.briefing)
-    assert asked["place"]["takes_message"] is False
+    asked = hub.phased.completer.calls[0].exchange.briefing
+    assert "No reply can be written there." in asked
     assert await hub.client.recent_conversations() == before
     assert result.capture.episode_id is not None
     episode = phased(await hub.phased.stored(result.capture.episode_id))

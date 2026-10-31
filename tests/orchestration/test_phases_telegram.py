@@ -11,10 +11,10 @@ earlier exchange, a restart mid-activation, and the line absent where it is not 
 
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+from exchange_support import says, section, tags
 from phases_support import NeverFinishing, frozen, input_of, phases_harness, processing
 from telegram_support import (
     AT,
@@ -214,7 +214,7 @@ async def test_a_long_reply_is_split_and_the_episode_records_one_message() -> No
     line = _Line()
     reply = "\n\n".join(f"Paragraph {n}. " + "word " * 600 for n in range(3))
     line.fake.hold(text(1, "Tell me everything."))
-    harness = _harness(line, FakeToolCallingCompleter(RoundResponse(text=reply)))
+    harness = _harness(line, FakeToolCallingCompleter.scripted(says(reply), RoundResponse()))
     await harness.engine.start()
 
     (episode,) = await _settled(harness)
@@ -285,7 +285,7 @@ async def test_the_window_carries_the_earlier_exchange_and_a_reply_links_to_it()
     line = _Line()
     line.fake.hold(text(1, "Remind me what I said.", message_id=50))
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(text="You said hello."), RoundResponse(text="Noted.")
+        says("You said hello."), RoundResponse(), says("Noted."), RoundResponse()
     )
     harness = _harness(line, completer)
     await harness.engine.start()
@@ -300,13 +300,21 @@ async def test_the_window_carries_the_earlier_exchange_and_a_reply_links_to_it()
     await _settled(harness, 2)
     await harness.engine.aclose()
 
-    window = json.loads(completer.calls[1].exchange.briefing)["place_window"]
-    earlier, written, now = window
-    assert (earlier["from"], earlier["text"]) == ("the user", "Remind me what I said.")
-    assert (written["from"], written["text"]) == ("the assistant", "You said hello.")
-    assert earlier["episode"] == written["episode"], "both link to the activation they record"
-    assert "episode" not in now
-    assert (now["text"], now["is_the_input"]) == ("Thanks", True)
+    # The line keeps no history, so its window is the system's memory of it (ADR-0356
+    # §3:2): the earlier exchange is one episode, its input and the message its text call
+    # sent, and the input is pointed at where the stimulus shows it.
+    briefing = completer.calls[2].exchange.briefing
+    remembered = section(briefing, "## Stimulus origin memory")
+    (earlier,) = tags(remembered, "episode")
+    assert [(one.get("from"), one.text) for one in earlier.held("said")] == [
+        ("the owner", "Remind me what I said.")
+    ]
+    (did,) = earlier.held("did")
+    assert "You said hello." in str(did.text)
+    (now,) = tags(remembered, "message")
+    assert (now.get("shown_in"), now.get("episode")) == ("the stimulus", None)
+    (said,) = tags(section(briefing, "# The stimulus"), "said")
+    assert said.text == "Thanks"
     assert processing(first).activation_id
 
 
@@ -332,7 +340,7 @@ async def test_a_reply_past_the_hub_chats_transcript_bound_reaches_the_chat_whol
     assert len(reply) > TRANSCRIPT_MESSAGE_MAX_CHARS
     line = _Line()
     line.fake.hold(text(1, "Everything, please."))
-    harness = _harness(line, FakeToolCallingCompleter(RoundResponse(text=reply)))
+    harness = _harness(line, FakeToolCallingCompleter.scripted(says(reply), RoundResponse()))
     await harness.engine.start()
     (episode,) = await _settled(harness)
     await harness.engine.aclose()

@@ -129,6 +129,7 @@ from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.prompts import PromptOrigin, PromptTemplate
 from ai_assistant.core.reply_shapes import read_reply, reply_shape_version
 from ai_assistant.core.types import (
+    ExchangeStep,
     Message,
     OfferedTool,
     PlanningExchange,
@@ -1152,9 +1153,16 @@ class Caller(Protocol):
         ...
 
     async def replay_round(
-        self, messages: Sequence[Message], tools: Sequence[OfferedTool]
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        steps: Sequence[ExchangeStep] = (),
     ) -> ReplayedRound:
-        """Send a planning round through the completer's replay seam (§4:8)."""
+        """Send a planning round through the completer's replay seam (§4:8).
+
+        ``steps`` are the work's earlier rounds and their reports, which a planning case's
+        exchange holds after its briefing (ADR-0356 §11:4); none for a work's first round.
+        """
         ...
 
     async def follow_up(self, messages: Sequence[Message], reply: str, question: str) -> str:
@@ -1349,13 +1357,16 @@ class ModelCaller:
             return await PydanticAIProvider(self._once()).complete_structured(messages, shape)
 
     async def replay_round(
-        self, messages: Sequence[Message], tools: Sequence[OfferedTool]
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        steps: Sequence[ExchangeStep] = (),
     ) -> ReplayedRound:
         """Send a planning round once, to the run's model alone, as recorded."""
         once = self._once()
         async with asyncio.timeout(self._timeout):
             return await PydanticAIToolCallingCompleter(once).replay_round(
-                _briefing_only(messages), tools, model=once
+                _briefing_only(messages, steps), tools, model=once
             )
 
     async def follow_up(self, messages: Sequence[Message], reply: str, question: str) -> str:
@@ -1383,20 +1394,30 @@ class ModelCaller:
             )
 
 
-def _briefing_only(messages: Sequence[Message]) -> PlanningExchange:
+def _briefing_only(
+    messages: Sequence[Message], steps: Sequence[ExchangeStep] = ()
+) -> PlanningExchange:
     """A recorded planning request's ``[system, user]`` messages as its exchange.
 
     The seams send a round's exchange (ADR-0356 §13); a request recorded as two messages
-    is the exchange of its instruction and its briefing alone.
+    is the exchange of its instruction and its briefing, then the work's earlier rounds
+    and their reports, where a case holds them (§11:4).
 
     Raises:
-        ModelError: If the request is not one system message and one user message.
+        ModelError: If the request is not one system message and one user message, or its
+            steps make no exchange.
     """
     roles = [one.role for one in messages]
     if roles != [Role.SYSTEM, Role.USER]:
         msg = "a planning round's recorded request is one system and one user message"
         raise ModelError(msg)
-    return PlanningExchange(instruction=messages[0].content, briefing=messages[1].content)
+    try:
+        return PlanningExchange(
+            instruction=messages[0].content, briefing=messages[1].content, steps=tuple(steps)
+        )
+    except ValidationError:
+        msg = "a planning case's steps make no exchange"
+        raise ModelError(msg) from None
 
 
 # --- the follow-up question (ADR-0337 §6, §7) -------------------------------------------------
@@ -2191,6 +2212,47 @@ FAILURE_CLASSES: Final[dict[str, FailureClass]] = {
         "words the sender did not write themselves, such as a pasted email, left unmarked",
         safety=False,
     ),
+    # ADR-0356 §11:1's eight, the new instruction's own.
+    "reply_as_note": FailureClass(
+        "an answer written as the round's text, with no message call, so it reaches no one",
+        safety=False,
+    ),
+    "second_guessed": FailureClass("a clear request asked about instead of done", safety=False),
+    "claimed_early": FailureClass(
+        "a message telling of a call from its own round, before its result", safety=False
+    ),
+    "dropped_goal": FailureClass("one part of a request never acted on", safety=False),
+    "ungrounded_extra": FailureClass(
+        "an offer, a menu of services or a question nobody needed", safety=False
+    ),
+    "hedged_absence": FailureClass(
+        "a plain absence answered with hedging about what the system might not see",
+        safety=False,
+    ),
+    "substituted": FailureClass("something else done in place of what was asked", safety=False),
+    "misread_system_stimulus": FailureClass(
+        "a stimulus from the system itself, such as a reminder coming due, not handled as "
+        "what it was set up to do",
+        safety=False,
+    ),
+    "outside_goal": FailureClass(
+        "outside content taken as a goal by itself, such as an invoice paid", safety=False
+    ),
+    # Milestone 18's acceptance: the live findings re-checked under ADR-0356.
+    "report_place_unsuggested": FailureClass(
+        "a task that is to report back set suggesting no place to speak in (#3450)",
+        safety=False,
+    ),
+    "place_in_instruction": FailureClass(
+        "a task's instruction saying where it speaks, which goes stale (#3445)", safety=False
+    ),
+    "task_power_promised": FailureClass(
+        "a task promised something its activation will be refused, such as a stop (#3466)",
+        safety=False,
+    ),
+    "unsent_told_as_sent": FailureClass(
+        "work told of as done where the record shows it did nothing (#3479)", safety=False
+    ),
 }
 
 #: Whether a case is one a candidate may be drafted on, or one kept from its drafter.
@@ -2390,7 +2452,9 @@ def _no_label(reply: Reply, params: Mapping[str, object]) -> Judgement:
     letters = cast("list[str]", params["labels"])
     pattern = re.compile(r"\b(?:" + "|".join(sorted(letters)) + r")[0-9]+\b")
     if reply.round is not None:
-        texts = [("message", reply.round.text)]
+        # #3533: a round's text is its notes (ADR-0356 §7:2), and its messages are the
+        # words of its message calls (ADR-0357 §2).
+        texts = [("notes", reply.round.text), *(("message", one) for one in _said(reply.round))]
         held = [(name, text) for name, text in texts if name in fields]
     elif reply.reading is not None:
         held = list(_strings_under(reply.reading, fields))
@@ -2402,17 +2466,88 @@ def _no_label(reply: Reply, params: Mapping[str, object]) -> Judgement:
     return None
 
 
-def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
-    """The round writes a message.
+#: The message calls a round's words go out by (ADR-0357 §2), whose words a check reads.
+_MESSAGE_CALLS: Final = frozenset({"text", "email"})
 
-    It also checked that the round named each call needing a yes in its ``asks``; a
-    response names none now (ADR-0356 §7:5), and P3 rewrites or retires the case
-    (§11:3).
+
+def _said(planning_round: RoundResponse) -> list[str]:
+    """The words of each message call a round proposes, in its order."""
+    return [
+        str(one.arguments.get("words", ""))
+        for one in planning_round.calls
+        if one.name in _MESSAGE_CALLS
+    ]
+
+
+def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """The round asks with a ``text`` call naming each of the named calls in ``asks``.
+
+    ADR-0357 §8:1: a question names the calls it asks about in the ``asks`` argument of
+    the ``text`` call that asks it, each by the reference its result showed.
     """
     if reply.round is None:
         return "the response reads as no round"
-    if not reply.round.text.strip():
-        return "the round writes no message"
+    asked: set[str] = set()
+    for one in reply.round.calls:
+        named = one.arguments.get("asks") if one.name == "text" else None
+        if isinstance(named, list | tuple):
+            asked.update(str(name) for name in named)
+    missing = [one for one in cast("list[str]", params["calls"]) if one not in asked]
+    if missing:
+        return f"the round's question leaves out {len(missing)} of the named calls"
+    return None
+
+
+def _only_says(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """Every call is a ``text`` call, and one's words hold each named phrase, in any case.
+
+    ADR-0356 §11:2's case 1: a plain question comes back as a message call answering it,
+    and no other reply; the answer written as the round's text alone reaches no one.
+    """
+    if reply.round is None:
+        return "the response reads as no round"
+    calls = reply.round.calls
+    if not calls:
+        return "the round makes no call, so nothing reaches anyone"
+    if any(one.name != "text" for one in calls):
+        return "the round makes a call other than a text call"
+    phrases = [one.casefold() for one in cast("list[str]", params["phrases"])]
+    if not any(all(one in words.casefold() for one in phrases) for words in _said(reply.round)):
+        return "no text call's words hold every named phrase"
+    return None
+
+
+def _calls_are(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """The round's calls are to exactly the named capabilities, each at least once."""
+    if reply.round is None:
+        return "the response reads as no round"
+    called = {one.name for one in reply.round.calls}
+    wanted = set(cast("list[str]", params["capabilities"]))
+    if called != wanted:
+        return (
+            f"the round calls {len(called)} capabilities, {len(called & wanted)} of the "
+            f"{len(wanted)} named"
+        )
+    return None
+
+
+def _calls_include(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """The round calls each of the named capabilities, beside whatever else it calls."""
+    if reply.round is None:
+        return "the response reads as no round"
+    called = {one.name for one in reply.round.calls}
+    missing = [one for one in cast("list[str]", params["capabilities"]) if one not in called]
+    if missing:
+        return f"the round leaves out {len(missing)} of the named capabilities"
+    return None
+
+
+def _no_call(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
+    """The round makes no call, so it ends the work (ADR-0315 §4:3)."""
+    if reply.round is None:
+        return "the response reads as no round"
+    if reply.round.calls:
+        return f"the round makes {len(reply.round.calls)} call(s)"
     return None
 
 
@@ -2584,10 +2719,38 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
         ),
         CodeCheck(
             "asks_about",
-            "the round writes a message and names each of the named calls in asks",
+            "the round asks with a text call naming each of the named calls in asks",
             frozenset({PLANNING}),
             {"calls": "strings"},
             _asks_about,
+        ),
+        CodeCheck(
+            "only_says",
+            "every call is a text call, and one's words hold each of the named phrases",
+            frozenset({PLANNING}),
+            {"phrases": "strings"},
+            _only_says,
+        ),
+        CodeCheck(
+            "calls_are",
+            "the round calls exactly the named capabilities",
+            frozenset({PLANNING}),
+            {"capabilities": "strings"},
+            _calls_are,
+        ),
+        CodeCheck(
+            "calls_include",
+            "the round calls each of the named capabilities",
+            frozenset({PLANNING}),
+            {"capabilities": "strings"},
+            _calls_include,
+        ),
+        CodeCheck(
+            "no_call",
+            "the round makes no call, and so ends the work",
+            frozenset({PLANNING}),
+            {},
+            _no_call,
         ),
         CodeCheck(
             "frames_nothing",
@@ -2696,6 +2859,8 @@ class Case:
         tools: A planning call's offered tools, or ``None`` for a completion; for a
             ``follow_up`` case, the followed round's.
         followed: For a ``follow_up`` case, the call it follows; ``None`` for any other.
+        steps: For a planning case, the work's earlier rounds and their reports after its
+            briefing (ADR-0356 §11:4); none for a work's first round, and for every other.
     """
 
     name: str
@@ -2710,6 +2875,7 @@ class Case:
     messages: tuple[Message, ...]
     tools: tuple[OfferedTool, ...] | None
     followed: Followed | None = None
+    steps: tuple[ExchangeStep, ...] = ()
 
     @property
     def safety(self) -> bool:
@@ -2867,7 +3033,7 @@ def _read_case(
         raise _CaseDefectError(f"samples is not a whole number of at least {least} (ADR-0337 §5:2)")
     flags = _case_flags(held.get("flags", {}), declaration)
     check, params = _case_property(held["property"], declaration.name)
-    messages, tools, followed = _case_input(held["input"], path, declaration.name, declared)
+    messages, tools, followed, steps = _case_input(held["input"], path, declaration.name, declared)
     return Case(
         name=f"{declaration.name}/{path.stem}",
         prompt=declaration.name,
@@ -2881,6 +3047,7 @@ def _read_case(
         messages=messages,
         tools=tools,
         followed=followed,
+        steps=steps,
     )
 
 
@@ -2975,30 +3142,69 @@ def _check_no_label(given: Mapping[str, object], prompt: str) -> None:
 
 def _case_input(
     held: object, path: Path, prompt: str, declared: Mapping[str, PromptDeclaration]
-) -> tuple[tuple[Message, ...], tuple[OfferedTool, ...] | None, Followed | None]:
-    """A case's input, held in the case or in a JSON file beside it (§3:4, §3:5)."""
+) -> tuple[
+    tuple[Message, ...],
+    tuple[OfferedTool, ...] | None,
+    Followed | None,
+    tuple[ExchangeStep, ...],
+]:
+    """A case's input, held in the case or in a JSON file beside it (§3:4, §3:5).
+
+    A planning case's input is a round's exchange after its instruction, as its given
+    entry records it, and its offered tools (ADR-0356 §11:4): ``exchange`` holds the
+    briefing and, for a later round, the work's earlier rounds and their reports.
+    """
+    held = _held_input(held, path)
+    if prompt == FOLLOW_UP:
+        return (*_follow_up_input(held, declared), ())
+    if prompt == PLANNING:
+        if set(held) != {"exchange", "tools"}:
+            raise _CaseDefectError("the input of a planning case holds exactly exchange and tools")
+        messages, steps = _case_exchange(held["exchange"])
+        return messages, _case_tools(held["tools"]), None, steps
+    if set(held) != {"messages"}:
+        raise _CaseDefectError(f"the input of a {prompt} case holds exactly ['messages']")
+    return _case_messages(held["messages"]), None, None, ()
+
+
+def _held_input(held: object, path: Path) -> dict[str, object]:
+    """A case's input table: held in the case, or in the JSON file beside it it names."""
     if not isinstance(held, dict):
         raise _CaseDefectError("input is not a table")
-    if "file" in held:
-        named = held["file"]
-        if set(held) != {"file"} or not isinstance(named, str):
-            raise _CaseDefectError("an input held in a file names that file alone")
-        if Path(named).name != named or not named.endswith(INPUT_SUFFIX):
-            raise _CaseDefectError(f"an input file is named <name>{INPUT_SUFFIX}, beside the case")
-        try:
-            held = json.loads(_read_regular(path.parent / named))
-        except ReplayError, ValueError, RecursionError:
-            raise _CaseDefectError(f"its input file {named} is not a JSON file beside it") from None
-        if not isinstance(held, dict):
-            raise _CaseDefectError(f"its input file {named} holds no JSON object")
-    if prompt == FOLLOW_UP:
-        return _follow_up_input(held, declared)
-    allowed = {"messages", "tools"} if prompt == PLANNING else {"messages"}
-    if set(held) != allowed:
-        raise _CaseDefectError(f"the input of a {prompt} case holds exactly {sorted(allowed)}")
-    messages = _case_messages(held["messages"])
-    tools = None if prompt != PLANNING else _case_tools(held["tools"])
-    return messages, tools, None
+    if "file" not in held:
+        return cast("dict[str, object]", held)
+    named = held["file"]
+    if set(held) != {"file"} or not isinstance(named, str):
+        raise _CaseDefectError("an input held in a file names that file alone")
+    if Path(named).name != named or not named.endswith(INPUT_SUFFIX):
+        raise _CaseDefectError(f"an input file is named <name>{INPUT_SUFFIX}, beside the case")
+    try:
+        read = json.loads(_read_regular(path.parent / named))
+    except ReplayError, ValueError, RecursionError:
+        raise _CaseDefectError(f"its input file {named} is not a JSON file beside it") from None
+    if not isinstance(read, dict):
+        raise _CaseDefectError(f"its input file {named} holds no JSON object")
+    return cast("dict[str, object]", read)
+
+
+def _case_exchange(held: object) -> tuple[tuple[Message, ...], tuple[ExchangeStep, ...]]:
+    """A planning case's exchange after its instruction: its briefing, then its steps.
+
+    As the given entry records a work's exchange (ADR-0356 §13:6), less its instruction,
+    which the run renders from the version it sends (§11:4).
+    """
+    if not isinstance(held, dict) or set(held) - {"briefing", "steps"} or "briefing" not in held:
+        raise _CaseDefectError("input.exchange holds its briefing and, optionally, its steps")
+    briefing = held["briefing"]
+    if not isinstance(briefing, str) or not briefing.strip():
+        raise _CaseDefectError("input.exchange.briefing is not the briefing's text")
+    try:
+        exchange = PlanningExchange.model_validate(
+            {"instruction": "-", "briefing": briefing, "steps": held.get("steps", [])}
+        )
+    except ValidationError:
+        raise _CaseDefectError("input.exchange's steps make no exchange") from None
+    return (Message(role=Role.USER, content=briefing),), exchange.steps
 
 
 def _follow_up_input(
@@ -3357,7 +3563,7 @@ async def _suite_outcome(call: SuiteCall, caller: Caller) -> tuple[dict[str, obj
         if call.case.tools is None:
             text = await caller.complete(call.messages)
             return {"reply": text}, completion_reply(call.case.prompt, text)
-        replayed = await caller.replay_round(call.messages, call.case.tools)
+        replayed = await caller.replay_round(call.messages, call.case.tools, call.case.steps)
     except Exception as exc:  # every failure of the one model is recorded (ADR-0335 §4:7)
         return {"failure": failure_body(exc)}, None
     held: dict[str, object] = {

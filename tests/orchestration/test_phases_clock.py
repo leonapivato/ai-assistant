@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from exchange_support import shown_text
+from exchange_support import section, shown_text
 from phases_support import chat_turn, phases_harness
 from test_engine_phases import _BOOK
 from understanding_support import STATED_PROPOSAL, understanding_stage
@@ -64,7 +64,7 @@ async def test_what_time_is_it_takes_two_model_calls() -> None:
     assert _CLOCK not in offered
     assert {"remember", "book"} <= offered
     # What planning answers from instead: its input carries the current time.
-    assert '"now"' in str(planning_round.exchange.briefing)
+    assert section(planning_round.exchange.briefing, "## The situation").startswith("- Now: ")
 
 
 async def test_a_clock_call_that_arrives_anyway_is_refused_as_not_offered() -> None:

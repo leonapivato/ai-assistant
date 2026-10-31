@@ -8,14 +8,15 @@ each driven through the engine with the phases wired, over the canonical fakes.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, time, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 import structlog
+from exchange_support import section, tags
 from phases_support import phases_harness, until
 from task_support import AT, CHAT, LINE, activation, message, pushed, seams, spawn_effect
+from test_phases_task_scheduler import _THE_SCHEDULE
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -33,7 +34,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
 )
 from ai_assistant.orchestration.person_block import PersonBlocks
-from ai_assistant.orchestration.task_scheduler import SCHEDULE, TASK_SCHEDULER_DESCRIPTION
+from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore, FakeToolCallingCompleter
 from ai_assistant.testing.person_model import FakePersonModelStore
 
@@ -64,12 +65,14 @@ class _Inputs:
 
     def completer(self) -> FakeToolCallingCompleter:
         def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
-            request: dict[str, Any] = json.loads(exchange.briefing)
-            if request["place"].get("description") == TASK_SCHEDULER_DESCRIPTION:
-                window = request["place_window"]
-                self.inputs.extend(str(one["text"]) for one in window if one.get("is_the_input"))
-                self.windows.append([str(one["text"]) for one in window])
-            return RoundResponse(text="")
+            briefing = exchange.briefing
+            # Started by the Task Scheduler: its origin is the schedule (ADR-0353 §4:4).
+            if f"- The origin: {_THE_SCHEDULE}," in section(briefing, "## The situation"):
+                stimulus = section(briefing, "# The stimulus")
+                self.inputs.extend(str(one.text) for one in tags(stimulus))
+                window = section(briefing, "## Stimulus origin knowledge")
+                self.windows.append([one.text or "" for one in tags(window, "message")])
+            return RoundResponse()
 
         return FakeToolCallingCompleter(response=respond)
 

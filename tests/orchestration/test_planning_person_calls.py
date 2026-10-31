@@ -13,6 +13,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
+from exchange_support import section
 from test_planning_person import _inputs as _person_inputs
 from test_planning_person import _sent
 from test_planning_person import _stage as _person_stage
@@ -39,15 +40,25 @@ def _block(**profile: str) -> PersonBlock:
 # --- the person's zone on planning's clock (§3:6) ---------------------------------------
 
 
+def _now_line(briefing: str) -> str:
+    """The situation's first line: the current time, and the zone every time is in."""
+    (now,) = [
+        line
+        for line in section(briefing, "## The situation").split("\n")
+        if line.startswith("- Now:")
+    ]
+    return now
+
+
 async def test_the_current_time_is_given_in_the_persons_zone_where_it_is_set() -> None:
     stage, completer, _ = _person_stage()
 
     await stage.plan(_person_inputs(person=_block(time_zone="America/New_York")))
 
-    sent = _sent(completer)
-    assert sent["now"] == "2026-10-21T05:00:00-04:00"
-    assert sent["time_zone"] == "America/New_York"
-    assert sent["person"]["profile"]["time_zone"]["value"] == "America/New_York"
+    assert _now_line(_sent(completer)) == (
+        "- Now: Wednesday 21 October 2026, 5:00 am, in the owner's time zone "
+        "(America/New_York). Every time below is in this zone."
+    )
 
 
 @pytest.mark.parametrize("person", [_block(), None], ids=["zone-not-set", "no-person"])
@@ -59,9 +70,9 @@ async def test_the_hubs_zone_is_used_where_the_persons_is_not_set_or_there_is_no
 
     await stage.plan(_person_inputs(person=person))
 
-    sent = _sent(completer)
-    assert sent["now"] == "2026-10-21T10:00:00+01:00"
-    assert sent["time_zone"] == "Europe/Lisbon"
+    assert _now_line(_sent(completer)).startswith(
+        "- Now: Wednesday 21 October 2026, 10:00 am, in the hub's time zone (Europe/Lisbon)."
+    )
 
 
 async def test_a_zone_that_does_not_resolve_falls_back_to_the_hubs() -> None:
@@ -70,7 +81,9 @@ async def test_a_zone_that_does_not_resolve_falls_back_to_the_hubs() -> None:
 
     await stage.plan(_person_inputs(person=_block(time_zone="Mars/Olympus")))
 
-    assert _sent(completer)["time_zone"] == "Europe/Lisbon"
+    now = _now_line(_sent(completer))
+    assert "in the hub's time zone (Europe/Lisbon)" in now
+    assert "Mars/Olympus" not in _sent(completer)
 
 
 # --- the exact line (§8:6; ADR-0321 §2:5, §2:7) -------------------------------------------

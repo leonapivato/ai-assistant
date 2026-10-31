@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from ai_assistant.core.episode_encoding import project_episode
@@ -150,9 +149,17 @@ def test_the_matters_pass_and_the_tidy_up_attribute_it_and_never_show_it_as_the_
 
 
 def test_planning_shows_an_earlier_steps_input_as_the_assistants_and_not_its_text() -> None:
-    request = SimpleNamespace(shown=SimpleNamespace(marked=False))
+    """Planning's short view: the system's task, withheld, unmarked (ADR-0356 §9:1)."""
+    lines, marked = planning.short_view(
+        _projection(),
+        "E1",
+        naming=planning._Naming(person_id=OWNER_PERSON_ID, name="Maren"),
+        at=lambda instant: instant.isoformat(),
+        place=lambda kind, thing: None,
+    )
+    rendered = "\n".join(lines)
 
-    shown = planning._Request._episode_input(request, _projection(), in_place=False)  # type: ignore[arg-type]  # the one attribute the method reads
-
-    assert shown == "the assistant's own instruction for work it scheduled, not shown"
-    assert request.shown.marked is False
+    assert '<task from="the system" withheld="yes"/>' in rendered
+    assert "Maren" not in rendered
+    assert _INSTRUCTION not in rendered
+    assert marked is False

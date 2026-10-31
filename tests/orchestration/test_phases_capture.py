@@ -14,10 +14,10 @@ import json
 from typing import TYPE_CHECKING, Final
 
 import structlog
-from phases_support import answered, chat_turn, open_conversation, phases_harness, say
+from phases_support import answered, chat_turn, open_conversation, phases_harness, replying, say
 
 from ai_assistant.core.errors import ConversationStoreError, MemoryStoreError
-from ai_assistant.core.types import Capture, Modality, RoundResponse
+from ai_assistant.core.types import Capture, Modality
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
@@ -69,7 +69,7 @@ class _RefusingIndex(FakeConversationStore):
 
 
 def _writing() -> FakeToolCallingCompleter:
-    return FakeToolCallingCompleter(RoundResponse(text=f"Certainly, {_SPAN}."))
+    return replying(f"Certainly, {_SPAN}.")
 
 
 async def test_no_log_on_the_capture_path_carries_what_was_written() -> None:

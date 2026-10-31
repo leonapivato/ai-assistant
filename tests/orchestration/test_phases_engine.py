@@ -26,6 +26,7 @@ from phases_support import (
     chat_turn,
     open_conversation,
     phases_harness,
+    replies,
     say,
 )
 
@@ -39,6 +40,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.engine import DrainPhase
 from ai_assistant.testing import FakeToolCallingCompleter
+from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -323,10 +325,10 @@ async def test_a_completed_activation_emits_one_trace_through_the_sink() -> None
 
 
 class _Witness(FakeToolCallingCompleter):
-    """Planning's default round, recording the requesting device it ran under."""
+    """Planning that answers as :func:`replying` does, recording the device it ran under."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(response=replies(DEFAULT_ROUND_TEXT))
         self.seen: list[RequestingDevice] = []
 
     async def respond(
