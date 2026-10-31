@@ -43,6 +43,7 @@ from ai_assistant.core.types import GrantScope
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, Engine
 from ai_assistant.orchestration.matters_pass import MattersPassReport
 from ai_assistant.orchestration.observer import RunOutcome
+from ai_assistant.orchestration.story_tidy_up import ScheduledTidyUpReport
 from ai_assistant.readers import CALENDAR_READER_NAME
 from ai_assistant.service.scheduler import Job, Scheduler, jobs_for
 
@@ -970,6 +971,7 @@ async def test_the_consolidation_row_is_retired_and_its_interval_arms_the_matter
             "conversation_sweep",
             "notification_reconsider",
             "observer",
+            "scheduled_tidy_up",
             "matters_pass",
         ]
         assert not any("consolidat" in getattr(job.run, "__name__", "") for job in armed)
@@ -1006,6 +1008,33 @@ async def test_the_matters_pass_runs_on_consolidations_schedule_and_only_with_it
         report = await matters.run()
         assert isinstance(report, MattersPassReport)
         assert (report.flags, report.exhausted) == (0, True)
+    finally:
+        await engine.aclose()
+
+
+async def test_the_scheduled_tidy_up_runs_just_before_the_matters_pass_and_only_with_it(
+    tmp_path: Path,
+) -> None:
+    """ADR-0358 §4:1: one row, on ``consolidation_interval``, immediately before the
+    ``matters_pass`` row, and disabled wherever that setting is unset, as the pass is.
+
+    Bound by identity to the engine's concrete maintenance method, which takes no
+    argument and is on no Protocol (§4:8). The production composition wires the run, so
+    the row's body runs rather than refusing: over an empty store no story is due and
+    no model call is made.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert "scheduled_tidy_up" not in {job.name for job in jobs_for(engine, Settings())}
+
+        armed = jobs_for(engine, Settings(consolidation_interval=timedelta(hours=6)))
+        tidying, matters = armed[-2:]
+        assert (tidying.name, matters.name) == ("scheduled_tidy_up", "matters_pass")
+        assert tidying.interval == timedelta(hours=6)
+        assert tidying.run == engine.tidy_stories
+        assert not hasattr(AssistantEngine, "tidy_stories")
+        report = await tidying.run()
+        assert report == ScheduledTidyUpReport()
     finally:
         await engine.aclose()
 

@@ -125,7 +125,11 @@ from ai_assistant.orchestration.story_calls import (
     StoryCalls,
 )
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
-from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp
+from ai_assistant.orchestration.story_tidy_up import (
+    STORY_TIDY_UP_PROMPT,
+    ScheduledTidyUp,
+    StoryTidyUp,
+)
 from ai_assistant.orchestration.task_manager import TaskManagerLimits, TaskSchedulerSeams
 from ai_assistant.orchestration.telegram import TelegramLineSeams
 from ai_assistant.orchestration.understanding import (
@@ -322,6 +326,19 @@ STORY_TIDY_UP_BUDGET: Final = timedelta(minutes=2)
 #: §6:1). Its other-story count, so a decision on a pair with each story it can name
 #: fits, and a story with fewer decisions than that shows them all.
 STORY_TIDY_UP_DECISIONS: Final = STORY_TIDY_UP_OTHER_STORIES
+
+#: ADR-0358 §4:2-§4:3's scheduled tidy-up: **tunable defaults**, ADR-0358's lane's choice
+#: set beside the matters pass's figures, not owner rulings; a hub changes them by a
+#: change here. A story is due once its notes and episodes pending, the count planning
+#: is shown (ADR-0307 §6:3), reach **5**, so a matter is tidied while it is moving; or
+#: once anything is pending and the newest of it came over **24 hours** ago, so a matter
+#: with one misfiled episode is tidied once it settles and its flag can be raised. A
+#: run starts at most **10** tidy-ups, the matters pass's completions per run, each a
+#: completion on consolidation's route; a run's time is bounded by
+#: ``scheduler_run_budget``, and it runs at ``consolidation_interval``.
+SCHEDULED_TIDY_UP_THRESHOLD: Final = 5
+SCHEDULED_TIDY_UP_QUIET: Final = timedelta(hours=24)
+SCHEDULED_TIDY_UP_PER_RUN: Final = 10
 
 #: The matters pass's bounds (ADR-0300 §9:3, ADR-0302 §5), chosen here as §5:4 has the
 #: building lane choose them; none is measured yet, and the test hub is where to.
@@ -1991,6 +2008,19 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 budget=settings.scheduler_run_budget,
                 # ADR-0334 §3:5: its instruction, as read at start, default or override.
                 prompt=prompts[MATTERS_PASS_PROMPT.name],
+            ),
+            # ADR-0358 §4's scheduled tidy-up, which the scheduler's `scheduled_tidy_up`
+            # row runs just before the matters pass, on consolidation's interval: over
+            # the one tidy-up planning's call runs, so a story is tidied by one run at a
+            # time whoever started it (ADR-0300 §5:10), and the same story store.
+            scheduled_tidy_up=ScheduledTidyUp(
+                tidy_up=tidy_up,
+                stories=stories,
+                threshold=SCHEDULED_TIDY_UP_THRESHOLD,
+                quiet=SCHEDULED_TIDY_UP_QUIET,
+                per_run=SCHEDULED_TIDY_UP_PER_RUN,
+                budget=settings.scheduler_run_budget,
+                now=_utcnow,
             ),
             # The two speech seams, each under the deadline decorator ADR-0200 §1
             # puts on the *wrapper* rather than in the seam, "so that it composes
