@@ -1052,27 +1052,35 @@ def _labelled(outcome: CallOutcome, *, owner_records: bool) -> tuple[PlanningLab
 
 
 def _summary_versions(outcome: CallOutcome) -> dict[str, int]:
-    """The summary version each story a result's rendering shows was shown at (§11:2).
+    """The summary version each story a result's rendering first shows was shown at.
 
-    A story read's, and each larger story's short view beside it; a matter an episode
-    look-up names; and a story a full view shows again. A story named by its label alone
-    showed no summary, and keeps none.
+    ADR-0358 §11:2, in the rendering's order, so a story shown twice keeps the version
+    it was first shown at, as it keeps its one label: a story read's, then each larger
+    story's short view beside it; each matter an episode search names, episode by
+    episode; and a full view's matters, which head it, then each story it shows again. A
+    story whose summary is withheld, or named by its label alone, showed none, and
+    keeps none.
     """
-    versions: dict[str, int | None] = {}
+    shown: list[tuple[str, int | None, bool]] = []
     story = outcome.story
     if story is not None:
-        versions[story.story_id] = story.summary_version
-        versions |= {one.story_id: one.summary_version for one in story.inherited}
+        shown.append((story.story_id, story.summary_version, story.withheld))
+        shown.extend((one.story_id, one.summary_version, one.withheld) for one in story.inherited)
     if outcome.episodes is not None:
-        versions |= {
-            matter.story_id: matter.summary_version
+        shown.extend(
+            (matter.story_id, matter.summary_version, matter.withheld)
             for found in outcome.episodes.episodes
             for matter in found.matters
-        }
+        )
     full = outcome.full
     if full is not None:
-        versions |= {one.story_id: one.summary_version for one in full.stories.values()}
-        versions |= {one.story_id: one.summary_version for one in full.matters}
+        shown.extend((one.story_id, one.summary_version, one.withheld) for one in full.matters)
+        shown.extend(
+            (one.story_id, one.summary_version, one.withheld) for one in full.stories.values()
+        )
+    versions: dict[str, int | None] = {}
+    for story_id, version, withheld in shown:
+        versions.setdefault(story_id, None if withheld else version)
     return {key: value for key, value in versions.items() if value is not None}
 
 

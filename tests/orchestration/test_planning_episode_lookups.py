@@ -759,3 +759,27 @@ def test_a_story_read_keeps_each_story_by_the_version_its_view_showed() -> None:
         if isinstance(one, ShownRecord) and one.kind is ShownRecordKind.STORY
     }
     assert versions == {view.story_id: 3, "story:summer": 2}
+
+
+def test_a_story_shown_twice_keeps_the_version_it_was_first_shown_at() -> None:
+    """§11:2: two episodes of one story, its summary rewritten between their reads."""
+    first = MatterShown(story_id="story:dentist", summary_version=1, first_line="Version one.")
+    later = MatterShown(story_id="story:dentist", summary_version=2, first_line="Version two.")
+    hidden = MatterShown(story_id="story:hidden", summary_version=4, withheld=True)
+    found = EpisodesFound(
+        episodes=(
+            EpisodeShown(record=_episode("activation:one"), matters=(first, hidden)),
+            EpisodeShown(record=_episode("activation:two"), matters=(later,)),
+        )
+    )
+    outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", episodes=found)
+
+    showed = call_showed(outcome, bound=1000)
+
+    assert showed is not None
+    stories = [
+        (one.id, one.summary_version)
+        for one in showed.parts
+        if isinstance(one, ShownRecord) and one.kind is ShownRecordKind.STORY
+    ]
+    assert stories == [("story:dentist", 1), ("story:hidden", None)]
