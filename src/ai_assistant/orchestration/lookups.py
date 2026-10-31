@@ -125,7 +125,13 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.acting import HeldByIds, NamedResult
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
-from ai_assistant.orchestration.planning import OLDER_NOTES_PAGE_ARGUMENT, PAGE_ARGUMENT
+from ai_assistant.orchestration.planning import (
+    OLDER_NOTES_PAGE_ARGUMENT,
+    PAGE_ARGUMENT,
+    EpisodeRead,
+    EpisodesFound,
+    OlderHistory,
+)
 from ai_assistant.orchestration.story_calls import STORY_ARGUMENT
 
 if TYPE_CHECKING:
@@ -136,12 +142,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.acting import OwnRecordsAnswer
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.episode_lookups import EpisodeLookUpReads, OlderSource
-    from ai_assistant.orchestration.planning import (
-        EpisodeRead,
-        EpisodesFound,
-        OlderHistory,
-        PlanningStory,
-    )
+    from ai_assistant.orchestration.planning import PlanningStory
 
 __all__ = [
     "EPISODE_ARGUMENT",
