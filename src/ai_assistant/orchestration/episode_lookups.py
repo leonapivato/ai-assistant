@@ -337,22 +337,29 @@ class EpisodeLookUpReads:
                 (at for at, one in enumerate(entries) if one.record.id in source.episodes), None
             )
             whole = len(entries) < limit
-            # Enough is the requested page and one more beyond the oldest shown episode,
-            # however many episodes the channel gained since the window was read.
-            if (first is not None and first >= needed) or whole or limit >= _CHANNEL_PAGE_MAX:
+            older = entries if first is None else entries[:first]
+            records = [
+                record
+                for record in admitted_to_understanding(
+                    audience, [one.record for one in reversed(older)]
+                )
+                if isinstance(record, EpisodicMemory)
+            ]
+            # Enough is the requested page of admitted episodes and one more beyond the
+            # oldest shown, however many the channel gained since the window was read and
+            # however many the audience refuses.
+            if (
+                (first is not None and len(records) >= needed)
+                or whole
+                or limit >= _CHANNEL_PAGE_MAX
+            ):
                 break
             limit = min(_CHANNEL_PAGE_MAX, limit * 2)
         if first is None and not whole:
             return OlderHistory(readable=False, page=page)
-        older = entries if first is None else entries[:first]
-        truncated = read.total > len(entries)
-        records = [
-            record
-            for record in admitted_to_understanding(
-                audience, [one.record for one in reversed(older)]
-            )
-            if isinstance(record, EpisodicMemory)
-        ]
+        # Older episodes are left unread where the read stopped short of the channel's
+        # start: the store's tail read reaches no further back (§9:4).
+        truncated = len(entries) < read.total
         start = (page - 1) * self._history_page
         shown = records[start : start + self._history_page]
         if not shown and truncated:

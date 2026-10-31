@@ -166,3 +166,26 @@ def test_a_full_view_showing_a_marked_summary_is_outside_content_read() -> None:
 
     assert working.read_outside_content
     assert "story:venue" in working.fetched_outside_from
+
+
+def test_a_marked_summary_only_another_page_shows_is_not_read_on_this_one() -> None:
+    """§6:4: what the page shows is counted, and a story only a later page names is not."""
+    from test_planning_episode_lookups import _full_record, _read  # noqa: PLC0415
+
+    from ai_assistant.orchestration.acting import ActedRound  # noqa: PLC0415
+    from ai_assistant.orchestration.phase_path import PhasePath  # noqa: PLC0415
+    from ai_assistant.orchestration.planning import MatterShown  # noqa: PLC0415
+
+    marked = MatterShown(
+        story_id="story:dentist", summary_version=1, first_line="The venue wrote", outside=True
+    )
+    for page, read_outside in ((1, False), (3, True)):
+        working = _acted(
+            READ_EPISODE, output={"looked_up": "read_episode"}, episode="activation:full"
+        )
+        read = _read(_full_record(), page_size=1, page=page, stories={"story:dentist": marked})
+        handed = tuple(working.latest.handed.values())
+
+        PhasePath._looked(working, ActedRound(round_id="round-1", calls=handed), {"d1": read})
+
+        assert ("story:dentist" in working.fetched_outside_from) is read_outside

@@ -294,6 +294,10 @@ from ai_assistant.core.types import (
     NewMessage,
     PlanningLabel,
     ProfileField,
+    ProjectedCall,
+    ProjectedEvidence,
+    ProjectedRecall,
+    ProjectedRound,
     ProposedCall,
     QuestionPart,
     RecallOutcome,
@@ -501,6 +505,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.lookups import EpisodeLookedUp, LookUps
     from ai_assistant.orchestration.matters import Matters
     from ai_assistant.orchestration.person_block import PersonBlock, PersonBlocks
+    from ai_assistant.orchestration.planning import FullViewPart
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_calls import StoryCalls
     from ai_assistant.orchestration.story_links import Candidates, ShortView, StoryCandidates
@@ -1646,23 +1651,36 @@ def _looked_outside(found: EpisodeLookedUp) -> tuple[str, ...]:
         )
     if isinstance(found, OlderHistory):
         return tuple(one.id for one in found.episodes if rests_on_outside_content(one))
-    projection = found.projection
-    if found.record is None or projection is None:
+    if found.record is None or found.projection is None:
         return ()
-    marked = (
-        rests_on_outside_content(found.record)
-        or bool(projection.evidence)
-        or any(one.notes_marked for one in projection.rounds)
-        or any(one.marked for one in projection.calls)
+    # What the page shows, as it is rendered: its evidence, a marked note or a marked
+    # entry; and a marked summary of a matter the episode is in, which every page names,
+    # or of a story the page shows again (ADR-0303 §3:6).
+    parts = found.page_parts()
+    marked = rests_on_outside_content(found.record) or any(
+        isinstance(part, ProjectedEvidence)
+        or (isinstance(part, ProjectedRound) and part.notes_marked)
+        or (isinstance(part, ProjectedCall) and part.marked)
+        for part in parts
     )
-    # A marked summary the full view shows, of a matter it is in or a story it shows
-    # again, is outside content read, as a story view's is (ADR-0303 §3:6).
+    again = {
+        one.id for part in parts for one in _named_on(part) if one.kind is ShownRecordKind.STORY
+    }
     summaries = (
         one.story_id
-        for one in (*found.matters, *found.stories.values())
+        for one in (*found.matters, *(found.stories[key] for key in again if key in found.stories))
         if one.outside and one.first_line is not None
     )
     return (*((found.episode_id,) if marked else ()), *dict.fromkeys(summaries))
+
+
+def _named_on(part: FullViewPart) -> tuple[ShownRecord, ...]:
+    """The records one full view's part names by reference (ADR-0358 §10:3)."""
+    if isinstance(part, ProjectedRecall):
+        return part.found
+    if isinstance(part, ProjectedCall) and part.showed is not None:
+        return tuple(one for one in part.showed.parts if isinstance(one, ShownRecord))
+    return ()
 
 
 # --- the working set ---------------------------------------------------------------------
@@ -2552,7 +2570,7 @@ class PhaseWorking:
                 for one in searched_ids(outcome.result)
             )
             return shown_within(listed, bound)
-        return call_showed(looked, bound=bound, raw=outcome.result)
+        return call_showed(looked, bound=bound)
 
     def acted_rounds(self) -> tuple[ActedRound, ...]:
         """Every acting decision, in round order."""
