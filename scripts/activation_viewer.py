@@ -3110,28 +3110,35 @@ def walk(
 
 
 def _came_of(steps: Sequence[dict[str, object]]) -> None:
-    """Set on each exchange round what came of its calls, from the next round's report.
+    """Set on each exchange round what came of its calls, from a later round's report.
 
     The record holds no entry for a call (acting writes none, ADR-0314 §4:3): what came
-    of a round's calls is in the next round's request alone, its exchange's report on
-    that round (ADR-0356 §5:3, §8:3). So each planning round recorded since ADR-0356 is
-    given, by call id, the result the next one's request shows for it, and the last,
-    which no request follows, is marked as holding none.
+    of a round's calls is in a later round's request alone, its exchange's report on
+    that round (ADR-0356 §5:3, §8:3), and every later request of the work repeats it.
+    A work's call ids are distinct across its exchange (§13), so each planning round
+    recorded since ADR-0356 is given, by call id, the result any later request shows
+    for it, and one whose calls no later request reports, as the last round's, or where
+    every later request was lost, is marked as holding none.
     """
     planning = [one for one in steps if one.get("phase") == "planning"]
-    for this, after in itertools.zip_longest(planning, planning[1:]):
-        if this is None or this.get("exchange") is not True:
+    reported: list[Mapping[str, object]] = [_mapping(one.pop("_results", None)) for one in planning]
+    for number, this in enumerate(planning):
+        if this.get("exchange") is not True:
             continue
-        before = None if after is None else _mapping(after.get("before"))
-        if not before:
+        later: dict[str, object] = {}
+        for results in reported[number + 1 :]:
+            later.update(results)
+        ids = [
+            str(call["id"])
+            for call in map(_mapping, _sequence(this.get("calls")))
+            if isinstance(call.get("id"), str)
+        ]
+        came = {one: later[one] for one in ids if one in later}
+        if not came:
             this["came_of"] = None
             this["came_of_note"] = NO_CALL_ENTRY
             continue
-        this["came_of"] = {
-            str(call["id"]): call["result"]
-            for call in map(_mapping, _sequence(before.get("calls")))
-            if isinstance(call.get("id"), str)
-        }
+        this["came_of"] = came
 
 
 def _phases(built: _Timeline) -> tuple[list[_Phase], Entry | None]:
@@ -4169,6 +4176,17 @@ def _words_of(raw: object) -> str | None:
     return words if isinstance(words, str) else None
 
 
+def _reported(steps: Sequence[object]) -> dict[str, object]:
+    """Every result an exchange's reports show, by call id, as the walk shows a result."""
+    shown: dict[str, object] = {}
+    for one in map(_mapping, steps):
+        for result in map(_mapping, _sequence(_mapping(one.get("report")).get("results"))):
+            call_id, text = _text(result.get("call_id")), _text(result.get("text"))
+            if call_id is not None and text is not None:
+                shown[call_id] = {"label": None, "text": _cut(text)}
+    return shown
+
+
 def _exchanged_before(steps: Sequence[object]) -> dict[str, object] | None:
     """What came back from the round before, as the work's exchange reports it (§5).
 
@@ -4229,6 +4247,8 @@ def _planning_step(phase: _Phase, *, era: bool | None = None) -> dict[str, objec
             "request": exchange is not None,
             "first": exchange is not None and not steps,
             "before": _exchanged_before(steps),
+            # Read by `_came_of` and taken out before the walk is served.
+            "_results": _reported(steps),
             "evidence": [],
             "returned": returned is not None,
             "failure": _failure_of(answered),

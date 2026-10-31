@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     DiagnosticKind,
     DiagnosticSource,
     ExchangeStep,
+    FrozenJson,
     PlanningExchange,
     ProposedCall,
     RoundReport,
@@ -49,7 +50,7 @@ _RESULT: Final = "TP 1351 departs 09:40, 212 EUR."
 _SENT: Final = "sent"
 _NEWS: Final = "nothing has changed since your last round"
 #: ADR-0356 §7:4: no name is reserved since, so a capability may be called this.
-_NAMED_SO: Final = {"notes": "an argument, not notes", "another_round": True}
+_NAMED_SO: Final[dict[str, FrozenJson]] = {"notes": "an argument, not notes", "another_round": True}
 
 _ROUND_1: Final = RoundResponse(
     text=_NOTES_1,
@@ -281,3 +282,63 @@ def test_a_round_no_request_of_its_activation_shows_is_read_as_neither(tmp_path:
     assert [one["name"] for one in second["calls"]] == ["text", "planning_round"]
     assert second["another_round"] is False
     assert viewer.timeline(_ID, read)["rounds"][0]["exchange"] is None
+
+
+def test_what_came_of_a_round_is_read_from_any_later_request(tmp_path: Path) -> None:
+    """Every later request of a work repeats each earlier round's report (§5:1), and call
+    ids are distinct across it (§13): with round 2's request lost, round 3's still shows
+    what came of round 1's calls, and round 2's."""
+    second = RoundResponse(
+        text=_NOTES_2,
+        calls=(
+            ProposedCall(call_id="c3", name="text", arguments={"words": _SAID_2}),
+            ProposedCall(call_id="c4", name="planning_round", arguments=_NAMED_SO),
+        ),
+    )
+    third = _LATER.model_copy(
+        update={
+            "steps": (
+                *_LATER.steps,
+                ExchangeStep(
+                    response=second,
+                    report=RoundReport(
+                        results=(
+                            CallResult(call_id="c3", text=_SENT),
+                            CallResult(call_id="c4", text="done"),
+                        ),
+                        news=_NEWS,
+                    ),
+                ),
+            )
+        }
+    )
+    kept = [one for one in _ENTRIES if not (one[1] is DiagnosticKind.GIVEN and one[2] == 1170)]
+    entries = [
+        *kept[:-1],
+        (DiagnosticSource.PLANNING, DiagnosticKind.GIVEN, 1820, _given(third)),
+        (DiagnosticSource.PLANNING, DiagnosticKind.RETURNED, 2000, _returned("Done.")),
+        (
+            DiagnosticSource.CONTROLLER,
+            DiagnosticKind.STEP,
+            2001,
+            step("planning", "round_due", 1810, 2001),
+        ),
+        (
+            DiagnosticSource.CONTROLLER,
+            DiagnosticKind.STEP,
+            2002,
+            step("end", "nothing_due", 2002, 2002),
+        ),
+    ]
+
+    first, middle, last = _planning(viewer.walk(_read(tmp_path, entries)))
+    assert first["came_of"] == {
+        "c1": {"label": None, "text": _RESULT},
+        "c2": {"label": None, "text": _SENT},
+    }
+    assert middle["came_of"] == {
+        "c3": {"label": None, "text": _SENT},
+        "c4": {"label": None, "text": "done"},
+    }
+    assert (last["came_of"], last["calls"]) == (None, [])
+    assert all("_results" not in one for one in (first, middle, last))
