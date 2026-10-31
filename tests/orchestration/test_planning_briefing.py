@@ -79,6 +79,7 @@ from ai_assistant.orchestration.planning import (
     PlanningStories,
     PlanningStory,
 )
+from ai_assistant.orchestration.story_links import ShortView
 from ai_assistant.testing import FakeToolCallingCompleter, default_prompt
 from ai_assistant.testing.memories import memory, said_support
 
@@ -460,6 +461,75 @@ async def test_a_short_view_shows_an_input_taken_in_where_it_was_taken() -> None
     assert took[0].tags[0].text == "make it 3"
 
 
+async def test_an_input_taken_in_between_rounds_is_shown_between_them() -> None:
+    """§9:1, review round 2: notes, effects and inputs taken in, in the order they happened."""
+    at = NOW - timedelta(hours=2)
+    first = PlanningRound(
+        id="r1",
+        recorded_at=at,
+        calls=(_call("c2", "book_table", restaurant="Luigi's"),),
+        notes="booking it",
+    )
+    second = PlanningRound(
+        id="r2",
+        follows="r1",
+        recorded_at=at + timedelta(minutes=2),
+        calls=(_call("c3", "text", to="Leo", words="Booked for three."),),
+        notes="made it three",
+    )
+    sent = RecordedDelivery(words="Booked for three.", went=CHAT, status=DeliveryStatus.SENT)
+    joined = JoinedInput(
+        joined_at=at + timedelta(minutes=1),
+        channel=TELEGRAM,
+        messages=(
+            RecordedInputMessage(text="make it 3", sent_at=at + timedelta(minutes=1), party=LEO),
+        ),
+    )
+    record = _episode(
+        "joined",
+        rounds=(first, second),
+        calls=(_entry("r1", "c2", "book_table"), _entry("r2", "c3", "text", delivered=sent)),
+        channel=TELEGRAM,
+        joined=(joined,),
+    )
+
+    briefing = await _briefing(_inputs(episodes=(record,)))
+
+    episode = tag(section(briefing, "## Short-term memory"), "episode", label="E1")
+    order = [one.name for one in episode.tags if one.name in {"notes", "did", "took_in"}]
+    assert order == ["notes", "did", "took_in", "notes", "did"]
+
+
+async def test_messages_to_unlabelled_places_are_told_apart() -> None:
+    """§9:2, review round 2: where a message went is its recorded place, labelled or not."""
+    sent = [
+        RecordedDelivery(
+            words="Hello.",
+            went=ChannelIdentity(channel_type="email", instance_id=address),
+            status=DeliveryStatus.SENT,
+        )
+        for address in ("alice@example.com", "bob@example.com")
+    ]
+    mailing = _round(
+        "r1", _call("c1", "email", to="Alice"), _call("c2", "email", to="Bob"), notes="mailed"
+    )
+    record = _episode(
+        "mail",
+        rounds=(mailing,),
+        calls=(
+            _entry("r1", "c1", "email", delivered=sent[0]),
+            _entry("r1", "c2", "email", delivered=sent[1]),
+        ),
+        channel=TELEGRAM,
+    )
+
+    briefing = await _briefing(_inputs(episodes=(record,)))
+
+    alice, bob = tag(section(briefing, "## Short-term memory"), "episode").held("did")
+    assert "alice@example.com" in str(alice.text)
+    assert "bob@example.com" in str(bob.text)
+
+
 async def test_an_episode_recorded_before_adr_0356_shows_its_messages_as_dids() -> None:
     """§9:3, §14:9: a round's text, its message then, is shown as a ``did``."""
     old = _round("r1", notes="Looked it up.")
@@ -589,13 +659,14 @@ def _state(
     merged_into: str | None = None,
     story_id: str = "story:dinner",
     written_at: datetime = NOW - timedelta(days=1),
+    version: int = 2,
 ) -> StorySummaryState:
     return StorySummaryState(
         story=StoryHeader(
             story_id=story_id, created_at=NOW - timedelta(days=3), merged_into=merged_into
         ),
         summary=StorySummary(
-            version=2,
+            version=version,
             lines=tuple(StorySummaryLine(text=one) for one in lines),
             written_at=written_at,
             outside=False,
@@ -749,6 +820,46 @@ async def test_a_changed_time_zone_is_named_and_the_works_times_stay() -> None:
 
     assert news.startswith("Now: Thursday 29 October 2026, 5:40 pm.")
     assert "- Leo's time zone is now Asia/Tokyo; this work's times stay in Europe/Lisbon." in news
+
+
+async def test_an_unchanged_matter_shown_by_a_bounded_view_is_no_news() -> None:
+    """ADR-0359 §2:1, review round 2: a short view's bounded lines are no baseline."""
+    view = ShortView(
+        story_id="story:dinner",
+        lines=(StorySummaryLine(text="Dinner"),),
+        notes=(),
+        episodes=(),
+        written=True,
+        summary_version=2,
+    )
+    given = _inputs(stories=PlanningStories(cited=(view,)))
+    whole = _state(
+        "Dinner at Luigi's on Friday, with Maren and her sister.", story_id="story:dinner"
+    )
+
+    news = await _next_round(
+        given,
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        matters_now={"story:dinner": whole},
+    )
+
+    assert news.endswith(NOTHING_NEW)
+
+
+async def test_a_split_moving_no_note_is_named() -> None:
+    """ADR-0359 §2:2, review round 2: a member leaving a matter is told by its count."""
+    given = _inputs(
+        stories=PlanningStories(stories=(_story(),)), matter_members={"story:dinner": 3}
+    )
+
+    news = await _next_round(
+        given,
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        matters_now={"story:dinner": _state("Dinner at Luigi's on Friday.")},
+        matter_members={"story:dinner": 2},
+    )
+
+    assert "- S1 changed: some of what it held was moved or split off into another matter." in news
 
 
 async def test_a_changed_matter_is_named_once_and_only_as_the_audience_may_see_it() -> None:

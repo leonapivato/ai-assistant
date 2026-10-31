@@ -7,8 +7,8 @@ set = "development"
 samples = 3
 
 [property]
-check = "tells"
-phrases = ["mother"]
+check = "read"
+read = """One text call to Leo that reminds him now to call his mother. It does not ask whether he still wants the reminder, promise to remind him later, or set or change a task."""
 
 [input]
 file = "reminder-coming-due-reminds.json"

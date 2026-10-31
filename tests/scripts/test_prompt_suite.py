@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from pydantic_ai.messages import (
@@ -1325,3 +1325,30 @@ def test_proposes_and_answers_offer_read_the_rounds_calls() -> None:
     assert _round("answers_offer", {"answer": "take", "offer": "E1"}, elsewhere) is not None
     assert _round("answers_offer", {"answer": "decline", "offer": "E1"}, decline) is None
     assert _round("answers_offer", {"answer": "decline", "offer": "E1"}, _calls()) is not None
+
+
+def test_a_later_rounds_follow_up_is_asked_of_its_whole_exchange() -> None:
+    """ADR-0337 §7:2, review round 2: the follow-up's request carries the case's steps."""
+    seen: list[object] = []
+
+    class _Caller:
+        async def follow_up_round(
+            self, messages: Any, tools: Any, response: Any, question: str, steps: Any = ()
+        ) -> str:
+            del messages, tools, response, question
+            seen.append(tuple(steps))
+            return "answered"
+
+    follow_up = replay_tool.FollowUp(
+        candidate=replay_tool.default_candidate(replay_tool.FOLLOW_UP_PROMPT),
+        question="Why?",
+    )
+    steps = ("a step",)
+    asked = asyncio.run(
+        replay_tool.ask_follow_up(
+            follow_up, cast("Any", _Caller()), (), (), {"response": {"parts": []}}, steps
+        )
+    )
+
+    assert asked is not None
+    assert seen == [steps]

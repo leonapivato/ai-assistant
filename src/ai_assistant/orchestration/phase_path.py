@@ -1281,6 +1281,7 @@ class _Reread:
     meanings: dict[str, str] = field(default_factory=dict)
     ended: dict[str, EpisodicMemory | None] = field(default_factory=dict)
     person: PersonNow | None = None
+    members: dict[str, int] = field(default_factory=dict)
 
 
 class StoryReads:
@@ -1371,6 +1372,19 @@ class StoryReads:
             return PlanningStories(unreadable=True)
         _log.info("planning_stories", stage="planning", stories=len(views), cited=len(cited))
         return PlanningStories(stories=tuple(views), cited=cited)
+
+    async def members(self, story_ids: Sequence[str]) -> dict[str, int]:
+        """How many members each story holds now, by its view's count; one gone is left out.
+
+        Raises:
+            StoryStoreError: If the story store cannot be read.
+        """
+        counts: dict[str, int] = {}
+        for story_id in story_ids:
+            page = await self._stories.view(story_id, limit=1)
+            if page is not None:
+                counts[story_id] = page.member_count
+        return counts
 
     async def states(self, story_ids: Sequence[str]) -> dict[str, StorySummaryState | None]:
         """Each story's summary state as the store holds it now, or ``None`` where it is gone.
@@ -4419,7 +4433,7 @@ class PhasePath:
                 # work was shown of memories and matters, re-read before each report.
                 earlier, reread = (
                     await self._earlier_work(state, working),
-                    await self._shown_now(working, state, given),
+                    await self._shown_now(working, state, given, stories),
                 )
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
@@ -4495,6 +4509,7 @@ class PhasePath:
             episodes_read=fetched is not None and fetched.episodes is not None,
             still_held=reread.still_held,
             matters_now=reread.matters,
+            matter_members=reread.members,
             meanings=reread.meanings,
             ended=reread.ended,
             person_now=reread.person,
@@ -4533,7 +4548,11 @@ class PhasePath:
         return self._matters.in_progress(state, supply=given.supply)
 
     async def _shown_now(
-        self, working: PhaseWorking, state: ActivationState | None, given: PhasePass
+        self,
+        working: PhaseWorking,
+        state: ActivationState | None,
+        given: PhasePass,
+        stories: PlanningStories | None = None,
     ) -> _Reread:
         """What the work's exchange showed, as the stores and the engine hold it now.
 
@@ -4545,8 +4564,21 @@ class PhasePath:
         read says nothing: no memory is named forgotten, and no matter changed.
         """
         work = working.work
+        # The member counts of the matters this round may show, and of those shown, so a
+        # member leaving one is news from the briefing on (ADR-0359 §2:2).
+        viewed = (
+            []
+            if stories is None
+            else [
+                *(one.story_id for one in stories.stories),
+                *(view.story_id for one in stories.stories for view in one.inherited),
+                *(one.story_id for one in stories.cited),
+            ]
+        )
+        shown_ids = () if work is None else tuple(work.shown.matters)
+        members = await self._matter_members(sorted({*viewed, *shown_ids}))
         if work is None:
-            return _Reread()
+            return _Reread(members=members)
         held: frozenset[str] | None = None
         ids = sorted(work.shown.memories)
         if ids:
@@ -4567,7 +4599,7 @@ class PhasePath:
         working.supplied.obtained(record for record in ended.values() if record is not None)
         if person is not None:
             working.supplied.obtained(person.pinned)
-        return _Reread(held, matters, meanings, ended, person)
+        return _Reread(held, matters, meanings, ended, person, members)
 
     async def _person_now(
         self, state: ActivationState | None, given: PhasePass
@@ -4602,6 +4634,16 @@ class PhasePath:
         admitted = admitted_to_understanding(given.supply, list(pinned.values()))
         return PersonNow(profile=model.profile, pinned=tuple(admitted))
 
+    async def _matter_members(self, story_ids: Sequence[str]) -> dict[str, int]:
+        """How many members each story holds now, where the store can say (ADR-0359 §2:2)."""
+        if self._story_reads is None or not story_ids:
+            return {}
+        try:
+            return await self._story_reads.members(story_ids)
+        except StoryStoreError:
+            _log.warning("planning_stories_unreadable", stage="planning")
+            return {}
+
     async def _works_now(
         self, shown: frozenset[str], state: ActivationState | None, given: PhasePass
     ) -> tuple[dict[str, str], dict[str, EpisodicMemory | None]]:
@@ -4623,18 +4665,33 @@ class PhasePath:
             if held is not None and held.understanding:
                 meanings[entry.activation_id] = held.understanding[-1].meaning
         gone = sorted(one for one in shown if matters.state_of(one) is None)
-        found: dict[str, EpisodicMemory] = {}
-        if gone:
-            try:
-                found = await admitted_episodes(
-                    self._memory, [episode_address(one) for one in gone], given.supply
-                )
-            except MemoryStoreError:
-                # Nothing is established: none is named ended, and each is read again
-                # before the next report, so its short view is not lost.
-                _log.warning("planning_episodes_unread", stage="planning")
-                return meanings, {}
-        return meanings, {one: found.get(episode_address(one)) for one in gone}
+        if not gone:
+            return meanings, {}
+        addresses = [episode_address(one) for one in gone]
+        try:
+            records = await self._memory.get_many(addresses)
+        except MemoryStoreError:
+            # Nothing is established: none is named ended, and each is read again before
+            # the next report, so its short view is not lost.
+            _log.warning("planning_episodes_unread", stage="planning")
+            return meanings, {}
+        frozen = [
+            record
+            for record in records.values()
+            if isinstance(record, EpisodicMemory)
+            and record.processing_record is not None
+            and not record.processing_record.is_open
+        ]
+        admitted = {record.id: record for record in admitted_to_understanding(given.supply, frozen)}
+        ended: dict[str, EpisodicMemory | None] = {}
+        for one, address in zip(gone, addresses, strict=True):
+            if address in admitted:
+                ended[one] = admitted[address]
+            elif any(record.id == address for record in frozen):
+                # Frozen, and the audience may not be shown it: it ended, and no more.
+                ended[one] = None
+            # Not yet frozen, or not yet written: read again before the next report.
+        return meanings, ended
 
     async def _wait_on_older(self, state: ActivationState, working: PhaseWorking) -> None:
         """ADR-0349 §7:25-§7:28: wait on an older activation before a round.
