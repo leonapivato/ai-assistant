@@ -119,7 +119,7 @@ def test_the_member_is_sent_when_nobody_took_the_matter() -> None:
     sent = _sent(_episode(None))
     processing = sent["processing_record"]
     assert isinstance(processing, dict)
-    assert processing["schema_version"] == 11
+    assert processing["schema_version"] == 12
     assert "taken_over_by" in processing
     assert processing["taken_over_by"] is None
     assert EpisodicMemory.model_validate(sent) == _episode(None)

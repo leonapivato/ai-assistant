@@ -115,14 +115,19 @@ def test_the_episode_carries_no_disposition() -> None:
     assert "disposition" not in record.model_dump(mode="json")
 
 
-def test_the_record_is_schema_version_eleven() -> None:
-    """ADR-0318 §7:1: ``schema_version`` advances to ``Literal[11]``; an earlier one is refused."""
+def test_the_record_is_schema_version_twelve() -> None:
+    """ADR-0356 §13: ``schema_version`` advances to ``Literal[12]``; an earlier one is refused.
+
+    Version 11's was ADR-0318 §7:1's, which lost the old path's links.
+    """
     data = _processing().model_dump(mode="json")
-    assert data["schema_version"] == 11
+    assert data["schema_version"] == 12
+    assert data["call_records"] == []
     assert "links" not in data
     assert "response_degraded" not in data
-    with pytest.raises(ValidationError, match="literal_error"):
-        EpisodeProcessingRecord.model_validate({**data, "schema_version": 10})
+    for earlier in (10, 11):
+        with pytest.raises(ValidationError, match="literal_error"):
+            EpisodeProcessingRecord.model_validate({**data, "schema_version": earlier})
 
 
 def test_absent_processing_retains_other_producer_outcomes() -> None:

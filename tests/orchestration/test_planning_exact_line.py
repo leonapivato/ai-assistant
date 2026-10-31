@@ -26,9 +26,11 @@ from typing import TYPE_CHECKING, Any, Final
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import AskedCall
+from ai_assistant.orchestration.matter_calls import MATTER_CAPABILITIES
 from ai_assistant.orchestration.person_calls import worded_argument
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.planning import DELIBERATE_REPEAT, LOOKING_FOR, exact_line
+from ai_assistant.orchestration.task_scheduler import TASK_SCHEDULER_CAPABILITIES
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -105,13 +107,20 @@ def _every_argument(tool: ToolDefinition) -> dict[str, Any]:
 
 
 async def _registered(tmp_path: Path) -> list[tuple[ToolDefinition, ToolDefinition]]:
-    """Each offered capability's offered declaration, and the one tool selection picks."""
+    """Each offered capability's offered declaration, and the one tool selection picks.
+
+    Every capability is offered on every round (ADR-0356 §4:3); the Task Scheduler's and
+    the calls on running work are left out here, as this case covered them before, when
+    they were offered only to an activation they could run in.
+    """
     engine = build_engine(_everything(), data_dir=tmp_path)
     try:
         phases = engine._phases
         assert isinstance(phases, PhasePath)
         offered: dict[str, ToolDefinition] = {}
         for tool in sorted(await phases._offered(), key=lambda one: str(one.id)):
+            if str(tool.capability) in TASK_SCHEDULER_CAPABILITIES | MATTER_CAPABILITIES:
+                continue
             offered.setdefault(str(tool.capability), tool)
         pairs: list[tuple[ToolDefinition, ToolDefinition]] = []
         for name, declaration in sorted(offered.items()):

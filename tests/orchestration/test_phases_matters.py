@@ -42,6 +42,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from exchange_support import request_view
 from phases_support import (
     SETTLE,
     Gated,
@@ -197,7 +198,8 @@ class _Planner(FakeToolCallingCompleter):
         model: str | None = None,
     ) -> RoundResponse:
         del model
-        request: dict[str, Any] = json.loads(exchange.briefing)
+        # The briefing and the reports since, read as one request (ADR-0356 §5).
+        request: dict[str, Any] = request_view(exchange)
         understanding = request.get("understanding")
         key = str(understanding["meaning"]) if isinstance(understanding, dict) else ""
         key = next((one for one in self._within if one in key), key)
@@ -714,7 +716,9 @@ async def test_input_continuing_work_that_acted_elsewhere_waits_on_it_with_no_of
     first_round, second_round = planner.requests[newer_text]
     (waited,) = first_round["waiting_on"]
     assert waited["has_acted"] is True
-    assert planner.offered[newer_text][0] == ["stop_activation"], "only the stop call"
+    # ADR-0356 §4:3, §4:5: the waiting round is offered every call, as every round is,
+    # and a call but the stop or a message comes back refused.
+    assert planner.offered[newer_text][0] == planner.offered[newer_text][1]
     (work,) = second_round["earlier_work"]
     assert work["status"] == "ended"
     assert work["input"] == "search apartments"
@@ -1333,8 +1337,12 @@ async def test_a_waiting_round_is_shown_no_approved_action_and_the_round_after_i
     waiting_round, after = planner.requests[newer_text][:2]
     assert "waiting_on" in waiting_round
     assert "approved_actions" not in waiting_round
-    assert planner.offered[newer_text][0] == ["stop_activation"]
-    assert "approved_actions" in after, "the round after the wait is shown the yes"
+    # ADR-0356 §4:3, §5:2: every round of a work is offered what its first was, and its
+    # briefing is rendered once, so an approval the waiting round was not shown is not
+    # shown after it either; where approved actions render is still undecided, and
+    # approvals stay stopped (§15, ADR-0353 §11).
+    assert planner.offered[newer_text][0] == planner.offered[newer_text][1]
+    assert "approved_actions" not in after
 
 
 # --- ADR-0352 §5: what a conversation shows after a hand-over ---------------------------

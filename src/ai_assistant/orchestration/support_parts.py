@@ -14,8 +14,8 @@ façade's reads stay batched (ADR-0086 §6) and every rule below is testable on 
 A part that does not resolve is ``None``, which every surface shows as gone and never
 as evidence (§15:7, ADR-0073 §4's floor): the episode is gone, or it holds no such part
 (a position past its end, a round it never recorded, a digest item it never kept, an
-effect record the plan store does not hold), or the part's text was never kept (a
-speech input whose transcript was discarded).
+effect record the plan store does not hold, a message call that sent nothing), or the
+part's text was never kept (a speech input whose transcript was discarded).
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     InputPart,
     LegacyPart,
     Memory,
+    MessageCallPart,
     ObserverInferencePart,
     PinPart,
     PlanningRound,
@@ -130,7 +131,7 @@ def remember_activations(
     return tuple(wanted)
 
 
-def part_content(  # noqa: C901, PLR0911 — one arm per part §4's table names, and §9:7's
+def part_content(  # noqa: C901, PLR0911, PLR0912 — one arm per part the part table names
     part: SupportPart,
     *,
     episodes: Mapping[str, EpisodicMemory],
@@ -157,6 +158,8 @@ def part_content(  # noqa: C901, PLR0911 — one arm per part §4's table names,
         case RoundMessagePart():
             round_ = _round(_processing(episodes.get(part.episode)), part.round)
             return None if round_ is None or not round_.text else round_.text
+        case MessageCallPart():
+            return _sent(_processing(episodes.get(part.episode)), part.round, part.call_id)
         case EvidenceItemPart():
             return _evidence(_processing(episodes.get(part.episode)), part.digest, part.item)
         case ConfirmationPart():
@@ -211,6 +214,20 @@ def _round(processing: EpisodeProcessingRecord | None, round_id: str) -> Plannin
     if processing is None:
         return None
     return next((one for one in processing.rounds if one.id == round_id), None)
+
+
+def _sent(processing: EpisodeProcessingRecord | None, round_id: str, call_id: str) -> str | None:
+    """The words one message call sent, as its entry holds them (ADR-0356 §13:2).
+
+    ``None`` where the episode holds no entry for the call, or the entry holds no
+    delivery: a message call refused, or come back before anything was sent (§8:4).
+    """
+    if processing is None:
+        return None
+    for entry in processing.call_records:
+        if entry.round == round_id and entry.call_id == call_id:
+            return None if entry.delivered is None else entry.delivered.words
+    return None
 
 
 def _evidence(processing: EpisodeProcessingRecord | None, digest: int, item: int) -> str | None:

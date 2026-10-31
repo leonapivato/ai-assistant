@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     MemoryOperationKind,
     MemoryStatus,
     MemorySupport,
+    MessageCallPart,
     OpenQuestion,
     OpenQuestionKind,
     PlacedRelation,
@@ -149,8 +150,9 @@ def created_fault(memory: Memory) -> str | None:
 def _marked_fault(memory: Memory) -> str | None:
     """§8:3's first refusal, §8:4 and §6:1 on a memory a write creates."""
     marks = set(memory.marks)
+    # ADR-0356 §13:3: a message call's message is read as the same kind of part.
     if MemoryMark.ASSISTANT_STATEMENT in marks and not any(
-        isinstance(one.points_at, RoundMessagePart) for one in memory.supports
+        isinstance(one.points_at, RoundMessagePart | MessageCallPart) for one in memory.supports
     ):
         return (
             "a memory marked assistant_statement carries a support pointing at the round's "

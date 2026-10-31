@@ -375,7 +375,10 @@ async def test_a_digest_the_episode_and_the_working_set_both_hold_is_one_ground(
                 ),
             ),
         ),
-        RoundResponse(calls=(_book(),), text="it opens at nine"),
+        # Its own call id: a work's exchange holds each once (ADR-0356 §13).
+        RoundResponse(
+            calls=(_book().model_copy(update={"call_id": "c2"}),), text="it opens at nine"
+        ),
         RoundResponse(text="It opens at nine."),
     )
     sink = FakeDiagnosticSink()

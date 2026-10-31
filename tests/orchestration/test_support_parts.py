@@ -16,8 +16,11 @@ from ai_assistant.core.types import (
     ActivationDigest,
     ActivationEffect,
     AskedCall,
+    CallOutcomeKind,
     CapabilityResult,
+    ChannelIdentity,
     ConfirmationPart,
+    DeliveryStatus,
     DigestOutcome,
     EpisodicMemory,
     EvidenceItem,
@@ -25,12 +28,15 @@ from ai_assistant.core.types import (
     InputPart,
     LegacyPart,
     MemorySource,
+    MessageCallPart,
     ObserverInferencePart,
     PinPart,
     PlanningRound,
     ProposedCall,
     Provenance,
     QuestionPart,
+    RecordedCall,
+    RecordedDelivery,
     RecordedInputMessage,
     RememberCallPart,
     RoundMessagePart,
@@ -51,7 +57,12 @@ from ai_assistant.orchestration.support_parts import (
     part_content,
     remember_activations,
 )
-from ai_assistant.testing.memories import confirmed_support, memory, remembered_support
+from ai_assistant.testing.memories import (
+    confirmed_support,
+    memory,
+    message_support,
+    remembered_support,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -250,6 +261,48 @@ def test_each_position_of_an_indexed_collection_reads_as_its_own_part() -> None:
 def test_a_round_that_wrote_no_message_has_no_message_to_show() -> None:
     record = _held(episode("a"), rounds=(_round("r-1", ""),))
     assert _content(RoundMessagePart(episode=record.id, round="r-1"), {record.id: record}) is None
+
+
+def _text_entry(call_id: str, delivered: RecordedDelivery | None) -> RecordedCall:
+    return RecordedCall(
+        round="r-1",
+        call_id=call_id,
+        capability="text",
+        effect=True,
+        outcome=CallOutcomeKind.DONE if delivered is not None else CallOutcomeKind.REFUSED,
+        reason=None if delivered is not None else "names a place you were never shown",
+        delivered=delivered,
+        recorded_at=AT,
+    )
+
+
+def test_a_message_call_reads_as_the_words_it_sent_and_as_nothing_where_it_sent_none() -> None:
+    """ADR-0356 §13:2, §14:9: a support at a ``MessageCallPart`` resolves to the words its
+    entry holds as delivered, and to nothing for a call that sent none."""
+    sent = RecordedDelivery(
+        words="It's booked for Thursday.",
+        went=ChannelIdentity(channel_type="conversation", instance_id="chat"),
+        status=DeliveryStatus.SENT,
+    )
+    calls = (
+        ProposedCall(call_id="c1", name="text", arguments={"words": "Booked."}),
+        ProposedCall(call_id="c2", name="text", arguments={"words": "Elsewhere.", "via": "L9"}),
+    )
+    record = _held(
+        episode("a"),
+        rounds=(_round("r-1", calls=calls),),
+        call_records=(_text_entry("c1", sent), _text_entry("c2", None)),
+    )
+    held = {record.id: record}
+
+    def part(call_id: str) -> MessageCallPart:
+        return MessageCallPart(episode=record.id, round="r-1", call_id=call_id)
+
+    assert _content(part("c1"), held) == "It's booked for Thursday."
+    assert _content(part("c2"), held) is None
+    assert _content(part("c9"), held) is None
+    assert _content(part("c1"), {}) is None
+    assert episodes_to_read([memory("m", "said", message_support(record.id))]) == (record.id,)
 
 
 def test_an_episode_recorded_without_a_processing_record_holds_only_its_input() -> None:

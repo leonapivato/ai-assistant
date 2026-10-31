@@ -120,7 +120,7 @@ def test_a_record_written_before_the_field_validates_unchanged() -> None:
     """§6:5: nobody by default, and ``schema_version`` does not move."""
     for record in (_open(), _frozen(_open())):
         assert record.taken_over_by is None
-        assert record.schema_version == 11
+        assert record.schema_version == 12
         assert "taken_over_by" not in record.model_dump(exclude_defaults=True)
         stored = record.model_dump(mode="json")
         del stored["taken_over_by"]

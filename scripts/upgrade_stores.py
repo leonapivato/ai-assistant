@@ -950,6 +950,24 @@ def _memory_understood_carry(records: Records) -> Records:
     return carried
 
 
+def _memory_called_carry(records: Records) -> Records:
+    """What a memory store read back before ADR-0356 reads back after it (§13:5).
+
+    Each episode's processing record reads back at ``schema_version`` 12, every stored
+    field whole; what it gains, ``call_records``, empty on every record the base wrote,
+    the comparison admits as added. Nothing else moves: no memory, the walk and the
+    nearest hits.
+    """
+    carried: Records = {}
+    for key, value in records.items():
+        processing = value.get("processing_record") if isinstance(value, dict) else None
+        if not isinstance(value, dict) or not isinstance(processing, dict):
+            carried[key] = value
+            continue
+        carried[key] = value | {"processing_record": processing | {"schema_version": 12}}
+    return carried
+
+
 async def _read_memory(directory: Path) -> Records:
     """Every record, the walk's resumption, and the nearest record to each one's content.
 
@@ -2049,13 +2067,14 @@ STORES: Final[tuple[Store, ...]] = (
         ("memory.db",),
         _write_memory,
         _read_memory,
-        shape=6,
+        shape=7,
         carries={
             1: _memory_record_carry,
             2: _memory_placed_carry,
             3: _memory_continuing_carry,
             4: _memory_parties_carry,
             5: _memory_understood_carry,
+            6: _memory_called_carry,
         },
     ),
     Store(

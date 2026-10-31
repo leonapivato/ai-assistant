@@ -34,7 +34,9 @@ from ai_assistant.core.types import (
     PeerNotes,
     PeerView,
     ProcessingStatus,
+    ProjectedCall,
     ProjectedEvidence,
+    ProjectedJoin,
     ProjectedRound,
     ProjectedText,
     RecordedChannelTrigger,
@@ -302,6 +304,16 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
     own evidence by the planning stage, never through this (ADR-0312 §4:1, §4:3).
     Each item is cut to ``excerpt_chars``.
 
+    **An episode's calls and the inputs it took in** (ADR-0356 §13) render where
+    ``owner_records`` says a record placed for the owner alone may be shown, as episode
+    notes are (§8:8, §9:5), and are empty otherwise: each call's entry with its round's
+    position and the arguments its round recorded, cut to ``excerpt_chars``, and each
+    joined input attributed and withheld as the input is, with the position of the
+    round before which it was taken. Each projected round carries its position among
+    every round the episode recorded, so a call-only round the projection omits still
+    keeps the others in order. A round recorded before ADR-0356 projects its ``text`` as
+    its message, as every round does here.
+
     **An episode's pending candidates** (ADR-0329 §6:9) are the facts the caller
     hands in ``candidates``: which of the episode's ``remember`` calls are candidates
     still pending is read from the plan store, which this module does not reach, so
@@ -411,7 +423,67 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
         candidates=tuple(
             ProjectedText(text=fact[:excerpt_chars], full_chars=len(fact)) for fact in candidates
         ),
+        calls=_projected_calls(processing, excerpt_chars) if owner_records else (),
+        joined=(
+            _projected_joins(processing, excerpt_chars, admit_outside_input=admit_outside_input)
+            if owner_records
+            else ()
+        ),
     )
+
+
+def _projected_calls(processing: EpisodeProcessingRecord, bound: int) -> tuple[ProjectedCall, ...]:
+    """Each call's entry, in the order appended, under its round's position (ADR-0356 §13)."""
+    positions = {one.id: index for index, one in enumerate(processing.rounds)}
+    proposed = {(one.id, call.call_id): call for one in processing.rounds for call in one.calls}
+    projected: list[ProjectedCall] = []
+    for entry in processing.call_records:
+        call = proposed[(entry.round, entry.call_id)]  # the record's validator holds it
+        arguments = json.dumps(
+            call.model_dump(mode="json")["arguments"], ensure_ascii=False, sort_keys=True
+        )
+        projected.append(
+            ProjectedCall(
+                position=positions[entry.round],
+                capability=entry.capability,
+                arguments=ProjectedText(text=arguments[:bound], full_chars=len(arguments)),
+                effect=entry.effect,
+                outcome=entry.outcome,
+                reason=entry.reason,
+                delivered=entry.delivered,
+                marked=entry.marked,
+            )
+        )
+    return tuple(projected)
+
+
+def _projected_joins(
+    processing: EpisodeProcessingRecord, bound: int, *, admit_outside_input: bool
+) -> tuple[ProjectedJoin, ...]:
+    """Each input the episode took in, attributed and withheld as its input is (§13)."""
+    projected: list[ProjectedJoin] = []
+    for one in processing.joined:
+        held = [message.party for message in one.messages]
+        parties = (
+            None
+            if any(party is None for party in held)
+            else canonical_parties([party for party in held if party is not None])
+        )
+        shown = parties_are_persons_own(parties, relayed=one.relayed) or (
+            parties_are_outside(parties, relayed=one.relayed) and admit_outside_input
+        )
+        projected.append(
+            ProjectedJoin(
+                position=sum(
+                    1 for planned in processing.rounds if planned.recorded_at <= one.joined_at
+                ),
+                channel=one.channel,
+                parties=parties,
+                relayed=one.relayed,
+                input=_joined_text(one, bound) if shown else None,
+            )
+        )
+    return tuple(projected)
 
 
 def _peer_view(
@@ -532,7 +604,7 @@ def _projected_rounds(
     carried only with the message (ADR-0322 §4:3).
     """
     projected: list[ProjectedRound] = []
-    for one in rounds:
+    for position, one in enumerate(rounds):
         message = _projected(one.text, bound) if _shows_message(one) else None
         notes = _projected(one.notes, bound) if owner_records else None
         if message is None and notes is None:
@@ -543,6 +615,7 @@ def _projected_rounds(
                 notes=notes,
                 notes_marked=notes is not None and one.notes_marked,
                 asked=tuple(asked.part for asked in one.asked) if _is_marked(one) else (),
+                position=position,
             )
         )
     return tuple(projected)
@@ -631,6 +704,8 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
     - entries appended at the end of ``joined``, every earlier entry unchanged, and
       unbounded: each input that joined, in the order it joined (ADR-0332 §3:16, as its
       §10 adds to ADR-0286 §3:3);
+    - entries appended at the end of ``call_records``, every earlier entry unchanged,
+      and unbounded: each call's entry, once its outcome is known (ADR-0356 §8:6, §13);
     - in the one revision that freezes it, ``status``, ``reason``, ``ended_at`` and
       ``understanding_omitted``, with the end entry the record's own validators then
       require last, and ``taken_over_by`` (ADR-0352 §6:6, as it adds to ADR-0286 §3:3),
@@ -682,6 +757,7 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
         or after.labels[: len(before.labels)] != before.labels
         or after.digests[: len(before.digests)] != before.digests
         or after.joined[: len(before.joined)] != before.joined
+        or after.call_records[: len(before.call_records)] != before.call_records
     ):
         return False
     settled = before.model_copy(
@@ -702,6 +778,7 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
             "labels": after.labels,
             "digests": after.digests,
             "joined": after.joined,
+            "call_records": after.call_records,
             "status": after.status,
             "reason": after.reason,
             "ended_at": after.ended_at,

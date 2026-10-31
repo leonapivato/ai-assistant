@@ -496,11 +496,14 @@ def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> Non
 
     # Carried on through ADR-0345 §13's shape, ADR-0349 §10:6's, ADR-0351 §9's and
     # ADR-0353 §9:6's, which the head's upgrades reach next.
-    carried = memory.carries[5](
-        memory.carries[4](memory.carries[3](memory.carries[2](memory.carries[1](base))))
+    # And ADR-0356 §13:5's, which carries every processing record to version 12.
+    carried = memory.carries[6](
+        memory.carries[5](
+            memory.carries[4](memory.carries[3](memory.carries[2](memory.carries[1](base))))
+        )
     )
 
-    assert memory.shape == 6
+    assert memory.shape == 7
     assert set(carried) == set(head)
     assert {
         key: first_difference(value, head[key]) for key, value in carried.items()
@@ -547,7 +550,10 @@ def test_the_memory_stores_carry_from_shape_2_is_what_its_upgrade_does(tmp_path:
 
     # Carried on through ADR-0349 §10:6's shape, ADR-0351 §9's and ADR-0353 §9:6's, which
     # the head's upgrades reach next.
-    carried = memory.carries[5](memory.carries[4](memory.carries[3](memory.carries[2](base))))
+    # And ADR-0356 §13:5's, which carries every processing record to version 12.
+    carried = memory.carries[6](
+        memory.carries[5](memory.carries[4](memory.carries[3](memory.carries[2](base))))
+    )
 
     assert set(carried) == set(head)
     assert {
@@ -597,7 +603,8 @@ def test_the_memory_stores_carry_from_shape_3_is_what_its_upgrade_does(tmp_path:
 
     # Carried on through ADR-0351 §9's shape and ADR-0353 §9:6's, which the head's
     # upgrades reach next.
-    carried = memory.carries[5](memory.carries[4](memory.carries[3](base)))
+    # And ADR-0356 §13:5's, which carries every processing record to version 12.
+    carried = memory.carries[6](memory.carries[5](memory.carries[4](memory.carries[3](base))))
 
     assert set(carried) == set(head)
     assert {
@@ -658,7 +665,8 @@ def test_the_memory_stores_carry_from_shape_4_is_what_its_upgrade_does(tmp_path:
     (memory,) = [one for one in STORES if one.name == "memory"]
 
     # Carried on through ADR-0353 §9:6's shape, which the head's upgrade reaches next.
-    carried = memory.carries[5](memory.carries[4](base))
+    # And ADR-0356 §13:5's, which carries every processing record to version 12.
+    carried = memory.carries[6](memory.carries[5](memory.carries[4](base)))
 
     assert set(carried) == set(head)
     assert {
@@ -716,7 +724,8 @@ def test_the_memory_stores_carry_from_shape_5_is_what_its_upgrade_does(tmp_path:
         store.close()
     (memory,) = [one for one in STORES if one.name == "memory"]
 
-    carried = memory.carries[5](base)
+    # And ADR-0356 §13:5's, which carries every processing record to version 12.
+    carried = memory.carries[6](memory.carries[5](base))
 
     assert set(carried) == set(head)
     assert {
@@ -737,6 +746,62 @@ def test_the_memory_stores_carry_from_shape_5_is_what_its_upgrade_does(tmp_path:
     assert isinstance(referents, list)
     assert len(referents) == 4
     assert first_difference(base["record/mem-episode-understood"], record) is not None
+
+
+@pytest.mark.integration
+def test_the_memory_stores_carry_from_shape_6_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """ADR-0356 §13:5: the carry from shape 6 says what the head's upgrade writes.
+
+    Taken over the file the release before ADR-0356 wrote (``tests/memory/legacy``):
+    every record that release read back, carried to shape 7, is read back by this build
+    after opening the file, each processing record at version 12, an open episode's
+    included; what the record gains, ``call_records``, empty on every one, the
+    comparison admits as added.
+    """
+    import shutil  # noqa: PLC0415
+
+    from ai_assistant.memory import SqliteMemoryStore  # noqa: PLC0415
+    from ai_assistant.models import HashingEmbedder  # noqa: PLC0415
+    from ai_assistant.testing import FakeTraceSink  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "memory" / "legacy"
+    path = tmp_path / "memory.db"
+    shutil.copyfile(legacy / "memory-before-adr-0356.db", path)
+    with sqlite3.connect(path) as conn:
+        base: Records = {
+            f"record/{record_id}": json.loads(data) | {"revision": revision}
+            for record_id, data, revision in conn.execute("SELECT id, data, revision FROM records")
+        }
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=path,
+        embedder=HashingEmbedder(dimensions=8),
+        now=lambda: datetime(2026, 10, 30, 10, 0, tzinfo=UTC),
+    )
+    try:
+        head: Records = {
+            f"record/{record.id}": upgrade_stores.to_json(record)
+            for record in asyncio.run(store.export())
+        }
+    finally:
+        store.close()
+    (memory,) = [one for one in STORES if one.name == "memory"]
+
+    carried = memory.carries[6](base)
+
+    assert set(carried) == set(head)
+    assert {
+        key: first_difference(value, head[key]) for key, value in carried.items()
+    } == dict.fromkeys(carried)
+    # And it is the carry that holds the head to the version: the base read version 11,
+    # which the head reading back would differ from without it.
+    for key in ("record/mem-episode", "record/mem-episode-open"):
+        record = head[key]
+        assert isinstance(record, dict)
+        processing = record["processing_record"]
+        assert isinstance(processing, dict)
+        assert (processing["schema_version"], processing["call_records"]) == (12, [])
+        assert first_difference(base[key], record) is not None
 
 
 @pytest.mark.integration

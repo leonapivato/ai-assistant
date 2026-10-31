@@ -103,7 +103,7 @@ def test_a_record_written_before_the_field_validates_unchanged() -> None:
     """§4:1: no position by default, and ``schema_version`` does not move."""
     record = _open()
     assert record.stories_position is None
-    assert record.schema_version == 11
+    assert record.schema_version == 12
     assert "stories_position" not in record.model_dump(exclude_defaults=True)
     stored = record.model_dump(mode="json")
     del stored["stories_position"]

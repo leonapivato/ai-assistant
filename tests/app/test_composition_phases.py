@@ -28,7 +28,12 @@ from ai_assistant.app.composition import (
     RECALL_SECOND_RUN_CAP,
 )
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.types import RECALLED_ITEMS_MAX, ProposedCall, ToolDefinition
+from ai_assistant.core.types import (
+    RECALLED_ITEMS_MAX,
+    LabelKind,
+    ProposedCall,
+    ToolDefinition,
+)
 from ai_assistant.orchestration.acting import _Beside
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
@@ -36,7 +41,7 @@ from ai_assistant.orchestration.lookups import (
     LookUps,
 )
 from ai_assistant.orchestration.matter_calls import MATTER_CAPABILITIES, MATTER_LABEL_ARGUMENTS
-from ai_assistant.orchestration.phase_path import PhasePath
+from ai_assistant.orchestration.phase_path import TEXT_CAPABILITY, VIA_ARGUMENT, PhasePath
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY, RELIANCE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.remembering import CANDIDATE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.story_calls import (
@@ -57,10 +62,24 @@ CONNECTION: Final = "conn-0001"
 SEARCH_ORIGIN: Final = "https://search.example.invalid"
 
 
+#: What every round of every activation is offered beside the tools a deployment
+#: advertises (ADR-0356 §4:3): ``text``, and the Task Scheduler's calls and the calls on
+#: running work, which the composition root attaches on every deployment.
+_EVERY_ROUND: Final = frozenset(
+    {TEXT_CAPABILITY, *TASK_SCHEDULER_CAPABILITIES, *MATTER_CAPABILITIES}
+)
+
+
 async def _offered(phases: PhasePath) -> tuple[ToolDefinition, ...]:
-    """What planning is offered: every capability the phases' tools advertise, bar one."""
+    """What planning is offered from the tools advertised: every capability, bar one.
+
+    Every round is offered :data:`_EVERY_ROUND` too (ADR-0356 §4:3), which is held here
+    and left out of what each case compares.
+    """
     assert phases._capabilities is None, "no fixed list: every one advertised"
-    return await phases._offered()
+    offered = await phases._offered()
+    assert {str(one.capability) for one in offered} >= _EVERY_ROUND
+    return tuple(one for one in offered if str(one.capability) not in _EVERY_ROUND)
 
 
 def test_the_opt_in_is_gone() -> None:
@@ -119,6 +138,8 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
             **RELIANCE_LABEL_ARGUMENTS,
             **TASK_SCHEDULER_LABEL_ARGUMENTS,
             **MATTER_LABEL_ARGUMENTS,
+            # ADR-0356 §7:7: a ``text`` call names its place by the place list's L label.
+            TEXT_CAPABILITY: {VIA_ARGUMENT: LabelKind.PLACE},
         }
         assert phases._task_calls is not None
         assert phases._matters is engine._matters

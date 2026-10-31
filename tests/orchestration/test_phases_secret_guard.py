@@ -378,7 +378,16 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     a ``PlanningExchange`` (ADR-0356 §5): planning's rendered instruction and briefing,
     the inputs judged here rendered as text, and each earlier ``ExchangeStep``, its
     response as above and its ``RoundReport`` of ``CallResult``s, code's text of what
-    came of a call, and the news, code's text: text, identifiers, no carrier.
+    came of a call, and the news, code's text: text, identifiers, no carrier. The
+    phases hold it as a ``PlanningWork`` (ADR-0356 §5, §6:4): that exchange, the tools
+    offered and the last response, both judged here, a round's id and number, and a
+    ``NewsShown`` of what the exchange has shown: identifiers, a count, a version, the
+    place window's items judged here, and each earlier work's view as code's text. Each
+    call's entry is a ``RecordedCall`` (ADR-0356 §8): identifiers, a capability's name, a
+    closed outcome, code's reason, a clock, flags, and, for a message call, a
+    ``RecordedDelivery``: the words the assistant sent, the ``ChannelIdentity`` they went
+    to and a closed status, prose the model wrote and the place it went, no carrier. A
+    ``MessageCallPart`` (§13) is an episode's address, a round's id and a call's id.
     ``ProposedActivationUnderstanding`` with ``UnclearPoint`` (ADR-0353 §9:2, §9:3), and
     digesting's ``DigestReply`` and ``_ProposedItem``, are the parse of a reply: prose the
     model wrote, labels it was shown and a flag; the record keeps the same
@@ -580,6 +589,13 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PlanningExchange",
         "RoundContinuation",
         "RoundReport",
+        # ADR-0356 §5, §8, §13: the work held, each call's entry and a message call's
+        # part, judged in the docstring above.
+        "MessageCallPart",
+        "NewsShown",
+        "PlanningWork",
+        "RecordedCall",
+        "RecordedDelivery",
         # ADR-0349 §5:6, §6:7-§6:10, §7:19: in-progress entries, an offer and another
         # activation's own work, judged in the docstring above.
         "InProgressEntry",

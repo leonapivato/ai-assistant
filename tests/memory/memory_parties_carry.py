@@ -12,7 +12,9 @@ upgrade test holds what they are.
 The chain runs on past it to ADR-0353 §9:6's, which rewrites each understanding version
 holding a retired field: :func:`parties_carried` carries that too, stated here on its own
 in the same way, so every earlier upgrade's test reads what the whole chain leaves.
-ADR-0353's own upgrade test holds that rewrite field by field.
+ADR-0353's own upgrade test holds that rewrite field by field. And it ends in ADR-0356
+§13:5's, which carries every processing record to version 12: :func:`parties_carried`
+carries that too, and :func:`calls_carried` says which rows it rewrites.
 """
 
 from __future__ import annotations
@@ -87,4 +89,29 @@ def parties_carried(stored: dict[str, Any]) -> dict[str, Any]:
         for name in _RETIRED:
             version.pop(name, None)
         version["meaning_referents"] = held
+    # ADR-0356 §13:5: the chain ends in carrying every processing record to version 12.
+    if isinstance(processing, dict) and processing.get("schema_version") == _BEFORE_CALLS:
+        processing["schema_version"] = _AFTER_CALLS
     return result
+
+
+#: The processing record's version before ADR-0356 §13:5's upgrade, and after it.
+_BEFORE_CALLS = 11
+_AFTER_CALLS = 12
+
+
+def calls_carried(data: str) -> bool:
+    """Whether ADR-0356 §13:5's upgrade, at the chain's end, rewrites a stored row.
+
+    It carries every processing record at version 11 to 12, so it rewrites every episode
+    that has one.
+
+    Args:
+        data: The row's stored blob.
+
+    Returns:
+        Whether its processing record is at version 11.
+    """
+    stored = json.loads(data)
+    processing = stored.get("processing_record") if isinstance(stored, dict) else None
+    return isinstance(processing, dict) and processing.get("schema_version") == _BEFORE_CALLS

@@ -63,7 +63,8 @@ place (ADR-0349 §7:21).
 
 **The waits on an older activation** (ADR-0349 §7:25-§7:28). Planning holds them: while
 its offer is open it plans no round; where it then waits on work still running, its
-first round is a waiting round, offered only the stop call, and its next is planned once
+first round is a waiting round, on which every call but the stop and a message comes back
+refused (ADR-0356 §4:5), and its next is planned once
 each activation it waits on has ended, the time waited moving its deadline later. Every
 round is shown the finished work of what it absorbed, took input from and waited on,
 read fresh (§7:10, §7:27), and an older's planning the offers open to it (§7:19).
@@ -85,6 +86,25 @@ the message (ADR-0293 §8:3): a stage's failure classifies as it is, and an acti
 that returned on the round limit, the loop guard or an undelivered last message is
 ``failed / processing_failed`` (ADR-0317 §3:5). The activation's messages, joined by a
 blank line, are the episode's ``outcome`` at the freeze (ADR-0307 §10).
+
+**A work's exchange, and each call's entry** (ADR-0356 §4:3, §5, §8). Every round of
+every activation is offered one tool set, in one fixed order (:meth:`PhasePath._offered`):
+the registry's capabilities, the person model's, the Task Scheduler's and the calls on
+running work where each is attached, and ``text`` last. A call whose condition for
+running does not hold comes back refused before authorizing, saying why
+(:meth:`PhasePath._not_here`). The working set holds the work's exchange,
+:class:`~ai_assistant.orchestration.planning.PlanningWork`, in memory alone, and hands it
+to each round. Each call's entry is appended to the episode once what came of it is
+known, before the next round's request, and every call still without one gets one at
+the freeze, with no outcome (:meth:`PhaseWorking.call_entries`).
+
+**A** ``text`` **call** (ADR-0356 §7:7-§7:8). It is taken out of the round's calls before
+authorizing, which checks it by its place alone as the round's message: the place its
+``via`` label names, or the input's where it names none. Allowed, it is claimed and
+written as the round's message is, under an effect record naming its round and finished
+with the position the medium recorded, and its entry holds the words the place took,
+where they went and how. ``text``'s other arguments, its wording step and its result's
+shape are ADR-0357's lane T1's.
 
 **What wrote each message** (ADR-0303 §7:1, ADR-0306 §5:3). The chat's reader links an
 assistant message in the window to the activation that wrote it, by the effect record
@@ -207,9 +227,9 @@ reaches nothing (§6:7).
 engine attaches the person block's assembly with :meth:`PhasePath.attach_person_model`
 exactly where it is handed one; unattached, as on every hub whose switch is off, nothing
 below is reached. Attached, ``set_profile``, ``pin`` and ``unpin`` are advertised beside
-the own records' other declarations and offered to each round of an activation given a
-person block; a ``pin``'s and an ``unpin``'s memory is named by ``M`` label; each runs
-through acting's own-records seam, by
+the own records' other declarations and offered to every round, refused in an
+activation given no person block (ADR-0356 §4:5); a ``pin``'s and an ``unpin``'s memory
+is named by ``M`` label; each runs through acting's own-records seam, by
 :class:`~ai_assistant.orchestration.person_calls.PersonModelCalls`. Before each round,
 the memory each such call that needs the user names is read from the memory store, so
 its question shows the memory's wording in place of its label (§8:6); one whose memory
@@ -258,10 +278,13 @@ from ai_assistant.core.types import (
     CapabilityResult,
     ControllerRule,
     ControllerStage,
+    CostBasis,
     DeletedMessage,
+    DeliveryStatus,
     DigestOutcome,
     EpisodicMemory,
     ForecastRefusal,
+    Idempotency,
     LabelKind,
     Memory,
     MemoryKind,
@@ -273,11 +296,17 @@ from ai_assistant.core.types import (
     ProposedCall,
     QuestionPart,
     RecallOutcome,
+    RecordedCall,
+    RecordedDelivery,
+    Reversibility,
+    RiskLevel,
     SendOutcome,
     StageOutcome,
     StoryMember,
     StoryMemberKind,
     StoryRelation,
+    ToolCost,
+    ToolDefinition,
     ToolFailure,
     ToolFailureKind,
     ToolOutcome,
@@ -299,6 +328,7 @@ from ai_assistant.orchestration.authorizer import (
     AllowedCall,
     AuthorizingStage,
     CallToAuthorize,
+    MessageVerdict,
     RoundAuthorization,
     RoundMessage,
     RoundToAuthorize,
@@ -351,6 +381,7 @@ from ai_assistant.orchestration.person_calls import (
     worded_argument,
 )
 from ai_assistant.orchestration.planning import (
+    WAITING_ROUND,
     ApprovedAction,
     CallOutcome,
     CallOutcomeKind,
@@ -366,6 +397,7 @@ from ai_assistant.orchestration.planning import (
     PlanningStage,
     PlanningStories,
     PlanningStory,
+    PlanningWork,
     RecordedCandidate,
     RefusedCall,
     RunningShown,
@@ -438,7 +470,6 @@ if TYPE_CHECKING:
         StoryStanding,
         StorySummaryState,
         ToolCall,
-        ToolDefinition,
         TranscriptMessage,
     )
     from ai_assistant.orchestration.activation_state import ActivationState
@@ -462,6 +493,10 @@ if TYPE_CHECKING:
 __all__ = [
     "CHAT_DESCRIPTION",
     "EVENT_DESCRIPTION",
+    "TEXT_CALL",
+    "TEXT_CAPABILITY",
+    "VIA_ARGUMENT",
+    "WORDS_ARGUMENT",
     "Delivery",
     "Fitted",
     "MessageWriter",
@@ -531,6 +566,89 @@ _UNKNOWN_SEARCHES: Final = frozenset({"deadline_expired", "transport_failed"})
 #: since planning's input carries ``now`` (#2942). ``tools`` declares it (ADR-0048 §1),
 #: and ``orchestration`` names it by its capability.
 _NOT_OFFERED: Final = frozenset({"report_current_time"})
+
+#: ADR-0356 §7:7-§7:8: the ``text`` call, a round's message in the form of a call, and
+#: its two arguments as this lane declares them: what to say, and where it goes by the
+#: place list's ``L`` label. Who it is for, the exact lines, what it asks about, the
+#: wording step and its result's shape are ADR-0357's lane T1's (§2:2, §3, §4, §8).
+TEXT_CAPABILITY: Final = "text"
+WORDS_ARGUMENT: Final = "words"
+VIA_ARGUMENT: Final = "via"
+
+TEXT_CALL: Final = ToolDefinition(
+    id=TEXT_CAPABILITY,
+    capability=TEXT_CAPABILITY,
+    description=(
+        "Send a short written message: the words, into the place your input came from, "
+        "or into the place on your place list its L label names."
+    ),
+    risk_level=RiskLevel.LOW,
+    reversibility=Reversibility.IRREVERSIBLE,
+    side_effecting=True,
+    reads=(),
+    writes=(),
+    discloses=(),
+    cost=ToolCost(basis=CostBasis.FREE),
+    idempotency=Idempotency.NONE,
+    effect=CapabilityEffect.WORLD,
+    leaves_hub=False,
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+    outcome_can_be_unknown=True,
+    safe_to_repeat=True,
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            WORDS_ARGUMENT: {"type": "string", "minLength": 1, "description": "What to say."},
+            VIA_ARGUMENT: {
+                "type": "string",
+                "minLength": 1,
+                "description": "Where it goes: a place on your place list, by its L label.",
+            },
+        },
+        "required": [WORDS_ARGUMENT],
+        "additionalProperties": False,
+    },
+)
+"""``text``'s declaration, as ADR-0356 §7:7-§7:9 needs it, offered on every round (§4:3).
+
+It is never selected, ruled on or run as a call: the phases take each ``text`` call out
+of the round's calls before authorizing, which checks it by its place alone as the
+round's message (§7:7), and write it into its place under an effect record as a message
+is written (§7:8). So nothing reads its egress fields, which declare none: where a
+message may go is the message place check's, and its place's writer holds the channel's
+rules (ADR-0306 §4:7, ADR-0292 §8:3). ``safe_to_repeat`` is set so the offer adds no
+*deliberate repeat* mark: a message's record is a message's, not a call's (ADR-0306 §5),
+and an accidental repeat's refusal is ADR-0357's (§10:1).
+"""
+
+#: Why a ``text`` call that gave nothing to say runs nothing (ADR-0356 §4:6).
+_NO_WORDS: Final = f"{WORDS_ARGUMENT!r} is what the message says, and it said nothing"
+
+#: Why a call whose condition for running does not hold in its activation runs nothing
+#: (ADR-0356 §4:4-§4:6), each the condition that decided whether it was offered before.
+_NO_PERSON: Final = "this activation is no person's, so it has no profile or pins to change"
+_NO_SPAWN: Final = "only an activation that may set a task runs the Task Scheduler's calls"
+_NO_RUNNING_VIEW: Final = (
+    "running work is shown only to an activation whose author its place establishes, "
+    "and this one's it does not"
+)
+_NO_AUTHORITY: Final = "a stop runs only on an input that carries the user's authority"
+_NO_OFFER: Final = "no offer is open to this work, so there is none to answer"
+
+#: Why a ``text`` call came back unknown: whether the place took it is not known.
+_UNKNOWN_WRITE: Final = "whether the place took it is not known"
+
+#: What a write's outcome tells of how a message went (ADR-0357 §3:2-§3:3).
+_DELIVERY_STATUS: Final = {
+    ToolOutcome.SUCCEEDED: DeliveryStatus.SENT,
+    ToolOutcome.FAILED: DeliveryStatus.FAILED,
+    ToolOutcome.INDETERMINATE: DeliveryStatus.UNKNOWN,
+}
+_WRITE_OUTCOME: Final = {
+    ToolOutcome.SUCCEEDED: CallOutcomeKind.DONE,
+    ToolOutcome.FAILED: CallOutcomeKind.NOT_DONE,
+    ToolOutcome.INDETERMINATE: CallOutcomeKind.UNKNOWN,
+}
 
 #: The activation whose round's calls are running, by what it holds of what it was given:
 #: a search's records are handed to it as the search returns them (ADR-0309 §5:10).
@@ -1528,6 +1646,10 @@ class _Round:
         not_taken: Whether its acts were held back because an answer of it did not come
             to what it asked (ADR-0352 §4:2): only its answers and pure reads ran, and
             its message was never written.
+        sent: What came of each of its ``text`` calls once it was written, or held
+            back unwritten, by call id (ADR-0356 §7:8).
+        effects: Whether each capability it was offered declared an effect, by name,
+            as its calls' entries record it (ADR-0356 §8:3).
     """
 
     planned: PlannedRound
@@ -1540,6 +1662,42 @@ class _Round:
     offers_shown: frozenset[str] = frozenset()
     waiting: bool = False
     not_taken: bool = False
+    sent: dict[str, _Sent] = field(default_factory=dict)
+    effects: Mapping[str, bool] = field(default_factory=dict)
+
+    @property
+    def has_messages(self) -> bool:
+        """Whether it has a message to write: its own, or a ``text`` call."""
+        return self.planned.message is not None or any(
+            one.call.name == TEXT_CAPABILITY for one in self.planned.calls
+        )
+
+    @property
+    def delivered(self) -> bool:
+        """Whether every message it had to write was recorded in its place."""
+        texts = [one.call.call_id for one in self.planned.calls if one.call.name == TEXT_CAPABILITY]
+        sent = all(
+            (one := self.sent.get(call_id)) is not None and one.kind is CallOutcomeKind.DONE
+            for call_id in texts
+        )
+        return sent and (self.planned.message is None or self.written)
+
+
+@dataclass(frozen=True, slots=True)
+class _Sent:
+    """What came of one ``text`` call (ADR-0356 §7:8, §8:4).
+
+    Attributes:
+        kind: Done, not done or unknown, as its write came back; not done where it was
+            held back unwritten.
+        reason: Why it was not done, or why it is unknown.
+        delivered: What it sent, where and how, where it was written or its write was
+            attempted; ``None`` where it was held back before anything was sent.
+    """
+
+    kind: CallOutcomeKind
+    reason: str | None = None
+    delivered: RecordedDelivery | None = None
 
 
 @dataclass
@@ -1582,7 +1740,7 @@ class PhaseWorking:
     never saved), and the messages it wrote.
     """
 
-    def __init__(  # noqa: PLR0913 — the activation, its place, its trigger, its audience, its round limit, its recorded labels and its input's authority
+    def __init__(  # noqa: PLR0913, PLR0915 — the activation, its place, its trigger, its audience, its round limit, its recorded labels and its input's authority
         self,
         *,
         activation_id: str,
@@ -1722,6 +1880,11 @@ class PhaseWorking:
         # came back with, by its result's id.
         self.shown_running: set[str] = set()
         self.peers: dict[str, PeerShown] = {}
+        # ADR-0356 §5: the work's exchange as its last round left it, held in memory for
+        # the work's life (§6:4) and handed to the next round; and the calls whose
+        # entries the episode already records, by their round and id (§8:6).
+        self.work: PlanningWork | None = None
+        self._entered: set[tuple[str, str]] = set()
 
     # --- what the rules read (PhaseFacts) ---
 
@@ -1777,11 +1940,15 @@ class PhaseWorking:
 
     @property
     def latest_allows(self) -> bool:
-        """The latest round's authorizing decision allows a call or its message."""
+        """The latest round's authorizing decision allows a call or a message."""
         decided = self._rounds[-1].authorization if self._rounds else None
         if decided is None:
             return False
-        return bool(decided.allowed) or (decided.message is not None and decided.message.allowed)
+        return (
+            bool(decided.allowed)
+            or (decided.message is not None and decided.message.allowed)
+            or any(one.allowed for one in decided.call_messages)
+        )
 
     @property
     def latest_acted(self) -> bool:
@@ -1841,20 +2008,25 @@ class PhaseWorking:
         *,
         offers_shown: frozenset[str] = frozenset(),
         waiting: bool = False,
+        effects: Mapping[str, bool] | None = None,
     ) -> None:
-        """Hold a round planning decided, and the labels it assigned.
+        """Hold a round planning decided, the labels it assigned, and its work's exchange.
 
         The round is planned from the latest understanding version (ADR-0332 §3:12),
         shown ``offers_shown`` (ADR-0349 §7:19), and is a waiting round where
-        ``waiting`` says so (§7:26).
+        ``waiting`` says so (§7:26). ``effects`` says whether each capability it was
+        offered declared an effect (ADR-0356 §8:3).
         """
         self.labels.add(planned.labels)
+        if planned.work is not None:
+            self.work = planned.work
         self._rounds.append(
             _Round(
                 planned=planned,
                 planned_from=self.version,
                 offers_shown=offers_shown,
                 waiting=waiting,
+                effects=dict(effects or {}),
             )
         )
 
@@ -1981,8 +2153,9 @@ class PhaseWorking:
             # come to what it asked, wrote nothing that needed writing.
             if one.planned_from != self.version or _held_back(one):
                 continue
-            if one.planned.message is not None:
-                return not one.written
+            # ADR-0356 §7:7: a ``text`` call is a message too.
+            if one.has_messages:
+                return not one.delivered
         return False
 
     def step(self, at: datetime, wait: timedelta) -> _Step:
@@ -2045,7 +2218,7 @@ class PhaseWorking:
                     if verdict.decision_id is not None
                 }
             )
-            for outcome in call_outcomes(one.planned, one.authorization, one.acted):
+            for outcome in call_outcomes(one.planned, one.authorization, one.acted, one.sent):
                 capability = names.get(outcome.call_id)
                 if outcome.result_id is not None:
                     capability = ran.get(outcome.result_id, capability)
@@ -2139,6 +2312,57 @@ class PhaseWorking:
     def planning_rounds(self) -> tuple[PlanningRound, ...]:
         """Every round, as planning recorded it or as it would have been."""
         return tuple(one.planned.round for one in self._rounds)
+
+    def call_entries(self, at: datetime, *, freezing: bool = False) -> tuple[RecordedCall, ...]:
+        """Each call's entry the episode does not yet record, as of now (ADR-0356 §8).
+
+        One for each call a round proposed, refused calls and look-ups included, once
+        what came of it is known, as planning is shown it (§8:2-§8:3). A tidy-up's is
+        made once it started, with no outcome, or once it was refused (§8:6). At the
+        freeze (``freezing``), every call still without one gets one, with no outcome.
+        Each entry is made once: the calls it is made for are held as entered.
+
+        Args:
+            at: When the entries are appended.
+            freezing: Whether the episode is freezing.
+
+        Returns:
+            The new entries, in the order the rounds proposed their calls.
+        """
+        entries: list[RecordedCall] = []
+        for one in self._rounds:
+            round_id = one.planned.round.id
+            outcomes = {
+                outcome.call_id: outcome
+                for outcome in call_outcomes(one.planned, one.authorization, one.acted, one.sent)
+            }
+            # An approved action is proposed under its tool and runs as its capability.
+            named = {planned.call.call_id: planned.call.name for planned in one.planned.calls}
+            for call in one.planned.round.calls:
+                if (round_id, call.call_id) in self._entered:
+                    continue
+                outcome = outcomes.get(call.call_id)
+                started = call.name == TIDY_STORY_CAPABILITY and one.authorization is not None
+                if outcome is None and not (started or freezing):
+                    continue
+                capability = named.get(call.call_id, call.name)
+                sent = one.sent.get(call.call_id)
+                entries.append(
+                    RecordedCall(
+                        round=round_id,
+                        call_id=call.call_id,
+                        capability=capability,
+                        effect=one.effects.get(capability, False),
+                        outcome=None if outcome is None else outcome.kind,
+                        reason=None if outcome is None else outcome.reason,
+                        delivered=None if sent is None else sent.delivered,
+                        recorded_at=at,
+                        marked=one.planned.read_outside
+                        or (outcome is not None and outcome.digested),
+                    )
+                )
+                self._entered.add((round_id, call.call_id))
+        return tuple(entries)
 
     def acted_rounds(self) -> tuple[ActedRound, ...]:
         """Every acting decision, in round order."""
@@ -2268,10 +2492,13 @@ def call_outcomes(
     planned: PlannedRound,
     authorization: RoundAuthorization | None,
     acted: ActedRound | None,
+    sent: Mapping[str, _Sent] | None = None,
 ) -> tuple[CallOutcome, ...]:
     """What came of one round's calls, as planning reads them, in the round's order.
 
-    A call planning's own check refused, or authorizing found not done, is refused;
+    A ``text`` call is what its write came to, with what it sent, or refused by the
+    message place check, where it was not allowed (ADR-0356 §7:7-§7:8, §8:4). Any
+    other call planning's own check refused, or authorizing found not done, is refused;
     one authorizing sent to the user needs you, carrying the request a question about it
     shows and records, or the part of the question it already waits on (ADR-0321 §2:8,
     §4:11); and one it allowed is what acting made of it, its result under the id acting
@@ -2281,6 +2508,10 @@ def call_outcomes(
     """
     refused = {one.call.call_id: one.reason for one in planned.refused}
     verdicts = {} if authorization is None else {one.call_id: one for one in authorization.verdicts}
+    messages = (
+        {} if authorization is None else {one.call_id: one for one in authorization.call_messages}
+    )
+    written = {} if sent is None else sent
     ran = {} if acted is None else {one.call.call.decision.id: one for one in acted.calls}
     round_id = planned.round.id
     outcomes: list[CallOutcome] = []
@@ -2290,6 +2521,10 @@ def call_outcomes(
             outcomes.append(
                 CallOutcome(round_id, call_id, CallOutcomeKind.REFUSED, reason=refused[call_id])
             )
+            continue
+        text = _text_outcome(round_id, call_id, written.get(call_id), messages.get(call_id))
+        if text is not None:
+            outcomes.append(text)
             continue
         verdict = verdicts.get(call_id)
         if verdict is None:
@@ -2350,6 +2585,19 @@ def call_outcomes(
             )
         )
     return tuple(outcomes)
+
+
+def _text_outcome(
+    round_id: str, call_id: str, sent: _Sent | None, verdict: MessageVerdict | None
+) -> CallOutcome | None:
+    """What came of a ``text`` call, or ``None`` where it is no ``text`` call or not yet."""
+    if sent is not None:
+        return CallOutcome(
+            round_id, call_id, sent.kind, reason=sent.reason, delivered=sent.delivered
+        )
+    if verdict is not None and not verdict.allowed:
+        return CallOutcome(round_id, call_id, CallOutcomeKind.REFUSED, reason=verdict.reason)
+    return None
 
 
 def authorized_round(decided: RoundAuthorization) -> AuthorizedRound:
@@ -2643,7 +2891,10 @@ def _answering(latest: _Round, decided: RoundAuthorization) -> _Answering | None
     return _Answering(
         decided=decided,
         first=replace(
-            decided, allowed=tuple(one for one in decided.allowed if answers(one)), message=None
+            decided,
+            allowed=tuple(one for one in decided.allowed if answers(one)),
+            message=None,
+            call_messages=(),
         ),
         rest=tuple(one for one in decided.allowed if not answers(one)),
         refused=any(call_id not in allowed for call_id in asked),
@@ -2677,7 +2928,11 @@ def _commits(latest: _Round, decided: RoundAuthorization) -> bool:
         and verdict.effect_id is not None
         and latest.planned.message is not None
     )
-    return message or any(not is_pure_read(one.call.request.tool) for one in decided.allowed)
+    # ADR-0356 §7:7: a ``text`` call is the round's message in the form of a call.
+    texts = any(one.allowed and one.effect_id is not None for one in decided.call_messages)
+    return (
+        message or texts or any(not is_pure_read(one.call.request.tool) for one in decided.allowed)
+    )
 
 
 def _commitment(
@@ -2714,6 +2969,24 @@ def _commitment(
     if state.commit() is Commitment.STOPPED:  # pragma: no cover — read just above
         return ActedRound(round_id=decided.round_id)
     return None
+
+
+#: Why a ``text`` call of a round the stop ended before it was dispatched was not sent.
+_STOPPED_UNSENT: Final = "the work was stopped before it was sent"
+
+
+def _unsent(latest: _Round, reason: str) -> None:
+    """Hold each ``text`` call the latest round may send as not done, unwritten, for ``reason``.
+
+    ADR-0349 §7:14, ADR-0352 §4:2: a round whose acts were held back writes no message,
+    a ``text`` call included (ADR-0356 §7:7), and sent nothing.
+    """
+    decided = latest.authorization
+    if decided is None:
+        return
+    for one in decided.call_messages:
+        if one.allowed and one.call_id is not None:
+            latest.sent.setdefault(one.call_id, _Sent(CallOutcomeKind.NOT_DONE, reason=reason))
 
 
 def _working(given: PhasePass) -> PhaseWorking:
@@ -3101,6 +3374,8 @@ class PhasePath:
         self._label_arguments: dict[str, Mapping[str, LabelKind]] = {
             name: dict(arguments) for name, arguments in (label_arguments or {}).items()
         }
+        # ADR-0356 §7:7: a ``text`` call names its place by the place list's L label.
+        self._label_arguments.setdefault(TEXT_CAPABILITY, {VIA_ARGUMENT: LabelKind.PLACE})
         self._story_calls = story_calls
         self._look_ups = look_ups
         # ADR-0338 §11:2: the person model's calls, attached only where a store is wired.
@@ -3173,8 +3448,9 @@ class PhasePath:
         ``spawn``, ``cancel_task`` and ``list_tasks`` are advertised among the own records'
         declarations; acting runs each by ``calls``, directly against the plan store
         (§4:3); and their task, place and earlier-task arguments are named by label
-        (ADR-0307 §5:2). They are offered only to an activation offered spawn (§3:4),
-        whose working set holds :class:`Scheduling`.
+        (ADR-0307 §5:2). They are offered on every round, and run only in an activation
+        offered spawn (§3:4), whose working set holds :class:`Scheduling`: in any other a
+        call to one comes back refused (ADR-0356 §4:5).
 
         Raises:
             ValueError: If it is attached already, or a capability it declares is
@@ -3629,6 +3905,9 @@ class PhasePath:
                     or any(one.outcome is DigestOutcome.ANSWERED for one in state.digests)
                 )
                 state.response = working.outcome()
+                # ADR-0356 §8:6: every call's entry not yet appended, its outcome where it
+                # is now known and none where it is not, carried by the freezing revision.
+                state.recorded_calls(working.call_entries(self._now(), freezing=True))
                 # ADR-0309 §5:10: taken once, here, over every round. The windows are
                 # held again in case no round was planned to hold them.
                 _hold_given(given, working, state)
@@ -3712,6 +3991,9 @@ class PhasePath:
         working = _working(given)
         fetched = given.understanding_fetch
         state = active_state()
+        # ADR-0356 §8:6: each call's entry is appended once its outcome is known, before
+        # the next round's request.
+        await self._entries(working)
         if state is not None:
             await self._wait_on_older(state, working)
             if state.stopped:
@@ -3754,6 +4036,19 @@ class PhasePath:
         if stories is not None:
             working.notes.update((one.note_id, one) for one in _shown_notes(stories))
         _hold_given(given, working, active_state())
+        # ADR-0356 §4:3: every capability on every round, in one fixed order; §4:4-§4:6:
+        # each whose condition does not hold here comes back refused, saying why.
+        offered = await self._offered()
+        not_here = self._not_here(
+            offered,
+            person=person is not None,
+            scheduling=working.scheduling is not None,
+            running=self._running_calls(state, working, offers=bool(offers)),
+            standing=state is not None
+            and state.standing is not None
+            and state.standing.author is not None,
+            waiting=bool(waiting),
+        )
         inputs = PlanningInputs(
             activation_id=working.activation_id,
             place=working.place,
@@ -3766,12 +4061,7 @@ class PhasePath:
             rounds=working.planning_rounds(),
             labels=working.labels.labels,
             outcomes=outcomes,
-            capabilities=await self._offered(
-                person=person is not None,
-                scheduling=working.scheduling is not None,
-                running=self._running_calls(state, working, offers=bool(offers)),
-                only=frozenset({STOP_ACTIVATION_CAPABILITY}) if waiting else None,
-            ),
+            capabilities=offered,
             label_arguments=self._label_arguments,
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
@@ -3790,6 +4080,8 @@ class PhasePath:
             waiting=waiting,
             declined=() if state is None else state.declined,
             earlier_work=earlier,
+            work=working.work,
+            not_here=not_here,
         )
         # The round is recorded inside planning's call, so the recorder reads what it
         # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
@@ -3809,6 +4101,9 @@ class PhasePath:
             planned,
             offers_shown=frozenset(one.activation_id for one in offers),
             waiting=bool(waiting),
+            effects={
+                str(one.capability): one.effect is not CapabilityEffect.NONE for one in offered
+            },
         )
         if waiting:
             working.waiting_round_planned = True
@@ -4007,47 +4302,85 @@ class PhasePath:
                 ),
             )
 
-    async def _offered(
-        self,
-        *,
-        person: bool = True,
-        scheduling: bool = False,
-        running: frozenset[str] = frozenset(),
-        only: frozenset[str] | None = None,
-    ) -> tuple[ToolDefinition, ...]:
-        """The declarations this round offers planning (ADR-0306 §2:7), the clock apart.
+    async def _offered(self) -> tuple[ToolDefinition, ...]:
+        """The declarations every round offers planning (ADR-0306 §2:7), the clock apart.
+
+        ADR-0356 §4:3: every capability planning may call, on every round of every
+        activation, in one fixed order, from the hub's start until it stops: the
+        registry's, the person model's calls where they are attached, the Task
+        Scheduler's and the calls on running work where each is wired, and ``text``
+        last. No round, activation, person or condition adds one or removes one; a call
+        whose condition does not hold comes back refused (:meth:`_not_here`).
 
         Planning's input carries ``now``, so the clock's call would only spend a round
         on what it has (#2942): it is left out of the offer, and stays registered.
-
-        The person model's calls are offered where they are attached, a fixed list or
-        none, and only to a round of an activation given a person block (``person``): an
-        activation that is no person's has no profile or pins to change (ADR-0338 §2:3).
-
-        Of the calls on running work, only those in ``running`` are offered (ADR-0349
-        §4:6, §6:1, §7:20); and a waiting round is offered only what ``only`` names
-        (§7:26).
         """
         names = (
             await self._tools.capabilities() if self._capabilities is None else self._capabilities
         )
         if self._person_calls is not None:
             names = (*names, *sorted(PERSON_MODEL_CAPABILITIES - set(names)))
-            if not person:
-                names = tuple(name for name in names if name not in PERSON_MODEL_CAPABILITIES)
         if self._task_calls is not None:
-            # ADR-0350 §3:4: offered only to an activation offered spawn.
             names = (*names, *sorted(TASK_SCHEDULER_CAPABILITIES - set(names)))
-            if not scheduling:
-                names = tuple(name for name in names if name not in TASK_SCHEDULER_CAPABILITIES)
         if self._matters is not None:
             names = (*names, *sorted(MATTER_CAPABILITIES - set(names)))
-            names = tuple(
-                name for name in names if name not in MATTER_CAPABILITIES or name in running
-            )
-        if only is not None:
-            names = tuple(name for name in names if name in only)
-        return await self._tools.offered([name for name in names if name not in _NOT_OFFERED])
+        declared = await self._tools.offered(
+            [name for name in names if name not in _NOT_OFFERED and name != TEXT_CAPABILITY]
+        )
+        return (*declared, TEXT_CALL)
+
+    @staticmethod
+    def _not_here(  # noqa: PLR0913 — each condition ADR-0356 §4:5 names
+        offered: Sequence[ToolDefinition],
+        *,
+        person: bool,
+        scheduling: bool,
+        running: frozenset[str],
+        standing: bool,
+        waiting: bool,
+    ) -> dict[str, str]:
+        """Why each capability offered cannot run in this activation, on this round.
+
+        ADR-0356 §4:4-§4:6, each the condition that decided before whether it was
+        offered: the person model's calls in an activation that is no person's (ADR-0338
+        §2:3); the Task Scheduler's in one ADR-0350 §3:4 does not admit; the calls on
+        running work where its author is not established, the stop where its input
+        carries no user's authority (ADR-0349 §4:6), and the answer where no offer is
+        open (§4:6); and, on a waiting round, every call but a message and the stop
+        (§7:26), whose activation the judge checks.
+        """
+        names = {str(one.capability) for one in offered}
+        why: dict[str, str] = {}
+        if not person:
+            why |= dict.fromkeys(sorted(PERSON_MODEL_CAPABILITIES & names), _NO_PERSON)
+        if not scheduling:
+            why |= dict.fromkeys(sorted(TASK_SCHEDULER_CAPABILITIES & names), _NO_SPAWN)
+        for name in sorted((MATTER_CAPABILITIES & names) - running):
+            if not standing:
+                why[name] = _NO_RUNNING_VIEW
+            elif name == STOP_ACTIVATION_CAPABILITY:
+                why[name] = _NO_AUTHORITY
+            else:
+                why[name] = _NO_OFFER
+        if waiting:
+            for name in sorted(names - {STOP_ACTIVATION_CAPABILITY, TEXT_CAPABILITY}):
+                why.setdefault(name, WAITING_ROUND)
+        return why
+
+    async def _entries(self, working: PhaseWorking) -> None:
+        """Append each call's entry whose outcome is now known (ADR-0356 §8:6).
+
+        Recorded as a round is (ADR-0307 §2:4): added to the activation's record and the
+        episode extended, a failure a capture failure that holds nothing back. A pass no
+        channel admitted has no episode, and records none.
+        """
+        state = active_state()
+        if state is None:
+            return
+        entries = working.call_entries(self._now())
+        if entries:
+            state.recorded_calls(entries)
+            await _extended(state, self.append)
 
     async def _worded(self, working: PhaseWorking) -> tuple[CallOutcome, ...]:
         """What came of every round's calls, a pin's or an unpin's memory worded.
@@ -4341,7 +4674,9 @@ class PhasePath:
                 approved_part=one.approved_part,
             )
             for one in planned.calls
+            if one.call.name != TEXT_CAPABILITY
         ]
+        texts = [one.call for one in planned.calls if one.call.name == TEXT_CAPABILITY]
         scheduling = working.scheduling
         places: tuple[str, ...] | None = None
         gone: tuple[str, ...] = ()
@@ -4351,7 +4686,12 @@ class PhasePath:
             named = planned.round.place
             place = None if named is None else place_of(named)
             message = None if planned.message is None else RoundMessage(planned.message, place)
-            if message is not None and place in scheduling.targets:
+            # ADR-0356 §7:7: a ``text`` call goes into the place on the list it names.
+            call_messages = self._text_messages(latest, texts, default=None)
+            if any(
+                one.place in scheduling.targets
+                for one in (*call_messages, *([] if message is None else [message]))
+            ):
                 # §5:8-§5:9: a place gone since the list was built is refused by rule,
                 # so the list is read again as it stands now (#3448), inside the
                 # phase's deadline as the check itself is.
@@ -4368,6 +4708,8 @@ class PhasePath:
                 if planned.message is None or place is None
                 else RoundMessage(planned.message, place)
             )
+            # ADR-0356 §7:7: into the place it names, or the input's where it names none.
+            call_messages = self._text_messages(latest, texts, default=place)
         rounds = working.planning_rounds()
         given_round = RoundToAuthorize(
             activation_id=working.activation_id,
@@ -4383,6 +4725,7 @@ class PhasePath:
             calls=tuple(calls),
             input_place=None if places is not None else place,
             message=message,
+            call_messages=call_messages,
             yes=working.yes(given.understanding),
             places=places,
             gone=gone,
@@ -4401,6 +4744,28 @@ class PhasePath:
             and verdict.decision_id is not None
             and verdict.call_id in looking
         }
+
+    @staticmethod
+    def _text_messages(
+        latest: _Round, texts: Sequence[ProposedCall], *, default: str | None
+    ) -> tuple[RoundMessage, ...]:
+        """Each ``text`` call as the message it is, with the place it names or resolves.
+
+        ADR-0356 §7:7: the place its ``via`` names, which planning's check has already
+        turned from an ``L`` label into the place, or ``default`` where it names none.
+        One that says nothing has nothing to act on (§4:6): it comes back so and is
+        never checked or written.
+        """
+        messages: list[RoundMessage] = []
+        for call in texts:
+            words = call.arguments.get(WORDS_ARGUMENT)
+            if not isinstance(words, str) or not words.strip():
+                latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=_NO_WORDS)
+                continue
+            via = call.arguments.get(VIA_ARGUMENT)
+            place = via if isinstance(via, str) else default
+            messages.append(RoundMessage(words, place, call.call_id))
+        return tuple(messages)
 
     @staticmethod
     async def _gone_since(scheduling: Scheduling) -> tuple[str, ...]:
@@ -4448,6 +4813,7 @@ class PhasePath:
                 withheld = _commitment(state, latest, decided)
                 if withheld is not None:
                     latest.acted = withheld
+                    _unsent(latest, _HELD_BACK if withheld.set_aside else _STOPPED_UNSENT)
                     return
             if answering is None:
                 ran, wrote = await asyncio.gather(
@@ -4466,6 +4832,8 @@ class PhasePath:
             # store, and planning is shown them: obtained, so they place what follows
             # (ADR-0309 §5:10, ADR-0321 §5:5).
             working.supplied.obtained(record for one in ran.calls for record in one.replaces)
+        # ADR-0356 §8:6: what came of each call is known now, before any next round.
+        await self._entries(working)
         for answer in (ran, wrote):
             if isinstance(answer, BaseException):
                 raise answer
@@ -4503,6 +4871,7 @@ class PhasePath:
             # starts nothing new, so nothing more of the round is dispatched, and the pass
             # ends on the stop; what the answers did happened.
             _log.info("phase_round_not_acted", stage="acting", reason="stopped")
+            _unsent(latest, _STOPPED_UNSENT)
             return answered, None
         settled = not answering.refused and all(
             one.call.decision.id in (() if caller is None else caller.as_asked)
@@ -4521,9 +4890,12 @@ class PhasePath:
         _log.info("phase_round_held_back", stage="acting", reason="offer_not_taken")
         latest.not_taken = True
         because = _not_taken(answering, caller)
+        _unsent(latest, because)
         reads = tuple(one for one in answering.rest if is_pure_read(one.call.request.tool))
         read = (
-            await self._calls(given, working, replace(decided, allowed=reads, message=None))
+            await self._calls(
+                given, working, replace(decided, allowed=reads, message=None, call_messages=())
+            )
             if reads
             else ActedRound(round_id=decided.round_id)
         )
@@ -4709,21 +5081,52 @@ class PhasePath:
             _log.error("phase_tidy_up_crashed", stage="acting", error=type(exc).__name__)
 
     async def _message(self, working: PhaseWorking, latest: _Round) -> None:
-        """Write the round's message into the input's place, where it may go (§3:1)."""
+        """Write the round's messages into their places, where each may go (§3:1).
+
+        The round's own message, then each ``text`` call allowed, in the round's order
+        (ADR-0356 §7:7-§7:8), each claimed and written as a message is.
+        """
         decided = latest.authorization
-        text = latest.planned.message
-        verdict = None if decided is None else decided.message
-        if verdict is None or not verdict.allowed or verdict.effect_id is None or text is None:
+        if decided is None:
             return
-        # Whether it was recorded decides whether the activation's last message was
-        # delivered (ADR-0317 §3:4).
-        latest.written = await self._write(
-            working,
-            text,
-            effect_id=verdict.effect_id,
-            round_id=latest.planned.round.id,
-            place=verdict.place,
-        )
+        text = latest.planned.message
+        verdict = decided.message
+        if (
+            verdict is not None
+            and verdict.allowed
+            and verdict.effect_id is not None
+            and text is not None
+        ):
+            # Whether it was recorded decides whether the activation's last message was
+            # delivered (ADR-0317 §3:4).
+            latest.written = await self._write(
+                working,
+                text,
+                effect_id=verdict.effect_id,
+                round_id=latest.planned.round.id,
+                place=verdict.place,
+            )
+        texts = {one.call.call_id: one.call for one in latest.planned.calls}
+        for one in decided.call_messages:
+            call = texts.get(one.call_id or "")
+            if not one.allowed or one.effect_id is None or call is None:
+                continue
+            words = call.arguments.get(WORDS_ARGUMENT)
+            if not isinstance(words, str):  # pragma: no cover — checked before authorizing
+                continue
+            try:
+                latest.sent[call.call_id] = await self._sent(
+                    working,
+                    words,
+                    effect_id=one.effect_id,
+                    round_id=latest.planned.round.id,
+                    place=one.place,
+                )
+            except Exception:
+                # The writer raised: whether it wrote is not known, and the stage ends
+                # on it, as on the round's own message.
+                latest.sent[call.call_id] = _Sent(CallOutcomeKind.UNKNOWN, reason=_UNKNOWN_WRITE)
+                raise
 
     async def _digest(self, given: PhasePass) -> None:
         """Digest each result acting holds as it is held, until acting has ended (§3:3)."""
@@ -4983,9 +5386,65 @@ class PhasePath:
         Returns:
             Whether the medium recorded it whole.
         """
+        wrote = await self._written(
+            working, text, effect_id=effect_id, round_id=round_id, place=place
+        )
+        return wrote is not None and wrote[0].outcome is ToolOutcome.SUCCEEDED
+
+    async def _sent(
+        self,
+        working: PhaseWorking,
+        words: str,
+        *,
+        effect_id: str,
+        round_id: str,
+        place: str | None,
+    ) -> _Sent:
+        """Write one ``text`` call's words, and say what came of it (ADR-0356 §7:8, §8:4).
+
+        Claimed, written and finished as any message is (:meth:`_written`): its entry
+        holds the words the place took, or tried to, where they went and how. A call
+        whose write never reached the place sent nothing, and holds no delivery.
+        """
+        wrote = await self._written(
+            working, words, effect_id=effect_id, round_id=round_id, place=place
+        )
+        if wrote is None:
+            return _Sent(CallOutcomeKind.NOT_DONE, reason=_GONE)
+        delivered, fitted, channel = wrote
+        reason = delivered.reason
+        if delivered.outcome is ToolOutcome.INDETERMINATE:
+            reason = _UNKNOWN_WRITE
+        return _Sent(
+            _WRITE_OUTCOME[delivered.outcome],
+            reason=reason,
+            delivered=RecordedDelivery(
+                words=delivered.written or fitted,
+                went=channel,
+                status=_DELIVERY_STATUS[delivered.outcome],
+                reason=reason,
+            ),
+        )
+
+    async def _written(
+        self,
+        working: PhaseWorking,
+        text: str,
+        *,
+        effect_id: str,
+        round_id: str | None,
+        place: str | None = None,
+    ) -> tuple[Delivery, str, ChannelIdentity] | None:
+        """Claim, write and finish one message, and say what came of it and where.
+
+        Returns:
+            What the place's writer said, the text it was handed, and the place's
+            channel; ``None`` where it went nowhere: no place, or a claim the stop
+            refused.
+        """
         target = self._target(working, place)
         if target is None:
-            return False
+            return None
         fitted = self._fitted(target, text)
         effect = ActivationEffect(
             id=effect_id,
@@ -4998,7 +5457,7 @@ class PhasePath:
             await self._plans.claim_activation_effect(effect, match=None)
         except ClaimStopped:
             _log.info("phase_message_unwritten", stage="acting", reason="stopped")
-            return False
+            return None
         try:
             delivered = await target.writer.deliver(fitted, effect_id=effect_id)
         except Exception:
@@ -5014,7 +5473,7 @@ class PhasePath:
             reason=delivered.reason,
             position=delivered.position,
         )
-        return delivered.outcome is ToolOutcome.SUCCEEDED
+        return delivered, fitted.text, target.channel
 
     async def _couldnt_finish(self, working: PhaseWorking) -> None:
         """Write the fixed *couldn't finish* message, listing the effects that happened.

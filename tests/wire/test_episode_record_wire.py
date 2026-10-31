@@ -128,14 +128,14 @@ def test_the_second_run_round_trips_through_the_codec() -> None:
     assert EpisodicMemory.model_validate(_sent(episode)) == episode
 
 
-def test_the_record_is_sent_at_schema_version_eleven_with_the_second_run_named_when_absent() -> (
+def test_the_record_is_sent_at_schema_version_twelve_with_the_second_run_named_when_absent() -> (
     None
 ):
     """ADR-0124 §9:2: a peer at an earlier version refuses the version as unknown."""
     sent = _sent(_episode(None))
     processing = sent["processing_record"]
     assert isinstance(processing, dict)
-    assert processing["schema_version"] == 11
+    assert processing["schema_version"] == 12
     assert "recall_second_run" in processing
     assert processing["recall_second_run"] is None
 

@@ -23,6 +23,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from exchange_support import shown_text
 from phases_support import chat_turn, frozen, processing, until, written
 from story_support import CONVERSATION
 from structured_support import structured
@@ -244,8 +245,9 @@ class _Planner(FakeToolCallingCompleter):
         return await super().respond(exchange, tools, model=model)
 
     def shown(self, index: int) -> str:
-        """What round ``index``, counted across the case, was shown."""
-        return self.calls[index].exchange.briefing
+        """What round ``index``, counted across the case, was shown: its briefing and
+        every report after an earlier round of its work (ADR-0356 §5)."""
+        return shown_text(self.calls[index])
 
     def offered(self, index: int) -> set[str]:
         """The tools round ``index`` was offered, by name."""

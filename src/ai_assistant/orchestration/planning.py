@@ -8,12 +8,17 @@ step and one round (§2:3): it assembles planning's inputs, asks the model once,
 the round, and judges the round's calls. It runs nothing, writes no message and
 decides nothing about whether a call may run (§9:1).
 
-**A round is asked with one briefing** (ADR-0356 §14:1). The request is a
-:class:`~ai_assistant.core.types.PlanningExchange` of the instruction and a briefing of
-one JSON object rendering planning's inputs, earlier rounds and acting's outcomes among
-them, as quoted data, with no earlier step: the work's exchange held across rounds, the
-reports and the news are the next lane's (§14:2). The round's text is kept as its notes
-(§7:2) and, until a message is a call (ADR-0357), is still also the round's message.
+**A work's rounds are one continuing exchange** (ADR-0356 §5). A work's first round
+renders the instruction and a briefing of one JSON object rendering planning's inputs as
+quoted data, once; :class:`PlanningWork` holds that exchange, with the round's response,
+and the phases hand it to the next round, which hands both in byte for byte and appends
+the last round's response, as the completer returned it, and its report: one result for
+each of its calls, in its order and under its ids, code's rendering of what came of it,
+a digested one as its digest's evidence, then the news, what the inputs hold that the
+exchange has not shown (§5:3-§5:6). Every round of a work is offered the tools its first
+was (§4:3). The round's text is kept as its notes (§7:2) and, until a message is a call
+(ADR-0357, ADR-0356 §14:3), is still also the round's message. The briefing's JSON and
+the instruction's flags are P3's to replace (§14:3).
 
 **What it is given** (§6, as ADR-0312 §4 corrects it). Understanding's record and its
 story links; the place window and the episode window; what both recall runs found
@@ -93,7 +98,10 @@ not offered, a label planning was never shown or one of the wrong kind, or lacki
 *looking for*, is refused whole with its reason and runs nothing. A call that passes
 carries ids in place of labels, and its *looking for* and *deliberate repeat* are
 taken out of its arguments (ADR-0306 §2:10). Whether a note a move names is still held
-is the story store's half, in the lane that builds planning's story calls.
+is the story store's half, in the lane that builds planning's story calls. A call to a
+capability whose condition for running does not hold here, which the phases say in
+:attr:`PlanningInputs.not_here`, is refused with that reason, and on a waiting round a
+stop naming work the round does not wait on is refused (ADR-0356 §4:4-§4:5).
 
 **Asking** (ADR-0321 §2). A call that came back needing the user's yes is shown with a
 reference and its exact line, written by :func:`exact_line` for every capability alike.
@@ -119,9 +127,11 @@ carries each unresolved open question on it, in words, wherever it is shown (§6
 **The instruction is a template** (ADR-0334): the system message is rendered from
 :data:`PLANNING_PROMPT`'s template, which the composition root reads at start and hands
 the stage, and this module keeps no copy of its text (§3:1). The stage computes the
-template's eight flags from what each round offers and supplies its three values; the
-rendered request, the tool declarations, the judge, the exact lines and every rule above
-stay here, whatever a template says (§1:3, §7:2).
+template's flags once, at a work's first round, holding to one value each that may
+change between its rounds, since a work's instruction is the same on every round
+(ADR-0356 §5:2), and supplies its three values; the rendered request, the tool
+declarations, the judge, the exact lines and every rule above stay here, whatever a
+template says (§1:3, §7:2).
 
 **It logs stage and code-owned reason only**, never inputs, model output or arguments
 (ADR-0275 §8).
@@ -152,10 +162,13 @@ from ai_assistant.core.types import (
     PEER_COULDNT_FINISH_LINE,
     AskedCall,
     BeliefBand,
+    CallOutcomeKind,
+    CallResult,
     CapabilityResult,
     DiagnosticKind,
     DiagnosticSource,
     EpisodicMemory,
+    ExchangeStep,
     HolderKind,
     LabelKind,
     MemoryMark,
@@ -170,6 +183,7 @@ from ai_assistant.core.types import (
     ReadingCertainty,
     RecordedTextInput,
     Role,
+    RoundReport,
     StoryEffectState,
     StoryMemberKind,
     StoryNoteAuthor,
@@ -182,7 +196,7 @@ from ai_assistant.core.types import (
     relay_mark_counts,
     statement_citations,
 )
-from ai_assistant.orchestration.channel_kinds import place_channel
+from ai_assistant.orchestration.channel_kinds import place_channel, place_of
 from ai_assistant.orchestration.matters import (
     LOOK_UP_ACTIVATION_CAPABILITY,
     STOP_ACTIVATION_CAPABILITY,
@@ -219,6 +233,7 @@ if TYPE_CHECKING:
         ProjectedRound,
         ProjectedText,
         QuestionPart,
+        RecordedDelivery,
         RoundResponse,
         StoryNote,
         StoryStanding,
@@ -242,13 +257,16 @@ __all__ = [
     "APPROVED_ACTION_TOOL",
     "DELIBERATE_REPEAT",
     "LOOKING_FOR",
+    "NOTHING_NEW",
     "OLDER_NOTES_PAGE_ARGUMENT",
     "PLANNING_PROMPT",
+    "WAITING_ROUND",
     "ApprovedAction",
     "CallOutcome",
     "CallOutcomeKind",
     "DigestItem",
     "DigestedEvidence",
+    "NewsShown",
     "OfferShown",
     "PeerShown",
     "PlaceAuthor",
@@ -260,6 +278,7 @@ __all__ = [
     "PlanningStage",
     "PlanningStories",
     "PlanningStory",
+    "PlanningWork",
     "RecordedCandidate",
     "RefusedCall",
     "RoundRecorder",
@@ -414,21 +433,6 @@ class PlaceWindow:
     items: tuple[PlaceItem, ...] = ()
 
 
-class CallOutcomeKind(StrEnum):
-    """What came of one call of an earlier round, as planning reads it."""
-
-    DONE = "done"
-    NOT_DONE = "not_done"
-    UNKNOWN = "unknown"
-    NEEDS_YOU = "needs_you"
-    """Authorizing ruled that it needs the user (ADR-0306 §4:8): it runs on their yes to a
-    question that showed it (ADR-0321 §2, §4)."""
-
-    REFUSED = "refused"
-    """Refused before it ran, by planning's own check or by authorizing's rules, a deny
-    among them: no yes lets it run, so it is never asked about (ADR-0321 §2:10)."""
-
-
 @dataclass(frozen=True, slots=True)
 class RecordedCandidate:
     """What a ``remember`` that recorded a candidate came back with (ADR-0329 §4, §6:5).
@@ -497,6 +501,8 @@ class CallOutcome:
         peer: For a stop call, a look-up or an answer, the activation it named and
             what came of it, under that activation's ``E`` label (ADR-0349 §4:9,
             §4:11, §6:5-§6:6); ``None`` for any other call.
+        delivered: For a message call that sent something, or tried to, what it sent,
+            where it went and how (ADR-0356 §8:4); ``None`` for any other call.
 
     Raises:
         ValueError: If it carries a result, or says one was digested, without the
@@ -522,6 +528,7 @@ class CallOutcome:
     worded: tuple[tuple[str, str], ...] = ()
     tasks: TaskListing | None = None
     peer: PeerShown | None = None
+    delivered: RecordedDelivery | None = None
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
@@ -884,6 +891,12 @@ class PlanningInputs:
         earlier_work: The finished work of each activation this one absorbed or took
             input from, and, after a wait, of each it waited on, read fresh (§7:10,
             §7:27).
+        work: The work's exchange as its last round left it (ADR-0356 §5), held by the
+            phases for the work's life; ``None`` for a work's first round, which renders
+            the briefing.
+        not_here: For each capability offered whose condition for running does not
+            hold in this activation or on this round, why (ADR-0356 §4:4-§4:6): a call
+            to it comes back refused, saying so, and runs nothing.
     """
 
     activation_id: str
@@ -913,6 +926,56 @@ class PlanningInputs:
     waiting: tuple[RunningShown, ...] = ()
     declined: tuple[tuple[str, str], ...] = ()
     earlier_work: tuple[PeerShown, ...] = ()
+    work: PlanningWork | None = None
+    not_here: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class NewsShown:
+    """What a work's exchange has shown of the inputs the news reports on (ADR-0356 §5:5).
+
+    Attributes:
+        offers: The offering activations whose offers it showed as open.
+        earlier_work: Each activation's finished work, by the activation, as last shown.
+        understanding: The understanding version it showed, or ``None`` for none.
+        items: The place-window items it showed.
+        evidence: How many of the inputs' digests it showed, which are held in the order
+            recorded.
+        stories: The stories the activation belongs to that it showed, by id.
+    """
+
+    offers: frozenset[str] = frozenset()
+    earlier_work: Mapping[str, str] = field(default_factory=dict)
+    understanding: int | None = None
+    items: frozenset[PlaceItem] = frozenset()
+    evidence: int = 0
+    stories: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningWork:
+    """A work's exchange, as its last round left it (ADR-0356 §5, §6:4).
+
+    Held only in memory, by the phases, for the work's life: never recorded in the
+    episode and never on the wire. The next round appends to it the last round's
+    response, as the completer returned it, and its report.
+
+    Attributes:
+        exchange: The exchange the last round was asked with.
+        tools: The tools its first round was offered, which every round of it is, in
+            the same order (ADR-0356 §4:3).
+        response: The last round's response, its continuation included.
+        round_id: The last round's id, which its calls' outcomes name.
+        number: The last round's number in the work, from 1.
+        shown: What the exchange has shown of the inputs the news reports on.
+    """
+
+    exchange: PlanningExchange
+    tools: tuple[OfferedTool, ...]
+    response: RoundResponse
+    round_id: str
+    number: int
+    shown: NewsShown
 
 
 # --- the round's decision ----------------------------------------------------------------
@@ -965,6 +1028,10 @@ class PlannedRound:
         refused: The calls refused whole, in the round's order.
         message: The text to write into the input's place, or ``None`` where the text
             is empty or the place takes no message (§3:2, §3:8).
+        work: The work's exchange with this round's response, which the phases hold
+            and hand the next round (ADR-0356 §5); ``None`` only where none was built.
+        read_outside: Whether the work had read outside content when this round was
+            asked, which marks each of its calls' entries (ADR-0356 §8:7).
     """
 
     round: PlanningRound
@@ -973,6 +1040,8 @@ class PlannedRound:
     calls: tuple[PlannedCall, ...] = ()
     refused: tuple[RefusedCall, ...] = ()
     message: str | None = None
+    work: PlanningWork | None = None
+    read_outside: bool = False
 
 
 class RoundRecorder(Protocol):
@@ -1286,6 +1355,12 @@ _FROM_OLDER_NOTES: Final = (
 _NO_EPISODES: Final = "none shown"
 _SHOWN_ABOVE: Final = "shown above under this label"
 _NOTHING_DONE: Final = "nothing recorded"
+
+#: The news of a report where nothing changed since the round before (ADR-0356 §5:5).
+NOTHING_NEW: Final = "nothing has changed since your last round"
+
+#: A digested result whose digest has not yet been recorded: its evidence comes as news.
+_NOT_YET_READ: Final = "not read yet: its digest's evidence comes as news once it is"
 _NO_MEANING: Final = "no meaning understood"
 #: ADR-0276 §3 (#2951): a text of an episode the place window already shows under its label.
 _IN_PLACE_WINDOW: Final = "shown in the place window under this label, not repeated here"
@@ -1562,6 +1637,9 @@ class _Request:
         )
         # Whether a story read is offered this round, set as the request is rendered.
         self._reads_stories = False
+        # Each earlier work's peer view as rendered, by its activation, which the news
+        # compares to what the exchange showed (ADR-0356 §5:5).
+        self._peers_rendered: dict[str, str] = {}
         # The episodes rendered whole so far, so one shown again is named by its label.
         self._rendered: set[str] = set()
         # Each running activation understanding cited: the list it is cited in, its
@@ -1632,7 +1710,7 @@ class _Request:
             document["waiting_on"] = [self._waited_on(one) for one in inputs.waiting]
         if inputs.earlier_work:
             # §7:10, §7:27: the finished work this one took over or waited on.
-            document["earlier_work"] = [self._peer(one) for one in inputs.earlier_work]
+            document["earlier_work"] = [self._peer_shown(one) for one in inputs.earlier_work]
         document |= {
             "place_window": [self._item(item) for item in inputs.place.items],
             "episode_window": self._episodes(),
@@ -1650,6 +1728,179 @@ class _Request:
         }
         self._name_running()
         return json.dumps(document, ensure_ascii=False, sort_keys=False)
+
+    def shown_now(self) -> NewsShown:
+        """What the briefing just rendered showed of what the news reports on (§5:5)."""
+        inputs = self._inputs
+        return NewsShown(
+            offers=frozenset(one.activation_id for one in inputs.offers),
+            earlier_work=dict(self._peers_rendered),
+            understanding=None if inputs.understanding is None else inputs.understanding.version,
+            items=frozenset(inputs.place.items),
+            evidence=len(inputs.evidence),
+            stories=frozenset(one.story_id for one in self._stories_held()),
+        )
+
+    def _stories_held(self) -> tuple[PlanningStory, ...]:
+        """The stories the activation belongs to, as this round's inputs hold them."""
+        given = self._inputs.stories
+        return () if given is None or given.unreadable else given.stories
+
+    def report(self, work: PlanningWork) -> tuple[RoundReport, NewsShown]:
+        """The system's turn after the work's last round: its results, then the news.
+
+        ADR-0356 §5:3-§5:6. One result for each call of that round, in its order and
+        under its id: code's rendering of what came of it, a digested result as its
+        digest's evidence, marked outside, and a result planning may name under its R
+        label. Then what the inputs hold that the exchange has not shown: each offer
+        newly open and each that closed, the finished work newly read of an activation
+        this work took over or waited on, and a stimulus taken in, with its meaning,
+        and any evidence not yet shown; or that nothing has changed.
+
+        Returns:
+            The report, and what the exchange has shown once it is sent.
+        """
+        inputs = self._inputs
+        shown = work.shown
+        outcomes = {
+            outcome.call_id: outcome
+            for outcome in inputs.outcomes
+            if outcome.round_id == work.round_id
+        }
+        fresh = list(enumerate(inputs.evidence))[shown.evidence :]
+        reported: set[int] = set()
+        results: list[CallResult] = []
+        for index, call in enumerate(work.response.calls, 1):
+            outcome = outcomes.get(call.call_id)
+            result = self._call(call, outcome, reference=f"{work.number}.{index}")
+            result.pop("capability", None)
+            result.pop("arguments", None)
+            if outcome is not None and outcome.digested and outcome.result_id is not None:
+                # §5:4: a result resting on outside content is its digest's evidence.
+                read = [(at, one) for at, one in fresh if one.result_id == outcome.result_id]
+                reported.update(at for at, _ in read)
+                result["evidence"] = [self._evidence(one) for _, one in read] or _NOT_YET_READ
+            results.append(
+                CallResult(
+                    call_id=call.call_id,
+                    text=json.dumps(result, ensure_ascii=False, sort_keys=False),
+                )
+            )
+        started = self._stories_started(work, outcomes, results, shown.stories)
+        news = self._news(shown, [one for at, one in fresh if at not in reported])
+        news |= self._text_unwritten(work)
+        self._name_running()
+        return (
+            RoundReport(
+                results=tuple(results),
+                news=NOTHING_NEW if not news else json.dumps(news, ensure_ascii=False),
+            ),
+            NewsShown(
+                offers=frozenset(one.activation_id for one in inputs.offers),
+                earlier_work={**shown.earlier_work, **self._peers_rendered},
+                understanding=(
+                    shown.understanding
+                    if inputs.understanding is None
+                    else inputs.understanding.version
+                ),
+                items=shown.items | frozenset(inputs.place.items),
+                evidence=len(inputs.evidence),
+                stories=shown.stories | started,
+            ),
+        )
+
+    def _stories_started(
+        self,
+        work: PlanningWork,
+        outcomes: Mapping[str, CallOutcome],
+        results: list[CallResult],
+        shown: frozenset[str],
+    ) -> frozenset[str]:
+        """The stories the round's story calls brought the activation into, in their result.
+
+        What came of a story call that started or linked the activation into a story is
+        that story, which a later round names by its S label (ADR-0356 §5:4, ADR-0307
+        §5:1): each story the inputs now hold that the exchange never showed is rendered,
+        as the story views are, in the result of the round's first story call done.
+
+        Returns:
+            The stories rendered, by id; none where no story call was done.
+        """
+        fresh = [one for one in self._stories_held() if one.story_id not in shown]
+        if not fresh:
+            return frozenset()
+        for at, call in enumerate(work.response.calls):
+            outcome = outcomes.get(call.call_id)
+            if (
+                call.name in STORY_CALL_CAPABILITIES
+                and outcome is not None
+                and outcome.kind is CallOutcomeKind.DONE
+            ):
+                result = json.loads(results[at].text)
+                result["stories"] = [self._story(one) for one in fresh]
+                results[at] = CallResult(
+                    call_id=call.call_id, text=json.dumps(result, ensure_ascii=False)
+                )
+                return frozenset(one.story_id for one in fresh)
+        return frozenset()
+
+    def _news(self, shown: NewsShown, evidence: Sequence[DigestedEvidence]) -> dict[str, object]:
+        """What the work's inputs hold that the exchange has not yet shown (§5:5-§5:6)."""
+        inputs = self._inputs
+        news: dict[str, object] = {}
+        opened = [
+            self._offer(one) for one in inputs.offers if one.activation_id not in shown.offers
+        ]
+        if opened:
+            news["offers_open"] = opened
+        open_now = {one.activation_id for one in inputs.offers}
+        closed = [
+            self._book.label(LabelKind.EPISODE, episode_address(one))
+            for one in sorted(shown.offers - open_now)
+        ]
+        if closed:
+            news["offers_closed"] = closed
+        read: list[dict[str, object]] = []
+        for one in inputs.earlier_work:
+            rendered = self._peer_shown(one)
+            if shown.earlier_work.get(one.activation_id) != self._peers_rendered[one.activation_id]:
+                read.append(rendered)
+        if read:
+            news["earlier_work"] = read
+        understanding = inputs.understanding
+        if understanding is not None and understanding.version != shown.understanding:
+            # A stimulus taken in, with its meaning (ADR-0332 §3:12).
+            news["understanding"] = self._understanding()
+        items = [self._item(item) for item in inputs.place.items if item not in shown.items]
+        if items:
+            news["place_window"] = items
+        if evidence:
+            news["evidence"] = [self._evidence(one) for one in evidence]
+        return news
+
+    def _text_unwritten(self, work: PlanningWork) -> dict[str, object]:
+        """Where the last round's text, still its message, was never written, and why.
+
+        Until a message is a call (ADR-0356 §14:1, P3), a round's text is also its message.
+        One new input overtook, or held back for an answer that did not come to what it
+        asked, was never written (ADR-0332 §3:7, ADR-0352 §4:2), and the report says so,
+        as the round's rendering once did.
+        """
+        if not work.response.text.strip():
+            return {}
+        if work.round_id in self._inputs.not_taken:
+            return {"text_was": _NOT_TAKEN}
+        if work.round_id in self._inputs.overtaken:
+            return {"text_was": _OVERTAKEN}
+        return {}
+
+    def _peer_shown(self, one: PeerShown) -> dict[str, object]:
+        """One activation's finished work, rendered and noted as shown."""
+        rendered = self._peer(one)
+        self._peers_rendered[one.activation_id] = json.dumps(
+            rendered, ensure_ascii=False, sort_keys=True
+        )
+        return rendered
 
     def _place(self) -> dict[str, object]:
         place = self._inputs.place
@@ -2526,6 +2777,7 @@ class _Request:
         if outcome.reason is not None:
             text = f"{text}: {outcome.reason}"
         shown["outcome"] = text
+        shown |= self._delivered(outcome.delivered)
         shown |= self._absorbed_by(outcome.peer)
         if outcome.kind is not CallOutcomeKind.DONE or outcome.result_id is None:
             return shown
@@ -2546,6 +2798,23 @@ class _Request:
             result["value"] = _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
         shown["result"] = result
         return shown
+
+    def _delivered(self, delivered: RecordedDelivery | None) -> dict[str, object]:
+        """What a message call sent, where it went and how (ADR-0356 §8:4), or nothing.
+
+        Where it went is named by its place label where planning holds one.
+        """
+        if delivered is None:
+            return {}
+        place = place_of(delivered.went)
+        shown: dict[str, object] = {
+            "words": delivered.words,
+            "went": self._book.held(LabelKind.PLACE, place) or place,
+            "how": delivered.status.value,
+        }
+        if delivered.reason is not None:
+            shown["because"] = delivered.reason
+        return {"delivered": shown}
 
     def _absorbed_by(self, peer: PeerShown | None) -> dict[str, object]:
         """ADR-0349 §4:9: the absorber a refused stop names, by its label, where one did."""
@@ -3076,11 +3345,35 @@ class _Judge:
     approved: Mapping[str, ApprovedAction] = field(default_factory=dict)
     """The approved actions, by the id their A label names, where the tool was offered."""
     capabilities: Sequence[ToolDefinition] = ()
+    not_here: Mapping[str, str] = field(default_factory=dict)
+    """Why each capability whose condition does not hold here cannot run (ADR-0356 §4:4)."""
+    waited: frozenset[str] | None = None
+    """On a waiting round, the episodes of the activations it waits on, which a stop may
+    name (§4:5, ADR-0349 §7:26); ``None`` on every other round."""
 
     def __call__(self, call: ProposedCall) -> PlannedCall | RefusedCall:
         if call.name == APPROVED_ACTION_TOOL and self.approved:
             return self._approved(call)
-        return self._capability(call)
+        # ADR-0356 §4:4-§4:6: offered on every round, and refused, saying why, where its
+        # condition for running does not hold in this activation.
+        why = self.not_here.get(call.name) if call.name in self.offered else None
+        if why is not None:
+            return RefusedCall(call, why)
+        judged = self._capability(call)
+        if isinstance(judged, PlannedCall) and self._stops_elsewhere(judged.call):
+            # §4:5, ADR-0349 §7:26: a waiting round's stop names work it waits on.
+            return RefusedCall(call, WAITING_ROUND)
+        return judged
+
+    def _stops_elsewhere(self, call: ProposedCall) -> bool:
+        """Whether ``call`` is a waiting round's stop naming work it does not wait on."""
+        if self.waited is None or call.name != STOP_ACTIVATION_CAPABILITY:
+            return False
+        named = self.label_arguments.get(call.name, {})
+        return any(
+            kind is LabelKind.EPISODE and call.arguments.get(argument) not in self.waited
+            for argument, kind in named.items()
+        )
 
     def _capability(self, call: ProposedCall) -> PlannedCall | RefusedCall:
         """A call to an offered capability, its labels replaced by ids (§5:3-§5:4)."""
@@ -3192,6 +3485,14 @@ class _Refusal:
     reason: str
 
 
+#: ADR-0356 §4:5, ADR-0349 §7:26: why a call on a waiting round runs nothing, unless it
+#: is a message call or a stop naming the work the round waits on.
+WAITING_ROUND: Final = (
+    "this round waits on running work: only a message, or a stop naming the work it "
+    "waits on, runs now; anything else waits for the next round"
+)
+
+
 #: ADR-0321 §4:2: an approved action is proposed by its label, and its values are the
 #: recorded ones.
 _APPROVED_LABEL_ALONE: Final = (
@@ -3296,14 +3597,28 @@ class PlanningStage:
         """
         book = _LabelBook(inputs.labels)
         offered = offered_tools(inputs.capabilities)
-        # ADR-0321 §4:2: each approved action holds its A label from before the request
-        # is rendered, so the tool proposing them can name every one.
-        approved = {
-            book.label(LabelKind.APPROVED_ACTION, _approved_id(one.part)): one
-            for one in inputs.approved
-        }
-        approved_tool = _approved_tool(approved, offered)
-        offered_here = offered if approved_tool is None else (*offered, approved_tool)
+        work = inputs.work
+        if work is None:
+            # ADR-0321 §4:2: each approved action holds its A label from before the
+            # request is rendered, so the tool proposing them can name every one.
+            approved = {
+                book.label(LabelKind.APPROVED_ACTION, _approved_id(one.part)): one
+                for one in inputs.approved
+            }
+            approved_tool = _approved_tool(approved, offered)
+            offered_here = offered if approved_tool is None else (*offered, approved_tool)
+        else:
+            # ADR-0356 §4:3, §5:2: every round of a work is offered what its first round
+            # was, and an approved action is one its briefing showed under an A label.
+            approved = {
+                label: one
+                for one in inputs.approved
+                if (label := book.held(LabelKind.APPROVED_ACTION, _approved_id(one.part)))
+            }
+            offered_here = work.tools
+            approved_tool = next(
+                (one for one in work.tools if one.name == APPROVED_ACTION_TOOL), None
+            )
         request = _Request(
             inputs,
             book,
@@ -3311,30 +3626,32 @@ class PlanningStage:
             now=self._now(),
             zone=self._zone_for(inputs.person),
         )
-        rendered = request.rendered(offered_here)
-        instruction = self._prompt.rendered(
-            flags={
-                "takes_message": inputs.place.takes_message,
-                "story_calls": any(tool.name in STORY_CALL_CAPABILITIES for tool in offered),
-                "story_reads": _offers_story_reads(offered),
-                "approved": approved_tool is not None,
-                "candidates": any(tool.name == REMEMBER_CAPABILITY for tool in offered),
-                "reliance": any(tool.name == NOTE_RELIANCE_CAPABILITY for tool in offered),
-                "person": inputs.person is not None,
-                "suggestions": inputs.person is not None and bool(inputs.person.suggestions),
-                "spawn": inputs.places is not None
-                and any(tool.name == SPAWN_CAPABILITY for tool in offered),
-                "scheduled": inputs.speaks_by_label,
-                "running_work": any(tool.name in _RUNNING_WORK_CALLS for tool in offered),
-                "offers": bool(inputs.offers),
-                "waiting": bool(inputs.waiting),
-                "earlier_work": bool(inputs.earlier_work),
-            },
-            values=_PLANNING_VALUES,
-        )
-        # ADR-0356 §14:1: one briefing of today's rendered context, the round asked
-        # afresh with it; the work's exchange held across rounds is P2's.
-        exchange = PlanningExchange(instruction=instruction.text, briefing=rendered)
+        instruction: RenderedPrompt | None
+        if work is None:
+            # ADR-0356 §5:2: a work's first round renders the briefing, once, and the
+            # instruction it is asked under, which every later round hands in unchanged.
+            rendered = request.rendered(offered_here)
+            instruction = self._prompt.rendered(
+                flags=self._flags(inputs, offered, approved_tool=approved_tool is not None),
+                values=_PLANNING_VALUES,
+            )
+            exchange = PlanningExchange(instruction=instruction.text, briefing=rendered)
+            shown = request.shown_now()
+            number = 1
+        else:
+            # §5:1-§5:3: every later round appends the last round's response, as the
+            # completer returned it, and its report; nothing earlier is re-rendered.
+            report, shown = request.report(work)
+            exchange = PlanningExchange(
+                instruction=work.exchange.instruction,
+                briefing=work.exchange.briefing,
+                steps=(
+                    *work.exchange.steps,
+                    ExchangeStep(response=work.response, report=report),
+                ),
+            )
+            instruction = None
+            number = work.number + 1
         response = await self._responded(exchange, offered_here, instruction)
         read_outside = inputs.outside_content_read or inputs.outside_trigger or request.shown.marked
         # ADR-0356 §7:2, §14:1: the round's text is kept as its notes. Until a message is
@@ -3359,7 +3676,7 @@ class PlanningStage:
         )
         labels = tuple(book.minted)
         recorded = await self._record(planning_round, labels)
-        declarations = _offered_declarations(inputs.capabilities, offered)
+        declarations = _offered_declarations(inputs.capabilities, offered_here)
         judge = _Judge(
             offered=declarations,
             label_arguments=inputs.label_arguments,
@@ -3370,6 +3687,12 @@ class PlanningStage:
                 else {_approved_id(one.part): one for one in approved.values()}
             ),
             capabilities=inputs.capabilities,
+            not_here=inputs.not_here,
+            waited=(
+                frozenset(episode_address(one.activation_id) for one in inputs.waiting)
+                if inputs.waiting
+                else None
+            ),
         )
         judged = [judge(call) for call in response.calls]
         refused = tuple(one for one in judged if isinstance(one, RefusedCall))
@@ -3386,13 +3709,55 @@ class PlanningStage:
                 if inputs.place.takes_message and planning_round.text.strip()
                 else None
             ),
+            work=PlanningWork(
+                exchange=exchange,
+                tools=tuple(offered_here),
+                response=response,
+                round_id=planning_round.id,
+                number=number,
+                shown=shown,
+            ),
+            read_outside=read_outside,
         )
+
+    @staticmethod
+    def _flags(
+        inputs: PlanningInputs, offered: Sequence[OfferedTool], *, approved_tool: bool
+    ) -> dict[str, bool]:
+        """The template's flags, computed once, at the work's first round (ADR-0334 §2:1).
+
+        The instruction is the same on every round of a work (ADR-0356 §5:2), so it is
+        rendered under what the first round holds, and a condition that may change between
+        rounds is held to one value. ADR-0356 §4:2 takes every flag away in the lane that
+        rewrites the instruction (§14:3).
+        """
+        return {
+            "takes_message": inputs.place.takes_message,
+            "story_calls": any(tool.name in STORY_CALL_CAPABILITIES for tool in offered),
+            "story_reads": _offers_story_reads(offered),
+            "approved": approved_tool,
+            "candidates": any(tool.name == REMEMBER_CAPABILITY for tool in offered),
+            "reliance": any(tool.name == NOTE_RELIANCE_CAPABILITY for tool in offered),
+            "person": inputs.person is not None,
+            "suggestions": inputs.person is not None and bool(inputs.person.suggestions),
+            "spawn": inputs.places is not None
+            and any(tool.name == SPAWN_CAPABILITY for tool in offered),
+            "scheduled": inputs.speaks_by_label,
+            "running_work": any(tool.name in _RUNNING_WORK_CALLS for tool in offered),
+            # What may change between a work's rounds is held to one value, since the
+            # instruction does not change with it: the offers' and the earlier work's
+            # lines are sent on every round, and the waiting round's line in place of the
+            # rest never is; a call a waiting round may not make is refused (§4:5).
+            "offers": True,
+            "waiting": False,
+            "earlier_work": True,
+        }
 
     async def _responded(
         self,
         exchange: PlanningExchange,
         offered: Sequence[OfferedTool],
-        instruction: RenderedPrompt,
+        instruction: RenderedPrompt | None,
     ) -> RoundResponse:
         """Ask the round, its request written to the record first (ADR-0314 §4, §5).
 
@@ -3400,24 +3765,28 @@ class PlanningStage:
         whether or not it reads as a round (§5:2). Where it wrote none because no
         response came back, this module writes it, with the failure; the failure is
         re-raised unchanged. The given entry records the exchange as handed in
-        (ADR-0356 §13:6), and beside it the same request as the system and user
-        messages it is sent as while the exchange is its briefing alone, which the
-        owner's replay tool and viewer read; it names the template the instruction was
-        rendered from and the flags it was rendered under (ADR-0334 §8:2, ADR-0335 §9:1).
+        (ADR-0356 §13:6). While the exchange is its briefing alone, it also records the
+        same request as the system and user messages it is sent as, which the owner's
+        replay tool and viewer read, and names the template the instruction was rendered
+        from and the flags it was rendered under (ADR-0334 §8:2, ADR-0335 §9:1). Once
+        the exchange has steps, those two messages are no longer the request, so they
+        are left out, and the instruction is the one the first round rendered.
         """
-        await write_diagnostic(
-            self._diagnostics,
-            DiagnosticSource.PLANNING,
-            DiagnosticKind.GIVEN,
-            lambda: {
-                "exchange": exchange.model_dump(mode="json"),
-                "messages": [
+
+        def given() -> dict[str, object]:
+            body: dict[str, object] = {"exchange": exchange.model_dump(mode="json")}
+            if not exchange.steps:
+                body["messages"] = [
                     Message(role=Role.SYSTEM, content=exchange.instruction).model_dump(mode="json"),
                     Message(role=Role.USER, content=exchange.briefing).model_dump(mode="json"),
-                ],
-                "tools": [tool.model_dump(mode="json") for tool in offered],
-                "prompt": instruction.provenance(),
-            },
+                ]
+            body["tools"] = [tool.model_dump(mode="json") for tool in offered]
+            if instruction is not None:
+                body["prompt"] = instruction.provenance()
+            return body
+
+        await write_diagnostic(
+            self._diagnostics, DiagnosticSource.PLANNING, DiagnosticKind.GIVEN, given
         )
         written = returned_written(DiagnosticSource.PLANNING)
         try:

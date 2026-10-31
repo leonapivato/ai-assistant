@@ -102,10 +102,18 @@ def _with_later_defaults(stored: dict[str, Any]) -> dict[str, Any]:
     assert record["trigger"]["origin"] == "user"  # the hub chat's, §9:2
     trigger = {name: one for name, one in record["trigger"].items() if name != "origin"}
     owner = SupportHolder.person(OWNER_PERSON_ID).model_dump(mode="json")
-    added: dict[str, Any] = {"joined": [], "stories_position": None, "taken_over_by": None}
+    added: dict[str, Any] = {
+        "joined": [],
+        "stories_position": None,
+        "taken_over_by": None,
+        "call_records": [],
+    }
+    # ADR-0356 §13:5: the chain ends in carrying the record to version 12.
     return {
         **stored,
-        "processing_record": added | record | {"trigger": trigger | {"parties": [owner]}},
+        "processing_record": added
+        | record
+        | {"trigger": trigger | {"parties": [owner]}, "schema_version": 12},
     }
 
 
