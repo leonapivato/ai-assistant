@@ -3541,7 +3541,7 @@ async def test_a_tidy_ups_entry_is_stored_as_it_starts_while_its_sibling_is_pend
         RoundResponse(
             calls=(
                 _call("c2", "tidy_story", story="S1"),
-                _call("c3", "text", words="Tidying."),
+                _call("c3", "text", to="the user", words="Tidying."),
             )
         ),
         RoundResponse(),

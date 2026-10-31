@@ -78,7 +78,7 @@ from ai_assistant.tools import (
 )
 from ai_assistant.tools.egress import TransportPinError
 from ai_assistant.tools.egress_binder import EgressBindingSeam
-from ai_assistant.tools.send_email import SEND_EMAIL, SEND_EMAIL_ID
+from ai_assistant.tools.send_email import EMAIL, EMAIL_ID
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -154,7 +154,7 @@ def _authorised(parameters: Mapping[str, FrozenJson], binding: object) -> ToolCa
         The call, which is unconstructable unless the decision authorises it.
     """
     request = ActionRequest(
-        tool=SEND_EMAIL,
+        tool=EMAIL,
         parameters=parameters,
         egress_binding=binding,  # type: ignore[arg-type]  # a case supplies None deliberately
     )
@@ -185,10 +185,10 @@ async def test_a_configured_deployment_registers_the_tool_and_binds_it_to_one_ac
     trail = FakeAuditTrail()
     registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
 
-    assert await registry.get(SEND_EMAIL_ID) == SEND_EMAIL
-    assert SEND_EMAIL.capability in await registry.capabilities()
+    assert await registry.get(EMAIL_ID) == EMAIL
+    assert EMAIL.capability in await registry.capabilities()
 
-    registration = egress_registrations(integration).registration(SEND_EMAIL_ID)
+    registration = egress_registrations(integration).registration(EMAIL_ID)
     assert registration is not None
     assert registration.reference == REFERENCE
     assert registration.transport_endpoint == ENDPOINT
@@ -205,9 +205,7 @@ async def test_the_registration_the_table_holds_is_the_one_the_transport_holds()
     """
     integration, _ = await _configured()
 
-    assert egress_registrations(integration).registration(SEND_EMAIL_ID) is (
-        integration.registration
-    )
+    assert egress_registrations(integration).registration(EMAIL_ID) is (integration.registration)
 
 
 async def test_an_unconfigured_deployment_holds_neither_half() -> None:
@@ -221,7 +219,7 @@ async def test_an_unconfigured_deployment_holds_neither_half() -> None:
     registry = build_default_registry(ledger=trail, gate=trail)
 
     assert {tool.id for tool in await registry.all_tools()} == {CURRENT_TIME.id}
-    assert egress_registrations(None).registration(SEND_EMAIL_ID) is None
+    assert egress_registrations(None).registration(EMAIL_ID) is None
 
 
 async def test_no_memory_capability_is_advertised_with_an_integration_either() -> None:
@@ -246,8 +244,8 @@ async def test_no_memory_capability_is_advertised_with_an_integration_either() -
     capabilities = await registry.capabilities()
     ids = {tool.id for tool in await registry.all_tools()}
 
-    assert set(capabilities) == {CURRENT_TIME.capability, SEND_EMAIL.capability}
-    assert ids == {CURRENT_TIME.id, SEND_EMAIL_ID}
+    assert set(capabilities) == {CURRENT_TIME.capability, EMAIL.capability}
+    assert ids == {CURRENT_TIME.id, EMAIL_ID}
 
 
 def test_an_endpoint_this_seam_will_not_pin_is_refused_at_wiring_rather_than_at_a_send() -> None:
@@ -289,12 +287,12 @@ async def test_a_send_with_no_connected_account_is_refused_not_answered_none() -
     """
     trail = FakeAuditTrail()
     registry = build_default_registry(ledger=trail, gate=trail)
-    registry.register(SEND_EMAIL, _never_called)
+    registry.register(EMAIL, _never_called)
     seam = _seam(None, registry)
 
     with pytest.raises(EgressBindingError, match="mis-registered"):
         await seam.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters=arguments(),
             provenance=CarriedProvenance(
                 spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
@@ -327,15 +325,15 @@ async def test_selection_reaches_the_registered_tool_when_it_is_the_one_capable_
     trail = FakeAuditTrail()
     registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
 
-    candidates: Sequence[ToolDefinition] = await registry.find(SEND_EMAIL.capability)
-    assert [tool.id for tool in candidates] == [SEND_EMAIL_ID]
+    candidates: Sequence[ToolDefinition] = await registry.find(EMAIL.capability)
+    assert [tool.id for tool in candidates] == [EMAIL_ID]
 
     fit = eligible_candidates(arguments(), candidates)
     assert fit.failure is None
-    assert [tool.id for tool in fit.eligible] == [SEND_EMAIL_ID]
+    assert [tool.id for tool in fit.eligible] == [EMAIL_ID]
 
     chosen = select(fit.eligible, Preference(()))
-    assert chosen.tool == SEND_EMAIL
+    assert chosen.tool == EMAIL
     assert chosen.tied == ()
 
 
@@ -363,7 +361,7 @@ async def test_an_authorised_call_reaches_the_transport_and_the_message_goes_out
 
     parameters = arguments()
     bound = await seam.bind(
-        SEND_EMAIL,
+        EMAIL,
         parameters=parameters,
         provenance=CarriedProvenance(
             spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
@@ -392,7 +390,7 @@ async def test_an_authorised_call_reaches_the_transport_and_the_message_goes_out
 
 
 async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> None:
-    """#1160 closed, over the **real** ``SEND_EMAIL`` and the whole chain (ADR-0157 §7).
+    """#1160 closed, over the **real** ``EMAIL`` and the whole chain (ADR-0157 §7).
 
     §7 puts this obligation on the implementing lane by name, and says why every
     other test in its list can pass while #1160 stays open: a lane could widen the
@@ -400,7 +398,7 @@ async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> N
     declaring the third form, leave this tool's own ``to`` array-only, and ship a
     green suite over the exact call #1159 recorded as refused.
 
-    So the subject here is ``SEND_EMAIL`` itself, and the call is the one leg 12's
+    So the subject here is ``EMAIL`` itself, and the call is the one leg 12's
     QA run measured — "send an email to X", which the planner composes as a bare
     string because it is tool-blind by design (ADR-0044 lineage) and picks the form
     the sentence's grammar suggests. Three assertions, one per stage that used to
@@ -417,13 +415,14 @@ async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> N
     parameters: Mapping[str, FrozenJson] = {
         "to": "Alice@Example.Invalid",
         "subject": "quarterly report",
-        "body": "attached, as promised",
+        "words": "attached, as promised",
+        "from": "user",
     }
 
-    assert parameter_violations(SEND_EMAIL.parameters_schema, parameters) == ()
+    assert parameter_violations(EMAIL.parameters_schema, parameters) == ()
 
     bound = await seam.bind(
-        SEND_EMAIL,
+        EMAIL,
         parameters=parameters,
         provenance=CarriedProvenance(
             spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
@@ -460,7 +459,7 @@ async def test_a_transport_refusal_comes_back_as_a_classified_failure_not_an_esc
 
     parameters = arguments()
     bound = await seam.bind(
-        SEND_EMAIL,
+        EMAIL,
         parameters=parameters,
         provenance=CarriedProvenance(
             spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED

@@ -68,7 +68,7 @@ from ai_assistant.tools.egress import (
     TransportPinError,
 )
 from ai_assistant.tools.egress_binder import EgressRegistration
-from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
+from ai_assistant.tools.send_email import EMAIL, SendEmail
 
 if TYPE_CHECKING:
     from egress_transport_harness import Keyring
@@ -124,8 +124,8 @@ def test_a_denial_performs_no_credential_read_and_no_network_io() -> None:
     credential unread and a connection unopened by construction.
     """
     request = ActionRequest(
-        tool=SEND_EMAIL,
-        parameters={"to": ["a@example.invalid"], "subject": "s", "body": "b"},
+        tool=EMAIL,
+        parameters={"to": ["a@example.invalid"], "subject": "s", "words": "b"},
     )
     denied = PermissionDecision.from_request(
         request,
@@ -451,7 +451,7 @@ async def test_the_payload_is_the_arguments_and_there_is_no_second_copy_to_subst
         pytest.param({"to": [1]}, id="a-recipient-that-is-not-text"),
         pytest.param({"to": {"address": "alice@example.invalid"}}, id="a-structured-recipient"),
         pytest.param({"subject": 7}, id="a-subject-that-is-not-text"),
-        pytest.param({"body": ["a", "b"]}, id="a-body-that-is-not-text"),
+        pytest.param({"words": ["a", "b"]}, id="a-body-that-is-not-text"),
         pytest.param({"to": []}, id="no-recipient-at-all"),
     ],
 )
@@ -1084,6 +1084,6 @@ def test_the_tool_the_registry_would_bind_still_declares_what_it_discloses() -> 
     designating ADR reads, and a tool that transmits while declaring nothing is
     the evasion §8 calls "otherwise available and undetectable".
     """
-    assert SEND_EMAIL.discloses == (DataTier.PERSONAL,)
-    assert SEND_EMAIL.side_effecting
+    assert EMAIL.discloses == (DataTier.PERSONAL,)
+    assert EMAIL.side_effecting
     assert ENDPOINT.startswith("smtps://")

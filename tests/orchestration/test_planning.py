@@ -115,7 +115,7 @@ from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN, FAKE_WEB_SEARCH
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.types import PlanningExchange, SupportHolder
@@ -203,14 +203,20 @@ class _Recorder:
     def __init__(self, *, fails: bool = False) -> None:
         self.fails = fails
         self.recorded: list[tuple[PlanningRound, tuple[PlanningLabel, ...]]] = []
+        self.questions: list[Mapping[str, str]] = []
 
     async def record(
-        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+        self,
+        planning_round: PlanningRound,
+        labels: tuple[PlanningLabel, ...],
+        *,
+        questions: Mapping[str, str] | None = None,
     ) -> None:
         if self.fails:
             msg = "the append failed"
             raise RuntimeError(msg)
         self.recorded.append((planning_round, labels))
+        self.questions.append(questions or {})
 
 
 #: ADR-0334 §9:2: a template of the test's own that prints each flag the stage set, one

@@ -365,7 +365,13 @@ def arguments(  # noqa: PLR0913 — one keyword per argument the tool declares.
     Returns:
         The mapping.
     """
-    built: dict[str, FrozenJson] = {"to": list(to), "subject": subject, "body": body}
+    built: dict[str, FrozenJson] = {
+        "to": list(to),
+        "subject": subject,
+        "words": body,
+        # ADR-0357 §2:9: the connected account a submission is sent from is the user's.
+        "from": "user",
+    }
     if cc:
         built["cc"] = list(cc)
     if bcc:
@@ -382,7 +388,7 @@ def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping 
     endpoint: str = ENDPOINT,
     subject: str = "quarterly report",
     body: str = "attached, as promised",
-    describes: Iterable[str] = ("subject", "body"),
+    describes: Iterable[str] = ("subject", "words"),
     indexed: bool = True,
 ) -> EgressBinding:
     """One authorised binding, as a ruling fixed it.
@@ -414,17 +420,20 @@ def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping 
         A binding a policy could have ruled on.
     """
     covered = frozenset(describes)
-    text_of = {"subject": subject, "body": body}
-    spans = [
+    text_of = {"subject": subject, "words": body}
+    unordered = [
         *(
             EgressSpan(
                 argument=argument,
                 provenance=DiscloserProvenance.USER_AUTHORED,
                 extent=len(text_of[argument]),
             )
-            # Ordered by argument name, which is what `EgressBinding` requires:
-            # "body" precedes "subject" precedes "to" by Unicode code point.
             for argument in sorted(covered)
+        ),
+        # ADR-0357 §2:9: ``from`` is an argument the call carries, so a span describes
+        # it, though it is never transmitted.
+        EgressSpan(
+            argument="from", provenance=DiscloserProvenance.USER_AUTHORED, extent=len("user")
         ),
         *(
             EgressSpan(
@@ -439,6 +448,10 @@ def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping 
             for index, (supplied, canonical) in enumerate(recipients)
         ),
     ]
+    # Ordered by argument name, which is what `EgressBinding` requires: "subject"
+    # precedes "to" precedes "words" by Unicode code point. The sort is stable, so the
+    # recipients keep their order.
+    spans = sorted(unordered, key=lambda one: one.argument)
     return EgressBinding(
         spans=tuple(spans),
         account=BoundAccount(identity=identity, reference=reference),

@@ -155,7 +155,7 @@ def tool_declaring(
 #: The shape every happy-path case binds: recipients, a subject and a body. The
 #: two free-text arguments establish no tier, which is ADR-0146 §5's own worked
 #: split — "a message body, a note, a subject line" establishes none.
-SEND_EMAIL: Final = tool_declaring(
+EMAIL: Final = tool_declaring(
     {
         "to": recipients(),
         "subject": {"type": "string"},
@@ -499,11 +499,11 @@ class EgressBinderContract(ABC):
         tool with no egress registration whose arguments revalidated, and no tool
         is both returned ``None`` for and refused under that section.
         """
-        self.register(binder, SEND_EMAIL)
+        self.register(binder, EMAIL)
 
         with pytest.raises(EgressBindingError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
@@ -518,13 +518,13 @@ class EgressBinderContract(ABC):
         exclusivity unpinned.
         """
         self.register(binder, NOT_EGRESS)
-        self.register(binder, SEND_EMAIL)
+        self.register(binder, EMAIL)
 
         answered = await binder.bind(
             NOT_EGRESS, parameters={"query": "q"}, provenance=_no_provenance()
         )
         with pytest.raises(EgressBindingError):
-            await binder.bind(SEND_EMAIL, parameters={}, provenance=_no_provenance())
+            await binder.bind(EMAIL, parameters={}, provenance=_no_provenance())
 
         assert answered is None
 
@@ -541,10 +541,10 @@ class EgressBinderContract(ABC):
         comparison, since a caller has no route by which to present one that
         disagrees.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         bound = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={
                 "to": ["Alice@Example.COM", "bob@example.com"],
                 "subject": "s",
@@ -575,10 +575,10 @@ class EgressBinderContract(ABC):
         for nothing disclosed. The binding is still produced: the call selects no
         onward recipient, which is ADR-0148 §2's third clause and not a defect.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         bound = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={"to": [], "subject": "s", "body": "b"},
             provenance=_no_provenance(),
         )
@@ -590,11 +590,11 @@ class EgressBinderContract(ABC):
         self, binder: EgressBinder
     ) -> None:
         """ADR-0148 §1 and ADR-0152 §5: refused, never passed through as its own canonical form."""
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         with pytest.raises(EgressBindingError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["not an address"], "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
@@ -611,11 +611,11 @@ class EgressBinderContract(ABC):
         declaration clause refuses the schema that would carry it and ADR-0145
         refuses the value against the schema that survives.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         with pytest.raises(EgressBindingError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={
                     "to": {"to": ["alice@example.com", "mallory@example.com"]},
                     "subject": "s",
@@ -633,11 +633,11 @@ class EgressBinderContract(ABC):
         recipient is accepted does not reach the case. It is refused too, and this
         is what says so.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         with pytest.raises(EgressBindingError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": {"address": "alice@example.com"}, "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
@@ -655,10 +655,10 @@ class EgressBinderContract(ABC):
         reconstructing it from the canonical one as a failure in terms — so the
         supplied form is asserted unaltered beside the computed one.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         bound = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={"to": [supplied], "subject": "s", "body": "b"},
             provenance=_no_provenance(),
         )
@@ -680,11 +680,11 @@ class EgressBinderContract(ABC):
         consumer's test park and approve a call production would never make, which
         is a double certifying a weaker seam than the one it stands in for.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         with pytest.raises(EgressBindingError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": [supplied], "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
@@ -754,11 +754,11 @@ class EgressBinderContract(ABC):
         renders neither the key nor its value — a key is a string a model can write
         as freely as a value, and this seam runs before the request exists.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         with pytest.raises(EgressBindingError) as raised:
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={
                     "to": ["alice@example.com"],
                     "subject": "s",
@@ -782,7 +782,7 @@ class EgressBinderContract(ABC):
         what detects it.
         """
         permissive = ToolDefinition.model_validate(
-            SEND_EMAIL.model_dump()
+            EMAIL.model_dump()
             | {
                 "parameters_schema": {
                     "type": "object",
@@ -809,7 +809,7 @@ class EgressBinderContract(ABC):
         asserting only the refusal would leave the empty call unpinned.
         """
         bare = ToolDefinition.model_validate(
-            SEND_EMAIL.model_dump() | {"parameters_schema": {"type": "object"}}
+            EMAIL.model_dump() | {"parameters_schema": {"type": "object"}}
         )
         self.register_egress(binder, bare)
 
@@ -899,11 +899,11 @@ class EgressBinderContract(ABC):
         it — so the refusal is otherwise unreachable rather than absent.
         """
         binder = self.canonicalising_nothing()
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         with pytest.raises(EgressBindingError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
@@ -1214,11 +1214,11 @@ class EgressBinderContract(ABC):
         split between a loggable handle and a Tier 1 value — and never names the
         identity.
         """
-        self.register_egress(binder, SEND_EMAIL, state=ProvisioningState.PENDING)
+        self.register_egress(binder, EMAIL, state=ProvisioningState.PENDING)
 
         with pytest.raises(EgressBindingError) as raised:
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
@@ -1228,12 +1228,12 @@ class EgressBinderContract(ABC):
 
     async def test_an_absent_record_is_refused(self, binder: EgressBinder) -> None:
         """ADR-0148 §6: a reference whose record is absent is not connectable either."""
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         self.remove_connection(binder, REFERENCE)
 
         with pytest.raises(EgressBindingError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
@@ -1247,12 +1247,12 @@ class EgressBinderContract(ABC):
         from an earlier one" (ADR-0148 §6). A seam that took the state at
         registration time would bind this call happily.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         self.set_connection(binder, REFERENCE, identity=IDENTITY, state=ProvisioningState.PENDING)
 
         with pytest.raises(EgressBindingError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
@@ -1265,11 +1265,11 @@ class EgressBinderContract(ABC):
         Only the identity moves, which is why only the identity is re-read
         (ADR-0152 §8).
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         self.set_connection(binder, REFERENCE, identity="rotated@example.com")
 
         bound = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
             provenance=_no_provenance(),
         )
@@ -1285,7 +1285,7 @@ class EgressBinderContract(ABC):
         Asserted against the subject's own instrumentation rather than by
         inspection, and for ``rebind`` as well as ``bind``.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         self.register(binder, NOT_EGRESS)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
@@ -1293,10 +1293,10 @@ class EgressBinderContract(ABC):
             "body": "b",
         }
 
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
         await binder.bind(NOT_EGRESS, parameters={"query": "q"}, provenance=_no_provenance())
-        await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+        await binder.rebind(EMAIL, parameters=parameters, approved=first.binding)
         await binder.rebind(NOT_EGRESS, parameters={"query": "q"}, approved=None)
 
         assert self.reads(binder) == (REFERENCE, REFERENCE)
@@ -1309,12 +1309,12 @@ class EgressBinderContract(ABC):
         Conflating the two writes a falsehood into a returned value and makes
         retryability unreadable.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         self.fail_next_read(binder)
 
         with pytest.raises(ConnectionStoreError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
@@ -1329,18 +1329,18 @@ class EgressBinderContract(ABC):
         ``bind`` case above while turning a store fault into a refusal at exactly
         the moment a user is waiting on an answer they have already given.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
         self.fail_next_read(binder)
 
         with pytest.raises(ConnectionStoreError):
-            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+            await binder.rebind(EMAIL, parameters=parameters, approved=first.binding)
 
     # --- ADR-0152 §1, §5: provenance ----------------------------------------
 
@@ -1353,10 +1353,10 @@ class EgressBinderContract(ABC):
         supplied by a field, which is why
         :attr:`~ai_assistant.core.types.EgressSpan.provenance` has none.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         bound = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
             provenance=CarriedProvenance(
                 spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
@@ -1380,11 +1380,11 @@ class EgressBinderContract(ABC):
         hide the disagreement. The message names a count and nothing of the
         locator, whose ``argument`` is caller-supplied text (ADR-0152 §11).
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         with pytest.raises(EgressBindingError) as raised:
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
                 provenance=CarriedProvenance(
                     spans={
@@ -1455,7 +1455,7 @@ class EgressBinderContract(ABC):
         could clear one. This is the one place the binder's suite reaches out of its
         own subsystem, and it is the clause's own subject that puts it there.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         recipient: Mapping[str, FrozenJson] = {"to": ["a@example.com"], "subject": "s"}
         user_authored = CarriedProvenance(
             spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
@@ -1464,12 +1464,12 @@ class EgressBinderContract(ABC):
         )
 
         bound = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={**recipient, "body": CREDENTIAL_LITERAL},
             provenance=user_authored,
         )
         plain = await binder.bind(
-            SEND_EMAIL, parameters={**recipient, "body": "b"}, provenance=_no_provenance()
+            EMAIL, parameters={**recipient, "body": "b"}, provenance=_no_provenance()
         )
 
         assert bound is not None
@@ -1533,9 +1533,9 @@ class EgressBinderContract(ABC):
         original meet before the ruling. It is not a substitute for ``invoke``'s
         own, which still runs.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         substituted = ToolDefinition.model_validate(
-            SEND_EMAIL.model_dump() | {"risk_level": RiskLevel.LOW.value}
+            EMAIL.model_dump() | {"risk_level": RiskLevel.LOW.value}
         )
 
         with pytest.raises(EgressBindingError):
@@ -1549,17 +1549,17 @@ class EgressBinderContract(ABC):
         self, binder: EgressBinder
     ) -> None:
         """ADR-0152 §1: three fields, so the caller never reaches for its own objects."""
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
 
-        bound = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        bound = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
 
         assert isinstance(bound, BoundEgressCall)
-        assert bound.tool == SEND_EMAIL
+        assert bound.tool == EMAIL
         assert dict(bound.parameters) == {
             "to": ("a@example.com",),
             "subject": "s",
@@ -1624,7 +1624,7 @@ class EgressBinderContract(ABC):
         described one, so a seam reading the caller's mapping after the await would
         either refuse under §6 or describe a payload nobody proposed.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
@@ -1633,7 +1633,7 @@ class EgressBinderContract(ABC):
         held = self.suspend_next_read(binder)
 
         async with held_at_its_first_await(
-            held, binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+            held, binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         ) as task:
             parameters["body"] = "rewritten while the seam was suspended"
             parameters["X-Secret"] = "sk-live-0001"
@@ -1655,7 +1655,7 @@ class EgressBinderContract(ABC):
         span to ``SYSTEM_SELECTED``; naming an absent span would make §5's refusal
         fire on a call that never carried one.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         carrier = CarriedProvenance(
             spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
             planned_with_external_content=False,
@@ -1666,7 +1666,7 @@ class EgressBinderContract(ABC):
         async with held_at_its_first_await(
             held,
             binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
                 provenance=carrier,
             ),
@@ -1693,19 +1693,19 @@ class EgressBinderContract(ABC):
         nobody approved. Asserted in both directions: the resume still succeeds, and
         what comes back is the **derived** binding rather than the substituted one.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
         approved = EgressBinding.model_validate(first.binding.model_dump())
         held = self.suspend_next_read(binder)
 
         async with held_at_its_first_await(
-            held, binder.rebind(SEND_EMAIL, parameters=parameters, approved=approved)
+            held, binder.rebind(EMAIL, parameters=parameters, approved=approved)
         ) as task:
             object.__setattr__(approved, "transport_endpoint", "test://somewhere-else")
         again = await task
@@ -1728,8 +1728,8 @@ class EgressBinderContract(ABC):
     def _bypass_subject(self, binder: EgressBinder, *, registered: bool) -> ToolDefinition:
         """The tool a bypass case is aimed at, on each side of ADR-0152 §8's partition."""
         if registered:
-            self.register_egress(binder, SEND_EMAIL)
-            return SEND_EMAIL
+            self.register_egress(binder, EMAIL)
+            return EMAIL
         self.register(binder, NOT_EGRESS)
         return NOT_EGRESS
 
@@ -1865,17 +1865,17 @@ class EgressBinderContract(ABC):
         pass the first and read the second's forged account as the one a user
         approved.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
         corrupted = EgressBinding.model_validate(first.binding.model_dump())
         object.__setattr__(corrupted, "account", None)
-        subject = SEND_EMAIL if registered else NOT_EGRESS
+        subject = EMAIL if registered else NOT_EGRESS
         if not registered:
             self.register(binder, NOT_EGRESS)
 
@@ -1935,16 +1935,16 @@ class EgressBinderContract(ABC):
         Never the one read back out of a store, so a tampered trail row cannot
         become the binding a second ruling is taken over.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
 
-        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+        again = await binder.rebind(EMAIL, parameters=parameters, approved=first.binding)
 
         assert again is not None
         assert again.binding == first.binding
@@ -1958,18 +1958,18 @@ class EgressBinderContract(ABC):
         of the trail carrying a forged occurrence is compared against a freshly
         derived binding, and ``rebind`` refuses before ``resolve`` is reached.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
         forged = _with_forged_canonical(first.binding)
 
         with pytest.raises(EgressBindingError):
-            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=forged)
+            await binder.rebind(EMAIL, parameters=parameters, approved=forged)
 
     @pytest.mark.parametrize(
         "field",
@@ -1985,18 +1985,18 @@ class EgressBinderContract(ABC):
         field, because a comparison that missed one would let that field move
         between the question and the answer.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
 
         with pytest.raises(EgressBindingError):
             await binder.rebind(
-                SEND_EMAIL, parameters=parameters, approved=_differing(first.binding, field)
+                EMAIL, parameters=parameters, approved=_differing(first.binding, field)
             )
 
     async def test_rebind_refuses_an_approved_binding_with_a_destination_omitted(
@@ -2021,13 +2021,13 @@ class EgressBinderContract(ABC):
         derived set names the **account alone**, which ADR-0150 §3's condition clause
         forbids reading as "this call selected no recipient".
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
         stripped = _without_destinations(first.binding)
         assert [member.account for member in stripped.canonical_destination_set] == [
@@ -2035,7 +2035,7 @@ class EgressBinderContract(ABC):
         ]
 
         with pytest.raises(EgressBindingError):
-            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=stripped)
+            await binder.rebind(EMAIL, parameters=parameters, approved=stripped)
 
     async def test_rebind_keeps_a_user_authored_provenance(self, binder: EgressBinder) -> None:
         """ADR-0152 §7, §13: the case a ``rebind`` re-deriving provenance would fail.
@@ -2045,14 +2045,14 @@ class EgressBinderContract(ABC):
         get an empty one, describe every span as ``SYSTEM_SELECTED`` and refuse
         every resumed call whose user typed anything.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
         first = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters=parameters,
             provenance=CarriedProvenance(
                 spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
@@ -2062,7 +2062,7 @@ class EgressBinderContract(ABC):
         )
         assert first is not None
 
-        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+        again = await binder.rebind(EMAIL, parameters=parameters, approved=first.binding)
 
         assert again is not None
         located = {(span.argument, span.index): span.provenance for span in again.binding.spans}
@@ -2083,10 +2083,10 @@ class EgressBinderContract(ABC):
         recovering it from an argument's value, its field or its shape, and the
         arguments below are identical across the two runs.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         bound = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
             provenance=CarriedProvenance(
                 spans={},
@@ -2114,14 +2114,14 @@ class EgressBinderContract(ABC):
         nothing else in it: everything else is still re-derived, and the resumed
         binding still has to equal the approved one whole.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
         first = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters=parameters,
             provenance=CarriedProvenance(
                 spans={}, planned_with_external_content=True, coverage=SpanCoverage.NOT_COVERED
@@ -2130,7 +2130,7 @@ class EgressBinderContract(ABC):
         assert first is not None
         assert first.binding.planned_with_external_content is True
 
-        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+        again = await binder.rebind(EMAIL, parameters=parameters, approved=first.binding)
 
         assert again is not None
         assert again.binding.planned_with_external_content is True
@@ -2150,7 +2150,7 @@ class EgressBinderContract(ABC):
         finds itself computing it here has breached the section. Both states are driven,
         so a seam that hard-coded either passes neither.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
@@ -2158,7 +2158,7 @@ class EgressBinderContract(ABC):
         }
         for carried in (True, False):
             bound = await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters=parameters,
                 provenance=CarriedProvenance(
                     spans={},
@@ -2231,14 +2231,14 @@ class EgressBinderContract(ABC):
         ``True``: a seam hard-coding either value passes one of these two cases and
         fails the other.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
         ordinary = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters=parameters,
             provenance=CarriedProvenance(
                 spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
@@ -2247,7 +2247,7 @@ class EgressBinderContract(ABC):
         assert ordinary is not None
         assert ordinary.binding.closed_loop is False
 
-        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=ordinary.binding)
+        again = await binder.rebind(EMAIL, parameters=parameters, approved=ordinary.binding)
 
         assert again is not None
         assert again.binding.closed_loop is False
@@ -2346,14 +2346,14 @@ class EgressBinderContract(ABC):
         disagrees with what the approver was shown (ADR-0181 §6's fourth clause
         renders the fact in both states).
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
         first = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters=parameters,
             provenance=CarriedProvenance(
                 spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
@@ -2361,7 +2361,7 @@ class EgressBinderContract(ABC):
         )
         assert first is not None
 
-        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+        again = await binder.rebind(EMAIL, parameters=parameters, approved=first.binding)
 
         assert again is not None
         assert again.binding.planned_with_external_content is False
@@ -2394,7 +2394,7 @@ class EgressBinderContract(ABC):
         which is the whole reason a divergence of this kind is caught rather than
         discovered downstream.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
@@ -2402,7 +2402,7 @@ class EgressBinderContract(ABC):
         }
         for carried in (True, False):
             bound = await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters=parameters,
                 provenance=CarriedProvenance(
                     spans={},
@@ -2538,7 +2538,7 @@ class EgressBinderContract(ABC):
             parameters = {"origin": SEARCH_ORIGIN, "query": "weather"}
             self.register_egress(binder, tool)
         else:
-            tool = SEND_EMAIL
+            tool = EMAIL
             parameters = {"to": ["a@example.com"], "subject": "s", "body": "b"}
             self.register_egress(binder, tool)
 
@@ -2574,10 +2574,10 @@ class EgressBinderContract(ABC):
         seam transcribes would make every such defect invisible in tests and visible
         only in production, which is the divergence this suite exists to prevent.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         bound = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
             provenance=CarriedProvenance(
                 spans={},
@@ -2690,10 +2690,10 @@ class EgressBinderContract(ABC):
         since it asserts that nothing in the call came from anywhere near this
         system's stores.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         bound = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
             provenance=CarriedProvenance(
                 spans={}, planned_with_external_content=False, coverage=coverage
@@ -2726,11 +2726,11 @@ class EgressBinderContract(ABC):
         No bound call comes back, because ADR-0150 §1 makes a binding whole or
         absent: the refusal is not a partial binding with the fact removed.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
 
         with pytest.raises(EgressBindingError):
             await binder.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
                 provenance=CarriedProvenance(
                     spans={},
@@ -2765,14 +2765,14 @@ class EgressBinderContract(ABC):
         it: everything else is still re-derived, and the resumed binding still has to
         equal the approved one whole.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
         first = await binder.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters=parameters,
             provenance=CarriedProvenance(
                 spans={}, planned_with_external_content=False, coverage=coverage
@@ -2781,7 +2781,7 @@ class EgressBinderContract(ABC):
         assert first is not None
         assert first.binding.coverage is coverage
 
-        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+        again = await binder.rebind(EMAIL, parameters=parameters, approved=first.binding)
 
         assert again is not None
         assert again.binding.coverage is coverage
@@ -2794,18 +2794,18 @@ class EgressBinderContract(ABC):
         self, binder: EgressBinder
     ) -> None:
         """ADR-0152 §7, §13: read afresh, never a state read before the user was asked."""
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
         self.set_connection(binder, REFERENCE, identity=IDENTITY, state=ProvisioningState.PENDING)
 
         with pytest.raises(EgressBindingError):
-            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+            await binder.rebind(EMAIL, parameters=parameters, approved=first.binding)
 
     async def test_rebind_refuses_an_approved_binding_for_an_unregistered_tool(
         self, binder: EgressBinder
@@ -2815,13 +2815,13 @@ class EgressBinderContract(ABC):
         A recorded decision stating an egress call and a registry stating a
         non-egress tool disagree about what was authorised.
         """
-        self.register_egress(binder, SEND_EMAIL)
+        self.register_egress(binder, EMAIL)
         parameters: dict[str, FrozenJson] = {
             "to": ["a@example.com"],
             "subject": "s",
             "body": "b",
         }
-        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        first = await binder.bind(EMAIL, parameters=parameters, provenance=_no_provenance())
         assert first is not None
         stranded = self.canonicalising_nothing()
         self.register(stranded, NOT_EGRESS)

@@ -88,7 +88,7 @@ from packaging.requirements import Requirement
 
 from ai_assistant.testing import FakeAuditTrail
 from ai_assistant.tools.builtin import build_default_registry
-from ai_assistant.tools.send_email import SEND_EMAIL_ID
+from ai_assistant.tools.send_email import EMAIL_ID
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOLS = _REPO_ROOT / "src" / "ai_assistant" / "tools"
@@ -580,7 +580,7 @@ async def test_an_unconfigured_deployment_has_no_tool_that_can_reach_the_transpo
     """
     registry = build_default_registry(ledger=FakeAuditTrail(), gate=FakeAuditTrail())
 
-    assert SEND_EMAIL_ID not in {tool.id for tool in await registry.all_tools()}
+    assert EMAIL_ID not in {tool.id for tool in await registry.all_tools()}
 
 
 def test_the_contract_exempts_the_seam_and_nothing_else() -> None:

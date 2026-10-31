@@ -809,26 +809,32 @@ class _Unmeasurable(ChatWriter):
         raise AssertionError  # pragma: no cover - nothing is written in these cases
 
 
-def _asking_round(text: str) -> PlanningRound:
+def _asking_round(words: str, **arguments: object) -> PlanningRound:
+    """A round whose asking ``text`` call ``t1`` asks about the booking (ADR-0357 §8:1)."""
     return PlanningRound(
         id="round:1",
         recorded_at=AT,
-        text=text,
+        calls=(_call("t1", "text", to="the user", words=words, asks=["1.1"], **arguments),),
         asked=(AskedCall(part=1, tool=_BOOK, values={"date": "Friday"}),),
     )
 
 
+#: The exact lines the asking call carries, as planning hands them on (ADR-0357 §8:2).
+_LINES: Final = {"t1": _FRIDAY_LINE}
+
+
 @pytest.mark.parametrize(
-    ("writer", "text", "whole"),
+    ("writer", "words", "whole"),
     [
-        pytest.param(ChatWriter, _QUESTION, True, id="fits"),
-        pytest.param(_Narrow, _QUESTION, False, id="cut-by-the-writer"),
+        pytest.param(ChatWriter, _ASKING, True, id="fits"),
+        pytest.param(_Narrow, _ASKING, False, id="cut-by-the-writer"),
         pytest.param(_Unmeasurable, "Shall I?", False, id="cannot-be-measured"),
     ],
 )
-def test_a_round_whose_message_the_writer_would_cut_asks_about_nothing(
-    writer: type[ChatWriter], text: str, whole: bool
+def test_a_round_whose_asking_call_the_writer_would_cut_asks_about_nothing(
+    writer: type[ChatWriter], words: str, whole: bool
 ) -> None:
+    """ADR-0321 §4:4, ADR-0357 §8:2: measured as it would go, the words then the lines."""
     hub = _Hub()
     path = hub.phases(
         hub.harness,
@@ -844,13 +850,59 @@ def test_a_round_whose_message_the_writer_would_cut_asks_about_nothing(
         trigger=_recorded_trigger(OWNERS_WORDS),
         owner_records=True,
     )
-    planned = _asking_round(text)
+    planned = _asking_round(words)
 
-    shown = path.shown_whole(working, planned)
+    shown = path.shown_whole(working, planned, _LINES)
 
     assert (shown is planned) is whole
     assert len(shown.asked) == (1 if whole else 0)
-    assert shown.text == planned.text
+    assert shown.calls == planned.calls
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({"to": "Anna"}, id="for-no-one-it-reaches"),
+        pytest.param({"via": "L9"}, id="into-a-place-never-shown"),
+        pytest.param({"via": "telegram"}, id="by-a-platform-the-input-is-not-on"),
+    ],
+)
+def test_a_round_whose_asking_call_could_go_nowhere_asks_about_nothing(
+    arguments: dict[str, object],
+) -> None:
+    """ADR-0321 §4:4: a question that would not go out whole, or at all, asked nothing."""
+    hub = _Hub()
+    path = hub.phases(hub.harness)
+    working = path.begin(
+        activation_id="a-1",
+        window=_window(),
+        conversation_id=CONVERSATION.instance_id,
+        trigger=_recorded_trigger(OWNERS_WORDS),
+        owner_records=True,
+    )
+    planned = _asking_round(_ASKING)
+    planned = planned.model_copy(
+        update={
+            "calls": (_call("t1", "text", **{**dict(planned.calls[0].arguments), **arguments}),)
+        }
+    )
+
+    assert path.shown_whole(working, planned, _LINES).asked == ()
+
+
+def test_a_round_with_no_lines_for_its_asking_call_asks_about_nothing() -> None:
+    """Failing closed: asked calls with no question to carry them were never shown."""
+    hub = _Hub()
+    path = hub.phases(hub.harness)
+    working = path.begin(
+        activation_id="a-1",
+        window=_window(),
+        conversation_id=CONVERSATION.instance_id,
+        trigger=_recorded_trigger(OWNERS_WORDS),
+        owner_records=True,
+    )
+
+    assert path.shown_whole(working, _asking_round(_ASKING), {}).asked == ()
 
 
 def test_a_round_in_a_place_that_takes_no_message_asks_about_nothing() -> None:
@@ -862,7 +914,7 @@ def test_a_round_in_a_place_that_takes_no_message_asks_about_nothing() -> None:
         owner_records=True,
     )
 
-    assert path.shown_whole(working, _asking_round("Shall I?")).asked == ()
+    assert path.shown_whole(working, _asking_round("Shall I?"), _LINES).asked == ()
 
 
 # --- the Telegram line (ADR-0323 §4:7-§4:9, §7) ---------------------------------------------

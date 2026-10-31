@@ -47,6 +47,13 @@ approved call does, the policy's recorded allow its deciding decision (§5:3). A
 it cannot read is not done. ADR-0328 §13's interim, under which remembering passed
 ``MemoryPolicy`` here, is retired with the composition root's switch.
 
+**An email** (ADR-0357 §2:5-§2:10). Its tool's own checks run before it is ruled on: a
+recipient that is not an address comes back saying an address is needed, since no
+ADR-0148 §5:2 source resolves a person to one in this build; an attachment comes back;
+and an email from the assistant's address comes back, since none is connected. One from
+the user's address needs their yes, by rule, beside the policy's allow, which stays the
+deciding decision, so it never runs without their yes to that exact email (§2:10).
+
 **The person model's calls** (ADR-0338 §8:5). Every ``set_profile``, ``pin`` and
 ``unpin`` call needs the person's yes, by rule and with no model: a source of *needs you*
 beside the policy's confirm, the stand-in's and a candidate's *confirm*, with the
@@ -67,6 +74,7 @@ ground of ADR-0306 §4:5 that held and the record it rests on, as
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -120,6 +128,16 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.channel_kinds import users_place
+from ai_assistant.orchestration.message_tools import (
+    ATTACHMENTS_ARGUMENT,
+    BCC_ARGUMENT,
+    CC_ARGUMENT,
+    EMAIL_CAPABILITY,
+    FROM_ARGUMENT,
+    FROM_ASSISTANT,
+    FROM_USER,
+    TO_ARGUMENT,
+)
 from ai_assistant.orchestration.outside_content import from_outside, is_outside_episode
 from ai_assistant.orchestration.person_calls import PERSON_MODEL_CAPABILITIES
 from ai_assistant.orchestration.remembering import (
@@ -201,6 +219,22 @@ _CONFIRM_WORDING: Final = "the user is asked to confirm this wording before it i
 #: ADR-0338 §8:5: a change to the person's profile or pins, which runs only on their yes.
 _PERSON_MODEL_YES: Final = "a change to the person's profile or pins runs only on their yes"
 _ELSEWHERE: Final = "a round's message goes only into the place its input came from"
+#: ADR-0357 §2:10: an email from the user's address, which runs only on their yes to it.
+_USERS_ADDRESS_YES: Final = (
+    "an email from the user's own address runs only on their yes to this exact email"
+)
+#: ADR-0357 §2:9: no address of the assistant's own is connected in this build, so an
+#: email that names none, or names the assistant's, comes back saying so.
+_ONLY_THE_USERS: Final = (
+    "no address of the assistant's own is connected, so only the user's address is "
+    f"available: name {FROM_ARGUMENT} {FROM_USER!r} to send from it, which needs their yes"
+)
+_NOT_A_SENDER: Final = (
+    f"{FROM_ARGUMENT!r} names the assistant's address, {FROM_ASSISTANT!r}, or the user's, "
+    f"{FROM_USER!r}"
+)
+#: ADR-0357 §2:8: nothing can be attached to an email in this build.
+_CANNOT_ATTACH: Final = "nothing can be attached to an email yet, so it was not sent"
 #: ADR-0350 §6:7: the reason a message of an activation the Task Scheduler started is
 #: refused where it names no place on its place list.
 _OFF_THE_LIST: Final = (
@@ -1033,6 +1067,63 @@ def _not_done(call: ProposedCall, reason: str) -> CallVerdict:
     return CallVerdict(call.call_id, Verdict.NOT_DONE, reason=reason)
 
 
+def _needs_you_by_rule(request: ActionRequest) -> tuple[str, str] | None:
+    """The check that needs the user's yes by rule, and why, or ``None`` where none does.
+
+    A person model's call (ADR-0338 §8:5), and an email from the user's own address,
+    whatever allows an email from the assistant's (ADR-0357 §2:10).
+    """
+    capability = str(request.tool.capability)
+    if capability in PERSON_MODEL_CAPABILITIES:
+        return "person_model", _PERSON_MODEL_YES
+    if capability == EMAIL_CAPABILITY and request.parameters.get(FROM_ARGUMENT) == FROM_USER:
+        return "email", _USERS_ADDRESS_YES
+    return None
+
+
+#: The recipient arguments of an email, in the order a coming back names them.
+_RECIPIENTS: Final = (TO_ARGUMENT, CC_ARGUMENT, BCC_ARGUMENT)
+
+#: What an email address looks like before its protocol's canonicaliser reads it: one
+#: ``@`` between a local part and a domain, with no space. A recipient that is not one is
+#: a person, as planning was shown them.
+_ADDRESS: Final = re.compile(r"[^@\s]+@[^@\s]+")
+
+
+def _email_comes_back(arguments: Mapping[str, FrozenJson]) -> str | None:
+    """Why an email runs nothing before it is ruled on, or ``None`` (ADR-0357 §2:7-§2:9).
+
+    A recipient that is not an address is a person, resolved to an address only from a
+    source ADR-0148 §5:2 allows and before the ruling, so the ruling covers the address
+    it goes to (§2:7). This build wires no such source, so a person comes back saying an
+    address is needed, and nothing is guessed. An attachment comes back, since nothing can
+    be attached yet (§2:8). And an email from the assistant's address, which ``from``
+    names or which it is sent from where ``from`` is left out, comes back, since no such
+    address is connected: sending in the user's name is always named (§2:9). Whether the
+    rest fits the schema is selection's, after this.
+    """
+    for argument in _RECIPIENTS:
+        value = arguments.get(argument)
+        recipients = [value] if isinstance(value, str) else value
+        if not isinstance(recipients, list | tuple):
+            continue
+        for number, one in enumerate(recipients, 1):
+            if isinstance(one, str) and _ADDRESS.fullmatch(one.strip()) is None:
+                return (
+                    f"no address is known for {argument!r} recipient {number}, which is not an "
+                    "address: an email goes to an address, so name theirs"
+                )
+    attachments = arguments.get(ATTACHMENTS_ARGUMENT)
+    if attachments is not None and attachments not in ([], ()):
+        return _CANNOT_ATTACH
+    sender = arguments.get(FROM_ARGUMENT, FROM_ASSISTANT)
+    if sender == FROM_ASSISTANT:
+        return _ONLY_THE_USERS
+    if sender != FROM_USER:
+        return _NOT_A_SENDER
+    return None
+
+
 class AuthorizingStage:
     """Check each call of a round by rule, and record every ruling (ADR-0306 §4)."""
 
@@ -1250,6 +1341,13 @@ class AuthorizingStage:
                 return
             _log.info("authorizing_approval_failed", stage="authorizing", reason=shown)
             state.note(one.call, "approval", "failed", shown)
+        if one.call.name == EMAIL_CAPABILITY:
+            # ADR-0357 §2:7-§2:9, §6:1: the email tool's own checks, before the ruling.
+            back = _email_comes_back(one.call.arguments)
+            if back is not None:
+                state.note(one.call, "email", Verdict.NOT_DONE.value, back)
+                state.verdicts.append(_not_done(one.call, back))
+                return
         selected = await self._selected(one.call, state)
         if isinstance(selected, CallVerdict):
             state.note(one.call, "selection", selected.verdict.value, selected.reason)
@@ -1483,11 +1581,13 @@ class AuthorizingStage:
             return verdict(Verdict.NEEDS_YOU, _STAND_IN)
         if tool.leaves_hub:
             state.note(call, "stand_in", "passed", None)
-        if str(tool.capability) in PERSON_MODEL_CAPABILITIES:
-            # ADR-0338 §8:5: by rule, beside the policy's allow, which stays the deciding
-            # decision (ADR-0321 §4:17).
-            state.note(call, "person_model", Verdict.NEEDS_YOU.value, _PERSON_MODEL_YES)
-            return verdict(Verdict.NEEDS_YOU, _PERSON_MODEL_YES)
+        yours = _needs_you_by_rule(ruled.request)
+        if yours is not None:
+            # By rule, beside the policy's allow, which stays the deciding decision
+            # (ADR-0321 §4:17).
+            check, reason = yours
+            state.note(call, check, Verdict.NEEDS_YOU.value, reason)
+            return verdict(Verdict.NEEDS_YOU, reason)
         if tool.capability == REMEMBER_CAPABILITY:
             remembered = self._candidate(ruled, call, state)
             if remembered is not None:

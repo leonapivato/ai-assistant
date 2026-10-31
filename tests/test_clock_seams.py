@@ -455,7 +455,9 @@ async def _planning_stage(now: Clock) -> None:
     """
 
     class _Unreached:
-        async def record(self, planning_round: object, labels: object) -> None:
+        async def record(
+            self, planning_round: object, labels: object, *, questions: object = None
+        ) -> None:
             raise AssertionError
 
     await PlanningStage(

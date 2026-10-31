@@ -724,9 +724,13 @@ async def test_a_call_that_is_no_story_call_is_not_done() -> None:
 
 class _Recorder:
     async def record(
-        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+        self,
+        planning_round: PlanningRound,
+        labels: tuple[PlanningLabel, ...],
+        *,
+        questions: object = None,
     ) -> None:
-        del planning_round, labels
+        del planning_round, labels, questions
 
 
 async def test_a_story_label_planning_was_never_shown_refuses_the_call_whole() -> None:

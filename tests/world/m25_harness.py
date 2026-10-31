@@ -99,7 +99,7 @@ from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport
 from ai_assistant.tools.egress import SmtpEgressTransport
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 from ai_assistant.tools.registry import InMemoryToolRegistry
-from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
+from ai_assistant.tools.send_email import EMAIL, SendEmail
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -571,7 +571,7 @@ def _seam(composition: Composition) -> SmtpEgressTransport:
     Returns:
         The ``SmtpEgressTransport`` bound to ``send_email`` in this deployment.
     """
-    binding = registry(composition)._live[SEND_EMAIL.id]
+    binding = registry(composition)._live[EMAIL.id]
     tool = binding.implementation
     assert isinstance(tool, SendEmail)
     transport = tool._transport
@@ -630,12 +630,14 @@ def arguments() -> Mapping[str, FrozenJson]:
     """The bound call's arguments, in the supplied form a user would have typed.
 
     Returns:
-        One recipient, a subject and a body.
+        One recipient, a subject and the words, from the user's own address, the
+        connected account's (ADR-0357 §2:9).
     """
     return {
         "to": [RECIPIENT_SUPPLIED],
         "subject": "the quarterly report",
-        "body": "attached, as promised",
+        "words": "attached, as promised",
+        "from": "user",
     }
 
 
@@ -652,9 +654,9 @@ def binding(reference: str) -> EgressBinding:
     return EgressBinding(
         spans=(
             EgressSpan(
-                argument="body",
+                argument="from",
                 provenance=DiscloserProvenance.USER_AUTHORED,
-                extent=len("attached, as promised"),
+                extent=len("user"),
             ),
             EgressSpan(
                 argument="subject",
@@ -671,6 +673,11 @@ def binding(reference: str) -> EgressBinding:
                     supplied=RECIPIENT_SUPPLIED,
                     canonical=RECIPIENT_CANONICAL,
                 ),
+            ),
+            EgressSpan(
+                argument="words",
+                provenance=DiscloserProvenance.USER_AUTHORED,
+                extent=len("attached, as promised"),
             ),
         ),
         account=BoundAccount(identity=IDENTITY, reference=reference),

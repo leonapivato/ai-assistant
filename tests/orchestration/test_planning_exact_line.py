@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 #: cannot pass over a configuration that registered none of them.
 _FLOOR: Final = frozenset(
     {
-        "send_email",
+        "email",
         "book_stay",
         "booking_availability",
         "web_search",

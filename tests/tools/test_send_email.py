@@ -41,7 +41,7 @@ from ai_assistant.tools.egress_declaration import (
     TIER_KEYWORD,
     read_declaration,
 )
-from ai_assistant.tools.send_email import SEND_EMAIL, SEND_EMAIL_ID, SendEmail
+from ai_assistant.tools.send_email import EMAIL, EMAIL_ID, SendEmail
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import EgressBinding, FrozenJson
@@ -85,7 +85,7 @@ class _RefusingTransport:
 
 def _properties() -> Mapping[str, FrozenJson]:
     """The schema's top-level ``properties`` object, checked to be one."""
-    properties = SEND_EMAIL.parameters_schema["properties"]
+    properties = EMAIL.parameters_schema["properties"]
     assert isinstance(properties, Mapping)
     return properties
 
@@ -100,7 +100,7 @@ def _subschema(name: str) -> Mapping[str, FrozenJson]:
 _ARGUMENTS = {
     "to": ("bob@example.com",),
     "subject": "lunch",
-    "body": "see you at one",
+    "words": "see you at one",
 }
 
 
@@ -114,9 +114,9 @@ async def test_an_unconfigured_deployment_registers_no_send_email() -> None:
     """
     registry = build_default_registry(ledger=FakeAuditTrail(), gate=FakeAuditTrail())
 
-    assert await registry.get(SEND_EMAIL_ID) is None
-    assert SEND_EMAIL_ID not in {tool.id for tool in await registry.all_tools()}
-    assert SEND_EMAIL.capability not in await registry.capabilities()
+    assert await registry.get(EMAIL_ID) is None
+    assert EMAIL_ID not in {tool.id for tool in await registry.all_tools()}
+    assert EMAIL.capability not in await registry.capabilities()
 
 
 async def test_the_callable_hands_the_binding_and_the_arguments_on_unchanged() -> None:
@@ -164,14 +164,14 @@ def test_the_definition_declares_a_world_changing_irreversible_high_risk_act() -
     Each is asserted separately rather than by comparing the whole model, so a
     failure names which claim changed.
     """
-    assert SEND_EMAIL.risk_level is RiskLevel.HIGH
-    assert SEND_EMAIL.reversibility is Reversibility.IRREVERSIBLE
-    assert SEND_EMAIL.side_effecting is True
-    assert SEND_EMAIL.reads == (DataTier.SECRET,)
-    assert SEND_EMAIL.writes == ()
-    assert SEND_EMAIL.cost.basis is CostBasis.UNKNOWN
-    assert SEND_EMAIL.idempotency is Idempotency.NONE
-    assert SEND_EMAIL.idempotency_window is None
+    assert EMAIL.risk_level is RiskLevel.HIGH
+    assert EMAIL.reversibility is Reversibility.IRREVERSIBLE
+    assert EMAIL.side_effecting is True
+    assert EMAIL.reads == (DataTier.SECRET,)
+    assert EMAIL.writes == ()
+    assert EMAIL.cost.basis is CostBasis.UNKNOWN
+    assert EMAIL.idempotency is Idempotency.NONE
+    assert EMAIL.idempotency_window is None
 
 
 def test_the_definition_discloses_a_non_empty_reach() -> None:
@@ -183,15 +183,13 @@ def test_the_definition_discloses_a_non_empty_reach() -> None:
     ``discloses=()`` "would clear §5's floor and reach ``ALLOW`` with no user in
     the loop, and nothing in ADR-0016 detects a declaration that understates."
     """
-    assert SEND_EMAIL.discloses == (DataTier.PERSONAL,)
+    assert EMAIL.discloses == (DataTier.PERSONAL,)
 
 
 def test_the_definition_declares_the_one_schema_dialect_that_is_read() -> None:
     """ADR-0145 §5: draft 2020-12, declared rather than left to the default."""
-    assert SEND_EMAIL.parameters_schema["$schema"] == (
-        "https://json-schema.org/draft/2020-12/schema"
-    )
-    assert SEND_EMAIL.parameters_schema["additionalProperties"] is False
+    assert EMAIL.parameters_schema["$schema"] == ("https://json-schema.org/draft/2020-12/schema")
+    assert EMAIL.parameters_schema["additionalProperties"] is False
 
 
 def test_every_recipient_argument_declares_both_keywords_and_no_other_does() -> None:
@@ -218,7 +216,11 @@ def test_every_recipient_argument_declares_both_keywords_and_no_other_does() -> 
         "cc": {DESTINATION_KEYWORD, TIER_KEYWORD},
         "bcc": {DESTINATION_KEYWORD, TIER_KEYWORD},
         "subject": set(),
-        "body": set(),
+        "words": set(),
+        # ADR-0357 §2:5: never transmitted, so none is destination-bearing or tiered.
+        "attachments": set(),
+        "from": set(),
+        "exact": set(),
     }
 
 
@@ -329,9 +331,9 @@ def test_what_the_widened_schema_accepts_for_to(value: FrozenJson, violates: boo
     (§2), so an empty array, an array of non-strings, a number and a structure each
     stay exactly as refused as they were.
     """
-    parameters: Mapping[str, FrozenJson] = {"to": value, "subject": "s", "body": "b"}
+    parameters: Mapping[str, FrozenJson] = {"to": value, "subject": "s", "words": "b"}
 
-    assert bool(parameter_violations(SEND_EMAIL.parameters_schema, parameters)) is violates
+    assert bool(parameter_violations(EMAIL.parameters_schema, parameters)) is violates
 
 
 def test_the_declaration_the_seam_reads_is_the_one_this_tool_intends() -> None:
@@ -344,12 +346,21 @@ def test_the_declaration_the_seam_reads_is_the_one_this_tool_intends() -> None:
     quiet omissions, and this is what pins that none of them is present.
     """
     declaration = read_declaration(
-        SEND_EMAIL.parameters_schema,
-        tool_id=SEND_EMAIL.id,
+        EMAIL.parameters_schema,
+        tool_id=EMAIL.id,
         canonicalises=frozenset(DestinationProtocol),
     )
 
-    assert declaration.named == ("to", "cc", "bcc", "subject", "body")
+    assert declaration.named == (
+        "to",
+        "cc",
+        "bcc",
+        "subject",
+        "words",
+        "attachments",
+        "from",
+        "exact",
+    )
     assert {
         name: (argument.protocol, argument.tier) for name, argument in declaration.arguments.items()
     } == {
@@ -357,7 +368,10 @@ def test_the_declaration_the_seam_reads_is_the_one_this_tool_intends() -> None:
         "cc": (DestinationProtocol.SMTP, DataTier.PERSONAL),
         "bcc": (DestinationProtocol.SMTP, DataTier.PERSONAL),
         "subject": (None, None),
-        "body": (None, None),
+        "words": (None, None),
+        "attachments": (None, None),
+        "from": (None, None),
+        "exact": (None, None),
     }
 
 
@@ -371,7 +385,7 @@ def test_the_keywords_leave_the_schema_validating_identically() -> None:
     schema that accepted everything would pass the first limb alone.
     """
     stripped: Mapping[str, FrozenJson] = {
-        **SEND_EMAIL.parameters_schema,
+        **EMAIL.parameters_schema,
         "properties": {
             name: (
                 {
@@ -388,21 +402,21 @@ def test_the_keywords_leave_the_schema_validating_identically() -> None:
     accepted: Mapping[str, FrozenJson] = {
         "to": ("bob@example.com",),
         "subject": "lunch",
-        "body": "one o'clock",
+        "words": "one o'clock",
     }
     rejected: Mapping[str, FrozenJson] = {
         "to": (),
         "subject": "lunch",
-        "body": "one o'clock",
+        "words": "one o'clock",
         "attachment": "x",
     }
 
     for parameters in (accepted, rejected):
-        assert parameter_violations(SEND_EMAIL.parameters_schema, parameters) == (
+        assert parameter_violations(EMAIL.parameters_schema, parameters) == (
             parameter_violations(stripped, parameters)
         )
-    assert parameter_violations(SEND_EMAIL.parameters_schema, accepted) == ()
-    assert parameter_violations(SEND_EMAIL.parameters_schema, rejected) != ()
+    assert parameter_violations(EMAIL.parameters_schema, accepted) == ()
+    assert parameter_violations(EMAIL.parameters_schema, rejected) != ()
 
 
 def test_the_definition_is_frozen() -> None:
@@ -410,4 +424,4 @@ def test_the_definition_is_frozen() -> None:
     assert ToolDefinition.model_config["frozen"] is True
 
     with pytest.raises(ValidationError):
-        SEND_EMAIL.risk_level = RiskLevel.LOW
+        EMAIL.risk_level = RiskLevel.LOW

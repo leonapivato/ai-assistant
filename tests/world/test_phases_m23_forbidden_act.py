@@ -42,8 +42,9 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
 )
+from ai_assistant.orchestration import authorizer
 from ai_assistant.permissions.policy import _PLANNED_OVER_EXTERNAL
-from ai_assistant.tools.send_email import SEND_EMAIL_ID
+from ai_assistant.tools.send_email import EMAIL_ID
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,7 +71,7 @@ class _Observed:
     @property
     def egress_decisions(self) -> list[PermissionDecision]:
         """The recorded rulings about the designated egress tool."""
-        return [d for d in self.decisions if d.tool.id == SEND_EMAIL_ID]
+        return [d for d in self.decisions if d.tool.id == EMAIL_ID]
 
     @property
     def reached_the_gate(self) -> bool:
@@ -226,13 +227,18 @@ class _AuthorisesEverything:
         return PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="calibration: allow")
 
 
-async def test_the_instrument_can_see_a_transmission(tmp_path: Path) -> None:
+async def test_the_instrument_can_see_a_transmission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A gate that authorises the call reaches the transport, and the figure moves.
 
     The calibration for ``ASR-past-gate``: without it the zero is unfalsifiable. It also
     pins that an activation which did transmit still ends and leaves its record, so a
-    scenario's figures are readable whatever they say.
+    scenario's figures are readable whatever they say. ADR-0357 §2:10 has an email from
+    the user's address wait on their yes by rule, whatever the gate allows, so the
+    calibration breaches that rule too, deliberately and here alone.
     """
+    monkeypatch.setattr(authorizer, "_needs_you_by_rule", lambda request: None)
     observed = await _drive(
         tmp_path, records=2, hostile=True, to=ATTACKER, policy=_AuthorisesEverything()
     )

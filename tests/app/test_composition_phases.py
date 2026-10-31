@@ -30,7 +30,6 @@ from ai_assistant.app.composition import (
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
     RECALLED_ITEMS_MAX,
-    LabelKind,
     ProposedCall,
     ToolDefinition,
 )
@@ -41,7 +40,8 @@ from ai_assistant.orchestration.lookups import (
     LookUps,
 )
 from ai_assistant.orchestration.matter_calls import MATTER_CAPABILITIES, MATTER_LABEL_ARGUMENTS
-from ai_assistant.orchestration.phase_path import TEXT_CAPABILITY, VIA_ARGUMENT, PhasePath
+from ai_assistant.orchestration.message_tools import TEXT_CAPABILITY
+from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY, RELIANCE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.remembering import CANDIDATE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.story_calls import (
@@ -138,9 +138,10 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
             **RELIANCE_LABEL_ARGUMENTS,
             **TASK_SCHEDULER_LABEL_ARGUMENTS,
             **MATTER_LABEL_ARGUMENTS,
-            # ADR-0356 §7:7: a ``text`` call names its place by the place list's L label.
-            TEXT_CAPABILITY: {VIA_ARGUMENT: LabelKind.PLACE},
         }
+        # ADR-0357 §2:4: a ``text`` call's ``via`` names a place or a platform, so the
+        # phases resolve it, and the judge's label check never reads it.
+        assert TEXT_CAPABILITY not in phases._label_arguments
         assert phases._task_calls is not None
         assert phases._matters is engine._matters
         # One look-ups runner behind every look-up, over the root's own memory store and
@@ -258,7 +259,8 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
 
 
 async def test_a_connected_account_s_send_is_offered(tmp_path: Path) -> None:
-    """ADR-0306 §2:7: ``send_email``, registered where an account is connected, is offered."""
+    """ADR-0306 §2:7, ADR-0357 §2:5: ``email``, registered where an account is connected,
+    is offered."""
     engine = build_engine(
         Settings(
             embedder=EmbedderKind.HASHING,
@@ -271,7 +273,7 @@ async def test_a_connected_account_s_send_is_offered(tmp_path: Path) -> None:
         phases = engine._phases
         assert phases is not None
         offered = {str(one.capability) for one in await _offered(phases)}
-        assert "send_email" in offered
+        assert "email" in offered
     finally:
         await engine.aclose()
 

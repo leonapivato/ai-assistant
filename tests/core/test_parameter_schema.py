@@ -47,7 +47,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.testing import with_phase_declaration
 from ai_assistant.tools.builtin import CURRENT_TIME
-from ai_assistant.tools.send_email import SEND_EMAIL
+from ai_assistant.tools.send_email import EMAIL
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -902,7 +902,7 @@ def test_todays_shipped_definitions_still_load() -> None:
     carries the richer of the two schemas — a nested array with an item pattern —
     so the corpus this asserts over is no thinner than it was.
     """
-    for tool in (CURRENT_TIME, SEND_EMAIL):
+    for tool in (CURRENT_TIME, EMAIL):
         assert ToolDefinition.model_validate(tool.model_dump()) == tool
 
 

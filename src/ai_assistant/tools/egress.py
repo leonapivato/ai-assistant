@@ -194,6 +194,14 @@ _DEFAULT_PORTS: Final[dict[str, int]] = {IMPLICIT_TLS_SCHEME: 465, STARTTLS_SCHE
 #: is ADR-0145's precedent one field over. Adversarial round 4 found it.
 _HEADER_TEXT_FIELDS: Final = frozenset({"subject"})
 
+#: The arguments a submission reads and never transmits (ADR-0357 §2:8-§2:9, §4:2):
+#: whose address it is from, the wording step's ``exact``, and what to attach.
+_NOT_TRANSMITTED: Final = frozenset({"from", "exact", "attachments"})
+
+#: What ``from`` names for the connected account a submission is sent from: the user's
+#: own, the only kind this build registers (ADR-0357 §2:9).
+_FROM_THE_ACCOUNT: Final = "user"
+
 #: How many lines of one reply this transport will hold. RFC 5321 places no bound
 #: on continuation lines, so this one is ours: the largest real ``EHLO`` responses
 #: run to a couple of dozen extensions, and a far end needing more than this is not
@@ -1779,13 +1787,23 @@ def _entry_of(stored: StoredEntry | None) -> ConnectionEntry | None:
 def smtp_message(parameters: Mapping[str, FrozenJson], *, tool_id: str) -> OutboundEmail:
     """Read an SMTP submission out of a call's arguments, or refuse them.
 
-    **The five fields are SMTP's, not an integration's**, which is what keeps this
-    inside the seam rather than making the seam know a particular tool's schema: a
-    submission has an envelope, a subject and a body, and a transport that spoke
-    some other vocabulary would be a transport for some other protocol. An
-    integration that wants different argument *names* maps them before it reaches
-    here; what it may not do is hand over a payload this seam did not derive from
-    the arguments the decision's digest binds (:meth:`SmtpEgressTransport.transmit`).
+    **The five fields it transmits are SMTP's, not an integration's**, which is what
+    keeps this inside the seam rather than making the seam know a particular tool's
+    schema: a submission has an envelope, a subject and a body, and a transport that
+    spoke some other vocabulary would be a transport for some other protocol. The body
+    is the message tools' ``words`` (ADR-0357 §2:5), which names what a message says
+    alike for a text and an email. What this seam may not do is hand over a payload it
+    did not derive from the arguments the decision's digest binds
+    (:meth:`SmtpEgressTransport.transmit`).
+
+    **Three more arguments are read and never transmitted** (ADR-0357 §2:8-§2:9, §4:2).
+    ``from`` names whose address the email is sent from, and this seam sends from the
+    connected account it is registered against, which is the user's own: so ``from``
+    must name the user, and an email naming the assistant's address, or leaving it out,
+    which means the assistant's, is refused rather than sent in the user's name.
+    ``exact`` is the wording step's, which has run before the ruling. ``attachments``
+    names what to attach, and this seam attaches nothing, so a call naming any is
+    refused rather than sent without them.
 
     Every refusal here is a defect in the caller rather than a state a user can
     reach: ADR-0145 checks the arguments against the tool's schema at construction,
@@ -1807,19 +1825,30 @@ def smtp_message(parameters: Mapping[str, FrozenJson], *, tool_id: str) -> Outbo
         The message, with recipients in the **supplied** forms the arguments carry.
 
     Raises:
-        BoundCallChangedError: If a key is one this seam does not transmit, a
-            recipient argument is neither a string nor a list of strings, a text
-            field is not a string, a header field carries a line break, or no
-            recipient is named. The message renders no value, because every one of
-            them is either a recipient or payload content.
+        BoundCallChangedError: If a key is one this seam does not read, ``from`` names
+            any address but the user's, an attachment is named, a recipient argument
+            is neither a string nor a list of strings, a text field is not a string, a
+            header field carries a line break, or no recipient is named. The message
+            renders no value, because every one of them is either a recipient or
+            payload content.
     """
-    unknown = set(parameters) - {"to", "cc", "bcc", "subject", "body"}
+    unknown = set(parameters) - {"to", "cc", "bcc", "subject", "words"} - _NOT_TRANSMITTED
     if unknown:
         msg = (
             f"{tool_id}: the call carries {len(unknown)} argument(s) this seam does "
             f"not transmit, so a span could reach the wire that no description "
             f"covers (ADR-0148 §6)"
         )
+        raise _refuse_changed(msg)
+    if parameters.get("from") != _FROM_THE_ACCOUNT:
+        msg = (
+            f"{tool_id}: the call is not from the user's address, the connected account "
+            f"this seam sends from, so it is refused rather than sent in their name "
+            f"(ADR-0357 §2:9)"
+        )
+        raise _refuse_changed(msg)
+    if parameters.get("attachments") not in (None, [], ()):
+        msg = f"{tool_id}: the call names an attachment, and this seam attaches nothing"
         raise _refuse_changed(msg)
     recipients: dict[str, tuple[str, ...]] = {}
     for field in ("to", "cc", "bcc"):
@@ -1839,7 +1868,7 @@ def smtp_message(parameters: Mapping[str, FrozenJson], *, tool_id: str) -> Outbo
             raise _refuse_changed(msg)
         recipients[field] = tuple(str(one) for one in value)
     texts: dict[str, str] = {}
-    for field in ("subject", "body"):
+    for field in ("subject", "words"):
         text = parameters.get(field, "")
         if not isinstance(text, str):
             msg = f"{tool_id}: the {field!r} argument is not text"
@@ -1860,7 +1889,7 @@ def smtp_message(parameters: Mapping[str, FrozenJson], *, tool_id: str) -> Outbo
         cc=recipients["cc"],
         bcc=recipients["bcc"],
         subject=texts["subject"],
-        body=texts["body"],
+        body=texts["words"],
     )
 
 
