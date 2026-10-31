@@ -22,10 +22,12 @@ from ai_assistant.core.types import (
     ActivationDigest,
     ActivationEffect,
     ActivationUnderstanding,
+    CallOutcomeKind,
     ChannelContext,
     ChannelIdentity,
     ControllerRule,
     ControllerStage,
+    DeliveryStatus,
     DigestOutcome,
     EpisodeProcessingRecord,
     EpisodeProjection,
@@ -44,8 +46,11 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     ProjectedEvidence,
     ProjectedText,
+    ProposedCall,
     Provenance,
+    RecordedCall,
     RecordedChannelTrigger,
+    RecordedDelivery,
     RecordedInputMessage,
     RecordedTextInput,
     StageEntry,
@@ -373,9 +378,9 @@ def test_effects_done_or_unknown_are_shown_in_claim_order() -> None:
         _call("e2", ToolOutcome.FAILED),
         _call("e3", None),
         _message("m1", ToolOutcome.INDETERMINATE, round_="r2"),
-        _message("m2", ToolOutcome.SUCCEEDED, round_="r2"),
-        _message("m3", None, round_="r2"),
-        _message("m4", ToolOutcome.FAILED, round_="r2"),
+        _message("m2", ToolOutcome.SUCCEEDED, round_="r1"),
+        _message("m3", None, round_="r3"),
+        _message("m4", ToolOutcome.FAILED, round_="r3"),
     )
 
     view = _peer(_episode(record), effects)
@@ -386,10 +391,8 @@ def test_effects_done_or_unknown_are_shown_in_claim_order() -> None:
             outcome=ToolOutcome.INDETERMINATE,
             message=ProjectedText(text="Here are three options.", full_chars=23),
         ),
-        PeerEffect(
-            outcome=ToolOutcome.SUCCEEDED,
-            message=ProjectedText(text="Here are three options.", full_chars=23),
-        ),
+        # r1 wrote no text and made no message call: a message it claimed has no words.
+        PeerEffect(outcome=ToolOutcome.SUCCEEDED),
     )
 
 
@@ -409,6 +412,106 @@ def test_a_message_whose_round_the_episode_does_not_hold_shows_no_text() -> None
     view = _peer(_episode(_found()), (_message("m1", ToolOutcome.SUCCEEDED, round_="r9"),))
 
     assert view.did == (PeerEffect(outcome=ToolOutcome.SUCCEEDED),)
+
+
+# --- ADR-0356 §7:8 (#3537): a message call's message is its entry's words ----------------
+
+
+def _sent(round_: str, call_id: str, words: str, **fields: Any) -> RecordedCall:
+    values: dict[str, Any] = {
+        "round": round_,
+        "call_id": call_id,
+        "capability": "text",
+        "effect": True,
+        "outcome": CallOutcomeKind.DONE,
+        "delivered": RecordedDelivery(words=words, went=_PLACE, status=DeliveryStatus.SENT),
+        "recorded_at": _NOW,
+    }
+    values.update(fields)
+    return RecordedCall.model_validate(values)
+
+
+def _texts(*call_ids: str) -> tuple[ProposedCall, ...]:
+    return tuple(
+        ProposedCall(call_id=one, name="text", arguments={"words": one}) for one in call_ids
+    )
+
+
+def _calling(text: str, *call_ids: str, entries: tuple[RecordedCall, ...]) -> EpisodicMemory:
+    planned = PlanningRound(
+        id="r1", recorded_at=_NOW, text=text, notes="the 9:40 is cheapest", calls=_texts(*call_ids)
+    )
+    return _episode(_record(rounds=(planned,), call_records=entries))
+
+
+def _words(view: PeerView) -> list[str | None]:
+    return [None if one.message is None else one.message.text for one in view.did]
+
+
+def test_a_rounds_own_message_and_its_message_call_each_show_their_own_words() -> None:
+    """Under ADR-0356's interim a round's text is still its message, written before each
+    message call: the first effect is the round's own, the next the call's."""
+    episode = _calling(
+        "Here are three options.", "c1", entries=(_sent("r1", "c1", "Booked the 9:40."),)
+    )
+    effects = (_message("m1", ToolOutcome.SUCCEEDED), _message("m2", ToolOutcome.SUCCEEDED))
+
+    assert _words(_peer(episode, effects)) == ["Here are three options.", "Booked the 9:40."]
+
+
+def test_a_round_with_no_text_shows_each_message_call_in_the_order_it_proposed_them() -> None:
+    """After ADR-0356 a round writes no message: each message effect is a call's, paired in
+    the round's order whatever order the entries were appended in."""
+    entries = (_sent("r1", "c2", "Second."), _sent("r1", "c1", "First."))
+    effects = (_message("m1", ToolOutcome.SUCCEEDED), _message("m2", ToolOutcome.INDETERMINATE))
+
+    assert _words(_peer(_calling("", "c1", "c2", entries=entries), effects)) == [
+        "First.",
+        "Second.",
+    ]
+
+
+def test_a_round_whose_own_message_went_nowhere_shows_the_calls_words_alone() -> None:
+    """A round whose text shows but whose own message was not claimed: as many effects as
+    deliveries, so each is a call's and the round's text is never shown for one."""
+    episode = _calling(
+        "Here are three options.", "c1", entries=(_sent("r1", "c1", "Booked the 9:40."),)
+    )
+
+    assert _words(_peer(episode, (_message("m1", ToolOutcome.SUCCEEDED),))) == ["Booked the 9:40."]
+
+
+def test_a_message_call_that_sent_nothing_pairs_with_no_effect() -> None:
+    """A refused message call holds no delivery and claimed no effect (ADR-0356 §8:4)."""
+    entries = (
+        _sent("r1", "c1", "Booked the 9:40."),
+        _sent("r1", "c2", "x", outcome=CallOutcomeKind.REFUSED, delivered=None, reason="no place"),
+    )
+    episode = _calling("Here are three options.", "c1", "c2", entries=entries)
+    effects = (_message("m1", ToolOutcome.SUCCEEDED), _message("m2", ToolOutcome.SUCCEEDED))
+
+    assert _words(_peer(episode, effects)) == ["Here are three options.", "Booked the 9:40."]
+
+
+def test_effects_the_entries_do_not_yet_account_for_show_no_words() -> None:
+    """While acting is still writing, before the entries are appended, the counts do not
+    pair: the messages are shown with no words rather than with another's."""
+    episode = _calling("Here are three options.", "c1", entries=())
+    effects = (_message("m1", ToolOutcome.SUCCEEDED), _message("m2", ToolOutcome.SUCCEEDED))
+
+    assert _words(_peer(episode, effects)) == [None, None]
+
+
+def test_a_message_calls_words_are_cut_to_the_bound() -> None:
+    episode = _calling("", "c1", entries=(_sent("r1", "c1", "Booked the 9:40 to Lisbon."),))
+
+    view = _peer(episode, (_message("m1", ToolOutcome.SUCCEEDED),), bound=6)
+
+    assert view.did == (
+        PeerEffect(
+            outcome=ToolOutcome.SUCCEEDED, message=ProjectedText(text="Booked", full_chars=26)
+        ),
+    )
 
 
 # --- §6:10: what it never shows ------------------------------------------------------
