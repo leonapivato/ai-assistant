@@ -10,7 +10,7 @@ answer to an offer (§7:20-§7:23).
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import pytest
@@ -18,6 +18,7 @@ from test_engine import tool
 from test_engine_phases import _BOOK
 
 from ai_assistant.core.config import Settings
+from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
     ActivationStop,
     ActivationUnderstanding,
@@ -31,6 +32,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    PlanningRound,
     Provenance,
     RecordedInputMessage,
     SupportHolder,
@@ -633,6 +635,63 @@ def test_a_take_hands_the_input_over_and_stops_the_offering_one() -> None:
     assert [(one.activation_id, one.became) for one in older.took] == [(_IDS[1], Became.TAKEN)]
     assert matters.forward(_IDS[1]) == _IDS[0], "a hand-over is followed forward (§7:4)"
     assert matters.absorbed_by(_IDS[1]) is None
+
+
+def test_a_take_rounds_after_the_offer_joins_when_taken_and_projects_there() -> None:
+    """#3540, ADR-0332 §3, ADR-0356 §13: an input taken rounds after its offer records
+    the take's instant as when it joined, so its projected position is the round before
+    which it was taken, not the one before which it was offered."""
+    minutes = iter(range(1, 100))
+
+    def clock() -> datetime:
+        return _AT + timedelta(minutes=next(minutes))
+
+    def planned(state: ActivationState, number: int) -> None:
+        follows = None if number == 1 else f"round-{number - 1}"
+        state.recorded_round(
+            PlanningRound(id=f"round-{number}", follows=follows, recorded_at=clock()), ()
+        )
+
+    older = _running("a", _IDS[0], order=1)
+    older.committed = True
+    older.clock = clock
+    newer = _running("a", _IDS[1], order=2, text="only two bedrooms")
+    matters = _matters([older, newer])
+    planned(older, 1)
+    matters.merge(newer, _understood(newer, _IDS[0]), at=clock())
+    planned(older, 2)
+    planned(older, 3)
+
+    matters.answer(older, _IDS[1], take=True, reason=None)
+
+    (joined,) = older.joined
+    assert joined.joined_at > older.rounds[-1].recorded_at
+    planned(older, 4)
+    frozen = _episode(older, _IDS[0]).model_copy(
+        update={"processing_record": older.processing(clock(), None)}
+    )
+    projected = project_episode(frozen, excerpt_chars=200, owner_records=True)
+    (taken,) = projected.joined
+    assert taken.position == 3, "before round 4, the first planned with it"
+
+
+def test_a_take_with_no_clock_or_a_bad_reading_keeps_the_offers_instant() -> None:
+    """A take is not the clock's to fail: it still hands the input over, at the offer's."""
+
+    def failing() -> datetime:
+        msg = "the clock is broken"
+        raise RuntimeError(msg)
+
+    def naive() -> datetime:
+        return datetime(2026, 10, 21, 10)  # noqa: DTZ001 — the bad reading under test
+
+    for held in (None, failing, naive):
+        matters, older, _ = _offered()
+        older.clock = held
+        offered = older.offers[_IDS[1]].inputs
+
+        assert matters.answer(older, _IDS[1], take=True, reason=None).came_to is TakeAnswer.TAKEN
+        assert [one.joined_at for one in older.joined] == [one.joined_at for one in offered]
 
 
 def test_a_decline_records_its_reason_and_the_offering_one_waits() -> None:
