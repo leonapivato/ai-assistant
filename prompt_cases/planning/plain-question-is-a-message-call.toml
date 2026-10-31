@@ -1,5 +1,6 @@
 # ADR-0356 §11:1 case 1, §11:2: a plain question comes back as a text call answering
-# it, and not as the round's text, which reaches no one.
+# it, and not as the round's text, which reaches no one. No other reply is no other
+# message, so a call that sends none may stand beside it (the coordinator, 2026-10-31).
 prompt = "planning"
 guards = "reply_as_note"
 came_from = "2026-10-31"
@@ -7,7 +8,7 @@ set = "development"
 samples = 3
 
 [property]
-check = "only_says"
+check = "answers_by_message"
 phrases = ["10:30"]
 
 [input]

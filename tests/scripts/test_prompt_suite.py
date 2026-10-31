@@ -606,6 +606,29 @@ def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
     )
 
 
+def test_answers_by_message_allows_a_call_that_sends_nothing_beside_the_answer() -> None:
+    """ADR-0356 §11:2, as ruled: no other reply is no other message."""
+    params: dict[str, object] = {"phrases": ["10:30"]}
+    reliance = ProposedCall(call_id="c2", name="note_reliance", arguments={"memories": ["M1"]})
+    search = ProposedCall(call_id="c3", name="search_memory", arguments={"query": "x"})
+
+    assert (
+        _round("answers_by_message", params, RoundResponse(calls=(_text("At 10:30."), reliance)))
+        is None
+    )
+    assert _round("answers_by_message", params, RoundResponse(calls=(search,))) == (
+        "the round sends no message, so nothing reaches anyone"
+    )
+    assert _round(
+        "answers_by_message",
+        params,
+        RoundResponse(calls=(_text("At 10:30."), _text("Bye.", call_id="c4"))),
+    ) == ("the round sends more than one message")
+    assert _round("answers_by_message", params, RoundResponse(calls=(_text("Soon."),))) == (
+        "the message's words do not hold every named phrase"
+    )
+
+
 def test_the_capability_checks_read_the_rounds_calls() -> None:
     spawn = ProposedCall(call_id="c1", name="spawn", arguments={"instruction": "x"})
     both = RoundResponse(calls=(spawn, _text("Set.", call_id="c2")))

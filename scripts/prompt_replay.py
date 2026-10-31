@@ -2517,6 +2517,32 @@ def _only_says(reply: Reply, params: Mapping[str, object]) -> Judgement:
     return None
 
 
+def _answers_by_message(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """One message, a ``text`` call whose words hold each named phrase, and no other.
+
+    ADR-0356 §11:2's case 1, as the coordinator ruled it on 2026-10-31: a reply is a
+    message, so "no other reply" is no other message, and a call that sends none, such
+    as a note of the memories relied on (ADR-0329 §6:8), may stand beside the answer.
+    """
+    if reply.round is None:
+        return "the response reads as no round"
+    said = [
+        str(one.arguments.get("words", ""))
+        for one in reply.round.calls
+        if one.name in _MESSAGE_CALLS
+    ]
+    if not said:
+        return "the round sends no message, so nothing reaches anyone"
+    if len(said) > 1:
+        return "the round sends more than one message"
+    phrases = [one.casefold() for one in cast("list[str]", params["phrases"])]
+    if any(one.name != "text" for one in reply.round.calls if one.name in _MESSAGE_CALLS):
+        return "the round's message is not a text call"
+    if not all(one in said[0].casefold() for one in phrases):
+        return "the message's words do not hold every named phrase"
+    return None
+
+
 def _calls_are(reply: Reply, params: Mapping[str, object]) -> Judgement:
     """The round's calls are to exactly the named capabilities, each at least once."""
     if reply.round is None:
@@ -2768,6 +2794,13 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
             frozenset({PLANNING}),
             {"phrases": "strings"},
             _only_says,
+        ),
+        CodeCheck(
+            "answers_by_message",
+            "one message, a text call holding each of the named phrases, and no other",
+            frozenset({PLANNING}),
+            {"phrases": "strings"},
+            _answers_by_message,
         ),
         CodeCheck(
             "calls_are",
