@@ -158,7 +158,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from ai_assistant.core.channel_validation import OriginKind, origin_kind
+from ai_assistant.core.channel_validation import TASK_SCHEDULER, OriginKind, origin_kind
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.diagnostics import returned_written, write_diagnostic, write_failure
 from ai_assistant.core.episode_encoding import project_episode
@@ -2858,7 +2858,12 @@ class _Request:
         return [*lines, *self._place_list()]
 
     def _last(self) -> tuple[datetime, str] | None:
-        """The newest earlier stimulus for the same person among what the pass holds (§6:2)."""
+        """The newest earlier stimulus for the same person among what the pass holds (§6:2).
+
+        The same person as ADR-0349 §5:3 reads it: an input whose authors are established
+        as the person, or a scheduled task's, run or running; never an event a connected
+        source pushed, whose author is someone else.
+        """
         person = self._naming.person_id
         if person is None:
             return None
@@ -2873,7 +2878,7 @@ class _Request:
             if not isinstance(record, EpisodicMemory) or record.processing_record is None:
                 continue
             trigger = record.processing_record.trigger
-            if activation_person(trigger) == person and parties_are_persons_own(trigger.parties):
+            if activation_person(trigger) == person and _authored_by_them(trigger):
                 found.append((record.occurred_at, _origin_where(trigger.channel)))
         found.extend(
             (entry.arrived_at, _origin_where(entry.channel))
@@ -4085,7 +4090,10 @@ class _Request:
                 continue
             pinned = self._memory(memory, whole=True, extra=(("pinned", "yes"),))
             lines.append(f"- Now pinned: {pinned}")
-        for memory_id in sorted(kept - now):
+        # A memory the store no longer holds is told as forgotten, not unpinned (§4:5).
+        held = self._inputs.still_held
+        forgotten = frozenset() if held is None else shown.memories - held
+        for memory_id in sorted(kept - now - forgotten):
             label = self._book.held(LabelKind.MEMORY, memory_id)
             if label is not None:
                 lines.append(f"- {label} is no longer pinned.")
@@ -4986,7 +4994,8 @@ def _view_input(
 ) -> list[str]:
     """A short view's ``input``: its words, withheld, or pointing at where they are shown."""
     word = _words_tag(projection.parties, relayed=projection.relayed)
-    writer = naming.parties(projection.parties) if projection.parties else naming.who
+    # Parties not known are unknown, never the person (ADR-0351 §2:5, ADR-0353 §4:3).
+    writer = naming.parties(projection.parties)
     if in_place is not None and in_place.input:
         return [_tag("input", [("shown_in", in_place.section)], None)]
     if projection.input is None:
@@ -5126,6 +5135,17 @@ def _old_message_did(one: ProjectedRound, in_place: _InPlace | None) -> str:
         return _tag("did", [("from", _SYSTEM), ("shown_in", in_place.section)], "a message")
     text = f"a message: {message.text}" + ("…" if message.cut else "")
     return _tag("did", [("from", _SYSTEM)], text)
+
+
+def _authored_by_them(trigger: RecordedChannelTrigger) -> bool:
+    """Whether a stimulus is for its person as ADR-0349 §5:3 reads the same person.
+
+    Its authors established as that person (ADR-0332 §4:1); or one the Task Scheduler
+    started, whose person is the one its task is for.
+    """
+    if trigger.channel is not None and trigger.channel.channel_type == TASK_SCHEDULER:
+        return True
+    return parties_are_persons_own(trigger.parties)
 
 
 def _written_into(delivered: RecordedDelivery, window: str | None) -> bool:

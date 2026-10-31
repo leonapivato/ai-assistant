@@ -1,7 +1,8 @@
 # #3450: the spawn came back with its read-back saying that the task suggests no place,
 # on a hub with no line, so the forecast it is to tell Leo would go nowhere. Checking the
-# result against what the call was meant to do, the round replaces the task with one
-# suggesting this conversation, and promises Leo no report before that comes back.
+# result against what the call was meant to do, the round cancels the task and spawns
+# one suggesting this conversation, and promises Leo no report before that comes back. A
+# replace would not do: it takes the replaced task's places (ADR-0350 §9:4).
 prompt = "planning"
 guards = "report_place_unsuggested"
 came_from = "#3450"
@@ -10,7 +11,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes a spawn whose replaces names T1 and whose places name L1, about checking whether it will rain tonight and telling Leo, still due at 6 pm as T1 was. No text call in this round tells Leo that the forecast will be reported, here or anywhere."""
+read = """The round cancels T1 and makes a new spawn, one that names no task it replaces, whose places name L1, about checking whether it will rain tonight and telling Leo, still due at 6 pm as T1 was. No text call in this round tells Leo that the forecast will be reported, here or anywhere."""
 
 [input]
 file = "a-read-back-suggesting-no-place-is-caught.json"
