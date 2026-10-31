@@ -2945,8 +2945,12 @@ class _Request:
             lines.extend(self._item(item))
         return [], lines
 
-    def _item(self, item: PlaceItem) -> list[str]:
-        """One item of the place window, as a ``message`` tag by who wrote it."""
+    def _item(self, item: PlaceItem, *, withheld: bool = False) -> list[str]:
+        """One item of the place window, as a ``message`` tag by who wrote it.
+
+        ``withheld`` withholds its words whatever else holds, its links kept: an older
+        history's relayed input (ADR-0358 §9:3).
+        """
         attributes = [("from", self._naming.author(item.author))]
         if item.at is not None:
             attributes.append(("at", self._at(item.at)))
@@ -2958,7 +2962,7 @@ class _Request:
         if item.is_input:
             # The stimulus itself, shown in its own section and pointed at here.
             return [_tag("message", [*attributes, ("shown_in", _IN_THE_STIMULUS)], None)]
-        if item.author is PlaceAuthor.OTHER or self._relayed_item(item):
+        if withheld or item.author is PlaceAuthor.OTHER or self._relayed_item(item):
             # ADR-0356 §3:6: someone else's words, and a relayed input's, are withheld.
             return [_tag("message", [*attributes, ("withheld", "yes")], None)]
         return [_tag("message", attributes, item.text)]
@@ -3845,7 +3849,7 @@ class _Request:
                 )
             )
         started = self._stories_started(work, outcomes, results, shown.stories)
-        news = self._news(shown, [one for at, one in fresh if at not in reported])
+        news = self._news(shown, [one for at, one in fresh if at not in reported], work.round_id)
         self._name_running()
         return (
             RoundReport(
@@ -3928,8 +3932,13 @@ class _Request:
                 return frozenset(one.story_id for one in fresh)
         return frozenset()
 
-    def _news(self, shown: NewsShown, evidence: Sequence[DigestedEvidence]) -> list[str]:
-        """What the work's inputs hold that the exchange has not yet shown (§5:5-§5:6)."""
+    def _news(
+        self, shown: NewsShown, evidence: Sequence[DigestedEvidence], round_id: str
+    ) -> list[str]:
+        """What the work's inputs hold that the exchange has not yet shown (§5:5-§5:6).
+
+        ``round_id`` is the round whose calls' results this report carries.
+        """
         inputs = self._inputs
         news: list[str] = []
         for one in inputs.offers:
@@ -3959,7 +3968,7 @@ class _Request:
         news.extend(self._matters_changed())
         news.extend(self._forgotten(shown))
         news.extend(self._works_changed(shown))
-        news.extend(self._always_changed(shown))
+        news.extend(self._always_changed(shown, round_id))
         return news
 
     def _works_changed(self, shown: NewsShown) -> list[str]:
@@ -4029,7 +4038,7 @@ class _Request:
             if outcome.peer is not None and outcome.peer.stopped
         }
 
-    def _always_changed(self, shown: NewsShown) -> list[str]:
+    def _always_changed(self, shown: NewsShown, round_id: str) -> list[str]:
         """What the person newly chose to keep in mind (ADR-0360 §4).
 
         Each memory the slot would now show pinned that the exchange has not shown pinned,
@@ -4038,17 +4047,20 @@ class _Request:
         longer pinned; and each field changed, with its new value, or as not set; the time
         zone saying that this work's times stay in the zone its briefing named. A pin or a
         field this work's own call changed comes back in that call's result, and is not
-        named again (§4:5).
+        named again (§4:5): only the change the result beside it carries, to the value
+        that call left, so a later change made anywhere else is still news (§4:1).
         """
         person = self._inputs.person_now
         if person is None:
             return []
         who = _line(self._naming.who)
-        own_pins, own_fields = self._chosen_here()
+        own_pinned, own_unpinned, own_fields = self._chosen_here(round_id)
         lines: list[str] = []
         before = dict(shown.profile)
         for name, value in _profile_of(person.profile):
-            if name not in before or before[name] == value or name in own_fields:
+            if name not in before or before[name] == value:
+                continue
+            if name in own_fields and own_fields[name] == value:
                 continue
             said = name.replace("_", " ")
             if name == ProfileField.TIME_ZONE.value:
@@ -4065,36 +4077,46 @@ class _Request:
             )
         now = person.pins_reach
         for memory in person.pinned:
-            if memory.id in shown.kept or memory.id in own_pins:
+            if memory.id in shown.kept or memory.id in own_pinned:
                 continue
             pinned = self._memory(memory, whole=True, extra=(("pinned", "yes"),))
             lines.append(f"- Now pinned: {pinned}")
-        for memory_id in sorted(shown.kept - now - own_pins):
+        for memory_id in sorted(shown.kept - now - own_unpinned):
             label = self._book.held(LabelKind.MEMORY, memory_id)
             if label is not None:
                 lines.append(f"- {label} is no longer pinned.")
         return lines
 
-    def _chosen_here(self) -> tuple[set[str], set[str]]:
-        """The memories and fields this work's own done pin, unpin and profile calls changed."""
+    def _chosen_here(self, round_id: str) -> tuple[set[str], set[str], dict[str, str | None]]:
+        """What the done pin, unpin and profile calls of ``round_id`` changed.
+
+        The calls whose results this report carries, and no earlier round's: the memories
+        they pinned, those they unpinned, and each field with the value they set it to.
+        """
         done = {
-            (one.round_id, one.call_id)
+            one.call_id
             for one in self._inputs.outcomes
-            if one.kind is CallOutcomeKind.DONE
+            if one.kind is CallOutcomeKind.DONE and one.round_id == round_id
         }
-        memories: set[str] = set()
-        fields: set[str] = set()
+        pinned: set[str] = set()
+        unpinned: set[str] = set()
+        fields: dict[str, str | None] = {}
         for planning_round in self._inputs.rounds:
+            if planning_round.id != round_id:
+                continue
             for call in planning_round.calls:
-                if (planning_round.id, call.call_id) not in done:
+                if call.call_id not in done:
                     continue
                 if call.name in {"pin", "unpin"}:
                     named = self._book.resolve(str(call.arguments.get("memory", "")))
                     if named is not None:
-                        memories.add(named.id)
+                        (pinned if call.name == "pin" else unpinned).add(named.id)
                 elif call.name == "set_profile":
-                    fields.add(str(call.arguments.get("field", "")))
-        return memories, fields
+                    value = call.arguments.get("value")
+                    fields[str(call.arguments.get("field", ""))] = (
+                        value if isinstance(value, str) or value is None else str(value)
+                    )
+        return pinned, unpinned, fields
 
     def _forgotten(self, shown: NewsShown) -> list[str]:
         """Each memory the exchange showed that the store no longer holds (#3536).
@@ -4517,12 +4539,9 @@ class _Request:
 
     def _older_item(self, item: PlaceItem, history: OlderHistory) -> str:
         """An older item as the place window shows one, a relayed input's withheld (§9:3)."""
-        if history.withheld(item) and item.author is PlaceAuthor.USER:
-            attributes = [("from", self._naming.who)]
-            if item.at is not None:
-                attributes.append(("at", self._at(item.at)))
-            return _tag("message", [*attributes, ("withheld", "yes")], None)
-        return "\n".join(self._item(replace(item, is_input=False)))
+        withheld = history.withheld(item) and item.author is PlaceAuthor.USER
+        # Its episode and task links are kept, so planning can follow it (§9:3).
+        return "\n".join(self._item(replace(item, is_input=False), withheld=withheld))
 
     def _full_episode(self, read: EpisodeRead) -> dict[str, object]:
         """One page of an episode's full record, its parts in the order they happened.

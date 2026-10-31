@@ -294,6 +294,7 @@ from ai_assistant.core.types import (
     Modality,
     NewMessage,
     PlanningLabel,
+    Profile,
     ProfileField,
     ProjectedCall,
     ProjectedEvidence,
@@ -2077,6 +2078,9 @@ class PhaseWorking:
         # entries the episode already records, by their round and id (§8:6).
         self.work: PlanningWork | None = None
         self._entered: set[tuple[str, str]] = set()
+        # ADR-0360 §4:1, ADR-0357 §2:3: the person's names as the news last showed them, a
+        # name changed mid-work being one planning was shown, which a message may use.
+        self.named_now: tuple[str, ...] = ()
         # ADR-0358 §7-§10: what each done episode look-up read, by its result's id; and
         # where the place window came from, which the older history is read from (§9:2).
         self.looked: dict[str, EpisodeLookedUp] = {}
@@ -4602,6 +4606,8 @@ class PhasePath:
         matters = await self._matter_states(sorted(work.shown.matters))
         meanings, ended = await self._works_now(work.shown.running, state, given)
         person = await self._person_now(state, given)
+        if person is not None:
+            working.named_now = _names_of(person.profile)
         # ADR-0309 §5:10: a record the news shows is held among what the activation was
         # given, so the episode inherits its placement, as any record shown is.
         working.supplied.obtained(record for record in ended.values() if record is not None)
@@ -5394,7 +5400,7 @@ class PhasePath:
         with why and what it may name instead, and is never checked or written.
         """
         messages: list[RoundMessage] = []
-        named = self._named()
+        named = self._named(working)
         labels = working.labels.labels
         for call in texts:
             checked = text_arguments(call.arguments)
@@ -5413,14 +5419,17 @@ class PhasePath:
         return tuple(messages)
 
     @staticmethod
-    def _named() -> tuple[str, ...]:
-        """The names the user's profile gives them, as planning is shown them (§2:3)."""
+    def _named(working: PhaseWorking) -> tuple[str, ...]:
+        """The names the user's profile gives them, as planning is shown them (§2:3).
+
+        The block's, as the briefing showed them, and any the news has shown since
+        (ADR-0360 §4:1), so a name changed mid-work names the person too.
+        """
         state = active_state()
         block = None if state is None else state.person_block
         if block is None:
             return ()
-        values = (block.profile.value(one) for one in (ProfileField.NAME, ProfileField.ADDRESS))
-        return tuple(one for one in values if isinstance(one, str) and one.strip())
+        return tuple(dict.fromkeys((*_names_of(block.profile), *working.named_now)))
 
     def _text_place(
         self, working: PhaseWorking, checked: TextArguments, labels: Sequence[PlanningLabel]
@@ -6096,7 +6105,7 @@ class PhasePath:
             checked = text_arguments(asking.arguments)
             if (
                 not isinstance(checked, str)
-                and who_it_is_for(checked.to, named=self._named()) is None
+                and who_it_is_for(checked.to, named=self._named(working)) is None
             ):
                 place = self._text_place(working, checked, (*working.labels.labels, *labels))
                 if isinstance(place, str):
@@ -6449,3 +6458,9 @@ class _RecallDigestFailedError(ToleratedStageError):
     evidence and planning is told it could not read recall's outside records
     (ADR-0308 §4:12-§4:13).
     """
+
+
+def _names_of(profile: Profile) -> tuple[str, ...]:
+    """The names a profile gives the person: their name and how they are addressed."""
+    values = (profile.value(one) for one in (ProfileField.NAME, ProfileField.ADDRESS))
+    return tuple(one for one in values if isinstance(one, str) and one.strip())
