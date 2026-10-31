@@ -10,6 +10,7 @@ call's entry keeps of what its result showed, by reference and cut to a bound.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -41,9 +42,16 @@ from ai_assistant.core.types import (
     ShownRecord,
     ShownRecordKind,
     ShownText,
+    StoryHeader,
+    StoryNote,
+    StoryNoteAuthor,
+    StorySummary,
+    StorySummaryLine,
+    StorySummaryState,
 )
 from ai_assistant.orchestration.lookups import LOOK_UP_LABEL_ARGUMENTS, READ_STORY, SEARCH_EPISODES
 from ai_assistant.orchestration.planning import (
+    NOTHING_NEW,
     CallOutcome,
     CallOutcomeKind,
     EpisodeRead,
@@ -892,3 +900,81 @@ def test_results_rendered_in_turn_read_each_under_the_labels_before_it() -> None
             )
         ),
     ]
+
+
+def _dentist_now(version: int, line: str, notes: int) -> StorySummaryState:
+    """The dentist matter as the store holds it, at ``version``, with ``notes`` pending."""
+    return StorySummaryState(
+        story=StoryHeader(
+            story_id="story:dentist", created_at=_AT - timedelta(days=3), merged_into=None
+        ),
+        summary=StorySummary(
+            version=version, lines=(StorySummaryLine(text=line),), written_at=_AT, outside=False
+        ),
+        pending_notes=tuple(
+            StoryNote(
+                note_id=one,
+                text="a note",
+                author=StoryNoteAuthor.PLANNING,
+                written_during="earlier",
+                outside=False,
+                written_at=_AT,
+            )
+            for one in range(1, notes + 1)
+        ),
+        pending_episodes=(),
+        as_of=3,
+    )
+
+
+async def test_a_matter_a_search_showed_is_named_when_it_changes() -> None:
+    """ADR-0359 §2:1, review round 3: a matter a call's result showed is one the work saw.
+
+    Its summary is compared by the version the search showed; it showed no note, so the
+    notes pending at the first read after it are its baseline, not news.
+    """
+    matter = MatterShown(story_id="story:dentist", summary_version=2, first_line="The dentist.")
+    found = EpisodesFound(
+        episodes=(EpisodeShown(record=_episode("activation:one"), matters=(matter,)),)
+    )
+    _, call = _looked("search_episodes", query="dentist")
+    listing = ProposedCall(call_id="c2", name="list_tasks", arguments={})
+    stage, completer, _ = _stage(
+        RoundResponse(calls=(call,)),
+        RoundResponse(calls=(listing,)),
+        RoundResponse(calls=(listing.model_copy(update={"call_id": "c3"}),)),
+        RoundResponse(text="ok"),
+    )
+    inputs = _inputs(owner_records=True)
+    planned = await stage.plan(inputs)
+    searched = CallOutcome(
+        planned.round.id, "c1", CallOutcomeKind.DONE, result_id="result:1", episodes=found
+    )
+    second = await _next_round(stage, inputs, planned, outcomes=(searched,))
+    assert second.work is not None
+    assert "story:dentist" in second.work.shown.matters
+    later = replace(inputs, rounds=(planned.round,), labels=planned.labels)
+    third = await _next_round(
+        stage,
+        later,
+        second,
+        outcomes=(CallOutcome(second.round.id, "c2", CallOutcomeKind.DONE),),
+        matters_now={"story:dentist": _dentist_now(2, "The dentist.", 1)},
+    )
+    assert completer.last_call.exchange.steps[-1].report.news.endswith(NOTHING_NEW)
+    later = replace(
+        later, rounds=(*later.rounds, second.round), labels=(*later.labels, *second.labels)
+    )
+    await _next_round(
+        stage,
+        later,
+        third,
+        outcomes=(CallOutcome(third.round.id, "c3", CallOutcomeKind.DONE),),
+        matters_now={"story:dentist": _dentist_now(3, "The dentist moved.", 2)},
+    )
+
+    news = completer.last_call.exchange.steps[-1].report.news
+    assert (
+        "- S1 changed: its summary was rewritten, and now begins: The dentist moved; "
+        "it gained a note."
+    ) in news

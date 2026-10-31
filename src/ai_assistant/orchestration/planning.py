@@ -152,7 +152,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -1459,6 +1459,11 @@ class MatterSeen:
             told by it, never by a bounded view's words.
         members: How many members the story held, where it was read; a member leaving
             it is told by it, a split moving no note among them.
+        notes_as: What ``notes`` is: ``"all"`` its pending notes, as a store read or a
+            view listing every one holds them, so any other note pending later is one it
+            gained, whatever its id; ``"newest"`` a bounded view's newest notes, so a note
+            is gained where it is newer than every one shown; ``"none"`` no note was
+            shown, as a look-up shows a matter, so the first read after it holds them.
     """
 
     summary: tuple[str, ...] = ()
@@ -1468,6 +1473,7 @@ class MatterSeen:
     written_at: datetime | None = None
     version: int | None = None
     members: int | None = None
+    notes_as: Literal["all", "newest", "none"] = "all"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1480,13 +1486,25 @@ class PersonNow:
 
     Attributes:
         profile: Their five fields.
-        pinned: Each memory a pin now reaches, each once, as the slot resolves pins
-            (ADR-0338 §4:8): the current memory its chain reaches, none resting on outside
-            content, and the pass's audience applied (§6:4-§6:5).
+        pinned: Each memory the slot would now show as pinned, each once, as the slot
+            resolves pins (ADR-0338 §4:8): the current memory its chain reaches, none
+            resting on outside content, the pass's audience applied (§6:4-§6:5), the
+            oldest pins' within the slot's budget (§6:1-§6:2).
+        reached: The ids of every memory a pin now reaches under those rules, the budget
+            aside, so a pin the budget leaves out is not told as no longer pinned;
+            ``None`` takes ``pinned``'s.
     """
 
     profile: Profile
     pinned: tuple[Memory, ...] = ()
+    reached: frozenset[str] | None = None
+
+    @property
+    def pins_reach(self) -> frozenset[str]:
+        """The ids of every memory a pin now reaches, the budget aside."""
+        if self.reached is None:
+            return frozenset(one.id for one in self.pinned)
+        return self.reached | {one.id for one in self.pinned}
 
 
 @dataclass(frozen=True, slots=True)
@@ -3232,7 +3250,13 @@ class _Request:
         texts = self._in_place.get(record.id)
         if texts is None or self._remembered:
             return None
-        messages, delivered = _messages_in_place(record, texts.assistant)
+        trigger = self._inputs.trigger
+        into = None if trigger is None else trigger.channel
+        if trigger is not None and into is None and isinstance(trigger.target, ChannelIdentity):
+            # A message into a conversation names it as its target (ADR-0284 §2:2).
+            into = trigger.target
+        window = None if into is None else place_of(into)
+        messages, delivered = _messages_in_place(record, texts.assistant, window)
         return _InPlace(
             input=bool(texts.user) and _JOINED.join(texts.user) == _input_of(record),
             messages=messages,
@@ -3414,14 +3438,21 @@ class _Request:
         if not view.notes_withheld:
             tags.extend(self._note(note) for note in view.notes)
         tags.extend(self._episode_text(record) for record in view.episodes)
+        # A short view shows its newest notes alone; the store's read beside the briefing,
+        # where there is one, holds every pending note, so a note moved in is told too.
+        state = self._inputs.matters_now.get(view.story_id)
+        shown = frozenset(int(note.note_id) for note in view.notes)
         self._matters.setdefault(
             view.story_id,
             MatterSeen(
                 summary=tuple(line.text for line in view.lines),
                 written=view.written,
-                notes=frozenset(int(note.note_id) for note in view.notes),
+                notes=shown
+                if state is None
+                else shown | frozenset(int(note.note_id) for note in state.pending_notes),
                 version=view.summary_version,
                 members=self._inputs.matter_members.get(view.story_id),
+                notes_as="newest" if state is None else "all",
             ),
         )
         return _container("matter", attributes, tags)
@@ -3855,7 +3886,9 @@ class _Request:
     def _kept_now(self, shown: NewsShown) -> frozenset[str]:
         """The memories the exchange has shown pinned once this report is sent."""
         person = self._inputs.person_now
-        return shown.kept if person is None else frozenset(one.id for one in person.pinned)
+        if person is None:
+            return shown.kept
+        return (shown.kept & person.pins_reach) | {one.id for one in person.pinned}
 
     def _name_running(self) -> None:
         """Nothing is left to name: running work is cited by a label already held."""
@@ -3999,8 +4032,9 @@ class _Request:
     def _always_changed(self, shown: NewsShown) -> list[str]:
         """What the person newly chose to keep in mind (ADR-0360 §4).
 
-        Each memory a pin now reaches that the exchange has not shown pinned, as always in
-        mind renders a pinned memory; each one shown pinned that no pin now reaches, as no
+        Each memory the slot would now show pinned that the exchange has not shown pinned,
+        as always in mind renders a pinned memory; each one shown pinned that no pin now
+        reaches, a pin the budget leaves out still reaching it, as no
         longer pinned; and each field changed, with its new value, or as not set; the time
         zone saying that this work's times stay in the zone its briefing named. A pin or a
         field this work's own call changed comes back in that call's result, and is not
@@ -4029,7 +4063,7 @@ class _Request:
                 if value
                 else f"- {_upper(who)}'s {said} is no longer set."
             )
-        now = {one.id for one in person.pinned}
+        now = person.pins_reach
         for memory in person.pinned:
             if memory.id in shown.kept or memory.id in own_pins:
                 continue
@@ -4156,6 +4190,7 @@ class _Request:
             summary=texts,
             written=summary is not None,
             notes=pending if visible else seen.notes,
+            notes_as="all" if visible else seen.notes_as,
             merged_into=merged,
             written_at=None if summary is None else summary.written_at,
             version=None if summary is None else summary.version,
@@ -4173,9 +4208,11 @@ class _Request:
     ) -> list[str]:
         """A matter's notes gained, and what left it, since the exchange showed it.
 
-        A bounded view shows the newest notes, so a note is new where it is newer than
-        every note the exchange showed (note ids rise as notes are written), and only on a
-        pass that may show notes (ADR-0359 §5:1). What left it is told by a member count
+        Where every pending note was shown or read, a note gained is any other pending
+        now, a lower id moved in from another matter among them; where a bounded view
+        showed only the newest, one newer than every note shown (note ids rise as notes
+        are written); where none was, nothing yet. Only on a pass that may show notes
+        (ADR-0359 §5:1). What left it is told by a member count
         that fell, a split moving no note among them, or by a note no longer pending where
         no rewrite took it in.
         """
@@ -4187,7 +4224,12 @@ class _Request:
             gained = [
                 note
                 for note in state.pending_notes
-                if int(note.note_id) > newest and note.written_during != self._inputs.activation_id
+                if note.written_during != self._inputs.activation_id
+                and (
+                    int(note.note_id) not in seen.notes
+                    if seen.notes_as == "all"
+                    else seen.notes_as == "newest" and int(note.note_id) > newest
+                )
             ]
             if gained:
                 said.append(
@@ -4407,6 +4449,7 @@ class _Request:
         self.summaries_shown.setdefault(
             matter.story_id, None if matter.withheld else matter.summary_version
         )
+        self._looked_up(matter, again=again)
         shown: dict[str, object] = {"label": label}
         if matter.withheld:
             shown["summary"] = _SUMMARY_WITHHELD
@@ -4420,6 +4463,35 @@ class _Request:
                 shown["summary_outside_content"] = _OUTSIDE
                 self.shown.marked = True
         return shown
+
+    def _looked_up(self, matter: MatterShown, *, again: bool) -> None:
+        """Note a matter a look-up showed, which the news later compares against.
+
+        ADR-0359 §2:1: a matter shown in a call's result is one the work was shown. A
+        look-up shows its summary's first line and no note, so the summary is compared by
+        its version, and its notes from the first read after it (``notes_as="none"``); the
+        full view's reading of a matter already shown is its summary as it now stands
+        (ADR-0358 §10:7), and what is known of its notes is kept.
+        """
+        lines = () if matter.first_line is None or matter.withheld else (matter.first_line,)
+        written = matter.withheld or matter.summary_version is not None
+        prior = self._matters.get(matter.story_id)
+        if prior is None:
+            self._matters[matter.story_id] = MatterSeen(
+                summary=lines,
+                written=written,
+                version=matter.summary_version,
+                members=self._inputs.matter_members.get(matter.story_id),
+                notes_as="none",
+            )
+        elif again:
+            self._matters[matter.story_id] = replace(
+                prior,
+                summary=lines,
+                written=written,
+                version=matter.summary_version,
+                written_at=None,
+            )
 
     def _older_history(self, history: OlderHistory) -> dict[str, object] | str:
         """One page of the origin's older history, or why none is shown (ADR-0358 §9).
@@ -5007,7 +5079,7 @@ def _old_message_did(one: ProjectedRound, in_place: _InPlace | None) -> str:
 
 
 def _messages_in_place(
-    record: EpisodicMemory, written: Sequence[str]
+    record: EpisodicMemory, written: Sequence[str], window: str | None = None
 ) -> tuple[frozenset[int], frozenset[tuple[int, int]]]:
     """Which of an episode's messages one of ``written`` is, whole, the latest first.
 
@@ -5015,7 +5087,9 @@ def _messages_in_place(
     projection's cut ones: a round's text, for a round recorded before ADR-0356, and each
     message call's delivered words, from its entry. Each item of the window stands for
     one message, and the window is the conversation's most recent part, so the latest
-    messages claim the items first.
+    messages claim the items first. A message call claims an item only where it went
+    into the window's own place, ``window``; one that went elsewhere is never the item,
+    whatever its words (§3:2); with no place known, none does.
 
     Returns:
         The rounds whose message is shown, by position; and the message calls whose words
@@ -5032,6 +5106,8 @@ def _messages_in_place(
     for entry in processing.call_records:
         round_at = position.get(entry.round)
         if entry.delivered is None or round_at is None:
+            continue
+        if window is None or place_of(entry.delivered.went) != window:
             continue
         calls = [one.call_id for one in processing.rounds[round_at].calls]
         index = calls.index(entry.call_id) if entry.call_id in calls else 0

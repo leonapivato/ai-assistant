@@ -51,6 +51,8 @@ from ai_assistant.core.types import (
     StageEntry,
     StageOutcome,
     StoryHeader,
+    StoryNote,
+    StoryNoteAuthor,
     StorySummary,
     StorySummaryLine,
     StorySummaryState,
@@ -810,6 +812,22 @@ async def test_a_pin_removed_is_named_once_no_pin_reaches_its_memory() -> None:
     assert "- M2 is no longer pinned." in gone
 
 
+async def test_a_pin_the_budget_leaves_out_is_not_told_as_unpinned() -> None:
+    """ADR-0360 §4:1, review round 3: still reached, it is no news, pinned or unpinned."""
+    given = _inputs(person=_block(KeptInMind(memory=BEACH, pinned=True)))
+    left_out = PersonNow(
+        profile=Profile(name="Leo", time_zone="Europe/Lisbon"),
+        pinned=(MAREN,),
+        reached=frozenset({MAREN.id, BEACH.id}),
+    )
+
+    news = await _next_round(
+        given, RoundResponse(calls=(_call("c1", "list_tasks"),)), person_now=left_out
+    )
+
+    assert news.endswith(NOTHING_NEW)
+
+
 async def test_a_changed_time_zone_is_named_and_the_works_times_stay() -> None:
     """ADR-0360 §2:3, §4:3: the new zone named; this work's times stay in the briefing's."""
     news = await _next_round(
@@ -977,8 +995,141 @@ async def test_a_memory_a_digest_named_is_announced_forgotten() -> None:
     )
     given = _inputs(evidence=(evidence,))
 
-    news = await _next_round(
-        given, RoundResponse(calls=(_call("c1", "list_tasks"),)), still_held=frozenset()
+    stage, completer = _stage(RoundResponse(calls=(_call("c1", "list_tasks"),)))
+    planned = await stage.plan(given)
+    source = tag(completer.last_call.exchange.briefing, "evidence").get("source")
+    later = replace(
+        given,
+        work=planned.work,
+        rounds=(planned.round,),
+        labels=planned.labels,
+        outcomes=(CallOutcome(round_id=planned.round.id, call_id="c1", kind=CallOutcomeKind.DONE),),
+        still_held=frozenset({MAREN.id}),
+    )
+    await stage.plan(later)
+    news = completer.last_call.exchange.steps[-1].report.news
+
+    # The pinned memory is still held, so the one forgotten is the digest's source alone.
+    forgotten = [line for line in news.splitlines() if "is forgotten" in line]
+    assert source is not None
+    assert forgotten == [
+        f"- {source} is forgotten: the system no longer holds it, so do not use it."
+    ]
+
+
+def _story_note(note_id: int) -> StoryNote:
+    return StoryNote(
+        note_id=note_id,
+        text=f"note {note_id}",
+        author=StoryNoteAuthor.PLANNING,
+        written_during="earlier",
+        outside=False,
+        written_at=NOW - timedelta(hours=1),
     )
 
-    assert "is forgotten: the system no longer holds it, so do not use it." in news
+
+def _with_notes(state: StorySummaryState, *note_ids: int) -> StorySummaryState:
+    return state.model_copy(update={"pending_notes": tuple(map(_story_note, note_ids))})
+
+
+async def test_an_older_note_moved_into_a_matter_shown_is_a_note_gained() -> None:
+    """ADR-0359 §2:2, review round 3: a move keeps a note's id, so it may be older."""
+    shown = replace(_story(), notes=(_story_note(100),))
+    given = _inputs(stories=PlanningStories(stories=(shown,)), owner_records=True)
+    now = _with_notes(_state("Dinner at Luigi's on Friday."), 50, 100)
+
+    news = await _next_round(
+        given, RoundResponse(calls=(_call("c1", "list_tasks"),)), matters_now={"story:dinner": now}
+    )
+
+    assert "- S1 changed: it gained a note." in news
+
+
+async def test_a_note_moved_into_a_matter_a_short_view_showed_is_gained() -> None:
+    """ADR-0359 §2:2, review round 3: a short view's whole, read beside the briefing."""
+    view = ShortView(
+        story_id="story:dinner",
+        lines=(StorySummaryLine(text="Dinner"),),
+        notes=(_story_note(100),),
+        episodes=(),
+        written=True,
+        summary_version=2,
+    )
+    whole = _state("Dinner at Luigi's on Friday.")
+    given = _inputs(
+        stories=PlanningStories(cited=(view,)),
+        owner_records=True,
+        matters_now={"story:dinner": _with_notes(whole, 40, 100)},
+    )
+
+    unchanged = await _next_round(
+        given,
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        matters_now={"story:dinner": _with_notes(whole, 40, 100)},
+    )
+    moved = await _next_round(
+        given,
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        matters_now={"story:dinner": _with_notes(whole, 40, 50, 100)},
+    )
+
+    assert unchanged.endswith(NOTHING_NEW)
+    assert "- S1 changed: it gained a note." in moved
+
+
+async def test_one_message_sent_to_two_places_is_matched_in_the_windows_own_place() -> None:
+    """ADR-0356 §3:2, review round 3: the window's item is the delivery into its place."""
+    sending = _round(
+        "r1",
+        _call("c1", "text", to="Leo", words="Booked."),
+        _call("c2", "text", to="Leo", words="Booked.", via="L2"),
+        notes="Told him in both.",
+    )
+    record = _episode(
+        "booking",
+        rounds=(sending,),
+        calls=(
+            _entry(
+                "r1",
+                "c1",
+                "text",
+                delivered=RecordedDelivery(words="Booked.", went=CHAT, status=DeliveryStatus.SENT),
+            ),
+            _entry(
+                "r1",
+                "c2",
+                "text",
+                delivered=RecordedDelivery(
+                    words="Booked.", went=TELEGRAM, status=DeliveryStatus.SENT
+                ),
+            ),
+        ),
+        channel=TELEGRAM,
+    )
+    window = PlaceWindow(
+        takes_message=True,
+        items=(
+            PlaceItem(
+                author=PlaceAuthor.ASSISTANT,
+                text="Booked.",
+                at=NOW - timedelta(hours=2),
+                episode_id=record.id,
+            ),
+            PlaceItem(author=PlaceAuthor.USER, text="What's on tonight?", at=NOW, is_input=True),
+        ),
+    )
+
+    briefing = await _briefing(_inputs(place=window, episodes=(record,)))
+
+    chat, telegram = tag(section(briefing, "## Short-term memory"), "episode").held("did")
+    assert "shown in the window" in str(chat.text)
+    assert "shown in the window" not in str(telegram.text)
+    assert "Booked." in str(telegram.text)
+
+
+def test_a_tag_left_open_fails_at_once() -> None:
+    """Review round 3: malformed output fails its test, and never loops."""
+    with pytest.raises(AssertionError, match="never closed"):
+        tags('## Always in mind\n<memory label="M1">x')
+    with pytest.raises(AssertionError, match="never closed"):
+        tags('<matter label="S1">\n<summary from="the system">x</summary>')

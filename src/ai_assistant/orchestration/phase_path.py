@@ -4560,8 +4560,9 @@ class PhasePath:
         the exchange named by an ``M`` label is looked up, each matter it showed is read
         again, each running work is read for its meaning, each work it showed running is
         checked for having ended, and the person's profile and pins are read, so the news
-        can say what changed. Nothing is read for a work's first round. A store that cannot be
-        read says nothing: no memory is named forgotten, and no matter changed.
+        can say what changed. For a work's first round only the member counts are read, and
+        each matter shown by a short view, whose whole the briefing's baseline is. A store
+        that cannot be read says nothing: no memory is named forgotten, and no matter changed.
         """
         work = working.work
         # The member counts of the matters this round may show, and of those shown, so a
@@ -4578,7 +4579,19 @@ class PhasePath:
         shown_ids = () if work is None else tuple(work.shown.matters)
         members = await self._matter_members(sorted({*viewed, *shown_ids}))
         if work is None:
-            return _Reread(members=members)
+            # A short view shows a matter's newest notes alone, so each is read whole
+            # beside the briefing, where every pending note is its baseline (ADR-0359 §2:2).
+            bounded = (
+                []
+                if stories is None
+                else sorted(
+                    {
+                        *(view.story_id for one in stories.stories for view in one.inherited),
+                        *(one.story_id for one in stories.cited),
+                    }
+                )
+            )
+            return _Reread(matters=await self._matter_states(bounded), members=members)
         held: frozenset[str] | None = None
         ids = sorted(work.shown.memories)
         if ids:
@@ -4586,12 +4599,7 @@ class PhasePath:
                 held = frozenset(await self._memory.get_history(ids))
             except MemoryStoreError:
                 _log.warning("planning_memories_unread", stage="planning")
-        matters: dict[str, StorySummaryState | None] = {}
-        if self._story_reads is not None and work.shown.matters:
-            try:
-                matters = await self._story_reads.states(sorted(work.shown.matters))
-            except StoryStoreError:
-                _log.warning("planning_stories_unreadable", stage="planning")
+        matters = await self._matter_states(sorted(work.shown.matters))
         meanings, ended = await self._works_now(work.shown.running, state, given)
         person = await self._person_now(state, given)
         # ADR-0309 §5:10: a record the news shows is held among what the activation was
@@ -4609,7 +4617,8 @@ class PhasePath:
         One read of the store, with no model call, beside ADR-0338 §7:10's check; the
         block is not reassembled. Each pin is resolved to the current memory its chain
         reaches, each memory once (§4:2), under the slot's rules: none resting on outside
-        content, and the pass's audience applied (ADR-0338 §6:4-§6:5). ``None`` for an
+        content, and the pass's audience applied (ADR-0338 §6:4-§6:5); those the slot
+        would show are the oldest pins' within its budget (§6:1-§6:2). ``None`` for an
         activation the block does not reach, or a store that could not be read.
         """
         blocks = self._person_blocks
@@ -4626,13 +4635,43 @@ class PhasePath:
         except PersonModelStoreError, MemoryStoreError:
             _log.warning("planning_person_unread", stage="planning")
             return None
+        # ADR-0338 §6:2: the oldest pin first, the store's order breaking a tie in time.
+        pins = [
+            pin
+            for _, pin in sorted(
+                enumerate(model.standing_pins), key=lambda one: (one[1].pinned_at, one[0])
+            )
+        ]
         pinned: dict[str, Memory] = {}
-        for pin in model.standing_pins:
+        for pin in pins:
             memory = reached.get(pin.memory_id)
             if memory is not None and not memory.rests_on_outside_content:
                 pinned.setdefault(memory.id, memory)
         admitted = admitted_to_understanding(given.supply, list(pinned.values()))
-        return PersonNow(profile=model.profile, pinned=tuple(admitted))
+        # §6:1-§6:2: the slot stops before the first memory past its budget, and pins come
+        # before any style memory, so the pins it would show are this prefix alone.
+        shown: list[Memory] = []
+        spent = 0
+        for memory in admitted:
+            spent += len(memory.content)
+            if spent > blocks.budget_chars:
+                break
+            shown.append(memory)
+        return PersonNow(
+            profile=model.profile,
+            pinned=tuple(shown),
+            reached=frozenset(one.id for one in admitted),
+        )
+
+    async def _matter_states(self, story_ids: Sequence[str]) -> dict[str, StorySummaryState | None]:
+        """Each story as the store holds it now, or nothing where it cannot be read."""
+        if self._story_reads is None or not story_ids:
+            return {}
+        try:
+            return await self._story_reads.states(story_ids)
+        except StoryStoreError:
+            _log.warning("planning_stories_unreadable", stage="planning")
+            return {}
 
     async def _matter_members(self, story_ids: Sequence[str]) -> dict[str, int]:
         """How many members each story holds now, where the store can say (ADR-0359 §2:2)."""

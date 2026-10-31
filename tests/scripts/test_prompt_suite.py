@@ -589,6 +589,15 @@ def test_asks_about_reads_the_asking_text_calls_asks() -> None:
     assert _round("asks_about", params, None) == "the response reads as no round"
 
 
+def test_asks_about_refuses_a_question_the_runtime_would_not_send() -> None:
+    """ADR-0357 §6:1, review round 3: blank words are refused, so nothing is asked."""
+    blank = RoundResponse(calls=(_text(" ", asks=["1.1"]),))
+
+    assert _round("asks_about", {"calls": ["1.1"]}, blank) == (
+        "the round's question is a text call the runtime refuses"
+    )
+
+
 def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
     """ADR-0356 §11:2: a plain question comes back as a message call, not as text."""
     params: dict[str, object] = {"phrases": ["10:30"]}

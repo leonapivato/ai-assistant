@@ -148,6 +148,7 @@ from ai_assistant.models import (
 from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT, follow_up_round
 from ai_assistant.orchestration.digesting import DigestReply
 from ai_assistant.orchestration.matters_pass import MattersPassReply
+from ai_assistant.orchestration.message_tools import text_arguments
 from ai_assistant.orchestration.observer.prompts import PERSON_FLAG
 from ai_assistant.orchestration.observer.replies import (
     FramingReplyShape,
@@ -2490,7 +2491,9 @@ def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:
     """The round asks with a ``text`` call naming each of the named calls in ``asks``.
 
     ADR-0357 §8:1: a question names the calls it asks about in the ``asks`` argument of
-    the ``text`` call that asks it, each by the reference its result showed.
+    the ``text`` call that asks it, each by the reference its result showed. A call the
+    runtime would refuse, its words blank, say, sends no question (§6:1, §6:3), so its
+    ``asks`` count for nothing.
     """
     if reply.round is None:
         return "the response reads as no round"
@@ -2498,6 +2501,8 @@ def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:
     for one in reply.round.calls:
         named = one.arguments.get("asks") if one.name == "text" else None
         if isinstance(named, list | tuple):
+            if isinstance(text_arguments(one.arguments), str):
+                return "the round's question is a text call the runtime refuses"
             # ADR-0357 §8:3: a second asking message is refused, and asks nothing.
             asked.update(str(name) for name in named)
             break
