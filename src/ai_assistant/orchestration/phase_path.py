@@ -440,7 +440,7 @@ from ai_assistant.orchestration.remembering import (
     is_candidate_result,
 )
 from ai_assistant.orchestration.stories import episode_address
-from ai_assistant.orchestration.story_calls import TIDY_STORY_CAPABILITY
+from ai_assistant.orchestration.story_calls import STORY_CALL_CAPABILITIES, TIDY_STORY_CAPABILITY
 from ai_assistant.orchestration.story_links import admitted_episodes
 from ai_assistant.orchestration.story_privacy import SummaryVisibility
 from ai_assistant.orchestration.story_standing import story_standing
@@ -1543,6 +1543,18 @@ def _cited(understanding: ActivationUnderstanding | None) -> list[str]:
     )
 
 
+def _started(work: PlanningWork | None, stories: PlanningStories | None) -> list[PlanningStory]:
+    """The stories the next report shows beside the last round's first story call done.
+
+    ADR-0356 §5:4, as planning's report renders them: each story the round's inputs hold
+    that the exchange has not shown; none before the first round, or where the stories
+    could not be read.
+    """
+    if work is None or stories is None or stories.unreadable:
+        return []
+    return [one for one in stories.stories if one.story_id not in work.shown.stories]
+
+
 def _stories_outside(given: PlanningStories) -> tuple[str, ...]:
     """What of the story views planning is shown rests on outside content (ADR-0303 §3:6).
 
@@ -2481,7 +2493,12 @@ class PhaseWorking:
         return tuple(one.planned.round for one in self._rounds)
 
     def call_entries(
-        self, at: datetime, *, freezing: bool = False, showed: int = SHOWED_CHARS
+        self,
+        at: datetime,
+        *,
+        freezing: bool = False,
+        showed: int = SHOWED_CHARS,
+        reported: Sequence[PlanningStory] | None = None,
     ) -> tuple[RecordedCall, ...]:
         """Each call's entry the episode does not yet record, as of now (ADR-0356 §8).
 
@@ -2500,12 +2517,18 @@ class PhaseWorking:
         records were never fetched, because no round followed, keeps at the freeze the
         records it listed for planning, by id. Each result is read under the labels
         planning holds and those each result before it assigns, as planning renders them.
+        The last round's first story call done also showed, in its report, the stories it
+        brought the activation into (``reported``), so the last round's story calls'
+        entries wait for the reads before the next round, which say what those are.
 
         Args:
             at: When the entries are appended.
             freezing: Whether the episode is freezing.
             showed: The composition root's bound on what an entry keeps of what its
                 call showed (§11:4).
+            reported: The stories the next round's report shows beside the last round's
+                first story call done, read before that round; ``None`` where they are
+                not read yet.
 
         Returns:
             The new entries, in the order the rounds proposed their calls.
@@ -2518,6 +2541,8 @@ class PhaseWorking:
         # is shown of it is known only then: its entry waits for that fetch, and only at
         # the freeze, with no round to follow, keeps the ids it listed.
         waiting = frozenset() if freezing else frozenset(self.unfetched_searches())
+        last = self._rounds[-1] if self._rounds else None
+        beside_given = False
         for one in self._rounds:
             round_id = one.planned.round.id
             outcomes = {
@@ -2543,9 +2568,24 @@ class PhaseWorking:
                 if outcome is not None and outcome.result_id in waiting:
                     continue
                 capability = named.get(call.call_id, call.name)
+                story_done = (
+                    one is last
+                    and outcome is not None
+                    and outcome.kind is CallOutcomeKind.DONE
+                    and call.name in STORY_CALL_CAPABILITIES
+                )
+                if story_done and reported is None and not freezing:
+                    continue
+                beside: Sequence[PlanningStory] = ()
+                if story_done and not beside_given:
+                    # As planning's report renders them (ADR-0356 §5:4).
+                    beside_given = True
+                    beside = reported or ()
                 sent = one.sent.get(call.call_id)
                 shown = (
-                    None if outcome is None else self._showed(outcome, capability, showed, labels)
+                    None
+                    if outcome is None
+                    else self._showed(outcome, capability, showed, labels, beside)
                 )
                 entries.append(
                     RecordedCall(
@@ -2572,7 +2612,12 @@ class PhaseWorking:
         return tuple(entries)
 
     def _showed(
-        self, outcome: CallOutcome, capability: str, bound: int, labels: ShowingLabels
+        self,
+        outcome: CallOutcome,
+        capability: str,
+        bound: int,
+        labels: ShowingLabels,
+        started: Sequence[PlanningStory] = (),
     ) -> CallShowed | None:
         """What a call's result showed planning, as its entry keeps it (ADR-0358 §11:2)."""
         looked = self._looked_up(outcome, capability)
@@ -2587,7 +2632,9 @@ class PhaseWorking:
                 for one in searched_ids(outcome.result)
             )
             return shown_within(listed, bound)
-        return call_showed(looked, bound=bound, owner_records=self.owner_records, labels=labels)
+        return call_showed(
+            looked, bound=bound, owner_records=self.owner_records, labels=labels, started=started
+        )
 
     def acted_rounds(self) -> tuple[ActedRound, ...]:
         """Every acting decision, in round order."""
@@ -4345,8 +4392,9 @@ class PhasePath:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         # ADR-0356 §8:6: each call's entry is appended once its outcome is known, before
         # the next round's request; after the reads, so a memory search's entry keeps the
-        # records the round is shown, as fetched (ADR-0358 §11:2).
-        await self._entries(working)
+        # records the round is shown, as fetched, and a story call's the stories its
+        # report shows beside it (ADR-0358 §11:2).
+        await self._entries(working, _started(working.work, stories))
         outside = (
             *_fetched_outside(fetched),
             *_found_outside(found),
@@ -4689,17 +4737,21 @@ class PhasePath:
                 why.setdefault(name, WAITING_ROUND)
         return why
 
-    async def _entries(self, working: PhaseWorking) -> None:
+    async def _entries(
+        self, working: PhaseWorking, started: Sequence[PlanningStory] | None = None
+    ) -> None:
         """Append each call's entry whose outcome is now known (ADR-0356 §8:6).
 
         Recorded as a round is (ADR-0307 §2:4): added to the activation's record and the
         episode extended, a failure a capture failure that holds nothing back. A pass no
-        channel admitted has no episode, and records none.
+        channel admitted has no episode, and records none. ``started`` are the stories
+        the next round's report shows beside the last round's first story call done,
+        once they are read (:meth:`PhaseWorking.call_entries`).
         """
         state = active_state()
         if state is None:
             return
-        entries = working.call_entries(self._now(), showed=self._showed_chars)
+        entries = working.call_entries(self._now(), showed=self._showed_chars, reported=started)
         if entries:
             state.recorded_calls(entries)
             await _extended(state, self.append)
