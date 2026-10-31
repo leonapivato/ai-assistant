@@ -1074,7 +1074,14 @@ def test_a_large_request_is_split_and_compared_within_bounds() -> None:
 def _round_tool(args: object) -> list[tuple[str, str]]:
     part = {"part_kind": "tool-call", "tool_name": "planning_round", "args": args}
     body = {"response": {"parts": [part]}}
-    view = viewer.model_call([viewer.Entry(0, "planning", "returned", 1.0, "", body)], 0)
+    # A request in the rendered context's form: the round was asked before ADR-0356,
+    # when the tool was the round's own (§7:4 reserves no name since).
+    asked = {"messages": [{"role": "user", "content": "{}"}]}
+    lines = [
+        viewer.Entry(0, "planning", "given", 0.5, "", asked),
+        viewer.Entry(1, "planning", "returned", 1.0, "", body),
+    ]
+    view = viewer.model_call(lines, 1)
     assert view is not None
     return [(one["title"], one["text"]) for one in view["did"]["parts"]]
 

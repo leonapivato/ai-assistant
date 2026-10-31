@@ -846,6 +846,7 @@ class _Timeline:
     spans: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     rounds: dict[int, dict[str, object]] = field(default_factory=dict)
     pairs: dict[int, int | None] = field(default_factory=dict)
+    era: bool | None = None
 
     def round_of(self, at: float) -> int | None:
         number = bisect.bisect_right(self.round_starts, at)
@@ -853,6 +854,7 @@ class _Timeline:
 
     def build(self) -> None:
         self.entries = [one for one in self.lines if isinstance(one, Entry)]
+        self.era = planning_era(self.entries)
         self._bound_rounds()
         given: dict[tuple[str, object, int | None], list[Entry]] = {}
         for entry in self.entries:
@@ -1056,6 +1058,8 @@ class _Timeline:
             return
         held = self.rounds[number]
         held["returned"] = entry.line
+        # A round whose request was not recorded is read by its activation's (§13:6).
+        held.setdefault("exchange", self.era)
         body = _mapping(entry.body)
         if _failed(body):
             held["failure"] = _failure_text(body.get("failure"))
@@ -1073,7 +1077,7 @@ class _Timeline:
                 thinking = True
             elif kind == "tool-call":
                 name = _text(shown.get("tool_name")) or "?"
-                if name == ROUND_TOOL and held.get("exchange") is not True:
+                if name == ROUND_TOOL and held.get("exchange") is False:
                     # The round's own tool: its `another_round` asks for another round.
                     # ADR-0356 §7:4 reserves no name since, so a call of that name in
                     # a work's exchange is a call like any other.
@@ -2397,11 +2401,12 @@ def _round_tool_parts(raw: object, call_id: str | None) -> list[dict[str, object
     return parts
 
 
-def _response_part(part: object, *, exchange: bool = False) -> list[dict[str, object]]:
+def _response_part(part: object, *, exchange: bool | None = False) -> list[dict[str, object]]:
     """One part of a provider's response, as the view shows it.
 
     The round's own tool is read as notes and asks only on a round recorded before
-    ADR-0356; since, no name is reserved (§7:4), and a call of that name is a call.
+    ADR-0356; since, no name is reserved (§7:4), and a call of that name is a call, as
+    it is where whether the round was recorded before is not known (``None``).
     """
     shown = _mapping(part)
     kind = shown.get("part_kind")
@@ -2415,7 +2420,7 @@ def _response_part(part: object, *, exchange: bool = False) -> list[dict[str, ob
         name = _text(shown.get("tool_name")) or "?"
         call_id = _text(shown.get("tool_call_id"))
         raw = shown.get("args")
-        if name == ROUND_TOOL and not exchange:
+        if name == ROUND_TOOL and exchange is False:
             return _round_tool_parts(raw, call_id)
         text = _arguments_text(raw, _arguments(raw))
         return [_sized(text, kind="call", title=f"Call · {name}", id=call_id)]
@@ -2423,7 +2428,7 @@ def _response_part(part: object, *, exchange: bool = False) -> list[dict[str, ob
     return [_sized(_pretty(part), kind="other", title=title)]
 
 
-def _did(source: str, body: object, *, exchange: bool = False) -> dict[str, object]:
+def _did(source: str, body: object, *, exchange: bool | None = False) -> dict[str, object]:
     """What the model did: the response's parts in order, its usage, and any failure.
 
     ``exchange`` says a planning round's request was its work's exchange (ADR-0356 §13:6).
@@ -2463,7 +2468,7 @@ def _did_round(
     did: dict[str, object],
     parts: list[dict[str, object]],
     *,
-    exchange: bool,
+    exchange: bool | None,
 ) -> dict[str, object]:
     """What a planning round did: its response's parts, and how the round read it."""
     response = _mapping(held.get("response"))
@@ -2649,7 +2654,7 @@ def model_call(lines: Sequence[Line], number: int) -> dict[str, object] | None:
     built.build()
     given, returned = _pair_of(built.pairs, lines, picked)
     anchor = given or picked
-    view = _read_call(picked.source, given, returned)
+    view = _read_call(picked.source, given, returned, era=built.era)
     view["round"] = built.round_of(anchor.at) if picked.source == "planning" else None
     view["about"] = _about(picked.source, anchor.body)
     if given is not None and picked.source == "planning":
@@ -2702,7 +2707,9 @@ def learning_call(lines: Sequence[Line], number: int) -> dict[str, object] | Non
     return view
 
 
-def _read_call(source: str, given: Entry | None, returned: Entry | None) -> dict[str, object]:
+def _read_call(
+    source: str, given: Entry | None, returned: Entry | None, *, era: bool | None = None
+) -> dict[str, object]:
     """What any model call shows: told, given and done, and what the record lacks."""
     anchor = given or returned
     notes: list[str] = []
@@ -2737,7 +2744,7 @@ def _read_call(source: str, given: Entry | None, returned: Entry | None) -> dict
         view["did"] = _did(
             source,
             returned.body,
-            exchange=given is not None and _exchange_of(given.body) is not None,
+            exchange=era if given is None else _exchange_of(given.body) is not None,
         )
     return view
 
@@ -3242,7 +3249,7 @@ def _phase_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
     elif phase.stage == "understanding":
         shown |= _understanding_step(built, phase)
     elif phase.stage == "planning":
-        shown |= _planning_step(phase)
+        shown |= _planning_step(phase, era=built.era)
     elif phase.stage == "authorizing":
         shown |= _authorizing_step(phase)
     elif phase.stage == "digesting":
@@ -4132,6 +4139,24 @@ def _result_in_short(value: object) -> dict[str, object] | None:
     return {"label": _text(held.get("label")), "text": _cut(text)}
 
 
+def planning_era(entries: Sequence[Line]) -> bool | None:
+    """Whether an activation's rounds were asked as a work's exchange (ADR-0356 §13:6).
+
+    ``True`` where any planning request it recorded is an exchange, ``False`` where it
+    recorded requests and none is, and ``None`` where it recorded none: a round whose own
+    request is missing is read by its activation's, since one activation's rounds are
+    asked by one build, and is read as neither where the activation holds none.
+    """
+    asked = [
+        one.body
+        for one in entries
+        if isinstance(one, Entry) and one.source == "planning" and one.kind == "given"
+    ]
+    if any(_exchange_of(body) is not None for body in asked):
+        return True
+    return False if asked else None
+
+
 def _exchange_of(body: object) -> Mapping[str, object] | None:
     """The work's exchange a planning request records, where it is one (ADR-0356 §13:6)."""
     exchange = _mapping(body).get("exchange")
@@ -4185,21 +4210,24 @@ def _exchanged_before(steps: Sequence[object]) -> dict[str, object] | None:
     }
 
 
-def _planning_step(phase: _Phase) -> dict[str, object]:
+def _planning_step(phase: _Phase, *, era: bool | None = None) -> dict[str, object]:
     """A planning round: what came back from the round before, and what this one proposed.
 
     A request recorded since ADR-0356 is the work's exchange (§13:6), read from its
-    steps; one recorded before is the rendered context, read from its user message.
+    steps; one recorded before is the rendered context, read from its user message. A
+    round whose request was not recorded is read by ``era``, its activation's
+    (:func:`planning_era`), and as neither where that is not known either.
     """
     given, returned = _first(phase, "given"), _last(phase, "returned")
     exchange = None if given is None else _exchange_of(given.body)
-    if exchange is not None:
-        steps = _sequence(exchange.get("steps"))
+    if exchange is not None or (given is None and era is not False):
+        steps = () if exchange is None else _sequence(exchange.get("steps"))
         answered = _mapping(None if returned is None else returned.body)
+        known = True if exchange is not None else era
         return {
-            "exchange": True,
-            "request": True,
-            "first": not steps,
+            "exchange": known,
+            "request": exchange is not None,
+            "first": exchange is not None and not steps,
             "before": _exchanged_before(steps),
             "evidence": [],
             "returned": returned is not None,
@@ -4207,7 +4235,7 @@ def _planning_step(phase: _Phase) -> dict[str, object]:
             "read_as_round": answered.get("read_as_round")
             if isinstance(answered.get("read_as_round"), bool)
             else None,
-        } | _proposed(answered, exchange=True)
+        } | _proposed(answered, exchange=known)
     document = None if given is None else _user_document(given.body)
     rounds = _sequence(_mapping(document).get("rounds"))
     before = _mapping(rounds[-1]) if rounds else None
@@ -4249,13 +4277,14 @@ def _planning_step(phase: _Phase) -> dict[str, object]:
     return shown | _proposed(body)
 
 
-def _proposed(body: Mapping[str, object], *, exchange: bool = False) -> dict[str, object]:
+def _proposed(body: Mapping[str, object], *, exchange: bool | None = False) -> dict[str, object]:
     """What a round's response proposed: its calls, its message, its notes and asks.
 
     Before ADR-0356 a round's text is its message and the round's own tool carries its
     notes. Since, in a work's exchange, its text is its notes, written to no one (§7:2),
     and what people receive comes from its message calls (§7:3), each listed with its
-    words.
+    words. Where which it is is not known (``None``), its text is read as neither, and
+    no tool name is reserved.
     """
     texts: list[str] = []
     calls: list[dict[str, object]] = []
@@ -4274,7 +4303,7 @@ def _proposed(body: Mapping[str, object], *, exchange: bool = False) -> dict[str
             name = _text(part.get("tool_name")) or "?"
             raw = part.get("args")
             parsed = _arguments(raw)
-            if name == ROUND_TOOL and not exchange:
+            if name == ROUND_TOOL and exchange is False:
                 held = _mapping(parsed)
                 said = held.get("notes")
                 listed = _strings(said)
@@ -4291,13 +4320,16 @@ def _proposed(body: Mapping[str, object], *, exchange: bool = False) -> dict[str
                 if words is not None:
                     messages.append({"id": call_id, "words": words})
     text = "".join(texts)
-    if exchange:
-        # §7:2: the notes are the response's text, and nothing else.
-        notes = text or None
+    unread: str | None = None
+    if exchange is not False:
+        # §7:2: the notes are the response's text, and nothing else; where the round's
+        # kind is not known, the text is read as neither its notes nor its message.
+        notes, unread = (text or None, None) if exchange else (None, text or None)
         text = ""
     return {
         "calls": calls,
         "message": text,
+        "text_unread": unread,
         "message_calls": messages,
         "notes": notes,
         "asks": asks,
@@ -6678,6 +6710,13 @@ SCRIPT: Final = r"""
         if (one.id) row.appendChild(el("div", "m", one.id));
         row.appendChild(el("div", "said", one.words));
       }
+    } else if (s.exchange === null) {
+      // No request of this activation was recorded: whether its text was its message
+      // (before ADR-0356) or its notes (since) is not known, so it is neither.
+      const said = sec(root, "Its text");
+      said.appendChild(el("p", "note", "No request was recorded, so whether this was its "
+        + "message or its notes is not known."));
+      if (s.text_unread) said.appendChild(el("div", "said", s.text_unread));
     } else {
       const message = sec(root, "Its message");
       message.appendChild(s.message ? el("div", "said", s.message)
