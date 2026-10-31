@@ -8,27 +8,43 @@ the frozen episode records of every call.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+import asyncio
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from channel_receiver_contract import event_input
 from exchange_support import reported
 from phases_support import chat_turn, event, phases_harness, processing, written
 from task_support import seams
+from test_engine_phases import _LOOKUP
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
+    ActionRequest,
     CallOutcomeKind,
     ChannelIdentity,
     DeliveryStatus,
     EpisodicMemory,
+    Idempotency,
     LabelKind,
     MessageAuthor,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
     PlanningLabel,
     ProposedCall,
     RecordedCall,
     RoundResponse,
+    ToolCall,
+    ToolDefinition,
     ToolOutcome,
+)
+from ai_assistant.orchestration.acting import (
+    ActedCall,
+    ActedOutcome,
+    AuthorizedCall,
+    ResultRoute,
 )
 from ai_assistant.orchestration.matters import STOP_ACTIVATION_CAPABILITY
 from ai_assistant.orchestration.phase_path import (
@@ -53,7 +69,7 @@ from ai_assistant.orchestration.task_scheduler import SPAWN_CAPABILITY
 from ai_assistant.testing import FakeToolCallingCompleter
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from test_engine import Harness
 
@@ -479,3 +495,159 @@ async def test_each_calls_entry_is_stored_before_the_next_rounds_request() -> No
         "c2": CallOutcomeKind.REFUSED,
     }
     await harness.engine.aclose()
+
+
+# --- #3539: a finished call keeps its outcome where acting raised or was cancelled ----
+
+
+def _lookup(name: str, **overrides: object) -> ToolDefinition:
+    """A read that changes nothing; any other ``name`` is one not safe to repeat, claimed."""
+    if name != "lookup":
+        overrides = {"safe_to_repeat": False, "idempotency": Idempotency.NONE, **overrides}
+    return ToolDefinition.model_validate(
+        {**_LOOKUP.model_dump(), "id": name, "capability": name, **overrides}
+    )
+
+
+async def test_a_look_up_beside_a_sibling_that_raised_keeps_its_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0356 §8:6 (#3539): a look-up with no effect record that finished is recorded
+    done, though the plan store failing to finish its sibling's record made acting raise."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "lookup", place="Riverside"),
+                _call("c2", "once", place="Hillside"),
+            )
+        )
+    )
+    harness = phases_harness(
+        completer,
+        tools=(_lookup("lookup"), _lookup("once")),
+        phases={"capabilities": ("lookup", "once")},
+    )
+    finish = harness.plans.finish_activation_effect
+    failed: list[str] = []
+
+    async def first_unfinished(effect_id: str, *args: Any, **kwargs: Any) -> None:
+        if not failed:
+            failed.append(effect_id)
+            msg = "the plan store is down"
+            raise PlanningError(msg)
+        await finish(effect_id, *args, **kwargs)
+
+    monkeypatch.setattr(harness.plans, "finish_activation_effect", first_unfinished)
+
+    _, episode = await chat_turn(harness, "what is the weather")
+
+    assert failed, "the sibling's record was the one left unfinished"
+    entries = _entries(episode)
+    assert entries["c1"].outcome is CallOutcomeKind.DONE
+    assert entries["c2"].outcome is None
+    await harness.engine.aclose()
+
+
+async def test_a_look_up_finished_before_the_round_was_cancelled_keeps_its_outcome() -> None:
+    """ADR-0356 §8:6 (#3539): a round cancelled mid-acting still records the outcome of
+    each call that finished; the call it cut short is recorded with none."""
+    entered = asyncio.Event()
+    done: list[str] = []
+
+    async def handler(parameters: Mapping[str, object], *, idempotency_key: str | None) -> None:
+        del idempotency_key
+        if parameters["place"] == "Hillside":
+            entered.set()
+            await asyncio.Event().wait()  # until the round is cancelled
+        done.append(str(parameters["place"]))
+
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "lookup", place="Riverside"),
+                _call("c2", "lookup", place="Hillside"),
+            )
+        )
+    )
+    # An event's input is outside content, so the read stays on the hub to be allowed.
+    harness = phases_harness(
+        completer,
+        tools=(_lookup("lookup", leaves_hub=False),),
+        tool_handler=handler,
+        phases={"capabilities": ("lookup",)},
+    )
+    task = asyncio.ensure_future(
+        harness.engine.receive(event_input(), reply=None, timeout=timedelta(seconds=30))
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+
+    def finished() -> bool:
+        # The round as the phases hold it: the look-up has come back to acting.
+        (running,) = [one.state for one in harness.engine._running if one.state is not None]
+        phases = getattr(running.working, "phases", None)
+        assert isinstance(phases, PhaseWorking)
+        return bool(getattr(phases.latest, "handed", None))
+
+    for _ in range(200):
+        if finished():
+            break
+        await asyncio.sleep(0)
+    assert done == ["Riverside"]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    (episode,) = await harness.memory.export()
+    assert isinstance(episode, EpisodicMemory)
+    assert not processing(episode).is_open
+    entries = _entries(episode)
+    assert entries["c1"].outcome is CallOutcomeKind.DONE
+    assert entries["c2"].outcome is None
+    await harness.engine.aclose()
+
+
+def test_a_handed_back_call_routed_to_a_digest_is_recorded_marked() -> None:
+    """ADR-0356 §8:6-§8:7 (#3539): where acting handed back no round, a call it handed back
+    is recorded from what came of it, marked where its result went to a digest."""
+    from ai_assistant.orchestration.authorizer import (  # noqa: PLC0415
+        CallVerdict,
+        RoundAuthorization,
+        Verdict,
+    )
+
+    working = _working()
+    working.planned(_planned(_call("c1", "lookup"), _call("c2", "book")))
+    working.latest.authorization = RoundAuthorization(
+        activation_id="activation",
+        round_id="round-1",
+        verdicts=(
+            CallVerdict("c1", Verdict.ALLOWED, decision_id="d1"),
+            CallVerdict("c2", Verdict.ALLOWED, decision_id="d2", effect_id="e2"),
+        ),
+    )
+    working.latest.acted_one(
+        ActedCall(
+            AuthorizedCall(_looked_up("d1")),
+            ActedOutcome.DONE,
+            route=ResultRoute.DIGEST,
+            result_id="result:1",
+        )
+    )
+
+    (looked,) = working.call_entries(_AT)
+    assert (looked.call_id, looked.outcome, looked.marked) == ("c1", CallOutcomeKind.DONE, True)
+    (booked,) = working.call_entries(_AT, freezing=True)
+    assert (booked.call_id, booked.outcome) == ("c2", None)
+
+
+def _looked_up(decision: str) -> ToolCall:
+    """A look-up allowed under ``decision``, as acting hands it back."""
+    request = ActionRequest(tool=_LOOKUP, parameters={"place": "Riverside"})
+    allowed = PermissionDecision.from_request(
+        request,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="allowed"),
+        id=decision,
+        decided_at=_AT,
+    )
+    return ToolCall(request=request, decision=allowed)

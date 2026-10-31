@@ -133,7 +133,7 @@ from ai_assistant.orchestration.person_calls import NotDone
 from ai_assistant.orchestration.remembering import NeedsYou
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Coroutine, Mapping, Sequence
 
     from ai_assistant.core.protocols import PlanStore, ToolInvoker
     from ai_assistant.core.types import (
@@ -706,11 +706,24 @@ class ActingStage:
             raise ValueError(msg)
         self._own_records = _Beside(runners, self._own_records)
 
-    async def act(self, authorized: AuthorizedRound, *, held: HeldResults) -> ActedRound:
+    async def act(
+        self,
+        authorized: AuthorizedRound,
+        *,
+        held: HeldResults,
+        on_acted: Callable[[ActedCall], None] | None = None,
+    ) -> ActedRound:
         """Run every call of ``authorized`` in parallel and say what came of each.
 
         Every call is let finish before this returns or raises, so a claimed call is
         never abandoned because a sibling failed.
+
+        **Each call's outcome is handed back as it is known**, to ``on_acted``, once per
+        call and before this returns or raises, independently of its siblings: where a
+        sibling raised, or the round was cancelled, what came of each call that finished
+        is not lost with the round (ADR-0356 §8:6). A call on the assistant's own
+        records, awaited to its end whatever cancels the round (§3:3), is handed back
+        from inside that wait, so its outcome survives the cancellation too.
 
         **Each call is revalidated and detached before the first ``await``**, and the
         claim, the invocation and the record all read that one snapshot. A caller's
@@ -725,6 +738,9 @@ class ActingStage:
             authorized: The round's allowed calls.
             held: The activation's held results, acting's part of its working
                 episode.
+            on_acted: Handed each call's outcome as it is known, once per call. It is
+                called synchronously and must not raise. ``None`` hands back nothing
+                but the round.
 
         Returns:
             Each call's outcome, in the round's order.
@@ -743,10 +759,23 @@ class ActingStage:
         match = tuple(str(one) for one in authorized.match)
         snapshots = [_snapshot(one) for one in authorized.calls]
         _distinct_decisions(snapshots)
-        answers = await asyncio.gather(
-            *(self._act(activation_id, round_id, match, one, held) for one in snapshots),
-            return_exceptions=True,
-        )
+        handed: set[str] = set()
+
+        def hand_back(acted: ActedCall) -> None:
+            # Once per call: a drained call is handed back inside its wait, and again
+            # here when that wait returns.
+            decision = acted.call.call.decision.id
+            if on_acted is None or decision in handed:
+                return
+            handed.add(decision)
+            on_acted(acted)
+
+        async def each(one: AuthorizedCall) -> ActedCall:
+            acted = await self._act(activation_id, round_id, match, one, held, hand_back)
+            hand_back(acted)
+            return acted
+
+        answers = await asyncio.gather(*(each(one) for one in snapshots), return_exceptions=True)
         acted: list[ActedCall] = []
         errors: list[Exception] = []
         for answer in answers:
@@ -763,19 +792,22 @@ class ActingStage:
             raise ExceptionGroup(msg, errors)
         return ActedRound(round_id=round_id, calls=tuple(acted))
 
-    async def _act(  # noqa: PLR0911 — each way a call ends before it runs, and the two routes it runs by
+    async def _act(  # noqa: PLR0911, PLR0913 — each way a call ends before it runs, the two routes it runs by, and the round's facts it runs under
         self,
         activation_id: str,
         round_id: str,
         match: tuple[str, ...],
         one: AuthorizedCall,
         held: HeldResults,
+        hand_back: Callable[[ActedCall], None],
     ) -> ActedCall:
         """Claim one detached call where it gets a record, run it, and finish the record.
 
         A call under an approval given to another activation is not done, and nothing is
         claimed or run: the yes's activation runs the calls it approved, and no other
-        activation uses that approval (ADR-0321 §4:1).
+        activation uses that approval (ADR-0321 §4:1). A call awaited to its end whatever
+        cancels this task is handed back (``hand_back``) inside that wait, which a
+        cancellation otherwise ends without its outcome.
         """
         call = one.call
         tool = call.request.tool
@@ -804,8 +836,11 @@ class ActingStage:
                 # ADR-0350 §3:3: the runner's write claims the record in its own step,
                 # awaited to its end as every call on the assistant's own records is.
                 work = asyncio.ensure_future(
-                    self._claimed_by_runner(
-                        claiming, one, record, None if tool.safe_to_repeat else match, held
+                    _handed_back(
+                        self._claimed_by_runner(
+                            claiming, one, record, None if tool.safe_to_repeat else match, held
+                        ),
+                        hand_back,
                     )
                 )
                 return await drain_registered(work, cancel_on_interrupt=False)
@@ -826,7 +861,9 @@ class ActingStage:
                 return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ALREADY_DONE)
         if tool.effect is CapabilityEffect.OWN_RECORDS:
             # §3:3: awaited to its end, finish included, whatever cancels this task.
-            work = asyncio.ensure_future(self._on_own_records(one, effect_id, round_id, held))
+            work = asyncio.ensure_future(
+                _handed_back(self._on_own_records(one, effect_id, round_id, held), hand_back)
+            )
             return await drain_registered(work, cancel_on_interrupt=False)
         return await self._through_invoker(one, effect_id, round_id, held)
 
@@ -1090,6 +1127,15 @@ class ActingStage:
         return ActedCall(
             one, outcome, route=ResultRoute.DIGEST, result_id=result_id, effect_id=effect_id
         )
+
+
+async def _handed_back(
+    work: Coroutine[object, object, ActedCall], hand_back: Callable[[ActedCall], None]
+) -> ActedCall:
+    """Run ``work`` and hand back what came of it, before anything awaiting it resumes."""
+    acted = await work
+    hand_back(acted)
+    return acted
 
 
 def _distinct_decisions(calls: Sequence[AuthorizedCall]) -> None:

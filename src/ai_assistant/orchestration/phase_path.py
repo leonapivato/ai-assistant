@@ -1662,6 +1662,9 @@ class _Round:
         finished: Where acting raised and handed back no call's outcome, the outcome and
             reason each of the round's finished effect records holds, by its id
             (ADR-0306 §6), which its call's entry is made from.
+        handed: What came of each call acting finished, by its decision's id, as acting
+            handed each back (ADR-0356 §8:6). Where acting raised or was cancelled before
+            handing back the round, each finished call's entry is made from it.
     """
 
     planned: PlannedRound
@@ -1677,6 +1680,11 @@ class _Round:
     sent: dict[str, _Sent] = field(default_factory=dict)
     effects: Mapping[str, bool] = field(default_factory=dict)
     finished: Mapping[str, tuple[ToolOutcome, str | None]] = field(default_factory=dict)
+    handed: dict[str, ActedCall] = field(default_factory=dict)
+
+    def acted_one(self, acted: ActedCall) -> None:
+        """Hold what came of one call, as acting hands it back (ADR-0356 §8:6)."""
+        self.handed[acted.call.call.decision.id] = acted
 
     @property
     def has_messages(self) -> bool:
@@ -2410,7 +2418,12 @@ class PhaseWorking:
             outcomes = {
                 outcome.call_id: outcome
                 for outcome in call_outcomes(
-                    one.planned, one.authorization, one.acted, one.sent, one.finished
+                    one.planned,
+                    one.authorization,
+                    one.acted,
+                    one.sent,
+                    one.finished,
+                    handed=one.handed,
                 )
             }
             # An approved action is proposed under its tool and runs as its capability.
@@ -2565,12 +2578,14 @@ def place_window(
     return PlaceWindow(takes_message=True, description=description, items=items)
 
 
-def call_outcomes(
+def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what acting handed back
     planned: PlannedRound,
     authorization: RoundAuthorization | None,
     acted: ActedRound | None,
     sent: Mapping[str, _Sent] | None = None,
     finished: Mapping[str, tuple[ToolOutcome, str | None]] | None = None,
+    *,
+    handed: Mapping[str, ActedCall] | None = None,
 ) -> tuple[CallOutcome, ...]:
     """What came of one round's calls, as planning reads them, in the round's order.
 
@@ -2583,6 +2598,11 @@ def call_outcomes(
     minted (ADR-0306 §5:1, §5:14), or needing you where the memory writer asked at write
     time, with the assertions its question shows replaced (ADR-0321 §5:5). A call with no
     decision yet has no outcome.
+
+    Where acting raised or was cancelled and so made nothing of the round (``acted`` is
+    ``None``), a call it ``handed`` back as it finished is what acting made of it, and
+    one claimed under an effect record it did not hand back is what that record holds
+    (ADR-0356 §8:6, ADR-0306 §6).
     """
     refused = {one.call.call_id: one.reason for one in planned.refused}
     verdicts = {} if authorization is None else {one.call_id: one for one in authorization.verdicts}
@@ -2590,7 +2610,11 @@ def call_outcomes(
         {} if authorization is None else {one.call_id: one for one in authorization.call_messages}
     )
     written = {} if sent is None else sent
-    ran = {} if acted is None else {one.call.call.decision.id: one for one in acted.calls}
+    ran = (
+        dict(handed or {})
+        if acted is None
+        else {one.call.call.decision.id: one for one in acted.calls}
+    )
     round_id = planned.round.id
     outcomes: list[CallOutcome] = []
     for call in planned.round.calls:
@@ -4932,8 +4956,9 @@ class PhasePath:
             # (ADR-0309 §5:10, ADR-0321 §5:5).
             working.supplied.obtained(record for one in ran.calls for record in one.replaces)
         elif isinstance(ran, Exception):
-            # ADR-0356 §8:6: acting raised, so it handed back no call's outcome; a call
-            # claimed under an effect record still has its outcome there (ADR-0306 §6).
+            # ADR-0356 §8:6: acting raised, so it handed back no round; each call it
+            # finished was handed back as it finished (`_Round.handed`), and one claimed
+            # under an effect record still has its outcome there (ADR-0306 §6).
             await self._finished_effects(working, latest)
 
     async def _finished_effects(self, working: PhaseWorking, latest: _Round) -> None:
@@ -5059,6 +5084,10 @@ class PhasePath:
         through its own-records seam and awaits each to its end (ADR-0306 §3:3), after
         the activation has ended if need be. What came of one is written to the story's
         version log, never to the episode (§7:1), so no acting decision of it is held.
+
+        **Each other call's outcome is held on the round as acting hands it back**, so
+        a call that finished keeps what came of it on its entry where a sibling raised
+        or the round was cancelled (ADR-0356 §8:6).
         """
         tidies = tuple(
             one
@@ -5074,6 +5103,7 @@ class PhasePath:
         if not rest:
             return ActedRound(round_id=decided.round_id)
         authorized = authorized_round(replace(decided, allowed=rest))
+        acted_one = working.latest.acted_one
         if caller is None:
             caller = self._caller(given, working)
         with (
@@ -5082,14 +5112,16 @@ class PhasePath:
             self._tools.holding(working.supplied, working.attributions),
         ):
             if self._look_ups is None:
-                acted = await self._acting.act(authorized, held=working.held)
+                acted = await self._acting.act(authorized, held=working.held, on_acted=acted_one)
                 self._peers(working, acted, caller)
                 return acted
             with self._look_ups.scope(
                 audience=given.supply, owner_records=working.owner_records
             ) as scope:
                 try:
-                    acted = await self._acting.act(authorized, held=working.held)
+                    acted = await self._acting.act(
+                        authorized, held=working.held, on_acted=acted_one
+                    )
                 finally:
                     # Every view a story read read was obtained, whatever became of
                     # the round's other calls (ADR-0309 §5:10).
