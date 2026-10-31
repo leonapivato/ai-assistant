@@ -344,7 +344,8 @@ class EpisodeLookUpReads:
             first = next(
                 (at for at, one in enumerate(entries) if one.record.id in source.episodes), None
             )
-            whole = len(entries) < limit
+            # The whole channel: a short page, or one holding every live episode on it.
+            whole = len(entries) < limit or len(entries) >= read.total
             older = entries if first is None else entries[:first]
             records = [
                 record

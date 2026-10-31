@@ -2508,6 +2508,10 @@ class PhaseWorking:
             The new entries, in the order the rounds proposed their calls.
         """
         entries: list[RecordedCall] = []
+        # ADR-0358 §8:1, §11:2: a matter planning holds a label for is rendered by that
+        # label alone, so it showed no summary: the stories labelled before these results
+        # are rendered, and those each result before it in this batch labels.
+        held = {one.id for one in self.labels.labels if one.kind is LabelKind.STORY}
         for one in self._rounds:
             round_id = one.planned.round.id
             outcomes = {
@@ -2532,7 +2536,13 @@ class PhaseWorking:
                     continue
                 capability = named.get(call.call_id, call.name)
                 sent = one.sent.get(call.call_id)
-                shown = None if outcome is None else self._showed(outcome, capability, showed)
+                shown = None if outcome is None else self._showed(outcome, capability, showed, held)
+                if shown is not None:
+                    held.update(
+                        part.id
+                        for part in shown.parts
+                        if isinstance(part, ShownRecord) and part.kind is ShownRecordKind.STORY
+                    )
                 entries.append(
                     RecordedCall(
                         round=round_id,
@@ -2557,7 +2567,9 @@ class PhaseWorking:
                 self._entered.add((round_id, call.call_id))
         return tuple(entries)
 
-    def _showed(self, outcome: CallOutcome, capability: str, bound: int) -> CallShowed | None:
+    def _showed(
+        self, outcome: CallOutcome, capability: str, bound: int, held: Collection[str]
+    ) -> CallShowed | None:
         """What a call's result showed planning, as its entry keeps it (ADR-0358 §11:2)."""
         looked = self._looked_up(outcome, capability)
         if (
@@ -2571,7 +2583,7 @@ class PhaseWorking:
                 for one in searched_ids(outcome.result)
             )
             return shown_within(listed, bound)
-        return call_showed(looked, bound=bound, owner_records=self.owner_records)
+        return call_showed(looked, bound=bound, owner_records=self.owner_records, held=held)
 
     def acted_rounds(self) -> tuple[ActedRound, ...]:
         """Every acting decision, in round order."""
