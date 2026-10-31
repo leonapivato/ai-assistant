@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from memory_parties_carry import calls_carried
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 from ai_assistant.core.types import (
@@ -212,7 +213,9 @@ async def test_every_version_loses_its_retired_fields_and_keeps_what_it_drew_on(
 async def test_every_other_record_reads_back_byte_for_byte(legacy: Path) -> None:
     """ADR-0326 §4:4: every row is kept; a rewritten one keeps its kind, revision, band
     and openness, and every row the upgrade does not rewrite is byte for byte what it was:
-    the memory, the bare episode and the episode that recorded no understanding."""
+    the memory and the bare episode. The chain goes on to ADR-0356 §13:5's upgrade, which
+    rewrites every episode with a processing record, the one that recorded no
+    understanding included, to carry it to version 12."""
     before = _raw_rows(legacy)
 
     exported = await _exported(legacy)
@@ -220,7 +223,7 @@ async def test_every_other_record_reads_back_byte_for_byte(legacy: Path) -> None
     after = _raw_rows(legacy)
     assert set(exported) == set(before) == set(after) == _IDS
     for record_id, row in before.items():
-        if record_id in _REWRITTEN:
+        if record_id in _REWRITTEN or calls_carried(row[1]):
             assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
         else:
             assert after[record_id] == row, record_id
@@ -241,6 +244,13 @@ async def test_a_rewritten_episode_changes_nothing_but_its_versions(legacy: Path
         assert new == old, record_id
         old_versions = old_processing.pop("understanding")
         new_versions = new_processing.pop("understanding")
+        # ADR-0356 §13:5, at the chain's end: the record is carried to version 12 with
+        # no call's entry.
+        assert (old_processing.pop("schema_version"), new_processing.pop("schema_version")) == (
+            11,
+            12,
+        )
+        assert new_processing.pop("call_records") == []
         assert new_processing == old_processing, record_id
         for was, now in zip(old_versions, new_versions, strict=True):
             kept = {name: value for name, value in was.items() if name not in RETIRED_FIELDS}

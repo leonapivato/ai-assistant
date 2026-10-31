@@ -181,9 +181,13 @@ async def test_a_tolerated_failure_then_a_silent_end_writes_nothing() -> None:
 async def test_the_round_limit_writes_couldnt_finish_whatever_earlier_rounds_wrote(
     text: str,
 ) -> None:
-    """§3:2: a loop of refused calls, silent or not, is ended by the round limit."""
-    refused = RoundResponse(text=text, calls=(_call("c1", "nowhere"),))
-    harness = _harness(FakeToolCallingCompleter.scripted(refused, refused, refused))
+    """§3:2: a loop of refused calls, silent or not, is ended by the round limit.
+
+    Each round's call carries an id of its own: a work's exchange holds every call id
+    once across its rounds (ADR-0356 §13), as a provider mints them.
+    """
+    refused = [RoundResponse(text=text, calls=(_call(f"c{n}", "nowhere"),)) for n in (1, 2, 3)]
+    harness = _harness(FakeToolCallingCompleter.scripted(*refused))
 
     conversation, episode = await _turn(harness)
 

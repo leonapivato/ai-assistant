@@ -127,7 +127,9 @@ async def test_the_composition_roots_switch_decides_whether_the_three_are_offere
     assert offered.isdisjoint(PERSON_MODEL_CAPABILITIES) is not on
 
 
-async def test_wired_the_three_are_offered_and_only_to_an_activation_given_a_block() -> None:
+async def test_wired_the_three_are_offered_and_refused_without_a_block() -> None:
+    """ADR-0356 §4:3-§4:5: offered on every round, and refused, saying why, in an activation
+    that is no person's, as the condition that once decided the offer."""
     hub, _ = await _hub()
     hub.reader.nothing()
     hub.planner.then(_DONE)
@@ -137,8 +139,18 @@ async def test_wired_the_three_are_offered_and_only_to_an_activation_given_a_blo
     assert hub.planner.offered(0) >= PERSON_MODEL_CAPABILITIES
     phases = hub.harness.engine._phases
     assert isinstance(phases, PhasePath)
-    offered = {str(tool.capability) for tool in await phases._offered(person=False)}
-    assert offered.isdisjoint(PERSON_MODEL_CAPABILITIES)
+    offered = await phases._offered()
+    assert {str(tool.capability) for tool in offered} >= PERSON_MODEL_CAPABILITIES
+    refused = phases._not_here(
+        offered,
+        person=False,
+        scheduling=True,
+        running=frozenset(),
+        standing=True,
+        waiting=False,
+    )
+    assert set(refused) >= PERSON_MODEL_CAPABILITIES
+    assert all("no person's" in refused[name] for name in PERSON_MODEL_CAPABILITIES)
 
 
 async def test_a_pin_needing_a_yes_is_asked_and_a_yes_pins_nothing() -> None:

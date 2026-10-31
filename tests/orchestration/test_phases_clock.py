@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from exchange_support import shown_text
 from phases_support import chat_turn, phases_harness
 from test_engine_phases import _BOOK
 from understanding_support import STATED_PROPOSAL, understanding_stage
@@ -81,4 +82,4 @@ async def test_a_clock_call_that_arrives_anyway_is_refused_as_not_offered() -> N
     await chat_turn(harness, "what time is it?")
 
     assert harness.invoker.invocations == []
-    assert "no capability of that name was offered" in completer.calls[-1].exchange.briefing
+    assert "no capability of that name was offered" in shown_text(completer.calls[-1])

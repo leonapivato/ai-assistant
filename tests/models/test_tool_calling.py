@@ -1375,6 +1375,39 @@ async def test_on_anthropics_wire_the_thinking_goes_back_signed_and_the_report_i
     assert all("cache_control" not in block for block in messages[0]["content"])
 
 
+async def test_on_anthropics_wire_another_models_round_goes_back_without_its_thinking() -> None:
+    """ADR-0356 §6:3, the risk P1 named and P2 first meets: guarded offline.
+
+    A work's later round, asked of a model with thinking on, hands back an earlier round
+    another model wrote: its continuation names that model, so the round goes back as
+    its text and its call alone, with no thinking block, under thinking still requested,
+    and its result follows under the call's id. Whether Anthropic accepts that turn is
+    verified live at the milestone's deploy rehearsal; this holds what is sent.
+    """
+    recorder = RequestRecorder(_thinking_then_text_and_a_call)
+    answered = RequestRecorder(anthropic_success)
+    with network_denied():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as first_client:
+            first = await PydanticAIToolCallingCompleter(
+                _anthropic("claude-opus-4-8", first_client)
+            ).respond(_request(), [_tool()])
+        step = ExchangeStep(response=first, report=_report(("toolu_1", "Watchman: booked.")))
+        exchange = _request().model_copy(update={"steps": (step,)})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(answered)) as second_client:
+            await PydanticAIToolCallingCompleter(
+                _anthropic("claude-haiku-4-5", second_client)
+            ).respond(exchange, [_tool()])
+    body = answered.only
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+    messages = cast("list[dict[str, Any]]", body["messages"])
+    assert [turn["role"] for turn in messages] == ["user", "assistant", "user"]
+    assistant = messages[1]["content"]
+    assert [block["type"] for block in assistant] == ["text", "tool_use"]
+    assert assistant[1]["id"] == "toolu_1"
+    report = messages[2]["content"]
+    assert (report[0]["type"], report[0]["tool_use_id"]) == ("tool_result", "toolu_1")
+
+
 async def test_a_fallback_chain_names_who_answered_and_is_handed_back_no_thinking() -> None:
     """ADR-0356 §13: a continuation names the model that wrote it, and a fallback chain,
     which cannot say before the request which of its models will answer, is handed back

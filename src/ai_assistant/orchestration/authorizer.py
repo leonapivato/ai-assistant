@@ -21,7 +21,8 @@ outside-content stand-in (§4:4 to §4:6). Then, for a candidate or a person mod
 its rule below. A call runs only where every check that applies allows it. A deny is
 *not done* with the reason (§4:9); a confirm, or a stand-in send to the user, is *needs
 you* (§4:8). Nothing parks and nothing resumes. The round's message is checked by its
-place alone (§4:7).
+place alone (§4:7), and so is each ``text`` call, which is the round's message in the form
+of a call (ADR-0356 §7:7): never by the policy or the outside-content rule.
 
 **Recorded and read back before anything runs** (§4:10, ADR-0037 §2 to §3). Every
 ruling is bound to its request, appended to the trail, and read back; a trail that hands
@@ -276,14 +277,20 @@ class CallToAuthorize:
 class RoundMessage:
     """The round's message, and the place it would be written into (ADR-0306 §4:7).
 
+    A ``text`` call is the round's message in the form of a call (ADR-0356 §7:7), and is
+    checked as one: by its place alone.
+
     Attributes:
-        text: The message's text.
+        text: The message's text: a ``text`` call's words.
         place: The place it would go into; ``None`` where a message of an activation the
             Task Scheduler started names no place on its list (ADR-0350 §6:7).
+        call_id: The ``text`` call it is, by the id the round proposed it under; ``None``
+            for the round's own message.
     """
 
     text: str
     place: str | None
+    call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +408,10 @@ class RoundToAuthorize:
         input_place: The place the activation's input came from, or ``None`` where it
             came from none.
         message: The round's message, where it has one to write.
+        call_messages: Each ``text`` call of the round that passed planning's check, as
+            the message it is (ADR-0356 §7:7), in the round's order: checked by its place
+            alone, never by the policy or the outside-content rule, and so never among
+            ``calls``.
         yes: The yes the activation's input carries, where understanding recorded a
             pointer (ADR-0321 §3:1, ADR-0322 §2:1); ``None`` where it recorded none, and
             then no call runs under an approval (§4:5).
@@ -411,8 +422,9 @@ class RoundToAuthorize:
             checks the message, a place gone since the list was built (§5:8-§5:9).
 
     Raises:
-        ValueError: If two calls share a call id, or a call is not one the round
-            proposed under that id and name. A call proposed by an approved action's
+        ValueError: If two calls or message calls share a call id, a message call names
+            no call the round proposed, or a call is not one the round proposed under
+            that id and name. A call proposed by an approved action's
             label is recorded under the label's tool and handed on as its capability's
             call (ADR-0321 §4:2), so it is matched by its id alone.
     """
@@ -423,6 +435,7 @@ class RoundToAuthorize:
     calls: tuple[CallToAuthorize, ...] = ()
     input_place: str | None = None
     message: RoundMessage | None = None
+    call_messages: tuple[RoundMessage, ...] = ()
     yes: YesContext | None = None
     places: tuple[str, ...] | None = None
     gone: tuple[str, ...] = ()
@@ -431,8 +444,12 @@ class RoundToAuthorize:
         """Each call is one the round proposed, once."""
         proposed = {one.call_id: one.name for one in self.round.calls}
         ids = [one.call.call_id for one in self.calls]
-        if len(set(ids)) != len(ids):
+        messages = [one.call_id for one in self.call_messages]
+        if len(set(ids) | set(messages)) != len(ids) + len(messages):
             msg = "a round's calls are authorized once each"
+            raise ValueError(msg)
+        if any(one is None or one not in proposed for one in messages):
+            msg = "a message call checked is one the round proposed, by its id"
             raise ValueError(msg)
         for one in self.calls:
             named = proposed.get(one.call.call_id)
@@ -506,12 +523,15 @@ class MessageVerdict:
         effect_id: The effect record it is to be claimed under, where it is allowed
             (ADR-0306 §5:3).
         reason: Why it is not allowed; ``None`` where it is.
+        call_id: The ``text`` call it rules on, by its id; ``None`` for the round's own
+            message (ADR-0356 §7:7).
     """
 
     place: str | None
     allowed: bool
     effect_id: str | None = None
     reason: str | None = None
+    call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,6 +552,8 @@ class RoundAuthorization:
             taken when the round was authorized (ADR-0306 §5:10); empty where no allowed
             call's capability is unsafe to repeat.
         message: The message's verdict, where the round has one.
+        call_messages: Each ``text`` call's verdict, by its call id, in the round's order
+            (ADR-0356 §7:7).
         read_outside_content: Whether the activation's record says it had read outside
             content when the round was authorized (ADR-0306 §4:5).
     """
@@ -542,6 +564,7 @@ class RoundAuthorization:
     allowed: tuple[AllowedCall, ...] = ()
     story_activations: tuple[str, ...] = ()
     message: MessageVerdict | None = None
+    call_messages: tuple[MessageVerdict, ...] = ()
     read_outside_content: bool = False
 
 
@@ -878,12 +901,20 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
             for one in given.calls
         ),
         input_place=None if given.input_place is None else str(given.input_place),
-        message=None
-        if message is None
-        else RoundMessage(str(message.text), None if message.place is None else str(message.place)),
+        message=None if message is None else _detached_message(message),
+        call_messages=tuple(_detached_message(one) for one in given.call_messages),
         yes=_detached_yes(given.yes),
         places=None if given.places is None else tuple(str(one) for one in given.places),
         gone=tuple(str(one) for one in given.gone),
+    )
+
+
+def _detached_message(message: RoundMessage) -> RoundMessage:
+    """A message's copy, so nothing a caller still holds is checked."""
+    return RoundMessage(
+        str(message.text),
+        None if message.place is None else str(message.place),
+        None if message.call_id is None else str(message.call_id),
     )
 
 
@@ -1139,7 +1170,8 @@ class AuthorizingStage:
             verdicts=tuple(state.verdicts),
             allowed=tuple(state.allowed),
             story_activations=stories,
-            message=self._message(snapshot),
+            message=None if snapshot.message is None else self._message(snapshot, snapshot.message),
+            call_messages=tuple(self._message(snapshot, one) for one in snapshot.call_messages),
             read_outside_content=read_outside,
         )
 
@@ -1178,6 +1210,16 @@ class AuthorizingStage:
                     "allowed": message.allowed,
                     "reason": message.reason,
                 }
+            if decided is not None and decided.call_messages:
+                returned["call_messages"] = [
+                    {
+                        "call_id": one.call_id,
+                        "place": one.place,
+                        "allowed": one.allowed,
+                        "reason": one.reason,
+                    }
+                    for one in decided.call_messages
+                ]
             if state is not None:
                 returned["read_outside_content"] = state.read_outside
             returned["grounds"] = [
@@ -1868,22 +1910,37 @@ class AuthorizingStage:
             state.stories = await self._story_activations(state.activation_id)
         return state.stories
 
-    def _message(self, snapshot: RoundToAuthorize) -> MessageVerdict | None:
-        """The message's place, and nothing else, checked (§4:7)."""
-        message = snapshot.message
-        if message is None:
-            return None
+    def _message(self, snapshot: RoundToAuthorize, message: RoundMessage) -> MessageVerdict:
+        """A message's place, and nothing else, checked (§4:7).
+
+        The round's own message, or a ``text`` call, which is the round's message in the
+        form of a call and is checked by the same rule (ADR-0356 §7:7): no place is
+        widened (§7:10).
+        """
         if snapshot.places is not None:
             # ADR-0350 §6:7: the one place on its list it names, a place gone since the
             # list was built included, and none off it.
             if message.place is None or message.place not in snapshot.places:
                 _log.info("authorizing_message_not_allowed", stage="authorizing")
-                return MessageVerdict(place=message.place, allowed=False, reason=_OFF_THE_LIST)
+                return MessageVerdict(
+                    place=message.place,
+                    allowed=False,
+                    reason=_OFF_THE_LIST,
+                    call_id=message.call_id,
+                )
             if message.place in snapshot.gone:
                 _log.info("authorizing_message_not_allowed", stage="authorizing")
-                return MessageVerdict(place=message.place, allowed=False, reason=_GONE_SINCE)
+                return MessageVerdict(
+                    place=message.place,
+                    allowed=False,
+                    reason=_GONE_SINCE,
+                    call_id=message.call_id,
+                )
             return MessageVerdict(
-                place=message.place, allowed=True, effect_id=self._new_effect_id()
+                place=message.place,
+                allowed=True,
+                effect_id=self._new_effect_id(),
+                call_id=message.call_id,
             )
         if (
             snapshot.input_place is None
@@ -1891,8 +1948,15 @@ class AuthorizingStage:
             or message.place != snapshot.input_place
         ):
             _log.info("authorizing_message_not_allowed", stage="authorizing")
-            return MessageVerdict(place=message.place, allowed=False, reason=_ELSEWHERE)
-        return MessageVerdict(place=message.place, allowed=True, effect_id=self._new_effect_id())
+            return MessageVerdict(
+                place=message.place, allowed=False, reason=_ELSEWHERE, call_id=message.call_id
+            )
+        return MessageVerdict(
+            place=message.place,
+            allowed=True,
+            effect_id=self._new_effect_id(),
+            call_id=message.call_id,
+        )
 
     async def _story_activations(self, activation_id: str) -> tuple[str, ...]:
         """The activations of the episodes in this activation's stories, as they stand now.

@@ -206,8 +206,8 @@ def test_the_end_entry_records_done_at_one_instant() -> None:
 
 
 def test_the_record_is_the_current_schema_version_and_refuses_an_earlier_one() -> None:
-    assert _record().schema_version == 11
-    for earlier in (4, 10):
+    assert _record().schema_version == 12
+    for earlier in (4, 10, 11):
         with pytest.raises(ValidationError):
             _record(schema_version=earlier)
 

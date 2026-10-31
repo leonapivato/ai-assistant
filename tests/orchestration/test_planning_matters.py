@@ -183,7 +183,9 @@ async def test_a_waiting_round_is_shown_what_it_waits_on_and_why_it_was_declined
     assert shown["place"] == "telegram:ref/42"
     assert (shown["input"], shown["has_acted"]) == ("book Saturday", True)
     assert shown["declined_this_input"] == "already booked"
-    assert "waiting" in _flags(completer)
+    # ADR-0356 §5:2: one instruction for the whole work, so the waiting round's line in
+    # place of the rest is never sent; a call it may not make is refused (§4:5).
+    assert "waiting" not in _flags(completer)
 
 
 async def test_earlier_work_is_the_peer_view_read_as_provisional_with_its_marks() -> None:
@@ -337,11 +339,14 @@ async def test_an_answers_result_says_why_the_hub_settled_it_so() -> None:
         assert set(one) == {"episode", "answer"}, "nothing the hub settled, so no reason"
 
 
-async def test_the_sections_appear_only_where_they_apply() -> None:
-    """The four flags, each set only for a round its part applies to."""
+async def test_the_sections_that_may_change_within_a_work_are_held_to_one_value() -> None:
+    """ADR-0356 §5:2: a work's instruction is the same on every round, so what may change
+    between its rounds is held to one value: the offers' and the earlier work's lines are
+    always sent, and the waiting round's never; running work's still follows the tools."""
     stage, completer, _ = _stage(RoundResponse(text=""), prompt=FLAG_ECHO)
     await stage.plan(_inputs())
-    assert not {"running_work", "offers", "waiting", "earlier_work"} & _flags(completer)
+    assert {"offers", "earlier_work"} <= _flags(completer)
+    assert not {"running_work", "waiting"} & _flags(completer)
 
 
 def test_a_running_entry_round_trips_its_acted_mark_and_whose_input_it_is() -> None:

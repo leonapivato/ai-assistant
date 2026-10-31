@@ -1,8 +1,8 @@
 """Fresh-state memory format boundary for ADR-0275 §12.
 
 Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286, 0307, 0308 and 0315; since then,
-each store's own label by ADRs 0328, 0332, 0338, 0345, 0349, 0350, 0352, 0351 and
-0353.
+each store's own label by ADRs 0328, 0332, 0338, 0345, 0349, 0350, 0352, 0351, 0353
+and 0356.
 """
 
 from __future__ import annotations
@@ -116,10 +116,10 @@ TAKEN_OVER_RECORD_FORMAT: Final[int] = 19
 #: (ADR-0326 §5:3).
 PARTIES_RECORD_FORMAT: Final[int] = 20
 
-#: The memory store's own label, the one this build writes. It advances to 21 for
-#: ADR-0353 §9's episode record (§15:3): each ``ActivationUnderstanding`` loses its
-#: ground, references, relationships, unresolved matters and answer pointers and gains
-#: ``unclear``, ``UnderstandingReferent.kind`` gains ``running``, and ``RecallCue``
+#: The memory store's label for ADR-0353 §9's episode record. It advances to 21 (§15:3):
+#: each ``ActivationUnderstanding`` loses its ground, references, relationships,
+#: unresolved matters and answer pointers and gains ``unclear``,
+#: ``UnderstandingReferent.kind`` gains ``running``, and ``RecallCue``
 #: gains ``understood_gap``, the shape of values and members of closed enumerations
 #: the store serialises in every episode (ADR-0326 §2:3). A file at 20 is upgraded in
 #: place: each episode whose versions hold a retired field is rewritten by
@@ -128,7 +128,19 @@ PARTIES_RECORD_FORMAT: Final[int] = 20
 #: ``meaning_referents`` and the rest dropped by the owner's ruling (§9:6, ADR-0326
 #: §4:4), and an older build, which serves 12 to 20, refuses a file at 21, whose
 #: episodes it would not read (ADR-0326 §5:3).
-MEMORY_RECORD_FORMAT: Final[int] = 21
+UNDERSTOOD_RECORD_FORMAT: Final[int] = 21
+
+#: The memory store's own label, the one this build writes. It advances to 22 for
+#: ADR-0356 §13's episode record (§13:5): ``EpisodeProcessingRecord`` gains
+#: ``call_records`` and its ``schema_version`` advances to 12, and ``SupportPart`` gains
+#: the part ``message_call``: a field and a version of a ``core`` model the store
+#: serialises in every episode, and a member of a closed enumeration a stored memory
+#: names (ADR-0326 §2:3). A file at 21 is upgraded in place: each episode with a
+#: processing record is rewritten by
+#: :func:`~ai_assistant.memory._calls_upgrade.called_episode`, carried whole at the new
+#: version with ``call_records`` empty (§13:5), and an older build, which serves 12 to
+#: 21, refuses a file at 22, whose episodes it would not read (ADR-0326 §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 22
 
 #: The memory store's labels a build opens: its own, and each it upgrades from, in
 #: order (ADR-0326 §4:5, §5:1).
@@ -143,6 +155,7 @@ MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
         CONTINUING_RECORD_FORMAT,
         TAKEN_OVER_RECORD_FORMAT,
         PARTIES_RECORD_FORMAT,
+        UNDERSTOOD_RECORD_FORMAT,
         MEMORY_RECORD_FORMAT,
     }
 )

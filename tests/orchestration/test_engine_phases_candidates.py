@@ -13,6 +13,7 @@ import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+from exchange_support import reported
 from structured_support import structured
 from test_engine import AT, Harness
 from test_engine_phases import _BOOK, _DIGESTED, _PHONE, _call, _conversation, _Policy, _settled
@@ -158,7 +159,7 @@ async def test_a_candidate_is_recorded_writes_no_memory_and_shows_its_lookup_nex
     assert recorded.outcome is ToolOutcome.SUCCEEDED
     held = [one for one in await harness.memory.export() if isinstance(one, Memory)]
     assert [one.id for one in held] == ["aisle"]
-    (call,) = _request(completer, 1)["rounds"][0]["calls"]
+    (call,) = reported(completer.calls[1], 0)
     assert call["outcome"] == "done"
     value = call["result"]["value"]
     assert value["candidate"].startswith("recorded as a candidate, and pending")
@@ -181,7 +182,7 @@ async def test_a_candidate_with_confirm_set_needs_you_and_records_nothing() -> N
 
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
     assert [one for one in effects if one.capability == "remember"] == []
-    (call,) = _request(completer, 1)["rounds"][0]["calls"]
+    (call,) = reported(completer.calls[1], 0)
     assert call["outcome"].startswith("needs the user's yes")
     assert call["because"] == "the user is asked to confirm this wording before it is kept"
 
@@ -208,7 +209,7 @@ async def test_reliance_is_noted_in_the_round_and_nowhere_else() -> None:
     assert episode.processing_record is not None
     noted = episode.processing_record.rounds[1].calls[0]
     assert (noted.name, dict(noted.arguments)["memories"]) == ("note_reliance", ("M1",))
-    reliance = _request(completer, 2)["rounds"][1]["calls"][0]
+    reliance = reported(completer.calls[2], 1)[0]
     assert reliance["outcome"] == "done"
     assert "result" not in reliance
 

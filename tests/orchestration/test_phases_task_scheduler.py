@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
+from exchange_support import request_view
 from phases_support import open_conversation, phases_harness, said, until, working, written
 from task_support import AT, activation, seams, spawn_effect, write_task
 from telegram_support import CHAT as LINE_CHAT
@@ -64,9 +65,8 @@ if TYPE_CHECKING:
 
 
 def _request(exchange: PlanningExchange) -> dict[str, Any]:
-    """The round's rendered request, as planning's model reads it."""
-    loaded: dict[str, Any] = json.loads(exchange.briefing)
-    return loaded
+    """The round's exchange, read as one request: its briefing and its reports since."""
+    return request_view(exchange)
 
 
 def _started_by_a_task(request: dict[str, Any]) -> bool:

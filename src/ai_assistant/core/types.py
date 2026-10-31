@@ -4836,6 +4836,114 @@ class JoinedInput(BaseModel):
         return self
 
 
+class CallOutcomeKind(StrEnum):
+    """What came of one call a planning round proposed, as planning was shown it.
+
+    Closed, **added to and never renamed**. Moved into ``core`` with its members
+    unchanged (ADR-0356 §13), since each call's entry the episode records names one
+    (:class:`RecordedCall`, §8:3).
+    """
+
+    DONE = "done"
+    NOT_DONE = "not_done"
+    UNKNOWN = "unknown"
+    NEEDS_YOU = "needs_you"
+    """Authorizing ruled that it needs the user (ADR-0306 §4:8): it runs on their yes to a
+    question that showed it (ADR-0321 §2, §4)."""
+
+    REFUSED = "refused"
+    """Refused before it ran, by planning's own check or by authorizing's rules, a deny
+    among them: no yes lets it run, so it is never asked about (ADR-0321 §2:10)."""
+
+
+class DeliveryStatus(StrEnum):
+    """How a message call's message went, as its result reports it (ADR-0356 §8:4).
+
+    Closed, **added to and never renamed**. *Delivered* and *read* only where the medium
+    reports them by the time the call returns; *unknown* is never reported as sent
+    (ADR-0357 §3:2-§3:3).
+    """
+
+    SENT = "sent"
+    DELIVERED = "delivered"
+    READ = "read"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+class RecordedDelivery(BaseModel):
+    """What one message call sent, or tried to send, as its entry holds it (ADR-0356 §8:4).
+
+    Attributes:
+        words: The words it sent, after any rewording and with any exact lines.
+        went: Where it went: the platform, as the channel's type, and the place.
+        status: How it went.
+        reason: Why it failed, or why how it went is unknown; ``None`` otherwise.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    words: NonBlankEncodableText
+    went: ChannelIdentity
+    status: DeliveryStatus
+    reason: NonBlankEncodableText | None = None
+
+
+#: The outcomes under which a message call sent something, or tried to (ADR-0356 §8:4).
+_ATTEMPTED: Final = frozenset(
+    {CallOutcomeKind.DONE, CallOutcomeKind.NOT_DONE, CallOutcomeKind.UNKNOWN}
+)
+
+
+class RecordedCall(BaseModel):
+    """One call a planning round proposed, as the episode records it (ADR-0356 §8).
+
+    Appended once its outcome is known, refused calls and look-ups included, and never
+    changed after (§8:6). It holds no result's body (§8:5): what each call showed is the
+    memory decision's addition to it.
+
+    Attributes:
+        round: The round that proposed it.
+        call_id: The id it was proposed under, in that round.
+        capability: The capability it called.
+        effect: Whether that capability declared an effect when the call ran
+            (ADR-0312).
+        outcome: What came of it, as planning was shown it; ``None`` where the entry is
+            recorded before one is known: a tidy-up that started, or a call still
+            running when the episode froze (§8:6).
+        reason: Why, where its outcome has one.
+        delivered: For a message call that was sent, or whose sending was attempted,
+            what it sent, where and how (§8:4); ``None`` for every other call.
+        recorded_at: When the entry was appended.
+        marked: Whether it rests on outside content (§8:7): its result was a digest's
+            evidence, or the work had read outside content when it was proposed.
+
+    Raises:
+        ValueError: If it carries a reason without an outcome, or a delivery on a call
+            that sent nothing: one with no outcome, refused or needing the user.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    round: Identifier
+    call_id: Identifier
+    capability: NonBlankEncodableText
+    effect: bool
+    outcome: CallOutcomeKind | None = None
+    reason: NonBlankEncodableText | None = None
+    delivered: RecordedDelivery | None = None
+    recorded_at: UtcInstant
+    marked: bool = False
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        if self.reason is not None and self.outcome is None:
+            msg = "a call's entry carries a reason only with its outcome (ADR-0356 §13)"
+            raise ValueError(msg)
+        if self.delivered is not None and self.outcome not in _ATTEMPTED:
+            msg = "only a message call that sent something, or tried to, holds a delivery"
+            raise ValueError(msg)
+        return self
+
+
 class EpisodeProcessingRecord(BaseModel):
     """The facts about one activation's processing, open while it runs (ADR-0286 §1).
 
@@ -4896,17 +5004,23 @@ class EpisodeProcessingRecord(BaseModel):
     understanding version records ``relayed``, every later version records it too, and a
     record in which a later version drops it is refused.
 
-    ``schema_version`` is 11 because the record loses the old path's links, resume
-    trigger and compose-stage degradation, and its stages their verdicts (ADR-0318
-    §4, §5:3, §7:1; ADR-0309 §3:7): a version-10 record carries them and does not
-    validate here.
+    ``call_records`` holds one entry for each call a round proposed, refused calls and
+    look-ups included, in the order they were appended, each naming its round and its
+    call (ADR-0356 §8:2). Appended to as the episode is extended, every earlier entry
+    unchanged, and empty by default. No other field records what came of a call.
+
+    ``schema_version`` is 12 because the record gains ``call_records`` (ADR-0356 §13),
+    which a version-11 record does not carry; the episode store's upgrade carries every
+    stored record to 12 with ``call_records`` empty (§13:5). Version 11 was the record
+    that lost the old path's links, resume trigger, compose-stage degradation and stage
+    verdicts (ADR-0318 §4, §5:3, §7:1).
     """
 
     # Its rounds keep the user's arguments, which the round keeps out of its own
     # validation errors (ADR-0145 §8, :class:`PlanningRound`); a record validated whole
     # renders by its own configuration, so it hides its input too.
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
-    schema_version: Literal[11] = 11
+    schema_version: Literal[12] = 12
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant | None = None
@@ -4927,11 +5041,30 @@ class EpisodeProcessingRecord(BaseModel):
     joined: tuple[JoinedInput, ...] = ()
     stories_position: int | None = Field(default=None, strict=True, ge=0, lt=2**63)
     taken_over_by: Identifier | None = None
+    call_records: tuple[RecordedCall, ...] = ()
 
     @property
     def is_open(self) -> bool:
         """Whether the record is open: its pass has not ended (ADR-0286 §1)."""
         return self.status is None
+
+    @model_validator(mode="after")
+    def _one_entry_per_proposed_call(self) -> Self:
+        # ADR-0356 §13: each entry names a round the record holds and a call that round
+        # proposed, and no call has two entries.
+        proposed = {one.id: {call.call_id for call in one.calls} for one in self.rounds}
+        seen: set[tuple[str, str]] = set()
+        for entry in self.call_records:
+            calls = proposed.get(entry.round)
+            if calls is None or entry.call_id not in calls:
+                msg = "a call's entry names a round the record holds and a call it proposed"
+                raise ValueError(msg)
+            key = (entry.round, entry.call_id)
+            if key in seen:
+                msg = "a processing record holds one entry for each call (ADR-0356 §8:2)"
+                raise ValueError(msg)
+            seen.add(key)
+        return self
 
     @model_validator(mode="after")
     def _taken_over_by_another_once_stopped(self) -> Self:
@@ -5250,6 +5383,10 @@ class ProjectedRound(BaseModel):
             Never set without ``notes``.
         asked: The parts the message asked about, ``1`` to *n* in order; empty where
             it asked about none. Never set without ``message``.
+        position: The round's index among every round the episode recorded, from
+            ``0``, so a round the projection omits for having nothing to show still
+            keeps the others in order, and a call or a joined input is placed among
+            them (ADR-0356 §13).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -5257,6 +5394,7 @@ class ProjectedRound(BaseModel):
     notes: ProjectedText | None = None
     notes_marked: bool = False
     asked: tuple[Annotated[int, Field(strict=True, ge=1, le=QUESTION_PART_MAX)], ...] = ()
+    position: int = Field(default=0, strict=True, ge=0, lt=2**31)
 
     @model_validator(mode="after")
     def _marked_with_notes(self) -> Self:
@@ -5273,6 +5411,61 @@ class ProjectedRound(BaseModel):
             msg = "a projected question's parts are 1 to n, in order (ADR-0321 §2:6)"
             raise ValueError(msg)
         return self
+
+
+class ProjectedCall(BaseModel):
+    """One call's entry, as a reader of a stored episode is shown it (ADR-0356 §13).
+
+    Placed for the owner alone, as episode notes are (§8:8): only a projection that
+    admits owner-only records carries any.
+
+    Attributes:
+        position: Its round's position, in :attr:`ProjectedRound.position`'s numbering.
+        capability: The capability it called.
+        arguments: The arguments its round recorded, as canonical JSON, cut to the
+            projection's excerpt bound.
+        effect: Whether that capability declared an effect when the call ran.
+        outcome: What came of it, or ``None`` where the entry recorded none.
+        reason: Why, where its outcome has one.
+        delivered: What a message call sent, where and how, where it sent anything.
+        marked: Whether it rests on outside content (§8:7).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    position: int = Field(strict=True, ge=0, lt=2**31)
+    capability: NonBlankEncodableText
+    arguments: ProjectedText
+    effect: bool
+    outcome: CallOutcomeKind | None = None
+    reason: NonBlankEncodableText | None = None
+    delivered: RecordedDelivery | None = None
+    marked: bool = False
+
+
+class ProjectedJoin(BaseModel):
+    """One input an episode took in (ADR-0349 §7:7), as a reader is shown it (ADR-0356 §13).
+
+    Attributed and withheld as the projection's input is: its parties, its relay mark,
+    and its text only where, read with that mark, it is the person's own. Placed for the
+    owner alone with the calls, so only a projection that admits owner-only records
+    carries any.
+
+    Attributes:
+        position: The position, in :attr:`ProjectedRound.position`'s numbering, of the
+            round before which it was taken in: the number of rounds recorded before it
+            joined.
+        channel: The place it came from.
+        parties: Whose words its messages carry, or ``None`` where any is unknown.
+        relayed: Whether it was appended relayed (ADR-0351 §5:14).
+        input: Its messages' text, cut to the excerpt bound; ``None`` where withheld.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    position: int = Field(strict=True, ge=0, lt=2**31)
+    channel: ChannelIdentity
+    parties: tuple[SupportHolder, ...] | None = None
+    relayed: bool = False
+    input: ProjectedText | None = None
 
 
 class ProjectedEvidence(BaseModel):
@@ -5345,6 +5538,11 @@ class EpisodeProjection(BaseModel):
             window is handed them, and only for an episode the observer has not
             processed; every other rendering carries none. Only an episode with a
             processing record carries them.
+        calls: Each call's entry the episode recorded, in the order appended, where
+            the reader may be shown a record placed for the owner alone (ADR-0356 §8:8,
+            §13); none otherwise.
+        joined: Each input the episode took in, in the order taken, under the same
+            audience as ``calls``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -5363,6 +5561,8 @@ class EpisodeProjection(BaseModel):
     rounds: tuple[ProjectedRound, ...] = ()
     evidence: tuple[ProjectedEvidence, ...] = ()
     candidates: tuple[ProjectedText, ...] = ()
+    calls: tuple[ProjectedCall, ...] = ()
+    joined: tuple[ProjectedJoin, ...] = ()
 
     @model_validator(mode="after")
     def _one_of_the_two_shapes(self) -> Self:
@@ -5384,6 +5584,8 @@ class EpisodeProjection(BaseModel):
                 or self.rounds
                 or self.evidence
                 or self.candidates
+                or self.calls
+                or self.joined
             ):
                 msg = "a projection without a processing record carries its content alone"
                 raise ValueError(msg)
@@ -5681,6 +5883,25 @@ class RoundMessagePart(BaseModel):
     round: Identifier
 
 
+class MessageCallPart(BaseModel):
+    """The message one message call of an episode's round sent (ADR-0356 §13).
+
+    ``round`` is the round that proposed the call and ``call_id`` the id it was proposed
+    under, so two messages of one round are told apart. It resolves to the words its
+    entry holds as delivered, and to nothing where the entry holds no delivery (§13:2).
+    A support pointing here takes the origin a round's message takes, by the same fact
+    (ADR-0328 §4:2-§4:3), and every rule and reader that reads a support pointing at a
+    round's message reads one pointing here as the same kind of part (§13:3).
+    :class:`RoundMessagePart` stays, for rounds recorded before ADR-0356.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: Literal["message_call"] = "message_call"
+    episode: EncodableText
+    round: Identifier
+    call_id: Identifier
+
+
 class EvidenceItemPart(BaseModel):
     """One evidence item of one of an episode's digests, by positions (ADR-0328 §4)."""
 
@@ -5760,6 +5981,7 @@ class PinPart(BaseModel):
 SupportPart = Annotated[
     InputPart
     | RoundMessagePart
+    | MessageCallPart
     | EvidenceItemPart
     | ConfirmationPart
     | RememberCallPart
@@ -5770,7 +5992,8 @@ SupportPart = Annotated[
 ]
 """The part one support points at, by ``part``.
 
-ADR-0328 §4's part table, with the parts ADR-0329 §9:7 and ADR-0338 §4:4 add to it.
+ADR-0328 §4's part table, with the parts ADR-0329 §9:7, ADR-0338 §4:4 and ADR-0356 §13
+add to it.
 
 A frozen value, compared and hashed by its fields: a support is unique by its memory
 and the part it points at (§4:8), and an operation names the support it cites by
@@ -5781,6 +6004,10 @@ that part (§5:1).
 _PART_ORIGINS: Final[dict[str, frozenset[SupportOrigin]]] = {
     "input": frozenset({SupportOrigin.USER_MESSAGE, SupportOrigin.OUTSIDE_INPUT}),
     "round_message": frozenset(
+        {SupportOrigin.ASSISTANT_MESSAGE, SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE}
+    ),
+    # ADR-0356 §13:2: a message call's message takes the origin a round's message takes.
+    "message_call": frozenset(
         {SupportOrigin.ASSISTANT_MESSAGE, SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE}
     ),
     "evidence_item": frozenset({SupportOrigin.EVIDENCE}),
@@ -5832,6 +6059,8 @@ _ORIGIN_HOLDERS: Final[dict[SupportOrigin, frozenset[HolderKind]]] = {
 #: The part the assistant made, by the part a support points at (ADR-0345 §2's table).
 _STATEMENT_PARTS: Final[dict[str, StatementPart]] = {
     "round_message": StatementPart.ROUND_MESSAGE,
+    # ADR-0356 §13:3: a message call's message is read as the same kind of part.
+    "message_call": StatementPart.ROUND_MESSAGE,
     "remember_call": StatementPart.REMEMBER_CALL,
     "observer_inference": StatementPart.OBSERVER_INFERENCE,
 }
@@ -6805,6 +7034,22 @@ def _round_texts(episode: EpisodicMemory, round_id: str) -> tuple[str, ...]:
     return tuple(one.text for one in processing.rounds if one.id == round_id)
 
 
+def _call_texts(episode: EpisodicMemory, round_id: str, call_id: str) -> tuple[str, ...]:
+    """The words one message call delivered, as its entry holds them (ADR-0356 §13:2).
+
+    None where the episode holds no such entry, or its entry holds no delivery: a call
+    that sent nothing gives no text.
+    """
+    processing = episode.processing_record
+    if processing is None:
+        return ()
+    return tuple(
+        entry.delivered.words
+        for entry in processing.call_records
+        if entry.round == round_id and entry.call_id == call_id and entry.delivered is not None
+    )
+
+
 def _part_texts(  # noqa: PLR0911 — one arm per part that gives text
     support: MemorySupport, episodes: Mapping[str, EpisodicMemory]
 ) -> tuple[str, ...]:
@@ -6827,6 +7072,8 @@ def _part_texts(  # noqa: PLR0911 — one arm per part that gives text
             return _input_texts(episode, part.message)
         case RoundMessagePart():
             return _round_texts(episode, part.round)
+        case MessageCallPart():
+            return _call_texts(episode, part.round, part.call_id)
         case EvidenceItemPart():
             processing = episode.processing_record
             if processing is None or part.digest >= len(processing.digests):
@@ -10375,7 +10622,7 @@ class CandidateDecline(BaseModel):
 #: (§3:6), a legacy record is no episode's, and an observer's inference is what a
 #: commit draws from a finding's parts rather than one of them (§9:7).
 _FINDING_PARTS: Final[frozenset[str]] = frozenset(
-    {"input", "round_message", "evidence_item", "confirmation"}
+    {"input", "round_message", "message_call", "evidence_item", "confirmation"}
 )
 
 
@@ -18195,6 +18442,7 @@ class SupportView(BaseModel):
     part: Literal[
         "input",
         "round_message",
+        "message_call",
         "evidence_item",
         "confirmation",
         "remember_call",
@@ -18228,14 +18476,18 @@ class StatementCitation(BaseModel):
 
     Attributes:
         episode: The episode the round belongs to.
-        round: The round that wrote the message.
+        round: The round that wrote the message, or whose message call sent it.
         when: When it was written, or ``None`` where that is unknown.
+        call_id: The message call that sent it, where the message is a call's
+            (ADR-0356 §13:3), so two messages of one round are cited apart; ``None``
+            for a round's own message, recorded before ADR-0356.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     episode: EncodableText
     round: Identifier
     when: UtcInstant | None = None
+    call_id: Identifier | None = None
 
 
 class BeliefSummary(BaseModel):
@@ -18400,9 +18652,10 @@ def _summary_fields(memory: Memory, *, now: datetime, supports_gone: bool) -> di
 def statement_citations(memory: Memory) -> tuple[StatementCitation, ...]:
     """The round messages a memory marked ``assistant_statement`` cites (ADR-0345 §12:4).
 
-    Every support pointing at a round's message, in the order the memory carries them,
-    on a memory carrying the mark; none on any other, which is never conveyed as what
-    the assistant said.
+    Every support pointing at a round's message or at a message call's (ADR-0356 §13:3),
+    in the order the memory carries them, on a memory carrying the mark; none on any
+    other, which is never conveyed as what the assistant said. A message call's citation
+    names its call, so two messages of one round are cited apart.
 
     Args:
         memory: The memory.
@@ -18412,11 +18665,23 @@ def statement_citations(memory: Memory) -> tuple[StatementCitation, ...]:
     """
     if MemoryMark.ASSISTANT_STATEMENT not in memory.marks:
         return ()
-    return tuple(
-        StatementCitation(episode=part.episode, round=part.round, when=support.when)
-        for support in memory.supports
-        if isinstance(part := support.points_at, RoundMessagePart)
-    )
+    cited: list[StatementCitation] = []
+    for support in memory.supports:
+        part = support.points_at
+        if isinstance(part, RoundMessagePart):
+            cited.append(
+                StatementCitation(episode=part.episode, round=part.round, when=support.when)
+            )
+        elif isinstance(part, MessageCallPart):
+            cited.append(
+                StatementCitation(
+                    episode=part.episode,
+                    round=part.round,
+                    when=support.when,
+                    call_id=part.call_id,
+                )
+            )
+    return tuple(cited)
 
 
 def belief_summary(memory: Memory, *, now: datetime, supports_gone: bool) -> BeliefSummary:

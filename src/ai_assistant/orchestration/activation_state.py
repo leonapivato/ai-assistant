@@ -57,6 +57,7 @@ if TYPE_CHECKING:
         Modality,
         PlanningLabel,
         PlanningRound,
+        RecordedCall,
         RecordedInputMessage,
         ReplyCapability,
         StageEntry,
@@ -169,6 +170,10 @@ class ActivationState:
     rounds: tuple[PlanningRound, ...] = ()
     labels: tuple[PlanningLabel, ...] = ()
     digests: tuple[ActivationDigest, ...] = ()
+    #: ADR-0356 §8:2, §8:6: one entry for each call a round proposed, each added once its
+    #: outcome is known, or with none at the freeze, and written with the append that
+    #: follows, as a round is.
+    call_records: tuple[RecordedCall, ...] = ()
     #: Whether a recorder is extending the episode, and the owner's next append, owed
     #: to the recorders that added to the record since its current one began. The
     #: writer's append reads, then writes conditioned on what it read, so two at once
@@ -358,6 +363,10 @@ class ActivationState:
         self.rounds = (*self.rounds, planning_round)
         self.labels = (*self.labels, *labels)
 
+    def recorded_calls(self, entries: Sequence[RecordedCall]) -> None:
+        """Add calls' entries, after those recorded (ADR-0356 §8:6)."""
+        self.call_records = (*self.call_records, *entries)
+
     def recorded_digest(self, digest: ActivationDigest, labels: tuple[PlanningLabel, ...]) -> None:
         """Add a digest and the labels it took, after those recorded (ADR-0308 §5:2)."""
         self.digests = (*self.digests, digest)
@@ -466,6 +475,7 @@ class ActivationState:
             joined=self.joined,
             stories_position=self.stories_position,
             taken_over_by=self.taken_over_by if reason is ProcessingReason.STOPPED else None,
+            call_records=self.call_records,
         )
 
     @property
@@ -511,6 +521,7 @@ class ActivationState:
             digests=self.digests,
             joined=self.joined,
             stories_position=self.stories_position,
+            call_records=self.call_records,
         )
 
     def _stage_record(

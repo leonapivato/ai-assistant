@@ -11,9 +11,9 @@ story and move any note it holds. These cases drive the phase path over fakes, a
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import TYPE_CHECKING, Final
 
+from exchange_support import reported
 from test_authorizer import _ACTIVATION
 from test_authorizer import _episode as _own_episode
 from test_engine import AT
@@ -216,7 +216,7 @@ async def test_on_a_pass_that_may_not_show_owner_records_a_read_shows_no_older_n
     assert view.notes_withheld
     assert view.older is None
     # The round after the read is shown its result: the story, and nothing of its notes.
-    (call,) = json.loads(completer.last_call.exchange.briefing)["rounds"][0]["calls"]
+    (call,) = reported(completer.last_call, 0)
     shown = call["result"]["value"]
     assert shown["label"] == "S1"
     assert not {"notes_since_tidied", "older_notes", "more_older_notes"} & set(shown)

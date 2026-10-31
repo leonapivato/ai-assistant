@@ -58,6 +58,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     MemoryWrite,
     MemoryWriterName,
+    MessageCallPart,
     OpenQuestionKind,
     PlacedAnswer,
     PlacedPair,
@@ -842,6 +843,40 @@ class PlacedWriterContract:
         summary = belief_summary(cited, now=_AT, supports_gone=False)
         assert [(one.episode, one.round, one.when) for one in summary.statements] == [
             (_address("said"), "round-1", _SAID_AT)
+        ]
+
+    async def test_a_statement_resting_on_a_message_call_is_written_and_cited_with_it(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0356 §13:3, §14:9: a message call's message is read as a round's message.
+
+        A memory marked ``assistant_statement`` resting on a ``MessageCallPart`` is
+        written, held as the assistant's statement of a round's message, and cited with
+        its call, apart from another message of the same round.
+        """
+        store = await self._world("said", "kept")
+        parts = [
+            MessageCallPart(episode=_address("said"), round="round-1", call_id=call_id)
+            for call_id in ("c1", "c2")
+        ]
+        supports = [
+            _message("said", backs=False).model_copy(update={"points_at": part}) for part in parts
+        ]
+        cited = await self._hold(
+            make_placed_writer,
+            store,
+            memory(
+                "m-cited",
+                "X is the best car for the commute",
+                _said("kept"),
+                *supports,
+                marks=(MemoryMark.ASSISTANT_STATEMENT,),
+            ),
+        )
+        summary = belief_summary(cited, now=_AT, supports_gone=False)
+        assert [(one.episode, one.round, one.call_id) for one in summary.statements] == [
+            (_address("said"), "round-1", "c1"),
+            (_address("said"), "round-1", "c2"),
         ]
 
     # --- §5: the write a placement yields -----------------------------------------------

@@ -238,8 +238,18 @@ def shown_rounds(exchange: PlanningExchange) -> list[dict[str, object]]:
     Returns:
         The rounds, empty for an activation's first round.
     """
-    shown = json.loads(exchange.briefing)
-    rounds: list[dict[str, object]] = shown["rounds"]
+    # ADR-0356 §5: the earlier rounds are the exchange's steps, each with its report.
+    rounds: list[dict[str, object]] = []
+    for number, step in enumerate(exchange.steps, 1):
+        calls = [
+            {
+                "capability": call.name,
+                "arguments": call.model_dump()["arguments"],
+                **json.loads(result.text),
+            }
+            for call, result in zip(step.response.calls, step.report.results, strict=True)
+        ]
+        rounds.append({"round": number, "text": step.response.text, "calls": calls})
     return rounds
 
 

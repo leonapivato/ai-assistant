@@ -161,7 +161,7 @@ def test_the_record_defaults_to_no_joined_input() -> None:
     """§7:2: a record written before the field validates unchanged."""
     record = _open()
     assert record.joined == ()
-    assert record.schema_version == 11
+    assert record.schema_version == 12
     assert "joined" not in record.model_dump(exclude_defaults=True)
 
 

@@ -22,6 +22,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
+from exchange_support import reported
 from phases_support import chat_turn, phases_harness, processing, stopped
 from telegram_support import SETTLE, text
 from test_matters import _matters, _running, _version
@@ -38,6 +39,8 @@ from ai_assistant.core.types import (
     MemorySupport,
     MemoryWriterName,
     MessageAuthor,
+    ProposedCall,
+    RoundResponse,
     SupportDirection,
     SupportHolder,
     SupportOrigin,
@@ -119,8 +122,10 @@ def _relaying() -> FakeModelProvider:
     return FakeModelProvider(reply=reply)
 
 
-async def _turn(text: str) -> tuple[EpisodicMemory, FakeToolCallingCompleter]:
-    planner = FakeToolCallingCompleter()
+async def _turn(
+    text: str, planner: FakeToolCallingCompleter | None = None
+) -> tuple[EpisodicMemory, FakeToolCallingCompleter]:
+    planner = FakeToolCallingCompleter() if planner is None else planner
     harness = phases_harness(planner, understanding=understanding_stage(model=_relaying()))
     _, episode = await chat_turn(harness, text)
     await harness.engine.aclose()
@@ -128,12 +133,12 @@ async def _turn(text: str) -> tuple[EpisodicMemory, FakeToolCallingCompleter]:
 
 
 def _offered(planner: FakeToolCallingCompleter) -> set[str]:
-    (call,) = planner.calls
+    call = planner.calls[0]
     return {one.name for one in call.tools}
 
 
 def _request(planner: FakeToolCallingCompleter) -> dict[str, Any]:
-    (call,) = planner.calls
+    call = planner.calls[0]
     shown: dict[str, Any] = json.loads(call.exchange.briefing)
     return shown
 
@@ -155,15 +160,25 @@ def _support(episode: EpisodicMemory, origin: SupportOrigin) -> MemorySupport:
 
 
 async def test_a_pasted_email_marked_relayed_carries_no_authority_and_is_read_as_received() -> None:
-    """§5:6, §5:13, §6:5, §7:6: no stop call, read outside content, held by unknown."""
-    episode, planner = await _turn(_EMAIL)
+    """§5:6, §5:13, §6:5, §7:6: no stop call, read outside content, held by unknown.
+
+    Every capability is offered on every round (ADR-0356 §4:3), so the stop call is offered
+    and comes back refused, saying why, running nothing (§4:4-§4:5).
+    """
+    stop = ProposedCall(
+        call_id="c-stop", name=STOP_ACTIVATION_CAPABILITY, arguments={"activation": "E9"}
+    )
+    planner = FakeToolCallingCompleter.scripted(RoundResponse(calls=(stop,)), RoundResponse())
+    episode, planner = await _turn(_EMAIL, planner)
 
     record = processing(episode)
     assert [one.relayed for one in record.understanding] == [True]
     assert record.trigger.parties == OWNERS_WORDS, "the relay mark changes no party (§5:8)"
     offered = _offered(planner)
-    assert LOOK_UP_ACTIVATION_CAPABILITY in offered
-    assert STOP_ACTIVATION_CAPABILITY not in offered, "its stop call is refused (§6:5)"
+    assert {LOOK_UP_ACTIVATION_CAPABILITY, STOP_ACTIVATION_CAPABILITY} <= offered
+    (refused,) = reported(planner.calls[1], 0)
+    assert refused["outcome"].startswith("refused"), "its stop call is refused (§6:5)"
+    assert "authority" in refused["outcome"]
     assert str(_request(planner)["place"]["input"]).startswith("an outside report")
     assert from_outside(episode), "it has read outside content (§5:13)"
     assert episode.content == record.understanding[-1].meaning, (

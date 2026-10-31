@@ -802,6 +802,82 @@ async def test_the_message_goes_only_into_the_inputs_place() -> None:
     assert silent.message is None
 
 
+def _texts(*messages: RoundMessage) -> RoundToAuthorize:
+    """A round whose calls are ``text`` calls, each handed on as the message it is."""
+    calls = tuple(
+        ProposedCall(call_id=str(one.call_id), name="text", arguments={"words": one.text})
+        for one in messages
+    )
+    given = _round()
+    return replace(
+        given,
+        round=given.round.model_copy(update={"calls": calls}),
+        call_messages=messages,
+    )
+
+
+async def test_a_text_call_is_checked_by_its_place_alone_as_the_rounds_message_is() -> None:
+    """ADR-0356 §7:7, §14:9: each ``text`` call has a verdict of its own, by its id, from
+    the message place check: into the input's place it is allowed, with an effect id of
+    its own (§7:8); off it, refused with the reason; and it is no call ruled on."""
+    hub = _Hub()
+
+    decided = await hub.authorize(
+        _texts(
+            RoundMessage("Booked.", _PLACE, "c1"),
+            RoundMessage("Psst.", "place:elsewhere", "c2"),
+            RoundMessage("And done.", _PLACE, "c3"),
+        )
+    )
+
+    assert decided.verdicts == ()
+    assert decided.allowed == ()
+    assert decided.message is None
+    here, there, again = decided.call_messages
+    assert [one.call_id for one in decided.call_messages] == ["c1", "c2", "c3"]
+    assert (here.allowed, again.allowed, there.allowed) == (True, True, False)
+    assert here.effect_id is not None
+    assert again.effect_id is not None
+    assert here.effect_id != again.effect_id
+    assert there.effect_id is None
+    assert there.reason is not None
+
+
+async def test_a_scheduled_activations_text_call_goes_only_into_a_place_on_its_list() -> None:
+    """ADR-0356 §7:7, ADR-0350 §6:7: a place on the list, and none gone since or off it."""
+    hub = _Hub()
+    given = replace(
+        _texts(
+            RoundMessage("Time for the pills.", "telegram:ref/42", "c1"),
+            RoundMessage("Time for the pills.", "conversation:c-1", "c2"),
+            RoundMessage("Time for the pills.", "conversation:gone", "c3"),
+            RoundMessage("Time for the pills.", None, "c4"),
+        ),
+        input_place=None,
+        places=("conversation:c-1", "telegram:ref/42"),
+        gone=("conversation:c-1",),
+    )
+
+    decided = await hub.authorize(given)
+
+    assert [one.allowed for one in decided.call_messages] == [True, False, False, False]
+    gone = decided.call_messages[1]
+    assert gone.reason is not None
+    assert "gone since its place list was built" in gone.reason
+
+
+def test_a_text_call_checked_names_a_call_the_round_proposed_once() -> None:
+    """ADR-0356 §7:7: a message call is one the round proposed, never also ruled on."""
+    given = _texts(RoundMessage("Booked.", _PLACE, "c1"))
+    with pytest.raises(ValueError, match="proposed, by its id"):
+        replace(given, call_messages=(RoundMessage("Booked.", _PLACE, "c9"),))
+    with pytest.raises(ValueError, match="authorized once each"):
+        replace(
+            given,
+            calls=(CallToAuthorize(given.round.calls[0]),),
+        )
+
+
 async def test_a_scheduled_activations_message_goes_only_into_a_place_on_its_list() -> None:
     """ADR-0350 §6:7, §13:3: the place it names, on its list; none, or one off it, refused."""
     hub = _Hub()

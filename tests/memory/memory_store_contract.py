@@ -57,11 +57,13 @@ from ai_assistant.core.types import (
     ActivationUnderstanding,
     Attestation,
     BeliefBand,
+    CallOutcomeKind,
     Capture,
     ChannelContext,
     ChannelIdentity,
     ControllerRule,
     ControllerStage,
+    DeliveryStatus,
     DigestOutcome,
     EpisodeProcessingRecord,
     EpisodicMemory,
@@ -95,7 +97,9 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
+    RecordedCall,
     RecordedChannelTrigger,
+    RecordedDelivery,
     RecordedInputMessage,
     RecordedTextInput,
     SituationLabel,
@@ -1530,7 +1534,7 @@ class MemoryStoreContract:
         got = await store.get("understood")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
-        assert got.processing_record.schema_version == 11
+        assert got.processing_record.schema_version == 12
         assert got.processing_record.understanding == (version,)
         assert got.processing_record.understanding[0].meaning_referents[0].id == " "
         assert got.processing_record.understanding_omitted is None
@@ -6105,6 +6109,68 @@ class MemoryStoreContract:
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
         assert got.processing_record.taken_over_by is None
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_an_open_episode_takes_each_calls_entry_appended_and_keeps_it(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """ADR-0356 §8:2, §8:6, §13: each call's entry is appended, and read back as written.
+
+        An open episode whose round proposed two calls is extended by one entry, then by
+        the other, each read back whole; a revision that changes an earlier entry, or
+        drops one, is refused and writes nothing.
+        """
+        opened = _open_episode("episode", channel=_CONVERSATION_A)
+        await store.add(opened)
+        planned = PlanningRound(
+            id="round-1",
+            recorded_at=_OCCURRED,
+            calls=(
+                ProposedCall(call_id="c1", name="search_memory", arguments={"query": "q"}),
+                ProposedCall(call_id="c2", name="text", arguments={"words": "Booked."}),
+            ),
+        )
+        rounded = _revised(opened, processing={"rounds": (planned,)})
+        await _replace(store, rounded, door)
+        looked = RecordedCall(
+            round="round-1",
+            call_id="c1",
+            capability="search_memory",
+            effect=False,
+            outcome=CallOutcomeKind.DONE,
+            recorded_at=_OCCURRED,
+        )
+        sent = RecordedCall(
+            round="round-1",
+            call_id="c2",
+            capability="text",
+            effect=True,
+            outcome=CallOutcomeKind.DONE,
+            delivered=RecordedDelivery(
+                words="Booked.", went=_CONVERSATION_A, status=DeliveryStatus.SENT
+            ),
+            recorded_at=_OCCURRED,
+        )
+        first = _revised(rounded, processing={"call_records": (looked,)})
+        await _replace(store, first, door)
+        both = _revised(first, processing={"call_records": (looked, sent)})
+        await _replace(store, both, door)
+
+        got = await store.get("episode")
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert got.processing_record.call_records == (looked, sent)
+        assert _unstamped_or_none(got) == both
+
+        changed = looked.model_copy(update={"outcome": CallOutcomeKind.UNKNOWN})
+        for revision in (
+            _revised(both, processing={"call_records": (changed, sent)}),
+            _revised(both, processing={"call_records": (looked,)}),
+        ):
+            with pytest.raises(MemoryStoreError):
+                await _replace(store, revision, door, companion=door != "add")
+            assert await store.get("companion") is None
+            assert _unstamped_or_none(await store.get("episode")) == both
 
     @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
     async def test_the_guard_admits_a_placement_only_change_to_a_frozen_episode(

@@ -451,21 +451,24 @@ def _projected_rounds(*, owner_records: bool) -> tuple[ProjectedRound, ...]:
 
 
 def test_an_owner_reader_is_shown_each_rounds_message_and_notes() -> None:
+    """Each round keeps its position among every round recorded (ADR-0356 §13)."""
     assert _projected_rounds(owner_records=True) == (
         ProjectedRound(
             message=ProjectedText(text="Looki", full_chars=8),
             notes=ProjectedText(text="check", full_chars=8),
             notes_marked=True,
+            position=0,
         ),
-        ProjectedRound(notes=ProjectedText(text="nothi", full_chars=11)),
-        ProjectedRound(message=ProjectedText(text="Done.", full_chars=5)),
+        ProjectedRound(notes=ProjectedText(text="nothi", full_chars=11), position=1),
+        ProjectedRound(message=ProjectedText(text="Done.", full_chars=5), position=3),
     )
 
 
 def test_another_reader_is_shown_the_messages_and_no_notes() -> None:
+    """A round omitted for having nothing to show leaves the others' positions alone."""
     assert _projected_rounds(owner_records=False) == (
-        ProjectedRound(message=ProjectedText(text="Looki", full_chars=8)),
-        ProjectedRound(message=ProjectedText(text="Done.", full_chars=5)),
+        ProjectedRound(message=ProjectedText(text="Looki", full_chars=8), position=0),
+        ProjectedRound(message=ProjectedText(text="Done.", full_chars=5), position=3),
     )
 
 
