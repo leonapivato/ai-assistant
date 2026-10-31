@@ -47,6 +47,7 @@ __all__ = [
     "BCC_ARGUMENT",
     "CC_ARGUMENT",
     "EMAIL_CAPABILITY",
+    "EMAIL_CHANNEL_TYPE",
     "EXACT_ARGUMENT",
     "FROM_ARGUMENT",
     "FROM_ASSISTANT",
@@ -64,6 +65,7 @@ __all__ = [
     "TextArguments",
     "asks_named",
     "carries_asks",
+    "emailed_to",
     "platform_name",
     "platform_type",
     "reworded",
@@ -103,7 +105,12 @@ PLATFORMS: Final[Mapping[str, str]] = {"hub_chat": "conversation", "telegram": "
 _PLATFORM_NAMES: Final[Mapping[str, str]] = {
     "conversation": "the hub chat",
     "telegram": "Telegram",
+    "email": "email",
 }
+
+#: The channel type an email's delivery names where it went (ADR-0357 §3:1): its
+#: platform, with its recipients as the place.
+EMAIL_CHANNEL_TYPE: Final = "email"
 
 #: The owner's ruling on #3094 (2026-10-16): the one fixed line code puts above the exact
 #: lines it appends to an asking message, so a question never goes out as a bare line.
@@ -335,6 +342,21 @@ def platform_type(name: str) -> str | None:
 def platform_name(channel_type: str) -> str:
     """How a result names the platform of ``channel_type`` (ADR-0357 §3:1)."""
     return _PLATFORM_NAMES.get(channel_type, channel_type)
+
+
+def emailed_to(arguments: Mapping[str, object]) -> str | None:
+    """Where an email went, as its delivery names the place: its recipients, in order.
+
+    ``to``, then ``cc``, then ``bcc``, each recipient once, joined by commas; ``None``
+    where it names none (ADR-0357 §3:1).
+    """
+    named: list[str] = []
+    for argument in (TO_ARGUMENT, CC_ARGUMENT, BCC_ARGUMENT):
+        value = arguments.get(argument)
+        values = [value] if isinstance(value, str) else value
+        if isinstance(values, list | tuple):
+            named.extend(one.strip() for one in values if isinstance(one, str) and one.strip())
+    return ", ".join(dict.fromkeys(named)) or None
 
 
 # --- the wording step (§4) and the asking message (§8:2) ---------------------------------
