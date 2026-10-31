@@ -223,9 +223,9 @@ class PydanticAIToolCallingCompleter:
         try:
             chosen = infer_model(self._default_model if model is None else model)
             settings = _settings(self._thinking, chosen, summarised=self._diagnostics is not None)
-            written_by = model_id(chosen)
+            recipient = model_id(chosen)
             history = exchange_history(
-                exchange, written_by, cache_point=marks_the_newest_report(chosen)
+                exchange, recipient, cache_point=marks_the_newest_report(chosen)
             )
             # Where the record is on, the tools as prepared are taken here, with no await
             # between this and the request preparing itself (#2910). `_offered` never
@@ -243,7 +243,7 @@ class PydanticAIToolCallingCompleter:
             # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
             raise _classify(exc) from exc
         try:
-            read = _round(response, written_by)
+            read = _round(response, _writer(recipient, response))
         except ModelResponseError as exc:
             await self._returned(offered_record, response, exc)
             raise
@@ -303,10 +303,10 @@ class PydanticAIToolCallingCompleter:
             raise ModelError(msg)
         try:
             settings = _settings(self._thinking, chosen, summarised=True)
-            written_by = model_id(chosen)
+            recipient = model_id(chosen)
             response = await model_request(
                 chosen,
-                exchange_history(sent, written_by, cache_point=marks_the_newest_report(chosen)),
+                exchange_history(sent, recipient, cache_point=marks_the_newest_report(chosen)),
                 model_settings=settings,
                 model_request_parameters=parameters,
             )
@@ -315,7 +315,7 @@ class PydanticAIToolCallingCompleter:
             raise _classify(exc) from exc
         whole = ModelMessagesTypeAdapter.dump_python([response], mode="json")[0]
         try:
-            read = _round(response, written_by)
+            read = _round(response, _writer(recipient, response))
         except ModelResponseError as exc:
             return ReplayedRound(response=whole, round=None, failure=exc)
         return ReplayedRound(response=whole, round=read, failure=None)
@@ -397,16 +397,32 @@ def _round_parameters(tools: Sequence[OfferedTool], *, caller: str) -> ModelRequ
     return ModelRequestParameters(function_tools=offered, allow_text_output=True)
 
 
-def model_id(model: models.Model) -> str:
-    """The ``"provider:model"`` a response from ``model`` is written by, under any wrappers.
+def model_id(model: models.Model) -> str | None:
+    """The ``"provider:model"`` a request to ``model`` goes to, under any wrappers.
 
-    A continuation names it (ADR-0356 §13), and it is handed back as it was only to the
-    model of the same name (§6:3).
+    A continuation names the model that wrote it (ADR-0356 §13), and it is handed back
+    as it was only to the model of the same name (§6:3). A fallback model has no one
+    name: which model it holds answers is known only once one has, so it is ``None``,
+    and nothing is handed back to it as it was.
     """
     inner = model
     while isinstance(inner, WrapperModel):
         inner = inner.wrapped
+    if isinstance(inner, FallbackModel):
+        return None
     return f"{inner.system}:{inner.model_name}"
+
+
+def _writer(recipient: str | None, response: ModelResponse) -> str:
+    """The ``"provider:model"`` that wrote ``response``, sent to ``recipient``.
+
+    The model the request went to, where it was one model; for a fallback model's, the
+    model the response names as having answered (ADR-0356 §13).
+    """
+    if recipient is not None:
+        return recipient
+    provider = response.provider_name or "unknown"
+    return f"{provider}:{response.model_name or 'unknown'}"
 
 
 def candidate_exchange(
@@ -436,9 +452,9 @@ def candidate_exchange(
 
 
 def exchange_history(
-    exchange: PlanningExchange, written_by: str, *, cache_point: bool = True
+    exchange: PlanningExchange, recipient: str | None, *, cache_point: bool = True
 ) -> list[ModelMessage]:
-    """The provider's messages for ``exchange``, as a model named ``written_by`` is sent it.
+    """The provider's messages for ``exchange``, as the model ``recipient`` names is sent it.
 
     The instruction is the system part and the briefing a user part of the first
     request; then each earlier response, handed back as :func:`_handed_back` gives it,
@@ -449,7 +465,8 @@ def exchange_history(
 
     Args:
         exchange: The exchange, oldest first.
-        written_by: The ``"provider:model"`` the request goes to (:func:`model_id`).
+        recipient: The ``"provider:model"`` the request goes to (:func:`model_id`), or
+            ``None`` for a fallback model, which is handed back no continuation.
         cache_point: Whether the newest report ends on a cache point.
 
     Returns:
@@ -464,7 +481,7 @@ def exchange_history(
         )
     ]
     for index, step in enumerate(exchange.steps):
-        handed = _handed_back(step.response, written_by)
+        handed = _handed_back(step.response, recipient)
         if handed is not None:
             history.append(handed)
         names = {call.call_id: call.name for call in step.response.calls}
@@ -482,7 +499,7 @@ def exchange_history(
     return history
 
 
-def _handed_back(response: RoundResponse, written_by: str) -> ModelResponse | None:
+def _handed_back(response: RoundResponse, recipient: str | None) -> ModelResponse | None:
     """``response`` as the provider is handed it back, or ``None`` where it holds nothing.
 
     Its continuation rebuilt, where the model it goes to wrote it and it still reads as
@@ -490,7 +507,7 @@ def _handed_back(response: RoundResponse, written_by: str) -> ModelResponse | No
     are the response's own. Anywhere else, its text and its calls alone (ADR-0356 §6:3).
     """
     continuation = response.continuation
-    if continuation is not None and continuation.model == written_by:
+    if continuation is not None and recipient is not None and continuation.model == recipient:
         rebuilt = _rebuilt(continuation)
         if rebuilt is not None and _reads_as(rebuilt, response):
             return rebuilt
