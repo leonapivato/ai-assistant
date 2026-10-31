@@ -947,9 +947,7 @@ def full_view_parts(projection: EpisodeProjection) -> tuple[FullViewPart, ...]:
     return tuple(part for _, part in placed)
 
 
-def call_showed(
-    outcome: CallOutcome, *, bound: int, raw: FrozenJsonValue = None
-) -> CallShowed | None:
+def call_showed(outcome: CallOutcome, *, bound: int) -> CallShowed | None:
     """What a done call's result showed planning directly, as its entry keeps it.
 
     ADR-0358 §11:2-§11:4, read off what planning renders of the result (:meth:`_call`):
@@ -957,15 +955,15 @@ def call_showed(
     version, never by a copy; its own words, for a result that goes to planning whole,
     as text. Of what it held for a digest, as outside text, nothing, record by record
     (§11:3): a memory search keeps the records it showed and nothing of those its digest
-    read. Each record is kept once, where first shown. What is kept is cut to ``bound``
-    characters, a record counting its id's, and the cut is carried.
+    read. A call on the Task Scheduler or on running work keeps the activations it showed
+    by their episodes, and nothing of their inputs or of a task's words, which no kind of
+    record an entry holds by reference names (§10:6). Each record is kept once, where
+    first shown. What is kept is cut to ``bound`` characters, a record counting its id's,
+    and the cut is carried.
 
     Args:
         outcome: What came of the call, carrying what its look-up found.
         bound: The composition root's bound on what an entry keeps (§11:4).
-        raw: What the call returned for planning before what it looked up replaced
-            it, as for a call on the Task Scheduler or on running work, whose result
-            planning is shown rendered.
 
     Returns:
         What it showed, or ``None`` for a call that was not done (§11:2).
@@ -979,20 +977,7 @@ def call_showed(
     if outcome.kind is not CallOutcomeKind.DONE:
         return None
     showing = _Showing()
-    if outcome.records is not None:
-        showing.memories(outcome.records)
-    elif outcome.candidate is not None:
-        showing.memories(outcome.candidate.similar or ())
-    elif outcome.story is not None:
-        showing.story(outcome.story)
-    elif outcome.episodes is not None:
-        showing.found(outcome.episodes)
-    elif outcome.history is not None:
-        showing.history(outcome.history)
-    elif outcome.full is not None:
-        showing.full(outcome.full)
-    elif not outcome.digested:
-        showing.text(outcome.result if outcome.result is not None else raw)
+    showing.of(outcome)
     return shown_within(showing.parts, bound)
 
 
@@ -1002,6 +987,25 @@ class _Showing:
     def __init__(self) -> None:
         self.parts: list[ShownText | ShownRecord] = []
         self._seen: set[tuple[ShownRecordKind, str]] = set()
+
+    def of(self, outcome: CallOutcome) -> None:
+        """What a done call's result showed, by what it looked up, or its own words."""
+        if outcome.records is not None:
+            self.memories(outcome.records)
+        elif outcome.candidate is not None:
+            self.memories(outcome.candidate.similar or ())
+        elif outcome.story is not None:
+            self.story(outcome.story)
+        elif outcome.episodes is not None:
+            self.found(outcome.episodes)
+        elif outcome.history is not None:
+            self.history(outcome.history)
+        elif outcome.full is not None:
+            self.full(outcome.full)
+        elif outcome.tasks is not None or outcome.peer is not None:
+            self.running(outcome.tasks, outcome.peer)
+        elif not outcome.digested:
+            self.text(outcome.result)
 
     def record(self, kind: ShownRecordKind, record_id: str, version: int | None = None) -> None:
         """A record, by its kind and id, and a story's by its summary version."""
@@ -1044,6 +1048,16 @@ class _Showing:
                 self.text({"from": item.author.value, "text": item.text})
         for episode in history.episodes:
             self.record(ShownRecordKind.EPISODE, episode.id)
+
+    def running(self, tasks: TaskListing | None, peer: PeerShown | None) -> None:
+        """A call on the Task Scheduler or on running work: each activation, by episode."""
+        listed = () if tasks is None else (*tasks.running, *tasks.recent)
+        for entry in listed:
+            self.record(ShownRecordKind.EPISODE, episode_address(entry.activation_id))
+        if peer is not None:
+            self.record(ShownRecordKind.EPISODE, episode_address(peer.activation_id))
+            if peer.absorbed_by is not None:
+                self.record(ShownRecordKind.EPISODE, episode_address(peer.absorbed_by))
 
     def full(self, read: EpisodeRead) -> None:
         """A full view's page: the episode, then each record it showed again as held now."""

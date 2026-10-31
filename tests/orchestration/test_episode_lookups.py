@@ -74,6 +74,8 @@ from ai_assistant.testing.memories import memory, said_support
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    import pytest
+
 _AT: Final = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
@@ -585,3 +587,25 @@ async def test_a_lines_older_history_reads_further_back_until_its_page_is_there(
     assert older.readable
     assert [one.id for one in older.episodes] == ["activation:17", "activation:16"]
     assert older.more
+
+
+async def test_a_lines_older_history_reads_back_past_episodes_the_audience_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§9:1, §6:3: a page of admitted episodes, however many the audience refuses."""
+    import ai_assistant.orchestration.episode_lookups as module  # noqa: PLC0415
+
+    refused = {"activation:15", "activation:16", "activation:17"}
+
+    def admitted(audience: object, records: Sequence[MemoryRecord]) -> list[MemoryRecord]:
+        del audience
+        return [one for one in records if one.id not in refused]
+
+    monkeypatch.setattr(module, "admitted_to_understanding", admitted)
+    channel = [_episode(f"activation:{at}") for at in range(20)]
+    source = OlderSource(channel=LINE, episodes=frozenset({"activation:18", "activation:19"}))
+
+    older = await _reads(_Memory(channel=channel)).older(source, 1, audience=UNBOUNDED)
+
+    assert older.readable
+    assert [one.id for one in older.episodes] == ["activation:14", "activation:13"]

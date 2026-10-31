@@ -511,3 +511,28 @@ async def test_a_full_view_names_the_matters_its_episode_belongs_to() -> None:
         ShownRecord(kind=ShownRecordKind.STORY, id="story:dentist", summary_version=2)
         in showed.parts
     )
+
+
+def test_a_task_listing_keeps_its_activations_by_episode_and_none_of_their_words() -> None:
+    """§11:2, §10:6: a list pull's activations by reference, never their inputs' words."""
+    from ai_assistant.orchestration.task_scheduler import (  # noqa: PLC0415
+        ActivationEntry,
+        TaskListing,
+    )
+
+    entry = ActivationEntry(
+        activation_id="busy",
+        started="09:00",
+        place="the hub chat",
+        status="running",
+        input="My private appointment details",
+        outside=False,
+    )
+    listing = TaskListing(running=(entry,), listed=True)
+    outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", tasks=listing)
+
+    showed = call_showed(outcome, bound=1000)
+
+    assert showed == CallShowed(
+        parts=(ShownRecord(kind=ShownRecordKind.EPISODE, id="activation:busy"),)
+    )
