@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     DeviceAccess,
     EpisodicMemory,
     MessageAuthor,
+    ProposedCall,
     ReplyExchange,
     ReplyFailure,
     ReplyMode,
@@ -298,6 +299,27 @@ async def until(check: Callable[[], Awaitable[bool]], *, what: str) -> None:
         await asyncio.sleep(0.005)
 
 
+def answering(words: str = REPLY) -> FakeToolCallingCompleter:
+    """Planning that answers ``words`` in a work's first round, and proposes nothing after.
+
+    A round's own text is its notes alone (ADR-0356 §7:3): where the origin takes a reply,
+    the first round sends ``words`` by a ``text`` call, whose round brings one more, which
+    ends the work; where it takes none, as an event's, the first keeps them as its notes.
+    """
+
+    def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
+        if exchange.steps:
+            return RoundResponse()
+        if "A reply can be written there." not in exchange.briefing:
+            return RoundResponse(text=words)
+        call = ProposedCall(
+            call_id="reply", name="text", arguments={"to": "the user", "words": words}
+        )
+        return RoundResponse(calls=(call,))
+
+    return FakeToolCallingCompleter(response=respond)
+
+
 def build_phased(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -311,9 +333,7 @@ def build_phased(
     so nothing is downloaded.
     """
     model = FakeModelProvider(_reply)
-    planning = (
-        completer if completer is not None else FakeToolCallingCompleter(RoundResponse(text=REPLY))
-    )
+    planning = completer if completer is not None else answering()
 
     async def complete(
         _self: PydanticAIProvider, messages: Sequence[Message], *, model: str | None = None

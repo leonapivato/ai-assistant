@@ -1,30 +1,16 @@
 # A reminder's activation writes one message into its suggested place (ADR-0340 §7,
-# ADR-0350 §6:7, ADR-0340 §10:5).
+# ADR-0350 §6:7, ADR-0340 §10:5). Rewritten for ADR-0356 §7:3: a round's text is no
+# message, so the message is a text call, and it goes via the place the task suggests, the
+# hub's chat, rather than the place list's other place, since the schedule takes none.
 prompt = "planning"
 guards = "reminder_unsaid"
 came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = true
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round writes one message that begins "L1: " and reminds the person to call their mother. It proposes no call."""
+read = """The round makes one text call reminding Leo to call his mother, whose via names L1, the hub's chat conversation the task suggests, and makes no other call. It does not send it via L2 or telegram, and its words carry no L label."""
 
 [input]
 file = "a-reminders-activation-writes-one-message-where-suggested.json"

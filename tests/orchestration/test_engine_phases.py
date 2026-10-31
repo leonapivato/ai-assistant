@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
@@ -26,7 +27,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from channel_receiver_contract import event_input
-from exchange_support import reported, shown_text
+from exchange_support import labels as shown_labels
+from exchange_support import reported, says, section, shown_text, tag, tags, text_call
 from story_support import episode
 from structlog.testing import capture_logs
 from structured_support import structured
@@ -141,14 +143,13 @@ from ai_assistant.orchestration.lookups import (
 )
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import (
-    EVENT_DESCRIPTION,
     MessageWriter,
     PhasePath,
     PhaseTools,
     PhaseWorking,
     StoryReads,
 )
-from ai_assistant.orchestration.planning import PLANNING_PROMPT, PlannedRound
+from ai_assistant.orchestration.planning import NOTE_REASONS, PLANNING_PROMPT, PlannedRound
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE, CandidateCalls
 from ai_assistant.orchestration.story_calls import (
@@ -362,6 +363,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     diagnostics: FakeDiagnosticSink | None = None,
     path: type[PhasePath] = PhasePath,
     authorizing: type[AuthorizingStage] = AuthorizingStage,
+    round_limit: int = 3,
 ) -> Callable[[Harness], PhasePath]:
     """The thin path as the composition root builds it, over the harness's own stores.
 
@@ -373,7 +375,8 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     store and the story views' reads, as the composition root wires them, and with
     ``episode_look_ups`` the episode look-ups too (ADR-0358 §7-§10), over the harness's
     memory, story and conversation stores, every score kept. ``path`` and
-    ``authorizing`` are the classes built, which a case may vary.
+    ``authorizing`` are the classes built, which a case may vary. ``round_limit`` is the
+    most rounds an activation runs.
     """
 
     def build(harness: Harness) -> PhasePath:
@@ -495,7 +498,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             },
             story_calls=calls,
             look_ups=looking,
-            round_limit=3,
+            round_limit=round_limit,
             round_wait=timedelta(seconds=5),
             excerpt_chars=2000,
             part_chars=4000,
@@ -587,6 +590,17 @@ def _call(call_id: str, name: str, **arguments: object) -> ProposedCall:
     return ProposedCall(call_id=call_id, name=name, arguments=arguments)  # type: ignore[arg-type]  # JSON values
 
 
+def _digests_read(result: dict[str, Any]) -> list[tuple[str, str]]:
+    """What each digest a result's evidence holds read, and what it looked for (ADR-0308 §5)."""
+    read: list[tuple[str, str]] = []
+    for one in result["evidence"]:
+        found = re.match(r"- What a digest read of (\S+), looking for (.+), resting on ", one)
+        assert found is not None, one
+        assert tags(one, "evidence"), "an answered digest's items are each a tag"
+        read.append((found.group(1), found.group(2)))
+    return read
+
+
 def _remember(call_id: str, fact: str) -> ProposedCall:
     """A ``remember`` recording a candidate resting on the input (ADR-0329 §3:1)."""
     return _call(call_id, "remember", fact=fact, why="worth keeping", rests_on_input=True)
@@ -596,8 +610,11 @@ def _remember(call_id: str, fact: str) -> ProposedCall:
 
 
 async def test_a_quick_question_is_answered_in_one_round() -> None:
-    """ADR-0307 §2, §3:1, §8:1: one round, its text written, and the activation ends."""
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello! How can I help?"))
+    """ADR-0307 §2, §3:1, §8:1, ADR-0356 §7:3: a round's text call is written, and the
+    round after it, proposing nothing, ends the activation."""
+    completer = FakeToolCallingCompleter.scripted(
+        says("Hello! How can I help?", text="Greeting them."), RoundResponse()
+    )
     harness = _harness(completer)
     conversation = await _conversation(harness)
 
@@ -615,11 +632,13 @@ async def test_a_quick_question_is_answered_in_one_round() -> None:
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
         (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
         (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
         (ControllerStage.END, ControllerRule.NOTHING_DUE),
     ]
     assert episode.processing_record is not None
-    (planning_round,) = episode.processing_record.rounds
-    assert planning_round.text == "Hello! How can I help?"
+    planning_round, _ = episode.processing_record.rounds
+    # The round's own text is its notes, which reach no one (ADR-0356 §7:3).
+    assert planning_round.text == ""
     assert episode.outcome == "Hello! How can I help?"
     # ADR-0306 §5:3-§5:5: the message is claimed, then finished with its position.
     (effect,) = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
@@ -636,10 +655,13 @@ async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
     """ADR-0308 §4, ADR-0309 §3:3: the search's result reaches planning as evidence."""
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
-            text="Let me look that up.",
-            calls=(_call("c1", "web_search", query="museum hours", looking_for="when it opens"),),
+            calls=(
+                text_call("Let me look that up."),
+                _call("c1", "web_search", query="museum hours", looking_for="when it opens"),
+            ),
         ),
-        RoundResponse(text="It opens at nine."),
+        says("It opens at nine.", call_id="say-2"),
+        RoundResponse(),
     )
     searcher = FakeWebSearcher(results=("Open daily from 9:00 to 17:00.",))
     harness = _harness(completer, searcher=searcher)
@@ -662,7 +684,8 @@ async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
     assert searched.request.parameters["origin"] == "https://search.example.com"
     assert searched.request.parameters["query"] == "museum hours"
     # The first round's step ran acting with digesting beside it, each its own entry;
-    # the second round, with no call, ran acting alone and ended the activation.
+    # the second round, its one call a message, ran acting alone, and the third, with
+    # no call, ended the activation.
     assert _stages(episode)[3:] == [
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
         (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
@@ -671,6 +694,7 @@ async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
         (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
         (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
         (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
         (ControllerStage.END, ControllerRule.NOTHING_DUE),
     ]
     # Read outside content, so the episode says so; and the search returned records a
@@ -688,8 +712,9 @@ async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
     assert [(one.label, one.kind) for one in record.labels] == [("R1", LabelKind.RESULT)]
     # The second round was shown the evidence under the result's label, never the
     # raw result: in the report on the first round's call (ADR-0356 §5:4).
-    (shown_search,) = reported(completer.calls[1], 0)
-    assert shown_search["evidence"][0]["digest_of"] == "R1"
+    _, shown_search = reported(completer.calls[1], 0)
+    (evidence,) = tags(shown_search["evidence"][0], "evidence")
+    assert (evidence.get("source"), evidence.get("outside")) == ("R1", "yes")
     assert "Open daily" not in shown_text(completer.calls[1])
     assert episode.outcome == "Let me look that up.\n\nIt opens at nine."
 
@@ -775,7 +800,8 @@ async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answe
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(calls=(_call("c1", "forecast_read", looking_for="rain tomorrow"),)),
-        RoundResponse(text="No rain tomorrow."),
+        says("No rain tomorrow."),
+        RoundResponse(),
     )
     digests = FakeModelProvider(reply=_DIGESTED)
     forecaster = FakeForecaster()
@@ -819,7 +845,9 @@ async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answe
     # Planning saw evidence under the result's label, never the forecast itself.
     shown = shown_text(completer.calls[1])
     (forecast,) = reported(completer.calls[1], 0)
-    assert forecast["evidence"][0]["digest_of"] == "R1"
+    (read_of,) = forecast["evidence"]
+    assert read_of.startswith("- What a digest read of R1, looking for rain tomorrow")
+    assert [one.get("source") for one in tags(read_of, "evidence")] == ["R1"]
     assert "2026-09-05" not in shown
     # The pull marks the activation (§9:1), and the records it returned were held by
     # it, so the episode is placed for the owner alone (ADR-0309 §5:10).
@@ -915,8 +943,7 @@ async def test_a_remember_records_a_candidate_through_the_assistants_own_records
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
-            text="I'll remember that.",
-            calls=(_remember("c1", "The user likes green tea."),),
+            calls=(text_call("I'll remember that."), _remember("c1", "The user likes green tea.")),
         ),
         RoundResponse(),
     )
@@ -937,7 +964,7 @@ async def test_a_remember_records_a_candidate_through_the_assistants_own_records
     # Done: a second round, shown it done, and then the end.
     assert episode.processing_record is not None
     assert len(episode.processing_record.rounds) == 2
-    (call,) = reported(completer.calls[1], 0)
+    _, call = reported(completer.calls[1], 0)
     assert call["outcome"] == "done"
     assert _stages(episode)[-2:] == [
         (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
@@ -949,7 +976,8 @@ async def test_a_booking_that_needs_you_is_answered_cannot_be_done_yet() -> None
     """ADR-0306 §4:8, ADR-0307 §9:4: a confirm runs nothing, and the next round says so."""
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(calls=(_call("c1", "book", date="2026-10-12"),)),
-        RoundResponse(text="I can't book that yet: it needs you, and that isn't possible yet."),
+        says("I can't book that yet: it needs you, and that isn't possible yet."),
+        RoundResponse(),
     )
     harness = _harness(completer)
     conversation = await _conversation(harness)
@@ -963,11 +991,11 @@ async def test_a_booking_that_needs_you_is_answered_cannot_be_done_yet() -> None
             "I can't book that yet: it needs you, and that isn't possible yet.",
         ),
     ]
-    # The second round was shown the call as needing the user. Until the glue hands
-    # planning the request authorizing ruled on, it cannot be asked about (ADR-0321
-    # §2:10).
+    # The second round was shown the call as needing a yes, not yet asked (ADR-0357
+    # §8:1); this case's round answers rather than asks.
     (call,) = reported(completer.calls[1], 0)
-    assert call["outcome"].startswith("needs the user")
+    assert call["outcome"].startswith("needs a yes, and is not yet asked")
+
     # Nothing ran: no effect record for the booking, and the invoker was not reached.
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
     assert all(one.capability is None for one in effects)
@@ -981,12 +1009,15 @@ async def test_a_stop_mid_task_ends_after_the_current_round_and_writes_nothing_m
     """ADR-0297 §4, ADR-0307 §8:5: a stop lands after the current step."""
     completer = _GatedCompleter(
         RoundResponse(
-            text="Let me look that up.",
-            calls=(_call("c1", "web_search", query="museum hours", looking_for="when it opens"),),
+            calls=(
+                text_call("Let me look that up."),
+                _call("c1", "web_search", query="museum hours", looking_for="when it opens"),
+            ),
         ),
-        RoundResponse(text="It opens at nine."),
+        says("It opens at nine.", call_id="say-2"),
         gated=2,
     )
+
     harness = _harness(completer, searcher=FakeWebSearcher())
     conversation = await _conversation(harness)
 
@@ -1053,7 +1084,7 @@ async def test_a_message_the_place_did_not_take_is_finished_without_a_position(
     writer: MessageWriter, outcome: ToolOutcome, *, reason: bool
 ) -> None:
     """ADR-0306 §5:5: a message not done, or unknown, carries no position."""
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello."))
+    completer = FakeToolCallingCompleter.scripted(says("Hello."), RoundResponse())
     harness = _harness(completer, writer=writer)
     conversation = await _conversation(harness)
 
@@ -1095,8 +1126,7 @@ async def test_a_message_that_fails_beside_a_remember_still_lists_what_was_remem
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
-            text="I'll remember that.",
-            calls=(_remember("c1", "The user likes green tea."),),
+            calls=(text_call("I'll remember that."), _remember("c1", "The user likes green tea.")),
         )
     )
     harness = _harness(completer, wrap=_FailsOnce)
@@ -1135,7 +1165,7 @@ class _Cuts:
 
 async def test_the_outcome_keeps_the_text_the_place_holds() -> None:
     """ADR-0307 §10: the messages written, as the conversation holds them."""
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello, how can I help?"))
+    completer = FakeToolCallingCompleter.scripted(says("Hello, how can I help?"), RoundResponse())
     harness = _harness(completer, wrap=_Cuts)
     conversation = await _conversation(harness)
 
@@ -1155,7 +1185,8 @@ async def test_two_results_digested_side_by_side_are_both_kept() -> None:
                 _call("c2", "web_search", query="museum prices", looking_for="what it costs"),
             )
         ),
-        RoundResponse(text="It opens at nine."),
+        says("It opens at nine."),
+        RoundResponse(),
     )
     searcher = FakeWebSearcher(results=("Open daily from 9:00 to 17:00.",))
     harness = _harness(completer, searcher=searcher)
@@ -1178,7 +1209,10 @@ async def test_the_round_limit_writes_couldnt_finish_after_earlier_messages() ->
     """ADR-0307 §3:7, §8:4: a loop of refused calls is ended by the round limit."""
     # Each round's call carries its own id: a work's exchange holds each id once
     # (ADR-0356 §13), as a provider mints them.
-    refused = [RoundResponse(text="Trying.", calls=(_call(f"c{n}", "nowhere"),)) for n in (1, 2, 3)]
+    refused = [
+        RoundResponse(calls=(text_call("Trying.", call_id=f"t{n}"), _call(f"c{n}", "nowhere")))
+        for n in (1, 2, 3)
+    ]
     completer = FakeToolCallingCompleter.scripted(*refused)
     harness = _harness(completer)
     conversation = await _conversation(harness)
@@ -1251,7 +1285,8 @@ async def test_a_deadline_ending_writes_couldnt_finish_and_the_state_says_so() -
 
 async def test_an_activation_whose_every_message_the_place_refused_reads_couldnt_finish() -> None:
     """ADR-0317 §3:4: its last message did not come back done, and none came after it."""
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello."))
+    completer = FakeToolCallingCompleter.scripted(says("Hello."), RoundResponse())
+
     harness = _harness(completer, writer=_Gone())
     conversation = await _conversation(harness)
 
@@ -1375,15 +1410,16 @@ async def test_a_found_episode_reaches_planning_after_recall_runs_again() -> Non
         (ControllerStage.RECALL, ControllerRule.UNDERSTOOD_NOT_RECALLED),
         # The fact a source reported goes to recall's digest (ADR-0308 §4:4).
         (ControllerStage.DIGESTING, ControllerRule.RECALL_UNDIGESTED),
+        # A round whose text is its notes alone and that calls nothing has nothing to
+        # authorize or act on (ADR-0356 §7:3).
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
-        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
-        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
         (ControllerStage.END, ControllerRule.NOTHING_DUE),
     ]
     record = episode.processing_record
     assert record is not None
     assert record.recall is not None
     assert record.recall.outcome is RecallOutcome.NOTHING_FOUND
+
     second = record.recall_second_run
     assert second is not None
     assert second.outcome is RecallOutcome.FOUND
@@ -1399,14 +1435,16 @@ async def test_a_found_episode_reaches_planning_after_recall_runs_again() -> Non
     # Planning was shown the episode by its records and the user's fact, and never the
     # fact a source reported (§3:1, §3:3).
     request = completer.calls[0].exchange.briefing
+    recalled = section(request, "### Recalled memories")
     # In band order: the user's fact is asserted, the episode observed.
-    found_fact, found_episode = json.loads(request)["recalled"]
-    assert found_episode["label"] == "E1"
-    assert found_episode["rounds"] == [
-        {"message": "Booked it for Friday.", "notes": "they prefer mornings"}
+    assert shown_labels(recalled) == ["M1", "E1"]
+    found_fact = tag(recalled, "memory")
+    assert found_fact.text == f"{_DENTIST} with Dr Rao"
+    found_episode = tag(recalled, "episode")
+    assert [(one.name, one.text) for one in found_episode.tags[1:]] == [
+        ("notes", "they prefer mornings"),
+        ("did", "a message: Booked it for Friday."),
     ]
-    assert found_fact["label"] == "M1"
-    assert found_fact["fact"] == f"{_DENTIST} with Dr Rao"
     assert "moved to 3pm" not in request
     labels = {(one.label, one.id) for one in record.labels}
     assert {("E1", "activation:past"), ("M1", "said")} <= labels
@@ -1454,7 +1492,7 @@ async def test_the_second_run_searches_the_meaning_then_each_unclear_points_gap(
 
 async def test_a_failed_second_run_is_recorded_and_planning_goes_on() -> None:
     """ADR-0308 §2:7: failure-tolerant, recorded, and planning runs without its finds."""
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="I could not check."))
+    completer = FakeToolCallingCompleter.scripted(says("I could not check."), RoundResponse())
     harness, _ = await _recalling_harness(completer, _DownForTheReading(now=lambda: AT))
     conversation = await _conversation(harness)
 
@@ -1469,7 +1507,9 @@ async def test_a_failed_second_run_is_recorded_and_planning_goes_on() -> None:
         (ControllerStage.RECALL, ControllerRule.UNDERSTOOD_NOT_RECALLED),
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
     ]
-    assert json.loads(completer.calls[0].exchange.briefing)["recalled"] == []
+    recalled = section(completer.calls[0].exchange.briefing, "### Recalled memories")
+    assert tags(recalled) == []
+    assert recalled.startswith(NOTE_REASONS)
     assert _said(await _messages(harness, conversation))[-1] == (
         MessageAuthor.ASSISTANT,
         "I could not check.",
@@ -1498,9 +1538,9 @@ async def test_what_the_first_run_kept_is_passed_over_and_both_runs_reach_planni
     shown_to_understanding = " ".join(one.content for one in understanding.calls[0].messages)
     assert "Dr Rao" in shown_to_understanding
     assert "Booked it for Friday." not in shown_to_understanding
-    recalled = json.loads(completer.calls[0].exchange.briefing)["recalled"]
-    assert [one["label"] for one in recalled] == ["M1", "E1"]
-    assert recalled[0]["fact"] == f"{_DENTIST} with Dr Rao"
+    recalled = section(completer.calls[0].exchange.briefing, "### Recalled memories")
+    assert shown_labels(recalled) == ["M1", "E1"]
+    assert tag(recalled, "memory").text == f"{_DENTIST} with Dr Rao"
 
 
 # --- ADR-0308 §4:4-§4:6, ADR-0309 §3's row 7: recall's digest -------------------------------
@@ -1578,14 +1618,14 @@ async def test_both_runs_outside_records_go_into_one_digest_answering_the_meanin
     # Planning is shown the evidence as outside content under that label, and neither
     # reported fact (§3:3, §4:13, §5:5).
     request = completer.calls[0].exchange.briefing
-    (shown,) = json.loads(request)["evidence"]
-    assert shown["digest_of"] == "the outside memories recall found"
-    (item,) = shown["digest"]["evidence"]
-    assert (item["text"], item["source"]) == ("The appointment is at three now.", "M1")
-    assert "outside_content" in item
+    recalled = section(request, "### Recalled memories")
+    assert "- What a digest read of the outside memories recall found" in recalled
+    item = tag(recalled, "evidence")
+    assert (item.text, item.get("source")) == ("The appointment is at three now.", "M1")
+    assert item.get("outside") == "yes"
     assert "moved to 3pm" not in request
     assert "referral" not in request
-    assert [one["label"] for one in json.loads(request)["recalled"]] == ["M2", "E1"]
+    assert shown_labels(recalled) == ["M2", "E1"]
 
     # Reading it counts as having read digested evidence (§5:4): the round's notes are
     # marked, and the episode rests on outside content.
@@ -1597,7 +1637,7 @@ async def test_both_runs_outside_records_go_into_one_digest_answering_the_meanin
 
 async def test_a_failed_recall_digest_tells_planning_it_could_not_read_and_shows_nothing() -> None:
     """ADR-0308 §4:11-§4:13: recorded with no evidence, tolerated, and planning goes on."""
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="It is on Friday."))
+    completer = FakeToolCallingCompleter.scripted(says("It is on Friday."), RoundResponse())
     digests = FakeModelProvider(reply="not json")
     harness, _ = await _recalling_harness(completer, digests=digests)
     conversation = await _conversation(harness)
@@ -1614,9 +1654,9 @@ async def test_a_failed_recall_digest_tells_planning_it_could_not_read_and_shows
         (ControllerRule.RECALL_UNDIGESTED, StageOutcome.FAILED)
     ]
     request = completer.calls[0].exchange.briefing
-    (shown,) = json.loads(request)["evidence"]
-    assert shown["digest_of"] == "the outside memories recall found"
-    assert shown["digest"].startswith("could not be read")
+    recalled = section(request, "### Recalled memories")
+    assert "- A digest of the outside memories recall found could not be read" in recalled
+    assert tags(recalled, "evidence") == []
     assert "moved to 3pm" not in request
     assert "reported" not in {one.id for one in record.labels}
     assert _said(await _messages(harness, conversation))[-1] == (
@@ -2018,8 +2058,8 @@ async def test_planning_fetches_what_recall_found_once_for_every_round() -> None
     assert held is not None
     assert held.missing == ("activation:gone",)
     for call in completer.calls:
-        (shown,) = json.loads(call.exchange.briefing)["recalled"]
-        assert shown["label"] == "E1"
+        recalled = section(call.exchange.briefing, "### Recalled memories")
+        assert [(one.name, one.get("label")) for one in tags(recalled)] == [("episode", "E1")]
 
 
 async def test_a_digest_the_state_holds_marks_the_episode_though_the_working_set_lacks_it() -> None:
@@ -2155,7 +2195,7 @@ async def test_a_later_activation_sees_what_an_earlier_one_wrote_under_its_episo
     A message the old path wrote has no effect record and stays not linkable.
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(text="Hello!"), RoundResponse(text="Again.")
+        says("Hello!"), RoundResponse(), says("Again."), RoundResponse()
     )
     harness = _harness(completer)
     conversation = await _conversation(harness)
@@ -2174,28 +2214,33 @@ async def test_a_later_activation_sees_what_an_earlier_one_wrote_under_its_episo
     await harness.engine.write_message(conversation, message=again)
     await _all_settled(harness, conversation, 2)
 
-    shown = json.loads(completer.calls[1].exchange.briefing)["place_window"]
-    assert [one["text"] for one in shown] == ["old", "Old reply.", "hi", "Hello!", "again"]
-    old_item, old_reply, taken, wrote, _input = shown
-    assert "episode" in old_item
-    assert "episode" not in old_reply
-    assert taken["episode"] == wrote["episode"] != old_item["episode"]
+    knowledge = section(completer.calls[2].exchange.briefing, "## Stimulus origin knowledge")
+    shown = tags(knowledge, "message")
+    assert [one.text for one in shown] == ["old", "Old reply.", "hi", "Hello!", None]
+    old_item, old_reply, taken, wrote, the_input = shown
+    assert the_input.get("shown_in") == "the stimulus"
+    assert old_item.get("episode") is not None
+    assert old_reply.get("episode") is None
+    assert taken.get("episode") == wrote.get("episode") != old_item.get("episode")
     # The first activation's episode is the one its message's effect record names.
     (effect,) = await harness.plans.activation_effects([first.id.removeprefix("activation:")])
     assert effect.position == 4
 
 
 async def test_planning_is_shown_an_earlier_exchange_once_with_its_notes() -> None:
-    """ADR-0276 §3, read with ADR-0307 §5:6 and §6:1 (#2951), end to end.
+    """ADR-0276 §3, read with ADR-0307 §5:6 and §6:1 (#2951), ADR-0356 §3:2, §9:1, end to end.
 
     The second message's planning is shown the first exchange as its two messages in
-    the place window, under the first activation's episode label, and that episode in
-    the episode window by its label and its notes, its texts said to be in the window.
-    The round's notes are its text (ADR-0356 §7:2), so they repeat the message's words.
+    stimulus origin knowledge, under the first activation's episode label, and that
+    episode in short-term memory by its label and its notes, its input pointed at where
+    it is shown. The round's notes are its text, apart from the message its text call
+    sent (ADR-0356 §7:2-§7:3), so the message's words are shown once.
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(text="Hello!"),
-        RoundResponse(text="Again."),
+        says("Hello!", text="They greeted me."),
+        RoundResponse(),
+        says("Again."),
+        RoundResponse(),
     )
     harness = _harness(completer)
     conversation = await _conversation(harness)
@@ -2206,18 +2251,20 @@ async def test_planning_is_shown_an_earlier_exchange_once_with_its_notes() -> No
     await harness.engine.write_message(conversation, message=again)
     await _all_settled(harness, conversation, 2)
 
-    rendered = completer.calls[1].exchange.briefing
-    sent = json.loads(rendered)
-    taken, wrote, _input = sent["place_window"]
-    assert (taken["text"], wrote["text"]) == ("hi", "Hello!")
-    (episode,) = sent["episode_window"]
-    assert taken["episode"] == wrote["episode"] == episode["label"]
-    in_place = "shown in the place window under this label, not repeated here"
-    assert (episode["input"], episode["response"]) == (in_place, in_place)
-    assert episode["rounds"] == [{"message": in_place, "notes": "Hello!"}]
-    # Once as the place window's message, and once as the round's notes, which are its
-    # text (ADR-0356 §7:2): the episode window never repeats the message itself.
-    assert rendered.count('"Hello!"') == 2
+    rendered = completer.calls[2].exchange.briefing
+
+    taken, wrote, _input = tags(section(rendered, "## Stimulus origin knowledge"), "message")
+    assert (taken.text, wrote.text) == ("hi", "Hello!")
+    episode = tag(section(rendered, "## Short-term memory"), "episode")
+    assert taken.get("episode") == wrote.get("episode") == episode.get("label")
+    (shown_input,) = episode.held("input")
+    assert (shown_input.get("shown_in"), shown_input.text) == ("stimulus origin knowledge", None)
+    assert [one.text for one in episode.held("notes")] == ["They greeted me."]
+    (did,) = episode.held("did")
+    assert did.text is not None
+    assert "Hello!" not in did.text
+    # Once, as the knowledge window's message: short-term memory never repeats it.
+    assert rendered.count("Hello!") == 1
 
 
 async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() -> None:
@@ -2393,22 +2440,24 @@ async def test_an_activation_in_a_story_is_shown_its_story_and_labels_what_it_sa
     linked = StoryMember(kind=StoryMemberKind.ACTIVATION, id=record.activation_id)
     assert [one.story_id for one in await stories.stories_of(linked)] == [trip]
 
-    request = json.loads(completer.calls[0].exchange.briefing)
-    (shown,) = request["stories"]
+    matters = section(completer.calls[0].exchange.briefing, "### Matters")
+    shown = tag(matters, "matter")
     labels = {one.label: (one.kind, one.id) for one in record.labels}
-    assert labels[shown["label"]] == (LabelKind.STORY, trip)
-    assert shown["summary"] == ["A camping trip to Riverside."]
-    assert shown["last_tidied"] == AT.isoformat()
+    story = shown.get("label")
+    assert story is not None
+    assert labels[story] == (LabelKind.STORY, trip)
+    assert [one.text for one in shown.held("summary")] == ["A camping trip to Riverside."]
+    assert shown.get("last_tidied") == "Thu 23 Jul 2026, 9:00 am"
     # The note, and this activation, linked since the summary was written.
-    assert shown["changes_since_tidied"] == 2
-    (note,) = shown["notes_since_tidied"]
-    assert note["text"] == "Next: check the dog policy."
-    assert labels[note["label"]][0] is LabelKind.NOTE
-    (done,) = shown["where_it_stands"]["done"]
-    assert done["state"] == "done"
-    assert labels[done["episode"]] == (LabelKind.EPISODE, "activation:past")
-    (latest,) = shown["latest_episodes"]
-    assert latest["label"] == done["episode"]
+    assert shown.get("changes_since") == "2"
+    (note,) = shown.held("note")
+    assert note.text == "Next: check the dog policy."
+    assert labels[note.get("label") or ""][0] is LabelKind.NOTE
+    done = re.search(rf"- What was done in {story}: (E\d+) \(done, ", matters)
+    assert done is not None
+    assert labels[done.group(1)] == (LabelKind.EPISODE, "activation:past")
+    (latest,) = tags(matters, "latest")
+    assert latest.get("episode") == done.group(1)
     # Nothing of the story was outside content, so the round read none.
     assert not record.rounds[0].notes_marked
 
@@ -2448,8 +2497,8 @@ async def test_a_marked_story_summary_reaches_the_first_ruling() -> None:
     for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING):
         assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
 
-    request = json.loads(completer.calls[0].exchange.briefing)
-    assert request["stories"][0]["summary"] == ["A reply came."]
+    summary = tag(section(completer.calls[0].exchange.briefing, "### Matters"), "summary")
+    assert (summary.text, summary.get("outside")) == ("A reply came.", "yes")
     assert working.fetched_outside
     decided = working.latest.authorization
     assert decided is not None
@@ -2487,9 +2536,13 @@ async def test_an_outside_episode_of_an_inherited_story_is_outside_content_read(
 
     assert (await planning.run(given)).outcome is StageOutcome.DONE
 
-    (shown,) = json.loads(completer.calls[0].exchange.briefing)["stories"]
-    (parent,) = shown["part_of"]
-    assert parent["latest_episodes"][0]["input"] == "an outside report, not shown"
+    parent = tag(
+        section(completer.calls[0].exchange.briefing, "### Matters"), "matter", inherited="yes"
+    )
+    (latest,) = parent.held("episode")
+    assert latest.get("outside") == "yes"
+    (withheld,) = latest.held("received")
+    assert (withheld.get("withheld"), withheld.text) == ("yes", None)
     assert working.fetched_outside
     assert working.latest.planned.round.notes_marked
 
@@ -2525,7 +2578,8 @@ async def test_a_later_round_is_handed_the_story_views_its_work_was_first_shown(
     assert (await stages[ControllerStage.PLANNING].run(given)).outcome is StageOutcome.DONE
 
     first, second = completer.calls
-    assert json.loads(first.exchange.briefing)["stories"][0]["notes_since_tidied"] == "none"
+    assert tag(section(first.exchange.briefing, "### Matters"), "matter").held("note") == []
+
     assert second.exchange.briefing == first.exchange.briefing
     assert "Written meanwhile." not in shown_text(second)
 
@@ -2650,11 +2704,11 @@ async def test_a_story_note_counts_as_outside_content_by_its_mark(
         completer, memory=FakeMemoryStore(now=lambda: AT), stories=stories
     )
 
-    shown = json.loads(completer.calls[0].exchange.briefing)["stories"][0]
+    shown = tag(section(completer.calls[0].exchange.briefing, "### Matters"), "matter")
     if note is not None:
         # Shown under its label, which authorizing reads the mark of.
-        (shown_note,) = shown["notes_since_tidied"]
-        assert shown_note["label"] == "N1"
+        (shown_note,) = shown.held("note")
+        assert shown_note.get("label") == "N1"
     decided = working.latest.authorization
     assert decided is not None
     assert [one.verdict for one in decided.verdicts] == [verdict, Verdict.ALLOWED]
@@ -2755,8 +2809,10 @@ async def _the_story(stories: FakeStoryStore, activation_id: str) -> str:
 
 
 _STARTED: Final = RoundResponse(
-    text="I'll keep track of the trip.",
-    calls=(_call("c1", "start_story", notes=["A camping trip to Riverside."]),),
+    calls=(
+        text_call("I'll keep track of the trip."),
+        _call("c1", "start_story", notes=["A camping trip to Riverside."]),
+    ),
 )
 
 
@@ -2800,10 +2856,12 @@ async def test_a_story_is_started_and_then_noted_end_to_end() -> None:
     ]
     # The second round was shown the new story under the label it then named, in the
     # start's result (ADR-0356 §5:4).
-    (started,) = reported(completer.calls[1], 0)
+    _, started = reported(completer.calls[1], 0)
     (shown,) = started["stories"]
-    assert shown["label"] == "S1"
-    assert [one["text"] for one in shown["notes_since_tidied"]] == ["A camping trip to Riverside."]
+    matter = tag(shown, "matter")
+    assert matter.get("label") == "S1"
+    assert [one.text for one in matter.held("note")] == ["A camping trip to Riverside."]
+
     assert (LabelKind.STORY, story) in {(one.kind, one.id) for one in record.labels}
     # The start is claimed under an effect record; the note, safe to repeat, is not.
     effects = await harness.plans.activation_effects([activation])
@@ -3188,6 +3246,7 @@ async def _searching_harness(
     completer: FakeToolCallingCompleter,
     *records: Memory,
     digests: FakeModelProvider | None = None,
+    round_limit: int = 3,
 ) -> Harness:
     """A test hub offering the look-ups, its memory holding ``records``."""
     store = FakeMemoryStore(now=lambda: AT)
@@ -3201,6 +3260,7 @@ async def _searching_harness(
             completer,
             digests=digests if digests is not None else FakeModelProvider(reply=_SEARCH_DIGESTED),
             look_ups=True,
+            round_limit=round_limit,
         ),
     )
 
@@ -3216,18 +3276,22 @@ async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_diges
     the fact a source reported is held by id and read by a digest answering the call's
     *looking for*, never shown. It then follows up on that result by its R label with a
     new question: the result as held is read again against it, under the same label,
-    and the answer is written from both digests.
+    and the answer is sent from both digests, by a text call whose round brings a fourth
+    (ADR-0356 §7:3), so this hub runs four rounds.
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
-            text="Let me check.",
-            calls=(_call("c1", "search_memory", query="dentist", looking_for="when it is"),),
+            calls=(
+                text_call("Let me check."),
+                _call("c1", "search_memory", query="dentist", looking_for="when it is"),
+            ),
         ),
         RoundResponse(calls=(_call("c2", "follow_up", result="R1", looking_for="what moved"),)),
-        RoundResponse(text="It is at three, with Dr Rao."),
+        says("It is at three, with Dr Rao.", call_id="say-2"),
+        RoundResponse(),
     )
     digests = FakeModelProvider(reply=_SEARCH_DIGESTED)
-    harness = await _searching_harness(completer, _SAID, _REPORTED, digests=digests)
+    harness = await _searching_harness(completer, _SAID, _REPORTED, digests=digests, round_limit=4)
     conversation = await _conversation(harness)
 
     await _say(harness, conversation, "when is the dentist?")
@@ -3237,7 +3301,8 @@ async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_diges
         (MessageAuthor.ASSISTANT, "Let me check."),
         (MessageAuthor.ASSISTANT, "It is at three, with Dr Rao."),
     ]
-    # Both look-ups ran acting with digesting beside it; the third round ended it.
+    # Both look-ups ran acting with digesting beside it; the third round sent the
+    # answer, and the fourth ended it.
     assert _stages(episode)[3:] == [
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
         (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
@@ -3250,6 +3315,7 @@ async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_diges
         (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
         (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
         (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED),
+        (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
         (ControllerStage.END, ControllerRule.NOTHING_DUE),
     ]
 
@@ -3279,16 +3345,16 @@ async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_diges
     # The second round: the user's fact under its own label, the outside one only as
     # evidence, never its text (ADR-0307 §9:2).
     second = shown_text(completer.calls[1])
-    (search,) = reported(completer.calls[1], 0)
+    _, search = reported(completer.calls[1], 0)
     assert search["result"]["label"] == "R1"
     value = search["result"]["value"]
-    assert [(one["label"], one["fact"]) for one in value["remembered"]] == [
+    remembered = [tag(one, "memory") for one in value["remembered"]]
+    assert [(one.get("label"), one.text) for one in remembered] == [
         ("M2", f"{_DENTIST} with Dr Rao")
     ]
     assert value["resting_on_outside_content"] == "read for you by a digest, under evidence"
     assert "moved to 3pm" not in second
-    (evidence,) = search["evidence"]
-    assert (evidence["digest_of"], evidence["looking_for"]) == ("R1", "when it is")
+    assert _digests_read(search) == [("R1", "when it is")]
 
     # The third: the follow-up's result is the result it named, under the same label,
     # and its digest is told apart by its question.
@@ -3299,13 +3365,9 @@ async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_diges
     }
     # Each digest is shown once, in the report on the call that brought it (ADR-0356
     # §5:6): the search's in the second round's report, the follow-up's in the third's.
-    (searched,) = reported(completer.calls[2], 0)
-    assert [(one["digest_of"], one["looking_for"]) for one in searched["evidence"]] == [
-        ("R1", "when it is")
-    ]
-    assert [(one["digest_of"], one["looking_for"]) for one in follow_up["evidence"]] == [
-        ("R1", "what moved")
-    ]
+    _, searched = reported(completer.calls[2], 0)
+    assert _digests_read(searched) == [("R1", "when it is")]
+    assert _digests_read(follow_up) == [("R1", "what moved")]
     # Read digested evidence, so the episode rests on outside content (§5:4).
     assert episode.provenance.derived_from_external
 
@@ -3459,11 +3521,11 @@ async def test_a_storys_full_view_is_read_and_its_marks_counted(outside: bool) -
         assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
     (read,) = reported(completer.calls[1], 0)
     assert read["result"]["label"] == "R1"
-    shown = read["result"]["value"]
-    assert shown["label"] == "S1"
-    (line,) = shown["notes_since_tidied"]
-    assert line["text"] == "The venue says Saturday."
-    assert ("outside_content" in line) is outside
+    shown = tag(read["result"]["value"], "matter")
+    assert shown.get("label") == "S1"
+    (line,) = shown.held("note")
+    assert line.text == "The venue says Saturday."
+    assert (line.get("outside") == "yes") is outside
     assert working.latest.planned.round.notes_marked is outside
     decided = working.latest.authorization
     assert decided is not None
@@ -3680,7 +3742,7 @@ async def test_with_the_record_on_each_source_writes_for_the_one_activation() ->
 
 async def test_with_the_record_off_an_activation_writes_nothing() -> None:
     """§2:1: no sink anywhere, and the same activation runs."""
-    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello!"))
+    completer = FakeToolCallingCompleter.scripted(says("Hello!"), RoundResponse())
     harness = _harness(completer)
     conversation = await _conversation(harness)
 
@@ -3742,26 +3804,27 @@ async def test_an_event_runs_the_phases_in_a_place_that_takes_no_message() -> No
     result, episode = await _event(harness)
 
     assert result.ended is ActivationEnding.DONE
-    # Authorizing is handed no message, since the place takes none, so with no call
-    # allowed nothing is due for acting.
+    # A round whose text is its notes alone and that calls nothing has nothing to
+    # authorize or act on (ADR-0356 §7:3).
     assert _stages(episode) == [
         (ControllerStage.WINDOWS, ControllerRule.WINDOWS_UNASSEMBLED),
         (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD),
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
-        (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
         (ControllerStage.END, ControllerRule.NOTHING_DUE),
     ]
-    # Planning is shown that the place takes no message (ADR-0307 §3:8).
+    # Planning is shown that the origin takes no reply (ADR-0307 §3:8), and the
+    # stimulus withheld as an outside report.
     (asked,) = completer.calls
-    place = json.loads(asked.exchange.briefing)["place"]
-    assert place["takes_message"] is False
-    assert place["description"] == EVENT_DESCRIPTION
-    assert place["input"].startswith("an outside report")
-    # Its text is kept with the episode, as its notes too, and written nowhere.
+    situation = section(asked.exchange.briefing, "## The situation")
+    assert "- The origin: a connected source" in situation
+    assert "No reply can be written there." in situation
+    withheld = tag(section(asked.exchange.briefing, "# The stimulus"), "received")
+    assert (withheld.get("withheld"), withheld.text) == ("yes", None)
+    # Its text is its notes, kept with the episode and written nowhere.
     record = episode.processing_record
     assert record is not None
     (planning_round,) = record.rounds
-    assert (planning_round.text, planning_round.notes) == (text, text)
+    assert (planning_round.text, planning_round.notes) == ("", text)
     assert planning_round.notes_marked
     await _wrote_nothing(harness, episode)
     assert _classified(episode) == (ProcessingStatus.COMPLETED, ProcessingReason.RETURNED)

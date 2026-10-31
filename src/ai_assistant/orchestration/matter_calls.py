@@ -162,8 +162,12 @@ STOP_ACTIVATION: Final = _declared(
     STOP_ACTIVATION_CAPABILITY,
     (
         "Stop running work you were shown as running, and that work alone. Nothing it "
-        "already did is undone, and what it set up stays. The result shows what it had "
-        "finished and what it set up that is still live."
+        "already did is undone, and what it set up stays. The result shows what it "
+        "had finished and what it set up that is still live, so say that. Stop work "
+        'only where the person asks for it, such as "never mind the booking" after it '
+        "has booked, or means to take over work this work waits on. Stop exactly what "
+        "their words cover, including what a stop's result lists, and keep the rest; "
+        "where it is unclear what the words cover, ask which."
     ),
     _naming("The running work, by its E label."),
     writes=True,
@@ -183,8 +187,10 @@ LOOK_UP_ACTIVATION: Final = _declared(
 ANSWER_OFFER: Final = _declared(
     ANSWER_OFFER_CAPABILITY,
     (
-        "Answer newer input offered to this work: take it, and it becomes part of this "
-        "work; or decline it, with a short reason, and it is done after this work ends."
+        "Answer newer input offered to this work, in the round it is offered. Take it "
+        "unless this work has already done something it would change that cannot be "
+        "undone, and then carry it out as part of this work. Otherwise decline it, "
+        "with the reason in a few words, and it is done once this work ends."
     ),
     {
         "type": "object",

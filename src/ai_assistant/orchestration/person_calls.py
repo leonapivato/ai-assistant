@@ -177,7 +177,9 @@ SET_PROFILE: Final = _declared(
     SET_PROFILE_CAPABILITY,
     (
         "Set one field of the person's profile to a value, or clear it. It runs only "
-        "once they say yes to the question that shows it."
+        "once they say yes to the question that shows it. Raise a suggestion the "
+        "system noticed only where it bears on what is being done, and only by asking "
+        "with this call, never as a change already made."
     ),
     {
         "type": "object",
@@ -203,7 +205,9 @@ PIN: Final = _declared(
     (
         "Pin one memory, so it is kept in mind in every conversation with the person; "
         "pinning confirms its wording. It runs only once they say yes to the question "
-        "that shows it."
+        "that shows it. Raise a suggestion the system noticed only where it bears on "
+        "what is being done, and only by asking with this call, never as a change "
+        "already made."
     ),
     _memory_schema("The memory to pin, by its M label."),
 )

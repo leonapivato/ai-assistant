@@ -13,10 +13,10 @@ read is not asked about (§8:6).
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Final
 
 import pytest
+from exchange_support import says
 from structlog.testing import capture_logs
 from test_engine import AT
 from test_person_block import _ended
@@ -163,19 +163,19 @@ async def test_a_pin_needing_a_yes_is_asked_and_a_yes_pins_nothing() -> None:
 
     (question,) = await hub.said(conversation)
     assert question.text == _ASKING_PIN
-    assert "needs the user's yes" in hub.planner.shown(1)
+    assert "needs a yes, and is not yet asked" in hub.planner.shown(1)
     model = await people.store.read(OWNER_PERSON_ID)
     assert model is not None
     assert model.pins == ()
 
     hub.reader.yes()
-    hub.planner.then(RoundResponse(text="I'm waiting on your answer above."))
+    hub.planner.then(says("I'm waiting on your answer above.", call_id="m1"))
     await hub.turn("Yes.", conversation=conversation, message_id="m-2")
 
     model = await people.store.read(OWNER_PERSON_ID)
     assert model is not None
     assert model.standing_pins == ()
-    assert "approved_actions" not in hub.planner.shown(2)
+    assert "<approved " not in hub.planner.shown(2)
 
 
 async def test_a_set_profile_is_asked_and_a_yes_sets_nothing() -> None:
@@ -191,12 +191,12 @@ async def test_a_set_profile_is_asked_and_a_yes_sets_nothing() -> None:
 
     (question,) = await hub.said(conversation)
     assert question.text == _ASKING_ZONE
-    assert "needs the user's yes" in hub.planner.shown(1)
-    shown_before = json.loads(hub.planner.shown(0))
-    assert shown_before["time_zone"] == "UTC"
+    assert "needs a yes, and is not yet asked" in hub.planner.shown(1)
+    # The situation's clock line names the zone it tells time in (ADR-0356 §3:1).
+    assert "in the hub's time zone (UTC)" in hub.planner.shown(0)
 
     hub.reader.yes()
-    hub.planner.then(RoundResponse(text="I'm waiting on your answer above."))
+    hub.planner.then(says("I'm waiting on your answer above.", call_id="m2"))
     await hub.turn("Yes.", conversation=conversation, message_id="m-2")
 
     model = await people.store.read(OWNER_PERSON_ID)
@@ -208,8 +208,7 @@ async def test_a_set_profile_is_asked_and_a_yes_sets_nothing() -> None:
     hub.planner.then(_DONE)
     await hub.turn("What time is it?", conversation=conversation, message_id="m-3")
 
-    shown_after = json.loads(hub.planner.shown(3))
-    assert shown_after["time_zone"] == "UTC"
+    assert "in the hub's time zone (UTC)" in hub.planner.shown(3)
 
 
 async def test_a_pin_whose_memory_is_gone_by_the_asking_round_is_not_asked_about() -> None:

@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 4: a "thanks" after the work was confirmed calls for nothing: no
+# offer, no menu of services and no "anything else?".
+prompt = "planning"
+guards = "ungrounded_extra"
+came_from = "2026-10-31"
+set = "development"
+samples = 3
+
+[property]
+check = "read"
+read = """The round makes no call, or at most one text call with a brief acknowledgement. It offers nothing, lists no services, asks no question and makes no other call."""
+
+[input]
+file = "thanks-after-a-booking-brings-no-extras.json"

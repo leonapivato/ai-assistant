@@ -612,6 +612,17 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "MessageCallPart",
         "NewsShown",
         "PlanningWork",
+        # ADR-0356 §5:5-§5:6, ADR-0360 §4: what the news compares against and reads again,
+        # a matter as shown (``MatterSeen``: its summary's lines, note ids, a flag, an id
+        # and a clock), a matter as the store holds it now (``StorySummaryState`` with
+        # ``StorySummary``: the ``StoryHeader``, ``StoryNote`` and ``StorySummaryLine``
+        # judged above, a version and a clock), and the person as the store holds them now
+        # (``PersonNow``: the ``Profile`` and ``Memory`` records the person block carries):
+        # no carrier.
+        "MatterSeen",
+        "PersonNow",
+        "StorySummary",
+        "StorySummaryState",
         "RecordedCall",
         "RecordedDelivery",
         # ADR-0358 §11:2-§11:4: what a done call showed, judged in the docstring above.

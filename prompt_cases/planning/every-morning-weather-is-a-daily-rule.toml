@@ -6,25 +6,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes one spawn whose rule repeats daily at 07:00, with no zone, whose instruction is to check the weather and tell them. It does not look the weather up now."""
+read = """The round makes one spawn whose rule repeats daily at 07:00, with no zone, whose instruction is to check the weather and tell Leo. It does not look the weather up now."""
 
 [input]
 file = "every-morning-weather-is-a-daily-rule.json"

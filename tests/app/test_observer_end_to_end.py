@@ -65,24 +65,31 @@ _FRAMING: Final = default_renderings(OBSERVER_FRAMING_PROMPT)
 
 
 class _Planning:
-    """Planning's rounds: ``remember`` on the request, then a plain reply to everything."""
+    """Planning's rounds: ``remember`` on the request, then a plain reply to everything.
+
+    Each reply is a ``text`` call (a round's own text is its notes alone, ADR-0356 §7:3),
+    and each work's round after its first proposes nothing, so the work ends.
+    """
 
     def __init__(self) -> None:
         self.recorded = False
 
     def __call__(self, exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
-        said = exchange.briefing
-        if _ASKED in said and not self.recorded:
+        if exchange.steps:
+            return RoundResponse()
+        if _ASKED in exchange.briefing and not self.recorded:
             self.recorded = True
             call = ProposedCall(
                 call_id="c1",
                 name="remember",
                 arguments={"fact": _FACT, "why": "health", "rests_on_input": True},
             )
-            return RoundResponse(text="Got it, I'll remember.", calls=(call,))
-        if self.recorded and "Got it, I'll remember." in said:
-            return RoundResponse()
-        return RoundResponse(text="Noted.")
+            return RoundResponse(calls=(_text("Got it, I'll remember."), call))
+        return RoundResponse(calls=(_text("Noted."),))
+
+
+def _text(words: str) -> ProposedCall:
+    return ProposedCall(call_id="say", name="text", arguments={"to": "the user", "words": words})
 
 
 class _Models:

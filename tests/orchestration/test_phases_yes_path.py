@@ -23,7 +23,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from exchange_support import shown_text
+from exchange_support import says, shown_text
 from phases_support import chat_turn, frozen, processing, until, written
 from story_support import CONVERSATION
 from structured_support import structured
@@ -220,7 +220,14 @@ class _Hooked:
 
 
 class _Planner(FakeToolCallingCompleter):
-    """Planning's rounds, scripted in order across every activation of a case."""
+    """Planning's rounds, scripted in order across every activation of a case.
+
+    A round's message is a ``text`` call (a round's own text is its notes alone, ADR-0356
+    §7:3), whose round brings another (ADR-0315 §2:1). The round after one whose calls
+    are all messages proposes nothing and so ends the work, as a round that only wrote
+    once did: it takes no step of the script and is not counted among :attr:`calls`, so
+    a case counts the rounds it scripts.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -236,6 +243,9 @@ class _Planner(FakeToolCallingCompleter):
         *,
         model: str | None = None,
     ) -> RoundResponse:
+        latest = exchange.steps[-1].response.calls if exchange.steps else ()
+        if latest and all(one.name == "text" for one in latest):
+            return RoundResponse()
         assert self._steps, "planning ran a round the case did not script"
         step = self._steps.popleft()
         if isinstance(step, _Hooked):
@@ -480,8 +490,8 @@ def _book(date: str = "Friday", **marks: object) -> RoundResponse:
 
 
 def _ask(text: str = _ASKING) -> RoundResponse:
-    """A round whose message asks in prose alone: no response names an asked call."""
-    return RoundResponse(text=text)
+    """A round whose message asks in prose alone: its ``text`` call names no asked call."""
+    return says(text, call_id="ask")
 
 
 def _run_approved(label: str = "A1") -> RoundResponse:
@@ -489,7 +499,7 @@ def _run_approved(label: str = "A1") -> RoundResponse:
     return RoundResponse(calls=(_call("c1", APPROVED_ACTION_TOOL, action=label),))
 
 
-_DONE: Final = RoundResponse(text="Done.")
+_DONE: Final = says("Done.", call_id="done")
 
 
 async def _asked(hub: _Hub) -> tuple[str, EpisodicMemory]:
@@ -521,19 +531,19 @@ async def test_a_booking_is_asked_and_a_yes_runs_nothing() -> None:
     (question,) = await hub.said(conversation)
     assert question.text == _ASKING
     assert not question.cut_off
-    assert _asked_calls(asking) == [(), ()]
-    assert "needs the user's yes" in hub.planner.shown(1)
+    assert all(one == () for one in _asked_calls(asking))
+    assert "needs a yes, and is not yet asked" in hub.planner.shown(1)
     assert hub.world.of("book") == []
 
     hub.reader.yes()
-    hub.planner.then(_book(), RoundResponse(text="I'm waiting on your answer above."))
+    hub.planner.then(_book(), says("I'm waiting on your answer above.", call_id="m1"))
     _, yes = await hub.turn("Yes please.", conversation=conversation, message_id="m-2")
 
     assert hub.world.of("book") == []
-    assert "approved_actions" not in hub.planner.shown(2)
+    assert "<approved " not in hub.planner.shown(2)
     assert APPROVED_ACTION_TOOL not in hub.planner.offered(2)
-    assert "needs the user's yes" in hub.planner.shown(3)
-    assert _asked_calls(yes) == [(), ()]
+    assert "needs a yes, and is not yet asked" in hub.planner.shown(3)
+    assert all(one == () for one in _asked_calls(yes))
     assert "answers" not in processing(yes).understanding[-1].model_dump()
     # Understanding was shown the question's message, and no mark on it.
     shown = hub.reader.model.calls[-1].messages[1].content
@@ -554,10 +564,10 @@ async def test_a_no_runs_nothing() -> None:
     conversation, _ = await _asked(hub)
 
     hub.reader.nothing()
-    hub.planner.then(RoundResponse(text="All right, I won't."))
+    hub.planner.then(says("All right, I won't.", call_id="m2"))
     await hub.turn("No, leave it.", conversation=conversation, message_id="m-2")
     assert hub.world.of("book") == []
-    assert "approved_actions" not in hub.planner.shown(2)
+    assert "<approved " not in hub.planner.shown(2)
 
 
 async def test_an_unclear_reply_runs_nothing() -> None:
@@ -565,11 +575,11 @@ async def test_an_unclear_reply_runs_nothing() -> None:
     conversation, _ = await _asked(hub)
 
     hub.reader.nothing()
-    hub.planner.then(RoundResponse(text="Do you want me to book it?"))
+    hub.planner.then(says("Do you want me to book it?", call_id="m3"))
     await hub.turn("Hmm, maybe.", conversation=conversation, message_id="m-2")
 
     assert hub.world.of("book") == []
-    assert "approved_actions" not in hub.planner.shown(2)
+    assert "<approved " not in hub.planner.shown(2)
 
 
 # --- only the user approves (§8:3) --------------------------------------------------------
@@ -581,6 +591,7 @@ async def test_a_yes_arriving_as_an_event_approves_nothing() -> None:
     await _asked(hub)
 
     hub.reader.yes()
+    # An event takes no message, so this round's text is its notes alone.
     hub.planner.then(_book(), RoundResponse(text="Noted."))
     result = await hub.harness.engine.receive(
         ChannelInput(
@@ -592,13 +603,13 @@ async def test_a_yes_arriving_as_an_event_approves_nothing() -> None:
     )
 
     assert hub.world.of("book") == []
-    assert "approved_actions" not in hub.planner.shown(2)
-    assert "cannot message them" in hub.planner.shown(3)
+    assert "<approved " not in hub.planner.shown(2)
+    assert "this activation cannot ask anyone" in hub.planner.shown(3)
     assert result.capture.episode_id is not None
     event = await hub.memory.get(result.capture.episode_id)
     assert event is not None
     assert "answers" not in processing(event).understanding[-1].model_dump()  # type: ignore[arg-type]  # an episode
-    assert _asked_calls(event) == [(), ()]  # type: ignore[arg-type]  # an episode
+    assert all(one == () for one in _asked_calls(event))  # type: ignore[arg-type]  # an episode
 
 
 def _window(*taken: TranscriptMessage) -> TranscriptWindow:
@@ -794,11 +805,11 @@ async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> 
     hub = _Hub()
 
     hub.reader.nothing()
-    hub.planner.then(RoundResponse(text="Yes to what?"))
+    hub.planner.then(says("Yes to what?", call_id="m5"))
     _, bare = await hub.turn("Yes.")
 
     assert "answers" not in processing(bare).understanding[-1].model_dump()
-    assert "approved_actions" not in hub.planner.shown(0)
+    assert "<approved " not in hub.planner.shown(0)
     assert hub.world.ran == []
 
 
@@ -814,8 +825,8 @@ async def test_a_deny_is_never_asked_about() -> None:
     )
     conversation, denied = await hub.turn("Wipe my calendar for May.")
 
-    assert "never ask the user about it" in hub.planner.shown(1)
-    assert _asked_calls(denied) == [(), ()]
+    assert "never ask about it" in hub.planner.shown(1)
+    assert all(one == () for one in _asked_calls(denied))
     (said,) = await hub.said(conversation)
     assert said.text == "Your settings do not allow that."
     assert hub.world.ran == []
@@ -1001,12 +1012,12 @@ async def test_a_typed_yes_on_the_line_approves_nothing() -> None:
     assert hub.world.of("book") == []
 
     hub.reader.yes()
-    hub.planner.then(RoundResponse(text="I'm waiting on your answer above."))
+    hub.planner.then(says("I'm waiting on your answer above.", call_id="m6"))
     yes = await hub.line_turn(fake, _reply(2, "Yes please.", question_id))
     await hub.harness.engine.aclose()
 
     assert hub.world.of("book") == []
-    assert "approved_actions" not in hub.planner.shown(2)
+    assert "<approved " not in hub.planner.shown(2)
     assert "answers" not in processing(yes).understanding[-1].model_dump()
 
 
@@ -1016,9 +1027,9 @@ async def test_a_forward_saying_yes_on_the_line_approves_nothing() -> None:
     forward = TelegramForwardOrigin(kind=TelegramForwardKind.USER, name="Sam", account_id=5)
 
     hub.reader.yes()
-    hub.planner.then(_run_approved(), RoundResponse(text="Noted."), _DONE)
+    hub.planner.then(_run_approved(), says("Noted.", call_id="m7"), _DONE)
     await hub.line_turn(fake, _reply(2, "Yes, book it.", question_id, forward=forward))
     await hub.harness.engine.aclose()
 
     assert hub.world.of("book") == []
-    assert "approved_actions" not in hub.planner.shown(2)
+    assert "<approved " not in hub.planner.shown(2)

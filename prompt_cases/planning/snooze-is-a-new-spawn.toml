@@ -1,5 +1,5 @@
 # ADR-0350 §13:4, §9:3: "snooze 10 minutes" right after a task's message is a new spawn,
-# written from what the place window shows of the episode that wrote the message. The
+# written from what is shown of the episode that wrote the message. The
 # reminder that fired is no longer pending, so it is neither replaced nor cancelled.
 prompt = "planning"
 guards = "snooze_not_respawned"
@@ -7,25 +7,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes one spawn, about taking the vitamins, falling due ten minutes from now: delay_minutes 10, or an instant ten minutes after the current time. It names no task in replaces, cancels nothing and does not call list_tasks first."""
+read = """The round makes one spawn, about taking the vitamins, falling due ten minutes from now: delay_minutes 10, or an instant ten minutes after the current time. It names no task in replaces, cancels nothing and does not call list_tasks first."""
 
 [input]
 file = "snooze-is-a-new-spawn.json"

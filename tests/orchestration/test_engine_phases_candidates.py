@@ -9,11 +9,10 @@ store until the observer has processed the episode.
 
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
-from exchange_support import reported
+from exchange_support import reported, section, tag, tags
 from structured_support import structured
 from test_engine import AT, Harness
 from test_engine_phases import _BOOK, _DIGESTED, _PHONE, _call, _conversation, _Policy, _settled
@@ -132,11 +131,6 @@ async def _say(harness: Harness, conversation: str, text: str, message_id: str) 
     await harness.engine.write_message(conversation, message=message)
 
 
-def _request(completer: FakeToolCallingCompleter, index: int) -> dict[str, Any]:
-    rendered: dict[str, Any] = json.loads(completer.calls[index].exchange.briefing)
-    return rendered
-
-
 def _candidate(call_id: str = "c1", **fields: Any) -> Any:
     return _call(call_id, "remember", fact=_FACT, why="travel", rests_on_input=True, **fields)
 
@@ -162,10 +156,9 @@ async def test_a_candidate_is_recorded_writes_no_memory_and_shows_its_lookup_nex
     (call,) = reported(completer.calls[1], 0)
     assert call["outcome"] == "done"
     value = call["result"]["value"]
-    assert value["candidate"].startswith("recorded as a candidate, and pending")
-    assert [(one["label"], one["fact"]) for one in value["similar_memories"]] == [
-        ("M1", "prefers aisle seats")
-    ]
+    assert value["candidate"].startswith("recorded as a candidate for long-term memory")
+    similar = [tag(one, "memory") for one in value["similar_memories"]]
+    assert [(one.get("label"), one.text) for one in similar] == [("M1", "prefers aisle seats")]
 
 
 async def test_a_candidate_with_confirm_set_needs_you_and_records_nothing() -> None:
@@ -183,7 +176,7 @@ async def test_a_candidate_with_confirm_set_needs_you_and_records_nothing() -> N
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
     assert [one for one in effects if one.capability == "remember"] == []
     (call,) = reported(completer.calls[1], 0)
-    assert call["outcome"].startswith("needs the user's yes")
+    assert call["outcome"].startswith("needs a yes, and is not yet asked")
     assert call["because"] == "the user is asked to confirm this wording before it is kept"
 
 
@@ -219,8 +212,17 @@ async def _first(harness: _Harness, conversation: str) -> EpisodicMemory:
     return await _settled(harness, conversation)
 
 
-def _window_candidates(completer: FakeToolCallingCompleter, index: int) -> list[Any]:
-    return [one.get("candidates") for one in _request(completer, index)["episode_window"]]
+def _window_candidates(
+    completer: FakeToolCallingCompleter, index: int
+) -> list[list[tuple[str | None, str | None]] | None]:
+    """Each short-term episode's candidates, each its fact and whether it is pending, or
+    ``None`` where the episode shows none (ADR-0356 §9:1)."""
+    briefing = completer.calls[index].exchange.briefing
+    shown = tags(section(briefing, "## Short-term memory"), "episode")
+    return [
+        [(one.text, one.get("pending")) for one in episode.held("candidate")] or None
+        for episode in shown
+    ]
 
 
 async def test_an_unprocessed_episodes_candidates_reach_the_next_activations_window() -> None:
@@ -256,13 +258,7 @@ async def test_an_unprocessed_episodes_candidates_reach_the_next_activations_win
     await _settled(harness, conversation, seeded=frozenset({first.id}))
 
     assert _window_candidates(completer, 3) == [
-        [
-            {"fact": _FACT, "status": "pending: recorded for long-term memory, not yet kept"},
-            {
-                "fact": "The user prefers window seats over aisle seats.",
-                "status": "pending: recorded for long-term memory, not yet kept",
-            },
-        ]
+        [(_FACT, "yes"), ("The user prefers window seats over aisle seats.", "yes")]
     ]
 
 
@@ -303,6 +299,4 @@ async def test_a_waiting_episode_still_shows_its_candidates() -> None:
     await _say(harness, conversation, "thanks", "m-2")
     await _settled(harness, conversation, seeded=frozenset({first.id}))
 
-    assert _window_candidates(completer, 2) == [
-        [{"fact": _FACT, "status": "pending: recorded for long-term memory, not yet kept"}]
-    ]
+    assert _window_candidates(completer, 2) == [[(_FACT, "yes")]]

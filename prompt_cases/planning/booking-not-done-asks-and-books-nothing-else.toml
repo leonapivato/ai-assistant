@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 6's variant: the booking came back not done, with other times
+# open, so the round asks Leo and books no other time.
+prompt = "planning"
+guards = "substituted"
+came_from = "2026-10-31"
+set = "development"
+samples = 3
+
+[property]
+check = "calls_are"
+capabilities = ["text"]
+
+[input]
+file = "booking-not-done-asks-and-books-nothing-else.json"

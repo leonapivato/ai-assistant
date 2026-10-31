@@ -1,5 +1,5 @@
 # ADR-0350 §13:4, §9:4: "make it 9" for a reminder not yet said is a spawn replacing it.
-# The round before listed the person's tasks, so the reminder is shown under its T label;
+# The round before listed Leo's tasks, so the reminder is shown under its T label;
 # there is no change capability, and a cancel then a new spawn is not the one step.
 prompt = "planning"
 guards = "change_not_replace"
@@ -7,25 +7,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes one spawn whose replaces names T1, the reminder to water the balcony plants, falling due at 21:00 London time today (a local time with no offset, 2026-06-13T21:00, or the same instant with its offset). It proposes no cancel_task call."""
+read = """The round makes one spawn whose replaces names T1, the reminder to water the balcony plants, falling due at 21:00 Lisbon time today (a local time with no offset, 2026-10-29T21:00, or the same instant with its offset). It makes no cancel_task call."""
 
 [input]
 file = "make-it-nine-replaces.json"

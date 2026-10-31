@@ -6,11 +6,13 @@ completer, as ``test_planning`` drives it.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from test_planning import FLAG_ECHO, _earlier, _flags, _inputs, _sent, _stage
+from exchange_support import reported, section, tag, tags
+from test_planning import _inputs, _sent, _stage
 
 from ai_assistant.core.types import (
     ChannelIdentity,
@@ -18,6 +20,7 @@ from ai_assistant.core.types import (
     ProposedCall,
     RoundResponse,
 )
+from ai_assistant.orchestration.message_tools import TEXT_CALL
 from ai_assistant.orchestration.planning import (
     CallOutcome,
     CallOutcomeKind,
@@ -28,6 +31,7 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.task_manager import spawn_when
 from ai_assistant.orchestration.task_scheduler import (
+    LIST_TASKS,
     SPAWN,
     TASK_SCHEDULER_LABEL_ARGUMENTS,
     ActivationEntry,
@@ -55,22 +59,51 @@ def _scheduled(**fields: Any) -> dict[str, Any]:
     return values
 
 
+async def _reported(call: ProposedCall, outcome: CallOutcome) -> dict[str, Any]:
+    """What the round after ``call``'s is reported of it, its outcome ``outcome``'s.
+
+    ADR-0356 §5:3: the first round proposes ``call``; the second is asked with that
+    round's report, whose one result is decoded here. ``outcome`` is read as the first
+    round's.
+    """
+    stage, completer, _ = _stage(RoundResponse(calls=(call,)), RoundResponse())
+    inputs = _inputs(**_scheduled(capabilities=(SPAWN, LIST_TASKS)))
+    planned = await stage.plan(inputs)
+    assert planned.refused == ()
+    await stage.plan(
+        replace(
+            inputs,
+            work=planned.work,
+            rounds=(planned.round,),
+            labels=planned.labels,
+            outcomes=(replace(outcome, round_id=planned.round.id),),
+        )
+    )
+    (result,) = reported(completer.last_call, 0)
+    return result
+
+
 async def test_the_place_list_groups_places_under_headings_that_take_no_label() -> None:
     """§5:10, §5:13: each place carries its own ``L`` label, a heading none."""
     stage, completer, _ = _stage(RoundResponse(text=""))
 
     await stage.plan(_inputs(**_scheduled()))
 
-    assert _sent(completer)["places"] == [
-        {
-            "channel": "The hub's chat",
-            "places": [{"label": "L1", "is": "the conversation this input came from"}],
-        },
-        {
-            "channel": "Telegram",
-            "places": [{"label": "L2", "is": "the person's Telegram chat", "suggested": True}],
-        },
-    ]
+    situation = section(_sent(completer), "## The situation")
+    listed = situation.split("Places a message can be sent by its label:\n", 1)[1]
+    headings = [line for line in listed.split("\n") if "<place" not in line]
+    assert headings == ["  - The hub's chat:", "  - Telegram:"]
+    here, line = tags(listed, "place")
+    assert (here.get("label"), here.text, here.get("suggested")) == (
+        "L1",
+        "the conversation this input came from",
+        None,
+    )
+    assert (line.get("label"), line.text, line.get("suggested")) == (
+        "L2",
+        "the person's Telegram chat",
+        "yes",
+    )
 
 
 async def test_a_spawn_naming_a_heading_or_a_label_never_shown_is_refused_whole() -> None:
@@ -92,55 +125,62 @@ async def test_a_spawn_naming_a_heading_or_a_label_never_shown_is_refused_whole(
     assert kept.call.model_dump()["arguments"]["places"] == ["telegram:ref/42"]
 
 
-async def test_a_scheduled_activations_message_names_its_place_by_label() -> None:
-    """§6:7, §12:8: the label is taken off the message and its place recorded."""
-    stage, _, recorder = _stage(RoundResponse(text="L2: time for the pills"))
+async def test_a_scheduled_activations_message_goes_where_its_text_calls_via_names() -> None:
+    """ADR-0357 §2:4: a message's place is a ``text`` call's ``via``, by its ``L`` label.
 
-    planned = await stage.plan(_inputs(**_scheduled(speaks_by_label=True)))
+    ADR-0356 §7 retires §6:7's leading label on the round's text: that text is its notes
+    alone and places nothing, and ``via`` is handed on as planning named it, for the tool
+    to resolve against the place list.
+    """
+    pills = ProposedCall(
+        call_id="c1",
+        name="text",
+        arguments={"to": "the user", "words": "time for the pills", "via": "L2"},
+    )
+    stage, _, recorder = _stage(RoundResponse(text="L2: time for the pills", calls=(pills,)))
 
-    assert planned.round.text == "time for the pills"
-    assert planned.round.place == _LINE
-    assert planned.message == "time for the pills"
+    planned = await stage.plan(_inputs(**_scheduled(capabilities=(SPAWN, TEXT_CALL))))
+
+    assert planned.message is None
+    assert (planned.round.text, planned.round.place) == ("", None)
+    assert planned.round.notes == "L2: time for the pills"
+    (sent,) = planned.calls
+    assert sent.call == pills
     ((recorded, _),) = recorder.recorded
-    assert recorded.place == _LINE
+    assert recorded.place is None
 
 
-async def test_a_message_naming_no_place_on_the_list_names_none() -> None:
-    """§6:7: an unshown label, or none, names no place, and authorizing refuses it."""
-    stage, _, _ = _stage(RoundResponse(text="L9: somewhere"), RoundResponse(text="no label"))
+async def test_a_rounds_text_names_no_place_labelled_or_not() -> None:
+    """ADR-0356 §7: a round's text is its notes, whatever label it begins with, or none."""
+    stage, _, _ = _stage(
+        RoundResponse(text="L2: somewhere"),
+        RoundResponse(text="L9: somewhere"),
+        RoundResponse(text="no label"),
+    )
 
-    unknown = await stage.plan(_inputs(**_scheduled(speaks_by_label=True)))
-    bare = await stage.plan(_inputs(**_scheduled(speaks_by_label=True)))
+    shown = await stage.plan(_inputs(**_scheduled()))
+    unknown = await stage.plan(_inputs(**_scheduled()))
+    bare = await stage.plan(_inputs(**_scheduled()))
 
-    assert (unknown.round.place, unknown.round.text) == (None, "L9: somewhere")
-    assert (bare.round.place, bare.round.text) == (None, "no label")
+    for planned, notes in (
+        (shown, "L2: somewhere"),
+        (unknown, "L9: somewhere"),
+        (bare, "no label"),
+    ):
+        assert (planned.round.place, planned.round.text, planned.round.notes) == (None, "", notes)
+        assert planned.message is None
 
 
 async def test_another_activations_message_keeps_a_leading_label_as_text() -> None:
-    """§6:8: an activation the Task Scheduler did not start replies where its input came from."""
+    """§6:8: an activation the Task Scheduler did not start places nothing by its text."""
     stage, _, _ = _stage(RoundResponse(text="L1: hello"))
 
     planned = await stage.plan(_inputs(**_scheduled()))
 
-    assert planned.round.text == "L1: hello"
+    assert planned.round.text == ""
+    assert planned.round.notes == "L1: hello"
     assert planned.round.place is None
-
-
-async def test_the_spawn_and_scheduled_flags_follow_what_the_round_offers() -> None:
-    """§3:4, §6:7: the instruction's two sections, each where it applies."""
-    offered, _, _ = _stage(RoundResponse(text=""), prompt=FLAG_ECHO)
-    started, started_completer, _ = _stage(RoundResponse(text=""), prompt=FLAG_ECHO)
-    plain, plain_completer, _ = _stage(RoundResponse(text=""), prompt=FLAG_ECHO)
-
-    await offered.plan(_inputs(**_scheduled()))
-    offered_flags = _flags(offered._completer)  # type: ignore[arg-type]  # the fake it holds
-    await started.plan(_inputs(**_scheduled(speaks_by_label=True)))
-    await plain.plan(_inputs())
-
-    assert {"spawn"} <= offered_flags
-    assert "scheduled" not in offered_flags
-    assert {"spawn", "scheduled"} <= _flags(started_completer)
-    assert not {"spawn", "scheduled"} & _flags(plain_completer)
+    assert planned.message is None
 
 
 async def test_a_listing_shows_tasks_and_their_parents_by_label() -> None:
@@ -163,27 +203,19 @@ async def test_a_listing_shows_tasks_and_their_parents_by_label() -> None:
         result_id="result:1",
         tasks=TaskListing(scheduled=(entry,), listed=True),
     )
-    stage, completer, _ = _stage(RoundResponse(text=""))
 
-    await stage.plan(
-        _inputs(
-            **_scheduled(
-                rounds=(
-                    _earlier(calls=(ProposedCall(call_id="c1", name="list_tasks", arguments={}),)),
-                ),
-                outcomes=(outcome,),
-            )
-        )
-    )
+    result = await _reported(ProposedCall(call_id="c1", name="list_tasks", arguments={}), outcome)
 
-    (round_,) = _sent(completer)["rounds"]
-    (call,) = round_["calls"]
-    shown = call["result"]["value"]
+    shown = result["result"]["value"]
     (task,) = shown["scheduled"]
     assert task["label"].startswith("T")
     assert task["suggests"] == ["L2"]
     assert task["parent"]["episode"].startswith("E")
     assert shown["running"] == "none"
+    # ADR-0356 §3: the task's instruction is carried as the system's own words.
+    assert tag(task["carries"], "task", **{"from": "the system"}).text == (
+        "remind them about the bins"
+    )
 
 
 async def test_a_window_item_a_tasks_activation_wrote_shows_its_task_label() -> None:
@@ -204,9 +236,10 @@ async def test_a_window_item_a_tasks_activation_wrote_shows_its_task_label() -> 
 
     planned = await stage.plan(_inputs(place=window))
 
-    (item,) = _sent(completer)["place_window"]
-    assert item["episode"].startswith("E")
-    assert item["scheduled_task"].startswith("T")
+    (item,) = tags(section(_sent(completer), "## Stimulus origin knowledge"), "message")
+    assert item.text == "time for the pills"
+    assert (item.get("episode") or "").startswith("E")
+    assert (item.get("task") or "").startswith("T")
     assert any(one.kind is LabelKind.SCHEDULED_TASK for one in planned.labels)
 
 
@@ -232,13 +265,8 @@ async def _shown(listing: TaskListing, call: str) -> dict[str, Any]:
     outcome = CallOutcome(
         "round:earlier", "c1", CallOutcomeKind.DONE, result_id="result:1", tasks=listing
     )
-    stage, completer, _ = _stage(RoundResponse(text=""))
-    earlier = _earlier(calls=(ProposedCall(call_id="c1", name=call, arguments={}),))
-
-    await stage.plan(_inputs(**_scheduled(rounds=(earlier,), outcomes=(outcome,))))
-
-    (round_,) = _sent(completer)["rounds"]
-    shown: dict[str, Any] = round_["calls"][0]["result"]["value"]
+    result = await _reported(ProposedCall(call_id="c1", name=call, arguments={}), outcome)
+    shown: dict[str, Any] = result["result"]["value"]
     return shown
 
 
@@ -266,14 +294,13 @@ async def test_a_refused_spawn_is_said_not_done_once() -> None:
     now = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)
     reason = spawn_when({"at": "2026-10-25T08:00:00+00:00"}, now=now, zone=ZoneInfo("UTC"))
     assert isinstance(reason, str)
-    earlier = _earlier(calls=(ProposedCall(call_id="c1", name="spawn", arguments={}),))
-    outcome = CallOutcome(earlier.id, "c1", CallOutcomeKind.NOT_DONE, reason)
-    stage, completer, _ = _stage(RoundResponse(text=""))
+    outcome = CallOutcome("round:earlier", "c1", CallOutcomeKind.NOT_DONE, reason)
 
-    await stage.plan(_inputs(**_scheduled(rounds=(earlier,), outcomes=(outcome,))))
+    result = await _reported(
+        ProposedCall(call_id="c1", name="spawn", arguments={"instruction": "x"}), outcome
+    )
 
-    shown = _sent(completer)["rounds"][0]["calls"][0]["outcome"]
-    assert shown == "not done: the instant it would fall due is earlier than now"
+    assert result["outcome"] == "not done: the instant it would fall due is earlier than now"
 
 
 def _ended(**fields: Any) -> ActivationEntry:

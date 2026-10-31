@@ -9,12 +9,12 @@ reaches its planning round, first in the request, with the flags set.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
+from exchange_support import section, tags
 from phases_support import chat_turn, event, phases_harness
 from test_activation_state import _admitted
 from test_engine import AT as HARNESS_AT
@@ -92,9 +92,9 @@ def _understood(model: FakeModelProvider) -> str:
     return rendered(model.calls[0].messages).section("Always in mind")
 
 
-def _planned(completer: FakeToolCallingCompleter) -> dict[str, Any]:
-    loaded: dict[str, Any] = json.loads(completer.last_call.exchange.briefing)
-    return loaded
+def _planned(completer: FakeToolCallingCompleter) -> str:
+    """What planning was shown as always in mind (ADR-0356 §3:1)."""
+    return section(completer.calls[0].exchange.briefing, "## Always in mind")
 
 
 def _recorded(
@@ -137,10 +137,10 @@ async def test_with_no_store_wired_nothing_of_the_person_model_reaches_a_model()
 
     # ADR-0353 §8:1: always in mind is rendered, and says the system does not have it.
     assert _understood(model).startswith("The system does not have it")
-    assert "person" not in _planned(completer)
-    # ADR-0338 §11:2: no flag set, so no instruction about the person model either.
+    assert _planned(completer).startswith("The system does not have it")
+    # Neither stage's template takes a flag (ADR-0353 §8:3, ADR-0356 §4:2).
     assert _flags(sink, DiagnosticSource.UNDERSTANDING) == {}
-    assert _flags(sink, DiagnosticSource.PLANNING) == {"person": False, "suggestions": False}
+    assert _flags(sink, DiagnosticSource.PLANNING) == {}
 
 
 async def test_an_owners_turn_is_given_its_block_in_understanding_and_planning() -> None:
@@ -156,18 +156,24 @@ async def test_an_owners_turn_is_given_its_block_in_understanding_and_planning()
     (kept,) = Rendered(model.calls[0].messages[1].content).tags("Always in mind", "memory")
     assert (kept.get("label"), kept.get("pinned"), kept.text) == ("M1", "yes", "Eats no meat.")
     planned = _planned(completer)
-    assert next(iter(planned)) == "person"
-    assert [one["fact"] for one in planned["person"]["kept_in_mind"]] == ["Eats no meat."]
+    assert "- How the owner likes to be addressed: Robin." in planned.split("\n")
+    (pinned,) = tags(planned, "memory")
+    assert (pinned.get("pinned"), pinned.text) == ("yes", "Eats no meat.")
     assert _flags(sink, DiagnosticSource.UNDERSTANDING) == {}
-    assert _flags(sink, DiagnosticSource.PLANNING) == {"person": True, "suggestions": False}
+    assert _flags(sink, DiagnosticSource.PLANNING) == {}
     assert counting.reads == 1
 
 
 async def test_a_connected_sources_event_is_the_owners_too() -> None:
     memory_store, counting, blocks = await _wired()
     model = FakeModelProvider(reply=STATED_PROPOSAL)
+    # One round, which takes no message: a later round's news would read the person
+    # model again for what changed (ADR-0360 §4:4).
     harness = phases_harness(
-        memory=memory_store, understanding=understanding_stage(model=model), person_blocks=blocks
+        FakeToolCallingCompleter(),
+        memory=memory_store,
+        understanding=understanding_stage(model=model),
+        person_blocks=blocks,
     )
 
     await event(harness)
@@ -240,7 +246,9 @@ async def test_a_pin_understanding_was_shown_is_inherited_though_dropped_before_
 
     _, episode = await chat_turn(harness, "What should I cook tonight?")
 
-    assert _planned(completer)["person"]["kept_in_mind"] == "none: they keep nothing in mind yet"
+    always = _planned(completer)
+    assert tags(always, "memory") == []
+    assert "- The owner keeps nothing in mind for the system yet." in always.split("\n")
     assert episode.placement.reach is PlacementReach.OWNER
 
 

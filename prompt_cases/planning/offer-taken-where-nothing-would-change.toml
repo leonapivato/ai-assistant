@@ -7,22 +7,6 @@ came_from = "2026-10-26"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = false
-scheduled = false
-running_work = true
-offers = true
-waiting = false
-earlier_work = false
-
 [property]
 check = "answers_offer"
 answer = "take"

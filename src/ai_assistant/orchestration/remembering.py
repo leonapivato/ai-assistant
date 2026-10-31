@@ -210,10 +210,15 @@ REMEMBER_CANDIDATE: Final = ToolDefinition(
     id=REMEMBER_CAPABILITY,
     capability=REMEMBER_CAPABILITY,
     description=(
-        "Record a candidate for long-term memory: one fact about the user or their "
-        "world, what it rests on, and why it is worth keeping. It is reviewed later "
-        "and kept only then; the result shows the memories already held that are "
-        "similar to it."
+        "Record a candidate for long-term memory: one fact, in your own words, what "
+        "it rests on, and briefly why it is worth keeping. Record one only where "
+        "someone asked for something to be kept, or the work in hand needs something "
+        "kept now, such as a fact a task it sets for later will rely on; anything "
+        "else said or seen is found later from the episode. A candidate is not yet a "
+        "memory: whether and how it is kept is decided later. The result shows the "
+        "memories already held that are similar to its fact; ask about one in the "
+        "moment only where it conflicts with the candidate and the conflict matters "
+        "to what is being done."
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.RECOVERABLE,

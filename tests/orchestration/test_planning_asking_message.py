@@ -41,12 +41,35 @@ def _text(call_id: str = "t1", **arguments: Any) -> Any:
 async def _planned(
     *calls: Any,
     outcomes: tuple[CallOutcome, ...],
-    rounds: tuple[PlanningRound, ...],
+    proposed: PlanningRound | None,
+    before: tuple[PlanningRound, ...] = (),
     **fields: Any,
 ) -> Any:
-    stage, _, recorder = _stage(RoundResponse(calls=calls))
+    """A round proposing ``calls``, after a round of its work that proposed ``proposed``'s.
+
+    ADR-0356 §5:3-§5:4, ADR-0357 §8:1: a call needing a yes is named by the reference
+    the report after its round shows it under, so the work's first round proposes
+    ``proposed``'s calls, after ``before``, and they come back as ``outcomes``, each taken
+    as that round's; the round after it is planned. With no ``proposed``, the round
+    proposing ``calls`` is the work's first.
+
+    Returns:
+        That round, and the recorder, holding the round proposing ``calls`` last.
+    """
+    inputs = _inputs(capabilities=(*_TOOLS, TEXT_CALL), rounds=before, **fields)
+    if proposed is None:
+        stage, _, recorder = _stage(RoundResponse(calls=calls))
+        return await stage.plan(replace(inputs, outcomes=outcomes)), recorder
+    stage, _, recorder = _stage(RoundResponse(calls=proposed.calls), RoundResponse(calls=calls))
+    first = await stage.plan(inputs)
     planned = await stage.plan(
-        _inputs(capabilities=(*_TOOLS, TEXT_CALL), rounds=rounds, outcomes=outcomes, **fields)
+        replace(
+            inputs,
+            work=first.work,
+            rounds=(*before, first.round),
+            labels=(*inputs.labels, *first.labels),
+            outcomes=tuple(replace(one, round_id=first.round.id) for one in outcomes),
+        )
     )
     return planned, recorder
 
@@ -57,7 +80,7 @@ async def test_the_asking_calls_named_calls_are_recorded_and_their_lines_handed_
     planned, recorder = await _planned(
         _text(words="I can book the table for 7pm tomorrow. Shall I?", asks=["1.1"]),
         outcomes=(_needs_you(earlier.id, "c1", _booking(), deliberate_repeat=True),),
-        rounds=(earlier,),
+        proposed=earlier,
     )
 
     assert planned.questions == {"t1": _LINE}
@@ -72,9 +95,9 @@ async def test_the_asking_calls_named_calls_are_recorded_and_their_lines_handed_
     assert planned.round.text == ""
     assert [one.call.call_id for one in planned.calls] == ["t1"]
     # The recorder is handed the lines, so it can tell whether the question fits.
-    ((recorded, _),) = recorder.recorded
+    (_, (recorded, _)) = recorder.recorded
     assert recorded.asked == planned.round.asked
-    assert recorder.questions == [{"t1": _LINE}]
+    assert recorder.questions == [{}, {"t1": _LINE}]
 
 
 async def test_several_calls_are_numbered_by_part_in_the_order_named() -> None:
@@ -85,7 +108,7 @@ async def test_several_calls_are_numbered_by_part_in_the_order_named() -> None:
         _needs_you(earlier.id, "c2", _booking("2026-10-13 20:00")),
     )
     planned, _ = await _planned(
-        _text(words="Shall I book both?", asks=["1.2", "1.1"]), outcomes=outcomes, rounds=(earlier,)
+        _text(words="Shall I book both?", asks=["1.2", "1.1"]), outcomes=outcomes, proposed=earlier
     )
 
     assert [one.part for one in planned.round.asked] == [1, 2]
@@ -103,7 +126,7 @@ async def test_a_name_that_resolves_to_no_call_needing_the_user_is_dropped(name:
         CallOutcome(earlier.id, "c2", CallOutcomeKind.DONE),
     )
     planned, _ = await _planned(
-        _text(words="Shall I?", asks=[name]), outcomes=outcomes, rounds=(earlier,)
+        _text(words="Shall I?", asks=[name]), outcomes=outcomes, proposed=earlier
     )
 
     assert planned.round.asked == ()
@@ -118,7 +141,7 @@ async def test_two_names_for_one_call_ask_about_it_once() -> None:
         _needs_you(earlier.id, "c2", _booking()),
     )
     planned, _ = await _planned(
-        _text(words="Shall I?", asks=["1.1", " 1.2 "]), outcomes=outcomes, rounds=(earlier,)
+        _text(words="Shall I?", asks=["1.1", " 1.2 "]), outcomes=outcomes, proposed=earlier
     )
     assert len(planned.round.asked) == 1
     assert planned.questions == {"t1": _LINE}
@@ -136,7 +159,7 @@ async def test_a_second_text_call_carrying_asks_runs_nothing() -> None:
         _text("t2", words="And at eight?", asks=["1.2"]),
         _text("t3", words="Back soon."),
         outcomes=outcomes,
-        rounds=(earlier,),
+        proposed=earlier,
     )
 
     assert [one.call.call_id for one in planned.calls] == ["t1", "t3"]
@@ -152,7 +175,7 @@ async def test_the_first_asking_call_stays_the_asking_one_though_it_names_nothin
         _text("t1", words="Shall I?", asks=["9.9"]),
         _text("t2", words="Shall I really?", asks=["1.1"]),
         outcomes=(_needs_you(earlier.id, "c1", _booking()),),
-        rounds=(earlier,),
+        proposed=earlier,
     )
     assert planned.round.asked == ()
     assert [one.call.call_id for one in planned.refused] == ["t2"]
@@ -164,7 +187,7 @@ async def test_where_the_place_takes_no_message_nothing_is_asked() -> None:
     planned, _ = await _planned(
         _text(words="Shall I?", asks=["1.1"]),
         outcomes=(_needs_you(earlier.id, "c1", _booking()),),
-        rounds=(earlier,),
+        proposed=earlier,
         place=PlaceWindow(takes_message=False),
     )
     assert planned.round.asked == ()
@@ -177,7 +200,7 @@ async def test_a_remember_is_asked_with_its_statement_and_what_it_replaces() -> 
     old = _remembered("m-old", MemorySource.USER_ASSERTED, "I live in Milan")
     outcome = _needs_you(earlier.id, "c1", _remember_request("I live in Rome"), replaces=(old,))
     planned, _ = await _planned(
-        _text(words="Shall I remember it?", asks=["1.1"]), outcomes=(outcome,), rounds=(earlier,)
+        _text(words="Shall I remember it?", asks=["1.1"]), outcomes=(outcome,), proposed=earlier
     )
 
     (asked,) = planned.round.asked
@@ -196,7 +219,7 @@ async def test_an_unrecordable_call_is_not_asked_about() -> None:
     planned, _ = await _planned(
         _text(words="Shall I?", asks=["1.1"]),
         outcomes=(_needs_you(earlier.id, "c1", request, deliberate_repeat=True),),
-        rounds=(earlier,),
+        proposed=earlier,
     )
     assert planned.round.asked == ()
 
@@ -212,7 +235,8 @@ async def test_a_call_an_earlier_round_asked_is_not_askable_again() -> None:
     planned, _ = await _planned(
         _text(words="Shall I?", asks=["1.1"]),
         outcomes=(_needs_you(first.id, "c1", _booking()),),
-        rounds=(first, asking),
+        proposed=first,
+        before=(first, asking),
     )
     assert planned.round.asked == ()
 
@@ -224,7 +248,7 @@ def test_the_question_the_phases_send_is_the_words_then_the_lines() -> None:
 
 async def test_the_judge_leaves_a_text_calls_via_as_written_for_the_phases() -> None:
     """ADR-0357 §2:4: ``via`` names a place or a platform, so no label check refuses it."""
-    planned, _ = await _planned(_text(words="Hi.", via="telegram"), outcomes=(), rounds=())
+    planned, _ = await _planned(_text(words="Hi.", via="telegram"), outcomes=(), proposed=None)
     (call,) = planned.calls
     assert call.call.arguments["via"] == "telegram"
 

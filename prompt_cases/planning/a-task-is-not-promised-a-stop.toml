@@ -1,0 +1,16 @@
+# #3466: a scheduled task's activation acts without Leo's authority, so a stop call it
+# makes comes back refused (ADR-0349 §4:6, ADR-0356 §4:5). The spawn came back set; the
+# round that tells Leo does not promise that the task will stop running work when it
+# fires.
+prompt = "planning"
+guards = "task_power_promised"
+came_from = "#3466"
+set = "development"
+samples = 2
+
+[property]
+check = "read"
+read = """No text call promises that the task will stop running work when it fires. A text call may say the reminder is set for 5:42 pm, and that the task cannot stop work by itself, or that Leo can ask for the stop when he is reminded."""
+
+[input]
+file = "a-task-is-not-promised-a-stop.json"

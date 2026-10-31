@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 3: both parts are acted on, a booking and a reminder, which can
+# run in the same round since neither needs the other's result.
+prompt = "planning"
+guards = "dropped_goal"
+came_from = "2026-10-31"
+set = "development"
+samples = 3
+
+[property]
+check = "calls_include"
+capabilities = ["book_table", "spawn"]
+
+[input]
+file = "two-part-request-meets-both.json"

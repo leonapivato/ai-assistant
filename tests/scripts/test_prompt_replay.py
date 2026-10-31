@@ -504,7 +504,8 @@ def test_a_template_where_its_default_ships_is_a_default() -> None:
     candidate = replay_tool.load_candidate(str(shipped), replay_tool.declared_prompts())
 
     assert candidate.origin == "default"
-    assert candidate.values == planning._PLANNING_VALUES
+    # ADR-0356 §4:2: planning's template declares no value, so none is supplied.
+    assert candidate.values == {}
 
 
 def test_stated_flags_must_name_declared_flags_and_state_every_one(

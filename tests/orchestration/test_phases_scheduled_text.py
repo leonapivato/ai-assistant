@@ -7,12 +7,18 @@ a ``text`` call naming its place by label, by platform or not at all.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 from phases_support import open_conversation, phases_harness, said, until, written
 from task_support import seams
-from test_phases_task_scheduler import _first_place, _responder, _spawning, _until_scheduled
+from test_phases_task_scheduler import (
+    _first_place,
+    _Request,
+    _responder,
+    _spawning,
+    _until_scheduled,
+)
 
 from ai_assistant.core.types import CallOutcomeKind, MessageAuthor, ProposedCall, RoundResponse
 from ai_assistant.orchestration.chat import COULDNT_FINISH
@@ -21,11 +27,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-def _texting(**via: str) -> Callable[[dict[str, Any]], RoundResponse]:
+def _texting(**via: str) -> Callable[[_Request], RoundResponse]:
     """The task's activation: one ``text`` call in its first round, then nothing."""
 
-    def task(request: dict[str, Any]) -> RoundResponse:
-        if request["rounds"]:
+    def task(request: _Request) -> RoundResponse:
+        if request.rounds:
             return RoundResponse()
         named = {
             key: _first_place(request) if value == "first place" else value

@@ -19,6 +19,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from channel_receiver_contract import event_input
+from exchange_support import says
 from test_engine import Harness
 from test_engine_phases import _BOOK, _phases
 from understanding_support import understanding_stage
@@ -41,6 +42,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.conversations import activation_ending
 from ai_assistant.testing import FakeToolCallingCompleter
+from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -57,6 +59,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.phase_path import PhasePath
     from ai_assistant.testing import FakeMemoryStore
+    from ai_assistant.testing.tool_calling import RoundReply
 
 #: The device every case writes from: the owner's own, so it may read and write.
 PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
@@ -84,6 +87,29 @@ PHASE_PATH_STAGES: Final = frozenset(
 )
 
 
+# --- planning's rounds --------------------------------------------------------------------
+
+
+def replying(words: str = DEFAULT_ROUND_TEXT) -> FakeToolCallingCompleter:
+    """Planning whose every work's first round sends ``words``, and whose later rounds end it.
+
+    The phases' stand-in for a model that answers the person and stops: each activation's
+    first round (an exchange with no step yet) makes one ``text`` call, and each round
+    after proposes nothing, so the work ends after two rounds.
+    """
+
+    return FakeToolCallingCompleter(response=replies(words))
+
+
+def replies(words: str) -> RoundReply:
+    """A response sending ``words`` in a work's first round, and nothing in each after."""
+
+    def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
+        return says(words) if not exchange.steps else RoundResponse()
+
+    return respond
+
+
 # --- the engine -------------------------------------------------------------------------
 
 
@@ -95,15 +121,16 @@ def phases_harness(
 ) -> Harness:
     """An engine with the phases wired, beside understanding, over ``knobs``' fakes.
 
-    ``completer`` answers each planning round; the default writes one message and
-    proposes nothing, so an activation ends after one round. ``phases`` are the
+    ``completer`` answers each planning round; the default (:func:`replying`) sends one
+    message in its first round and proposes nothing in its second, so an activation ends
+    after two rounds. ``phases`` are the
     keyword knobs ``test_engine_phases._phases`` takes; ``knobs`` are the harness's.
     Understanding is wired by default, since the phases are wired only beside it.
     """
     knobs.setdefault("understanding", understanding_stage())
     knobs.setdefault("tools", (_BOOK,))
     return Harness(
-        phases=_phases(completer or FakeToolCallingCompleter(), **(phases or {})),
+        phases=_phases(completer or replying(), **(phases or {})),
         **knobs,
     )
 
@@ -142,7 +169,7 @@ def phase_path(  # noqa: PLR0913 — the seams an engine already holds, and the 
         trail=trail,
         conversation_store=conversations,
     )
-    build = _phases(completer or FakeToolCallingCompleter(), **knobs)
+    build = _phases(completer or replying(), **knobs)
     return build(cast("Harness", seams))
 
 
@@ -150,7 +177,7 @@ class Gated(FakeToolCallingCompleter):
     """Planning's rounds, each answered only once :attr:`release` is set.
 
     ``responses`` are answered in turn, as :meth:`FakeToolCallingCompleter.scripted`
-    answers them; with none, every round is the default one.
+    answers them; with none, each work's rounds are :func:`replying`'s.
     """
 
     def __init__(self, *responses: RoundResponse) -> None:
@@ -161,7 +188,7 @@ class Gated(FakeToolCallingCompleter):
         ) -> RoundResponse:
             return queue.pop(0)
 
-        super().__init__(response=next_response if responses else None)
+        super().__init__(response=next_response if responses else replies(DEFAULT_ROUND_TEXT))
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.finished = asyncio.Event()

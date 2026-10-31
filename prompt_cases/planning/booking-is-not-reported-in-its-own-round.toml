@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 6: the round books and says nothing of the booking yet, since a
+# message never reports on a call from its own round.
+prompt = "planning"
+guards = "claimed_early"
+came_from = "2026-10-31"
+set = "development"
+samples = 3
+
+[property]
+check = "calls_are"
+capabilities = ["book_table"]
+
+[input]
+file = "booking-is-not-reported-in-its-own-round.json"

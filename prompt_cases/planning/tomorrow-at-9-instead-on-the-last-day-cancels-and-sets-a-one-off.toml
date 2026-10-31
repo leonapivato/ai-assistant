@@ -6,25 +6,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes a cancel_task naming T1, the daily reminder about the vitamin whose until is tomorrow, and one spawn with no rule and no replaces, about the vitamin, whose at is 2026-11-11T09:00. It proposes no spawn replacing T1."""
+read = """The round makes a cancel_task naming T1, the daily reminder about the vitamin whose until is tomorrow, and one spawn with no rule and no replaces, about the vitamin, whose at is 2026-10-30T09:00. It makes no spawn replacing T1."""
 
 [input]
 file = "tomorrow-at-9-instead-on-the-last-day-cancels-and-sets-a-one-off.json"

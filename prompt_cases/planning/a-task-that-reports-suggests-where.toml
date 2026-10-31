@@ -1,0 +1,16 @@
+# #3450: a task whose work is to tell Leo something suggests where it says it. On a hub
+# with no line, a task suggesting no place has nowhere to speak, so "tell me" from the
+# hub's chat is a spawn whose places name this conversation, and the round says nothing
+# of it before its read-back comes back.
+prompt = "planning"
+guards = "report_place_unsuggested"
+came_from = "#3450"
+set = "development"
+samples = 2
+
+[property]
+check = "read"
+read = """The round makes one spawn, falling due in 20 minutes, whose instruction is to check whether it will rain tonight and tell Leo, and whose places name L1. It makes no text call."""
+
+[input]
+file = "a-task-that-reports-suggests-where.json"
