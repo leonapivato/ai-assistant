@@ -1655,7 +1655,14 @@ def _looked_outside(found: EpisodeLookedUp) -> tuple[str, ...]:
         or any(one.notes_marked for one in projection.rounds)
         or any(one.marked for one in projection.calls)
     )
-    return (found.episode_id,) if marked else ()
+    # A marked summary the full view shows, of a matter it is in or a story it shows
+    # again, is outside content read, as a story view's is (ADR-0303 §3:6).
+    summaries = (
+        one.story_id
+        for one in (*found.matters, *found.stories.values())
+        if one.outside and one.first_line is not None
+    )
+    return (*((found.episode_id,) if marked else ()), *dict.fromkeys(summaries))
 
 
 # --- the working set ---------------------------------------------------------------------

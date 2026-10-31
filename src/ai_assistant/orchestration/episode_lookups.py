@@ -61,6 +61,7 @@ from ai_assistant.orchestration.planning import (
     OlderHistory,
     PlaceAuthor,
     PlaceItem,
+    relayed_episodes,
 )
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import SummaryVisibility, activation_of
@@ -273,6 +274,7 @@ class EpisodeLookUpReads:
 
         Raises:
             ConversationStoreError: If the store cannot be read.
+            MemoryStoreError: If the linked episodes cannot be read.
         """
         assert self._conversations is not None  # noqa: S101 — checked by the caller
         if source.before is None:
@@ -300,11 +302,17 @@ class EpisodeLookUpReads:
             conversation_id,
             positions=[one.position for one in messages if one.author is MessageAuthor.USER],
         )
+        items = tuple(_item(one, links) for one in messages)
+        # ADR-0351 §5:7: a user's message whose episode marks its input relayed is
+        # outside, read off that episode as it is held, whichever window shows it.
+        linked = sorted({one.episode_id for one in items if one.episode_id is not None})
+        held = await self._memory.get_many(linked) if linked else {}
         return OlderHistory(
             readable=True,
-            items=tuple(_item(one, links) for one in messages),
+            items=items,
             page=page,
             more=more,
+            relayed=relayed_episodes(held.values(), excerpt_chars=self._excerpt_chars),
         )
 
     async def _earlier_episodes(
@@ -320,7 +328,8 @@ class EpisodeLookUpReads:
         Raises:
             MemoryStoreError: If the store cannot be read.
         """
-        limit = min(_CHANNEL_PAGE_MAX, len(source.episodes) + page * self._history_page + 1)
+        needed = page * self._history_page + 1
+        limit = min(_CHANNEL_PAGE_MAX, len(source.episodes) + needed)
         while True:
             read = await self._memory.channel_episodes(channel, limit=limit)
             entries: Sequence[ChannelEpisode] = read.entries
@@ -328,7 +337,9 @@ class EpisodeLookUpReads:
                 (at for at, one in enumerate(entries) if one.record.id in source.episodes), None
             )
             whole = len(entries) < limit
-            if first is not None or whole or limit >= _CHANNEL_PAGE_MAX:
+            # Enough is the requested page and one more beyond the oldest shown episode,
+            # however many episodes the channel gained since the window was read.
+            if (first is not None and first >= needed) or whole or limit >= _CHANNEL_PAGE_MAX:
                 break
             limit = min(_CHANNEL_PAGE_MAX, limit * 2)
         if first is None and not whole:
@@ -383,6 +394,7 @@ class EpisodeLookUpReads:
             [one.id for one in named if one.kind is not ShownRecordKind.STORY], audience
         )
         visibility = SummaryVisibility(owner_records=owner_records)
+        matters = await self._matters(record, visibility)
         stories: dict[str, MatterShown] = {}
         if self._stories is not None:
             for one in named:
@@ -396,6 +408,7 @@ class EpisodeLookUpReads:
             projection=projection,
             memories={key: one for key, one in records.items() if isinstance(one, Memory)},
             stories=stories,
+            matters=matters,
             episodes=frozenset(
                 key
                 for key, one in records.items()

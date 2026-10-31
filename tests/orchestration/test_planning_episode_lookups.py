@@ -467,3 +467,47 @@ async def test_a_story_read_names_a_matter_an_episode_search_showed() -> None:
 
     (call,) = planned.calls
     assert call.call.arguments["story"] == "story:dentist"
+
+
+# --- review round 1: what a relayed item, and a full view's matters, show --------------------
+
+
+async def test_an_older_item_of_a_relayed_input_is_withheld_and_kept_by_nothing() -> None:
+    """ADR-0351 §5:7, §9:3, §11:2: withheld as a forward is, and never kept as shown."""
+    history = OlderHistory(
+        readable=True,
+        items=(
+            PlaceItem(
+                author=PlaceAuthor.USER, text="the dentist's own words", episode_id="activation:r"
+            ),
+            PlaceItem(author=PlaceAuthor.ASSISTANT, text="noted", episode_id="activation:r"),
+        ),
+        relayed=frozenset({"activation:r"}),
+    )
+    value, _ = await _shown("read_older_history", {"history": history})
+    outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", history=history)
+
+    assert "the dentist's own words" not in json.dumps(value)
+    assert value["items"][1]["text"] == "noted"
+    showed = call_showed(outcome, bound=1000)
+    assert showed is not None
+    assert "the dentist's own words" not in showed.model_dump_json()
+    assert len(showed.parts) == 1
+
+
+async def test_a_full_view_names_the_matters_its_episode_belongs_to() -> None:
+    """§8:1: the episode look-up names the episode's matters, as a search does."""
+    matter = MatterShown(story_id="story:dentist", summary_version=2, first_line="The dentist.")
+    read = _read(_full_record(), matters=(matter,))
+    outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", full=read)
+
+    value, planned = await _shown("read_episode", {"full": read}, owner_records=True)
+
+    assert value["in_matters"] == [{"label": "S1", "summary": "The dentist."}]
+    assert PlanningLabel(label="S1", kind=LabelKind.STORY, id="story:dentist") in planned.labels
+    showed = call_showed(outcome, bound=1000)
+    assert showed is not None
+    assert (
+        ShownRecord(kind=ShownRecordKind.STORY, id="story:dentist", summary_version=2)
+        in showed.parts
+    )
