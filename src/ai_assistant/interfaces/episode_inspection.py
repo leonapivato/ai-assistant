@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
         ActivationUnderstanding,
+        ChannelIdentity,
         EpisodePage,
         EpisodeProcessingRecord,
         EpisodeSummary,
@@ -164,6 +165,9 @@ def render_detail(
 ) -> None:
     """Distinguish processing status from goal achievement and playback.
 
+    After the stages, recall and understanding, it renders planning's rounds and each
+    call's entry (ADR-0356 §14:4): what each round wrote, and what came of each call.
+
     An open episode is labelled in progress in place of its absent status, reason
     and end time (ADR-0286 §11), and each section it may still grow says so.
 
@@ -219,6 +223,13 @@ def render_detail(
         soft_wrap=True,
     )
     _retention_notice(console)
+    console.print(
+        "\n".join([*_round_lines(processing), *_call_lines(processing)]),
+        markup=False,
+        emoji=False,
+        highlight=False,
+        soft_wrap=True,
+    )
     console.print(
         json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
         markup=False,
@@ -352,3 +363,70 @@ def _version_lines(version: ActivationUnderstanding) -> list[str]:
     lines.extend(f"  Continues activation {_quoted(one)}" for one in version.continues)
     lines.append(f"  Relayed: {'yes' if version.relayed else 'no'}")
     return lines
+
+
+def _round_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
+    """Render planning's rounds as the record holds them (ADR-0356 §8:1), deriving none.
+
+    Per round, in the record's order: its id and when it was recorded; the message its
+    ``text`` holds, which only a round recorded before ADR-0356, or under its interim,
+    carries (§8:1), with the place it went into where the record names one; and its
+    notes, with their mark where they rest on outside content (ADR-0307 §4:3). A round
+    recorded since writes no message: what people received is its calls' (§7:3), each
+    in the call lines. The calls a round proposed, with their arguments, stay in the
+    ``--json`` detail.
+    """
+    if processing is None:
+        return ["Rounds: unavailable"]
+    if not processing.rounds:
+        return [f"Rounds: {_none_recorded(processing)}"]
+    lines = ["Rounds:"]
+    for one in processing.rounds:
+        lines.append(f"  Round {_quoted(one.id)}, recorded {one.recorded_at.isoformat()}")
+        if one.text:
+            went = "" if one.place is None else f" (into {_channel(one.place)})"
+            lines.append(f"    Message{went}: {_quoted(one.text)}")
+        if one.notes is not None:
+            marked = " (rests on outside content)" if one.notes_marked else ""
+            lines.append(f"    Notes{marked}: {_quoted(one.notes)}")
+    return lines
+
+
+def _call_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
+    """Render each call's entry as the record holds it (ADR-0356 §8:2-§8:7), deriving none.
+
+    Per entry, in the order appended: the round and call it names, its capability,
+    whether that capability declared an effect, and its outcome as planning was shown
+    it, with its reason, or that it records none (a tidy-up that started, or a call
+    still running when the episode froze, §8:6); its mark where it rests on outside
+    content; and, for a message call that sent or tried to, the words, where they went
+    and how. A call's arguments stay in the ``--json`` detail.
+    """
+    if processing is None:
+        return ["Calls: unavailable"]
+    if not processing.call_records:
+        return [f"Calls: {_none_recorded(processing)}"]
+    lines = ["Calls:"]
+    for entry in processing.call_records:
+        effect = "with an effect" if entry.effect else "no effect"
+        outcome = "no outcome recorded" if entry.outcome is None else entry.outcome.value
+        marked = "; rests on outside content" if entry.marked else ""
+        lines.append(
+            f"  Round {_quoted(entry.round)}, call {_quoted(entry.call_id)}: "
+            f"{entry.capability} ({effect}{marked}): {outcome}"
+        )
+        if entry.reason is not None:
+            lines.append(f"    Reason: {_quoted(entry.reason)}")
+        delivered = entry.delivered
+        if delivered is not None:
+            lines.append(
+                f"    Sent to {_channel(delivered.went)}: {delivered.status.value}: "
+                f"{_quoted(delivered.words)}"
+            )
+            if delivered.reason is not None:
+                lines.append(f"      Why: {_quoted(delivered.reason)}")
+    return lines
+
+
+def _channel(place: ChannelIdentity) -> str:
+    return f"{place.channel_type}/{place.instance_id}"
