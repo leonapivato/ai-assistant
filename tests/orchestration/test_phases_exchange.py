@@ -9,15 +9,18 @@ the frozen episode records of every call.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
+import pytest
 from exchange_support import reported
 from phases_support import chat_turn, event, phases_harness, processing, written
 from task_support import seams
 
 from ai_assistant.core.types import (
     CallOutcomeKind,
+    ChannelIdentity,
     DeliveryStatus,
+    EpisodicMemory,
     LabelKind,
     MessageAuthor,
     PlanningLabel,
@@ -28,10 +31,15 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.matters import STOP_ACTIVATION_CAPABILITY
 from ai_assistant.orchestration.phase_path import (
+    _UNKNOWN_WRITE,
     TEXT_CALL,
     TEXT_CAPABILITY,
+    Delivery,
+    Fitted,
     PhasePath,
     PhaseWorking,
+    PlaceTarget,
+    _SendRaisedError,
 )
 from ai_assistant.orchestration.planning import (
     WAITING_ROUND,
@@ -43,7 +51,15 @@ from ai_assistant.orchestration.planning import (
 from ai_assistant.orchestration.task_scheduler import SPAWN_CAPABILITY
 from ai_assistant.testing import FakeToolCallingCompleter
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from test_engine import Harness
+
+    from ai_assistant.core.types import OfferedTool, PlanningExchange
+
 _AT: Final = datetime(2026, 10, 30, 9, 0, tzinfo=UTC)
+_LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="ref/42")
 
 
 def _call(call_id: str, name: str, **arguments: object) -> ProposedCall:
@@ -264,3 +280,154 @@ def test_a_tidy_up_that_started_gets_its_entry_with_no_outcome() -> None:
 
     (started,) = working.call_entries(_AT)
     assert (started.capability, started.outcome) == (TIDY_STORY_CAPABILITY, None)
+
+
+# --- review round 1: what an entry keeps when something raises, and when it is stored ---
+
+
+class _RaisingWriter:
+    """A place's writer that takes the message, and then raises."""
+
+    def __init__(self) -> None:
+        self.taken: list[str] = []
+
+    def fitted(self, text: str) -> Fitted:
+        return Fitted(text=text)
+
+    async def deliver(self, fitted: Fitted, *, effect_id: str) -> Delivery:
+        del effect_id
+        self.taken.append(fitted.text)
+        msg = "the line dropped after sending"
+        raise OSError(msg)
+
+
+async def test_a_write_that_raises_after_sending_keeps_what_it_tried_and_where() -> None:
+    """ADR-0356 §8:4: a message whose sending was attempted holds what it sent and where,
+    its status unknown, and the writer's own error is what the stage ends on."""
+    harness = phases_harness(FakeToolCallingCompleter())
+    phases = harness.engine._phases
+    assert isinstance(phases, PhasePath)
+    writer = _RaisingWriter()
+    working = PhaseWorking(
+        activation_id="activation",
+        place=PlaceWindow(takes_message=True),
+        conversation_id=None,
+        trigger=None,
+        owner_records=True,
+        round_limit=3,
+        target=PlaceTarget(channel=_LINE, writer=writer),
+    )
+
+    with pytest.raises(_SendRaisedError) as raised:
+        await phases._sent(working, "Booked.", effect_id="e1", round_id="round-1", place=None)
+
+    assert writer.taken == ["Booked."]
+    assert isinstance(raised.value.__context__, OSError)
+    sent = raised.value.sent
+    assert (sent.kind, sent.reason) == (CallOutcomeKind.UNKNOWN, _UNKNOWN_WRITE)
+    assert sent.delivered is not None
+    assert (sent.delivered.words, sent.delivered.went) == ("Booked.", _LINE)
+    assert sent.delivered.status is DeliveryStatus.UNKNOWN
+    (effect,) = await harness.plans.activation_effects(["activation"])
+    assert effect.outcome is ToolOutcome.INDETERMINATE
+    await harness.engine.aclose()
+
+
+def test_a_call_whose_sibling_raised_is_recorded_from_its_effect_record() -> None:
+    """ADR-0356 §8:6, ADR-0306 §6: where acting raised and handed back nothing, a call its
+    effect record says finished is recorded so; one with no record stays without one."""
+    from ai_assistant.orchestration.authorizer import (  # noqa: PLC0415
+        CallVerdict,
+        RoundAuthorization,
+        Verdict,
+    )
+
+    working = _working()
+    working.planned(_planned(_call("c1", "book"), _call("c2", "web_search")))
+    working.latest.authorization = RoundAuthorization(
+        activation_id="activation",
+        round_id="round-1",
+        verdicts=(
+            CallVerdict("c1", Verdict.ALLOWED, decision_id="d1", effect_id="e1"),
+            CallVerdict("c2", Verdict.ALLOWED, decision_id="d2"),
+        ),
+    )
+    working.latest.finished = {"e1": (ToolOutcome.SUCCEEDED, None)}
+
+    (booked,) = working.call_entries(_AT)
+    assert (booked.call_id, booked.outcome) == ("c1", CallOutcomeKind.DONE)
+    (searched,) = working.call_entries(_AT, freezing=True)
+    assert (searched.call_id, searched.outcome) == ("c2", None)
+
+
+async def test_a_text_call_naming_its_place_by_anything_but_one_label_sends_nothing() -> None:
+    """ADR-0356 §7:7: ``via`` names one place by its L label; a list of none is no place,
+    and never the input's by default."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", TEXT_CAPABILITY, words="Hello.", via=[]),)),
+        RoundResponse(),
+    )
+    harness = phases_harness(completer)
+
+    conversation, episode = await chat_turn(harness, "say hello")
+
+    said = [one.text for one in await written(harness, conversation)]
+    assert "Hello." not in said
+    entry = _entries(episode)["c1"]
+    assert (entry.outcome, entry.delivered) == (CallOutcomeKind.REFUSED, None)
+    assert entry.reason is not None
+    assert "one place" in entry.reason
+    await harness.engine.aclose()
+
+
+class _Watching(FakeToolCallingCompleter):
+    """Planning's model, reading the stored open episode as its second round is asked."""
+
+    def __init__(self, harness_of: list[Harness], *responses: RoundResponse) -> None:
+        super().__init__()
+        self._responses = list(responses)
+        self._harness_of = harness_of
+        self.stored: tuple[RecordedCall, ...] | None = None
+
+    async def respond(
+        self,
+        exchange: PlanningExchange,
+        tools: Sequence[OfferedTool],
+        *,
+        model: str | None = None,
+    ) -> RoundResponse:
+        if exchange.steps and self.stored is None:
+            (harness,) = self._harness_of
+            (opened,) = [
+                one
+                for one in await harness.memory.export()
+                if isinstance(one, EpisodicMemory)
+                and one.processing_record is not None
+                and one.processing_record.is_open
+            ]
+            assert opened.processing_record is not None
+            self.stored = opened.processing_record.call_records
+        await super().respond(exchange, tools, model=model)
+        return self._responses.pop(0)
+
+
+async def test_each_calls_entry_is_stored_before_the_next_rounds_request() -> None:
+    """ADR-0356 §8:6, §14:9: the open episode holds the last round's entries when the next
+    round is asked, not only at the freeze."""
+    holder: list[Harness] = []
+    completer = _Watching(
+        holder,
+        RoundResponse(calls=(_call("c1", TEXT_CAPABILITY, words="On it."), _call("c2", "nowhere"))),
+        RoundResponse(),
+    )
+    harness = phases_harness(completer)
+    holder.append(harness)
+
+    await chat_turn(harness, "do it")
+
+    assert completer.stored is not None
+    assert {one.call_id: one.outcome for one in completer.stored} == {
+        "c1": CallOutcomeKind.DONE,
+        "c2": CallOutcomeKind.REFUSED,
+    }
+    await harness.engine.aclose()

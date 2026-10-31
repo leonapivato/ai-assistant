@@ -621,6 +621,9 @@ rules (ADR-0306 §4:7, ADR-0292 §8:3). ``safe_to_repeat`` is set so the offer a
 and an accidental repeat's refusal is ADR-0357's (§10:1).
 """
 
+#: Why a ``text`` call naming no one place by one label runs nothing (ADR-0356 §7:7).
+_NOT_ONE_PLACE: Final = f"{VIA_ARGUMENT!r} names one place, by its L label"
+
 #: Why a ``text`` call that gave nothing to say runs nothing (ADR-0356 §4:6).
 _NO_WORDS: Final = f"{WORDS_ARGUMENT!r} is what the message says, and it said nothing"
 
@@ -643,6 +646,12 @@ _DELIVERY_STATUS: Final = {
     ToolOutcome.SUCCEEDED: DeliveryStatus.SENT,
     ToolOutcome.FAILED: DeliveryStatus.FAILED,
     ToolOutcome.INDETERMINATE: DeliveryStatus.UNKNOWN,
+}
+#: What a finished effect record's outcome is, as planning is shown a call's (ADR-0306 §6).
+_EFFECT_OUTCOMES: Final = {
+    ToolOutcome.SUCCEEDED: CallOutcomeKind.DONE,
+    ToolOutcome.FAILED: CallOutcomeKind.NOT_DONE,
+    ToolOutcome.INDETERMINATE: CallOutcomeKind.UNKNOWN,
 }
 _WRITE_OUTCOME: Final = {
     ToolOutcome.SUCCEEDED: CallOutcomeKind.DONE,
@@ -1650,6 +1659,9 @@ class _Round:
             back unwritten, by call id (ADR-0356 §7:8).
         effects: Whether each capability it was offered declared an effect, by name,
             as its calls' entries record it (ADR-0356 §8:3).
+        finished: Where acting raised and handed back no call's outcome, the outcome and
+            reason each of the round's finished effect records holds, by its id
+            (ADR-0306 §6), which its call's entry is made from.
     """
 
     planned: PlannedRound
@@ -1664,6 +1676,7 @@ class _Round:
     not_taken: bool = False
     sent: dict[str, _Sent] = field(default_factory=dict)
     effects: Mapping[str, bool] = field(default_factory=dict)
+    finished: Mapping[str, tuple[ToolOutcome, str | None]] = field(default_factory=dict)
 
     @property
     def has_messages(self) -> bool:
@@ -1698,6 +1711,18 @@ class _Sent:
     kind: CallOutcomeKind
     reason: str | None = None
     delivered: RecordedDelivery | None = None
+
+
+class _SendRaisedError(Exception):
+    """A ``text`` call's write raised, carrying what is known of it (ADR-0356 §8:4).
+
+    Raised from the writer's own error, which the stage ends on once its call's outcome
+    is held.
+    """
+
+    def __init__(self, sent: _Sent) -> None:
+        super().__init__("a text call's write raised")
+        self.sent = sent
 
 
 @dataclass
@@ -2218,7 +2243,9 @@ class PhaseWorking:
                     if verdict.decision_id is not None
                 }
             )
-            for outcome in call_outcomes(one.planned, one.authorization, one.acted, one.sent):
+            for outcome in call_outcomes(
+                one.planned, one.authorization, one.acted, one.sent, one.finished
+            ):
                 capability = names.get(outcome.call_id)
                 if outcome.result_id is not None:
                     capability = ran.get(outcome.result_id, capability)
@@ -2334,7 +2361,9 @@ class PhaseWorking:
             round_id = one.planned.round.id
             outcomes = {
                 outcome.call_id: outcome
-                for outcome in call_outcomes(one.planned, one.authorization, one.acted, one.sent)
+                for outcome in call_outcomes(
+                    one.planned, one.authorization, one.acted, one.sent, one.finished
+                )
             }
             # An approved action is proposed under its tool and runs as its capability.
             named = {planned.call.call_id: planned.call.name for planned in one.planned.calls}
@@ -2493,6 +2522,7 @@ def call_outcomes(
     authorization: RoundAuthorization | None,
     acted: ActedRound | None,
     sent: Mapping[str, _Sent] | None = None,
+    finished: Mapping[str, tuple[ToolOutcome, str | None]] | None = None,
 ) -> tuple[CallOutcome, ...]:
     """What came of one round's calls, as planning reads them, in the round's order.
 
@@ -2551,6 +2581,13 @@ def call_outcomes(
             continue
         one = None if verdict.decision_id is None else ran.get(verdict.decision_id)
         if one is None:
+            held = (finished or {}).get(verdict.effect_id or "")
+            if acted is None and held is not None and held[0] in _EFFECT_OUTCOMES:
+                # ADR-0356 §8:6: acting raised, and the call's effect record holds what
+                # came of it (ADR-0306 §6).
+                outcomes.append(
+                    CallOutcome(round_id, call_id, _EFFECT_OUTCOMES[held[0]], reason=held[1])
+                )
             continue
         if one.outcome is ActedOutcome.NEEDS_YOU:
             # ADR-0321 §5:5: a remember the writer asked about at write time needs you,
@@ -4762,7 +4799,10 @@ class PhasePath:
             if not isinstance(words, str) or not words.strip():
                 latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=_NO_WORDS)
                 continue
-            via = call.arguments.get(VIA_ARGUMENT)
+            via = call.arguments.get(VIA_ARGUMENT, None)
+            if VIA_ARGUMENT in call.arguments and not isinstance(via, str):
+                latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=_NOT_ONE_PLACE)
+                continue
             place = via if isinstance(via, str) else default
             messages.append(RoundMessage(words, place, call.call_id))
         return tuple(messages)
@@ -4825,6 +4865,17 @@ class PhasePath:
                 ran, wrote = await self._answered_first(given, working, latest, answering)
         finally:
             step.held.put_nowait(None)
+        await self._held_acted(working, latest, ran)
+        # ADR-0356 §8:6: what came of each call is known now, before any next round.
+        await self._entries(working)
+        for answer in (ran, wrote):
+            if isinstance(answer, BaseException):
+                raise answer
+
+    async def _held_acted(
+        self, working: PhaseWorking, latest: _Round, ran: ActedRound | BaseException
+    ) -> None:
+        """Hold what acting made of the round, or, where it raised, what its records hold."""
         if isinstance(ran, ActedRound):
             # Kept even where the message beside it failed: what acting ran happened.
             latest.acted = ran
@@ -4832,11 +4883,34 @@ class PhasePath:
             # store, and planning is shown them: obtained, so they place what follows
             # (ADR-0309 §5:10, ADR-0321 §5:5).
             working.supplied.obtained(record for one in ran.calls for record in one.replaces)
-        # ADR-0356 §8:6: what came of each call is known now, before any next round.
-        await self._entries(working)
-        for answer in (ran, wrote):
-            if isinstance(answer, BaseException):
-                raise answer
+        elif isinstance(ran, Exception):
+            # ADR-0356 §8:6: acting raised, so it handed back no call's outcome; a call
+            # claimed under an effect record still has its outcome there (ADR-0306 §6).
+            await self._finished_effects(working, latest)
+
+    async def _finished_effects(self, working: PhaseWorking, latest: _Round) -> None:
+        """Hold the outcome each of the round's effect records holds, where acting raised.
+
+        ADR-0356 §8:6, ADR-0306 §6: a call acting finished before a sibling raised has its
+        outcome on its effect record, which planning's entry for it is then made from. A
+        plan store that cannot be read leaves them unknown, as they are.
+        """
+        try:
+            recorded = await self._plans.activation_effects([working.activation_id])
+        except Exception as exc:  # the round's own error is the one the stage ends on
+            if is_defect(exc):
+                log_defect(
+                    "phase_effects_unread", exc, stage="acting", activation_id=working.activation_id
+                )
+            else:
+                _log.warning("phase_effects_unread", stage="acting", reason="store_failed")
+            return
+        round_id = latest.planned.round.id
+        latest.finished = {
+            one.id: (one.outcome, one.reason)
+            for one in recorded
+            if one.round == round_id and one.is_call and one.outcome is not None
+        }
 
     async def _answered_first(
         self,
@@ -4945,6 +5019,8 @@ class PhasePath:
         )
         if tidies:
             self._start_tidies(working, decided, tidies)
+            # ADR-0356 §8:6: a tidy-up that starts has its entry appended when it starts.
+            await self._entries(working)
         started = {one.call.decision.id for one in tidies}
         rest = tuple(one for one in decided.allowed if one.call.decision.id not in started)
         if not rest:
@@ -5122,11 +5198,12 @@ class PhasePath:
                     round_id=latest.planned.round.id,
                     place=one.place,
                 )
-            except Exception:
+            except _SendRaisedError as raised:
                 # The writer raised: whether it wrote is not known, and the stage ends
-                # on it, as on the round's own message.
-                latest.sent[call.call_id] = _Sent(CallOutcomeKind.UNKNOWN, reason=_UNKNOWN_WRITE)
-                raise
+                # on the writer's own error, as on the round's own message.
+                latest.sent[call.call_id] = raised.sent
+                cause = raised.__context__
+                raise cause if cause is not None else raised from None
 
     async def _digest(self, given: PhasePass) -> None:
         """Digest each result acting holds as it is held, until acting has ended (§3:3)."""
@@ -5406,9 +5483,33 @@ class PhasePath:
         holds the words the place took, or tried to, where they went and how. A call
         whose write never reached the place sent nothing, and holds no delivery.
         """
-        wrote = await self._written(
-            working, words, effect_id=effect_id, round_id=round_id, place=place
-        )
+        attempted: list[tuple[str, ChannelIdentity]] = []
+        try:
+            wrote = await self._written(
+                working,
+                words,
+                effect_id=effect_id,
+                round_id=round_id,
+                place=place,
+                attempted=attempted,
+            )
+        except Exception:
+            # ADR-0356 §8:4: where the send was attempted, what it tried to send and where
+            # are kept, its status unknown; the stage ends on the error, as on the round's
+            # own message.
+            tried = (
+                None
+                if not attempted
+                else RecordedDelivery(
+                    words=attempted[0][0],
+                    went=attempted[0][1],
+                    status=DeliveryStatus.UNKNOWN,
+                    reason=_UNKNOWN_WRITE,
+                )
+            )
+            raise _SendRaisedError(
+                _Sent(CallOutcomeKind.UNKNOWN, reason=_UNKNOWN_WRITE, delivered=tried)
+            ) from None
         if wrote is None:
             return _Sent(CallOutcomeKind.NOT_DONE, reason=_GONE)
         delivered, fitted, channel = wrote
@@ -5426,7 +5527,7 @@ class PhasePath:
             ),
         )
 
-    async def _written(
+    async def _written(  # noqa: PLR0913 — the message, its record, its place, and who is told it was tried
         self,
         working: PhaseWorking,
         text: str,
@@ -5434,8 +5535,12 @@ class PhasePath:
         effect_id: str,
         round_id: str | None,
         place: str | None = None,
+        attempted: list[tuple[str, ChannelIdentity]] | None = None,
     ) -> tuple[Delivery, str, ChannelIdentity] | None:
         """Claim, write and finish one message, and say what came of it and where.
+
+        ``attempted``, where given, is told the text and the place's channel just before
+        the place's writer is reached, so a caller whose write raised knows it was tried.
 
         Returns:
             What the place's writer said, the text it was handed, and the place's
@@ -5458,6 +5563,8 @@ class PhasePath:
         except ClaimStopped:
             _log.info("phase_message_unwritten", stage="acting", reason="stopped")
             return None
+        if attempted is not None:
+            attempted.append((fitted.text, target.channel))
         try:
             delivered = await target.writer.deliver(fitted, effect_id=effect_id)
         except Exception:
