@@ -9,18 +9,26 @@ cut to the composition root's bound, the cut carried.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import asyncio
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Final
 
-from test_phases_exchange import _AT, _call, _planned, _working
+import pytest
+from channel_receiver_contract import event_input
+from phases_support import chat_turn, phases_harness, processing
+from test_phases_exchange import _AT, _call, _entries, _lookup, _planned, _working
 from test_planning import _episode
 
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     ActionRequest,
     Attestation,
     CallShowed,
+    EpisodicMemory,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    RoundResponse,
     ShownRecord,
     ShownRecordKind,
     ToolCall,
@@ -29,11 +37,15 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.acting import ActedCall, ActedOutcome, AuthorizedCall, ResultRoute
 from ai_assistant.orchestration.authorizer import CallVerdict, RoundAuthorization, Verdict
 from ai_assistant.orchestration.lookups import READ_EPISODE, SEARCH_EPISODES, SEARCH_MEMORY
+from ai_assistant.orchestration.phase_path import PhasePath, PhaseWorking
 from ai_assistant.orchestration.planning import CallOutcomeKind, EpisodesFound, EpisodeShown
+from ai_assistant.testing import FakeToolCallingCompleter
 from ai_assistant.testing.memories import memory, said_support, sourced_support
 
 if TYPE_CHECKING:
-    from ai_assistant.orchestration.phase_path import PhaseWorking
+    from collections.abc import Mapping
+
+    from test_engine import Harness
 
 
 def _allowed(tool: ToolDefinition, decision: str, **parameters: Any) -> ToolCall:
@@ -145,8 +157,6 @@ def test_a_call_not_done_keeps_nothing_of_what_it_showed() -> None:
 def test_a_full_view_showing_a_marked_summary_is_outside_content_read() -> None:
     """§6:4, ADR-0303 §3:6: a marked summary the full view shows is counted as read."""
     from ai_assistant.core.episode_encoding import project_episode  # noqa: PLC0415
-    from ai_assistant.orchestration.acting import ActedRound  # noqa: PLC0415
-    from ai_assistant.orchestration.phase_path import PhasePath  # noqa: PLC0415
     from ai_assistant.orchestration.planning import EpisodeRead, MatterShown  # noqa: PLC0415
 
     working = _acted(READ_EPISODE, output={"looked_up": "read_episode"}, episode="activation:one")
@@ -162,7 +172,7 @@ def test_a_full_view_showing_a_marked_summary_is_outside_content_read() -> None:
     )
     handed = tuple(working.latest.handed.values())
 
-    PhasePath._looked(working, ActedRound(round_id="round-1", calls=handed), {"d1": read})
+    PhasePath._looked(working, handed, {"d1": read})
 
     assert working.read_outside_content
     assert "story:venue" in working.fetched_outside_from
@@ -172,8 +182,6 @@ def test_a_marked_summary_only_another_page_shows_is_not_read_on_this_one() -> N
     """§6:4: what the page shows is counted, and a story only a later page names is not."""
     from test_planning_episode_lookups import _full_record, _read  # noqa: PLC0415
 
-    from ai_assistant.orchestration.acting import ActedRound  # noqa: PLC0415
-    from ai_assistant.orchestration.phase_path import PhasePath  # noqa: PLC0415
     from ai_assistant.orchestration.planning import MatterShown  # noqa: PLC0415
 
     marked = MatterShown(
@@ -186,6 +194,127 @@ def test_a_marked_summary_only_another_page_shows_is_not_read_on_this_one() -> N
         read = _read(_full_record(), page_size=1, page=page, stories={"story:dentist": marked})
         handed = tuple(working.latest.handed.values())
 
-        PhasePath._looked(working, ActedRound(round_id="round-1", calls=handed), {"d1": read})
+        PhasePath._looked(working, handed, {"d1": read})
 
         assert ("story:dentist" in working.fetched_outside_from) is read_outside
+
+
+# --- review round 7: a done look-up keeps what it showed where acting raised ----------
+
+#: What a search for "dentist" over :func:`_seeded`'s store showed.
+_FOUND: Final = CallShowed(
+    parts=(ShownRecord(kind=ShownRecordKind.EPISODE, id="activation:dentist"),)
+)
+
+
+async def _seeded(harness: Harness) -> None:
+    """A past episode an episode search for "dentist" finds, stored in the harness."""
+    record = _episode("activation:dentist").model_copy(
+        update={"content": "the dentist moved the cleaning"}
+    )
+    await harness.memory.add(record)
+
+
+async def test_an_episode_search_beside_a_sibling_that_raised_keeps_what_it_showed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§11:2, ADR-0356 §8:6: a done episode search keeps the episodes it read, though the
+    plan store failing to finish its sibling's record made acting raise."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "search_episodes", query="dentist"),
+                _call("c2", "once", place="Hillside"),
+            )
+        )
+    )
+    harness = phases_harness(
+        completer,
+        tools=(_lookup("once"),),
+        phases={"capabilities": ("once",), "look_ups": True, "episode_look_ups": True},
+    )
+    await _seeded(harness)
+    finish = harness.plans.finish_activation_effect
+    failed: list[str] = []
+
+    async def first_unfinished(effect_id: str, *args: Any, **kwargs: Any) -> None:
+        if not failed:
+            failed.append(effect_id)
+            msg = "the plan store is down"
+            raise PlanningError(msg)
+        await finish(effect_id, *args, **kwargs)
+
+    monkeypatch.setattr(harness.plans, "finish_activation_effect", first_unfinished)
+
+    _, episode = await chat_turn(harness, "what did the dentist say")
+
+    assert failed, "the sibling's record was the one left unfinished"
+    entries = _entries(episode)
+    assert entries["c1"].outcome is CallOutcomeKind.DONE
+    assert entries["c1"].showed == _FOUND
+    assert entries["c2"].outcome is None
+    await harness.engine.aclose()
+
+
+async def test_an_episode_search_finished_before_the_round_was_cancelled_keeps_it() -> None:
+    """§11:2, ADR-0356 §8:6: a done episode search keeps the episodes it read, though the
+    round was cancelled before acting handed the round back."""
+    entered = asyncio.Event()
+
+    async def handler(parameters: Mapping[str, object], *, idempotency_key: str | None) -> None:
+        del parameters, idempotency_key
+        entered.set()
+        await asyncio.Event().wait()  # until the round is cancelled
+
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "search_episodes", query="dentist"),
+                _call("c2", "lookup", place="Hillside"),
+            )
+        )
+    )
+    # An event's input is outside content, so the read stays on the hub to be allowed.
+    harness = phases_harness(
+        completer,
+        tools=(_lookup("lookup", leaves_hub=False),),
+        tool_handler=handler,
+        phases={"capabilities": ("lookup",), "look_ups": True, "episode_look_ups": True},
+    )
+    await _seeded(harness)
+    task = asyncio.ensure_future(
+        harness.engine.receive(event_input(), reply=None, timeout=timedelta(seconds=30))
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+
+    def searched() -> bool:
+        # The round as the phases hold it: the search has come back to acting.
+        (running,) = [one.state for one in harness.engine._running if one.state is not None]
+        phases = getattr(running.working, "phases", None)
+        assert isinstance(phases, PhaseWorking)
+        return any(
+            str(one.call.call.request.tool.capability) == "search_episodes"
+            for one in phases.latest.handed.values()
+        )
+
+    for _ in range(200):
+        if searched():
+            break
+        await asyncio.sleep(0)
+    assert searched(), "the search came back to acting before the round was cancelled"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    (episode,) = [
+        one
+        for one in await harness.memory.export()
+        if isinstance(one, EpisodicMemory) and one.id != "activation:dentist"
+    ]
+    assert not processing(episode).is_open
+    entries = _entries(episode)
+    assert entries["c1"].outcome is CallOutcomeKind.DONE
+    assert entries["c1"].showed == _FOUND
+    assert entries["c2"].outcome is None
+    await harness.engine.aclose()

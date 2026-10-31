@@ -131,6 +131,7 @@ from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
+from ai_assistant.orchestration.episode_lookups import EpisodeLookUpReads
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
@@ -357,6 +358,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     tidy_up: Callable[[Harness], StoryTidyUp] | None = None,
     story_calls: bool = False,
     look_ups: bool = False,
+    episode_look_ups: bool = False,
     diagnostics: FakeDiagnosticSink | None = None,
     path: type[PhasePath] = PhasePath,
     authorizing: type[AuthorizingStage] = AuthorizingStage,
@@ -368,7 +370,9 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     planning's story calls too, over that store and the harness's memory store, with
     the tidy-up ``tidy_up`` builds, as the composition root wires them (ADR-0300 §10).
     ``look_ups`` offers planning's look-ups (ADR-0307 §6:6), over the harness's memory
-    store and the story views' reads, as the composition root wires them. ``path`` and
+    store and the story views' reads, as the composition root wires them, and with
+    ``episode_look_ups`` the episode look-ups too (ADR-0358 §7-§10), over the harness's
+    memory, story and conversation stores, every score kept. ``path`` and
     ``authorizing`` are the classes built, which a case may vary.
     """
 
@@ -395,7 +399,26 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 episodes=3,
             )
         )
-        looking = LookUps(memory=harness.memory, views=reads, search_limit=5) if look_ups else None
+        episode_reads = (
+            EpisodeLookUpReads(
+                memory=harness.memory,
+                stories=stories,
+                conversations=harness.conversation_store,
+                threshold=0.0,
+                limit=6,
+                search_page=3,
+                history_page=10,
+                full_page=20,
+                excerpt_chars=500,
+            )
+            if episode_look_ups
+            else None
+        )
+        looking = (
+            LookUps(memory=harness.memory, views=reads, search_limit=5, episodes=episode_reads)
+            if look_ups
+            else None
+        )
         tools = PhaseTools(
             registry=harness.invoker,
             invoker=harness.invoker,

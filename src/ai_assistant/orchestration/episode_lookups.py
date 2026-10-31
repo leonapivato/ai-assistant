@@ -68,6 +68,7 @@ from ai_assistant.orchestration.story_privacy import SummaryVisibility, activati
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
+    from datetime import datetime
 
     from ai_assistant.core.protocols import ConversationStore, MemoryStore, StoryStore
     from ai_assistant.core.types import (
@@ -106,6 +107,9 @@ class OlderSource:
             reply named included, which the older history does not show again.
         channel: The channel and place whose recent episodes the window was read from.
         episodes: The ids of the episodes that window showed items of.
+        started: When the activation started, which bounds a channel's older history
+            where its window showed no episode: one that started at or after it came
+            after the window was read. ``None`` where it is not known.
 
     Raises:
         ValueError: If neither source is set, or both are.
@@ -116,6 +120,7 @@ class OlderSource:
     shown: frozenset[int] = frozenset()
     channel: ChannelIdentity | None = None
     episodes: frozenset[str] = frozenset()
+    started: datetime | None = None
 
     def __post_init__(self) -> None:
         """One source, a conversation or a channel's episodes."""
@@ -323,7 +328,10 @@ class EpisodeLookUpReads:
         The channel's tail is read, growing until it reaches the oldest episode the
         window showed or the whole channel, as ``MemoryStore.channel_episodes`` reads
         only from the tail or forward; past the largest page it reads, the older history
-        cannot be read here (§9:4).
+        cannot be read here (§9:4). Where the window showed episodes and none is on the
+        channel now, gone or expired, nothing marks where the older history ends, so it
+        cannot be read here either; where it showed none, an episode is older only where
+        it started before this activation did, and without that start none is known older.
 
         Raises:
             MemoryStoreError: If the store cannot be read.
@@ -355,8 +363,14 @@ class EpisodeLookUpReads:
             ):
                 break
             limit = min(_CHANNEL_PAGE_MAX, limit * 2)
-        if first is None and not whole:
+        if first is None and (not whole or source.episodes or source.started is None):
             return OlderHistory(readable=False, page=page)
+        if first is None:
+            # The window showed no episode: whatever started since this activation did
+            # came after it was read, so it is not older (§9:1).
+            started = source.started
+            assert started is not None  # noqa: S101 — checked just above
+            records = [one for one in records if _started(one) < started]
         # Older episodes are left unread where the read stopped short of the channel's
         # start: the store's tail read reaches no further back (§9:4).
         truncated = len(entries) < read.total
@@ -437,6 +451,12 @@ class EpisodeLookUpReads:
         held = await self._memory.get_many(wanted)
         admitted = admitted_to_understanding(audience, [held[one] for one in wanted if one in held])
         return {one.id: one for one in admitted}
+
+
+def _started(record: EpisodicMemory) -> datetime:
+    """When ``record``'s activation started, or, with no processing record, it occurred."""
+    processing = record.processing_record
+    return record.occurred_at if processing is None else processing.started_at
 
 
 def _named(projection: EpisodeProjection) -> tuple[ShownRecord, ...]:
