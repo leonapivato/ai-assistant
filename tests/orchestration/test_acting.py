@@ -585,6 +585,87 @@ async def test_a_sibling_that_raises_does_not_abandon_a_claimed_call() -> None:
     assert record.outcome is ToolOutcome.SUCCEEDED
 
 
+async def test_each_call_is_handed_back_as_it_finishes_where_a_sibling_raises() -> None:
+    """ADR-0356 §8:6 (#3539): a call with no effect record that finished is handed back
+    with what came of it, its route included, though its sibling made acting raise."""
+    plans = FakePlanStore(now=_now)
+
+    def answer(call: ToolCall) -> ToolResult:
+        if call.request.tool.id == "book":
+            msg = "unexpected"
+            raise RuntimeError(msg)
+        return ToolResult(outcome=ToolOutcome.SUCCEEDED, output="page")
+
+    handed: list[ActedCall] = []
+    with pytest.raises(RuntimeError, match="unexpected"):
+        await _stage(plans, _Invoker(answer)).act(
+            held=HeldResults(),
+            authorized=_round(
+                _authorized("lookup"), _authorized("book", decision="d2", effect="e1")
+            ),
+            on_acted=handed.append,
+        )
+
+    (looked,) = handed
+    assert looked.call.call.decision.id == "d1"
+    assert (looked.outcome, looked.route) == (ActedOutcome.DONE, ResultRoute.DIGEST)
+
+
+async def test_a_call_finished_before_a_cancellation_is_handed_back_once() -> None:
+    """ADR-0356 §8:6 (#3539): a cancelled round still hands back each call that finished,
+    and a call on the assistant's own records, awaited to its end through the
+    cancellation, from inside that wait; each once."""
+    plans = FakePlanStore(now=_now)
+    invoker = _Invoker(lambda _: ToolResult(outcome=ToolOutcome.SUCCEEDED, output="page"))
+    own = _OwnRecords()
+    own.release = asyncio.Event()
+    handed: list[ActedCall] = []
+    task = asyncio.ensure_future(
+        _stage(plans, invoker, own).act(
+            held=HeldResults(),
+            authorized=_round(
+                _authorized("lookup"), _authorized("remember", decision="d2", effect="e1")
+            ),
+            on_acted=handed.append,
+        )
+    )
+    await own.entered.wait()
+    for _ in range(10):
+        if handed:
+            break
+        await asyncio.sleep(0)
+    assert [one.call.call.decision.id for one in handed] == ["d1"]
+
+    task.cancel()
+    await asyncio.sleep(0)
+    own.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [(one.call.call.decision.id, one.outcome) for one in handed] == [
+        ("d1", ActedOutcome.DONE),
+        ("d2", ActedOutcome.DONE),
+    ]
+
+
+async def test_each_call_is_handed_back_once_on_a_round_that_returns() -> None:
+    """Every call, the drained one included, is handed back once, beside the round."""
+    plans = FakePlanStore(now=_now)
+    handed: list[ActedCall] = []
+
+    acted = await _stage(plans).act(
+        held=HeldResults(),
+        authorized=_round(
+            _authorized("lookup"), _authorized("remember", decision="d2", effect="e1")
+        ),
+        on_acted=handed.append,
+    )
+
+    assert sorted(one.call.call.decision.id for one in handed) == ["d1", "d2"]
+    by_decision = {one.call.call.decision.id: one for one in acted.calls}
+    assert all(one is by_decision[one.call.call.decision.id] for one in handed)
+
+
 # --- holding results (ADR-0308 §6) ------------------------------------------------
 
 
