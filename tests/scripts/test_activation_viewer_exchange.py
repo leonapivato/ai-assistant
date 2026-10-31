@@ -142,9 +142,12 @@ _ENTRIES: Final[list[tuple[DiagnosticSource, DiagnosticKind, int, dict[str, Any]
 ]
 
 
-async def _write(directory: Path) -> None:
+async def _write(
+    directory: Path,
+    entries: list[tuple[DiagnosticSource, DiagnosticKind, int, dict[str, Any]]] = _ENTRIES,
+) -> None:
     store = FileDiagnosticRecord(directory=directory, file_bytes=8 * 1024 * 1024)
-    for source, kind, ms, body in _ENTRIES:
+    for source, kind, ms, body in entries:
         await store.write(
             DiagnosticEntry(
                 activation_id=_ID, source=source, kind=kind, recorded_at=at(ms), body=body
@@ -152,15 +155,22 @@ async def _write(directory: Path) -> None:
         )
 
 
-@pytest.fixture
-def lines(tmp_path: Path) -> list[Any]:
+def _read(
+    tmp_path: Path,
+    entries: list[tuple[DiagnosticSource, DiagnosticKind, int, dict[str, Any]]] = _ENTRIES,
+) -> list[Any]:
     directory = tmp_path / "data" / "diagnostics"
     directory.mkdir(parents=True)
-    asyncio.run(_write(directory))
+    asyncio.run(_write(directory, entries))
     read = viewer.Record(directory.parent).lines(_ID)
     assert read is not None
     held: list[Any] = read[0]
     return held
+
+
+@pytest.fixture
+def lines(tmp_path: Path) -> list[Any]:
+    return _read(tmp_path)
 
 
 def _planning(walked: dict[str, Any]) -> list[dict[str, Any]]:
@@ -241,3 +251,33 @@ def test_a_call_named_as_the_retired_round_tool_is_a_call_like_any_other(
     ]
     # A round recorded before reads the reserved tool as it was written.
     assert viewer._proposed(alone)["notes"] == "an argument, not notes"
+
+
+def test_a_round_whose_request_is_missing_is_read_by_its_activations(tmp_path: Path) -> None:
+    """ADR-0314 §2:4: an entry may be lost. Round 2's request lost, round 1's shows the
+    activation's rounds were asked as an exchange, so round 2 is read as one: its text is
+    its notes, and its call named ``planning_round`` stays a call."""
+    lost = [one for one in _ENTRIES if not (one[1] is DiagnosticKind.GIVEN and one[2] == 1170)]
+    read = _read(tmp_path, lost)
+
+    _, second = _planning(viewer.walk(read))
+    assert (second["exchange"], second["request"]) == (True, False)
+    assert (second["notes"], second["message"]) == (_NOTES_2, "")
+    assert [one["name"] for one in second["calls"]] == ["text", "planning_round"]
+    timeline = viewer.timeline(_ID, read)["rounds"][-1]
+    assert (timeline["exchange"], timeline["marked"]) == (True, False)
+    assert [one["name"] for one in timeline["calls"]] == ["text", "planning_round"]
+
+
+def test_a_round_no_request_of_its_activation_shows_is_read_as_neither(tmp_path: Path) -> None:
+    """With no request recorded at all, whether a round's text was its message or its
+    notes is not known: it is read as neither, and no tool name is reserved."""
+    alone = [one for one in _ENTRIES if one[1] is not DiagnosticKind.GIVEN]
+    read = _read(tmp_path, alone)
+
+    first, second = _planning(viewer.walk(read))
+    assert (first["exchange"], first["request"]) == (None, False)
+    assert (first["message"], first["notes"], first["text_unread"]) == ("", None, _NOTES_1)
+    assert [one["name"] for one in second["calls"]] == ["text", "planning_round"]
+    assert second["another_round"] is False
+    assert viewer.timeline(_ID, read)["rounds"][0]["exchange"] is None
