@@ -13,7 +13,7 @@ import json
 from datetime import timedelta
 from typing import Any
 
-from test_planning import _AT, _earlier, _episode, _inputs, _remembered, _sent, _stage
+from test_planning import _AT, _TOOLS, _earlier, _episode, _inputs, _remembered, _sent, _stage
 from test_planning_stories import _story
 
 from ai_assistant.core.episode_encoding import project_episode
@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     ShownRecordKind,
     ShownText,
 )
+from ai_assistant.orchestration.lookups import LOOK_UP_LABEL_ARGUMENTS, READ_STORY, SEARCH_EPISODES
 from ai_assistant.orchestration.planning import (
     CallOutcome,
     CallOutcomeKind,
@@ -436,3 +437,33 @@ def test_a_full_views_page_keeps_the_episode_and_each_record_shown_again() -> No
             ShownRecord(kind=ShownRecordKind.MEMORY, id="said"),
         )
     )
+
+
+# --- §8:2: a story read reads any story planning holds a label for ---------------------------
+
+
+async def test_a_story_read_names_a_matter_an_episode_search_showed() -> None:
+    """§8:2: a matter planning was not shown, named by a search's result, reads by its label.
+
+    Planning's check maps any S label it holds to the story's id, whichever result gave it.
+    """
+    earlier, _ = _looked("search_episodes", query="dentist")
+    matter = MatterShown(story_id="story:dentist", summary_version=1, first_line="The dentist.")
+    found = EpisodesFound(
+        episodes=(EpisodeShown(record=_episode("activation:one"), matters=(matter,)),)
+    )
+    outcome = CallOutcome(earlier.id, "c1", CallOutcomeKind.DONE, result_id="r:1", episodes=found)
+    read = ProposedCall(call_id="c2", name="read_story", arguments={"story": "S1"})
+    stage, _, _ = _stage(RoundResponse(calls=(read,)))
+
+    planned = await stage.plan(
+        _inputs(
+            rounds=(earlier,),
+            outcomes=(outcome,),
+            capabilities=(*_TOOLS, READ_STORY, SEARCH_EPISODES),
+            label_arguments=LOOK_UP_LABEL_ARGUMENTS,
+        )
+    )
+
+    (call,) = planned.calls
+    assert call.call.arguments["story"] == "story:dentist"
