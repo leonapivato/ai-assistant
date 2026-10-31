@@ -207,7 +207,7 @@ async def test_an_offer_the_briefing_showed_is_no_news() -> None:
 async def test_a_message_calls_result_says_what_it_sent_where_and_how() -> None:
     """§8:4: a ``text`` call's result holds its delivered words, where they went and how."""
     stage, completer, _ = _stage(
-        RoundResponse(calls=(_call("c1", "text", words="Booked."),)), RoundResponse()
+        RoundResponse(calls=(_call("c1", "text", to="the user", words="Booked."),)), RoundResponse()
     )
     inputs = _inputs()
     planned = await stage.plan(inputs)
@@ -224,7 +224,12 @@ async def test_a_message_calls_result_says_what_it_sent_where_and_how() -> None:
     (sent,) = reported(completer.calls[1], 0)
     assert sent == {
         "outcome": "done",
-        "delivered": {"words": "Booked.", "went": "conversation:chat-1", "how": "sent"},
+        "delivered": {
+            "words": "Booked.",
+            "went": "conversation:chat-1",
+            "by": "the hub chat",
+            "how": "sent",
+        },
     }
 
 

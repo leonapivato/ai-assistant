@@ -1,4 +1,14 @@
-"""The first egress integration: declared in full, and registered where it is configured.
+"""The first egress integration, ``email``: declared in full, registered where configured.
+
+**It is the message tool for an email** (ADR-0357 §2:5): today's ``send_email``, renamed
+``email`` and reshaped. Its arguments are ``to``, the recipients, ``subject`` and
+``words``, required; and ``cc``, ``bcc``, ``attachments``, ``from`` and ``exact``,
+optional. ``from`` names whose address it is sent from, the assistant's or the user's
+(§2:9), and selects nothing at this seam: one tool is registered per connected account
+(ADR-0148 §6), and the one account this build connects is the user's own, so
+authorizing's gate lets through only an email ``from`` the user, on their yes (§2:10).
+``exact`` is the wording step's (§4:2) and ``attachments`` the email tool's (§2:8); none of
+the three is transmitted, and the transport refuses an attachment it cannot send.
 
 **This tool transmits.** ADR-0154 §1 designates ``ai_assistant.tools.egress`` and
 §4 attests every one of ADR-0017 §3's fourteen conditions in code; ADR-0155
@@ -21,8 +31,8 @@ ordinary consequence of an owner-directed send under §2. On §3: this module's
 execution path introduces no covered content into any span, because it reads no
 store, calls no model and composes no value (ADR-0155 §6's fourth clause states
 the same for the same tool). The declared arguments through which a store value
-*could* reach a payload are all five below — ``to``, ``cc``, ``bcc``, ``subject``
-and ``body`` — and what keeps one out today is a rule binding whatever composes
+*could* reach a payload are the five below it transmits — ``to``, ``cc``, ``bcc``,
+``subject`` and ``words`` — and what keeps one out today is a rule binding whatever composes
 them rather than a mechanism: ADR-0155 §4 names that absence and files it as
 **#1154**.
 
@@ -40,7 +50,7 @@ set of machinery:
   binding it to a specific connected account, which is
   :class:`~ai_assistant.tools.egress_binder.EgressRegistration`'s job and not this
   module's. So this module still registers nothing itself, and
-  :data:`SEND_EMAIL_ID` still names an operation rather than an account.
+  :data:`EMAIL_ID` still names an operation rather than an account.
 - **declares its destination-bearing arguments** — in ADR-0152 §3's
   ``x-egress-destination``, on the schema below.
 - **declares what each field establishes** — in ADR-0152 §3's ``x-egress-tier``,
@@ -50,8 +60,9 @@ set of machinery:
   integration that speaks it, not for this one, and which the binding seam calls
   rather than this module.
 - **resolves names as first-class gated calls** — ADR-0148 §5. Nothing here
-  resolves anything: the arguments carry addresses, and an argument that is not
-  an address is refused rather than looked up.
+  resolves anything: a recipient that is not an address is a person, whom authorizing
+  resolves only from a source ADR-0148 §5:2 allows, before the ruling (ADR-0357 §2:7),
+  and none is wired, so it comes back rather than being looked up.
 
 **Two keywords rather than five declared facts is ADR-0152 §3's result, not a
 simplification of it.** This module used to carry a ``DestinationDeclaration``
@@ -102,8 +113,13 @@ if TYPE_CHECKING:
 #: The id this declaration would be registered under, once an account exists to
 #: bind it to. One tool per connected account (ADR-0148 §6) means a registered id
 #: names the account as well as the operation; this bare form names neither and is
-#: why the constant is a template rather than a registration.
-SEND_EMAIL_ID: Final = "send_email"
+#: why the constant is a template rather than a registration. It is also the capability,
+#: ``email`` (ADR-0357 §2:5).
+EMAIL_ID: Final = "email"
+
+#: The two addresses ``from`` names (ADR-0357 §2:9): the assistant's own, or the user's.
+FROM_ASSISTANT: Final = "assistant"
+FROM_USER: Final = "user"
 
 
 def _recipients(*, minimum: int | None = None) -> dict[str, FrozenJson]:
@@ -158,10 +174,13 @@ def _recipients(*, minimum: int | None = None) -> dict[str, FrozenJson]:
     }
 
 
-SEND_EMAIL: Final = ToolDefinition(
-    id=SEND_EMAIL_ID,
-    capability="send_email",
-    description="Send an email from a connected account to the named recipients.",
+EMAIL: Final = ToolDefinition(
+    id=EMAIL_ID,
+    capability=EMAIL_ID,
+    description=(
+        "Send an email to the recipients, each a person as you were shown them or an "
+        "address, from the assistant's address or the user's, as from says."
+    ),
     risk_level=RiskLevel.HIGH,
     reversibility=Reversibility.IRREVERSIBLE,
     side_effecting=True,
@@ -183,9 +202,23 @@ SEND_EMAIL: Final = ToolDefinition(
             "cc": _recipients(),
             "bcc": _recipients(),
             "subject": {"type": "string"},
-            "body": {"type": "string"},
+            "words": {"type": "string", "description": "What the email says."},
+            "attachments": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Things you were shown to attach, each by how you were shown it.",
+            },
+            "from": {
+                "type": "string",
+                "enum": [FROM_ASSISTANT, FROM_USER],
+                "description": (
+                    "Whose address it is sent from: the assistant's, or the user's, which "
+                    "needs their yes."
+                ),
+            },
+            "exact": {"type": "boolean", "description": "Send the words exactly as written."},
         },
-        "required": ["to", "subject", "body"],
+        "required": ["to", "subject", "words"],
         "additionalProperties": False,
     },
 )
@@ -250,12 +283,12 @@ wire.
 
 **It also carries the whole egress declaration** (ADR-0152 §3). ``to``, ``cc`` and
 ``bcc`` each declare ``x-egress-destination: "smtp"`` and
-``x-egress-tier: "personal"``; ``subject`` and ``body`` declare neither, and the
-absence is the statement rather than an omission:
+``x-egress-tier: "personal"``; ``subject``, ``words``, ``attachments``, ``from`` and
+``exact`` declare neither, and the absence is the statement rather than an omission:
 
 - **Destination-bearing.** All three select recipients, and nothing else does. No
-  semantic recipient of this call is determined from a subject or a body, and an
-  address appearing inside a body selects nobody — which is why the *declaration*
+  semantic recipient of this call is determined from a subject or its words, and an
+  address appearing inside the words selects nobody — which is why the *declaration*
   is read rather than the values. ``bcc`` is marked like the other two on purpose:
   a blind copy is a recipient, and omitting it would be the mis-declaration
   ADR-0148 §2's third clause names, "a defect in the same class as a mis-declared
@@ -266,7 +299,9 @@ absence is the statement rather than an omission:
   recipient list passes, so ``PERSONAL`` is stated; ``subject`` and ``body`` fail
   it, carrying "arbitrary text the user supplied … however well the implementation
   knows what that field is for", which is §5's round-4 repair over this exact pair
-  of fields. Stating a tier for them would assert a fact nobody established.
+  of fields (the body, renamed ``words`` by ADR-0357 §2:5). Stating a tier for them
+  would assert a fact nobody established. ``from``, ``exact`` and ``attachments`` are
+  never transmitted.
 
 Both keywords are unknown to draft 2020-12, which treats an unrecognised keyword
 as an annotation — so this schema validates exactly as the same schema without
@@ -395,8 +430,10 @@ class SendEmail:
 
 
 __all__ = [
-    "SEND_EMAIL",
-    "SEND_EMAIL_ID",
+    "EMAIL",
+    "EMAIL_ID",
+    "FROM_ASSISTANT",
+    "FROM_USER",
     "BoundTransport",
     "SendEmail",
 ]

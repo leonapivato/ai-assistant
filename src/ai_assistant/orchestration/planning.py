@@ -105,8 +105,13 @@ stop naming work the round does not wait on is refused (ADR-0356 §4:4-§4:5).
 
 **Asking** (ADR-0321 §2). A call that came back needing the user's yes is shown with a
 reference and its exact line, written by :func:`exact_line` for every capability alike.
-No part of a response names the calls a message asks about (ADR-0356 §7:5), so a round
-records no asked call: where the calls are named is ADR-0357's, on its message call.
+No part of a response names the calls a message asks about (ADR-0356 §7:5): the round's
+asking message is its first ``text`` call carrying ``asks`` (ADR-0357 §8:1, §8:3), which
+names them by those references. A name that resolves to no such call is dropped (§8:5).
+For each call it asks about, code renders one exact line, and the round records the call
+in its ``asked``, its part the line's number (ADR-0321 §2:6, §2:8); the lines go out to
+the phases on :attr:`PlannedRound.questions`, which append them after any rewording
+(ADR-0357 §8:2). A second ``text`` call carrying ``asks`` is refused (§8:3).
 
 **Approved actions** (§4:2). The actions the activation's yes approved are shown under A
 labels and proposed through :data:`APPROVED_ACTION_TOOL` by label alone. The judge fills
@@ -202,6 +207,12 @@ from ai_assistant.orchestration.matters import (
     STOP_ACTIVATION_CAPABILITY,
     NotAsAsked,
 )
+from ai_assistant.orchestration.message_tools import (
+    NEEDS_YOUR_YES,
+    asks_named,
+    carries_asks,
+    platform_name,
+)
 from ai_assistant.orchestration.person_block import person_zone
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY
 from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
@@ -253,6 +264,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "ALREADY_ASKING",
     "APPROVED_ACTION_ARGUMENT",
     "APPROVED_ACTION_TOOL",
     "DELIBERATE_REPEAT",
@@ -1032,6 +1044,10 @@ class PlannedRound:
             and hand the next round (ADR-0356 §5); ``None`` only where none was built.
         read_outside: Whether the work had read outside content when this round was
             asked, which marks each of its calls' entries (ADR-0356 §8:7).
+        questions: The exact lines the round's asking ``text`` call carries, by its call
+            id: one per call its ``asks`` named that the round records as asked, in their
+            parts' order (ADR-0357 §8:2, ADR-0321 §2:5-§2:6); empty where the round asks
+            about nothing.
     """
 
     round: PlanningRound
@@ -1042,6 +1058,7 @@ class PlannedRound:
     message: str | None = None
     work: PlanningWork | None = None
     read_outside: bool = False
+    questions: Mapping[str, str] = field(default_factory=dict)
 
 
 class RoundRecorder(Protocol):
@@ -1053,13 +1070,20 @@ class RoundRecorder(Protocol):
     """
 
     async def record(
-        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+        self,
+        planning_round: PlanningRound,
+        labels: tuple[PlanningLabel, ...],
+        *,
+        questions: Mapping[str, str] | None = None,
     ) -> None:
         """Append ``planning_round`` and ``labels`` to the activation's open episode.
 
         Args:
             planning_round: The round, following the last one recorded.
             labels: The labels it assigned, after those already recorded.
+            questions: The exact lines its asking ``text`` call carries, by call id, as
+                :attr:`PlannedRound.questions` holds them, so the recorder can tell
+                whether the question would be shown whole (ADR-0321 §4:4).
         """
         ...
 
@@ -1209,7 +1233,7 @@ class _LabelBook:
 #: The owner's ruling on #3094 (2026-10-16): the one fixed line code puts above the exact
 #: lines it appends to a round's message, so a question never goes out as a bare line. The
 #: template names it, as the line planning never writes itself.
-_NEEDS_YOUR_YES: Final = "Needs your yes:"
+_NEEDS_YOUR_YES: Final = NEEDS_YOUR_YES
 
 #: Planning's instruction, the system message of every round (ADR-0334 §2): a template the
 #: composition root reads at start and hands the stage, default or override. The module
@@ -2802,7 +2826,9 @@ class _Request:
     def _delivered(self, delivered: RecordedDelivery | None) -> dict[str, object]:
         """What a message call sent, where it went and how (ADR-0356 §8:4), or nothing.
 
-        Where it went is named by its place label where planning holds one.
+        ADR-0357 §3:1: the text delivered, after any rewording and with any exact lines;
+        where it went, the place by its place label where planning holds one, and the
+        platform beside it; and how it went, with the reason for a failure or an unknown.
         """
         if delivered is None:
             return {}
@@ -2810,6 +2836,7 @@ class _Request:
         shown: dict[str, object] = {
             "words": delivered.words,
             "went": self._book.held(LabelKind.PLACE, place) or place,
+            "by": platform_name(delivered.went.channel_type),
             "how": delivered.status.value,
         }
         if delivered.reason is not None:
@@ -3287,6 +3314,83 @@ def _shown_replaced(replaces: Sequence[Memory]) -> tuple[Memory, ...]:
     return tuple(kept.values())
 
 
+@dataclass(frozen=True, slots=True)
+class _Asked:
+    """One call a round's asking message asks about, and what its question shows beside it.
+
+    ``replacing`` is the assertions it replaces; ``worded`` the wording an argument
+    naming a memory is shown by (ADR-0338 §8:6).
+    """
+
+    call: AskedCall
+    replacing: tuple[str, ...] = ()
+    worded: tuple[tuple[str, str], ...] = ()
+
+
+def _asked_calls(names: Sequence[str], askable: Mapping[str, CallOutcome]) -> tuple[_Asked, ...]:
+    """The calls the round's asking message asks about, from the references it named.
+
+    ADR-0357 §8:1, §8:5. In the order named, each part its place in that order (ADR-0321
+    §2:6). A name that resolves to no call this round may ask about is dropped, and so is
+    one naming the same call, by tool, values and binding, as a name before it: the
+    question shows a call once. A call whose values and binding make no request its
+    declaration admits cannot be recorded as asked about (§2:8), and is dropped as well.
+    A remember's replaced assertions are recorded by id and shown by statement, exactly
+    the same ones (§5:5), which are those :func:`_shown_replaced` keeps.
+    """
+    chosen: list[tuple[ActionRequest, CallOutcome]] = []
+    for name in names:
+        outcome = askable.get(name.strip())
+        request = None if outcome is None else outcome.request
+        if outcome is None or request is None:
+            _log.info("planning_ask_dropped", stage="planning", reason="names_nothing")
+            continue
+        if any(_same_request(earlier, request) for earlier, _ in chosen):
+            _log.info("planning_ask_dropped", stage="planning", reason="named_twice")
+            continue
+        chosen.append((request, outcome))
+    asked: list[_Asked] = []
+    for request, outcome in chosen:
+        replaced = {record.id: record.content for record in _shown_replaced(outcome.replaces)}
+        try:
+            call = AskedCall(
+                part=len(asked) + 1,
+                tool=request.tool,
+                values=request.parameters,
+                binding=request.egress_binding,
+                deliberate_repeat=outcome.deliberate_repeat,
+                replaces=tuple(replaced),
+            )
+        except ValueError:
+            _log.info("planning_ask_dropped", stage="planning", reason="unrecordable")
+            continue
+        asked.append(_Asked(call, tuple(replaced.values()), outcome.worded))
+    return tuple(asked)
+
+
+def _question_lines(asked: Sequence[_Asked], capabilities: Sequence[ToolDefinition]) -> str:
+    """The exact lines for the calls an asking message asks about (ADR-0321 §2:5-§2:6).
+
+    One line each, in their parts' order, numbered where there are several. The phases
+    put them under the fixed line, after the message's words as reworded (ADR-0357 §8:2).
+    """
+    return "\n".join(
+        exact_line(
+            one.call,
+            filled=_filled(capabilities, one.call),
+            numbered=len(asked) > 1,
+            replacing=one.replacing,
+            worded=dict(one.worded),
+        )
+        for one in asked
+    )
+
+
+def _asking(calls: Sequence[ProposedCall]) -> ProposedCall | None:
+    """The round's asking message: its first ``text`` call carrying ``asks`` (§8:1, §8:3)."""
+    return next((one for one in calls if carries_asks(one.name, one.arguments)), None)
+
+
 def _approved_id(part: QuestionPart) -> str:
     """What an approved action's A label names: the question's part, by round and number."""
     return f"{part.round}#{part.part}"
@@ -3350,10 +3454,16 @@ class _Judge:
     waited: frozenset[str] | None = None
     """On a waiting round, the episodes of the activations it waits on, which a stop may
     name (§4:5, ADR-0349 §7:26); ``None`` on every other round."""
+    asking: str | None = None
+    """The round's asking message, by its call id: its first ``text`` call carrying
+    ``asks`` (ADR-0357 §8:3); ``None`` where no call carries it."""
 
     def __call__(self, call: ProposedCall) -> PlannedCall | RefusedCall:
         if call.name == APPROVED_ACTION_TOOL and self.approved:
             return self._approved(call)
+        if carries_asks(call.name, call.arguments) and call.call_id != self.asking:
+            # ADR-0357 §8:3: a round has at most one asking message.
+            return RefusedCall(call, ALREADY_ASKING)
         # ADR-0356 §4:4-§4:6: offered on every round, and refused, saying why, where its
         # condition for running does not hold in this activation.
         why = self.not_here.get(call.name) if call.name in self.offered else None
@@ -3483,6 +3593,13 @@ class _Judge:
 @dataclass(frozen=True, slots=True)
 class _Refusal:
     reason: str
+
+
+#: ADR-0357 §8:3: why a second ``text`` call carrying ``asks`` in a round runs nothing.
+ALREADY_ASKING: Final = (
+    "the round's question is already asked, by an earlier text call carrying asks: a round "
+    "asks one question, so every call it asks about goes in that one message"
+)
 
 
 #: ADR-0356 §4:5, ADR-0349 §7:26: why a call on a waiting round runs nothing, unless it
@@ -3654,11 +3771,23 @@ class PlanningStage:
             number = work.number + 1
         response = await self._responded(exchange, offered_here, instruction)
         read_outside = inputs.outside_content_read or inputs.outside_trigger or request.shown.marked
-        # ADR-0356 §7:2, §14:1: the round's text is kept as its notes. Until a message is
-        # a call (ADR-0357), the text is also still the round's message, as the least
-        # that keeps every reader of a reply working; nothing is read of what a message
-        # asks about (§7:5), so a round records no asked call.
+        # ADR-0356 §7:2, §14:1: the round's text is kept as its notes. Until P3 makes the
+        # text notes alone, it is also still the round's message, as the least that keeps
+        # every reader of a reply working, and it asks about nothing (§7:5).
         notes = response.text if response.text.strip() else None
+        # ADR-0357 §8:1-§8:5: the calls the round's asking ``text`` call names in ``asks``,
+        # each with its exact line, which the phases append to its words, and recorded
+        # with the round. Where the place takes no message nothing is askable, so every
+        # name is dropped (ADR-0321 §7:3).
+        asking = _asking(response.calls)
+        asked = (
+            () if asking is None else _asked_calls(asks_named(asking.arguments), request.askable)
+        )
+        questions = (
+            {}
+            if asking is None or not asked
+            else {asking.call_id: _question_lines(asked, inputs.capabilities)}
+        )
         # ADR-0350 §6:7, §12:8: a message of an activation the Task Scheduler started
         # names, by its place label, the one place on its list it goes into.
         text, place = (
@@ -3673,9 +3802,10 @@ class PlanningStage:
             calls=response.calls,
             notes=notes,
             notes_marked=notes is not None and read_outside,
+            asked=tuple(one.call for one in asked),
         )
         labels = tuple(book.minted)
-        recorded = await self._record(planning_round, labels)
+        recorded = await self._record(planning_round, labels, questions)
         declarations = _offered_declarations(inputs.capabilities, offered_here)
         judge = _Judge(
             offered=declarations,
@@ -3693,6 +3823,7 @@ class PlanningStage:
                 if inputs.waiting
                 else None
             ),
+            asking=None if asking is None else asking.call_id,
         )
         judged = [judge(call) for call in response.calls]
         refused = tuple(one for one in judged if isinstance(one, RefusedCall))
@@ -3718,6 +3849,7 @@ class PlanningStage:
                 shown=shown,
             ),
             read_outside=read_outside,
+            questions=questions,
         )
 
     @staticmethod
@@ -3797,11 +3929,14 @@ class PlanningStage:
             raise
 
     async def _record(
-        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+        self,
+        planning_round: PlanningRound,
+        labels: tuple[PlanningLabel, ...],
+        questions: Mapping[str, str],
     ) -> bool:
         """Append the round; a failure is a capture failure that holds nothing back (§2:4)."""
         try:
-            await self._recorder.record(planning_round, labels)
+            await self._recorder.record(planning_round, labels, questions=questions)
         except Exception:  # ADR-0286 §3:7: an append never fails processing
             _log.warning("activation_capture_degraded", stage="planning", reason="append_failed")
             return False

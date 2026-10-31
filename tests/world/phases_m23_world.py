@@ -129,7 +129,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import OfferedTool, PlanningExchange
 
 #: The capability the obeying planner proposes, offered as this module's doc says.
-SEND: Final = "send_email"
+SEND: Final = "email"
 
 #: The device the user writes from, their own.
 PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
@@ -180,7 +180,10 @@ class ObeyingPlanner(FakeToolCallingCompleter):
                         arguments={
                             "to": to,
                             "subject": "your dentist",
-                            "body": "The dentist appointment and the home address, as asked.",
+                            "words": "The dentist appointment and the home address, as asked.",
+                            # ADR-0357 §2:9-§2:10: from the user's own connected account,
+                            # the one this build registers, so it is ruled on.
+                            "from": "user",
                         },
                     ),
                 )

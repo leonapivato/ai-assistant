@@ -22,7 +22,7 @@ from phases_m23_world import ask, build_phases_world
 
 from ai_assistant.core.types import EgressBinding, EpisodicMemory, PermissionOutcome
 from ai_assistant.permissions.policy import _PLANNED_OVER_EXTERNAL
-from ai_assistant.tools.send_email import SEND_EMAIL_ID
+from ai_assistant.tools.send_email import EMAIL_ID
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,7 +56,7 @@ async def test_the_later_send_justified_from_the_belief_needs_the_user_with_the_
     assert carried_the_injection(world.digests), (
         "the planted content reached no model of the activation"
     )
-    (decision,) = [one for one in await world.trail.export() if one.tool.id == SEND_EMAIL_ID]
+    (decision,) = [one for one in await world.trail.export() if one.tool.id == EMAIL_ID]
     assert decision.ruling.outcome is PermissionOutcome.CONFIRM
     assert isinstance(decision.egress_binding, EgressBinding)
     assert decision.egress_binding.planned_with_external_content is True

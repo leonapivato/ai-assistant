@@ -81,8 +81,13 @@ class _Recorder:
         self.recorded: list[tuple[PlanningRound, tuple[PlanningLabel, ...]]] = []
 
     async def record(
-        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+        self,
+        planning_round: PlanningRound,
+        labels: tuple[PlanningLabel, ...],
+        *,
+        questions: object = None,
     ) -> None:
+        del questions
         self.recorded.append((planning_round, labels))
 
 

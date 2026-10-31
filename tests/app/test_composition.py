@@ -103,7 +103,7 @@ from ai_assistant.tools import InMemoryToolRegistry
 from ai_assistant.tools.egress import SmtpEgressTransport, StreamOutboundTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
-from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
+from ai_assistant.tools.send_email import EMAIL, SendEmail
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -1341,7 +1341,7 @@ async def test_the_root_constructs_the_transport_capability_and_hands_it_in(
     try:
         registry = wired_registry(engine)
         assert isinstance(registry, InMemoryToolRegistry)
-        tool = registry._live[SEND_EMAIL.id].implementation
+        tool = registry._live[EMAIL.id].implementation
         assert isinstance(tool, SendEmail)
         seam = tool._transport
         assert isinstance(seam, SmtpEgressTransport)
@@ -1397,7 +1397,7 @@ async def test_the_transport_is_constructed_only_where_an_integration_is(
 
     try:
         assert built == expected
-        assert (await wired_registry(engine).get(SEND_EMAIL.id) is None) is not configured
+        assert (await wired_registry(engine).get(EMAIL.id) is None) is not configured
     finally:
         await engine.aclose()
 
@@ -1427,8 +1427,8 @@ async def test_the_wired_binder_refuses_a_mis_registered_egress_tool(
     try:
         binder = wired_binder(engine)
         assert isinstance(binder, EgressBindingSeam)
-        assert binder._registrations.registration("send_email") is None
-        assert await wired_registry(engine).get("send_email") is None
+        assert binder._registrations.registration("email") is None
+        assert await wired_registry(engine).get("email") is None
     finally:
         await engine.aclose()
 
@@ -1457,11 +1457,11 @@ async def test_a_configured_deployment_wires_the_registry_and_the_table_together
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        assert await wired_registry(engine).get("send_email") is not None
+        assert await wired_registry(engine).get("email") is not None
 
         binder = wired_binder(engine)
         assert isinstance(binder, EgressBindingSeam)
-        registration = binder._registrations.registration("send_email")
+        registration = binder._registrations.registration("email")
         assert registration is not None
         assert registration.reference == "conn-0001"
         assert registration.transport_endpoint == "smtps://mail.example.invalid:465"

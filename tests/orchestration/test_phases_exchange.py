@@ -47,10 +47,9 @@ from ai_assistant.orchestration.acting import (
     ResultRoute,
 )
 from ai_assistant.orchestration.matters import STOP_ACTIVATION_CAPABILITY
+from ai_assistant.orchestration.message_tools import TEXT_CALL, TEXT_CAPABILITY
 from ai_assistant.orchestration.phase_path import (
     _UNKNOWN_WRITE,
-    TEXT_CALL,
-    TEXT_CAPABILITY,
     Delivery,
     Fitted,
     PhasePath,
@@ -179,12 +178,12 @@ async def test_a_text_call_is_written_into_its_place_and_its_entry_holds_what_it
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _call("c1", TEXT_CAPABILITY, words="On it."),
-                _call("c2", TEXT_CAPABILITY, words="Over there.", via="L7"),
+                _call("c1", TEXT_CAPABILITY, to="the user", words="On it."),
+                _call("c2", TEXT_CAPABILITY, to="the user", words="Over there.", via="L7"),
                 _call("c3", "nowhere"),
             )
         ),
-        RoundResponse(calls=(_call("c4", TEXT_CAPABILITY, words="Done."),)),
+        RoundResponse(calls=(_call("c4", TEXT_CAPABILITY, to="the user", words="Done."),)),
         RoundResponse(),
     )
     harness = phases_harness(completer)
@@ -428,7 +427,7 @@ async def test_a_text_call_naming_its_place_by_anything_but_one_label_sends_noth
     """ADR-0356 §7:7: ``via`` names one place by its L label; a list of none is no place,
     and never the input's by default."""
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", TEXT_CAPABILITY, words="Hello.", via=[]),)),
+        RoundResponse(calls=(_call("c1", TEXT_CAPABILITY, to="the user", words="Hello.", via=[]),)),
         RoundResponse(),
     )
     harness = phases_harness(completer)
@@ -481,7 +480,12 @@ async def test_each_calls_entry_is_stored_before_the_next_rounds_request() -> No
     holder: list[Harness] = []
     completer = _Watching(
         holder,
-        RoundResponse(calls=(_call("c1", TEXT_CAPABILITY, words="On it."), _call("c2", "nowhere"))),
+        RoundResponse(
+            calls=(
+                _call("c1", TEXT_CAPABILITY, to="the user", words="On it."),
+                _call("c2", "nowhere"),
+            )
+        ),
         RoundResponse(),
     )
     harness = phases_harness(completer)

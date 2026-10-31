@@ -278,13 +278,11 @@ from ai_assistant.core.types import (
     CapabilityResult,
     ControllerRule,
     ControllerStage,
-    CostBasis,
     DeletedMessage,
     DeliveryStatus,
     DigestOutcome,
     EpisodicMemory,
     ForecastRefusal,
-    Idempotency,
     LabelKind,
     Memory,
     MemoryKind,
@@ -293,19 +291,17 @@ from ai_assistant.core.types import (
     Modality,
     NewMessage,
     PlanningLabel,
+    ProfileField,
     ProposedCall,
     QuestionPart,
     RecallOutcome,
     RecordedCall,
     RecordedDelivery,
-    Reversibility,
-    RiskLevel,
     SendOutcome,
     StageOutcome,
     StoryMember,
     StoryMemberKind,
     StoryRelation,
-    ToolCost,
     ToolDefinition,
     ToolFailure,
     ToolFailureKind,
@@ -370,6 +366,19 @@ from ai_assistant.orchestration.matters import (
     STOP_ACTIVATION_CAPABILITY,
     NotAsAsked,
     is_pure_read,
+)
+from ai_assistant.orchestration.message_tools import (
+    PLACE_LABEL,
+    PLATFORMS,
+    TEXT_CALL,
+    TEXT_CAPABILITY,
+    TextArguments,
+    platform_name,
+    platform_type,
+    reworded,
+    text_arguments,
+    who_it_is_for,
+    with_question,
 )
 from ai_assistant.orchestration.outside_content import rests_on_outside_content
 from ai_assistant.orchestration.person_block import still_held
@@ -493,10 +502,6 @@ if TYPE_CHECKING:
 __all__ = [
     "CHAT_DESCRIPTION",
     "EVENT_DESCRIPTION",
-    "TEXT_CALL",
-    "TEXT_CAPABILITY",
-    "VIA_ARGUMENT",
-    "WORDS_ARGUMENT",
     "Delivery",
     "Fitted",
     "MessageWriter",
@@ -567,65 +572,27 @@ _UNKNOWN_SEARCHES: Final = frozenset({"deadline_expired", "transport_failed"})
 #: and ``orchestration`` names it by its capability.
 _NOT_OFFERED: Final = frozenset({"report_current_time"})
 
-#: ADR-0356 §7:7-§7:8: the ``text`` call, a round's message in the form of a call, and
-#: its two arguments as this lane declares them: what to say, and where it goes by the
-#: place list's ``L`` label. Who it is for, the exact lines, what it asks about, the
-#: wording step and its result's shape are ADR-0357's lane T1's (§2:2, §3, §4, §8).
-TEXT_CAPABILITY: Final = "text"
-WORDS_ARGUMENT: Final = "words"
-VIA_ARGUMENT: Final = "via"
-
-TEXT_CALL: Final = ToolDefinition(
-    id=TEXT_CAPABILITY,
-    capability=TEXT_CAPABILITY,
-    description=(
-        "Send a short written message: the words, into the place your input came from, "
-        "or into the place on your place list its L label names."
-    ),
-    risk_level=RiskLevel.LOW,
-    reversibility=Reversibility.IRREVERSIBLE,
-    side_effecting=True,
-    reads=(),
-    writes=(),
-    discloses=(),
-    cost=ToolCost(basis=CostBasis.FREE),
-    idempotency=Idempotency.NONE,
-    effect=CapabilityEffect.WORLD,
-    leaves_hub=False,
-    result=CapabilityResult.NO_OUTSIDE_TEXT,
-    outcome_can_be_unknown=True,
-    safe_to_repeat=True,
-    parameters_schema={
-        "type": "object",
-        "properties": {
-            WORDS_ARGUMENT: {"type": "string", "minLength": 1, "description": "What to say."},
-            VIA_ARGUMENT: {
-                "type": "string",
-                "minLength": 1,
-                "description": "Where it goes: a place on your place list, by its L label.",
-            },
-        },
-        "required": [WORDS_ARGUMENT],
-        "additionalProperties": False,
-    },
+#: Why a ``text`` call goes nowhere, by how ADR-0357 §2:4 fails to resolve its place.
+_NO_PLACE_HERE: Final = "this activation's input came from no place that takes a message"
+_SUGGESTS_SEVERAL: Final = "its task suggests more than one place, so via names one"
+_SUGGESTS_NONE: Final = (
+    "its task suggests no place and the line's chat is not on its list, so via names one"
 )
-"""``text``'s declaration, as ADR-0356 §7:7-§7:9 needs it, offered on every round (§4:3).
+#: The place check's refusal where it gave no reason of its own.
+_NOT_ALLOWED_THERE: Final = "the message may not go there"
+#: How much of a ``via`` that names nothing its coming back quotes.
+_QUOTED_VIA_CHARS: Final = 40
+#: The line's chat's channel type: where a task's message goes that suggests no place
+#: (ADR-0357 §2:4).
+_LINE_TYPE: Final = PLATFORMS["telegram"]
 
-It is never selected, ruled on or run as a call: the phases take each ``text`` call out
-of the round's calls before authorizing, which checks it by its place alone as the
-round's message (§7:7), and write it into its place under an effect record as a message
-is written (§7:8). So nothing reads its egress fields, which declare none: where a
-message may go is the message place check's, and its place's writer holds the channel's
-rules (ADR-0306 §4:7, ADR-0292 §8:3). ``safe_to_repeat`` is set so the offer adds no
-*deliberate repeat* mark: a message's record is a message's, not a call's (ADR-0306 §5),
-and an accidental repeat's refusal is ADR-0357's (§10:1).
-"""
 
-#: Why a ``text`` call naming no one place by one label runs nothing (ADR-0356 §7:7).
-_NOT_ONE_PLACE: Final = f"{VIA_ARGUMENT!r} names one place, by its L label"
+@dataclass(frozen=True, slots=True)
+class _Nowhere:
+    """Why a ``text`` call can go nowhere, with the places it may name (ADR-0357 §6:2)."""
 
-#: Why a ``text`` call that gave nothing to say runs nothing (ADR-0356 §4:6).
-_NO_WORDS: Final = f"{WORDS_ARGUMENT!r} is what the message says, and it said nothing"
+    reason: str
+
 
 #: Why a call whose condition for running does not hold in its activation runs nothing
 #: (ADR-0356 §4:4-§4:6), each the condition that decided whether it was offered before.
@@ -2763,15 +2730,23 @@ class _RoundRecorder:
         self._path = path
 
     async def record(
-        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+        self,
+        planning_round: PlanningRound,
+        labels: tuple[PlanningLabel, ...],
+        *,
+        questions: Mapping[str, str] | None = None,
     ) -> None:
-        """Add the round and its labels to the activation's record, and extend it."""
+        """Add the round and its labels to the activation's record, and extend it.
+
+        A round whose question would not be shown whole is recorded asking about
+        nothing (:meth:`PhasePath.shown_whole`).
+        """
         state = active_state()
         if state is None:
             return
         working = _PLANNING.get()
         if working is not None:
-            planning_round = self._path.shown_whole(working, planning_round)
+            planning_round = self._path.shown_whole(working, planning_round, questions, labels)
         state.recorded_round(planning_round, labels)
         await _extended(state, self._path.append)
 
@@ -3483,8 +3458,9 @@ class PhasePath:
         self._label_arguments: dict[str, Mapping[str, LabelKind]] = {
             name: dict(arguments) for name, arguments in (label_arguments or {}).items()
         }
-        # ADR-0356 §7:7: a ``text`` call names its place by the place list's L label.
-        self._label_arguments.setdefault(TEXT_CAPABILITY, {VIA_ARGUMENT: LabelKind.PLACE})
+        # ADR-0357 §2:4: a ``text`` call's ``via`` names a place by its L label or a
+        # platform by name, so it is resolved by the phases (`_text_place`), never by the
+        # judge's label check, which would refuse a platform.
         self._story_calls = story_calls
         self._look_ups = look_ups
         # ADR-0338 §11:2: the person model's calls, attached only where a store is wired.
@@ -4203,7 +4179,7 @@ class PhasePath:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         finally:
             _PLANNING.reset(planning)
-        whole = self.shown_whole(working, planned.round)
+        whole = self.shown_whole(working, planned.round, planned.questions, planned.labels)
         if whole is not planned.round:
             planned = replace(planned, round=whole)
         working.planned(
@@ -4795,8 +4771,9 @@ class PhasePath:
             named = planned.round.place
             place = None if named is None else place_of(named)
             message = None if planned.message is None else RoundMessage(planned.message, place)
-            # ADR-0356 §7:7: a ``text`` call goes into the place on the list it names.
-            call_messages = self._text_messages(latest, texts, default=None)
+            # ADR-0357 §2:4: a ``text`` call goes into the place on the list it names or
+            # the tool resolves.
+            call_messages = self._text_messages(working, latest, texts)
             if any(
                 one.place in scheduling.targets
                 for one in (*call_messages, *([] if message is None else [message]))
@@ -4817,8 +4794,8 @@ class PhasePath:
                 if planned.message is None or place is None
                 else RoundMessage(planned.message, place)
             )
-            # ADR-0356 §7:7: into the place it names, or the input's where it names none.
-            call_messages = self._text_messages(latest, texts, default=place)
+            # ADR-0357 §2:4: into the place it names, or the input's where it names none.
+            call_messages = self._text_messages(working, latest, texts)
         rounds = working.planning_rounds()
         given_round = RoundToAuthorize(
             activation_id=working.activation_id,
@@ -4845,6 +4822,15 @@ class PhasePath:
         except TimeoutError:
             raise ModelTimeoutError(_AUTHORIZING_EXPIRED) from None
         latest.authorization = decided
+        held = working.labels.labels
+        for one in decided.call_messages:
+            if not one.allowed and one.call_id is not None:
+                # ADR-0357 §2:5: a place the message place check does not allow comes back
+                # with the places it may use.
+                latest.sent[one.call_id] = _Sent(
+                    CallOutcomeKind.REFUSED,
+                    reason=f"{one.reason or _NOT_ALLOWED_THERE}; {self._may_use(working, held)}",
+                )
         looking = {one.call.call_id: one.looking_for for one in planned.calls if one.looking_for}
         latest.looking_for = {
             verdict.decision_id: looking[verdict.call_id]
@@ -4854,30 +4840,164 @@ class PhasePath:
             and verdict.call_id in looking
         }
 
-    @staticmethod
     def _text_messages(
-        latest: _Round, texts: Sequence[ProposedCall], *, default: str | None
+        self, working: PhaseWorking, latest: _Round, texts: Sequence[ProposedCall]
     ) -> tuple[RoundMessage, ...]:
         """Each ``text`` call as the message it is, with the place it names or resolves.
 
-        ADR-0356 §7:7: the place its ``via`` names, which planning's check has already
-        turned from an ``L`` label into the place, or ``default`` where it names none.
-        One that says nothing has nothing to act on (§4:6): it comes back so and is
-        never checked or written.
+        ADR-0357 §2:2-§2:4, §6:1: its arguments checked, who it is for found, and where it
+        goes resolved from its ``via`` or, where it names none, chosen as §2:4 says
+        (:meth:`_text_place`). One that cannot be carried out runs nothing: it comes back
+        with why and what it may name instead, and is never checked or written.
         """
         messages: list[RoundMessage] = []
+        named = self._named()
+        labels = working.labels.labels
         for call in texts:
-            words = call.arguments.get(WORDS_ARGUMENT)
-            if not isinstance(words, str) or not words.strip():
-                latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=_NO_WORDS)
+            checked = text_arguments(call.arguments)
+            if isinstance(checked, str):
+                latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=checked)
                 continue
-            via = call.arguments.get(VIA_ARGUMENT, None)
-            if VIA_ARGUMENT in call.arguments and not isinstance(via, str):
-                latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=_NOT_ONE_PLACE)
+            nobody = who_it_is_for(checked.to, named=named)
+            if nobody is not None:
+                latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=nobody)
                 continue
-            place = via if isinstance(via, str) else default
-            messages.append(RoundMessage(words, place, call.call_id))
+            place = self._text_place(working, checked, labels)
+            if isinstance(place, _Nowhere):
+                latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=place.reason)
+                continue
+            messages.append(RoundMessage(checked.words, place, call.call_id))
         return tuple(messages)
+
+    @staticmethod
+    def _named() -> tuple[str, ...]:
+        """The names the user's profile gives them, as planning is shown them (§2:3)."""
+        state = active_state()
+        block = None if state is None else state.person_block
+        if block is None:
+            return ()
+        values = (block.profile.value(one) for one in (ProfileField.NAME, ProfileField.ADDRESS))
+        return tuple(one for one in values if isinstance(one, str) and one.strip())
+
+    def _text_place(
+        self, working: PhaseWorking, checked: TextArguments, labels: Sequence[PlanningLabel]
+    ) -> str | _Nowhere:
+        """Where a ``text`` call goes, or why it can go nowhere (ADR-0357 §2:4, §6:2).
+
+        ``via`` names a place by its ``L`` label, which names what it named when planning
+        was shown it, or a platform by name (:meth:`_platform_place`); left out, the tool
+        chooses (:meth:`_chosen_place`). Whether the place may take the message is the
+        message place check's, after this (ADR-0306 §4:1).
+        """
+        scheduling = working.scheduling
+        listed = (
+            scheduling.places if scheduling is not None and scheduling.speaks_by_label else None
+        )
+        via = checked.via
+        if via is None:
+            return self._chosen_place(working, listed, labels)
+        if PLACE_LABEL.fullmatch(via):
+            place = next(
+                (one.id for one in labels if one.label == via and one.kind is LabelKind.PLACE),
+                None,
+            )
+            if place is None:
+                return self._nowhere(working, labels, f"{via!r} names no place you were shown")
+            return place
+        return self._platform_place(working, via, listed, labels)
+
+    def _chosen_place(
+        self,
+        working: PhaseWorking,
+        listed: Sequence[ListedPlace] | None,
+        labels: Sequence[PlanningLabel],
+    ) -> str | _Nowhere:
+        """Where a ``text`` call naming no place goes (ADR-0357 §2:4).
+
+        The place the input came from; or, for an activation the Task Scheduler started,
+        the one place its task suggests, or the line's chat where it suggests none. Where
+        no such place is on the list, or the task suggests more than one, it goes nowhere.
+        """
+        if listed is None:
+            target = self._target(working)
+            if target is None:
+                return self._nowhere(working, labels, _NO_PLACE_HERE)
+            return target.place
+        suggested = [one for one in listed if one.suggested]
+        if len(suggested) > 1:
+            return self._nowhere(working, labels, _SUGGESTS_SEVERAL)
+        if suggested:
+            return suggested[0].place
+        lines = [one for one in listed if one.channel.channel_type == _LINE_TYPE]
+        if len(lines) == 1:
+            return lines[0].place
+        return self._nowhere(working, labels, _SUGGESTS_NONE)
+
+    def _platform_place(
+        self,
+        working: PhaseWorking,
+        via: str,
+        listed: Sequence[ListedPlace] | None,
+        labels: Sequence[PlanningLabel],
+    ) -> str | _Nowhere:
+        """Where a ``text`` call naming a platform goes (ADR-0357 §2:4).
+
+        The place the input came from, where it is on that platform; or, for an
+        activation the Task Scheduler started, the one place on its list on that platform,
+        or its task's one suggestion among several there.
+        """
+        channel_type = platform_type(via)
+        if channel_type is None:
+            quoted = repr(via[:_QUOTED_VIA_CHARS])
+            return self._nowhere(
+                working, labels, f"{quoted} names no place by its L label and no platform"
+            )
+        platform = platform_name(channel_type)
+        if listed is None:
+            target = self._target(working)
+            if target is not None and target.channel.channel_type == channel_type:
+                return target.place
+            return self._nowhere(
+                working, labels, f"no place this message may go into is on {platform}"
+            )
+        on = [one for one in listed if one.channel.channel_type == channel_type]
+        if not on:
+            return self._nowhere(working, labels, f"no place on your list is on {platform}")
+        suggested = [one for one in on if one.suggested]
+        if len(on) == 1 or len(suggested) == 1:
+            return (on if len(on) == 1 else suggested)[0].place
+        return self._nowhere(working, labels, f"more than one place on your list is on {platform}")
+
+    def _nowhere(
+        self, working: PhaseWorking, labels: Sequence[PlanningLabel], why: str
+    ) -> _Nowhere:
+        """A ``text`` call that can go nowhere: why, and the places it may name (§6:2)."""
+        return _Nowhere(f"{why}; {self._may_use(working, labels)}")
+
+    def _may_use(self, working: PhaseWorking, labels: Sequence[PlanningLabel]) -> str:
+        """The places a ``text`` call may name, as its coming back says them (§2:4-§2:5).
+
+        For an activation the Task Scheduler started, each place on its list, by its ``L``
+        label and its platform; for every other, the place its input came from alone,
+        with its platform and its label where it has one, since a message goes into no
+        other (ADR-0306 §4:1, ADR-0356 §7:10).
+        """
+        held = {one.id: one.label for one in labels if one.kind is LabelKind.PLACE}
+        scheduling = working.scheduling
+        if scheduling is not None and scheduling.speaks_by_label:
+            named = [
+                f"{held.get(one.place, one.place)} ({platform_name(one.channel.channel_type)})"
+                for one in scheduling.places
+            ]
+            if not named:
+                return "your place list is empty, so a message goes nowhere"
+            return "the places it may name: " + ", ".join(named)
+        target = self._target(working)
+        if target is None:
+            return "this activation can message no one: its input came from no place that takes one"
+        label = held.get(target.place)
+        where = platform_name(target.channel.channel_type) + ("" if label is None else f", {label}")
+        return f"it may go only into the place your input came from ({where}): leave via out"
 
     @staticmethod
     async def _gone_since(scheduling: Scheduling) -> tuple[str, ...]:
@@ -5240,7 +5360,9 @@ class PhasePath:
         """Write the round's messages into their places, where each may go (§3:1).
 
         The round's own message, then each ``text`` call allowed, in the round's order
-        (ADR-0356 §7:7-§7:8), each claimed and written as a message is.
+        (ADR-0356 §7:7-§7:8), each claimed and written as a message is: its words as the
+        wording step renders them, and an asking call's exact lines after them (ADR-0357
+        §4, §8:2).
         """
         decided = latest.authorization
         if decided is None:
@@ -5263,13 +5385,19 @@ class PhasePath:
                 place=verdict.place,
             )
         texts = {one.call.call_id: one.call for one in latest.planned.calls}
+        questions = latest.planned.questions
         for one in decided.call_messages:
             call = texts.get(one.call_id or "")
             if not one.allowed or one.effect_id is None or call is None:
                 continue
-            words = call.arguments.get(WORDS_ARGUMENT)
-            if not isinstance(words, str):  # pragma: no cover — checked before authorizing
+            checked = text_arguments(call.arguments)
+            if isinstance(checked, str):  # pragma: no cover — checked before authorizing
                 continue
+            # ADR-0357 §4, §8:2: the words as the wording step renders them, and after
+            # them the exact lines of the question it asks, which are never reworded.
+            words = with_question(
+                reworded(checked.words, exact=checked.exact), questions.get(call.call_id)
+            )
             try:
                 latest.sent[call.call_id] = await self._sent(
                     working,
@@ -5363,29 +5491,54 @@ class PhasePath:
 
     # --- the yes path (ADR-0321) ---
 
-    def shown_whole(self, working: PhaseWorking, planning_round: PlanningRound) -> PlanningRound:
-        """``planning_round``, asking about nothing where its message would not be shown whole.
+    def shown_whole(
+        self,
+        working: PhaseWorking,
+        planning_round: PlanningRound,
+        questions: Mapping[str, str] | None = None,
+        labels: Sequence[PlanningLabel] = (),
+    ) -> PlanningRound:
+        """``planning_round``, asking about nothing where its question would not be shown whole.
 
         The dispatcher's ruling on ADR-0321 §4:4's *shown*: a message cut to fit is not
-        shown, since its exact lines come last (§2:5) and any cut takes them. So a round
-        whose message the place would cut, by the transcript's bound or the writer's,
-        records no asked call: by §2:2 nothing waits on the user that they were not
-        clearly asked about, so no yes to that message approves anything, no proposal is
-        held back as already asked, and the call may be asked about again whole. Where
-        whether it fits cannot be told, it is taken not to, failing closed.
+        shown, since its exact lines come last (§2:5) and any cut takes them. The question
+        is the round's asking ``text`` call, the one ``questions`` holds lines for
+        (ADR-0357 §8:2), as it would be written: its words as reworded and the lines after
+        them, into the place it names or resolves. So a round whose asking call would be
+        cut, by the transcript's bound or the writer's, or could go nowhere, its person or
+        place not found, records no asked call: by §2:2 nothing waits on the user that
+        they were not clearly asked about, so no yes to that message approves anything,
+        no proposal is held back as already asked, and the call may be asked about again
+        whole. Where whether it fits cannot be told, it is taken not to, failing closed.
+        ``labels`` are the round's own, which the working set does not hold yet.
 
         Returns:
-            ``planning_round`` itself where it asks about nothing or its message would be
+            ``planning_round`` itself where it asks about nothing or its question would be
             shown whole; otherwise a copy that asks about nothing.
         """
         if not planning_round.asked:
             return planning_round
-        named = planning_round.place
-        target = self._target(working, None if named is None else place_of(named))
+        lines = questions or {}
+        asking = next((one for one in planning_round.calls if one.call_id in lines), None)
+        target, text = None, ""
+        if asking is not None:
+            checked = text_arguments(asking.arguments)
+            if (
+                not isinstance(checked, str)
+                and who_it_is_for(checked.to, named=self._named()) is None
+            ):
+                place = self._text_place(working, checked, (*working.labels.labels, *labels))
+                if isinstance(place, str):
+                    target = self._target(working, place)
+                    if target is not None and target.place != place:
+                        target = None  # it would not go where the place check allows
+                    text = with_question(
+                        reworded(checked.words, exact=checked.exact), lines[asking.call_id]
+                    )
         whole = False
         if target is not None:
             try:
-                whole = not self._fitted(target, planning_round.text).cut_off
+                whole = not self._fitted(target, text).cut_off
             except Exception as exc:  # whether it fits is not known: not shown whole
                 if is_defect(exc):
                     log_defect(

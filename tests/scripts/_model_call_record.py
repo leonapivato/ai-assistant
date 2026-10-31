@@ -58,7 +58,7 @@ def _tool(name: str, description: str, **properties: object) -> dict[str, Any]:
 
 
 WEB_SEARCH = _tool("web_search", "Search the web.", query={"type": "string"})
-SEND_EMAIL = _tool("send_email", "Send an email for the user.", to={"type": "string"})
+EMAIL = _tool("send_email", "Send an email for the user.", to={"type": "string"})
 ROUND = _tool("planning_round", "Not a capability: calling it runs nothing and goes to no one.")
 
 #: Understanding's instructions, with a heading of each kind the view reads.
@@ -128,7 +128,7 @@ def _call(name: str, args: object, call_id: str) -> dict[str, Any]:
 
 
 ROUND_1_RETURNED: Final = {
-    "offered_tools": [WEB_SEARCH, SEND_EMAIL, ROUND],
+    "offered_tools": [WEB_SEARCH, EMAIL, ROUND],
     "response": _response(
         [
             _part("thinking", content="The user wants flights.", signature="sig"),
@@ -201,7 +201,7 @@ CALL_ENTRIES: Final[list[_Written]] = [
         320,
         {
             "messages": _messages(_instructions(ROLE, LABELS, CALLS_RULE), ROUND_1_INPUT),
-            "tools": [WEB_SEARCH, SEND_EMAIL],
+            "tools": [WEB_SEARCH, EMAIL],
         },
     ),
     (_P, _RETURNED, 800, ROUND_1_RETURNED),

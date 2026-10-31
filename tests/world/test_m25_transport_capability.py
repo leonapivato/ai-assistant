@@ -28,7 +28,7 @@ import m25_harness as m25
 
 from ai_assistant.core.types import ToolFailureKind, ToolOutcome, TransportEndpoint
 from ai_assistant.testing import FakeOutboundTransport, TransportAttempt
-from ai_assistant.tools.send_email import SEND_EMAIL
+from ai_assistant.tools.send_email import EMAIL
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -85,7 +85,7 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             #    is the only one in the composition.
             assert m25.the_capability_the_root_handed_out(composition) is capability
             assert m25.every_tool_that_can_reach_a_transport(composition) == {
-                SEND_EMAIL.id: (capability,)
+                EMAIL.id: (capability,)
             }
             assert list(capability.attempts) == []
 
@@ -107,7 +107,7 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             # self-report is an arrangement, and this is a reading.
             reaching = m25.every_tool_that_can_reach_a_transport(composition)
 
-            assert reaching == {SEND_EMAIL.id: (capability,)}
+            assert reaching == {EMAIL.id: (capability,)}
             assert result.outcome is ToolOutcome.FAILED
             assert result.failure is not None
             assert result.failure.kind is ToolFailureKind.INTERNAL
@@ -150,7 +150,7 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             # run, the probe's own ``route`` attribute would answer instead and the
             # container would go untested.
             assert m25.every_tool_that_can_reach_a_transport(composition) == {
-                SEND_EMAIL.id: (capability,),
+                EMAIL.id: (capability,),
                 m25.ARMED_PROBE.id: (capability,),
             }
 
@@ -227,7 +227,7 @@ async def test_a_deployment_that_configures_no_integration_registers_no_egress_t
     """
     composition = m25.build(tmp_path, capability=FakeOutboundTransport())
     try:
-        assert await m25.registry(composition).get("send_email") is None
+        assert await m25.registry(composition).get("email") is None
     finally:
         await composition.engine.aclose()
 

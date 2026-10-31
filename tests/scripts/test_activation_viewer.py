@@ -49,6 +49,7 @@ from _model_call_record import (
     CALLS_RULE,
     DIGEST_GIVEN_LINE,
     DIGEST_RETURNED_LINE,
+    EMAIL,
     LABELS,
     ODD,
     ODD_ENTRIES,
@@ -57,7 +58,6 @@ from _model_call_record import (
     ROUND_1_INPUT,
     ROUND_1_RETURNED_LINE,
     ROUND_2_GIVEN,
-    SEND_EMAIL,
     UNDERSTANDING_GIVEN,
     UNDERSTANDING_RETURNED,
     WEB_SEARCH,
@@ -941,7 +941,7 @@ def test_a_round_shows_what_changed_in_its_request_since_the_round_before(
     assert " " + CALLS_RULE in diff
     assert any(one.startswith('+  "round": 1') for one in shown["input · rounds"]["diff"]["lines"])
     assert shown["input · rounds"]["before"] == len("[]")
-    assert shown["tool · send_email"]["before"] == len(json.dumps(SEND_EMAIL))
+    assert shown["tool · send_email"]["before"] == len(json.dumps(EMAIL))
 
 
 def test_a_call_the_record_holds_half_of_says_what_is_missing() -> None:

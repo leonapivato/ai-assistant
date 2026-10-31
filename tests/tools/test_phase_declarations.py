@@ -15,7 +15,7 @@ from ai_assistant.testing.searching import FAKE_WEB_SEARCH
 from ai_assistant.tools.booking import BOOKING_ACT, BOOKING_AVAILABILITY
 from ai_assistant.tools.builtin import CURRENT_TIME
 from ai_assistant.tools.forecast import FORECAST_READ
-from ai_assistant.tools.send_email import SEND_EMAIL
+from ai_assistant.tools.send_email import EMAIL
 from ai_assistant.tools.web_search import WEB_SEARCH
 
 _NONE = CapabilityEffect.NONE
@@ -30,7 +30,7 @@ _DECLARED: list[tuple[ToolDefinition, tuple[object, ...]]] = [
     (FAKE_WEB_SEARCH, (_NONE, True, _MAY, True, True)),
     (FORECAST_READ, (_NONE, True, _MAY, True, True)),
     (FAKE_FORECAST_READ, (_NONE, True, _MAY, True, True)),
-    (SEND_EMAIL, (_WORLD, True, _NO, True, False)),
+    (EMAIL, (_WORLD, True, _NO, True, False)),
     (BOOKING_AVAILABILITY, (_NONE, True, _NO, False, True)),
     (BOOKING_ACT, (_WORLD, True, _NO, True, False)),
 ]

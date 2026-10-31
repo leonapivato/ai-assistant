@@ -29,8 +29,8 @@ confirmation and a payload nothing renders.
 
 **The egress tool is present only where a deployment configured one, and both
 halves of that come from one value.** ADR-0148 §6 binds a registered tool to at
-most one connected account, so ``send_email`` is registerable only *against* an
-account: an unconfigured deployment gets no ``send_email`` in the registry **and**
+most one connected account, so ``email`` is registerable only *against* an
+account: an unconfigured deployment gets no ``email`` in the registry **and**
 no entry in the binding seam's registration table. Deriving both from one
 :class:`EgressIntegration` is what makes the half-state — a tool selection can
 reach and the seam then refuses under ADR-0152 §8, on every call, forever —
@@ -80,7 +80,7 @@ from ai_assistant.tools.egress import (
 from ai_assistant.tools.egress_binder import EgressRegistration, RegistrationTable
 from ai_assistant.tools.forecast import FORECAST_READ, FORECAST_READ_ID, ForecastEgress
 from ai_assistant.tools.registry import InMemoryToolRegistry
-from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
+from ai_assistant.tools.send_email import EMAIL, SendEmail
 from ai_assistant.tools.web_search import (
     WEB_SEARCH,
     WEB_SEARCH_ID,
@@ -247,7 +247,7 @@ def build_send_email_integration(
     secrets: Secrets,
     transport: OutboundTransport,
 ) -> EgressIntegration:
-    """Register ``send_email`` against one connected account (ADR-0148 §6, ADR-0152 §10).
+    """Register ``email`` against one connected account (ADR-0148 §6, ADR-0152 §10).
 
     **The one place in production a transport is constructed.** Issue #83's third
     bullet asks whether "the client is constructed centrally at the seam so the
@@ -311,10 +311,10 @@ def build_send_email_integration(
     # Fail-fast only; the parsed value is deliberately discarded. See above.
     parse_smtp_endpoint(endpoint)
     registration = EgressRegistration(
-        tool_id=SEND_EMAIL.id, reference=connection, transport_endpoint=endpoint
+        tool_id=EMAIL.id, reference=connection, transport_endpoint=endpoint
     )
     return EgressIntegration(
-        definition=SEND_EMAIL,
+        definition=EMAIL,
         implementation=SendEmail(
             SmtpEgressTransport(
                 registration=registration,
@@ -384,7 +384,7 @@ def build_web_search_integration(  # noqa: PLR0913 — one parameter per injecte
     compares per call is the ruled call's origin against this registration's *as text,
     before parsing* (ADR-0154's condition 5), so two spellings of one host stay two
     origins; the parse here changes nothing about that comparison and only decides
-    whether the text is one this seam will ever open. Unlike ``send_email``'s, this
+    whether the text is one this seam will ever open. Unlike ``email``'s, this
     fail-fast is exactly as strong as it reads: ADR-0231 §8's grammar validates the
     authority, so #1147's and #1158's escapes have no counterpart here.
 
@@ -919,7 +919,7 @@ def build_default_registry(
             ``(definition, callable)`` binding of each, stays inside `tools/`" and
             that "the composition root supplies only the injected dependencies a
             tool needs", which is exactly what this parameter is — the dependency
-            ``send_email`` needs is a connected account, and a deployment that has
+            ``email`` needs is a connected account, and a deployment that has
             not named one has not supplied it. Registering the tool anyway would
             put a declaration in front of the selection stage that the binding seam
             refuses on every call (ADR-0152 §8): a capable-looking tool that can
@@ -927,7 +927,7 @@ def build_default_registry(
             and offer.
 
     Returns:
-        A registry holding ``current_time``, and ``send_email`` where one is
+        A registry holding ``current_time``, and ``email`` where one is
         configured — ready to select from and invoke. **No memory tool is among
         them** (ADR-0208 §1), and no lane re-binds one under any id without an ADR
         deciding the question ADR-0208 leaves to #1732.

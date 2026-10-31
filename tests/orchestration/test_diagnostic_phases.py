@@ -317,9 +317,13 @@ async def test_understanding_writes_the_failure_of_its_call() -> None:
 
 class _Recorder:
     async def record(
-        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+        self,
+        planning_round: PlanningRound,
+        labels: tuple[PlanningLabel, ...],
+        *,
+        questions: object = None,
     ) -> None:
-        del planning_round, labels
+        del planning_round, labels, questions
 
 
 def _inputs() -> PlanningInputs:

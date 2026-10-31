@@ -196,7 +196,7 @@ def plan_reply(*, to: str) -> str:
     The envelope is the retired ``ModelBackedPlanner``'s (ADR-0309 §5): an object
     carrying a ``steps`` list, each step a ``capability`` and an ``intent`` with
     optional ``parameters``. The step's ``capability`` is ``send_email``, which is what
-    ``SEND_EMAIL.capability`` declares.
+    ``EMAIL.capability`` declares.
 
     Args:
         to: The recipient the transcript names — the attacker in the hostile

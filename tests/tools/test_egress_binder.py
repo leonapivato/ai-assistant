@@ -17,11 +17,11 @@ from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 from egress_binder_contract import (
+    EMAIL,
     ENDPOINT,
     IDENTITY,
     REFERENCE,
     SEARCH_ORIGIN,
-    SEND_EMAIL,
     EgressBinderContract,
     https_tool,
     recipients,
@@ -385,15 +385,15 @@ def test_the_registry_hands_back_a_detached_original() -> None:
     and the "original" would be the same object and could never differ.
     """
     registry = InMemoryToolRegistry(ledger=FakeAuditTrail(), gate=FakeAuditTrail())
-    registry.register(SEND_EMAIL, _refuses)
+    registry.register(EMAIL, _refuses)
 
-    first = registry.original(SEND_EMAIL.id)
+    first = registry.original(EMAIL.id)
     assert first is not None
     object.__setattr__(first, "id", "rewritten")
 
-    second = registry.original(SEND_EMAIL.id)
+    second = registry.original(EMAIL.id)
     assert second is not None
-    assert second.id == SEND_EMAIL.id
+    assert second.id == EMAIL.id
     assert registry.original("nobody") is None
 
 
@@ -405,9 +405,9 @@ async def test_no_refusal_message_renders_a_destination_form_or_an_identity() ->
     discipline for one refusal leaves the others free to breach it.
     """
     harness = _Harness()
-    harness.registry.register(SEND_EMAIL, _refuses)
+    harness.registry.register(EMAIL, _refuses)
     harness.table.register(
-        EgressRegistration(tool_id=SEND_EMAIL.id, reference=REFERENCE, transport_endpoint=ENDPOINT)
+        EgressRegistration(tool_id=EMAIL.id, reference=REFERENCE, transport_endpoint=ENDPOINT)
     )
     harness.records.put(REFERENCE, identity=IDENTITY, state=ProvisioningState.ACTIVE)
     address = "Mallory@Example.COM"  # a Tier 1 recipient, never rendered
@@ -420,7 +420,7 @@ async def test_no_refusal_message_renders_a_destination_form_or_an_identity() ->
     ):
         with pytest.raises(Exception) as raised:  # noqa: PT011 — the message is the subject, not the type
             await harness.seam.bind(
-                SEND_EMAIL,
+                EMAIL,
                 parameters=cast("dict[str, FrozenJson]", arguments),
                 provenance=CarriedProvenance(
                     spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
@@ -431,7 +431,7 @@ async def test_no_refusal_message_renders_a_destination_form_or_an_identity() ->
     harness.records.put(REFERENCE, identity=IDENTITY, state=ProvisioningState.PENDING)
     with pytest.raises(Exception) as pending:  # noqa: PT011 — the message is the subject, not the type
         await harness.seam.bind(
-            SEND_EMAIL,
+            EMAIL,
             parameters={"to": [address], "subject": "s", "body": "b"},
             provenance=CarriedProvenance(
                 spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
@@ -450,7 +450,7 @@ async def test_no_refusal_message_renders_a_destination_form_or_an_identity() ->
     # names**, and the connection reference — so a discipline that named nothing at
     # all would pass every assertion above while leaving a refusal unreadable.
     assert "'to'" in refusals[0]
-    assert SEND_EMAIL.id in refusals[0]
+    assert EMAIL.id in refusals[0]
     assert REFERENCE in refusals[-1]
 
 

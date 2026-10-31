@@ -638,7 +638,10 @@ class _Kept:
     def __init__(self) -> None:
         self.labels: list[PlanningLabel] = []
 
-    async def record(self, _round: object, labels: tuple[PlanningLabel, ...]) -> None:
+    async def record(
+        self, _round: object, labels: tuple[PlanningLabel, ...], *, questions: object = None
+    ) -> None:
+        del questions
         self.labels.extend(labels)
 
 
