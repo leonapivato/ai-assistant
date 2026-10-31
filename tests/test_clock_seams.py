@@ -149,6 +149,11 @@ from ai_assistant.orchestration.planning import (
     PlanningStage,
 )
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
+from ai_assistant.orchestration.story_tidy_up import (
+    STORY_TIDY_UP_PROMPT,
+    ScheduledTidyUp,
+    StoryTidyUp,
+)
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.orchestration.understanding import RecentEpisodes
 from ai_assistant.orchestration.writes import MemoryWriteStage
@@ -626,6 +631,39 @@ async def _observer(now: Clock) -> None:
     ).run()
 
 
+async def _scheduled_tidy_up(now: Clock) -> None:
+    """ADR-0358 §4:2's quiet period, measured from the clock as a run finds what is due.
+
+    Driven through ``run``, over the canonical fakes on a conforming clock, so the reading
+    under test is the run's own: it is the first thing a run reads, store or no story.
+    """
+
+    def conforming() -> datetime:
+        return _AWARE
+
+    stories = FakeStoryStore(now=conforming)
+    memory = FakeMemoryStore(now=conforming)
+    await ScheduledTidyUp(
+        tidy_up=StoryTidyUp(
+            model=structured(FakeModelProvider()),
+            stories=stories,
+            memory=memory,
+            excerpt_chars=10,
+            other_stories=0,
+            decisions=0,
+            budget=timedelta(minutes=1),
+            threshold=0.0,
+            prompt=default_prompt(STORY_TIDY_UP_PROMPT),
+        ),
+        stories=stories,
+        threshold=1,
+        quiet=timedelta(hours=1),
+        per_run=1,
+        budget=timedelta(minutes=1),
+        now=now,
+    ).run()
+
+
 async def _fake_plan_store(now: Clock) -> None:
     await FakePlanStore(now=now).export()
 
@@ -919,6 +957,9 @@ SEAMS = [
     # ADR-0329 §16's queue instant, propagating for `ActingStage`'s reason: the
     # observer's stage adds no error class either.
     Seam("Observer", _observer, ClockReadingError),
+    # ADR-0358 §4:2's quiet period, propagating for `Observer`'s reason: the scheduled
+    # tidy-up adds no error class either.
+    Seam("ScheduledTidyUp", _scheduled_tidy_up, ClockReadingError),
     Seam("FakeMemoryStore", _fake_store, MemoryStoreError),
     Seam("FakeMemoryWriter", _fake_writer, MemoryStoreError),
     Seam("FakePlanStore", _fake_plan_store, PlanningError),
@@ -1238,6 +1279,11 @@ PROPAGATED: Final[dict[str, str]] = {
         "ADR-0329 adds **no** error class to `core.errors`, and a clock this process "
         "cannot read is not a failed attempt: no episode was read, no model was asked "
         "and nothing was recorded"
+    ),
+    "ScheduledTidyUp": (
+        "ADR-0358 adds **no** error class to `core.errors`, and a clock this process "
+        "cannot read is not a failed tidy-up: no story was read as due, no model was "
+        "asked and nothing was written"
     ),
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
     "StoreHealthReader": _UNDECLARED,
