@@ -380,6 +380,11 @@ def test_each_planning_round_shows_what_came_back_and_what_it_proposed(record: P
     assert second["evidence"][0]["of"] == "R1"
     assert second["message"] == ROUND_2_MESSAGE
     assert second["calls"] == []
+    # ADR-0356 §8:1: rounds recorded before it read as they did: a round's text is its
+    # message, its own tool carries its notes, and no next round's report is looked for.
+    assert (first["exchange"], second["exchange"]) == (False, False)
+    assert first["message_calls"] == []
+    assert "came_of" not in first
 
 
 def test_authorizing_shows_each_verdict_and_the_message(record: Path) -> None:
