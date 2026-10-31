@@ -317,6 +317,7 @@ __all__ = [
     "exact_line",
     "full_view_parts",
     "offered_tools",
+    "relayed_episodes",
     "shown_within",
 ]
 
@@ -805,6 +806,9 @@ class OlderHistory:
             episodes, newest first, each admitted by the pass's audience (§9:2).
         page: Which page this is, the newest 1.
         more: Whether there is older history past this page.
+        relayed: The episodes, among those its items link to, whose input their latest
+            understanding marks relayed, where the mark counts: the user's items of one
+            are outside, and withheld as a forward is (ADR-0351 §5:7, ADR-0358 §9:3).
     """
 
     readable: bool
@@ -812,6 +816,13 @@ class OlderHistory:
     episodes: tuple[EpisodicMemory, ...] = ()
     page: int = 1
     more: bool = False
+    relayed: frozenset[str] = frozenset()
+
+    def withheld(self, item: PlaceItem) -> bool:
+        """Whether ``item`` is shown withheld: someone else's, or of a relayed input."""
+        return item.author is PlaceAuthor.OTHER or (
+            item.author is PlaceAuthor.USER and item.episode_id in self.relayed
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -831,6 +842,8 @@ class EpisodeRead:
         projection: Its full view, where ``record`` is held.
         memories: The memories the full view names, as held now, by id.
         stories: The stories the full view names, as held now, by id.
+        matters: The matters the episode belongs to now, read by ``StoryStore.stories_of``
+            (ADR-0358 §8:1).
         episodes: The other episodes the full view names that are still held.
         page: Which page of the full view this is, the first 1.
         page_size: How many of the full view's parts one page shows.
@@ -842,6 +855,7 @@ class EpisodeRead:
     projection: EpisodeProjection | None = None
     memories: Mapping[str, Memory] = field(default_factory=dict)
     stories: Mapping[str, MatterShown] = field(default_factory=dict)
+    matters: tuple[MatterShown, ...] = ()
     episodes: frozenset[str] = frozenset()
     page: int = 1
     page_size: int = 1
@@ -1025,7 +1039,8 @@ class _Showing:
     def history(self, history: OlderHistory) -> None:
         """The older history: each item's words, none of an item never shown, and episodes."""
         for item in history.items:
-            if item.author is not PlaceAuthor.OTHER:
+            # As planning was shown it (§11:2): a withheld item's words never.
+            if not history.withheld(item):
                 self.text({"from": item.author.value, "text": item.text})
         for episode in history.episodes:
             self.record(ShownRecordKind.EPISODE, episode.id)
@@ -1035,6 +1050,8 @@ class _Showing:
         if read.projection is None:
             return
         self.record(ShownRecordKind.EPISODE, read.episode_id)
+        for matter in read.matters:
+            self.record(ShownRecordKind.STORY, matter.story_id, matter.summary_version)
         for part in read.page_parts():
             if isinstance(part, ProjectedRecall):
                 named: Iterable[ShownRecord] = part.found
@@ -2070,7 +2087,7 @@ class _Request:
         # The episodes the pass holds whose input their latest understanding marks
         # relayed, where the mark counts (ADR-0351 §5:7, §5:11): the user's items of
         # one are outside, so each is withheld as a forward is (ADR-0307 §9:2).
-        self._relayed = _relayed_episodes(
+        self._relayed = relayed_episodes(
             (*inputs.episodes, *inputs.recalled), excerpt_chars=excerpt_chars
         )
         # The place window's items by the id understanding's referents name them by, each
@@ -3301,11 +3318,20 @@ class _Request:
         shown: dict[str, object] = {"page": history.page}
         if history.items or not history.episodes:
             # A page whose every message was deleted, or already shown, shows none.
-            shown["items"] = [self._item(item) for item in history.items] or _NO_OLDER
+            shown["items"] = [self._older_item(item, history) for item in history.items] or (
+                _NO_OLDER
+            )
         if history.episodes:
             shown["episodes"] = [self._shown_episode(record) for record in history.episodes]
         if history.more:
             shown["more"] = _next_page(history.page)
+        return shown
+
+    def _older_item(self, item: PlaceItem, history: OlderHistory) -> dict[str, object]:
+        """An older item as the place window shows one, a relayed input's withheld (§9:3)."""
+        shown = self._item(item)
+        if history.withheld(item) and item.author is PlaceAuthor.USER:
+            shown["text"] = _RELAYED_ITEM
         return shown
 
     def _full_episode(self, read: EpisodeRead) -> dict[str, object]:
@@ -3329,6 +3355,9 @@ class _Request:
             return shown
         self._rendered.add(read.episode_id)
         shown |= self._full_head(projection)
+        if read.matters:
+            # ADR-0358 §8:1: the matters it belongs to, as an episode search names them.
+            shown["in_matters"] = [self._matter(matter) for matter in read.matters]
         if not self._inputs.owner_records:
             return shown
         shown["page"] = read.page
@@ -3727,7 +3756,7 @@ class _InPlace:
     messages: frozenset[int] = frozenset()
 
 
-def _relayed_episodes(
+def relayed_episodes(
     records: Iterable[EpisodicMemory | Memory], *, excerpt_chars: int
 ) -> frozenset[str]:
     """The ids of the episodes among ``records`` whose input is relayed (ADR-0351 §5:7).
@@ -3739,6 +3768,7 @@ def _relayed_episodes(
         record.id
         for record in records
         if isinstance(record, EpisodicMemory)
+        and not (record.processing_record is not None and record.processing_record.is_open)
         and relay_mark_counts(
             (projected := project_episode(record, excerpt_chars=excerpt_chars)).parties,
             relayed=projected.relayed,

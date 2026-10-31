@@ -28,7 +28,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.acting import ActedCall, ActedOutcome, AuthorizedCall, ResultRoute
 from ai_assistant.orchestration.authorizer import CallVerdict, RoundAuthorization, Verdict
-from ai_assistant.orchestration.lookups import SEARCH_EPISODES, SEARCH_MEMORY
+from ai_assistant.orchestration.lookups import READ_EPISODE, SEARCH_EPISODES, SEARCH_MEMORY
 from ai_assistant.orchestration.planning import CallOutcomeKind, EpisodesFound, EpisodeShown
 from ai_assistant.testing.memories import memory, said_support, sourced_support
 
@@ -140,3 +140,29 @@ def test_a_call_not_done_keeps_nothing_of_what_it_showed() -> None:
 
     assert entry.outcome is CallOutcomeKind.REFUSED
     assert entry.showed is None
+
+
+def test_a_full_view_showing_a_marked_summary_is_outside_content_read() -> None:
+    """§6:4, ADR-0303 §3:6: a marked summary the full view shows is counted as read."""
+    from ai_assistant.core.episode_encoding import project_episode  # noqa: PLC0415
+    from ai_assistant.orchestration.acting import ActedRound  # noqa: PLC0415
+    from ai_assistant.orchestration.phase_path import PhasePath  # noqa: PLC0415
+    from ai_assistant.orchestration.planning import EpisodeRead, MatterShown  # noqa: PLC0415
+
+    working = _acted(READ_EPISODE, output={"looked_up": "read_episode"}, episode="activation:one")
+    record = _episode("activation:one")
+    marked = MatterShown(
+        story_id="story:venue", summary_version=1, first_line="The venue wrote", outside=True
+    )
+    read = EpisodeRead(
+        episode_id=record.id,
+        record=record,
+        projection=project_episode(record, excerpt_chars=50, owner_records=True, full_view=True),
+        matters=(marked,),
+    )
+    handed = tuple(working.latest.handed.values())
+
+    PhasePath._looked(working, ActedRound(round_id="round-1", calls=handed), {"d1": read})
+
+    assert working.read_outside_content
+    assert "story:venue" in working.fetched_outside_from

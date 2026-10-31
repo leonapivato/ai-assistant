@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
-from test_planning import _earlier, _episode
+from test_planning import _earlier, _episode, _relayed
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
@@ -536,3 +536,52 @@ async def test_an_unreadable_store_makes_an_episode_look_up_not_done() -> None:
     assert answer.failure is not None
     assert answer.failure.kind is ToolFailureKind.UNAVAILABLE
     assert scope.found == {}
+
+
+# --- review round 1 -------------------------------------------------------------------
+
+
+async def test_an_older_message_of_a_relayed_input_is_marked_from_its_held_episode() -> None:
+    """ADR-0351 §5:7, §9:3: read off the linked episode as held, whatever the windows hold."""
+    entries: list[TranscriptMessage | DeletedMessage] = [
+        _message(1, MessageAuthor.USER, "the dentist's own words"),
+        _message(2, MessageAuthor.USER, "in the window"),
+    ]
+    conversations = _Conversations(entries, taken={1: "relay"})
+    relayed = _relayed(_episode("activation:relay"))
+    reads = _reads(_Memory(held=(relayed,)), conversations=conversations)
+    source = OlderSource(conversation_id="conv-1", before=2, shown=frozenset({2}))
+
+    older = await reads.older(source, 1, audience=BOUNDED)
+
+    (item,) = older.items
+    assert item.episode_id == "activation:relay"
+    assert older.relayed == frozenset({"activation:relay"})
+    assert older.withheld(item)
+
+
+async def test_the_full_view_reads_the_matters_its_episode_belongs_to() -> None:
+    """§8:1: by ``stories_of``, whatever the record referenced."""
+    record = _episode("activation:full")
+    stories = _Stories(
+        of={"full": ("story:dentist",)}, summaries={"story:dentist": _summary("The dentist.")}
+    )
+    reads = _reads(_Memory(held=(record,)), stories=stories)
+
+    read = await reads.full("activation:full", 1, audience=BOUNDED, owner_records=True)
+
+    (matter,) = read.matters
+    assert (matter.story_id, matter.first_line) == ("story:dentist", "The dentist.")
+
+
+async def test_a_lines_older_history_reads_further_back_until_its_page_is_there() -> None:
+    """§9:1: the channel grew since the window was read; the page is read from further back."""
+    channel = [_episode(f"activation:{at}") for at in range(23)]
+    store = _Memory(channel=channel)
+    source = OlderSource(channel=LINE, episodes=frozenset({"activation:18", "activation:19"}))
+
+    older = await _reads(store).older(source, 1, audience=BOUNDED)
+
+    assert older.readable
+    assert [one.id for one in older.episodes] == ["activation:17", "activation:16"]
+    assert older.more
