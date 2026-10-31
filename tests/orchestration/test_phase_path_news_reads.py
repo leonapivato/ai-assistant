@@ -19,7 +19,9 @@ from test_planning import _episode
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import ChannelIdentity, Profile
+from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION
 from ai_assistant.orchestration.disclosure import UnboundedAudienceSupply
+from ai_assistant.orchestration.message_tools import who_it_is_for
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.planning import NewsShown, PlanningWork
 from ai_assistant.testing.memories import memory
@@ -217,3 +219,43 @@ async def test_an_ended_work_whose_episode_is_not_frozen_is_read_again() -> None
     )
 
     assert reread.ended == {}
+
+
+async def test_a_name_changed_mid_work_names_the_person_in_a_message() -> None:
+    """ADR-0357 §2:3, ADR-0360 §4:1, review round 4: as planning was shown them, since."""
+    path = _path(_Memory())
+    renamed = SimpleNamespace(standing_pins=[], profile=Profile(name="Tom"))
+
+    async def read(person_id: str) -> object:
+        del person_id
+        return renamed
+
+    async def current_ends(memory_ids: Iterable[str]) -> dict[str, Memory]:
+        del memory_ids
+        return {}
+
+    path._person_blocks = cast(
+        "Any",
+        SimpleNamespace(
+            store=SimpleNamespace(read=read), current_ends=current_ends, budget_chars=1600
+        ),
+    )
+    block = SimpleNamespace(profile=Profile(name="Leo"))
+    state = SimpleNamespace(
+        person_block=block,
+        trigger=SimpleNamespace(
+            channel=ChannelIdentity(channel_type="conversation", instance_id="chat"), target=None
+        ),
+    )
+    working = _working(frozenset())
+
+    await path._shown_now(working, cast("Any", state), cast("Any", SimpleNamespace(supply=_SUPPLY)))
+
+    token = CURRENT_ACTIVATION.set(cast("Any", SimpleNamespace(state=state)))
+    try:
+        named = PhasePath._named(working)
+    finally:
+        CURRENT_ACTIVATION.reset(token)
+    assert named == ("Leo", "Tom")
+    # None: the name reaches the user.
+    assert who_it_is_for("Tom", named=named) is None

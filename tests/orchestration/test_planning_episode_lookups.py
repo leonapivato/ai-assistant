@@ -524,6 +524,31 @@ async def test_an_older_item_of_a_relayed_input_is_withheld_and_kept_by_nothing(
     )
 
 
+async def test_a_withheld_relayed_item_keeps_its_episode_link() -> None:
+    """ADR-0358 §9:3, review round 4: its words withheld, its episode still labelled."""
+    history = OlderHistory(
+        readable=True,
+        items=(
+            PlaceItem(
+                author=PlaceAuthor.USER,
+                text="the dentist's own words",
+                episode_id="activation:relayed",
+            ),
+        ),
+        relayed=frozenset({"activation:relayed"}),
+    )
+
+    value, planned = await _shown("read_older_history", {"history": history})
+
+    (item,) = value["items"]
+    shown = tag(item, "message")
+    assert (shown.get("withheld"), shown.text) == ("yes", None)
+    assert shown.get("episode") == "E1"
+    assert (
+        PlanningLabel(label="E1", kind=LabelKind.EPISODE, id="activation:relayed") in planned.labels
+    )
+
+
 async def test_a_full_view_names_the_matters_its_episode_belongs_to() -> None:
     """§8:1: the episode look-up names the episode's matters, as a search does."""
     matter = MatterShown(story_id="story:dentist", summary_version=2, first_line="The dentist.")

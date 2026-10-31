@@ -812,6 +812,49 @@ async def test_a_pin_removed_is_named_once_no_pin_reaches_its_memory() -> None:
     assert "- M2 is no longer pinned." in gone
 
 
+async def test_a_change_after_the_works_own_is_still_news() -> None:
+    """ADR-0360 §4:1, §4:5, review round 4: only the result beside it hides one's own."""
+    given = _inputs(person=_block(KeptInMind(memory=BEACH, pinned=True)))
+    own = RoundResponse(
+        calls=(
+            _call("c1", "set_profile", field="address", value="Lee"),
+            _call("c2", "pin", memory="M2"),
+        )
+    )
+    stage, completer = _stage(own, RoundResponse(calls=(_call("c3", "list_tasks"),)))
+    planned = await stage.plan(given)
+    second = replace(
+        given,
+        work=planned.work,
+        rounds=(planned.round,),
+        labels=planned.labels,
+        outcomes=tuple(
+            CallOutcome(round_id=planned.round.id, call_id=one, kind=CallOutcomeKind.DONE)
+            for one in ("c1", "c2")
+        ),
+        person_now=_now(BEACH, address="Lee"),
+    )
+    planned_two = await stage.plan(second)
+    await stage.plan(
+        replace(
+            second,
+            work=planned_two.work,
+            rounds=(planned.round, planned_two.round),
+            labels=(*planned.labels, *planned_two.labels),
+            outcomes=(
+                *second.outcomes,
+                CallOutcome(round_id=planned_two.round.id, call_id="c3", kind=CallOutcomeKind.DONE),
+            ),
+            person_now=_now(address="Tom"),
+        )
+    )
+    first_news, later = (one.report.news for one in completer.last_call.exchange.steps)
+
+    assert first_news.endswith(NOTHING_NEW)
+    assert "- Leo's address is now Tom." in later
+    assert "- M2 is no longer pinned." in later
+
+
 async def test_a_pin_the_budget_leaves_out_is_not_told_as_unpinned() -> None:
     """ADR-0360 §4:1, review round 3: still reached, it is no news, pinned or unpinned."""
     given = _inputs(person=_block(KeptInMind(memory=BEACH, pinned=True)))
