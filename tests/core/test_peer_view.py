@@ -546,6 +546,58 @@ def test_a_frozen_round_recorded_before_the_decision_shows_its_text() -> None:
     ]
 
 
+def _closed_by_a_restart(episode: EpisodicMemory) -> EpisodicMemory:
+    """``episode``, as a restart's close freezes an open one: no entry appended."""
+    processing = episode.processing_record
+    assert processing is not None
+    closed = EpisodeProcessingRecord.model_validate(
+        {
+            **dict(processing),
+            "status": ProcessingStatus.INTERRUPTED,
+            "reason": ProcessingReason.HUB_STOPPED,
+            "ended_at": _LATER,
+            "stages": (
+                *processing.stages,
+                _stage(ControllerStage.END, ControllerRule.HUB_STOPPED),
+            ),
+        }
+    )
+    return _episode(closed)
+
+
+def test_a_restarts_close_never_settles_a_round_its_entries_are_missing_from() -> None:
+    """A text call done before its entry was appended, and the hub stopped: the close
+    freezes the episode with the entry still missing, so a frozen record is no proof the
+    round is settled, and the draft its own message never sent is never shown."""
+    episode = _closed_by_a_restart(_calling("Draft that was never sent.", "c1", entries=()))
+
+    assert _words(_peer(episode, (_message("m1", ToolOutcome.SUCCEEDED),))) == [None]
+
+
+def test_an_entry_with_no_outcome_leaves_its_round_unsettled() -> None:
+    """§8:6: a call still running at the freeze has its entry with no outcome, and so no
+    delivery yet; the round's text is not taken for a message it may not have sent."""
+    running = _sent("r1", "c1", "x", outcome=None, delivered=None)
+    episode = _calling("Draft that was never sent.", "c1", entries=(running,), frozen=True)
+
+    assert _words(_peer(episode, (_message("m1", ToolOutcome.SUCCEEDED),))) == [None]
+
+
+def test_every_message_of_a_round_recorded_before_the_decision_shows_its_text() -> None:
+    """§8:1: a round recorded before keeps its text as the message it wrote, for every
+    reader: its episode holds no entry and froze by its own pass."""
+    effects = (
+        _message("m1", ToolOutcome.INDETERMINATE, round_="r2"),
+        _message("m2", ToolOutcome.SUCCEEDED, round_="r2"),
+    )
+    frozen = _record(rounds=_found().rounds, frozen=True)
+
+    assert _words(_peer(_episode(frozen), effects)) == [
+        "Here are three options.",
+        "Here are three options.",
+    ]
+
+
 def test_a_message_calls_words_are_cut_to_the_bound() -> None:
     episode = _calling("", "c1", entries=(_sent("r1", "c1", "Booked the 9:40 to Lisbon."),))
 

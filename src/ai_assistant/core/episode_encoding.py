@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     PeerEffect,
     PeerNotes,
     PeerView,
+    ProcessingReason,
     ProcessingStatus,
     ProjectedCall,
     ProjectedEvidence,
@@ -708,17 +709,24 @@ def _peer_effects(
     A message effect shows the words of the message it claimed (ADR-0356 §7:8). The
     record names its round and no call, so each round's message effects, in claim
     order, are paired with that round's messages in the order they are written: the
-    round's own message where its ``text`` shows one (a round recorded before ADR-0356,
-    or under its interim), then each message call whose entry holds a delivery, in the
-    order the round proposed them (#3537). The pairing is read off the counts, and only
-    once the round's entries are settled: every call it proposed has its entry, or the
-    episode is frozen, by which every call has one (ADR-0356 §8:6), so a frozen round
-    with none was recorded before the decision. Then one effect more than the
-    deliveries, on a round whose text shows, makes the first the round's own, and as
-    many as the deliveries makes each a call's. While a round's entries are not settled,
-    as while acting is still writing, or at any other count, its messages are shown
-    with no words: no message is shown with another's words, and no text a round never
-    sent is shown as sent.
+    round's own message where its ``text`` shows one, then each message call whose entry
+    holds a delivery, in the order the round proposed them (#3537). A delivery is held
+    exactly by a message call that was claimed, so where a round shows no text, as many
+    effects as deliveries pair each with its call, and any other count shows none.
+
+    A round whose text shows is one recorded before ADR-0356 or under its interim. An
+    episode recorded before holds no entry, and one frozen since by its own pass holds
+    one for every call (§8:6), so a frozen episode holding none, frozen other than by a
+    restart's close, was recorded before: each of its message effects shows the round's
+    text, as it always has (§8:1). Otherwise the text is the round's own message only
+    once the round is settled, every call it proposed holding an entry with an
+    outcome, so every message call claimed holds its delivery: then one effect more
+    than the deliveries makes the first the round's own, and as many makes each a
+    call's.
+
+    Any other case, as while acting is still writing, or an episode a restart closed
+    with entries missing, shows the round's messages with no words: no message is shown
+    with another's words, and no text a round never sent is shown as sent.
 
     Raises:
         ValueError: If an effect is another activation's.
@@ -751,30 +759,55 @@ def _message_words(
         if not effect.is_call and effect.round is not None:
             claimed.setdefault(effect.round, []).append(effect)
     words: dict[str, ProjectedText] = {}
+    before = (
+        not processing.call_records
+        and not processing.is_open
+        and processing.reason is not ProcessingReason.HUB_STOPPED
+    )
     for one in processing.rounds:
         held = claimed.get(one.id, [])
         if not held:
             continue
-        recorded = {entry.call_id for entry in processing.call_records if entry.round == one.id}
-        if processing.is_open and any(call.call_id not in recorded for call in one.calls):
-            continue
-        order = {call.call_id: index for index, call in enumerate(one.calls)}
-        sent = sorted(
-            (
-                entry
-                for entry in processing.call_records
-                if entry.round == one.id and entry.delivered is not None
-            ),
-            key=lambda entry: order[entry.call_id],  # the record's validator holds it
+        shows = _shows_message(one)
+        messages: list[str] | None = (
+            [one.text] * len(held)
+            if shows and before
+            else _round_messages(processing, one, len(held), shows=shows)
         )
-        messages = [entry.delivered.words for entry in sent if entry.delivered is not None]
-        if _shows_message(one) and len(held) == len(messages) + 1:
-            messages.insert(0, one.text)
-        elif len(held) != len(messages):
+        if messages is None:
             continue
         for effect, text in zip(held, messages, strict=True):
             words[effect.id] = ProjectedText(text=text[:bound], full_chars=len(text))
     return words
+
+
+def _round_messages(
+    processing: EpisodeProcessingRecord, planned: PlanningRound, claimed: int, *, shows: bool
+) -> list[str] | None:
+    """A round's messages in the order written, where ``claimed`` effects pair with them.
+
+    ``None`` where they do not: the counts differ, or the round's text shows and the round
+    is not settled, so a claimed message call may still lack its delivery.
+    """
+    entries = {
+        entry.call_id: entry for entry in processing.call_records if entry.round == planned.id
+    }
+    sent = [
+        entry.delivered.words
+        for call in planned.calls
+        if (entry := entries.get(call.call_id)) is not None and entry.delivered is not None
+    ]
+    if not shows:
+        return sent if claimed == len(sent) else None
+    settled = all(
+        (entry := entries.get(call.call_id)) is not None and entry.outcome is not None
+        for call in planned.calls
+    )
+    if not settled:
+        return None
+    if claimed == len(sent) + 1:
+        return [planned.text, *sent]
+    return sent if claimed == len(sent) else None
 
 
 def _projected_rounds(
