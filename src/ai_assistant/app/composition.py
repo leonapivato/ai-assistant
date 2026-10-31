@@ -88,6 +88,7 @@ from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapabilit
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
+from ai_assistant.orchestration.episode_lookups import EpisodeLookUpReads
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
@@ -496,6 +497,33 @@ PHASES_STORY_EPISODES: Final = STORY_SHORT_VIEW_EPISODES + 1
 #: routed by source (ADR-0307 §6:6, ADR-0306 §5:16). **Provisional (#2589).** As many as
 #: recall's second run keeps in all, so an asked-for search reaches no fewer than recall.
 PHASES_MEMORY_SEARCH_LIMIT: Final = RECALL_SECOND_RUN_CAP
+
+#: The most past episodes one search planning makes keeps (ADR-0358 §7:1).
+#: **Provisional (#2589).** As many as recall's second run keeps in all, so an asked-for
+#: search reaches no fewer episodes than recall can.
+PLANNING_EPISODE_SEARCH_LIMIT: Final = RECALL_SECOND_RUN_CAP
+
+#: How many of the episodes a search found one page of its result shows (ADR-0358
+#: §6:6). **Provisional (#2589).** Each is a short view, so a few at a time.
+PLANNING_EPISODE_SEARCH_PAGE: Final = 3
+
+#: How many older messages, or earlier episodes, one page of the origin's older history
+#: shows (ADR-0358 §6:6, §9:1). **Provisional (#2589).** A place window's worth of
+#: messages; an episode window's earlier episodes come as short views, so fewer suffice,
+#: but one page size serves both.
+PLANNING_OLDER_HISTORY_PAGE: Final = 10
+
+#: How many of an episode's full view's parts one page shows (ADR-0358 §6:6, §10:3):
+#: understanding's versions, recall's runs, each round's notes and each call, the
+#: evidence and what it took in. **Provisional (#2589).**
+PLANNING_FULL_VIEW_PAGE: Final = 20
+
+#: The bound, in characters, on what a call's entry keeps of what its result showed
+#: planning (ADR-0358 §11:4): a record counts its id's characters and a result's own
+#: words theirs. **Provisional (#2589).** Twice an excerpt: a page of records by id
+#: fits many times over, and a tool's own result is kept to about what planning reads of
+#: another episode's texts.
+CALL_SHOWED_CHARS: Final = 2 * PHASES_EXCERPT_CHARS
 
 #: How many similar memories a candidate's lookup returns at most (ADR-0329 §4:1).
 #: **Provisional (#2589).** A handful: enough to show planning a conflict that matters,
@@ -2609,8 +2637,10 @@ def _build_phase_path(
     the arguments that name things by label handed to planning (ADR-0307 §5:2), and the
     same runner checking a move or a split before it is authorized (§5:3-§5:4). **And
     planning's look-ups** (§6:6): a memory search, a story's full view and the
-    follow-up, in no registry either, each run through the own-records seam by one
-    :class:`LookUps` over the one memory store and the story views' reads. **And the
+    follow-up, and ADR-0358's search of past episodes, an episode's full record and the
+    origin's older history, in no registry either, each run through the own-records seam
+    by one :class:`LookUps` over the one memory store, the story views' reads and the
+    episode look-ups' reads. **And the
     weather pull** (ADR-0324 §5:4), where a forecaster is configured: the forecast read
     is in no registry (ADR-0260 §1, ADR-0324 §5:5), so :class:`PhaseTools` offers it
     beside the registry's capabilities as it offers the search, fills every argument it
@@ -2677,7 +2707,23 @@ def _build_phase_path(
     # a story's full view through the same story reads, and the follow-up, which acting
     # runs against the activation's held results (ADR-0308 §6:6).
     look_ups = LookUps(
-        memory=seams.memory, views=story_reads, search_limit=PHASES_MEMORY_SEARCH_LIMIT
+        memory=seams.memory,
+        views=story_reads,
+        search_limit=PHASES_MEMORY_SEARCH_LIMIT,
+        # ADR-0358 §7-§10: the episode look-ups, over the one memory store, story store
+        # and conversation store, a search kept under recall's threshold for the embedder
+        # the deployment wires (§7:1, ADR-0281 §3).
+        episodes=EpisodeLookUpReads(
+            memory=seams.memory,
+            stories=seams.stories,
+            conversations=seams.chat,
+            threshold=RECALL_THRESHOLDS[settings.embedder],
+            limit=PLANNING_EPISODE_SEARCH_LIMIT,
+            search_page=PLANNING_EPISODE_SEARCH_PAGE,
+            history_page=PLANNING_OLDER_HISTORY_PAGE,
+            full_page=PLANNING_FULL_VIEW_PAGE,
+            excerpt_chars=PHASES_EXCERPT_CHARS,
+        ),
     )
     tools = PhaseTools(
         registry=seams.registry,
@@ -2757,6 +2803,8 @@ def _build_phase_path(
         story_calls=story_calls,
         # The look-ups' runner, whose scope the path opens around acting (§6:6).
         look_ups=look_ups,
+        # ADR-0358 §11:4: what an entry keeps of what each call showed.
+        showed_chars=CALL_SHOWED_CHARS,
         round_limit=PHASES_ROUND_LIMIT,
         round_wait=PHASES_CALL_DEADLINE,
         excerpt_chars=PHASES_EXCERPT_CHARS,
