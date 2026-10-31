@@ -312,6 +312,7 @@ __all__ = [
     "RefusedCall",
     "RoundRecorder",
     "RunningShown",
+    "ShowingLabels",
     "answer_fact",
     "call_showed",
     "exact_line",
@@ -952,7 +953,7 @@ def call_showed(
     *,
     bound: int,
     owner_records: bool = True,
-    held: Collection[str] = frozenset(),
+    labels: ShowingLabels | None = None,
 ) -> CallShowed | None:
     """What a done call's result showed planning directly, as its entry keeps it.
 
@@ -969,15 +970,20 @@ def call_showed(
     planning was shown them. What is kept is cut to ``bound`` characters, a record
     counting its id's, and the cut is carried (§11:4).
 
-    A matter planning already held a label for when the result was rendered is shown
-    by that label alone, with no summary (§8:1), so it keeps no summary version.
+    **The summary versions are read off a second rendering, under the labels planning
+    holds** (``labels``): a story keeps the version the rendering first showed its
+    summary at, so a matter planning already held a label for, which is shown by that
+    label alone (§8:1), keeps none, and a page shows only what is on it. That rendering
+    assigns labels as planning's does, so a batch of results rendered in turn over one
+    ``labels`` reads each as planning is shown it after the ones before it.
 
     Args:
         outcome: What came of the call, carrying what its look-up found.
         bound: The composition root's bound on what an entry keeps (§11:4).
         owner_records: Whether the pass may be shown a record placed for the owner
             alone, which decides what a full view's page shows (§10:5).
-        held: The stories planning held a label for before the result was rendered.
+        labels: The labels planning holds as the result is rendered, which the
+            rendering adds to; ``None`` for none.
 
     Returns:
         What it showed, or ``None`` for a call that was not done (§11:2).
@@ -1014,7 +1020,9 @@ def call_showed(
             for item in history.items
             if not history.withheld(item)
         )
-    versions = _summary_versions(outcome, held)
+    versions = _summary_versions(
+        outcome, ShowingLabels() if labels is None else labels, owner_records=owner_records
+    )
     parts.extend(
         ShownRecord(
             kind=_SHOWN_KINDS[one.kind],
@@ -1040,9 +1048,24 @@ _SHOWING_PLACE: Final = PlaceWindow(takes_message=False)
 _SHOWING_AT: Final = datetime(2000, 1, 1, tzinfo=UTC)
 
 
-def _labelled(outcome: CallOutcome, *, owner_records: bool) -> tuple[PlanningLabel, ...]:
-    """Every thing the rendering of ``outcome``'s result names under a label, in order."""
-    book = _LabelBook(())
+class ShowingLabels:
+    """The labels planning holds as results are rendered, for what each showed (§11:2).
+
+    Seeded with the labels the activation holds, and added to as each result is
+    rendered over it, as planning's own rendering assigns them.
+    """
+
+    def __init__(self, held: Sequence[PlanningLabel] = ()) -> None:
+        """Start from the labels planning holds.
+
+        Args:
+            held: The labels the activation holds before the results are rendered.
+        """
+        self._book = _LabelBook(held)
+
+
+def _rendering(outcome: CallOutcome, book: _LabelBook, *, owner_records: bool) -> _Request:
+    """``outcome``'s result rendered over ``book``, as planning renders it."""
     request = _Request(
         PlanningInputs(
             activation_id="showed",
@@ -1056,46 +1079,28 @@ def _labelled(outcome: CallOutcome, *, owner_records: bool) -> tuple[PlanningLab
         zone=ZoneInfo("UTC"),
     )
     request._result_value(outcome)
+    return request
+
+
+def _labelled(outcome: CallOutcome, *, owner_records: bool) -> tuple[PlanningLabel, ...]:
+    """Every thing the rendering of ``outcome``'s result names under a label, in order."""
+    book = _LabelBook(())
+    _rendering(outcome, book, owner_records=owner_records)
     return tuple(book.minted)
 
 
-def _summary_versions(outcome: CallOutcome, held: Collection[str]) -> dict[str, int]:
-    """The summary version each story a result's rendering first shows was shown at.
+def _summary_versions(
+    outcome: CallOutcome, labels: ShowingLabels, *, owner_records: bool
+) -> dict[str, int]:
+    """The summary version each story's summary was first rendered at (ADR-0358 §11:2).
 
-    ADR-0358 §11:2, in the rendering's order, so a story shown twice keeps the version
-    it was first shown at, as it keeps its one label: a story read's, then each larger
-    story's short view beside it; each matter an episode search names, episode by
-    episode; and a full view's matters, which head it, then each story it shows again. A
-    story whose summary is withheld, or named by its label alone, showed none, and
-    keeps none: a matter is named by its label alone where planning held that label
-    before the result was rendered (``held``), as :meth:`_Request._matter` renders it.
+    Read off the rendering of ``outcome``'s result under the labels planning holds, so a
+    story shown twice keeps the version it was first shown at, as it keeps its one
+    label; a story whose summary is withheld showed none, and one named by its label
+    alone, a matter planning already held a label for among them, showed none either.
     """
-    shown: list[tuple[str, int | None, bool]] = []
-    story = outcome.story
-    if story is not None:
-        shown.append((story.story_id, story.summary_version, story.withheld))
-        shown.extend((one.story_id, one.summary_version, one.withheld) for one in story.inherited)
-    if outcome.episodes is not None:
-        shown.extend(
-            (matter.story_id, matter.summary_version, matter.withheld)
-            for found in outcome.episodes.episodes
-            for matter in found.matters
-            if matter.story_id not in held
-        )
-    full = outcome.full
-    if full is not None:
-        shown.extend(
-            (one.story_id, one.summary_version, one.withheld)
-            for one in full.matters
-            if one.story_id not in held
-        )
-        shown.extend(
-            (one.story_id, one.summary_version, one.withheld) for one in full.stories.values()
-        )
-    versions: dict[str, int | None] = {}
-    for story_id, version, withheld in shown:
-        versions.setdefault(story_id, None if withheld else version)
-    return {key: value for key, value in versions.items() if value is not None}
+    rendered = _rendering(outcome, labels._book, owner_records=owner_records)
+    return {key: value for key, value in rendered.summaries_shown.items() if value is not None}
 
 
 def shown_within(parts: Sequence[ShownText | ShownRecord], bound: int) -> CallShowed:
@@ -2099,6 +2104,10 @@ class _Request:
         self._peers_rendered: dict[str, str] = {}
         # The episodes rendered whole so far, so one shown again is named by its label.
         self._rendered: set[str] = set()
+        # The summary version each story was first rendered with a summary at, or
+        # ``None`` where its summary was withheld, in the order rendered; a story named
+        # by its label alone is not here (ADR-0358 §11:2).
+        self.summaries_shown: dict[str, int | None] = {}
         # Each running activation understanding cited: the list it is cited in, its
         # place there and its episode, named once the request is rendered (ADR-0353 §14:1).
         self._running_cited: list[tuple[list[object], int, str]] = []
@@ -2863,6 +2872,7 @@ class _Request:
                 written=one.written, withheld=one.withheld, lines=one.lines, outside=one.outside
             ),
         }
+        self.summaries_shown.setdefault(one.story_id, None if one.withheld else one.summary_version)
         if one.outside and one.written and not one.withheld:
             shown["summary_outside_content"] = _OUTSIDE
         if (
@@ -2949,6 +2959,9 @@ class _Request:
             withheld=view.withheld,
             lines=view.lines,
             outside=view.outside,
+        )
+        self.summaries_shown.setdefault(
+            view.story_id, None if view.withheld else view.summary_version
         )
         if view.outside and not view.withheld:
             shown["summary_outside_content"] = _OUTSIDE
@@ -3313,6 +3326,9 @@ class _Request:
         label = self._book.label(LabelKind.STORY, matter.story_id)
         if held and not again:
             return label
+        self.summaries_shown.setdefault(
+            matter.story_id, None if matter.withheld else matter.summary_version
+        )
         shown: dict[str, object] = {"label": label}
         if matter.withheld:
             shown["summary"] = _SUMMARY_WITHHELD

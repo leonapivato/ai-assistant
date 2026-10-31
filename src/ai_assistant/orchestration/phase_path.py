@@ -427,6 +427,7 @@ from ai_assistant.orchestration.planning import (
     RecordedCandidate,
     RefusedCall,
     RunningShown,
+    ShowingLabels,
     answer_fact,
     call_showed,
     shown_within,
@@ -2494,9 +2495,11 @@ class PhaseWorking:
         §11:2-§11:4), read off what planning renders of it
         (:func:`~ai_assistant.orchestration.planning.call_showed`): each record by its
         kind and id, never by a copy, nothing of what was held for a digest, cut to
-        ``showed`` characters. A memory search whose records the next round has not
-        fetched, because no round followed, keeps the records it listed for planning,
-        by id.
+        ``showed`` characters. A memory search's entry waits for the fetch before the
+        next round, which decides which of its records planning is shown; one whose
+        records were never fetched, because no round followed, keeps at the freeze the
+        records it listed for planning, by id. Each result is read under the labels
+        planning holds and those each result before it assigns, as planning renders them.
 
         Args:
             at: When the entries are appended.
@@ -2508,10 +2511,13 @@ class PhaseWorking:
             The new entries, in the order the rounds proposed their calls.
         """
         entries: list[RecordedCall] = []
-        # ADR-0358 §8:1, §11:2: a matter planning holds a label for is rendered by that
-        # label alone, so it showed no summary: the stories labelled before these results
-        # are rendered, and those each result before it in this batch labels.
-        held = {one.id for one in self.labels.labels if one.kind is LabelKind.STORY}
+        # ADR-0358 §8:1, §11:2: each result is read as planning is shown it, under the
+        # labels planning holds and those each result before it in this batch assigns.
+        labels = ShowingLabels(self.labels.labels)
+        # A memory search's records are fetched before the next round, and what planning
+        # is shown of it is known only then: its entry waits for that fetch, and only at
+        # the freeze, with no round to follow, keeps the ids it listed.
+        waiting = frozenset() if freezing else frozenset(self.unfetched_searches())
         for one in self._rounds:
             round_id = one.planned.round.id
             outcomes = {
@@ -2534,15 +2540,13 @@ class PhaseWorking:
                 started = call.name == TIDY_STORY_CAPABILITY and one.authorization is not None
                 if outcome is None and not (started or freezing):
                     continue
+                if outcome is not None and outcome.result_id in waiting:
+                    continue
                 capability = named.get(call.call_id, call.name)
                 sent = one.sent.get(call.call_id)
-                shown = None if outcome is None else self._showed(outcome, capability, showed, held)
-                if shown is not None:
-                    held.update(
-                        part.id
-                        for part in shown.parts
-                        if isinstance(part, ShownRecord) and part.kind is ShownRecordKind.STORY
-                    )
+                shown = (
+                    None if outcome is None else self._showed(outcome, capability, showed, labels)
+                )
                 entries.append(
                     RecordedCall(
                         round=round_id,
@@ -2568,7 +2572,7 @@ class PhaseWorking:
         return tuple(entries)
 
     def _showed(
-        self, outcome: CallOutcome, capability: str, bound: int, held: Collection[str]
+        self, outcome: CallOutcome, capability: str, bound: int, labels: ShowingLabels
     ) -> CallShowed | None:
         """What a call's result showed planning, as its entry keeps it (ADR-0358 §11:2)."""
         looked = self._looked_up(outcome, capability)
@@ -2583,7 +2587,7 @@ class PhaseWorking:
                 for one in searched_ids(outcome.result)
             )
             return shown_within(listed, bound)
-        return call_showed(looked, bound=bound, owner_records=self.owner_records, held=held)
+        return call_showed(looked, bound=bound, owner_records=self.owner_records, labels=labels)
 
     def acted_rounds(self) -> tuple[ActedRound, ...]:
         """Every acting decision, in round order."""
