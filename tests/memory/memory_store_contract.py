@@ -58,6 +58,7 @@ from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
     CallOutcomeKind,
+    CallShowed,
     Capture,
     ChannelContext,
     ChannelIdentity,
@@ -102,6 +103,9 @@ from ai_assistant.core.types import (
     RecordedDelivery,
     RecordedInputMessage,
     RecordedTextInput,
+    ShownRecord,
+    ShownRecordKind,
+    ShownText,
     SituationLabel,
     StageEntry,
     StageOutcome,
@@ -6171,6 +6175,72 @@ class MemoryStoreContract:
                 await _replace(store, revision, door, companion=door != "add")
             assert await store.get("companion") is None
             assert _unstamped_or_none(await store.get("episode")) == both
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_an_entry_keeps_what_its_call_showed_by_reference(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """ADR-0358 §11:2-§11:4: an entry appended keeping what its call showed, each record
+        by kind and id and a story by its summary version, with the bound's cut, reads back
+        as written, beside an entry that keeps nothing; a revision that changes what an
+        earlier entry showed is refused and writes nothing (ADR-0356 §8:6)."""
+        opened = _open_episode("episode", channel=_CONVERSATION_A)
+        await store.add(opened)
+        planned = PlanningRound(
+            id="round-1",
+            recorded_at=_OCCURRED,
+            calls=(
+                ProposedCall(call_id="c1", name="search_memory", arguments={"query": "q"}),
+                ProposedCall(call_id="c2", name="read_story", arguments={"story": "S1"}),
+            ),
+        )
+        rounded = _revised(opened, processing={"rounds": (planned,)})
+        await _replace(store, rounded, door)
+        showed = CallShowed(
+            parts=(
+                ShownText(text="Two records match:"),
+                ShownRecord(kind=ShownRecordKind.MEMORY, id=" fact "),
+                ShownRecord(kind=ShownRecordKind.EPISODE, id="activation:earlier"),
+                ShownRecord(kind=ShownRecordKind.STORY, id="story-1", summary_version=4),
+            ),
+            cut=True,
+        )
+        looked = RecordedCall(
+            round="round-1",
+            call_id="c1",
+            capability="search_memory",
+            effect=False,
+            outcome=CallOutcomeKind.DONE,
+            recorded_at=_OCCURRED,
+            showed=showed,
+        )
+        read = RecordedCall(
+            round="round-1",
+            call_id="c2",
+            capability="read_story",
+            effect=False,
+            outcome=CallOutcomeKind.DONE,
+            recorded_at=_OCCURRED,
+        )
+        both = _revised(rounded, processing={"call_records": (looked, read)})
+        await _replace(store, both, door)
+
+        got = await store.get("episode")
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert [one.showed for one in got.processing_record.call_records] == [showed, None]
+        assert _unstamped_or_none(got) == both
+
+        changed = looked.model_copy(update={"showed": CallShowed()})
+        with pytest.raises(MemoryStoreError):
+            await _replace(
+                store,
+                _revised(both, processing={"call_records": (changed, read)}),
+                door,
+                companion=door != "add",
+            )
+        assert await store.get("companion") is None
+        assert _unstamped_or_none(await store.get("episode")) == both
 
     @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
     async def test_the_guard_admits_a_placement_only_change_to_a_frozen_episode(

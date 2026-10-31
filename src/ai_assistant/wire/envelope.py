@@ -2754,7 +2754,16 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``SupportView.part`` the member ``message_call`` on the memory views. A peer at 122
 #:     refuses version 12 and the new field as extra, and a hub at 123 refuses version 11
 #:     (ADR-0124 §9:2). The method set does not move: no ``Protocol`` gains a member.
-PROTOCOL_VERSION: Final[int] = 123
+#: 124: ADR-0358 §11:7 advances the version once for its lane M1 (§12:1), on these
+#:     grounds: each ``RecordedCall`` in the wire-carried
+#:     ``EpisodicMemory.processing_record.call_records`` gains ``showed``, a
+#:     ``CallShowed`` of ``ShownText`` and ``ShownRecord`` parts, the record's kind the
+#:     closed ``ShownRecordKind``: what a done call's result showed planning, held by
+#:     reference. The record's ``schema_version`` stays 12, since an entry written before
+#:     validates unchanged (§11:6). A peer at 123 refuses the new field as extra, and a
+#:     hub at 124 reads an entry without it as keeping nothing (ADR-0124 §9:2). The method
+#:     set does not move: no ``Protocol`` gains a member.
+PROTOCOL_VERSION: Final[int] = 124
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

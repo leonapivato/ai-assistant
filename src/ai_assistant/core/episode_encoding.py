@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     EpisodeProjection,
     EpisodeSummary,
     EpisodicMemory,
+    MemoryKind,
     PeerEffect,
     PeerNotes,
     PeerView,
@@ -37,11 +38,16 @@ from ai_assistant.core.types import (
     ProjectedCall,
     ProjectedEvidence,
     ProjectedJoin,
+    ProjectedProposal,
+    ProjectedRecall,
     ProjectedRound,
     ProjectedText,
+    ProjectedUnderstanding,
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
+    ShownRecord,
+    ShownRecordKind,
     ToolOutcome,
     canonical_parties,
     parties_are_outside,
@@ -55,9 +61,11 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActivationDigest,
         ActivationEffect,
+        ActivationRecall,
         EpisodeProcessingRecord,
         JoinedInput,
         PlanningRound,
+        ProposedCall,
         SupportHolder,
     )
 
@@ -258,6 +266,7 @@ def project_episode(
     admit_outside_input: bool = False,
     owner_records: bool = False,
     candidates: Sequence[str] = (),
+    full_view: bool = False,
 ) -> EpisodeProjection: ...
 
 
@@ -279,6 +288,7 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
     owner_records: bool = False,
     candidates: Sequence[str] = (),
     effects: Sequence[ActivationEffect] | None = None,
+    full_view: bool = False,
 ) -> EpisodeProjection | PeerView:
     """Project an episode onto what a model is shown of it (ADR-0284 §8:1-§8:2).
 
@@ -313,6 +323,21 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
     every round the episode recorded, so a call-only round the projection omits still
     keeps the others in order. A round recorded before ADR-0356 projects its ``text`` as
     its message, as every round does here.
+
+    **The full view** (ADR-0358 §10:3, §11:5) is what ``full_view`` adds, for the
+    episode look-up alone, and only where ``owner_records`` admits a record placed for
+    the owner alone: on a pass where it does not, the full view, like the short view,
+    has the input, the meaning and how the work ended, and nothing more (§10:5). Under
+    it each call's entry carries what its result showed, kept by reference
+    (:class:`~ai_assistant.core.types.CallShowed`), or ``None`` where the entry keeps
+    none (§11:6); and the projection also carries each version of understanding the
+    record holds, with how many it elided when it recorded them, what each recall run
+    found, each record by kind and id and never by
+    the excerpt the run kept (§10:6), and each call a round proposed whose entry the
+    record does not hold, with its arguments (§10:9). Each version is placed by the
+    number of rounds recorded before it. Every part is cut to ``excerpt_chars`` as the
+    others are; nothing of a record is read here, so the caller reads each referenced
+    record again, as it is now held, under its own audience (§10:6, §6:3).
 
     **An episode's pending candidates** (ADR-0329 §6:9) are the facts the caller
     hands in ``candidates``: which of the episode's ``remember`` calls are candidates
@@ -357,6 +382,8 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
             rounds record them, or none. None for the peer view.
         effects: The activation's effect records, finished or not, in claim order, as
             the plan store returns them: given, the peer view is returned.
+        full_view: Whether to project the episode look-up's full view (ADR-0358
+            §11:5), which only that look-up sets. Never set for the peer view.
 
     Returns:
         The projection, or the peer view where ``effects`` is given.
@@ -367,8 +394,8 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
             input there (ADR-0286 §6), so a reader that feeds a model passes over it
             before it projects; or ``candidates`` are given for an episode with no
             processing record, which records no round; for the peer view, if the
-            episode has no processing record, ``admit_outside_input`` or
-            ``candidates`` are given, or an effect is another activation's.
+            episode has no processing record, ``admit_outside_input``, ``candidates``
+            or ``full_view`` are given, or an effect is another activation's.
     """
     if type(excerpt_chars) is not int or excerpt_chars < 1:
         msg = "the episode excerpt bound must be an integer of at least 1"
@@ -376,6 +403,9 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
     if effects is not None:
         if admit_outside_input or candidates:
             msg = "a peer view admits no outside input and carries no candidate (ADR-0349 §6:9)"
+            raise ValueError(msg)
+        if full_view:
+            msg = "the full view is the episode look-up's, never a peer view (ADR-0358 §11:5)"
             raise ValueError(msg)
         return _peer_view(record, effects, excerpt_chars, owner_records=owner_records)
     if record.processing_record is not None and record.processing_record.is_open:
@@ -394,6 +424,7 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
             input=_projected(record.content, excerpt_chars),
             response=response,
             derived_from_external=external,
+            full_view=full_view,
         )
     trigger = processing.trigger
     relayed = _trigger_relayed(processing)
@@ -404,6 +435,10 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
         parties_are_outside(trigger.parties, relayed=relayed) and admit_outside_input
     )
     latest = processing.understanding[-1] if processing.understanding else None
+    full = full_view and owner_records
+    understood, recalled, unrecorded = (
+        _full_view_parts(processing, excerpt_chars) if full else ((), (), ())
+    )
     return EpisodeProjection(
         occurred_at=record.occurred_at,
         channel=trigger.channel,
@@ -423,38 +458,116 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
         candidates=tuple(
             ProjectedText(text=fact[:excerpt_chars], full_chars=len(fact)) for fact in candidates
         ),
-        calls=_projected_calls(processing, excerpt_chars) if owner_records else (),
+        calls=(
+            _projected_calls(processing, excerpt_chars, full_view=full_view)
+            if owner_records
+            else ()
+        ),
         joined=(
             _projected_joins(processing, excerpt_chars, admit_outside_input=admit_outside_input)
             if owner_records
             else ()
         ),
+        full_view=full_view,
+        understood=understood,
+        understood_elided=processing.understanding_elided if full else 0,
+        recalled=recalled,
+        unrecorded=unrecorded,
     )
 
 
-def _projected_calls(processing: EpisodeProcessingRecord, bound: int) -> tuple[ProjectedCall, ...]:
-    """Each call's entry, in the order appended, under its round's position (ADR-0356 §13)."""
+def _projected_calls(
+    processing: EpisodeProcessingRecord, bound: int, *, full_view: bool
+) -> tuple[ProjectedCall, ...]:
+    """Each call's entry, in the order appended, under its round's position (ADR-0356 §13).
+
+    In the full view each also carries what its result showed (ADR-0358 §11:5).
+    """
     positions = {one.id: index for index, one in enumerate(processing.rounds)}
     proposed = {(one.id, call.call_id): call for one in processing.rounds for call in one.calls}
     projected: list[ProjectedCall] = []
     for entry in processing.call_records:
         call = proposed[(entry.round, entry.call_id)]  # the record's validator holds it
-        arguments = json.dumps(
-            call.model_dump(mode="json")["arguments"], ensure_ascii=False, sort_keys=True
-        )
         projected.append(
             ProjectedCall(
                 position=positions[entry.round],
                 capability=entry.capability,
-                arguments=ProjectedText(text=arguments[:bound], full_chars=len(arguments)),
+                arguments=_projected_arguments(call, bound),
                 effect=entry.effect,
                 outcome=entry.outcome,
                 reason=entry.reason,
                 delivered=entry.delivered,
                 marked=entry.marked,
+                showed=entry.showed if full_view else None,
             )
         )
     return tuple(projected)
+
+
+def _projected_arguments(call: ProposedCall, bound: int) -> ProjectedText:
+    """A proposed call's arguments as canonical JSON, cut to ``bound`` (ADR-0356 §13)."""
+    arguments = json.dumps(
+        call.model_dump(mode="json")["arguments"], ensure_ascii=False, sort_keys=True
+    )
+    return ProjectedText(text=arguments[:bound], full_chars=len(arguments))
+
+
+#: How a recalled item's memory kind is held by reference (ADR-0358 §10:3, §10:6): an
+#: item stored naming ``semantic`` keeps meaning a memory (ADR-0328 §2:5).
+_RECALLED_KINDS: Final = {
+    MemoryKind.EPISODIC: ShownRecordKind.EPISODE,
+    MemoryKind.SEMANTIC: ShownRecordKind.MEMORY,
+    MemoryKind.MEMORY: ShownRecordKind.MEMORY,
+}
+
+
+def _full_view_parts(
+    processing: EpisodeProcessingRecord, bound: int
+) -> tuple[
+    tuple[ProjectedUnderstanding, ...], tuple[ProjectedRecall, ...], tuple[ProjectedProposal, ...]
+]:
+    """The parts only the full view carries, beside those every view does (ADR-0358 §10:3).
+
+    Each understanding version, placed by the rounds recorded before it; what each recall
+    run found, by reference alone; and each call a round proposed whose entry the record
+    does not hold, with its arguments (§10:9).
+    """
+    understood = tuple(
+        ProjectedUnderstanding(
+            position=sum(
+                1 for planned in processing.rounds if planned.recorded_at <= one.recorded_at
+            ),
+            version=one.version,
+            meaning=one.meaning,
+            unclear=one.unclear,
+        )
+        for one in processing.understanding
+    )
+    runs = ((processing.recall, False), (processing.recall_second_run, True))
+    recalled = tuple(
+        _projected_recall(run, second=second) for run, second in runs if run is not None
+    )
+    entered = {(entry.round, entry.call_id) for entry in processing.call_records}
+    unrecorded = tuple(
+        ProjectedProposal(
+            position=position,
+            capability=call.name,
+            arguments=_projected_arguments(call, bound),
+        )
+        for position, one in enumerate(processing.rounds)
+        for call in one.calls
+        if (one.id, call.call_id) not in entered
+    )
+    return understood, recalled, unrecorded
+
+
+def _projected_recall(run: ActivationRecall, *, second: bool) -> ProjectedRecall:
+    """What one recall run found, each record by kind and id alone (ADR-0358 §10:6)."""
+    return ProjectedRecall(
+        second=second,
+        outcome=run.outcome,
+        found=tuple(ShownRecord(kind=_RECALLED_KINDS[item.kind], id=item.id) for item in run.items),
+    )
 
 
 def _projected_joins(

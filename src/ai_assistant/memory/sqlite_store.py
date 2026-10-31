@@ -85,6 +85,7 @@ from ai_assistant.memory._channel_reads import (
 )
 from ai_assistant.memory._continuing_upgrade import continuing_episode
 from ai_assistant.memory._episode_format import (
+    CALLED_RECORD_FORMAT,
     CONTINUING_RECORD_FORMAT,
     EPISODE_RECORD_FORMAT,
     JOINED_RECORD_FORMAT,
@@ -598,6 +599,7 @@ class SqliteMemoryStore:
             self._upgrade_to_parties(conn, existing_format)
             self._upgrade_to_understood(conn, existing_format)
             self._upgrade_to_called(conn, existing_format)
+            self._upgrade_to_showed(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -1500,7 +1502,7 @@ class SqliteMemoryStore:
             MemoryStoreError: If a stored episode cannot be upgraded. Nothing is
                 written, and the file is left as it was found.
         """
-        if found is None or found >= MEMORY_RECORD_FORMAT:
+        if found is None or found >= CALLED_RECORD_FORMAT:
             return
         chunk = conn.execute(
             "SELECT rowid, data FROM records WHERE kind = ? ORDER BY rowid LIMIT ?",
@@ -1525,6 +1527,31 @@ class SqliteMemoryStore:
                 "ORDER BY rowid LIMIT ?",
                 (MemoryKind.EPISODIC.value, chunk[-1][0], _BACKFILL_CHUNK),
             ).fetchall()
+        conn.execute("UPDATE episode_record_format SET version = ?", (CALLED_RECORD_FORMAT,))
+
+    @staticmethod
+    def _upgrade_to_showed(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0358 §11's episode record, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_called` has carried a file to 22, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+
+        **The label alone advances.** A record written at 22 validates unchanged under
+        this build (§11:6): ``RecordedCall.showed`` defaults to ``None``, which is what
+        every entry a build at 22 wrote omits, since no build before ADR-0358 kept what a
+        call showed. Nothing is rewritten, so nothing can be dropped (§4:4). What the
+        label buys is §5:3's refusal: an older build, which reads 12 to 22, refuses a
+        file whose episodes carry a field it would not read, rather than failing on the
+        read.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        if found is None or found >= MEMORY_RECORD_FORMAT:
+            return
         conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
 
     @staticmethod
