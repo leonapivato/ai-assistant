@@ -583,6 +583,32 @@ def test_an_entry_with_no_outcome_leaves_its_round_unsettled() -> None:
     assert _words(_peer(episode, (_message("m1", ToolOutcome.SUCCEEDED),))) == [None]
 
 
+def test_a_started_tidy_up_beside_message_calls_leaves_their_words() -> None:
+    """§8:6: a tidy-up's entry has no outcome, ever. A round recorded since the decision
+    writes no message of its own (§7:3), so its effects pair with its deliveries alone,
+    whatever another call's entry holds, open or frozen."""
+    tidy = (ProposedCall(call_id="c5", name="tidy_story", arguments={"story": "S1"}),)
+    started = _sent("r1", "c5", "x", capability="tidy_story", outcome=None, delivered=None)
+    entries = (started, _sent("r1", "c1", "Booked the 9:40."))
+    effects = (_message("m1", ToolOutcome.SUCCEEDED),)
+
+    for frozen in (False, True):
+        episode = _calling("", "c1", entries=entries, calls=tidy, frozen=frozen)
+        assert _words(_peer(episode, effects)) == ["Booked the 9:40."]
+
+
+def test_under_the_interim_a_started_tidy_up_leaves_the_rounds_text_unpaired() -> None:
+    """Under ADR-0356's interim a round's text is still its own message, and no record
+    names which effect is it: an entry with no outcome may be a message call whose write
+    was cut off. A tidy-up's never settles, so the round's messages show no words rather
+    than risk a draft shown as sent (ADR-0349 §6:8). P3 ends the interim (§7:3)."""
+    tidy = (ProposedCall(call_id="c5", name="tidy_story", arguments={"story": "S1"}),)
+    started = _sent("r1", "c5", "x", capability="tidy_story", outcome=None, delivered=None)
+    episode = _calling("Sent summary.", entries=(started,), calls=tidy, frozen=True)
+
+    assert _words(_peer(episode, (_message("m1", ToolOutcome.SUCCEEDED),))) == [None]
+
+
 def test_every_message_of_a_round_recorded_before_the_decision_shows_its_text() -> None:
     """§8:1: a round recorded before keeps its text as the message it wrote, for every
     reader: its episode holds no entry and froze by its own pass."""
