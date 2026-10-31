@@ -981,9 +981,10 @@ class PlanningWork:
         number: The last round's number in the work, from 1.
         shown: What the exchange has shown of the inputs the news reports on.
         askable: Every call the exchange has shown as needing the user's yes and not yet
-            asked about, by the reference it was shown under, which a later round's
-            asking ``text`` call may name (ADR-0357 §8:1): the exchange is never
-            re-rendered, so a reference shown rounds ago still stands.
+            asked about, by the reference it was shown under, as the round and the call
+            id its outcome names, which a later round's asking ``text`` call may name
+            (ADR-0357 §8:1): the exchange is never re-rendered, so a reference shown
+            rounds ago still stands. Its outcome is read afresh on each round.
     """
 
     exchange: PlanningExchange
@@ -992,7 +993,7 @@ class PlanningWork:
     round_id: str
     number: int
     shown: NewsShown
-    askable: Mapping[str, CallOutcome] = field(default_factory=dict)
+    askable: Mapping[str, tuple[str, str]] = field(default_factory=dict)
 
 
 # --- the round's decision ----------------------------------------------------------------
@@ -1657,11 +1658,12 @@ class _Request:
         self.askable: dict[str, CallOutcome] = {}
         # The calls this activation's earlier rounds asked about, by their round's number:
         # a round new input overtook asked nothing, since its message was never written
-        # (ADR-0332 §3:7, ADR-0321 §2:2).
+        # (ADR-0332 §3:7, ADR-0321 §2:2), and nor did one whose asking ``text`` call was
+        # not sent, since nothing waits on a question the user did not see (ADR-0357 §8).
         self._asked_before: tuple[tuple[int, AskedCall], ...] = tuple(
             (number, asked)
             for number, one in enumerate(inputs.rounds, 1)
-            if one.id not in inputs.overtaken
+            if one.id not in inputs.overtaken and _question_sent(one, inputs.outcomes)
             for asked in one.asked
         )
         # Whether a story read is offered this round, set as the request is rendered.
@@ -2904,17 +2906,30 @@ class _Request:
             shown["not_replacing"] = _not_replacing(withheld)
         return shown
 
-    def still_askable(self, carried: Mapping[str, CallOutcome]) -> dict[str, CallOutcome]:
-        """Those of ``carried`` no round of this activation has asked about since.
+    def still_askable(self, carried: Mapping[str, tuple[str, str]]) -> dict[str, CallOutcome]:
+        """Those of ``carried`` that may still be asked about, each as its outcome is now.
 
-        Where a later round's question asked about one, it is already asked and waiting
-        (ADR-0321 §4:11), so its reference no longer names a call to ask about.
+        Each is read afresh from the round's inputs, by its round and call id, so a
+        request the inputs no longer hand on, such as a pin whose memory was forgotten
+        (ADR-0338 §8:6), names nothing. One still needing the user may be asked about
+        where the place takes a message, no question waits on it (ADR-0321 §4:11), and
+        no round of this activation has asked about it since.
         """
-        return {
-            reference: outcome
-            for reference, outcome in carried.items()
-            if outcome.request is not None and self._asked_earlier(outcome.request) is None
-        }
+        now = {(one.round_id, one.call_id): one for one in self._inputs.outcomes}
+        kept: dict[str, CallOutcome] = {}
+        for reference, key in carried.items():
+            outcome = now.get(key)
+            if outcome is None or not self._inputs.place.takes_message:
+                continue
+            request = outcome.request
+            if (
+                outcome.kind is CallOutcomeKind.NEEDS_YOU
+                and request is not None
+                and outcome.already_asked is None
+                and self._asked_earlier(request) is None
+            ):
+                kept[reference] = outcome
+        return kept
 
     def _asked_earlier(self, request: ActionRequest) -> tuple[int, AskedCall] | None:
         """The earlier round of this activation that asked about this call, if one did."""
@@ -3408,6 +3423,27 @@ def _asking(calls: Sequence[ProposedCall]) -> ProposedCall | None:
     return next((one for one in calls if carries_asks(one.name, one.arguments)), None)
 
 
+def _question_sent(planning_round: PlanningRound, outcomes: Sequence[CallOutcome]) -> bool:
+    """Whether a round that asked about calls sent the question (ADR-0357 §8, §3:3).
+
+    Its asking ``text`` call sent it where that call is done. One failed, unknown, refused
+    or with no outcome yet did not show it, so nothing waits on it (ADR-0321 §2:2). A
+    round that asks about nothing, or whose question its own message carried, as rounds
+    recorded before the asking ``text`` call did, keeps what it recorded.
+    """
+    if not planning_round.asked:
+        return True
+    asking = _asking(planning_round.calls)
+    if asking is None:
+        return True
+    return any(
+        one.round_id == planning_round.id
+        and one.call_id == asking.call_id
+        and one.kind is CallOutcomeKind.DONE
+        for one in outcomes
+    )
+
+
 def _approved_id(part: QuestionPart) -> str:
     """What an approved action's A label names: the question's part, by round and number."""
     return f"{part.round}#{part.part}"
@@ -3867,7 +3903,10 @@ class PlanningStage:
                 round_id=planning_round.id,
                 number=number,
                 shown=shown,
-                askable=dict(request.askable),
+                askable={
+                    reference: (outcome.round_id, outcome.call_id)
+                    for reference, outcome in request.askable.items()
+                },
             ),
             read_outside=read_outside,
             questions=questions,

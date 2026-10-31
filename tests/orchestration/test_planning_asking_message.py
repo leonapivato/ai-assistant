@@ -229,8 +229,16 @@ async def test_the_judge_leaves_a_text_calls_via_as_written_for_the_phases() -> 
     assert call.call.arguments["via"] == "telegram"
 
 
-async def _three_rounds(*responses: RoundResponse, asked_between: bool = False) -> tuple[Any, ...]:
-    """Three rounds of one work: a booking needing the user, then ``responses``."""
+async def _three_rounds(
+    *responses: RoundResponse,
+    sent: CallOutcomeKind = CallOutcomeKind.DONE,
+    handed_on: bool = True,
+) -> tuple[Any, ...]:
+    """Three rounds of one work: a booking needing the user, then ``responses``.
+
+    Round 2's ``t1`` came to ``sent``; before round 3 the booking still needs the user,
+    its request handed on only where ``handed_on``.
+    """
     stage, _, recorder = _stage(RoundResponse(calls=(_call("c1", "book", slot=_SLOT),)), *responses)
     first_inputs = _inputs(capabilities=(*_TOOLS, TEXT_CALL))
     first = await stage.plan(first_inputs)
@@ -242,14 +250,14 @@ async def _three_rounds(*responses: RoundResponse, asked_between: bool = False) 
         outcomes=(_needs_you(first.round.id, "c1", _booking()),),
     )
     second = await stage.plan(second_inputs)
-    later = () if asked_between else (CallOutcome(second.round.id, "t1", CallOutcomeKind.DONE),)
+    booking = second_inputs.outcomes if handed_on else (_needs_you(first.round.id, "c1", None),)
     third = await stage.plan(
         replace(
             second_inputs,
             work=second.work,
             rounds=(first.round, second.round),
             labels=(*first.labels, *second.labels),
-            outcomes=(*second_inputs.outcomes, *later),
+            outcomes=(*booking, CallOutcome(second.round.id, "t1", sent)),
         )
     )
     return second, third, recorder
@@ -275,9 +283,43 @@ async def test_a_reference_asked_about_since_is_not_asked_again() -> None:
     second, third, _ = await _three_rounds(
         RoundResponse(calls=(_text("t1", words="Shall I book it?", asks=["1.1"]),)),
         RoundResponse(calls=(_text("t2", words="Shall I, really?", asks=["1.1"]),)),
-        asked_between=True,
     )
 
     assert len(second.round.asked) == 1
+    assert third.round.asked == ()
+    assert third.questions == {}
+
+
+@pytest.mark.parametrize(
+    "sent",
+    [CallOutcomeKind.NOT_DONE, CallOutcomeKind.UNKNOWN, CallOutcomeKind.REFUSED],
+    ids=["failed", "unknown", "refused"],
+)
+async def test_a_question_that_was_not_sent_may_be_asked_again(sent: CallOutcomeKind) -> None:
+    """ADR-0321 §2:2, ADR-0357 §8: nothing waits on a question the user did not see, so
+    a later round asks it again, its exact lines and all."""
+    second, third, _ = await _three_rounds(
+        RoundResponse(calls=(_text("t1", words="Shall I book it?", asks=["1.1"]),)),
+        RoundResponse(calls=(_text("t2", words="Shall I book it?", asks=["1.1"]),)),
+        sent=sent,
+    )
+
+    assert len(second.round.asked) == 1
+    (asked,) = third.round.asked
+    assert asked.values["slot"] == _SLOT
+    assert third.questions == {"t2": _LINE}
+
+
+async def test_a_reference_is_read_afresh_so_a_request_no_longer_handed_on_names_nothing() -> None:
+    """§8:5, ADR-0338 §8:6: a carried reference names its call as the inputs hold it now;
+    one whose request is no longer handed on, such as a pin whose memory was forgotten,
+    is dropped."""
+    second, third, _ = await _three_rounds(
+        RoundResponse(calls=(_text("t1", words="Checking something first."),)),
+        RoundResponse(calls=(_text("t2", words="Shall I book it?", asks=["1.1"]),)),
+        handed_on=False,
+    )
+
+    assert second.round.asked == ()
     assert third.round.asked == ()
     assert third.questions == {}
