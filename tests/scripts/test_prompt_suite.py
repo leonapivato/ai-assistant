@@ -620,6 +620,31 @@ def test_the_capability_checks_read_the_rounds_calls() -> None:
     )
     assert _round("no_call", {}, RoundResponse(text="done")) is None
     assert _round("no_call", {}, both) == "the round makes 2 call(s)"
+    reliance = ProposedCall(call_id="c3", name="note_reliance", arguments={"memories": ["M1"]})
+    assert _round("no_message", {}, RoundResponse(calls=(reliance,))) is None
+    assert _round("no_message", {}, both) == "the round sends 1 message(s)"
+    pay: dict[str, object] = {"capabilities": ["pay_bill"]}
+    paying = ProposedCall(call_id="c4", name="pay_bill", arguments={"amount": "1"})
+    assert _round("none_of", pay, both) is None
+    assert _round("none_of", pay, RoundResponse(calls=(paying,))) == (
+        "the round calls a named capability"
+    )
+    twice = RoundResponse(calls=(_text("a"), _text("b", call_id="c2")))
+    assert _round("none_of", pay, twice) == "the round sends more than one message"
+    within: dict[str, object] = {
+        "capabilities": ["stop_activation", "look_up_activation"],
+        "argument": "activation",
+        "value": "E1",
+    }
+    look = ProposedCall(call_id="c5", name="look_up_activation", arguments={"activation": "E1"})
+    elsewhere = ProposedCall(call_id="c6", name="stop_activation", arguments={"activation": "E2"})
+    assert _round("calls_within", within, RoundResponse(calls=(look,))) is None
+    assert _round("calls_within", within, RoundResponse(calls=(look, elsewhere))) == (
+        "a call names another value, or none"
+    )
+    assert _round("calls_within", within, both) == (
+        "the round makes a call to a capability not named"
+    )
 
 
 def test_the_framing_check_reads_whether_any_memory_is_kept() -> None:
