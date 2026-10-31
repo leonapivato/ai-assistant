@@ -372,7 +372,8 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
     reader renders as provisional; its rounds' notes and its evidence under
     ``owner_records``, as here; and each effect shown as :class:`PeerEffect` says. A
     round's message is shown only through a message effect done or unknown, never from
-    the round itself, so a message not yet sent is never shown (§6:8). Nothing else of
+    the round itself, so a message not yet sent is never shown (§6:8); a message call's
+    effect shows the words its entry holds as delivered (ADR-0356 §7:8). Nothing else of
     the episode is: no recall, story link, failed call, draft, approval, call value or
     result (§6:10).
 
@@ -704,15 +705,27 @@ def _peer_effects(
 ) -> tuple[PeerEffect, ...]:
     """Each effect done or unknown, in claim order, as §6:9 shows it.
 
+    A message effect shows the words of the message it claimed (ADR-0356 §7:8). The
+    record names its round and no call, so each round's message effects, in claim
+    order, are paired with that round's messages in the order they are written: the
+    round's own message where its ``text`` shows one (a round recorded before ADR-0356,
+    or under its interim), then each message call whose entry holds a delivery, in the
+    order the round proposed them (#3537). The pairing is read off the counts: one
+    effect more than the deliveries, on a round whose text shows, makes the first the
+    round's own; as many as the deliveries makes each a call's. Any other count, as
+    while acting is still writing before the entries are appended, shows the message
+    with no words, so no message is shown with another's.
+
     Raises:
         ValueError: If an effect is another activation's.
     """
-    rounds = {one.id: one for one in processing.rounds}
-    shown: list[PeerEffect] = []
     for effect in effects:
         if effect.activation_id != processing.activation_id:
             msg = "a peer view shows the effects of the activation it reads alone"
             raise ValueError(msg)
+    words = _message_words(processing, effects, bound)
+    shown: list[PeerEffect] = []
+    for effect in effects:
         outcome = effect.outcome
         if outcome is None or outcome not in _SHOWN_OUTCOMES:
             continue
@@ -721,12 +734,40 @@ def _peer_effects(
         elif effect.round is None:
             shown.append(PeerEffect(outcome=outcome, couldnt_finish=True))
         else:
-            planned = rounds.get(effect.round)
-            message = (
-                _projected(planned.text, bound) if planned and _shows_message(planned) else None
-            )
-            shown.append(PeerEffect(outcome=outcome, message=message))
+            shown.append(PeerEffect(outcome=outcome, message=words.get(effect.id)))
     return tuple(shown)
+
+
+def _message_words(
+    processing: EpisodeProcessingRecord, effects: Sequence[ActivationEffect], bound: int
+) -> dict[str, ProjectedText]:
+    """The words each message effect naming a round claimed, by the effect's id (#3537)."""
+    claimed: dict[str, list[ActivationEffect]] = {}
+    for effect in effects:
+        if not effect.is_call and effect.round is not None:
+            claimed.setdefault(effect.round, []).append(effect)
+    words: dict[str, ProjectedText] = {}
+    for one in processing.rounds:
+        held = claimed.get(one.id, [])
+        if not held:
+            continue
+        order = {call.call_id: index for index, call in enumerate(one.calls)}
+        sent = sorted(
+            (
+                entry
+                for entry in processing.call_records
+                if entry.round == one.id and entry.delivered is not None
+            ),
+            key=lambda entry: order[entry.call_id],  # the record's validator holds it
+        )
+        messages = [entry.delivered.words for entry in sent if entry.delivered is not None]
+        if _shows_message(one) and len(held) == len(messages) + 1:
+            messages.insert(0, one.text)
+        elif len(held) != len(messages):
+            continue
+        for effect, text in zip(held, messages, strict=True):
+            words[effect.id] = ProjectedText(text=text[:bound], full_chars=len(text))
+    return words
 
 
 def _projected_rounds(
