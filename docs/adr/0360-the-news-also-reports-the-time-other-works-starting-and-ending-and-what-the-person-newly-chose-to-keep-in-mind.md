@@ -58,7 +58,7 @@ changed since. The briefing and every earlier turn stay as sent.
 > nothing else is new (ADR-0356 §5:5).
 
 > **Normative.** Every time a work is shown is in the zone its briefing's situation named,
-> for the whole work. A time zone the person changes while it runs is named as §4:2 says, and
+> for the whole work. A time zone the person changes while it runs is named as §4:3 says, and
 > takes effect from the next briefing.
 
 ### 3. Other works starting and ending
@@ -92,8 +92,11 @@ changed since. The briefing and every earlier turn stay as sent.
 
 > **Normative.** For planning's exchange, ADR-0349 §5:2's *understanding alone* and §5:9's
 > *Planning is not shown the section* read as ADR-0356 §3 and this section have them: planning
-> is shown the section in its briefing and its starts and ends in the news. Neither is
-> replaced for any other stage.
+> is shown the section in its briefing and its starts and ends in the news. ADR-0349 §5:1's
+> *No rule pushes one activation's findings into another's* gains one exception, this
+> section's news: a started activation's entry and meaning (§3:1), and an ended one's short
+> view (§3:2), each under the section's rules and the view's filters. None of the three is
+> replaced for any other stage, and no other rule pushes findings.
 
 **Why.** A new input starts its own activation (ADR-0349 §8). Where it continues this work's
 matter after this work acted, it reaches this work as an offer, which is already news; where
@@ -103,11 +106,15 @@ did, and does not do it again or count on it still running.
 
 ### 4. What the person newly chose
 
-> **Normative.** The news names each pin the person added since the exchange showed the person
-> block, as always in mind renders a pinned memory, under its `M` label, where the slot would
-> show it (ADR-0338 §6:2, §6:4, §6:5); each pin removed, by its label, as no longer pinned; and
-> each profile field changed, with its new value as the block renders that field, or as not
-> set.
+> **Normative.** The news names each memory the slot would now show as pinned that the
+> exchange has not shown pinned, as always in mind renders a pinned memory, under its `M`
+> label (ADR-0338 §6:2, §6:4, §6:5); each memory the exchange showed pinned that no pin now
+> reaches, by its label, as no longer pinned; and each profile field changed, with its new
+> value as the block renders that field, or as not set.
+
+> **Normative.** Pinned is read per memory, as the slot resolves pins: each pin to the current
+> memory its chain reaches (ADR-0338 §4:8), each memory once. A memory two pins reach stays
+> pinned until neither does, and a pin added to a memory already shown pinned is no news.
 
 > **Normative.** The time zone, which always in mind does not render (ADR-0353 §4:5), is named
 > with its new zone as the situation names one, saying that this work's times stay in the zone
@@ -169,7 +176,9 @@ one more read, of the person-model store, before each later round.
 > briefing's zone; a work started between rounds is named once, in the next report, with its
 > meaning, and one ended is shown once as its short view, under that view's filters, with its
 > input pointed at and not repeated; a pin added between rounds is named
-> once with its words, and a field changed once with its new value; and the briefing stays
+> once with its words, and a field changed once with its new value; of two pins reaching one
+> memory, removing the first is no news and removing the second names it no longer pinned;
+> and the briefing stays
 > byte-identical across rounds.
 
 ### 9. Relationship to earlier decisions
@@ -179,8 +188,8 @@ Superseded in part. Every clause the middle column does not name stands:
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
 | ADR-0356 | §5:5, in the addition alone: the news also begins with the time, and names each other work started or ended and each pin or field the person changed since it was shown | §2, §3, §4 |
-| ADR-0349 | §5:2's *understanding alone* and §5:9's *Planning is not shown the section*, for planning's exchange alone: planning is shown the section in its briefing (ADR-0356 §3) and its starts and ends in the news | §3:6 |
-| ADR-0338 | §7:1's *The same block reaches every planning round*, in the addition alone: a pin or field the person changed since reaches the later rounds of the work as news | §4:1, §4:3 |
+| ADR-0349 | §5:2's *understanding alone* and §5:9's *Planning is not shown the section*, for planning's exchange alone: planning is shown the section in its briefing (ADR-0356 §3) and its starts and ends in the news; §5:1's *No rule pushes one activation's findings into another's*, for planning's exchange and in the addition alone: the news shows a started activation's entry and meaning and an ended one's short view | §3:6 |
+| ADR-0338 | §7:1's *The same block reaches every planning round*, in the addition alone: a pin or field the person changed since reaches the later rounds of the work as news | §4:1, §4:2, §4:4 |
 
 Read through and not superseded:
 
@@ -215,7 +224,7 @@ Read through and not superseded:
   without its briefing changing, so the cache holds.
 - The news grows by a line each report for the time, and a line for each work started or
   ended and each choice changed, said once.
-- Each later round reads the person-model store once more (§4:3).
+- Each later round reads the person-model store once more (§4:4).
 - A work that ran across a time-zone change shows its old zone to the end (§2:3).
 
 ## Alternatives considered
