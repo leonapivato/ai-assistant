@@ -42,6 +42,7 @@ from ai_assistant.orchestration.planning import (
     OlderHistory,
     PlaceAuthor,
     PlaceItem,
+    ShowingLabels,
     call_showed,
     full_view_parts,
 )
@@ -794,7 +795,7 @@ def test_a_matter_planning_held_a_label_for_keeps_no_summary_version() -> None:
     )
     outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", episodes=found)
 
-    showed = call_showed(outcome, bound=1000, held=frozenset({"story:dentist"}))
+    showed = call_showed(outcome, bound=1000, labels=_held("story:dentist"))
 
     assert showed == CallShowed(
         parts=(
@@ -802,3 +803,75 @@ def test_a_matter_planning_held_a_label_for_keeps_no_summary_version() -> None:
             ShownRecord(kind=ShownRecordKind.STORY, id="story:dentist"),
         )
     )
+
+
+def _held(*stories: str) -> ShowingLabels:
+    return ShowingLabels(
+        tuple(
+            PlanningLabel(label=f"S{at}", kind=LabelKind.STORY, id=one)
+            for at, one in enumerate(stories, 1)
+        )
+    )
+
+
+def test_a_full_view_page_keeps_only_the_summaries_it_rendered() -> None:
+    """§10:4, §11:2: a page heads with its matters, an already labelled one by its label
+    alone, and a story only a later page shows again keeps no version on this page."""
+    now = MatterShown(story_id="story:dentist", summary_version=2, first_line="Version two.")
+    read = _read(
+        _full_record(),
+        page_size=1,
+        page=1,
+        matters=(now,),
+        stories={"story:dentist": now},
+    )
+    outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", full=read)
+
+    held = call_showed(outcome, bound=1000, labels=_held("story:dentist"))
+    fresh = call_showed(outcome, bound=1000)
+
+    assert _story_versions(held) == [("story:dentist", None)]
+    assert _story_versions(fresh) == [("story:dentist", 2)]
+
+
+def _story_versions(showed: CallShowed | None) -> list[tuple[str, int | None]]:
+    assert showed is not None
+    return [
+        (one.id, one.summary_version)
+        for one in showed.parts
+        if isinstance(one, ShownRecord) and one.kind is ShownRecordKind.STORY
+    ]
+
+
+def test_results_rendered_in_turn_read_each_under_the_labels_before_it() -> None:
+    """§11:2, §11:4: a second result naming a story the first showed shows it by its label
+    alone, though the first's entry was cut before it kept that story."""
+    first = MatterShown(story_id="story:dentist", summary_version=1, first_line="Version one.")
+    later = MatterShown(story_id="story:dentist", summary_version=2, first_line="Version two.")
+    labels = ShowingLabels()
+    shown = [
+        call_showed(
+            CallOutcome(
+                "r",
+                call_id,
+                CallOutcomeKind.DONE,
+                result_id=f"x{call_id}",
+                episodes=EpisodesFound(
+                    episodes=(EpisodeShown(record=_episode(f"activation:{call_id}"), matters=(m,)),)
+                ),
+            ),
+            bound=27,
+            labels=labels,
+        )
+        for call_id, m in (("a-much-longer-one", first), ("2", later))
+    ]
+
+    assert shown == [
+        CallShowed(cut=True),
+        CallShowed(
+            parts=(
+                ShownRecord(kind=ShownRecordKind.EPISODE, id="activation:2"),
+                ShownRecord(kind=ShownRecordKind.STORY, id="story:dentist"),
+            )
+        ),
+    ]

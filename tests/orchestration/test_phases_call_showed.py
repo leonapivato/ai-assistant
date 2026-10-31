@@ -107,6 +107,26 @@ def test_a_search_no_round_followed_keeps_the_ids_it_listed() -> None:
     assert entry.showed == CallShowed(parts=(ShownRecord(kind=ShownRecordKind.MEMORY, id="said"),))
 
 
+def test_a_searchs_entry_waits_for_the_fetch_that_decides_what_planning_is_shown() -> None:
+    """§11:2: a record gone before the next round's fetch was never shown, so a search's
+    entry is made once its records are fetched, and keeps only those that came back."""
+    from ai_assistant.orchestration.acting import ActedRound  # noqa: PLC0415
+
+    working = _acted(SEARCH_MEMORY, output={"records": ["said", "gone"]}, query="dentist")
+    working.latest.acted = ActedRound(
+        round_id="round-1", calls=tuple(working.latest.handed.values())
+    )
+    assert working.call_entries(_AT) == ()
+
+    working.searched["result:1"] = (
+        memory("said", "dentist with Dr Rao", said_support(when=_AT, added_at=_AT)),
+    )
+    (entry,) = working.call_entries(_AT)
+
+    assert entry.showed == CallShowed(parts=(ShownRecord(kind=ShownRecordKind.MEMORY, id="said"),))
+    assert working.call_entries(_AT) == ()
+
+
 def test_a_result_held_for_a_digest_keeps_nothing() -> None:
     """§11:3: a result held for a digest keeps nothing; its digests are on the record."""
     working = _acted(SEARCH_MEMORY, output=None, route=ResultRoute.DIGEST, query="dentist")
