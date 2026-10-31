@@ -2570,7 +2570,7 @@ class PhaseWorking:
                 for one in searched_ids(outcome.result)
             )
             return shown_within(listed, bound)
-        return call_showed(looked, bound=bound)
+        return call_showed(looked, bound=bound, owner_records=self.owner_records)
 
     def acted_rounds(self) -> tuple[ActedRound, ...]:
         """Every acting decision, in round order."""

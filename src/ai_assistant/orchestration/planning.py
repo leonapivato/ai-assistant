@@ -947,23 +947,29 @@ def full_view_parts(projection: EpisodeProjection) -> tuple[FullViewPart, ...]:
     return tuple(part for _, part in placed)
 
 
-def call_showed(outcome: CallOutcome, *, bound: int) -> CallShowed | None:
+def call_showed(
+    outcome: CallOutcome, *, bound: int, owner_records: bool = True
+) -> CallShowed | None:
     """What a done call's result showed planning directly, as its entry keeps it.
 
-    ADR-0358 §11:2-§11:4, read off what planning renders of the result (:meth:`_call`):
-    each record it showed held by its kind and its id, and a story also by its summary
-    version, never by a copy; its own words, for a result that goes to planning whole,
-    as text. Of what it held for a digest, as outside text, nothing, record by record
-    (§11:3): a memory search keeps the records it showed and nothing of those its digest
-    read. A call on the Task Scheduler or on running work keeps the activations it showed
-    by their episodes, and nothing of their inputs or of a task's words, which no kind of
-    record an entry holds by reference names (§10:6). Each record is kept once, where
-    first shown. What is kept is cut to ``bound`` characters, a record counting its id's,
-    and the cut is carried.
+    ADR-0358 §11:2-§11:4, read off planning's own rendering of the result
+    (:meth:`_Request._result_value`), so it keeps what planning was shown and nothing a
+    second walk of the result could miss: the result is rendered once with an empty
+    label book, and every memory, episode and story the rendering names under a label
+    is kept by its kind and id, in the order first shown, a story also by the summary
+    version its view showed (§11:2). A record the rendering withholds takes no label,
+    so it leaves nothing: a memory search keeps the records it showed and nothing of
+    those its digest read, record by record (§11:3), and an activation's input or a
+    task's words, which no record kind names, are never kept (§10:6). A result that goes
+    to planning whole keeps its own words, as text; an older message, its words where
+    planning was shown them. What is kept is cut to ``bound`` characters, a record
+    counting its id's, and the cut is carried (§11:4).
 
     Args:
         outcome: What came of the call, carrying what its look-up found.
         bound: The composition root's bound on what an entry keeps (§11:4).
+        owner_records: Whether the pass may be shown a record placed for the owner
+            alone, which decides what a full view's page shows (§10:5).
 
     Returns:
         What it showed, or ``None`` for a call that was not done (§11:2).
@@ -976,147 +982,98 @@ def call_showed(outcome: CallOutcome, *, bound: int) -> CallShowed | None:
         raise ValueError(msg)
     if outcome.kind is not CallOutcomeKind.DONE:
         return None
-    showing = _Showing()
-    showing.of(outcome)
-    return shown_within(showing.parts, bound)
-
-
-class _Showing:
-    """What one result showed, gathered in the order shown, each record once (§11:2)."""
-
-    def __init__(self) -> None:
-        self.parts: list[ShownText | ShownRecord] = []
-        self._seen: set[tuple[ShownRecordKind, str]] = set()
-
-    def of(self, outcome: CallOutcome) -> None:
-        """What a done call's result showed, by what it looked up, or its own words."""
-        if outcome.records is not None:
-            self.memories(outcome.records)
-        elif outcome.candidate is not None:
-            self.memories(outcome.candidate.similar or ())
-        elif outcome.story is not None:
-            self.story(outcome.story)
-        elif outcome.episodes is not None:
-            self.found(outcome.episodes)
-        elif outcome.history is not None:
-            self.history(outcome.history)
-        elif outcome.full is not None:
-            self.full(outcome.full)
-        elif outcome.tasks is not None or outcome.peer is not None:
-            self.running(outcome.tasks, outcome.peer)
-        elif not outcome.digested:
-            self.text(outcome.result)
-
-    def record(self, kind: ShownRecordKind, record_id: str, version: int | None = None) -> None:
-        """A record, by its kind and id, and a story's by its summary version."""
-        if (kind, record_id) not in self._seen:
-            self._seen.add((kind, record_id))
-            self.parts.append(ShownRecord(kind=kind, id=record_id, summary_version=version))
-
-    def text(self, value: FrozenJsonValue | dict[str, str]) -> None:
-        """A result's own words, as canonical JSON; nothing for none."""
-        if value is None:
-            return
-        self.parts.append(
-            ShownText(text=json.dumps(_thawed(value), ensure_ascii=False, sort_keys=True))
+    looked = (
+        outcome.records,
+        outcome.story,
+        outcome.candidate,
+        outcome.tasks,
+        outcome.peer,
+        outcome.episodes,
+        outcome.history,
+        outcome.full,
+    )
+    if all(one is None for one in looked):
+        if outcome.digested or outcome.result is None:
+            return CallShowed()
+        words = json.dumps(_thawed(outcome.result), ensure_ascii=False, sort_keys=True)
+        return shown_within((ShownText(text=words),), bound)
+    parts: list[ShownText | ShownRecord] = []
+    history = outcome.history
+    if history is not None:
+        # An older message's words, as planning was shown them: a withheld one's never.
+        parts.extend(
+            ShownText(text=json.dumps({"from": item.author.value, "text": item.text}))
+            for item in history.items
+            if not history.withheld(item)
         )
+    versions = _summary_versions(outcome)
+    parts.extend(
+        ShownRecord(
+            kind=_SHOWN_KINDS[one.kind],
+            id=one.id,
+            summary_version=versions.get(one.id) if one.kind is LabelKind.STORY else None,
+        )
+        for one in _labelled(outcome, owner_records=owner_records)
+        if one.kind in _SHOWN_KINDS
+    )
+    return shown_within(parts, bound)
 
-    def memories(self, memories: Iterable[Memory]) -> None:
-        """Each memory shown, one resting on outside content left out as it is rendered."""
-        for memory in memories:
-            if not memory.rests_on_outside_content:
-                self.record(ShownRecordKind.MEMORY, memory.id)
 
-    def story(self, story: PlanningStory) -> None:
-        """A story read: the story, by the summary version it showed, and its episodes."""
-        self.record(ShownRecordKind.STORY, story.story_id, story.summary_version)
-        for episode in (*story.newer, *story.latest):
-            self.record(ShownRecordKind.EPISODE, episode.id)
+#: The kinds of label whose thing an entry keeps by reference (ADR-0358 §10:6, §11:2).
+_SHOWN_KINDS: Final = {
+    LabelKind.MEMORY: ShownRecordKind.MEMORY,
+    LabelKind.EPISODE: ShownRecordKind.EPISODE,
+    LabelKind.STORY: ShownRecordKind.STORY,
+}
 
-    def found(self, found: EpisodesFound) -> None:
-        """A search of episodes: each episode, then the matters it belongs to."""
-        for one in found.episodes:
-            self.record(ShownRecordKind.EPISODE, one.record.id)
-            for matter in one.matters:
-                self.record(ShownRecordKind.STORY, matter.story_id, matter.summary_version)
+#: What the rendering :func:`call_showed` reads labels from is given: no window, no
+#: capability, and a clock nothing it renders reads.
+_SHOWING_PLACE: Final = PlaceWindow(takes_message=False)
+_SHOWING_AT: Final = datetime(2000, 1, 1, tzinfo=UTC)
 
-    def history(self, history: OlderHistory) -> None:
-        """The older history: each item's words, none of an item never shown, and episodes."""
-        for item in history.items:
-            # As planning was shown it (§11:2): a withheld item's words never.
-            if not history.withheld(item):
-                self.text({"from": item.author.value, "text": item.text})
-        for episode in history.episodes:
-            self.record(ShownRecordKind.EPISODE, episode.id)
 
-    def running(self, tasks: TaskListing | None, peer: PeerShown | None) -> None:
-        """A call on the Task Scheduler or on running work: each episode it labelled.
+def _labelled(outcome: CallOutcome, *, owner_records: bool) -> tuple[PlanningLabel, ...]:
+    """Every thing the rendering of ``outcome``'s result names under a label, in order."""
+    book = _LabelBook(())
+    request = _Request(
+        PlanningInputs(
+            activation_id="showed",
+            place=_SHOWING_PLACE,
+            capabilities=(),
+            owner_records=owner_records,
+        ),
+        book,
+        excerpt_chars=1,
+        now=_SHOWING_AT,
+        zone=ZoneInfo("UTC"),
+    )
+    request._result_value(outcome)
+    return tuple(book.minted)
 
-        Every episode the result's rendering shows under its ``E`` label, in the order
-        :meth:`_Request._listing` and :meth:`_Request._peer` show them: each activation
-        listed, each task's parent, and what a stopped activation set up that is still
-        live; and nothing of an input's or a task's words (§10:6).
-        """
-        if tasks is not None:
-            self.listing(tasks)
-        if peer is not None:
-            self.episode(peer.activation_id)
-            if peer.absorbed_by is not None:
-                self.episode(peer.absorbed_by)
-            left = peer.set_up
-            if peer.answered is None and left is not None and left.read and not left.nothing:
-                for task in left.tasks:
-                    self.episode(task.parent)
-                for one in left.activations:
-                    if not isinstance(one, StartingEntry):
-                        self.episode(one.activation_id)
 
-    def listing(self, tasks: TaskListing) -> None:
-        """A call on the Task Scheduler's result, as :meth:`_Request._listing` shows it."""
-        for task in (tasks.spawned, tasks.cancelled):
-            if task is not None:
-                self.episode(task.parent)
-        if tasks.listed:
-            for entry in tasks.running:
-                self.episode(entry.activation_id)
-            for task in tasks.scheduled:
-                self.episode(task.parent)
-            for entry in tasks.recent:
-                self.episode(entry.activation_id)
+def _summary_versions(outcome: CallOutcome) -> dict[str, int]:
+    """The summary version each story a result's rendering shows was shown at (§11:2).
 
-    def episode(self, activation_id: str) -> None:
-        """An activation's episode, by its address, as its ``E`` label names it."""
-        self.record(ShownRecordKind.EPISODE, episode_address(activation_id))
-
-    def full(self, read: EpisodeRead) -> None:
-        """A full view's page: the episode, then each record it showed again as held now."""
-        if read.projection is None:
-            return
-        self.record(ShownRecordKind.EPISODE, read.episode_id)
-        for matter in read.matters:
-            self.record(ShownRecordKind.STORY, matter.story_id, matter.summary_version)
-        for part in read.page_parts():
-            if isinstance(part, ProjectedRecall):
-                named: Iterable[ShownRecord] = part.found
-            elif isinstance(part, ProjectedCall) and part.showed is not None:
-                named = (one for one in part.showed.parts if isinstance(one, ShownRecord))
-            else:
-                continue
-            for one in named:
-                self.again(one, read)
-
-    def again(self, one: ShownRecord, read: EpisodeRead) -> None:
-        """A record the full view showed again, where it showed it (§10:6, §6:3)."""
-        if one.kind is ShownRecordKind.MEMORY:
-            memory = read.memories.get(one.id)
-            if memory is not None and not memory.rests_on_outside_content:
-                self.record(ShownRecordKind.MEMORY, one.id)
-        elif one.kind is ShownRecordKind.STORY:
-            story = read.stories.get(one.id)
-            if story is not None:
-                self.record(ShownRecordKind.STORY, one.id, story.summary_version)
-        elif one.id in read.episodes:
-            self.record(ShownRecordKind.EPISODE, one.id)
+    A story read's, and each larger story's short view beside it; a matter an episode
+    look-up names; and a story a full view shows again. A story named by its label alone
+    showed no summary, and keeps none.
+    """
+    versions: dict[str, int | None] = {}
+    story = outcome.story
+    if story is not None:
+        versions[story.story_id] = story.summary_version
+        versions |= {one.story_id: one.summary_version for one in story.inherited}
+    if outcome.episodes is not None:
+        versions |= {
+            matter.story_id: matter.summary_version
+            for found in outcome.episodes.episodes
+            for matter in found.matters
+        }
+    full = outcome.full
+    if full is not None:
+        versions |= {one.story_id: one.summary_version for one in full.stories.values()}
+        versions |= {one.story_id: one.summary_version for one in full.matters}
+    return {key: value for key, value in versions.items() if value is not None}
 
 
 def shown_within(parts: Sequence[ShownText | ShownRecord], bound: int) -> CallShowed:
