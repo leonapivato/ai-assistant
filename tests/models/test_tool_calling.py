@@ -1300,9 +1300,9 @@ async def test_a_response_with_no_usable_continuation_goes_back_as_its_text_and_
     """§6:3: sent and answered, with no thinking another model could refuse."""
     capturing = _Capturing([ModelResponse(parts=[TextPart("done")])])
     model = capturing.model
-    exchange = _request().model_copy(
-        update={"steps": (_step(continuation(tool_calling.model_id(model))),)}
-    )
+    name = tool_calling.model_id(model)
+    assert name is not None
+    exchange = _request().model_copy(update={"steps": (_step(continuation(name)),)})
     response = await PydanticAIToolCallingCompleter(model).respond(exchange, [_tool()])
     assert response.text == "done"
     handed = capturing.sent[0][1]
@@ -1373,3 +1373,35 @@ async def test_on_anthropics_wire_the_thinking_goes_back_signed_and_the_report_i
     assert report[-1]["text"] == "Nothing has changed."
     assert report[-1]["cache_control"] == _FIVE_MINUTES
     assert all("cache_control" not in block for block in messages[0]["content"])
+
+
+async def test_a_fallback_chain_names_who_answered_and_is_handed_back_no_thinking() -> None:
+    """ADR-0356 §13: a continuation names the model that wrote it, and a fallback chain,
+    which cannot say before the request which of its models will answer, is handed back
+    no continuation, so one model's signed thinking never reaches another."""
+    first = _Capturing([_signed_round(), ModelResponse(parts=[TextPart("unused")])])
+    second = _Capturing([ModelResponse(parts=[TextPart("done")])])
+    failing = [False, True]
+
+    def primary(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if failing.pop(0):
+            raise ModelHTTPError(status_code=503, model_name="primary")
+        return first.answer(messages, info)
+
+    chain = FallbackModel(FunctionModel(primary), FunctionModel(second.answer, model_name="b"))
+    completer = PydanticAIToolCallingCompleter(chain, thinking=False)
+
+    answered = await completer.respond(_request(), [_tool()])
+    assert answered.continuation is not None
+    assert answered.continuation.model != tool_calling.model_id(FunctionModel(second.answer))
+    assert answered.continuation.model.endswith(":function:primary:")
+    exchange = _request().model_copy(
+        update={"steps": (ExchangeStep(response=answered, report=_two_results()),)}
+    )
+    await completer.respond(exchange, [_tool()])
+
+    (sent,) = second.sent
+    handed = sent[1]
+    assert isinstance(handed, ModelResponse)
+    assert not any(isinstance(part, ThinkingPart) for part in handed.parts)
+    assert [type(part) for part in handed.parts] == [TextPart, ToolCallPart, ToolCallPart]
