@@ -3770,18 +3770,27 @@ def relayed_episodes(
     """The ids of the episodes among ``records`` whose input is relayed (ADR-0351 §5:7).
 
     Each read through its projection (ADR-0284 §8:3), whose relay mark is its latest
-    understanding version's (§5:11, §8:4), and counted only where the mark counts.
+    understanding version's (§5:11, §8:4), and counted only where the mark counts. An
+    open episode is never projected (ADR-0286 §6), so its mark is read off its record as
+    the projection reads it: the trigger's parties and the latest version's mark.
     """
     return frozenset(
         record.id
         for record in records
-        if isinstance(record, EpisodicMemory)
-        and not (record.processing_record is not None and record.processing_record.is_open)
-        and relay_mark_counts(
-            (projected := project_episode(record, excerpt_chars=excerpt_chars)).parties,
-            relayed=projected.relayed,
-        )
+        if isinstance(record, EpisodicMemory) and _input_relayed(record, excerpt_chars)
     )
+
+
+def _input_relayed(record: EpisodicMemory, excerpt_chars: int) -> bool:
+    """Whether ``record``'s input is relayed where the mark counts (ADR-0351 §5:7, §5:11)."""
+    processing = record.processing_record
+    if processing is not None and processing.is_open:
+        latest = processing.understanding[-1] if processing.understanding else None
+        return relay_mark_counts(
+            processing.trigger.parties, relayed=latest is not None and latest.relayed
+        )
+    projected = project_episode(record, excerpt_chars=excerpt_chars)
+    return relay_mark_counts(projected.parties, relayed=projected.relayed)
 
 
 def _in_place(

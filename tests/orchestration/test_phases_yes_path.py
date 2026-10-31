@@ -727,6 +727,41 @@ def test_on_the_line_only_the_owners_own_messages_none_forwarded_carry_authority
     assert working.target.place == f"telegram:{_LINE.instance_id}"
 
 
+def test_a_lines_older_history_is_bounded_by_the_activations_start() -> None:
+    """ADR-0358 §9:1: where the line's window shows no episode, what started since this
+    activation did is not older, so the older history's source carries that start."""
+    from test_activation_state import _admitted  # noqa: PLC0415
+
+    from ai_assistant.orchestration.activation_state import (  # noqa: PLC0415
+        CURRENT_ACTIVATION,
+        ActivationScope,
+    )
+
+    hub = _Hub()
+    path = hub.phases(hub.harness)
+    window = TranscriptWindow(_LINE, (), input_messages=(_said_on_the_line(1),))
+    state = _admitted()
+    token = CURRENT_ACTIVATION.set(ActivationScope(state))
+    try:
+        working = path.begin_line(
+            activation_id="a-2",
+            window=window,
+            target=PlaceTarget(channel=_LINE, writer=_NoWrites()),
+            description="the line",
+            giver=ApprovalGiver.USER_THROUGH_TELEGRAM,
+            trigger=_recorded_trigger(OWNERS_WORDS),
+            owner_records=True,
+        )
+    finally:
+        CURRENT_ACTIVATION.reset(token)
+
+    assert working.older is not None
+    assert working.older.channel == _LINE
+    assert working.older.episodes == frozenset()
+    assert state.started_at is not None
+    assert working.older.started == state.started_at
+
+
 def test_a_forward_in_the_lines_window_is_someone_elses_whose_text_planning_never_sees() -> None:
     """ADR-0323 §4:10, ADR-0307 §9:2: a forward is ``other``'s in the place window."""
     window = TranscriptWindow(

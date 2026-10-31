@@ -431,7 +431,9 @@ async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_roun
     acted = await stages[ControllerStage.ACTING].run(given)
 
     assert acted.outcome is StageOutcome.FAILED
-    assert working.pages == {}
+    # ADR-0356 §8:6, ADR-0358 §11:2: the read acting handed back done is held under its
+    # result all the same, so its entry keeps what it showed.
+    assert [one.story_id for one in working.pages.values()] == [created.story_id]
     assert working.supplied.withheld(_BOUNDED)
 
 

@@ -461,6 +461,7 @@ if TYPE_CHECKING:
         Callable,
         Collection,
         Coroutine,
+        Iterable,
         Iterator,
         Mapping,
         MutableMapping,
@@ -3908,12 +3909,15 @@ class PhasePath:
             giver=giver,
         )
         # ADR-0358 §9:2, ADR-0323 §10:1: a line's window is its recent episodes on the
-        # channel and place, so its older history is the earlier episodes there.
+        # channel and place, so its older history is the earlier episodes there, bounded
+        # by this activation's start where the window showed none.
+        state = active_state()
         working.older = OlderSource(
             channel=window.conversation,
             episodes=frozenset(
                 item.episode_id for item in working.place.items if item.episode_id is not None
             ),
+            started=None if state is None else state.started_at,
         )
         return working
 
@@ -5412,7 +5416,8 @@ class PhasePath:
 
         **The look-ups** (ADR-0307 §6:6) run inside a scope opened around acting, so
         they read under the pass's audience and its owner-only placement. A story's full
-        view a story read read is held under its call's result once acting returns.
+        view a story read read, and what an episode look-up read, is held under its call's
+        result as the scope closes, from what acting handed back where it raised.
 
         **The tidy-up exception** (ADR-0307 §7:2, §8:1). A new round waits for every
         call of the last one but a tidy-up, and neither it nor the activation's end
@@ -5440,7 +5445,8 @@ class PhasePath:
         if not rest:
             return ActedRound(round_id=decided.round_id)
         authorized = authorized_round(replace(decided, allowed=rest))
-        acted_one = working.latest.acted_one
+        latest = working.latest
+        acted_one = latest.acted_one
         if caller is None:
             caller = self._caller(given, working)
         with (
@@ -5455,10 +5461,9 @@ class PhasePath:
             with self._look_ups.scope(
                 audience=given.supply, owner_records=working.owner_records, older=working.older
             ) as scope:
+                ran: ActedRound | None = None
                 try:
-                    acted = await self._acting.act(
-                        authorized, held=working.held, on_acted=acted_one
-                    )
+                    ran = await self._acting.act(authorized, held=working.held, on_acted=acted_one)
                 finally:
                     # Every view a story read read, and every record an episode look-up
                     # read, was obtained, whatever became of the round's other calls
@@ -5469,10 +5474,15 @@ class PhasePath:
                     working.supplied.obtained(
                         tuple(record for found in scope.found.values() for record in _read(found))
                     )
-        self._pages(working, acted, scope.views)
-        self._looked(working, acted, scope.found)
-        self._peers(working, acted, caller)
-        return acted
+                    # ADR-0356 §8:6, ADR-0358 §11:2: where acting raised or was cancelled
+                    # before handing back the round, each read a call it handed back as
+                    # done read is held under its result all the same, so its entry keeps
+                    # what it showed.
+                    calls = tuple(latest.handed.values()) if ran is None else ran.calls
+                    self._pages(working, calls, scope.views)
+                    self._looked(working, calls, scope.found)
+        self._peers(working, ran, caller)
+        return ran
 
     def _caller(self, given: PhasePass, working: PhaseWorking) -> MatterCaller | None:
         """Who calls on running work in this round, read from the working set (§4:6)."""
@@ -5528,7 +5538,7 @@ class PhasePath:
 
     @staticmethod
     def _pages(
-        working: PhaseWorking, acted: ActedRound, views: Mapping[str, PlanningStory]
+        working: PhaseWorking, calls: Iterable[ActedCall], views: Mapping[str, PlanningStory]
     ) -> None:
         """Hold each story's full view a done story read read, under its call's result.
 
@@ -5537,7 +5547,7 @@ class PhasePath:
         story views are (ADR-0300 §10:6, ADR-0306 §4:5) and named by what set it; every
         note it shows is held with its mark, which authorizing reads for its ``N`` label.
         """
-        for one in acted.calls:
+        for one in calls:
             view = views.get(one.call.call.decision.id)
             if (
                 view is None
@@ -5553,7 +5563,7 @@ class PhasePath:
 
     @staticmethod
     def _looked(
-        working: PhaseWorking, acted: ActedRound, found: Mapping[str, EpisodeLookedUp]
+        working: PhaseWorking, calls: Iterable[ActedCall], found: Mapping[str, EpisodeLookedUp]
     ) -> None:
         """Hold what each done episode look-up read, under its call's result (ADR-0358 §6).
 
@@ -5561,7 +5571,7 @@ class PhasePath:
         summary shown set ``fetched_outside``, named by what set it, as the story views'
         do (§6:4, ADR-0306 §4:5).
         """
-        for one in acted.calls:
+        for one in calls:
             looked = found.get(one.call.call.decision.id)
             if looked is None or one.outcome is not ActedOutcome.DONE or one.result_id is None:
                 continue

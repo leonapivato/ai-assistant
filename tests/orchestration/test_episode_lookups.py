@@ -609,3 +609,85 @@ async def test_a_lines_older_history_reads_back_past_episodes_the_audience_refus
 
     assert older.readable
     assert [one.id for one in older.episodes] == ["activation:14", "activation:13"]
+
+
+# --- review round 7 -------------------------------------------------------------------
+
+
+def _opened(record: EpisodicMemory) -> EpisodicMemory:
+    """``record`` as its activation holds it while it runs: open, nothing frozen yet."""
+    processing = record.processing_record
+    assert processing is not None
+    open_record = EpisodeProcessingRecord.model_validate(
+        {
+            **processing.model_dump(),
+            "status": None,
+            "reason": None,
+            "ended_at": None,
+            "stages": [],
+        }
+    )
+    return record.model_copy(update={"processing_record": open_record, "outcome": None})
+
+
+async def test_an_older_message_of_a_relayed_input_still_running_is_withheld() -> None:
+    """ADR-0351 §5:7, §5:11: an open episode is never projected, and its relay mark is
+    read off its latest understanding version all the same."""
+    entries: list[TranscriptMessage | DeletedMessage] = [
+        _message(1, MessageAuthor.USER, "the dentist's own words"),
+        _message(2, MessageAuthor.USER, "in the window"),
+    ]
+    conversations = _Conversations(entries, taken={1: "relay"})
+    running = _opened(_relayed(_episode("activation:relay")))
+    assert running.processing_record is not None
+    assert running.processing_record.is_open
+    reads = _reads(_Memory(held=(running,)), conversations=conversations)
+    source = OlderSource(conversation_id="conv-1", before=2, shown=frozenset({2}))
+
+    older = await reads.older(source, 1, audience=BOUNDED)
+
+    (item,) = older.items
+    assert older.relayed == frozenset({"activation:relay"})
+    assert older.withheld(item)
+
+
+async def test_a_lines_older_history_cannot_be_read_once_the_windows_episodes_are_gone() -> None:
+    """§9:1, §9:4: with the episodes the window showed gone, nothing marks where the
+    older history ends, so a later arrival is never taken for an older one."""
+    channel = [_episode(f"activation:{at}") for at in (0, 1, 4, 5)]
+    source = OlderSource(channel=LINE, episodes=frozenset({"activation:2", "activation:3"}))
+
+    older = await _reads(_Memory(channel=channel)).older(source, 1, audience=BOUNDED)
+
+    assert older == OlderHistory(readable=False)
+
+
+def _at(record: EpisodicMemory, minutes: int) -> EpisodicMemory:
+    """``record``, its activation started ``minutes`` from ``_AT``."""
+    processing = record.processing_record
+    assert processing is not None
+    started = _AT + timedelta(minutes=minutes)
+    return record.model_copy(
+        update={
+            "occurred_at": started,
+            "processing_record": processing.model_copy(
+                update={"started_at": started, "ended_at": started}
+            ),
+        }
+    )
+
+
+async def test_a_lines_older_history_where_the_window_showed_none_started_before_this() -> None:
+    """§9:1: where the window showed no episode, one that started after this activation
+    did came after the window was read, and is not older; without that start, none is
+    known older."""
+    channel = [_at(_episode("activation:old"), -10), _at(_episode("activation:new"), 5)]
+    store = _Memory(channel=channel)
+
+    older = await _reads(store).older(OlderSource(channel=LINE, started=_AT), 1, audience=BOUNDED)
+    unknown = await _reads(store).older(OlderSource(channel=LINE), 1, audience=BOUNDED)
+
+    assert older.readable
+    assert [one.id for one in older.episodes] == ["activation:old"]
+    assert not older.more
+    assert unknown == OlderHistory(readable=False)
