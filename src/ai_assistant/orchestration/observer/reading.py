@@ -34,8 +34,10 @@ by its identity, never by its excerpt, and no read follows from it.
 
 **Parts, not fields** (ADR-0329 §8:6). An episode is rendered by the parts a support may
 point at (ADR-0328 §4's part table): the input or each message it took in, each round's
-message, each evidence item of its digests, and, for a candidate recorded under an
-approval, the user's yes to the wording it showed. Each carries a label (``P1``, ``P2``,
+message and each message call's (ADR-0356 §13:2), each evidence item of its digests,
+and, for a candidate recorded under an approval, the user's yes to the wording it
+showed. A round's notes are no part, so the observer never reads them as its message.
+Each carries a label (``P1``, ``P2``,
 ...) the steps name it by, and code maps the label back to the part: no model writes a
 part's address. The leaving episode's understanding, its latest version, is rendered
 beside its parts (§2:5); every other field of an episode is not.
@@ -76,6 +78,7 @@ from ai_assistant.core.types import (
     MemoryOperationKind,
     MemoryStanding,
     MemoryStatus,
+    MessageCallPart,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -114,6 +117,7 @@ if TYPE_CHECKING:
         EpisodeProcessingRecord,
         FrozenJson,
         OpenQuestion,
+        PlanningRound,
         RecalledItem,
         StoryNote,
         SupportHolder,
@@ -1223,18 +1227,8 @@ class _Shown:
                 if over
                 else SupportOrigin.ASSISTANT_MESSAGE
             )
-            parts.extend(
-                self._part(
-                    RoundMessagePart(episode=record.id, round=one.id),
-                    episode=record,
-                    text=one.text,
-                    origin=origin,
-                    when=one.recorded_at,
-                    answers=said,
-                )
-                for one in processing.rounds
-                if one.text
-            )
+            for one in processing.rounds:
+                parts.extend(self._messages(record, one, origin, said))
             for index, digest in enumerate(processing.digests):
                 parts.extend(
                     self._part(
@@ -1248,6 +1242,61 @@ class _Shown:
                     for position, item in enumerate(digest.evidence)
                 )
         return ReadEpisode(handle=handle, episode=record.id, record=record, parts=tuple(parts))
+
+    def _messages(
+        self,
+        record: EpisodicMemory,
+        planned: PlanningRound,
+        origin: SupportOrigin,
+        said: str | None,
+    ) -> list[ReadPart]:
+        """One round's messages, in the order they were written (ADR-0356 §13:2-§13:3).
+
+        The round's own message where its ``text`` holds one, as a round recorded before
+        ADR-0356 writes it and as its interim still does, a :class:`RoundMessagePart` when
+        the round was recorded; then each message call whose entry holds a delivery, in the
+        order the round proposed them, a :class:`MessageCallPart` of the words delivered,
+        when its entry was appended. Both take the origin a round's message takes, by the
+        same fact (ADR-0328 §4:3). A round's notes are no part (ADR-0329 §8:6), so they are
+        never read as its message.
+        """
+        processing = record.processing_record
+        parts: list[ReadPart] = []
+        if planned.text:
+            parts.append(
+                self._part(
+                    RoundMessagePart(episode=record.id, round=planned.id),
+                    episode=record,
+                    text=planned.text,
+                    origin=origin,
+                    when=planned.recorded_at,
+                    answers=said,
+                )
+            )
+        if processing is None:  # pragma: no cover — the caller reads a processing record
+            return parts
+        order = {call.call_id: index for index, call in enumerate(planned.calls)}
+        sent = sorted(
+            (
+                entry
+                for entry in processing.call_records
+                if entry.round == planned.id and entry.delivered is not None
+            ),
+            key=lambda entry: order[entry.call_id],  # the record's validator holds it
+        )
+        parts.extend(
+            self._part(
+                MessageCallPart(episode=record.id, round=planned.id, call_id=entry.call_id),
+                episode=record,
+                text=entry.delivered.words,
+                origin=origin,
+                when=entry.recorded_at,
+                answers=said,
+            )
+            for entry in sent
+            if entry.delivered is not None
+        )
+        return parts
 
     def _inputs(
         self, record: EpisodicMemory, processing: EpisodeProcessingRecord, answers: str | None
@@ -1310,7 +1359,11 @@ class _Shown:
         if candidate.rests_on_input:
             wanted.add((leaving.id, "input"))
         wanted.update((one, "input") for one in candidate.user_messages)
-        wanted.update((one, "round_message") for one in candidate.assistant_messages)
+        wanted.update(
+            (one, part)
+            for one in candidate.assistant_messages
+            for part in ("round_message", "message_call")
+        )
         digests = _result_digests(leaving, candidate.results)
         return tuple(
             part.handle
