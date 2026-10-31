@@ -6,34 +6,37 @@ direct request API, so the provider's own tool calling carries the calls and not
 parses them out of reply text. Nothing here runs a call: pydantic-ai's direct request
 returns the model's response and executes no tool.
 
-**How the notes ride the native shape is this module's** (ADR-0315 §3:3). They ride one
-reserved tool, :data:`ROUND_TOOL`, offered beside the capabilities. Its description tells
-the model that it runs nothing; a call to it is read back into
-:class:`~ai_assistant.core.types.RoundResponse`'s ``notes`` and never returned as a call.
-Outside this module the notes are not a call (§3:2). A model may call it more than once
-in one response, and the notes are joined in order. Nothing it carries asks for a round:
-the controller's rule alone decides whether one runs (§2, §3:4). An offered capability
-may not take its name.
+**A round is the model's response in two parts and its continuation** (ADR-0356 §7:1,
+§6:1). Its text is the text parts alone, joined as pydantic-ai joins them, and is the
+model's reply to the system, which planning keeps as its notes; its calls are every call
+the model proposed. No tool carries notes and no tool name is reserved (§7:4): a tool
+of any name is offered as given, ``planning_round`` included. No part of the response
+names the calls a message asks about (§7:5).
 
-**The round's naming of the calls its message asks about rides the same tool**
-(ADR-0321 §2:3, which leaves the native shape to this module as ADR-0315 §3:3 does). It
-is the tool's ``asks``, an array of strings, read back into ``RoundResponse.asks``: each
-name once, in the order the model first gave it across every call of the tool, and a
-blank name dropped as blank notes are. This module reads nothing of a name; what each
-refers to is planning's, which tells the model what to give.
+**The exchange is translated into the provider's messages** (ADR-0356 §5, §13). The
+instruction is the system part and the briefing one user part, in the request that opens
+the history, exactly as :class:`~ai_assistant.models.provider.PydanticAIProvider` sends a
+system and a user turn. Each earlier round's response is handed back as the provider
+returned it, rebuilt from its continuation (§6:2); each report follows it as one request
+of the provider's tool-result parts, under their call ids and in order, then the news as
+a user part. The newest report carries a cache point, so the exchange up to it is read
+back from the cache on the next round; a model that caches nothing drops the point.
 
-**Each round is asked afresh** (§2:6). The request is the rendered ``Message`` history,
-translated exactly as :class:`~ai_assistant.models.provider.PydanticAIProvider`
-translates it, so a ``Role.TOOL`` turn is refused there and no earlier tool exchange is
-ever replayed natively.
+**Thinking is handed back** (ADR-0356 §6). A response's continuation is the provider's
+whole response, every part in order, thinking and the thinking's signatures included,
+with the ``"provider:model"`` that wrote it. It is handed back as it was only to the
+model that wrote it, and only where it still reads as that response, its calls under the
+same ids. Anywhere else, where a response carries no continuation, one another model
+wrote, or one that no longer reads as the response, the response is handed back as its
+text and its calls alone, which every provider accepts and which carries no thinking for
+another model to refuse (§6:3).
 
 **Planning is given room to reason before it writes** (#2861). The request asks for the
 provider's thinking through pydantic-ai's unified ``thinking`` setting, which a model or
-provider without it ignores. The model reasons in thinking parts and writes the round's
-message in text parts, so its working stays out of the words the user reads (§3:1). A
-thinking part is none of a round's three parts (ADR-0315 §3:1): it is dropped here, never returned,
-recorded or replayed, and the next round is asked afresh without it (§2:6). A provider
-may count thinking against the response's output ceiling, as Anthropic's does, so where
+provider without it ignores. The model reasons in thinking parts and writes its reply to
+the system in text parts. A thinking part is no part of a round's text: it reaches the
+response's continuation alone, and the episode never carries it (ADR-0356 §6:4). A
+provider may count thinking against the response's output ceiling, as Anthropic's does, so where
 the model takes the setting the ceiling is widened by the thinking budget pydantic-ai
 gives the level on a budget-based Anthropic model, or by the budget the model's own
 settings give it: the thinking never takes the room the message had, and a budget-based
@@ -41,28 +44,26 @@ model is never refused for a ceiling at or below its budget. A response cut at i
 ceiling is not a round: its message may stop mid-sentence and whatever followed the cut
 is lost, so it is refused as unreadable rather than returned.
 
-**The diagnostic record keeps the thinking** (ADR-0314 §5), and nothing else does.
+**The diagnostic record keeps the thinking** (ADR-0314 §5), and beyond it only the
+response's continuation does, held in memory for the work's life (ADR-0356 §6:4).
 Where the composition root hands the completer a
 :class:`~ai_assistant.core.protocols.DiagnosticSink` — the record is on — a round on a
 model with Anthropic's adaptive thinking asks for the thinking's summarised text, which
 that thinking otherwise omits, and the completer writes planning's returned entry from
 the provider's whole response, every part in order, thinking included, whether or not
 it reads as a round, before it returns or raises. Beside the response it writes every
-tool the request offered, :data:`ROUND_TOOL` and its description included (#2894):
-planning's module writes the given entry with the capabilities it offers, and the
-reserved tool is added here, so this is the one place the record can show the whole
-list the provider received. Each tool's parameters are recorded as the chosen model's
-request preparation sent them (#2910), since a provider's schema transformer may rewrite
-them (OpenAI's adds ``additionalProperties: false``); where that cannot be computed they
-are recorded as the round built them, and the entry says so. The entry is written for the
-activation :mod:`ai_assistant.core.diagnostics` carries, and nothing is written where
-none is bound. The thinking still reaches nothing else: :class:`RoundResponse`, the
-episode and the next round never carry it (§5:3). Where the record is off, the request
-is as it is without this.
+tool the request offered (#2894). Each tool's parameters are recorded as the chosen
+model's request preparation sent them (#2910), since a provider's schema transformer may
+rewrite them (OpenAI's adds ``additionalProperties: false``); where that cannot be
+computed they are recorded as the round built them, and the entry says so. The entry is
+written for the activation :mod:`ai_assistant.core.diagnostics` carries, and nothing is
+written where none is bound. Where the record is off, the request is as it is without
+this.
 
 **A round asks the provider to cache its tools and instructions** (#3077): they are
 the same from one round to the next, and :mod:`~ai_assistant.models.prompt_cache` marks
-them where the model is Anthropic's, as it does for every completion. A fallback model
+them where the model is Anthropic's, as it does for every completion; the newest report
+is marked as above. A fallback model
 keeps the request it had, so it is given no marks either.
 
 **Nothing here retries or re-routes**, as nothing in the streaming sibling does:
@@ -74,7 +75,9 @@ round's resilience is the caller's to decide.
 as :meth:`~PydanticAIToolCallingCompleter.respond` sends it where the record is on,
 summarised thinking included, and hands the caller the provider's whole response, every
 part in order, thinking included, beside the round it reads as or why it reads as none
-(ADR-0335 §10 lets that thinking reach the replay's results). It writes no entry, even
+(ADR-0335 §10 lets that thinking reach the replay's results). Where the run's
+instruction differs from the one the exchange was recorded with, earlier responses are
+handed back without their continuations (ADR-0356 §6:3, §13). It writes no entry, even
 where the completer holds a sink, binds no activation and is on no Protocol, and no
 stage calls it (§4:9). It sends to the one model it is named, which may not fall back to
 another (§4:7), and it sends once and continues nothing (§4:10).
@@ -89,7 +92,17 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from pydantic import ValidationError
 from pydantic_ai.direct import model_request
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ToolCallPart
+from pydantic_ai.messages import (
+    CachePoint,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import ModelRequestParameters, infer_model
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.instrumented import InstrumentedModel
@@ -104,26 +117,22 @@ from ai_assistant.core.types import (
     DiagnosticKind,
     DiagnosticSource,
     OfferedTool,
+    PlanningExchange,
     ProposedCall,
-    Role,
+    RoundContinuation,
     RoundResponse,
 )
-from ai_assistant.models.prompt_cache import prompt_cache_settings
-from ai_assistant.models.provider import _classify, _to_model_messages
+from ai_assistant.models.prompt_cache import marks_the_newest_report, prompt_cache_settings
+from ai_assistant.models.provider import _classify
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from pydantic_ai import models
-    from pydantic_ai.messages import ModelMessage, ModelResponse
+    from pydantic_ai.messages import ModelMessage, ModelRequestPart, ModelResponsePart
     from pydantic_ai.settings import ThinkingLevel
 
     from ai_assistant.core.protocols import DiagnosticSink
-    from ai_assistant.core.types import Message
-
-#: The reserved tool the notes ride (ADR-0315 §3:3). No capability takes
-#: this name.
-ROUND_TOOL: Final = "planning_round"
 
 #: How much a round may reason before it writes (#2861): on, at the provider's own
 #: default effort. On a model with adaptive thinking that is the model's own judgement of
@@ -143,32 +152,6 @@ _UNPREPARED: Final = "offered_tools_unprepared"
 #: The output a round's message and calls had before it could think: pydantic-ai's
 #: Anthropic default ceiling. Thinking is given its room on top of this, never out of it.
 _MESSAGE_TOKENS: Final = 4096
-
-_ROUND_TOOL_DESCRIPTION: Final = (
-    "Not a capability: calling it runs nothing and goes to no one. Call it to keep "
-    "episode notes on this activation: free text for your own later rounds and later "
-    "activations to read; and to name, in asks, each call that needs the user that this "
-    "round's message asks them about."
-)
-
-_ROUND_TOOL_SCHEMA: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "notes": {
-            "type": "string",
-            "description": "Episode notes to keep with this round.",
-        },
-        "asks": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": (
-                "Each call that needs the user that this round's message asks them "
-                "about, named as your instructions say."
-            ),
-        },
-    },
-    "additionalProperties": False,
-}
 
 
 class PydanticAIToolCallingCompleter:
@@ -209,38 +192,41 @@ class PydanticAIToolCallingCompleter:
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        """Produce one planning round's response to ``messages``, offering ``tools``.
+        """Produce one planning round's response to ``exchange``, offering ``tools``.
 
         The request is built on the call, before the first await, from one observation
-        of each argument (ADR-0065): the history is translated and the tools are
-        rebuilt through validation, so a caller mutating either while the round is out
-        cannot tear it.
+        of each argument (ADR-0065): the exchange is translated and the tools are
+        rebuilt through validation, so a caller mutating the tools while the round is
+        out cannot tear it.
 
         Args:
-            messages: The round's rendered request, oldest first.
+            exchange: The work's exchange, oldest first.
             tools: The capabilities offered for this round.
             model: Optional ``"provider:model"`` override.
 
         Returns:
-            The round's response.
+            The round's response, its continuation the provider's whole response.
 
         Raises:
-            ModelError: The bare class, before any model is contacted, if ``messages``
-                is empty, ends on a ``Role.ASSISTANT`` turn or carries a ``Role.TOOL``
-                turn, or if two tools share a name or one takes :data:`ROUND_TOOL`'s.
-                A provider failure is narrowed to the most specific subclass, and a
-                response that cannot be read as a round, or was cut at its output
-                ceiling, is a :class:`~ai_assistant.core.errors.ModelResponseError`.
+            ModelError: The bare class, before any model is contacted, if two tools
+                share a name. A provider failure is narrowed to the most specific
+                subclass, and a response that cannot be read as a round, or was cut at
+                its output ceiling, is a
+                :class:`~ai_assistant.core.errors.ModelResponseError`.
         """
-        history, parameters = _round_request(messages, tools, caller="respond()")
+        parameters = _round_parameters(tools, caller="respond()")
         try:
             chosen = infer_model(self._default_model if model is None else model)
             settings = _settings(self._thinking, chosen, summarised=self._diagnostics is not None)
+            written_by = model_id(chosen)
+            history = exchange_history(
+                exchange, written_by, cache_point=marks_the_newest_report(chosen)
+            )
             # Where the record is on, the tools as prepared are taken here, with no await
             # between this and the request preparing itself (#2910). `_offered` never
             # raises.
@@ -257,7 +243,7 @@ class PydanticAIToolCallingCompleter:
             # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
             raise _classify(exc) from exc
         try:
-            read = _round(response)
+            read = _round(response, written_by)
         except ModelResponseError as exc:
             await self._returned(offered_record, response, exc)
             raise
@@ -266,29 +252,33 @@ class PydanticAIToolCallingCompleter:
 
     async def replay_round(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: models.Model | str,
+        instruction: str | None = None,
     ) -> ReplayedRound:
         """Send one recorded round again, as :meth:`respond` sends it with the record on.
 
         The owner's replay tool's seam (ADR-0335 §4:8): the request is built as
-        :meth:`respond` builds it, :data:`ROUND_TOOL` added beside ``tools``, and its
-        settings are the ones :meth:`respond` sends where it holds a sink, so a model
-        with Anthropic's adaptive thinking is asked for the thinking's summarised text.
-        Nothing is written, whether or not this completer holds a sink, and no activation
-        is bound (§4:9). It is sent once, to ``model`` alone (§4:7), and nothing is
-        continued: no further round, no repair and no tool's result (§4:10).
+        :meth:`respond` builds it, and its settings are the ones :meth:`respond` sends
+        where it holds a sink, so a model with Anthropic's adaptive thinking is asked
+        for the thinking's summarised text. Nothing is written, whether or not this
+        completer holds a sink, and no activation is bound (§4:9). It is sent once, to
+        ``model`` alone (§4:7), and nothing is continued: no further round, no repair
+        and no tool's result (§4:10).
 
         Args:
-            messages: The round's recorded request, oldest first, its system message the
-                candidate's.
+            exchange: The round's recorded exchange, oldest first.
             tools: The capabilities the round offered, as planning's given entry records
-                them: :data:`ROUND_TOOL` is added here and may not be among them.
+                them.
             model: The one model the run names, as a ``"provider:model"`` string or a
                 pydantic-ai model. It replaces this completer's default model for this
                 call, and may not be a fallback model, wrapped or not.
+            instruction: A candidate's instruction, sent in place of the exchange's own;
+                where it differs from it, earlier responses are handed back without
+                their continuations (ADR-0356 §6:3, §13). ``None`` sends the exchange's
+                own.
 
         Returns:
             The provider's whole response, with the round it reads as or why it reads as
@@ -296,12 +286,13 @@ class PydanticAIToolCallingCompleter:
 
         Raises:
             ModelError: The bare class, before any model is contacted, where
-                :meth:`respond` would refuse ``messages`` or ``tools``, or ``model`` is a
-                fallback model. A failure sending the request, where no response came
-                back, is narrowed as :meth:`respond` narrows it; a response that does not
-                read as a round is returned, not raised.
+                :meth:`respond` would refuse ``tools``, ``instruction`` is blank, or
+                ``model`` is a fallback model. A failure sending the request, where no
+                response came back, is narrowed as :meth:`respond` narrows it; a
+                response that does not read as a round is returned, not raised.
         """
-        history, parameters = _round_request(messages, tools, caller="replay_round()")
+        parameters = _round_parameters(tools, caller="replay_round()")
+        sent = candidate_exchange(exchange, instruction, caller="replay_round()")
         try:
             chosen = infer_model(model)
         except Exception as exc:
@@ -312,15 +303,19 @@ class PydanticAIToolCallingCompleter:
             raise ModelError(msg)
         try:
             settings = _settings(self._thinking, chosen, summarised=True)
+            written_by = model_id(chosen)
             response = await model_request(
-                chosen, history, model_settings=settings, model_request_parameters=parameters
+                chosen,
+                exchange_history(sent, written_by, cache_point=marks_the_newest_report(chosen)),
+                model_settings=settings,
+                model_request_parameters=parameters,
             )
         except Exception as exc:
             # Broad on purpose, as in `respond`: `_classify` is the taxonomy (ADR-0063).
             raise _classify(exc) from exc
         whole = ModelMessagesTypeAdapter.dump_python([response], mode="json")[0]
         try:
-            read = _round(response)
+            read = _round(response, written_by)
         except ModelResponseError as exc:
             return ReplayedRound(response=whole, round=None, failure=exc)
         return ReplayedRound(response=whole, round=read, failure=None)
@@ -334,9 +329,9 @@ class PydanticAIToolCallingCompleter:
         """Write planning's returned entry from the provider's whole response (§5:2).
 
         Every part in order, thinking included, as pydantic-ai serialises the response;
-        every tool the request offered, in the order it offered them, the reserved one
-        included (#2894), each as the chosen model's request preparation gave it to the
-        provider (#2910); and where the response did not read as a round, why not.
+        every tool the request offered, in the order it offered them (#2894), each as
+        the chosen model's request preparation gave it to the provider (#2910); and
+        where the response did not read as a round, why not.
         Where the tools as prepared cannot be computed they are kept as the round built
         them, and :data:`_UNPREPARED` says why.
 
@@ -385,36 +380,161 @@ class ReplayedRound:
     failure: ModelResponseError | None
 
 
-def _round_request(
-    messages: Sequence[Message], tools: Sequence[OfferedTool], *, caller: str
-) -> tuple[list[ModelMessage], ModelRequestParameters]:
-    """A round's request: the history, and the tools with :data:`ROUND_TOOL` beside them.
+def _round_parameters(tools: Sequence[OfferedTool], *, caller: str) -> ModelRequestParameters:
+    """A round's tools as the request offers them, every one as given and none added.
 
-    Built from one observation of each argument (ADR-0065): the history is translated and
-    the tools are rebuilt through validation.
+    Built from one observation of ``tools`` (ADR-0065): each is rebuilt through
+    validation. No name is reserved (ADR-0356 §7:4).
 
     Raises:
-        ModelError: The bare class if ``messages`` is empty, ends on a
-            ``Role.ASSISTANT`` turn or carries a ``Role.TOOL`` turn, or if two tools
-            share a name or one takes :data:`ROUND_TOOL`'s.
+        ModelError: The bare class if two tools share a name.
     """
-    if not messages:
-        msg = f"{caller} requires at least one message"
-        raise ModelError(msg)
-    if messages[-1].role is Role.ASSISTANT:
-        msg = f"{caller} requires a conversation awaiting a reply"
-        raise ModelError(msg)
-    history = _to_model_messages(messages)
     offered = [_native(OfferedTool.model_validate(tool.model_dump())) for tool in tools]
     names = [tool.name for tool in offered]
     if len(set(names)) != len(names):
         msg = f"{caller} requires distinct tool names"
         raise ModelError(msg)
-    if ROUND_TOOL in names:
-        msg = f"the tool name {ROUND_TOOL!r} is reserved for the round's notes"
+    return ModelRequestParameters(function_tools=offered, allow_text_output=True)
+
+
+def model_id(model: models.Model) -> str:
+    """The ``"provider:model"`` a response from ``model`` is written by, under any wrappers.
+
+    A continuation names it (ADR-0356 §13), and it is handed back as it was only to the
+    model of the same name (§6:3).
+    """
+    inner = model
+    while isinstance(inner, WrapperModel):
+        inner = inner.wrapped
+    return f"{inner.system}:{inner.model_name}"
+
+
+def candidate_exchange(
+    exchange: PlanningExchange, instruction: str | None, *, caller: str
+) -> PlanningExchange:
+    """``exchange`` under ``instruction``, its continuations dropped where that differs.
+
+    A response's thinking was written under the instruction the exchange was recorded
+    with, so a candidate's replay or follow-up under another instruction hands earlier
+    responses back without their continuations (ADR-0356 §13).
+
+    Raises:
+        ModelError: The bare class if ``instruction`` is blank.
+    """
+    if instruction is None or instruction == exchange.instruction:
+        return exchange
+    if not instruction.strip():
+        msg = f"{caller} requires a non-blank instruction"
         raise ModelError(msg)
-    sent = [*offered, _round_tool()]
-    return history, ModelRequestParameters(function_tools=sent, allow_text_output=True)
+    steps = tuple(
+        step.model_copy(
+            update={"response": step.response.model_copy(update={"continuation": None})}
+        )
+        for step in exchange.steps
+    )
+    return exchange.model_copy(update={"instruction": instruction, "steps": steps})
+
+
+def exchange_history(
+    exchange: PlanningExchange, written_by: str, *, cache_point: bool = True
+) -> list[ModelMessage]:
+    """The provider's messages for ``exchange``, as a model named ``written_by`` is sent it.
+
+    The instruction is the system part and the briefing a user part of the first
+    request; then each earlier response, handed back as :func:`_handed_back` gives it,
+    and the request after it: the report's results as tool-result parts under their
+    call ids and in order, then the news. Where ``cache_point``, the newest report ends
+    on a cache point (ADR-0356 §13). A response with nothing to hand back is left out,
+    and its report follows the request before it, which providers join into one turn.
+
+    Args:
+        exchange: The exchange, oldest first.
+        written_by: The ``"provider:model"`` the request goes to (:func:`model_id`).
+        cache_point: Whether the newest report ends on a cache point.
+
+    Returns:
+        The history, ending on a request.
+    """
+    history: list[ModelMessage] = [
+        ModelRequest(
+            parts=[
+                SystemPromptPart(content=exchange.instruction),
+                UserPromptPart(content=exchange.briefing),
+            ]
+        )
+    ]
+    for index, step in enumerate(exchange.steps):
+        handed = _handed_back(step.response, written_by)
+        if handed is not None:
+            history.append(handed)
+        names = {call.call_id: call.name for call in step.response.calls}
+        parts: list[ModelRequestPart] = [
+            ToolReturnPart(
+                tool_name=names[result.call_id], content=result.text, tool_call_id=result.call_id
+            )
+            for result in step.report.results
+        ]
+        newest = cache_point and index == len(exchange.steps) - 1
+        parts.append(
+            UserPromptPart(content=[step.report.news, CachePoint()] if newest else step.report.news)
+        )
+        history.append(ModelRequest(parts=parts))
+    return history
+
+
+def _handed_back(response: RoundResponse, written_by: str) -> ModelResponse | None:
+    """``response`` as the provider is handed it back, or ``None`` where it holds nothing.
+
+    Its continuation rebuilt, where the model it goes to wrote it and it still reads as
+    this response: one model response whose text and calls, by id, name and arguments,
+    are the response's own. Anywhere else, its text and its calls alone (ADR-0356 §6:3).
+    """
+    continuation = response.continuation
+    if continuation is not None and continuation.model == written_by:
+        rebuilt = _rebuilt(continuation)
+        if rebuilt is not None and _reads_as(rebuilt, response):
+            return rebuilt
+    parts: list[ModelResponsePart] = []
+    if response.text:
+        parts.append(TextPart(content=response.text))
+    parts.extend(
+        ToolCallPart(
+            tool_name=call.name,
+            args=call.model_dump(mode="json")["arguments"],
+            tool_call_id=call.call_id,
+        )
+        for call in response.calls
+    )
+    return ModelResponse(parts=parts) if parts else None
+
+
+def _rebuilt(continuation: RoundContinuation) -> ModelResponse | None:
+    """The response a continuation holds, or ``None`` where it holds no one response."""
+    try:
+        rebuilt = ModelMessagesTypeAdapter.validate_python([_thawed(continuation.parts)])
+    except ValidationError, TypeError, ValueError:
+        return None
+    if len(rebuilt) != 1 or not isinstance(rebuilt[0], ModelResponse):
+        return None
+    return rebuilt[0]
+
+
+def _thawed(value: object) -> object:
+    """A frozen JSON value as plain JSON: mappings as dicts, sequences as lists."""
+    if isinstance(value, Mapping):
+        return {str(key): _thawed(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_thawed(item) for item in value]
+    return value
+
+
+def _reads_as(rebuilt: ModelResponse, response: RoundResponse) -> bool:
+    """Whether ``rebuilt`` reads as ``response``: the same text, and the same calls."""
+    try:
+        read = _round(rebuilt, None)
+    except ModelResponseError:
+        return False
+    return read.text == response.text and read.calls == response.calls
 
 
 def _falls_back(model: models.Model) -> bool:
@@ -646,54 +766,36 @@ def _recorded(tool: NativeTool, prepared: NativeTool) -> dict[str, object]:
     }
 
 
-def _round_tool() -> NativeTool:
-    """The reserved tool carrying the notes, built afresh per request."""
-    return NativeTool(
-        name=ROUND_TOOL,
-        description=_ROUND_TOOL_DESCRIPTION,
-        parameters_json_schema=copy.deepcopy(_ROUND_TOOL_SCHEMA),
-    )
+def _round(response: ModelResponse, written_by: str | None) -> RoundResponse:
+    """Read a provider response as a round's parts (ADR-0356 §7:1, §6:1).
 
-
-def _round(response: ModelResponse) -> RoundResponse:
-    """Read a provider response as a round's three parts (ADR-0315 §3:1).
-
-    The text is the text parts alone: a thinking part is none of the three, and is
-    dropped.
+    The text is the text parts alone, joined as pydantic-ai joins them: a thinking part
+    is no part of it. Every call is a call, whatever its name (§7:4). The continuation
+    is the whole response, every part in order, written by ``written_by``, or none where
+    that is ``None``.
 
     Raises:
         ModelResponseError: If the response was cut at its output ceiling, a call's
-            arguments are not a JSON object, the reserved tool's arguments are not of
-            its shape, or the parts do not make a round.
+            arguments are not a JSON object, or the parts do not make a round.
     """
     if response.finish_reason == "length":
         msg = "the model's response was cut at its output ceiling, so it is not a whole round"
         raise ModelResponseError(msg)
-    calls: list[ProposedCall] = []
-    notes: list[str] = []
-    asks: dict[str, None] = {}
     try:
-        for part in response.parts:
-            if not isinstance(part, ToolCallPart):
-                continue
-            arguments = _arguments(part)
-            if part.tool_name != ROUND_TOOL:
-                calls.append(
-                    ProposedCall(
-                        call_id=part.tool_call_id, name=part.tool_name, arguments=arguments
-                    )
-                )
-                continue
-            written = _round_notes(arguments)
-            if written is not None and written.strip():
-                notes.append(written)
-            asks.update(dict.fromkeys(name for name in _round_asks(arguments) if name.strip()))
-        return RoundResponse(
-            text=response.text or "",
-            calls=tuple(calls),
-            notes="\n\n".join(notes) if notes else None,
-            asks=tuple(asks),
+        calls = tuple(
+            ProposedCall(call_id=part.tool_call_id, name=part.tool_name, arguments=_arguments(part))
+            for part in response.parts
+            if isinstance(part, ToolCallPart)
         )
+        continuation = (
+            None
+            if written_by is None
+            else RoundContinuation(
+                model=written_by,
+                parts=ModelMessagesTypeAdapter.dump_python([response], mode="json")[0],
+            )
+        )
+        return RoundResponse(text=response.text or "", calls=calls, continuation=continuation)
     except (ValidationError, ValueError) as exc:
         msg = "the model's response could not be read as a planning round"
         raise ModelResponseError(msg) from exc
@@ -710,35 +812,3 @@ def _arguments(part: ToolCallPart) -> dict[str, Any]:
     except AssertionError as exc:
         msg = "a call's arguments are not a JSON object"
         raise ValueError(msg) from exc
-
-
-def _round_notes(arguments: dict[str, object]) -> str | None:
-    """The notes one call of the reserved tool carries.
-
-    Raises:
-        ValueError: If they are present and not text, or anything but the notes and the
-            naming is present, the retired mark included (ADR-0315 §3:4).
-    """
-    if set(arguments) - {"notes", "asks"}:
-        msg = "the round's tool takes notes and the calls its message asks about alone"
-        raise ValueError(msg)
-    notes = arguments.get("notes")
-    if notes is not None and not isinstance(notes, str):
-        msg = "the round's notes are text"
-        raise ValueError(msg)
-    return notes
-
-
-def _round_asks(arguments: dict[str, object]) -> list[str]:
-    """The names one call of the reserved tool gives the calls its message asks about.
-
-    Raises:
-        ValueError: If they are present and not an array of text (ADR-0321 §2:3).
-    """
-    asks = arguments.get("asks")
-    if asks is None:
-        return []
-    if not isinstance(asks, list) or not all(isinstance(name, str) for name in asks):
-        msg = "the calls a round's message asks about are named by text"
-        raise ValueError(msg)
-    return asks

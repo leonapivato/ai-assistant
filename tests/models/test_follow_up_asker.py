@@ -154,6 +154,13 @@ def _given(
     **body: object,
 ) -> DiagnosticEntry:
     held: dict[str, object] = {"messages": _messages(), "prompt": _PROMPT}
+    if source is DiagnosticSource.PLANNING:
+        # ADR-0356 §13:6: planning's given entry records the work's exchange.
+        held["exchange"] = {
+            "instruction": "The stage's instruction.",
+            "briefing": "what is on today",
+            "steps": [],
+        }
     held.update(body)
     return diagnostic_entry(
         activation_id, source=source, kind=DiagnosticKind.GIVEN, recorded_at=at, body=held

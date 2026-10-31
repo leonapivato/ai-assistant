@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
     import pytest
 
-    from ai_assistant.core.types import Message, OfferedTool
+    from ai_assistant.core.types import Message, OfferedTool, PlanningExchange
 
 _FACT: Final = "The user is allergic to peanuts."
 _ASKED: Final = "remember I'm allergic to peanuts"
@@ -70,8 +70,8 @@ class _Planning:
     def __init__(self) -> None:
         self.recorded = False
 
-    def __call__(self, messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
-        said = messages[-1].content
+    def __call__(self, exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
+        said = exchange.briefing
         if _ASKED in said and not self.recorded:
             self.recorded = True
             call = ProposedCall(

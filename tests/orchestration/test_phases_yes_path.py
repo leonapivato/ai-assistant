@@ -3,13 +3,15 @@
 The phases as the composition root wires them, driven through the engine across
 several activations, for #3058's scenarios. Each case scripts planning's rounds and
 understanding's reading, because the model's own judgment is QA's to test live; what
-these cases pin is what the code owns: how a question is asked and recorded, and who
-carries the user's authority. Approvals stop until the authority run (ADR-0353 §11):
-understanding is shown no question mark and records no answer pointer whatever its reply
-holds, so authorizing's rules, which stand unchanged, find none, every call that needs
-the user goes back to planning as needing them, and an identical call already asked is
-not asked again (§11:3). The cases a yes ran a call in, ADR-0322 §5's among them, fail
-again until approvals are redesigned, and are not here.
+these cases pin is what the code owns: who carries the user's authority. Approvals stop
+until the authority run (ADR-0353 §11): understanding is shown no question mark and
+records no answer pointer whatever its reply holds, so authorizing's rules, which stand
+unchanged, find none, and every call that needs the user goes back to planning as
+needing them. The cases a yes ran a call in, ADR-0322 §5's among them, fail again until
+approvals are redesigned, and are not here. No part of a response names the calls a
+message asks about any more (ADR-0356 §7:5), so planning appends no exact line and
+records no asked call; the cases that pinned how a question was asked and recorded went
+with the naming, and a question here is the round's prose alone.
 """
 
 from __future__ import annotations
@@ -31,7 +33,6 @@ from understanding_support import TextAsStructured, recall_stage
 
 from ai_assistant.core.errors import ClassifiedToolError, OversizedValueError
 from ai_assistant.core.types import (
-    TRANSCRIPT_MESSAGE_MAX_CHARS,
     ApprovalGiver,
     AskedCall,
     CapabilityEffect,
@@ -122,6 +123,7 @@ if TYPE_CHECKING:
         MessageReceipt,
         OfferedTool,
         PermissionDecision,
+        PlanningExchange,
     )
     from ai_assistant.orchestration.person_block import PersonBlocks
 
@@ -171,8 +173,8 @@ _DIGESTED: Final = json.dumps({"evidence": [{"text": "It opens at nine.", "sourc
 _ASKING: Final = "Shall I book a table for Friday?"
 #: The booking's exact line, as the question shows it (§2:5).
 _FRIDAY_LINE: Final = 'book — date: "Friday"'
-#: The question as the user reads it: the text, then the fixed line code puts above the
-#: exact line (the owner's ruling on #3094), then the line.
+#: A question as a round recorded asking about the booking shows it: the text, then the
+#: fixed line above the exact line (the owner's ruling on #3094), then the line.
 _QUESTION: Final = f"{_ASKING}\n\nNeeds your yes:\n{_FRIDAY_LINE}"
 
 
@@ -205,7 +207,7 @@ class _Policy:
 
 # --- the scripts --------------------------------------------------------------------------
 
-type _Respond = Callable[[Sequence[Message], Sequence[OfferedTool]], RoundResponse]
+type _Respond = Callable[[PlanningExchange, Sequence[OfferedTool]], RoundResponse]
 
 
 @dataclass(frozen=True)
@@ -228,7 +230,7 @@ class _Planner(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
@@ -239,11 +241,11 @@ class _Planner(FakeToolCallingCompleter):
             await step.hook()
             step = step.response
         self._response = step
-        return await super().respond(messages, tools, model=model)
+        return await super().respond(exchange, tools, model=model)
 
     def shown(self, index: int) -> str:
         """What round ``index``, counted across the case, was shown."""
-        return self.calls[index].messages[-1].content
+        return self.calls[index].exchange.briefing
 
     def offered(self, index: int) -> set[str]:
         """The tools round ``index`` was offered, by name."""
@@ -475,9 +477,9 @@ def _book(date: str = "Friday", **marks: object) -> RoundResponse:
     return RoundResponse(calls=(_call("c1", "book", date=date, **marks),))
 
 
-def _ask(text: str = _ASKING, *refs: str) -> RoundResponse:
-    """A round whose message asks about the calls ``refs`` name: round 1's first call."""
-    return RoundResponse(text=text, asks=refs or ("1.1",))
+def _ask(text: str = _ASKING) -> RoundResponse:
+    """A round whose message asks in prose alone: no response names an asked call."""
+    return RoundResponse(text=text)
 
 
 def _run_approved(label: str = "A1") -> RoundResponse:
@@ -489,7 +491,11 @@ _DONE: Final = RoundResponse(text="Done.")
 
 
 async def _asked(hub: _Hub) -> tuple[str, EpisodicMemory]:
-    """The booking asked about in a conversation of its own: round 1 needs you, round 2 asks."""
+    """The booking asked about in a conversation of its own: round 1 needs you, round 2 asks.
+
+    Round 2 asks in prose alone, so the question is its text and no call is recorded as
+    asked (ADR-0356 §7:5).
+    """
     hub.reader.nothing()
     hub.planner.then(_book(), _ask())
     return await hub.turn("Book a table for Friday.")
@@ -500,41 +506,31 @@ def _asked_calls(episode: EpisodicMemory) -> list[tuple[AskedCall, ...]]:
     return [one.asked for one in processing(episode).rounds]
 
 
-def _activation(episode: EpisodicMemory) -> str:
-    return processing(episode).activation_id
-
-
 # --- a booking (§8:1) ---------------------------------------------------------------------
 
 
-async def test_a_booking_is_asked_with_its_exact_line_and_a_yes_runs_nothing() -> None:
-    """ADR-0353 §11:1-§11:3: the question is asked and recorded as before; a yes to it
-    records no pointer, so planning is shown no approved action, and the booking
-    proposed again goes back as needing the user, already asked, and is not asked again."""
+async def test_a_booking_is_asked_and_a_yes_runs_nothing() -> None:
+    """ADR-0353 §11:1-§11:3: the question is asked in prose and records no asked call; a
+    yes to it records no pointer, so planning is shown no approved action, and the
+    booking proposed again goes back as needing the user."""
     hub = _Hub()
     conversation, asking = await _asked(hub)
 
     (question,) = await hub.said(conversation)
-    assert question.text == _QUESTION
+    assert question.text == _ASKING
     assert not question.cut_off
-    (asked,) = _asked_calls(asking)[1]
-    assert (asked.part, asked.values) == (1, {"date": "Friday"})
+    assert _asked_calls(asking) == [(), ()]
     assert "needs the user's yes" in hub.planner.shown(1)
     assert hub.world.of("book") == []
 
-    async def link() -> None:
-        await hub.linked(_activation(asking))
-
     hub.reader.yes()
-    hub.planner.then(
-        _Hooked(link, _book()), RoundResponse(text="I'm waiting on your answer above.")
-    )
+    hub.planner.then(_book(), RoundResponse(text="I'm waiting on your answer above."))
     _, yes = await hub.turn("Yes please.", conversation=conversation, message_id="m-2")
 
     assert hub.world.of("book") == []
     assert "approved_actions" not in hub.planner.shown(2)
     assert APPROVED_ACTION_TOOL not in hub.planner.offered(2)
-    assert "already asked about" in hub.planner.shown(3)
+    assert "needs the user's yes" in hub.planner.shown(3)
     assert _asked_calls(yes) == [(), ()]
     assert "answers" not in processing(yes).understanding[-1].model_dump()
     # Understanding was shown the question's message, and no mark on it.
@@ -546,57 +542,6 @@ async def test_a_booking_is_asked_with_its_exact_line_and_a_yes_runs_nothing() -
         for one in await hub.harness.trail.recent(limit=20)
         if one.ruling.outcome is PermissionOutcome.ALLOW and one.approval is not None
     ]
-
-
-async def test_a_prose_question_in_the_proposing_round_asks_nothing() -> None:
-    """#3071, #3072: only a message that showed the exact line asks.
-
-    The proposing round writes "Shall I?" and names a reference it guessed: no call has
-    come back yet, so the name is dropped and nothing is recorded as asked. The next
-    round is shown the call as needing a yes and not yet asked, and its question carries
-    the line.
-    """
-    hub = _Hub()
-    hub.reader.nothing()
-    prose = "Friday is free. Shall I book it? Please confirm the details below."
-    proposing = RoundResponse(
-        text=prose, calls=(_call("c1", "book", date="Friday"),), asks=("1.1",)
-    )
-    hub.planner.then(proposing, _ask())
-    conversation, asking = await hub.turn("Book a table for Friday.")
-
-    assert _asked_calls(asking)[0] == ()
-    shown = hub.planner.shown(1)
-    assert "needs the user's yes, and is not yet asked" in shown
-    assert "already asked" not in shown
-    assert [one.text for one in await hub.said(conversation)] == [
-        prose,
-        _QUESTION,
-    ]
-
-
-async def test_proposing_it_again_while_it_waits_is_already_asked() -> None:
-    """§4:11: a call identical to one asked in a story's episode, not yet used."""
-    hub = _Hub()
-    conversation, asking = await _asked(hub)
-
-    async def link() -> None:
-        await hub.linked(_activation(asking))
-
-    hub.reader.nothing()
-    hub.planner.then(_Hooked(link, _book()), _ask("Waiting on you for Friday."))
-    _, again = await hub.turn(
-        "And dinner on Friday, then?", conversation=conversation, message_id="m-2"
-    )
-
-    assert "already asked about, in a question that showed its exact details" in (
-        hub.planner.shown(3)
-    )
-    # It is not asked about again: the second round's message carries no exact line.
-    assert _asked_calls(again) == [(), ()]
-    said = await hub.said(conversation)
-    assert said[-1].text == "Waiting on you for Friday."
-    assert hub.world.of("book") == []
 
 
 # --- the other answers (§8:2) -------------------------------------------------------------
@@ -611,21 +556,6 @@ async def test_a_no_runs_nothing() -> None:
     await hub.turn("No, leave it.", conversation=conversation, message_id="m-2")
     assert hub.world.of("book") == []
     assert "approved_actions" not in hub.planner.shown(2)
-
-
-async def test_a_change_approves_nothing_and_brings_a_new_question() -> None:
-    hub = _Hub()
-    conversation, _ = await _asked(hub)
-
-    hub.reader.nothing()
-    hub.planner.then(_book("Saturday"), _ask("Shall I make it Saturday instead?"))
-    _, changed = await hub.turn("Make it Saturday.", conversation=conversation, message_id="m-2")
-
-    assert hub.world.of("book") == []
-    (asked,) = _asked_calls(changed)[1]
-    assert asked.values == {"date": "Saturday"}
-    said = await hub.said(conversation)
-    assert said[-1].text.endswith('book — date: "Saturday"')
 
 
 async def test_an_unclear_reply_runs_nothing() -> None:
@@ -854,76 +784,7 @@ async def test_a_deny_is_never_asked_about() -> None:
     assert hub.world.ran == []
 
 
-# --- email (§8:9) -------------------------------------------------------------------------
-
-
-async def test_an_emails_full_text_is_in_its_exact_line() -> None:
-    hub = _Hub()
-    body = "Running late.\nSee you at 7."
-    hub.reader.nothing()
-    hub.planner.then(
-        RoundResponse(calls=(_call("c1", "send_email", to="sam@example.com", body=body),)),
-        _ask("Shall I email Sam that you are running late?"),
-    )
-    conversation, _ = await hub.turn("Email Sam that I'm running late.")
-
-    (question,) = await hub.said(conversation)
-    line = question.text.splitlines()[-1]
-    assert json.dumps(body) in line
-    assert '"sam@example.com"' in line
-    assert hub.world.of("send_email") == []
-
-
 # --- a question cut to fit is not shown (§4:4) --------------------------------------------
-
-
-async def test_a_question_cut_to_fit_is_not_approvable_and_is_asked_again_whole() -> None:
-    hub = _Hub()
-    long = (
-        _ASKING
-        + " "
-        + "It is the corner table by the window. " * (TRANSCRIPT_MESSAGE_MAX_CHARS // 30)
-    )
-    hub.reader.nothing()
-    hub.planner.then(_book(), _ask(long))
-    conversation, cut = await hub.turn("Book a table for Friday.")
-
-    (question,) = await hub.said(conversation)
-    assert question.cut_off
-    assert _FRIDAY_LINE not in question.text
-    assert _asked_calls(cut) == [(), ()], "a cut question records no asked call"
-
-    # A yes approves nothing: planning is shown no approved action, and the call
-    # proposed again is not held back as already asked, so it is asked again, whole.
-    hub.reader.yes()
-    hub.planner.then(_book(), _ask())
-    _, again = await hub.turn("Yes.", conversation=conversation, message_id="m-2")
-
-    assert "approved_actions" not in hub.planner.shown(2)
-    assert "already asked" not in hub.planner.shown(3)
-    assert [len(one) for one in _asked_calls(again)] == [0, 1]
-    assert (await hub.said(conversation))[-1].text == _QUESTION
-    assert hub.world.ran == []
-
-
-async def test_the_fixed_line_counts_toward_the_size_a_question_must_fit() -> None:
-    """#3094 with §4:4: the cut rule measures the whole message, the fixed line in it.
-
-    The text and the exact line alone come to the transcript's bound exactly, so only
-    the fixed line puts the question over it: it is cut, and records no asked call.
-    """
-    hub = _Hub()
-    long = _ASKING + "x" * (TRANSCRIPT_MESSAGE_MAX_CHARS - len(f"{_ASKING}\n\n{_FRIDAY_LINE}"))
-    assert len(f"{long}\n\n{_FRIDAY_LINE}") == TRANSCRIPT_MESSAGE_MAX_CHARS
-    hub.reader.nothing()
-    hub.planner.then(_book(), _ask(long))
-    conversation, cut = await hub.turn("Book a table for Friday.")
-
-    (question,) = await hub.said(conversation)
-    assert question.cut_off
-    assert question.text.startswith(f"{long}\n\nNeeds your yes:\n")
-    assert _FRIDAY_LINE not in question.text
-    assert _asked_calls(cut) == [(), ()], "a cut question records no asked call"
 
 
 class _Narrow(ChatWriter):
@@ -1027,7 +888,7 @@ async def _asked_on_the_line() -> tuple[_Hub, FakeTelegramBotClient, int, Episod
     hub.planner.then(_book(), _ask())
     asking = await hub.line_turn(fake, text(1, "Book a table for Friday.", message_id=10))
     ((question_id, question),) = fake.messages
-    assert question == _QUESTION, "plain text with its exact lines, no buttons (§7:1)"
+    assert question == _ASKING, "plain text, no buttons (§7:1)"
     return hub, fake, question_id, asking
 
 
@@ -1038,7 +899,7 @@ def _reply(update_id: int, words: str, question_id: int, **marks: Any) -> Telegr
         words,
         message_id=question_id + update_id,
         reply_to=TelegramQuotedMessage(
-            message_id=question_id, sender_id=1, sender_is_bot=True, text=_QUESTION
+            message_id=question_id, sender_id=1, sender_is_bot=True, text=_ASKING
         ),
         **marks,
     )

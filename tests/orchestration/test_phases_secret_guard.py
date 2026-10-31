@@ -372,7 +372,13 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     **What a model call is and returns.** ``Message`` is a role, text and a name.
     ``OfferedTool`` is a capability's name, its description and its argument schema as
     frozen JSON. ``RoundResponse`` is planning's text, its ``ProposedCall``s — a provider
-    id, a capability name and arguments as frozen JSON — and its notes.
+    id, a capability name and arguments as frozen JSON — and its ``RoundContinuation``
+    (ADR-0356 §6:1): a ``"provider:model"`` name and the provider's own response as frozen
+    JSON, the thinking it wrote included: prose a model wrote, no carrier. The request is
+    a ``PlanningExchange`` (ADR-0356 §5): planning's rendered instruction and briefing,
+    the inputs judged here rendered as text, and each earlier ``ExchangeStep``, its
+    response as above and its ``RoundReport`` of ``CallResult``s, code's text of what
+    came of a call, and the news, code's text: text, identifiers, no carrier.
     ``ProposedActivationUnderstanding`` with ``UnclearPoint`` (ADR-0353 §9:2, §9:3), and
     digesting's ``DigestReply`` and ``_ProposedItem``, are the parse of a reply: prose the
     model wrote, labels it was shown and a flag; the record keeps the same
@@ -568,6 +574,12 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ReportedExtent",
         "RoundMessagePart",
         "RoundResponse",
+        # ADR-0356 §5, §6:1, §13: planning's exchange, judged in the docstring above.
+        "CallResult",
+        "ExchangeStep",
+        "PlanningExchange",
+        "RoundContinuation",
+        "RoundReport",
         # ADR-0349 §5:6, §6:7-§6:10, §7:19: in-progress entries, an offer and another
         # activation's own work, judged in the docstring above.
         "InProgressEntry",

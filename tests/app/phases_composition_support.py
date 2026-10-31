@@ -67,7 +67,7 @@ if TYPE_CHECKING:
         ToolRegistry,
         WebSearcher,
     )
-    from ai_assistant.core.types import ChannelResult, Message, OfferedTool
+    from ai_assistant.core.types import ChannelResult, Message, OfferedTool, PlanningExchange
     from ai_assistant.orchestration import Engine
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.activation_writer import ActivationWriter
@@ -322,12 +322,12 @@ def build_phased(
 
     async def respond(
         _self: PydanticAIToolCallingCompleter,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        return await planning.respond(messages, tools, model=model)
+        return await planning.respond(exchange, tools, model=model)
 
     recorded = model
     monkeypatch.setattr(PydanticAIProvider, "complete", complete)

@@ -189,8 +189,7 @@ async def test_a_note_on_a_later_page_is_read_then_split_off_by_its_label() -> N
     assert [note.note_id for note in view.older] == [first]
     assert (view.older_page, view.older_more) == (2, 0)
     # The page shown is the second: the oldest note, and nothing more beyond it.
-    (read,) = completer.calls[1].messages[1:]
-    assert "more_older_notes" not in read.content
+    assert "more_older_notes" not in completer.calls[1].exchange.briefing
     assert not working.latest.planned.refused
     (split,) = await stories.stories_of(StoryMember(kind=StoryMemberKind.ACTIVATION, id="other"))
     assert split.story_id != trip
@@ -217,11 +216,11 @@ async def test_on_a_pass_that_may_not_show_owner_records_a_read_shows_no_older_n
     assert view.notes_withheld
     assert view.older is None
     # The round after the read is shown its result: the story, and nothing of its notes.
-    (call,) = json.loads(completer.last_call.messages[1].content)["rounds"][0]["calls"]
+    (call,) = json.loads(completer.last_call.exchange.briefing)["rounds"][0]["calls"]
     shown = call["result"]["value"]
     assert shown["label"] == "S1"
     assert not {"notes_since_tidied", "older_notes", "more_older_notes"} & set(shown)
-    assert "Dana" not in completer.last_call.messages[1].content
+    assert "Dana" not in completer.last_call.exchange.briefing
 
 
 async def test_a_marked_older_note_a_read_shows_is_named_once_in_authorizings_grounds() -> None:
@@ -232,7 +231,7 @@ async def test_a_marked_older_note_a_read_shows_is_named_once_in_authorizings_gr
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(calls=(_call("c1", "read_story", story="S1"),)),
-        RoundResponse(calls=(_book(),), notes="the venue answered"),
+        RoundResponse(calls=(_book(),), text="the venue answered"),
     )
     harness = _harness(completer)
     await harness.memory.add(_own_episode())

@@ -798,7 +798,7 @@ async def test_an_earlier_tidy_up_is_shown_as_started_and_nothing_more() -> None
         )
     )
 
-    (shown,) = json.loads(completer.last_call.messages[1].content)["rounds"][0]["calls"]
+    (shown,) = json.loads(completer.last_call.exchange.briefing)["rounds"][0]["calls"]
     assert shown["outcome"].startswith("started: it runs on its own")
 
 

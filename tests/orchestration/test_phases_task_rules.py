@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from test_engine import Harness
 
     from ai_assistant.core.protocols import PlanStore
-    from ai_assistant.core.types import Message, OfferedTool, ScheduledTask
+    from ai_assistant.core.types import OfferedTool, PlanningExchange, ScheduledTask
 
 #: The person's profile zone: AT, midnight UTC on 1 January 2026, is 19:00 on Wednesday
 #: 31 December 2025 there. The hub's ``Settings.timezone`` is UTC.
@@ -63,8 +63,8 @@ class _Inputs:
         self.windows: list[list[str]] = []
 
     def completer(self) -> FakeToolCallingCompleter:
-        def respond(messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
-            request: dict[str, Any] = json.loads(messages[-1].content)
+        def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
+            request: dict[str, Any] = json.loads(exchange.briefing)
             if request["place"].get("description") == TASK_SCHEDULER_DESCRIPTION:
                 window = request["place_window"]
                 self.inputs.extend(str(one["text"]) for one in window if one.get("is_the_input"))

@@ -113,12 +113,12 @@ def _inputs(**fields: Any) -> PlanningInputs:
 
 
 def _sent(completer: FakeToolCallingCompleter) -> dict[str, Any]:
-    rendered: dict[str, Any] = json.loads(completer.last_call.messages[1].content)
+    rendered: dict[str, Any] = json.loads(completer.last_call.exchange.briefing)
     return rendered
 
 
 def _flags(completer: FakeToolCallingCompleter) -> set[str]:
-    return set(completer.last_call.messages[0].content.split("\n")) - {""}
+    return set(completer.last_call.exchange.instruction.split("\n")) - {""}
 
 
 async def test_no_block_shows_nothing_of_the_person_model() -> None:

@@ -145,7 +145,7 @@ def _remember_outcomes(world: PhasesWorld) -> list[str]:
     with its outcome (ADR-0307 §2:3).
     """
     outcomes: list[str] = []
-    for shown in shown_rounds(world.planner.calls[-1].messages):
+    for shown in shown_rounds(world.planner.calls[-1].exchange):
         calls = shown["calls"]
         assert isinstance(calls, list)
         for call in calls:

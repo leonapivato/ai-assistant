@@ -230,7 +230,7 @@ async def test_a_story_view_names_its_summary_note_and_moment_once_each_every_ro
     once each.
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_book(),), notes="the venue answered"),
+        RoundResponse(calls=(_book(),), text="the venue answered"),
         RoundResponse(text="Saturday."),
     )
     harness = phases_harness(completer)
@@ -280,14 +280,18 @@ async def test_a_story_view_names_its_summary_note_and_moment_once_each_every_ro
 
     named = [trip, str(note.note_id), "activation:report"]
     assert list(working.fetched_outside_from) == named
-    (marked, _) = working.planning_rounds()
-    each_once = [
-        *({"ground": "fetched_outside", "record": one} for one in named),
-        {"ground": "notes_marked", "record": marked.id},
+    (marked, answered) = working.planning_rounds()
+    fetched = [{"ground": "fetched_outside", "record": one} for one in named]
+    shown = [
         {"ground": "note_shown_marked", "record": str(note.note_id)},
         {"ground": "outside_episode_shown", "record": "activation:report"},
     ]
-    assert _grounds(sink) == [each_once, each_once]
+    # The second round's text is its notes (ADR-0356 §7:2), marked too, and named once.
+    notes = [{"ground": "notes_marked", "record": one.id} for one in (marked, answered)]
+    assert _grounds(sink) == [
+        [*fetched, notes[0], *shown],
+        [*fetched, *notes, *shown],
+    ]
 
 
 async def test_a_story_read_names_the_marked_note_its_view_shows_once() -> None:
@@ -302,7 +306,7 @@ async def test_a_story_read_names_the_marked_note_its_view_shows_once() -> None:
         RoundResponse(
             calls=(ProposedCall(call_id="c1", name="read_story", arguments={"story": "S1"}),)
         ),
-        RoundResponse(calls=(_book(),), notes="the venue answered"),
+        RoundResponse(calls=(_book(),), text="the venue answered"),
     )
     harness = phases_harness(completer)
     await harness.memory.add(_episode())
@@ -371,7 +375,7 @@ async def test_a_digest_the_episode_and_the_working_set_both_hold_is_one_ground(
                 ),
             ),
         ),
-        RoundResponse(calls=(_book(),), notes="it opens at nine"),
+        RoundResponse(calls=(_book(),), text="it opens at nine"),
         RoundResponse(text="It opens at nine."),
     )
     sink = FakeDiagnosticSink()
@@ -390,10 +394,12 @@ async def test_a_digest_the_episode_and_the_working_set_both_hold_is_one_ground(
     assert record is not None
     (digest,) = record.digests
     assert digest.outcome is DigestOutcome.ANSWERED
-    (_, marked, _) = record.rounds
+    (_, marked, answered) = record.rounds
     assert marked.notes_marked
     each_once = [
         {"ground": "digest_answered", "record": "R1"},
         {"ground": "notes_marked", "record": marked.id},
     ]
-    assert _grounds(sink) == [[], each_once, each_once]
+    # The last round's text is its notes (ADR-0356 §7:2), marked too, and named once.
+    last = [*each_once, {"ground": "notes_marked", "record": answered.id}]
+    assert _grounds(sink) == [[], each_once, last]

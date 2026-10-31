@@ -132,7 +132,7 @@ async def _say(harness: Harness, conversation: str, text: str, message_id: str) 
 
 
 def _request(completer: FakeToolCallingCompleter, index: int) -> dict[str, Any]:
-    rendered: dict[str, Any] = json.loads(completer.calls[index].messages[1].content)
+    rendered: dict[str, Any] = json.loads(completer.calls[index].exchange.briefing)
     return rendered
 
 

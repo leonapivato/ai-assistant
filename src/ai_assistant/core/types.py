@@ -4459,34 +4459,115 @@ def _distinct_call_ids(calls: tuple[ProposedCall, ...]) -> None:
         raise ValueError(msg)
 
 
+class RoundContinuation(BaseModel):
+    """What a provider needs handed back with its own response (ADR-0356 §6:1).
+
+    ``model`` is the ``"provider:model"`` that wrote the response, and ``parts`` an
+    opaque JSON value, the response as that provider returned it, its thinking and the
+    thinking's signatures included. Only ``models/`` reads ``parts``: no other package
+    reads, renders or alters it, and it is never recorded in the episode, never crosses
+    the wire and never reaches text anyone reads (§6:4).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    model: NonBlankEncodableText
+    parts: FrozenJsonValue
+
+
 class RoundResponse(BaseModel):
-    """One model response of a planning round, in its parts (ADR-0315 §3:1).
+    """One model response of a planning round, in its parts (ADR-0356 §7:1, §13).
 
-    ``text`` is the round's message, possibly empty; ``calls`` the calls it proposes;
-    and ``notes`` its episode notes, or ``None`` where it wrote none. The notes are a
-    part of the response and never a call (§3:2, §3:3). No part asks for a round: the
-    controller's rule alone decides whether one runs (§2, §3:4).
-
-    ``asks`` (ADR-0321 §2:3) names the calls that came back needing the user that the
-    round's message asks about, each once and in the order the model named them. The
-    naming is a part of the response and never a call, and how the provider's native
-    shape carries it is the implementation's, as for the notes. Each name is a
-    reference in whatever scheme planning's instructions give the model, such as the
-    label of an earlier round's call shown with its outcome: this type reads none of
-    them, and planning resolves them or drops them.
+    ``text`` is all the text the model wrote outside a call, possibly empty: its reply
+    to the system, which planning keeps as the round's notes (§7:2). ``calls`` are the
+    calls it proposes, and ``continuation`` what the provider needs handed back with
+    this response to continue the exchange, or ``None`` where it needs nothing (§6:1).
+    No part names the calls a message asks about (§7:5), no tool carries notes (§7:4),
+    and no part asks for a round: the controller's rule alone decides whether one runs
+    (ADR-0315 §2, §3:4).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     text: EncodableText = Field(default="", validate_default=True)
     calls: tuple[ProposedCall, ...] = ()
-    notes: NonBlankEncodableText | None = None
-    asks: tuple[NonBlankEncodableText, ...] = ()
+    continuation: RoundContinuation | None = None
 
     @model_validator(mode="after")
     def _calls_distinct(self) -> Self:
         _distinct_call_ids(self.calls)
-        if len(set(self.asks)) != len(self.asks):
-            msg = "a round names each call its message asks about once"
+        return self
+
+
+class CallResult(BaseModel):
+    """What came of one call of a round, as its report tells it (ADR-0356 §5:3, §13).
+
+    ``call_id`` is the id the call was proposed under, and ``text`` code's rendering of
+    what came of it (§5:4).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    call_id: Identifier
+    text: NonBlankEncodableText
+
+
+class RoundReport(BaseModel):
+    """The system's turn after a round: each call's result, then the news (ADR-0356 §5:3).
+
+    ``results`` holds one result for each call of the round it follows, in that round's
+    order and under its ids; :class:`ExchangeStep` checks them against the round.
+    ``news`` is what changed since, or says that nothing did (§5:5).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    results: tuple[CallResult, ...] = ()
+    news: NonBlankEncodableText
+
+
+class ExchangeStep(BaseModel):
+    """One earlier round of a work's exchange, and the report after it (ADR-0356 §13).
+
+    ``response`` is the round's response as the completer returned it, its continuation
+    included and unchanged (§6:2), and ``report`` the turn after it.
+
+    Raises:
+        ValueError: If the report's results are not one for each of the response's
+            calls, in its order and under its ids (§5:3).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    response: RoundResponse
+    report: RoundReport
+
+    @model_validator(mode="after")
+    def _one_result_per_call(self) -> Self:
+        made = [call.call_id for call in self.response.calls]
+        reported = [result.call_id for result in self.report.results]
+        if reported != made:
+            msg = "a report holds one result for each call of its round, in order (ADR-0356 §5:3)"
+            raise ValueError(msg)
+        return self
+
+
+class PlanningExchange(BaseModel):
+    """A work's exchange with its model, as a round is asked with it (ADR-0356 §5, §13).
+
+    ``instruction`` is planning's system text, ``briefing`` the system's first turn,
+    rendered once and handed in byte for byte on every later round (§5:2), and
+    ``steps`` each earlier round with its report, oldest first (§5:1).
+
+    Raises:
+        ValueError: If two calls anywhere in the exchange share an id.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    instruction: NonBlankEncodableText
+    briefing: NonBlankEncodableText
+    steps: tuple[ExchangeStep, ...] = ()
+
+    @model_validator(mode="after")
+    def _call_ids_distinct(self) -> Self:
+        ids = [call.call_id for step in self.steps for call in step.response.calls]
+        if len(set(ids)) != len(ids):
+            msg = "an exchange's calls carry distinct ids across every step"
             raise ValueError(msg)
         return self
 

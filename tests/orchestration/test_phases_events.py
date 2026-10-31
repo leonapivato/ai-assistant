@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
     from test_engine import Harness
 
-    from ai_assistant.core.types import ChannelResult, Message, OfferedTool
+    from ai_assistant.core.types import ChannelResult, Message, OfferedTool, PlanningExchange
 
 _BUDGET: Final = timedelta(seconds=10)
 _S = ControllerStage
@@ -69,7 +69,7 @@ class _Controlled(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
@@ -82,7 +82,7 @@ class _Controlled(FakeToolCallingCompleter):
             await self.release.wait()
             if self.error is not None:
                 raise self.error
-            return await super().respond(messages, tools, model=model)
+            return await super().respond(exchange, tools, model=model)
         finally:
             self.cleaned.set()
 
@@ -225,7 +225,7 @@ async def test_overlapping_events_keep_separate_identity_context_and_receipts() 
     assert len({result.capture.activation_id for result in results}) == 2
     # And each planning round was handed the understanding of its own input alone.
     planned = sorted(
-        json.loads(call.messages[1].content)["understanding"]["meaning"] for call in completer.calls
+        json.loads(call.exchange.briefing)["understanding"]["meaning"] for call in completer.calls
     )
     assert planned == ["It reported first.", "It reported second."]
     for result, expected in zip(results, ("first", "second"), strict=True):

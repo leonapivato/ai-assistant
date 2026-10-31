@@ -51,8 +51,8 @@ if TYPE_CHECKING:
         ChannelInput,
         ChannelResult,
         EpisodeProcessingRecord,
-        Message,
         OfferedTool,
+        PlanningExchange,
         StageOutcome,
     )
     from ai_assistant.orchestration.phase_path import PhasePath
@@ -157,7 +157,7 @@ class Gated(FakeToolCallingCompleter):
         queue = list(responses)
 
         def next_response(
-            _messages: Sequence[Message], _tools: Sequence[OfferedTool]
+            _exchange: PlanningExchange, _tools: Sequence[OfferedTool]
         ) -> RoundResponse:
             return queue.pop(0)
 
@@ -168,7 +168,7 @@ class Gated(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
@@ -176,7 +176,7 @@ class Gated(FakeToolCallingCompleter):
         self.entered.set()
         await self.release.wait()
         self.finished.set()
-        return await super().respond(messages, tools, model=model)
+        return await super().respond(exchange, tools, model=model)
 
 
 class NeverFinishing(FakeToolCallingCompleter):
@@ -193,12 +193,12 @@ class NeverFinishing(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        del messages, tools, model
+        del exchange, tools, model
         self.entered.set()
         try:
             await asyncio.Event().wait()

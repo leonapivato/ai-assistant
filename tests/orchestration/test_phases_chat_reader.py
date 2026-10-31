@@ -58,7 +58,7 @@ from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import Message, OfferedTool, RoundResponse
+    from ai_assistant.core.types import OfferedTool, PlanningExchange, RoundResponse
 
 
 class _DeletedBeforeMarking(FakeConversationStore):
@@ -136,12 +136,12 @@ class _FailingRounds(FakeToolCallingCompleter):
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
     ) -> RoundResponse:
-        del messages, tools, model
+        del exchange, tools, model
         raise self._error
 
 
@@ -339,7 +339,9 @@ async def test_a_message_deleted_before_it_is_marked_never_reaches_the_activatio
     assert input_of(episode) == "DELETED ORDER\n\nkept"
     assert completer.calls
     assert all(
-        "DELETED ORDER" not in one.content for call in completer.calls for one in call.messages
+        "DELETED ORDER" not in one
+        for call in completer.calls
+        for one in (call.exchange.instruction, call.exchange.briefing)
     )
 
 

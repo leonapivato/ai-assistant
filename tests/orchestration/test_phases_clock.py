@@ -24,14 +24,14 @@ from ai_assistant.tools import CURRENT_TIME
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import Message, OfferedTool
+    from ai_assistant.core.types import OfferedTool, PlanningExchange
 
 _CLOCK: Final = str(CURRENT_TIME.capability)
 _ANSWER: Final = "It's noon."
 
 
 def _calls_the_clock_when_offered(
-    _messages: Sequence[Message], tools: Sequence[OfferedTool]
+    _exchange: PlanningExchange, tools: Sequence[OfferedTool]
 ) -> RoundResponse:
     """A planner that reaches for the clock whenever it is offered, as #2942's did."""
     if any(one.name == _CLOCK for one in tools):
@@ -63,7 +63,7 @@ async def test_what_time_is_it_takes_two_model_calls() -> None:
     assert _CLOCK not in offered
     assert {"remember", "book"} <= offered
     # What planning answers from instead: its input carries the current time.
-    assert '"now"' in str(planning_round.messages[-1].content)
+    assert '"now"' in str(planning_round.exchange.briefing)
 
 
 async def test_a_clock_call_that_arrives_anyway_is_refused_as_not_offered() -> None:
@@ -81,4 +81,4 @@ async def test_a_clock_call_that_arrives_anyway_is_refused_as_not_offered() -> N
     await chat_turn(harness, "what time is it?")
 
     assert harness.invoker.invocations == []
-    assert "no capability of that name was offered" in str(completer.calls[-1].messages)
+    assert "no capability of that name was offered" in completer.calls[-1].exchange.briefing

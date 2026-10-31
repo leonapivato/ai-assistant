@@ -149,7 +149,7 @@ async def test_an_event_over_the_hub_socket_runs_the_phases_and_starts_no_conver
     ]
     assert understanding
     assert hub.phased.completer.calls, "planning ran"
-    asked = json.loads(hub.phased.completer.calls[0].messages[1].content)
+    asked = json.loads(hub.phased.completer.calls[0].exchange.briefing)
     assert asked["place"]["takes_message"] is False
     assert await hub.client.recent_conversations() == before
     assert result.capture.episode_id is not None

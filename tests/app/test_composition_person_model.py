@@ -132,7 +132,9 @@ async def test_the_switch_reaches_planning_only_where_it_is_on(
         assert written.kind is PersonModelWriteKind.WRITTEN
         await on.say("hello")
         sent_on = "\n".join(
-            message.content for call in on.completer.calls for message in call.messages
+            text
+            for call in on.completer.calls
+            for text in (call.exchange.instruction, call.exchange.briefing)
         )
     finally:
         await on.engine.aclose()
@@ -141,7 +143,9 @@ async def test_the_switch_reaches_planning_only_where_it_is_on(
     try:
         await off.say("hello")
         sent_off = "\n".join(
-            message.content for call in off.completer.calls for message in call.messages
+            text
+            for call in off.completer.calls
+            for text in (call.exchange.instruction, call.exchange.briefing)
         )
     finally:
         await off.engine.aclose()

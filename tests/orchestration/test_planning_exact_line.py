@@ -1,13 +1,15 @@
 """The exact line's test for every capability (ADR-0321 §2:7, §8:10).
 
 For every capability the composition root registers and planning is offered, a call
-sending a value for every argument its selected declaration takes is asked about, and
-its exact line must show every one of them but those §2:5 leaves out: the arguments the
-offered declaration names in ``system_supplied``, the *looking for* and the *deliberate
-repeat* mark. The capabilities are read from a deployment that configures every
-provider and keeps the person model, so a capability added later is covered without a
-change here. An argument naming a memory by its id, as a ``pin``'s does, is read as the
-memory's wording, which its line shows in the id's place (ADR-0338 §8:6).
+sending a value for every argument its selected declaration takes has its exact line
+rendered, as an approved action's details are, and the line must show every one of them
+but those §2:5 leaves out: the arguments the offered declaration names in
+``system_supplied``, the *looking for* and the *deliberate repeat* mark. No message asks
+about a call by name any more (ADR-0356 §7:5), so the line is rendered directly. The
+capabilities are read from a deployment that configures every provider and keeps the
+person model, so a capability added later is covered without a change here. An argument
+naming a memory by its id, as a ``pin``'s does, is read as the memory's wording, which
+its line shows in the id's place (ADR-0338 §8:6).
 
 **Nothing here opens a socket.** The engine is built over a hashing embedder and closed;
 every configured origin is an ``.invalid`` one (RFC 6761 §6.4), and no transport is
@@ -21,19 +23,12 @@ from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
-from test_planning import _earlier, _inputs, _stage
-
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.types import ActionRequest, ProposedCall, RoundResponse
+from ai_assistant.core.types import AskedCall
 from ai_assistant.orchestration.person_calls import worded_argument
 from ai_assistant.orchestration.phase_path import PhasePath
-from ai_assistant.orchestration.planning import (
-    DELIBERATE_REPEAT,
-    LOOKING_FOR,
-    CallOutcome,
-    CallOutcomeKind,
-)
+from ai_assistant.orchestration.planning import DELIBERATE_REPEAT, LOOKING_FOR, exact_line
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -133,34 +128,19 @@ async def test_every_capabilitys_exact_line_shows_every_argument_it_sends(
     """§8:10: every argument but those the hub fills and the two marks, for every one."""
     pairs = await _registered(tmp_path)
     assert {str(offered.capability) for offered, _ in pairs} >= _FLOOR
-    calls = tuple(
-        ProposedCall(call_id=f"c{n}", name=str(offered.capability))
-        for n, (offered, _) in enumerate(pairs, 1)
-    )
-    earlier = _earlier(calls=calls)
     sent = [_every_argument(selected) for _, selected in pairs]
     worded = [worded_argument(str(offered.capability)) for offered, _ in pairs]
-    outcomes = tuple(
-        CallOutcome(
-            earlier.id,
-            call.call_id,
-            CallOutcomeKind.NEEDS_YOU,
-            request=ActionRequest(tool=selected, parameters=values),
-            worded=() if argument is None else ((argument, _WORDING),),
+    lines = [
+        exact_line(
+            AskedCall(part=number, tool=selected, values=values),
+            filled={*offered.system_supplied, *selected.system_supplied},
+            numbered=True,
+            worded={} if argument is None else {argument: _WORDING},
         )
-        for call, (_, selected), values, argument in zip(calls, pairs, sent, worded, strict=True)
-    )
-    asks = tuple(f"1.{n}" for n in range(1, len(pairs) + 1))
-    stage, _, _ = _stage(RoundResponse(text="Shall I?", asks=asks))
-    planned = await stage.plan(
-        _inputs(
-            capabilities=tuple(offered for offered, _ in pairs),
-            rounds=(earlier,),
-            outcomes=outcomes,
+        for number, ((offered, selected), values, argument) in enumerate(
+            zip(pairs, sent, worded, strict=True), 1
         )
-    )
-    assert len(planned.round.asked) == len(pairs)
-    lines = planned.round.text.splitlines()[-len(pairs) :]
+    ]
     missing: dict[str, list[str]] = {}
     for number, ((offered, _), values, line, by_wording) in enumerate(
         zip(pairs, sent, lines, worded, strict=True), 1

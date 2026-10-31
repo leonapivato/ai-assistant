@@ -1,8 +1,10 @@
 """ADR-0307 §10's types: a planning round, its labels, and the episode that keeps them.
 
 The round's request and response shapes (``OfferedTool``, ``ProposedCall``,
-``RoundResponse``), what the episode records (``PlanningRound``, ``PlanningLabel``,
-``LabelKind``, ``EpisodeProcessingRecord.rounds`` and ``labels``), the appends
+``RoundResponse``, and ADR-0356 §13's exchange: ``PlanningExchange``, ``ExchangeStep``,
+``RoundReport``, ``CallResult`` and ``RoundContinuation``), what the episode records
+(``PlanningRound``, ``PlanningLabel``, ``LabelKind``, ``EpisodeProcessingRecord.rounds``
+and ``labels``), the appends
 ``episode_extends`` admits for them, and what ``project_episode`` renders of them.
 """
 
@@ -17,12 +19,14 @@ from pydantic import ValidationError
 from ai_assistant.core.episode_encoding import episode_extends, project_episode, question_marks
 from ai_assistant.core.types import (
     AskedCall,
+    CallResult,
     ChannelContext,
     ControllerRule,
     ControllerStage,
     CostBasis,
     EpisodeProcessingRecord,
     EpisodicMemory,
+    ExchangeStep,
     Idempotency,
     LabelKind,
     MemorySource,
@@ -31,6 +35,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    PlanningExchange,
     PlanningLabel,
     PlanningRound,
     ProcessingReason,
@@ -43,6 +48,8 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     Reversibility,
     RiskLevel,
+    RoundContinuation,
+    RoundReport,
     RoundResponse,
     StageEntry,
     StageOutcome,
@@ -145,8 +152,16 @@ def test_a_proposed_calls_arguments_are_frozen_json() -> None:
         call.arguments["tags"] = ()  # type: ignore[index]  # the point: it is frozen
 
 
-def test_a_round_response_defaults_to_no_text_calls_or_notes() -> None:
-    assert RoundResponse() == RoundResponse(text="", calls=(), notes=None)
+def test_a_round_response_defaults_to_no_text_calls_or_continuation() -> None:
+    assert RoundResponse() == RoundResponse(text="", calls=(), continuation=None)
+
+
+@pytest.mark.parametrize("retired", ["notes", "asks"])
+def test_a_round_response_carries_no_notes_and_no_naming(retired: str) -> None:
+    """ADR-0356 §7:4, §7:5: the text is the notes, and nothing names what a message asks."""
+    assert retired not in RoundResponse.model_fields
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        RoundResponse.model_validate({"text": "t", retired: "x"})
 
 
 @pytest.mark.parametrize(
@@ -168,9 +183,77 @@ def test_a_round_response_refuses_two_calls_under_one_id() -> None:
         RoundResponse(calls=(_call("same"), _call("same", "remember")))
 
 
-def test_blank_notes_are_refused_so_none_means_none_written() -> None:
+# --- the exchange (ADR-0356 §5, §6, §13) ---------------------------------------------
+
+
+def _report(*call_ids: str) -> RoundReport:
+    return RoundReport(
+        results=tuple(CallResult(call_id=one, text=f"result of {one}") for one in call_ids),
+        news="Nothing has changed.",
+    )
+
+
+def _response(*call_ids: str) -> RoundResponse:
+    return RoundResponse(calls=tuple(_call(one) for one in call_ids))
+
+
+def test_an_exchange_holds_its_instruction_its_briefing_and_its_steps_in_order() -> None:
+    first = ExchangeStep(response=_response("a", "b"), report=_report("a", "b"))
+    second = ExchangeStep(response=_response("c"), report=_report("c"))
+    exchange = PlanningExchange(
+        instruction="Plan.", briefing="# The stimulus", steps=(first, second)
+    )
+    assert exchange.steps == (first, second)
+    assert PlanningExchange(instruction="Plan.", briefing="b").steps == ()
+
+
+@pytest.mark.parametrize("field", ["instruction", "briefing"])
+def test_an_exchange_refuses_a_blank_instruction_or_briefing(field: str) -> None:
     with pytest.raises(ValidationError):
-        RoundResponse(notes="   ")
+        PlanningExchange.model_validate({"instruction": "Plan.", "briefing": "b", field: "  "})
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        pytest.param(("a",), id="misses-one"),
+        pytest.param(("b", "a"), id="reordered"),
+        pytest.param(("a", "b", "z"), id="names-a-call-not-made"),
+        pytest.param(("a", "a"), id="one-twice"),
+    ],
+)
+def test_a_report_not_one_result_per_call_in_order_is_refused(reported: tuple[str, ...]) -> None:
+    """ADR-0356 §5:3: one result for each call of its round, in order, under its id."""
+    with pytest.raises(ValidationError, match="one result for each call"):
+        ExchangeStep(response=_response("a", "b"), report=_report(*reported))
+
+
+def test_a_round_of_no_call_is_reported_by_its_news_alone() -> None:
+    step = ExchangeStep(response=RoundResponse(text="Thinking."), report=_report())
+    assert step.report.results == ()
+    with pytest.raises(ValidationError):
+        RoundReport(news="  ")
+
+
+def test_two_steps_reusing_a_call_id_are_refused() -> None:
+    first = ExchangeStep(response=_response("a"), report=_report("a"))
+    again = ExchangeStep(response=_response("a"), report=_report("a"))
+    with pytest.raises(ValidationError, match="distinct ids across every step"):
+        PlanningExchange(instruction="Plan.", briefing="b", steps=(first, again))
+
+
+def test_a_continuation_names_its_model_and_holds_frozen_opaque_parts() -> None:
+    continuation = RoundContinuation(model="anthropic:claude", parts={"parts": [{"k": "v"}]})
+    response = RoundResponse(text="t", continuation=continuation)
+    assert response.continuation is not None
+    with pytest.raises(TypeError):
+        response.continuation.parts["parts"] = ()  # type: ignore[index]  # the point: frozen
+    assert response.model_dump(mode="json")["continuation"] == {
+        "model": "anthropic:claude",
+        "parts": {"parts": [{"k": "v"}]},
+    }
+    with pytest.raises(ValidationError):
+        RoundContinuation(model="  ", parts=None)
 
 
 # --- labels -----------------------------------------------------------------------

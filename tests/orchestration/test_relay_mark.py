@@ -134,7 +134,7 @@ def _offered(planner: FakeToolCallingCompleter) -> set[str]:
 
 def _request(planner: FakeToolCallingCompleter) -> dict[str, Any]:
     (call,) = planner.calls
-    shown: dict[str, Any] = json.loads(call.messages[-1].content)
+    shown: dict[str, Any] = json.loads(call.exchange.briefing)
     return shown
 
 

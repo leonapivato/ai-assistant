@@ -45,9 +45,17 @@ from ai_assistant.core.diagnostics import (
 )
 from ai_assistant.core.errors import ModelError, ModelRateLimitError
 from ai_assistant.core.prompts import PromptOrigin
-from ai_assistant.core.types import DiagnosticSource, Message, OfferedTool, Role
+from ai_assistant.core.types import (
+    CallResult,
+    DiagnosticSource,
+    ExchangeStep,
+    OfferedTool,
+    PlanningExchange,
+    ProposedCall,
+    RoundReport,
+    RoundResponse,
+)
 from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT, NOT_RUN, follow_up_round
-from ai_assistant.models.tool_calling import ROUND_TOOL
 from ai_assistant.testing import default_prompt
 
 if TYPE_CHECKING:
@@ -63,12 +71,9 @@ def _now() -> datetime:
     return datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
 
 
-def _request() -> tuple[list[Message], list[OfferedTool]]:
+def _request() -> tuple[PlanningExchange, list[OfferedTool]]:
     return (
-        [
-            Message(role=Role.SYSTEM, content="The round's instruction."),
-            Message(role=Role.USER, content="book me a stay"),
-        ],
+        PlanningExchange(instruction="The round's instruction.", briefing="book me a stay"),
         [
             OfferedTool(
                 name="web_search",
@@ -90,7 +95,6 @@ _PROPOSING: Final = (
     ThinkingPart("Search first.", signature="sig-1", provider_name="anthropic"),
     TextPart("Looking now."),
     ToolCallPart("web_search", {"query": "stays"}, tool_call_id="a"),
-    ToolCallPart(ROUND_TOOL, {"notes": "searching"}, tool_call_id="r"),
 )
 
 
@@ -121,9 +125,9 @@ def _never() -> FunctionModel:
 
 
 async def _ask(model: Model, response: dict[str, Any] | None = None) -> str:
-    messages, tools = _request()
+    exchange, tools = _request()
     followed = _followed(*_PROPOSING) if response is None else response
-    return await follow_up_round(messages, tools, followed, _QUESTION, model=model)
+    return await follow_up_round(exchange, tools, followed, _QUESTION, model=model)
 
 
 # --- §6:1: the prompt ---------------------------------------------------------------------------
@@ -159,23 +163,17 @@ async def test_the_request_is_the_rounds_then_its_whole_response_then_each_call_
     assert response.parts[0] == ThinkingPart(
         "Search first.", signature="sig-1", provider_name="anthropic"
     )
-    assert [type(one) for one in response.parts] == [
-        ThinkingPart,
-        TextPart,
-        ToolCallPart,
-        ToolCallPart,
-    ]
+    assert [type(one) for one in response.parts] == [ThinkingPart, TextPart, ToolCallPart]
     assert isinstance(closing, ModelRequest)
     returns = [one for one in closing.parts if isinstance(one, ToolReturnPart)]
     assert [(one.tool_call_id, one.tool_name, one.content) for one in returns] == [
         ("a", "web_search", NOT_RUN),
-        ("r", ROUND_TOOL, NOT_RUN),
     ]
     last = closing.parts[-1]
     assert isinstance(last, UserPromptPart)
     assert last.content == _QUESTION
-    # The offered tools stay in the request, the reserved one beside them (§6:4).
-    assert world.tools == [["web_search", ROUND_TOOL]]
+    # The offered tools stay in the request, and no other is added (ADR-0356 §7:4).
+    assert world.tools == [["web_search"]]
 
 
 async def test_a_response_that_proposed_no_call_is_followed_by_the_question_alone() -> None:
@@ -204,16 +202,15 @@ async def test_on_anthropics_wire_the_thinking_goes_back_signed_and_each_call_ha
     body: dict[str, Any] = recorder.only
     assert answer == "anthropic reply"
     assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
-    assert [one["name"] for one in body["tools"]] == ["web_search", ROUND_TOOL]
+    assert [one["name"] for one in body["tools"]] == ["web_search"]
     turns = body["messages"]
     assert [turn["role"] for turn in turns] == ["user", "assistant", "user"]
     said = turns[1]["content"]
     assert said[0] == {"type": "thinking", "thinking": "Search first.", "signature": "sig-1"}
-    assert [one["type"] for one in said] == ["thinking", "text", "tool_use", "tool_use"]
+    assert [one["type"] for one in said] == ["thinking", "text", "tool_use"]
     closing = turns[2]["content"]
     assert [(one["type"], one.get("tool_use_id")) for one in closing] == [
         ("tool_result", "a"),
-        ("tool_result", "r"),
         ("text", None),
     ]
     assert closing[-1]["text"] == _QUESTION
@@ -303,15 +300,42 @@ async def test_a_followed_response_that_is_none_is_refused_before_any_model(
     assert type(caught.value) is ModelError
 
 
-async def test_a_blank_question_or_the_reserved_tool_is_refused_before_any_model() -> None:
-    messages, tools = _request()
-    reserved = OfferedTool(name=ROUND_TOOL, description="d", parameters={"type": "object"})
+async def test_a_blank_question_or_two_tools_of_one_name_are_refused_before_any_model() -> None:
+    exchange, tools = _request()
     followed = _followed(*_PROPOSING)
 
     with pytest.raises(ModelError):
-        await follow_up_round(messages, tools, followed, "  ", model=_never())
+        await follow_up_round(exchange, tools, followed, "  ", model=_never())
     with pytest.raises(ModelError):
-        await follow_up_round(messages, [*tools, reserved], followed, _QUESTION, model=_never())
+        await follow_up_round(exchange, [*tools, *tools], followed, _QUESTION, model=_never())
+
+
+async def test_the_request_is_the_rounds_whole_exchange_before_the_followed_response() -> None:
+    """ADR-0356 §13: the follow-up sends the round's exchange, as `respond` sends it."""
+    world = _World()
+    exchange, tools = _request()
+    step = ExchangeStep(
+        response=RoundResponse(
+            text="First, the dates.",
+            calls=(ProposedCall(call_id="e", name="web_search", arguments={"query": "dates"}),),
+        ),
+        report=RoundReport(
+            results=(CallResult(call_id="e", text="14 November."),), news="Nothing changed."
+        ),
+    )
+    stepped = exchange.model_copy(update={"steps": (step,)})
+
+    await follow_up_round(stepped, tools, _followed(*_PROPOSING), _QUESTION, model=world.model)
+
+    (sent,) = world.sent
+    assert [type(one) for one in sent] == [ModelRequest, ModelResponse] * 2 + [ModelRequest]
+    report = sent[2]
+    assert isinstance(report, ModelRequest)
+    returns = [one for one in report.parts if isinstance(one, ToolReturnPart)]
+    assert [(one.tool_call_id, one.content) for one in returns] == [("e", "14 November.")]
+    news = report.parts[-1]
+    assert isinstance(news, UserPromptPart)
+    assert news.content == "Nothing changed."
 
 
 # --- ADR-0335 §4:9: no stage calls it -------------------------------------------------------

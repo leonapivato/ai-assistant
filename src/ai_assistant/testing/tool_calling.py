@@ -8,8 +8,10 @@ from any test while staying out of production code paths (``lint-imports`` forbi
 production modules from importing it).
 
 It never calls a model. The response is a constant
-:class:`~ai_assistant.core.types.RoundResponse` or a callable over the request, and
-every accepted call is recorded so a test can assert what planning sent. For a scripted
+:class:`~ai_assistant.core.types.RoundResponse` or a callable over the exchange and the
+offered tools, and every accepted call is recorded so a test can assert what planning
+sent. It hands back no continuation of its own: a scripted response is returned as
+scripted (ADR-0356 §6:1). For a scripted
 sequence of rounds use :meth:`FakeToolCallingCompleter.scripted`. Only the behaviour
 the shared conformance suite asserts is part of the contract; the recording and
 scripting helpers are conveniences on top.
@@ -26,13 +28,13 @@ from dataclasses import dataclass
 from typing import Final
 
 from ai_assistant.core.errors import ModelError
-from ai_assistant.core.types import Message, OfferedTool, Role, RoundResponse
+from ai_assistant.core.types import OfferedTool, PlanningExchange, RoundResponse
 
-#: What an unscripted fake answers: a round that writes this text and proposes nothing.
+#: What an unscripted fake answers: a round whose text is this and that proposes nothing.
 DEFAULT_ROUND_TEXT: Final = "fake planning round"
 
-#: A response computed from the round's request: its conversation and offered tools.
-type RoundReply = Callable[[Sequence[Message], Sequence[OfferedTool]], RoundResponse]
+#: A response computed from the round's request: its exchange and offered tools.
+type RoundReply = Callable[[PlanningExchange, Sequence[OfferedTool]], RoundResponse]
 
 
 class _ScriptExhaustedError(AssertionError):
@@ -49,13 +51,13 @@ class RoundCall:
     """One recorded call to a :class:`FakeToolCallingCompleter`.
 
     Attributes:
-        messages: The conversation passed to ``respond``, as an independent snapshot
-            taken before the first await.
+        exchange: The exchange passed to ``respond``. It is frozen all the way down, so
+            what was passed is what was observed.
         tools: The tools offered, as an independent snapshot.
         model: The per-call ``"provider:model"`` override, or ``None``.
     """
 
-    messages: tuple[Message, ...]
+    exchange: PlanningExchange
     tools: tuple[OfferedTool, ...]
     model: str | None
 
@@ -73,7 +75,7 @@ class FakeToolCallingCompleter:
 
         Args:
             response: A constant response for every call, or a callable given the
-                conversation and the offered tools that returns one. Defaults to a
+                exchange and the offered tools that returns one. Defaults to a
                 round writing :data:`DEFAULT_ROUND_TEXT` and proposing nothing.
         """
         self._response = RoundResponse(text=DEFAULT_ROUND_TEXT) if response is None else response
@@ -95,7 +97,7 @@ class FakeToolCallingCompleter:
         queue: deque[RoundResponse] = deque(responses)
 
         def next_response(
-            _messages: Sequence[Message], _tools: Sequence[OfferedTool]
+            _exchange: PlanningExchange, _tools: Sequence[OfferedTool]
         ) -> RoundResponse:
             if not queue:
                 msg = "FakeToolCallingCompleter.scripted ran out of responses"
@@ -106,7 +108,7 @@ class FakeToolCallingCompleter:
 
     async def respond(
         self,
-        messages: Sequence[Message],
+        exchange: PlanningExchange,
         tools: Sequence[OfferedTool],
         *,
         model: str | None = None,
@@ -118,7 +120,7 @@ class FakeToolCallingCompleter:
         advance a :meth:`scripted` queue (ADR-0066 §6).
 
         Args:
-            messages: The round's rendered request, oldest first.
+            exchange: The work's exchange, oldest first.
             tools: The capabilities offered for this round.
             model: Optional ``"provider:model"`` override; recorded and otherwise
                 ignored.
@@ -127,20 +129,18 @@ class FakeToolCallingCompleter:
             The configured response, detached from the fake's own copy.
 
         Raises:
-            ModelError: If ``messages`` is empty, ends on a ``Role.ASSISTANT`` turn or
-                carries a ``Role.TOOL`` turn, if two tools share a name, or if a
-                callable ``response`` fails — each matching the provider-backed
-                implementation's boundary.
+            ModelError: If two tools share a name, or if a callable ``response`` fails —
+                each matching the provider-backed implementation's boundary. No tool
+                name is reserved (ADR-0356 §7:4).
             AssertionError: If a :meth:`scripted` fake runs out of responses.
         """
-        snapshot = tuple(message.model_copy(deep=True) for message in messages)
         offered = tuple(OfferedTool.model_validate(tool.model_dump()) for tool in tools)
-        _refuse_malformed(snapshot, offered)
-        self.calls.append(RoundCall(messages=snapshot, tools=offered, model=model))
+        _refuse_malformed(offered)
+        self.calls.append(RoundCall(exchange=exchange, tools=offered, model=model))
         response = self._response
         if callable(response):
             try:
-                answer = response(snapshot, offered)
+                answer = response(exchange, offered)
             except _ScriptExhaustedError:
                 raise
             except Exception as exc:
@@ -165,21 +165,12 @@ class FakeToolCallingCompleter:
         return self.calls[-1]
 
 
-def _refuse_malformed(messages: tuple[Message, ...], tools: tuple[OfferedTool, ...]) -> None:
-    """ADR-0066 §1's precondition, the tool-role refusal, and distinct tool names.
+def _refuse_malformed(tools: tuple[OfferedTool, ...]) -> None:
+    """Distinct tool names, the one shape a round's request is refused for.
 
     Raises:
         ModelError: The bare class, neither retryable nor routable.
     """
-    if not messages:
-        msg = "respond() requires at least one message"
-        raise ModelError(msg)
-    if messages[-1].role is Role.ASSISTANT:
-        msg = "respond() requires a conversation awaiting a reply"
-        raise ModelError(msg)
-    if any(message.role is Role.TOOL for message in messages):
-        msg = "respond() replays no tool exchange; a round is asked afresh"
-        raise ModelError(msg)
     names = [tool.name for tool in tools]
     if len(set(names)) != len(names):
         msg = "respond() requires distinct tool names"

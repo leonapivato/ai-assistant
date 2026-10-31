@@ -341,7 +341,7 @@ async def test_a_stamped_episode_a_story_view_shows_places_the_episode() -> None
 
     await path.run(given, controlled, state=state)
 
-    shown = completer.calls[0].messages[1].content
+    shown = completer.calls[0].exchange.briefing
     assert address("other") in {one.id for one in working.labels.labels}, shown
     assert state.facts is not None
     assert state.facts.supplied_withheld

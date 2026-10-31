@@ -276,7 +276,7 @@ async def test_a_story_labelled_by_understanding_keeps_its_label() -> None:
 
 async def test_a_marked_summary_marks_the_rounds_notes() -> None:
     """ADR-0303 §3:6: a marked summary planning reads is outside content it has read."""
-    stage, completer, _ = _stage(RoundResponse(text="ok", notes="it moved"))
+    stage, completer, _ = _stage(RoundResponse(text="ok"))
     story = _story(outside=True)
 
     planned = await stage.plan(_inputs(stories=PlanningStories(stories=(story,))))
@@ -286,7 +286,7 @@ async def test_a_marked_summary_marks_the_rounds_notes() -> None:
 
 
 async def test_a_marked_note_marks_the_rounds_notes() -> None:
-    stage, completer, _ = _stage(RoundResponse(text="ok", notes="it moved"))
+    stage, completer, _ = _stage(RoundResponse(text="ok"))
     story = _story(notes=(_note(1, "The site said Sunday.", outside=True),))
 
     planned = await stage.plan(_inputs(stories=PlanningStories(stories=(story,))))
@@ -297,7 +297,7 @@ async def test_a_marked_note_marks_the_rounds_notes() -> None:
 
 
 async def test_a_marked_moment_of_where_it_stands_marks_the_rounds_notes() -> None:
-    stage, completer, _ = _stage(RoundResponse(text="ok", notes="it moved"))
+    stage, completer, _ = _stage(RoundResponse(text="ok"))
     story = _story(
         standing=_standing("story:trip", recent=(_moment("a", "a reply came", outside=True),))
     )
@@ -310,7 +310,7 @@ async def test_a_marked_moment_of_where_it_stands_marks_the_rounds_notes() -> No
 
 
 async def test_an_unmarked_view_leaves_the_rounds_notes_unmarked() -> None:
-    stage, _, _ = _stage(RoundResponse(text="ok", notes="nothing outside"))
+    stage, _, _ = _stage(RoundResponse(text="ok"))
     story = _story(
         notes=(_note(1, "Mine."),),
         inherited=(_short("story:summer", notes=(_note(2, "Also mine."),)),),
@@ -353,7 +353,7 @@ async def test_an_outside_episode_in_an_inherited_or_cited_view_marks_the_rounds
         ),
         PlanningStories(cited=(_short("story:car", episodes=(outside,)),)),
     ):
-        stage, completer, recorder = _stage(RoundResponse(text="ok", notes="from what I saw"))
+        stage, completer, recorder = _stage(RoundResponse(text="ok"))
 
         await stage.plan(_inputs(stories=stories))
 

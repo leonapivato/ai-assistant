@@ -1,11 +1,12 @@
 """The person model's calls end to end, through the engine and the phases (ADR-0338 §8:4-§8:8).
 
 The yes-path hub of :mod:`test_phases_yes_path`, with a person-model store wired: a
-``pin`` planning proposes needs the person's yes; the question shows the memory's
-wording in its exact line, and records its id. A ``set_profile`` is asked the same way.
-Until the authority run a yes approves nothing (ADR-0353 §11:3), so neither runs on one:
-each goes back to planning as needing the person. With no store wired, none of the three
-is offered, and nothing changes (§11:2). A ``pin`` or ``unpin`` whose memory the asking
+``pin`` planning proposes needs the person's yes, and so does a ``set_profile``. No part
+of a response names the calls a message asks about (ADR-0356 §7:5), so a question is the
+round's prose alone and records no asked call. Until the authority run a yes approves
+nothing (ADR-0353 §11:3), so neither runs on one: each goes back to planning as needing
+the person. With no store wired, none of the three is offered, and nothing changes
+(§11:2). A ``pin`` or ``unpin`` whose memory the asking
 round's live read does not return current, finds resting on outside content, or cannot
 read is not asked about (§8:6).
 """
@@ -140,18 +141,17 @@ async def test_wired_the_three_are_offered_and_only_to_an_activation_given_a_blo
     assert offered.isdisjoint(PERSON_MODEL_CAPABILITIES)
 
 
-async def test_a_pin_is_asked_with_the_memorys_wording_and_a_yes_pins_nothing() -> None:
-    """§8:5-§8:6: needs you by rule, and the line shows the wording; ADR-0353 §11:3: a
-    yes records no pointer, so nothing is pinned."""
+async def test_a_pin_needing_a_yes_is_asked_and_a_yes_pins_nothing() -> None:
+    """§8:5: needs you by rule, and is asked in prose; ADR-0353 §11:3: a yes records no
+    pointer, so nothing is pinned."""
     hub, people = await _hub()
     hub.reader.nothing()
     hub.planner.then(RoundResponse(calls=(_call("c1", "pin", memory="M1"),)), _ask(_ASKING_PIN))
-    conversation, asking = await hub.turn("I don't eat meat, keep that in mind.")
+    conversation, _ = await hub.turn("I don't eat meat, keep that in mind.")
 
     (question,) = await hub.said(conversation)
-    assert question.text == f'{_ASKING_PIN}\n\nNeeds your yes:\npin — memory: "Eats no meat."'
-    (asked,) = _asked_calls(asking)[1]
-    assert dict(asked.values) == {"memory": DIET.id}
+    assert question.text == _ASKING_PIN
+    assert "needs the user's yes" in hub.planner.shown(1)
     model = await people.store.read(OWNER_PERSON_ID)
     assert model is not None
     assert model.pins == ()
@@ -167,8 +167,8 @@ async def test_a_pin_is_asked_with_the_memorys_wording_and_a_yes_pins_nothing() 
 
 
 async def test_a_set_profile_is_asked_and_a_yes_sets_nothing() -> None:
-    """§8:5: asked with its exact line; ADR-0353 §11:3: a yes approves nothing, so the
-    field and the clock stay as they were."""
+    """§8:5: needs you, and is asked in prose; ADR-0353 §11:3: a yes approves nothing,
+    so the field and the clock stay as they were."""
     hub, people = await _hub()
     hub.reader.nothing()
     hub.planner.then(
@@ -178,7 +178,8 @@ async def test_a_set_profile_is_asked_and_a_yes_sets_nothing() -> None:
     conversation, _ = await hub.turn("I've moved to Bangalore.")
 
     (question,) = await hub.said(conversation)
-    assert question.text.endswith('set_profile — field: "time_zone"; value: "Asia/Kolkata"')
+    assert question.text == _ASKING_ZONE
+    assert "needs the user's yes" in hub.planner.shown(1)
     shown_before = json.loads(hub.planner.shown(0))
     assert shown_before["time_zone"] == "UTC"
 

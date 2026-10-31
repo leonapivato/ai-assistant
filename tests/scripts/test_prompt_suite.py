@@ -354,15 +354,6 @@ def test_a_malformed_case_is_a_defect_naming_its_file(
             _planning(
                 input={
                     "messages": [{"role": "user", "content": "x"}],
-                    "tools": [{**WEB_SEARCH, "name": "planning_round"}],
-                }
-            ),
-            "which the completer adds itself",
-        ),
-        (
-            _planning(
-                input={
-                    "messages": [{"role": "user", "content": "x"}],
                     "tools": [{"name": "t", "description": "d", "parameters": {"type": "array"}}],
                 }
             ),
@@ -576,33 +567,27 @@ def test_no_label_takes_a_label_as_a_whole_word_alone() -> None:
         assert _judge("no_label", params, "observer_scout", scouted(text)) is not None, text
 
 
-def test_no_label_reads_a_rounds_message_and_notes() -> None:
-    noted = RoundResponse(text="Booked S1", notes="see S1")
+def test_no_label_reads_a_rounds_message() -> None:
+    """A round's message is the one field the check reads of it (ADR-0356 §7:2)."""
+    labelled = RoundResponse(text="Booked S1")
 
-    assert _round("no_label", {"fields": ["notes"], "labels": ["S"]}, noted) == (
-        "a label stands in notes"
-    )
-    assert _round("no_label", {"fields": ["message"], "labels": ["S"]}, noted) == (
+    assert _round("no_label", {"fields": ["message"], "labels": ["S"]}, labelled) == (
         "a label stands in message"
     )
-    assert _round("no_label", {"fields": ["notes"], "labels": ["S"]}, RoundResponse(text="hi")) is (
-        None
-    )
-    assert _round("no_label", {"fields": ["notes"], "labels": ["S"]}, None) == (
+    assert _round(
+        "no_label", {"fields": ["message"], "labels": ["S"]}, RoundResponse(text="hi")
+    ) is (None)
+    assert _round("no_label", {"fields": ["message"], "labels": ["S"]}, None) == (
         "the reply is not one its stage reads"
     )
 
 
-def test_asks_about_needs_a_message_and_every_call_named() -> None:
+def test_asks_about_needs_a_message() -> None:
+    """No response names an asked call (ADR-0356 §7:5): the check reads the message alone."""
     params: dict[str, object] = {"calls": ["1.1"]}
 
-    assert _round("asks_about", params, RoundResponse(text="Shall I?", asks=("1.1",))) is None
-    assert _round("asks_about", params, RoundResponse(text="", asks=("1.1",))) == (
-        "the round writes no message"
-    )
-    assert _round("asks_about", params, RoundResponse(text="It waits for your yes.")) == (
-        "the round's asks leave out 1 of the calls that need a yes"
-    )
+    assert _round("asks_about", params, RoundResponse(text="Shall I?")) is None
+    assert _round("asks_about", params, RoundResponse(text="")) == "the round writes no message"
     assert _round("asks_about", params, None) == "the response reads as no round"
 
 
@@ -732,18 +717,16 @@ def test_a_candidate_runs_its_prompts_cases_alone(tmp_path: Path) -> None:
     assert reports[0] == "1 cases of 1 prompts (1 development, 0 held out)"
 
 
-def test_a_planning_case_is_sent_as_a_round_with_its_tools_and_its_asks_read(
+def test_a_planning_case_is_sent_as_a_round_with_its_tools_and_its_message_read(
     tmp_path: Path,
 ) -> None:
+    """The case's tools alone are offered: no tool name is reserved (ADR-0356 §7:4)."""
     directory = _cases(tmp_path, ("planning/one.toml", _planning(samples=3)))
     answers: Iterator[list[ModelResponsePart]] = iter(
         [
-            [
-                TextPart("Shall I book it? " + PRIVATE),
-                ToolCallPart("planning_round", {"asks": ["1.1"]}),
-            ],
-            [TextPart("It waits for your yes. " + PRIVATE)],
-            [TextPart("Shall I book it?"), ToolCallPart("planning_round", "not json")],
+            [TextPart("Shall I book it? " + PRIVATE)],
+            [ToolCallPart("web_search", {"query": PRIVATE})],
+            [TextPart("Shall I book it?"), ToolCallPart("web_search", "not json")],
         ]
     )
     model = Model(reply=lambda system: ModelResponse(parts=next(answers)))
@@ -751,10 +734,10 @@ def test_a_planning_case_is_sent_as_a_round_with_its_tools_and_its_asks_read(
 
     _suite(directory, model, reports, results=tmp_path / "results")
 
-    assert model.tools == [["planning_round", "web_search"]] * 3
+    assert model.tools == [["web_search"]] * 3
     lines = _lines(tmp_path / "results")
     assert [one["passed"] for one in lines] == [True, False, False]
-    assert lines[1]["reason"] == "the round's asks leave out 1 of the calls that need a yes"
+    assert lines[1]["reason"] == "the round writes no message"
     assert lines[2]["read_as_round"] is False
     assert lines[2]["reason"] == "the response reads as no round"
     assert lines[0]["response"]["parts"][0]["content"].endswith(PRIVATE)

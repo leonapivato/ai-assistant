@@ -22,7 +22,15 @@ import pytest
 from anthropic import AsyncAnthropic
 from network_guard import network_denied
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart, ToolCallPart
+from pydantic_ai.messages import (
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    TextPart,
+    ThinkingPart,
+    ToolCallPart,
+)
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -38,15 +46,19 @@ from ai_assistant.core.diagnostics import (
 )
 from ai_assistant.core.errors import ModelError, ModelRateLimitError, ModelResponseError
 from ai_assistant.core.types import (
+    CallResult,
     DiagnosticSource,
+    ExchangeStep,
     Message,
     OfferedTool,
+    PlanningExchange,
     ProposedCall,
     Role,
+    RoundContinuation,
+    RoundReport,
     RoundResponse,
 )
-from ai_assistant.models import PydanticAIToolCallingCompleter
-from ai_assistant.models.tool_calling import ROUND_TOOL
+from ai_assistant.models import PydanticAIToolCallingCompleter, tool_calling
 from ai_assistant.testing import FakeDiagnosticSink
 
 if TYPE_CHECKING:
@@ -64,9 +76,14 @@ def _now() -> datetime:
     return datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
 
 
+def _exchange() -> PlanningExchange:
+    return PlanningExchange(instruction="A candidate instruction.", briefing="book me a stay")
+
+
 def _given_entry() -> dict[str, object]:
     """A recorded planning given entry's request, as planning's module writes it."""
     return {
+        "exchange": _exchange().model_dump(mode="json"),
         "messages": [
             Message(role=Role.SYSTEM, content="A candidate instruction.").model_dump(mode="json"),
             Message(role=Role.USER, content="book me a stay").model_dump(mode="json"),
@@ -81,15 +98,13 @@ def _given_entry() -> dict[str, object]:
     }
 
 
-def _recorded() -> tuple[list[Message], list[OfferedTool]]:
+def _recorded() -> tuple[PlanningExchange, list[OfferedTool]]:
     """The request a script outside the package rebuilds from a given entry's JSON."""
     entry = _given_entry()
-    messages = entry["messages"]
     tools = entry["tools"]
-    assert isinstance(messages, list)
     assert isinstance(tools, list)
     return (
-        [Message.model_validate(one) for one in messages],
+        PlanningExchange.model_validate(entry["exchange"]),
         [OfferedTool.model_validate(one) for one in tools],
     )
 
@@ -133,8 +148,8 @@ def _never() -> FunctionModel:
 
 
 async def _replay(model: Model) -> ReplayedRound:
-    messages, tools = _recorded()
-    return await PydanticAIToolCallingCompleter(_never()).replay_round(messages, tools, model=model)
+    exchange, tools = _recorded()
+    return await PydanticAIToolCallingCompleter(_never()).replay_round(exchange, tools, model=model)
 
 
 # --- §4:8: sent as `respond` sends it with the record on, the whole response returned --------
@@ -148,17 +163,17 @@ def _anthropic(name: str, http_client: httpx.AsyncClient) -> Model:
 async def _wire(name: str, handler: Handler, *, replay: bool) -> dict[str, object]:
     """The body one round put on Anthropic's wire: replayed with no sink, or with one."""
     recorder = RequestRecorder(handler)
-    messages, tools = _recorded()
+    exchange, tools = _recorded()
     with network_denied():
         async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as http_client:
             model = _anthropic(name, http_client)
             if replay:
                 await PydanticAIToolCallingCompleter(_never()).replay_round(
-                    messages, tools, model=model
+                    exchange, tools, model=model
                 )
             else:
                 completer = PydanticAIToolCallingCompleter(model, diagnostics=FakeDiagnosticSink())
-                await completer.respond(messages, tools)
+                await completer.respond(exchange, tools)
     return recorder.only
 
 
@@ -181,18 +196,17 @@ async def test_a_replay_returns_the_whole_response_thinking_included() -> None:
         ThinkingPart("They asked for a stay, so search first."),
         TextPart("Looking now."),
         ToolCallPart("web_search", {"query": "stays"}, tool_call_id="a"),
-        ToolCallPart(ROUND_TOOL, {"notes": "searching"}, tool_call_id="r"),
     )
 
     replayed = await _replay(world.model)
 
     parts = replayed.response["parts"]
-    assert [part["part_kind"] for part in parts] == ["thinking", "text", "tool-call", "tool-call"]
+    assert [part["part_kind"] for part in parts] == ["thinking", "text", "tool-call"]
     assert parts[0]["content"] == "They asked for a stay, so search first."
-    assert replayed.round == RoundResponse(
+    assert replayed.round is not None
+    assert replayed.round.model_copy(update={"continuation": None}) == RoundResponse(
         text="Looking now.",
         calls=(ProposedCall(call_id="a", name="web_search", arguments={"query": "stays"}),),
-        notes="searching",
     )
     assert replayed.failure is None
 
@@ -215,14 +229,15 @@ async def test_a_replay_writes_no_entry_even_where_the_completer_holds_a_sink() 
     world = _Counted(ThinkingPart("hm"), TextPart("ok"))
     sink = FakeDiagnosticSink()
     completer = PydanticAIToolCallingCompleter(_never(), diagnostics=sink)
-    messages, tools = _recorded()
+    exchange, tools = _recorded()
 
     with diagnosed_activation(_ACTIVATION, clock=_now):
         before = returned_written(DiagnosticSource.PLANNING)
-        replayed = await completer.replay_round(messages, tools, model=world.model)
+        replayed = await completer.replay_round(exchange, tools, model=world.model)
         after = returned_written(DiagnosticSource.PLANNING)
 
-    assert replayed.round == RoundResponse(text="ok")
+    assert replayed.round is not None
+    assert replayed.round.text == "ok"
     assert sink.recorded == ()
     assert after == before
 
@@ -284,15 +299,87 @@ async def test_a_replay_is_sent_once_and_its_calls_are_not_run_or_answered() -> 
     assert [call.name for call in replayed.round.calls] == ["web_search"]
 
 
-async def test_a_replay_given_the_reserved_tool_is_refused_before_the_model() -> None:
-    """The returned entry's tools carry the reserved one; the given entry's do not."""
+def _stepped(*, signed: bool) -> PlanningExchange:
+    """The recorded exchange with one earlier step, its response signed or not."""
+    continuation = (
+        RoundContinuation(
+            model="function:function:answer:",
+            parts=ModelMessagesTypeAdapter.dump_python(
+                [
+                    ModelResponse(
+                        parts=[
+                            ThinkingPart("search first", signature="sig"),
+                            ToolCallPart("web_search", {"query": "stays"}, tool_call_id="a"),
+                        ]
+                    )
+                ],
+                mode="json",
+            )[0],
+        )
+        if signed
+        else None
+    )
+    step = ExchangeStep(
+        response=RoundResponse(
+            calls=(ProposedCall(call_id="a", name="web_search", arguments={"query": "stays"}),),
+            continuation=continuation,
+        ),
+        report=RoundReport(
+            results=(CallResult(call_id="a", text="Two stays."),), news="Nothing changed."
+        ),
+    )
+    return _exchange().model_copy(update={"steps": (step,)})
+
+
+class _Seeing:
+    """A ``FunctionModel`` that keeps every history it was sent."""
+
+    def __init__(self) -> None:
+        self.sent: list[list[ModelMessage]] = []
+
+    def answer(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        self.sent.append(list(messages))
+        return ModelResponse(parts=[TextPart("ok")])
+
+
+@pytest.mark.parametrize(
+    ("instruction", "thinking_kept"),
+    [
+        pytest.param(None, True, id="as-recorded"),
+        pytest.param("A candidate instruction.", True, id="the-same-instruction"),
+        pytest.param("Another candidate.", False, id="another-instruction"),
+    ],
+)
+async def test_a_candidates_replay_hands_earlier_responses_back_without_continuations(
+    instruction: str | None, thinking_kept: bool
+) -> None:
+    """ADR-0356 §13: thinking written under one instruction is not handed to another."""
+    seeing = _Seeing()
+    model = FunctionModel(seeing.answer)
+    assert tool_calling.model_id(model) == "function:function:answer:"
+    _, tools = _recorded()
+
+    await PydanticAIToolCallingCompleter(_never()).replay_round(
+        _stepped(signed=True), tools, model=model, instruction=instruction
+    )
+
+    (sent,) = seeing.sent
+    opening, handed = sent[0], sent[1]
+    assert isinstance(opening, ModelRequest)
+    assert isinstance(opening.parts[0], SystemPromptPart)
+    assert opening.parts[0].content == (instruction or "A candidate instruction.")
+    assert isinstance(handed, ModelResponse)
+    assert any(isinstance(part, ThinkingPart) for part in handed.parts) is thinking_kept
+
+
+async def test_a_replay_under_a_blank_instruction_is_refused_before_the_model() -> None:
     world = _Counted(TextPart("ok"))
-    messages, tools = _recorded()
-    reserved = OfferedTool(name=ROUND_TOOL, description="d", parameters={"type": "object"})
+    _, tools = _recorded()
 
     with pytest.raises(ModelError) as caught:
         await PydanticAIToolCallingCompleter(_never()).replay_round(
-            messages, [*tools, reserved], model=world.model
+            _stepped(signed=False), tools, model=world.model, instruction="  "
         )
 
     assert type(caught.value) is ModelError

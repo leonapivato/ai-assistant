@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
 
-    from ai_assistant.core.types import Message, OfferedTool, ToolInvocation
+    from ai_assistant.core.types import OfferedTool, PlanningExchange, ToolInvocation
 
 #: Long enough that a released worker finishes inside it on any machine this runs on.
 _WAITING: Final = 5.0
@@ -95,7 +95,7 @@ def _proposes_the_call_once() -> FakeToolCallingCompleter:
     """Planning proposing the one call, then writing and proposing nothing."""
     proposed = [False]
 
-    def respond(_messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
+    def respond(_exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
         if proposed[0]:
             return RoundResponse(text="Sent.")
         proposed[0] = True
