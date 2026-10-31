@@ -388,6 +388,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``RecordedDelivery``: the words the assistant sent, the ``ChannelIdentity`` they went
     to and a closed status, prose the model wrote and the place it went, no carrier. A
     ``MessageCallPart`` (§13) is an episode's address, a round's id and a call's id.
+    What a done call showed, ``CallShowed`` (ADR-0358 §11:2-§11:4), is a flag and parts,
+    each a ``ShownText``, code's or the result's own words with no record's content and
+    no outside text held for a digest (§11:3), or a ``ShownRecord``, a closed kind, a
+    record's id and a version: no carrier.
     ``ProposedActivationUnderstanding`` with ``UnclearPoint`` (ADR-0353 §9:2, §9:3), and
     digesting's ``DigestReply`` and ``_ProposedItem``, are the parse of a reply: prose the
     model wrote, labels it was shown and a flag; the record keeps the same
@@ -596,6 +600,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PlanningWork",
         "RecordedCall",
         "RecordedDelivery",
+        # ADR-0358 §11:2-§11:4: what a done call showed, judged in the docstring above.
+        "CallShowed",
+        "ShownRecord",
+        "ShownText",
         # ADR-0349 §5:6, §6:7-§6:10, §7:19: in-progress entries, an offer and another
         # activation's own work, judged in the docstring above.
         "InProgressEntry",

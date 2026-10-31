@@ -1,8 +1,8 @@
 """Fresh-state memory format boundary for ADR-0275 §12.
 
 Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286, 0307, 0308 and 0315; since then,
-each store's own label by ADRs 0328, 0332, 0338, 0345, 0349, 0350, 0352, 0351, 0353
-and 0356.
+each store's own label by ADRs 0328, 0332, 0338, 0345, 0349, 0350, 0352, 0351, 0353,
+0356 and 0358.
 """
 
 from __future__ import annotations
@@ -130,8 +130,8 @@ PARTIES_RECORD_FORMAT: Final[int] = 20
 #: episodes it would not read (ADR-0326 §5:3).
 UNDERSTOOD_RECORD_FORMAT: Final[int] = 21
 
-#: The memory store's own label, the one this build writes. It advances to 22 for
-#: ADR-0356 §13's episode record (§13:5): ``EpisodeProcessingRecord`` gains
+#: The memory store's label for ADR-0356 §13's episode record. It advances to 22
+#: (§13:5): ``EpisodeProcessingRecord`` gains
 #: ``call_records`` and its ``schema_version`` advances to 12, and ``SupportPart`` gains
 #: the part ``message_call``: a field and a version of a ``core`` model the store
 #: serialises in every episode, and a member of a closed enumeration a stored memory
@@ -140,7 +140,18 @@ UNDERSTOOD_RECORD_FORMAT: Final[int] = 21
 #: :func:`~ai_assistant.memory._calls_upgrade.called_episode`, carried whole at the new
 #: version with ``call_records`` empty (§13:5), and an older build, which serves 12 to
 #: 21, refuses a file at 22, whose episodes it would not read (ADR-0326 §5:3).
-MEMORY_RECORD_FORMAT: Final[int] = 22
+CALLED_RECORD_FORMAT: Final[int] = 22
+
+#: The memory store's own label, the one this build writes. It advances to 23 for
+#: ADR-0358 §11's episode record (§11:8): each ``RecordedCall`` gains ``showed``, what a
+#: done call's result showed planning, held by reference as ``CallShowed`` with its
+#: ``ShownText`` and ``ShownRecord`` parts and the closed ``ShownRecordKind``, a field of
+#: a ``core`` model the store serialises in every episode and the members of a closed
+#: enumeration a stored episode names (ADR-0326 §2:3). A file at 22 is upgraded in place
+#: by the label alone, since a record written at 22 validates unchanged, every entry with
+#: ``showed`` empty (§11:6), and an older build, which serves 12 to 22, refuses a file at
+#: 23, whose episodes it would not read (ADR-0326 §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 23
 
 #: The memory store's labels a build opens: its own, and each it upgrades from, in
 #: order (ADR-0326 §4:5, §5:1).
@@ -156,6 +167,7 @@ MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
         TAKEN_OVER_RECORD_FORMAT,
         PARTIES_RECORD_FORMAT,
         UNDERSTOOD_RECORD_FORMAT,
+        CALLED_RECORD_FORMAT,
         MEMORY_RECORD_FORMAT,
     }
 )

@@ -13,17 +13,25 @@ import pytest
 from ai_assistant.core.errors import OversizedValueError, StaleEpisodeReadError
 from ai_assistant.core.types import (
     ActivationUnderstanding,
+    CallOutcomeKind,
+    CallShowed,
     ChannelContext,
     ChannelIdentity,
     ControllerRule,
     EpisodeProcessingRecord,
     EpisodicMemory,
     MemorySource,
+    PlanningRound,
     ProcessingReason,
     ProcessingStatus,
+    ProposedCall,
     Provenance,
+    RecordedCall,
     RecordedChannelTrigger,
     RecordedTextInput,
+    ShownRecord,
+    ShownRecordKind,
+    ShownText,
     UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
@@ -226,6 +234,76 @@ class EpisodeInspectionContract:
         assert shown["meaning_referents"][0]["kind"] == "running"
         assert "meaning_ground" not in shown
         assert "answers" not in shown
+
+    async def test_what_each_call_showed_reassembles_exactly(
+        self, episode_inspection: EpisodeInspectionSubject
+    ) -> None:
+        """ADR-0358 §11:7: a call's entry keeping what it showed, by reference, crosses the
+        surface as stored, beside one keeping nothing."""
+        subject = episode_inspection
+        base = _episode("called", activation=True)
+        assert base.processing_record is not None
+        planned = PlanningRound(
+            id="round-1",
+            recorded_at=INSPECTION_AT,
+            calls=(
+                ProposedCall(call_id="c1", name="search_memory", arguments={"query": "q"}),
+                ProposedCall(call_id="c2", name="read_story", arguments={"story": "S1"}),
+            ),
+        )
+        showed = CallShowed(
+            parts=(
+                ShownText(text="One record matches:"),
+                ShownRecord(kind=ShownRecordKind.STORY, id="story-1", summary_version=2),
+            ),
+            cut=True,
+        )
+        entries = (
+            RecordedCall(
+                round="round-1",
+                call_id="c1",
+                capability="search_memory",
+                effect=False,
+                outcome=CallOutcomeKind.DONE,
+                recorded_at=INSPECTION_AT,
+                showed=showed,
+            ),
+            RecordedCall(
+                round="round-1",
+                call_id="c2",
+                capability="read_story",
+                effect=False,
+                outcome=CallOutcomeKind.DONE,
+                recorded_at=INSPECTION_AT,
+            ),
+        )
+        record = base.model_copy(
+            update={
+                "processing_record": EpisodeProcessingRecord.model_validate(
+                    base.processing_record.model_dump()
+                    | {"rounds": (planned,), "call_records": entries}
+                )
+            }
+        )
+        await subject.memory.add(record)
+        stored = await subject.memory.get("called")
+        assert stored is not None
+        current = await subject.engine.episode_chunk("called")
+        assert current is not None
+        version_id = current.version
+        parts = [current.text]
+        while current.next_offset is not None:
+            following = await subject.engine.episode_chunk(
+                "called", version=version_id, offset=current.next_offset
+            )
+            assert following is not None
+            current = following
+            parts.append(current.text)
+        decoded = json.loads("".join(parts))
+        assert decoded == stored.model_dump(mode="json")
+        looked, read = decoded["processing_record"]["call_records"]
+        assert looked["showed"] == showed.model_dump(mode="json")
+        assert read["showed"] is None
 
     async def test_episode_detail_rereads_after_annotation_deletion_and_expiry(
         self, episode_inspection: EpisodeInspectionSubject

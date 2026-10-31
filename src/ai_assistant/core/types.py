@@ -4894,12 +4894,108 @@ _ATTEMPTED: Final = frozenset(
 )
 
 
+class ShownRecordKind(StrEnum):
+    """The kind of record a call's result showed, as its entry keeps it (ADR-0358 §11:2).
+
+    Closed, **added to and never renamed**: the records an episode shows by reference
+    and the episode look-up reads again (§10:6).
+    """
+
+    MEMORY = "memory"
+    """A memory the memory store holds (ADR-0328)."""
+
+    EPISODE = "episode"
+    """An episode the memory store holds (ADR-0284)."""
+
+    STORY = "story"
+    """A story the story store holds (ADR-0300)."""
+
+
+#: The bound on a story's summary version, the story store's position bound (ADR-0347).
+_SHOWN_VERSION_BOUND: Final = 2**63
+
+
+class ShownRecord(BaseModel):
+    """One record a call's result showed planning, held by reference (ADR-0358 §11:2).
+
+    Held by its kind and its id, and a story also by the summary version it showed, and
+    never by a copy of its content: a reader of the entry reads the record again, as it
+    is now held, so a memory forgotten since never comes back through an old result
+    (§10:6). Also how the full view names what a recall run found (§10:3).
+
+    Attributes:
+        kind: What it is.
+        id: Its id exactly as its store holds it, never normalised.
+        summary_version: For a story, the version of its summary the result showed, or
+            ``None`` where it had none yet; ``None`` for every other kind.
+
+    Raises:
+        ValueError: If a record other than a story carries a summary version.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    shown: Literal["record"] = "record"
+    kind: ShownRecordKind
+    id: EncodableText
+    summary_version: int | None = Field(default=None, strict=True, ge=1, lt=_SHOWN_VERSION_BOUND)
+
+    @model_validator(mode="after")
+    def _a_version_only_on_a_story(self) -> Self:
+        if self.summary_version is not None and self.kind is not ShownRecordKind.STORY:
+            msg = "only a story is held by the summary version it showed (ADR-0358 §11:2)"
+            raise ValueError(msg)
+        return self
+
+
+class ShownText(BaseModel):
+    """Text a call's result showed planning of its own, beside its records (ADR-0358 §11:2).
+
+    What the result said itself, as planning was shown it: never a record's content,
+    which :class:`ShownRecord` holds by reference, and never outside text held for a
+    digest, of which an entry holds nothing (§11:3).
+
+    Attributes:
+        text: The words.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    shown: Literal["text"] = "text"
+    text: NonBlankEncodableText
+
+
+ShownPart = Annotated[ShownText | ShownRecord, Field(discriminator="shown")]
+"""One part of what a call's result showed planning, in the order shown (ADR-0358 §11:2)."""
+
+
+class CallShowed(BaseModel):
+    """What a done call's result showed planning directly, as its entry keeps it.
+
+    ADR-0358 §11's addition to the per-call entry (:class:`RecordedCall`), for the
+    episode look-up (§10:3). ``parts`` are the result as planning was shown it, in order:
+    its own words as :class:`ShownText`, and each record it showed as a
+    :class:`ShownRecord`, by reference (§11:2). A record the result held for a digest,
+    as outside text, leaves nothing, record by record (§11:3), so a result that showed
+    only such records keeps no part.
+
+    ``cut`` is the composition-root bound's cut (§11:4): set where the bound left out
+    the rest of what the result showed, which the record then no longer keeps (§10:9).
+
+    Attributes:
+        parts: What the result showed, in order, up to the bound.
+        cut: Whether the bound cut it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    parts: tuple[ShownPart, ...] = ()
+    cut: bool = False
+
+
 class RecordedCall(BaseModel):
     """One call a planning round proposed, as the episode records it (ADR-0356 §8).
 
     Appended once its outcome is known, refused calls and look-ups included, and never
-    changed after (§8:6). It holds no result's body (§8:5): what each call showed is the
-    memory decision's addition to it.
+    changed after (§8:6). It holds no result's body (§8:5): what each call showed is
+    ADR-0358 §11's addition to it, ``showed``, kept by reference and never by copy.
 
     Attributes:
         round: The round that proposed it.
@@ -4916,10 +5012,15 @@ class RecordedCall(BaseModel):
         recorded_at: When the entry was appended.
         marked: Whether it rests on outside content (§8:7): its result was a digest's
             evidence, or the work had read outside content when it was proposed.
+        showed: For a call that was done, what its result showed planning directly
+            (ADR-0358 §11:2-§11:4). ``None`` where the entry keeps none: a call not
+            done, and an entry recorded before the addition, which validates unchanged
+            and whose full view says what it showed was not kept (§11:6).
 
     Raises:
-        ValueError: If it carries a reason without an outcome, or a delivery on a call
-            that sent nothing: one with no outcome, refused or needing the user.
+        ValueError: If it carries a reason without an outcome, a delivery on a call
+            that sent nothing: one with no outcome, refused or needing the user; or what
+            a call showed on one that was not done.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -4932,6 +5033,7 @@ class RecordedCall(BaseModel):
     delivered: RecordedDelivery | None = None
     recorded_at: UtcInstant
     marked: bool = False
+    showed: CallShowed | None = None
 
     @model_validator(mode="after")
     def _well_formed(self) -> Self:
@@ -4940,6 +5042,9 @@ class RecordedCall(BaseModel):
             raise ValueError(msg)
         if self.delivered is not None and self.outcome not in _ATTEMPTED:
             msg = "only a message call that sent something, or tried to, holds a delivery"
+            raise ValueError(msg)
+        if self.showed is not None and self.outcome is not CallOutcomeKind.DONE:
+            msg = "only a call that was done keeps what its result showed (ADR-0358 §11:2)"
             raise ValueError(msg)
         return self
 
@@ -5429,6 +5534,9 @@ class ProjectedCall(BaseModel):
         reason: Why, where its outcome has one.
         delivered: What a message call sent, where and how, where it sent anything.
         marked: Whether it rests on outside content (§8:7).
+        showed: What its result showed, as its entry keeps it, by reference
+            (ADR-0358 §11:2); carried only in the full view (§11:5), and ``None`` there
+            where the entry keeps none (§11:6).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -5440,6 +5548,65 @@ class ProjectedCall(BaseModel):
     reason: NonBlankEncodableText | None = None
     delivered: RecordedDelivery | None = None
     marked: bool = False
+    showed: CallShowed | None = None
+
+
+class ProjectedProposal(BaseModel):
+    """A call a round proposed whose entry the record does not hold, in the full view.
+
+    ADR-0358 §10:3 has the full view show each round's calls with their arguments, and
+    §10:9 say what the record no longer keeps: a call recorded before ADR-0356's entry,
+    or whose entry's append failed (ADR-0356 §8:6), keeps its arguments on its round and
+    nothing of what came of it or what it showed.
+
+    Attributes:
+        position: Its round's position, in :attr:`ProjectedRound.position`'s numbering.
+        capability: The capability it named.
+        arguments: The arguments its round recorded, as canonical JSON, cut to the
+            projection's excerpt bound.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    position: int = Field(strict=True, ge=0, lt=2**31)
+    capability: NonBlankEncodableText
+    arguments: ProjectedText
+
+
+class ProjectedUnderstanding(BaseModel):
+    """One version of understanding an episode records, in the full view (ADR-0358 §10:3).
+
+    Attributes:
+        position: The position, in :attr:`ProjectedRound.position`'s numbering, of the
+            round before which it was recorded: the number of rounds recorded before it.
+        version: The version's number.
+        meaning: What it understood.
+        unclear: What it found unclear, each point with its readings.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    position: int = Field(strict=True, ge=0, lt=2**31)
+    version: int = Field(strict=True, ge=1, lt=2**31)
+    meaning: NonBlankEncodableText
+    unclear: tuple[UnclearPoint, ...] = ()
+
+
+class ProjectedRecall(BaseModel):
+    """What one of an episode's recall runs found, in the full view (ADR-0358 §10:3).
+
+    Each record it found by reference alone, never by the excerpt the run kept, so a
+    reader reads it again as it is now held (§10:6).
+
+    Attributes:
+        second: Whether it is recall's second run, made on what understanding found
+            (ADR-0308 §2, §7); the first otherwise.
+        outcome: Whether it found anything, or why not.
+        found: Each record it found, in the order it kept them.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    second: bool = False
+    outcome: RecallOutcome
+    found: tuple[ShownRecord, ...] = ()
 
 
 class ProjectedJoin(BaseModel):
@@ -5543,6 +5710,22 @@ class EpisodeProjection(BaseModel):
             §13); none otherwise.
         joined: Each input the episode took in, in the order taken, under the same
             audience as ``calls``.
+        full_view: Whether this is the episode look-up's full view (ADR-0358 §11:5),
+            under which a call's ``showed`` of ``None`` says what it showed is no longer
+            kept (§10:9).
+        understood: In the full view, under the same audience as ``calls``, each
+            version of understanding the record holds, in order (§10:3); none otherwise.
+        understood_elided: In the full view, under the same audience, how many versions
+            the record elided when it recorded them (ADR-0276 §7:4), which it no longer
+            keeps (§10:9); ``0`` otherwise.
+        recalled: In the full view, under the same audience, what each recall run
+            found, the first run before the second (§10:3); none otherwise.
+        unrecorded: In the full view, under the same audience, each call a round
+            proposed whose entry the record does not hold, in round order (§10:3,
+            §10:9); none otherwise.
+
+    Raises:
+        ValueError: If a full view's part is carried outside the full view.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -5563,6 +5746,25 @@ class EpisodeProjection(BaseModel):
     candidates: tuple[ProjectedText, ...] = ()
     calls: tuple[ProjectedCall, ...] = ()
     joined: tuple[ProjectedJoin, ...] = ()
+    full_view: bool = False
+    understood: tuple[ProjectedUnderstanding, ...] = ()
+    understood_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
+    recalled: tuple[ProjectedRecall, ...] = ()
+    unrecorded: tuple[ProjectedProposal, ...] = ()
+
+    @model_validator(mode="after")
+    def _the_full_views_parts_only_in_it(self) -> Self:
+        # ADR-0358 §11:5: only the full view carries its parts.
+        if not self.full_view and (
+            self.understood
+            or self.understood_elided
+            or self.recalled
+            or self.unrecorded
+            or any(call.showed is not None for call in self.calls)
+        ):
+            msg = "only the full view carries what calls showed and its other parts"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _one_of_the_two_shapes(self) -> Self:
@@ -5586,6 +5788,10 @@ class EpisodeProjection(BaseModel):
                 or self.candidates
                 or self.calls
                 or self.joined
+                or self.understood
+                or self.understood_elided
+                or self.recalled
+                or self.unrecorded
             ):
                 msg = "a projection without a processing record carries its content alone"
                 raise ValueError(msg)
