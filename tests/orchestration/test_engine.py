@@ -124,6 +124,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.phase_path import PhasePath
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
+    from ai_assistant.orchestration.story_tidy_up import ScheduledTidyUp
     from ai_assistant.orchestration.task_manager import TaskSchedulerSeams
     from ai_assistant.orchestration.telegram import TelegramLineSeams
     from ai_assistant.orchestration.understanding import UnderstandingStage
@@ -304,6 +305,9 @@ class Harness:
         # ADR-0300 §9:3's matters pass. `None` is every other case's deployment:
         # `decide_story_flags` refuses, and nothing else reads it.
         matters_pass: MattersPass | None = None,
+        # ADR-0358 §4's scheduled tidy-up. `None` is every other case's deployment:
+        # `tidy_stories` refuses, and nothing else reads it.
+        scheduled_tidy_up: ScheduledTidyUp | None = None,
         transcriber: SpeechTranscriber | None | _Default = _DEFAULT,
         synthesizer: SpeechSynthesizer | None | _Default = _DEFAULT,
         speakable_attested_sources: frozenset[str] = frozenset(),
@@ -442,6 +446,7 @@ class Harness:
             story_candidates=story_candidates,
             story_links=story_links,
             matters_pass=matters_pass,
+            scheduled_tidy_up=scheduled_tidy_up,
             transcriber=self.transcriber,
             synthesizer=self.synthesizer,
             speakable_attested_sources=speakable_attested_sources,

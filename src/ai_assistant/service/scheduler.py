@@ -218,6 +218,16 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       asked for while the frozen episode's run is going answers busy and starts
       nothing (§16:6).
 
+    * **The scheduled tidy-up** — ADR-0358 §4's row, tidying each story whose pending
+      notes and episodes have reached a count or gone quiet, so the flags the matters
+      pass decides are raised whether or not planning tidies. **Immediately before the
+      matters pass** (§4:1), on the same ``consolidation_interval`` and nothing of its
+      own, so it is **disabled wherever that setting is unset**, as the matters pass is,
+      and a flag its tidy-up raises is decided in the same tick. A bound public engine
+      method holding no store (ADR-0083 §8), like its neighbours. Its run is bounded by
+      ``scheduler_run_budget`` and by a composition-root number of tidy-ups (§4:3), so
+      it holds the loop no longer than the matters pass's does.
+
     * **The matters pass** — ADR-0300 §9:3's background pass deciding the flags on
       the stories, as ADR-0302 §5 builds it. §9:3 runs it "on the schedule of the
       background memory work, consolidation", and that schedule outlived the
@@ -226,10 +236,11 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       default** and armed only by an operator setting that interval. It is the same
       kind of row as the two above it — a bound public engine method holding no
       store (ADR-0083 §8) — and the **last**, which is a scheduling decision rather
-      than a listing order: every job is due at the first tick, and this is the one
-      whose run is bounded by ``scheduler_run_budget`` rather than by its backlog,
-      so putting it last lets each sibling have its turn at boot and a sibling waits
-      behind it at most that long.
+      than a listing order: every job is due at the first tick, and this and the
+      scheduled tidy-up before it are the two whose runs are bounded by
+      ``scheduler_run_budget`` rather than by their backlog, so putting them last lets
+      each sibling have its turn at boot and a sibling waits behind them at most that
+      long each.
 
     **No reader ingests on this table** (ADR-0294 §1). The calendar's and the email
     source's scheduled ingestion rows are retired and nothing replaces them here: a
@@ -262,6 +273,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
             engine.notice_upcoming_events,
         ),
         ("observer", settings.observer_interval, engine.observe_episodes),
+        ("scheduled_tidy_up", settings.consolidation_interval, engine.tidy_stories),
         ("matters_pass", settings.consolidation_interval, engine.decide_story_flags),
     )
     return tuple(

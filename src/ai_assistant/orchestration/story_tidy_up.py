@@ -93,20 +93,36 @@ starts one in the background does not await it.
 **It logs code-owned counts only**: no story id, no note, no line and no episode
 content (ADR-0275 §8). A reply carrying keys its shape does not name is read without them,
 and the run logs how many it dropped, never which (#3246).
+
+**The scheduled tidy-up** (ADR-0358 §4). Planning's tidy-up call is one caller of the
+operation; :class:`ScheduledTidyUp` is the other, the body of the scheduler's
+``scheduled_tidy_up`` row through ``Engine.tidy_stories``. It runs the same one
+:class:`StoryTidyUp`, so nothing about what a run reads, writes, checks or flags changes
+(§4:5), and a story planning is tidying answers busy to it (ADR-0300 §5:10). A story is
+due once the count planning is shown, its notes and episodes pending (ADR-0307 §6:3),
+reaches a threshold, or once that count is at least one and the newest of what is
+pending came longer ago than a quiet period (§4:2). A run takes the due stories oldest
+pending first, a story whose last run in this process wrote nothing after every one
+whose has not (§4:4), and stops at its bound on tidy-ups started or its budget (§4:3).
+It is background maintenance of the assistant's own records (§4:7): it starts no
+activation, records no episode and tells nobody.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import math
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 import structlog
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.errors import (
     MemoryStoreError,
@@ -150,8 +166,8 @@ from ai_assistant.orchestration.story_flags import (
 from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-    from datetime import timedelta
+    from collections.abc import Callable, Mapping, Sequence
+    from datetime import datetime
 
     from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.protocols import MemoryStore, StoryStore, StructuredCompleter
@@ -164,7 +180,15 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.story_flags import RecordedDecision
 
-__all__ = ["STORY_TIDY_UP_PROMPT", "StoryTidyUp", "TidyUpOutcome", "TidyUpReply", "TidyUpResult"]
+__all__ = [
+    "STORY_TIDY_UP_PROMPT",
+    "ScheduledTidyUp",
+    "ScheduledTidyUpReport",
+    "StoryTidyUp",
+    "TidyUpOutcome",
+    "TidyUpReply",
+    "TidyUpResult",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -207,6 +231,33 @@ class TidyUpResult(StrEnum):
 
     FAILED = "failed"
     """A store or the provider raised, or the run's budget expired."""
+
+
+#: The results of a run that started on its story and wrote nothing: a run with one of
+#: these is a failed attempt, which ADR-0358 §4:4 puts behind every story that has not
+#: failed. A reply that never parses is the case §4:4 names; a store's refusal and a
+#: member moved mid-run are counted with it, since each wrote nothing and may recur.
+_FAILED_RESULTS: Final = frozenset(
+    {
+        TidyUpResult.REFUSED,
+        TidyUpResult.STORE_REFUSED,
+        TidyUpResult.MEMBERS_MOVED,
+        TidyUpResult.FAILED,
+    }
+)
+
+#: The results of a run that did not start on its story, which a scheduled run passes
+#: over without counting it toward its bound (ADR-0358 §4:6): merged or gone, already
+#: being tidied, nothing but outside content, and nothing pending it can read, an open
+#: episode or one the memory store no longer holds, which made no completion either.
+_PASSED_OVER: Final = frozenset(
+    {
+        TidyUpResult.NO_STORY,
+        TidyUpResult.BUSY,
+        TidyUpResult.OUTSIDE_ONLY,
+        TidyUpResult.NOTHING_TO_READ,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -565,6 +616,29 @@ class StoryTidyUp:
         self._budget = budget
         self._threshold = threshold
         self._running: set[str] = set()
+        # ADR-0358 §4:4: when each story's last run in this process failed, as a place
+        # in the order of attempts, cleared once a run on it writes.
+        self._attempts = itertools.count()
+        self._failed: dict[str, int] = {}
+
+    def last_failure(self, story_id: str) -> int | None:
+        """Where the story's last failed run falls in this process's order of attempts.
+
+        A failed run is one that started on the story and wrote nothing: its reply did
+        not parse or failed a check, the store refused the write, a member moved, or a
+        store or the provider raised. Whoever ran it, planning's call or a scheduled
+        run, counts. A later run that writes clears it; one that does not start leaves
+        it as it was. Held in the process, so a restart forgets it (ADR-0358 §4:4).
+
+        Args:
+            story_id: The story asked about.
+
+        Returns:
+            A number that is larger the more recent the failure, or ``None`` where no
+            run on the story has failed since the process started or since its last
+            write.
+        """
+        return self._failed.get(story_id)
 
     async def run(self, story_id: str) -> TidyUpOutcome:
         """Tidy one story's summary, unless a run on it is already running.
@@ -587,6 +661,10 @@ class StoryTidyUp:
             outcome = TidyUpOutcome(TidyUpResult.FAILED, error=exc)
         finally:
             self._running.discard(story_id)
+        if outcome.result is TidyUpResult.WRITTEN:
+            self._failed.pop(story_id, None)
+        elif outcome.result in _FAILED_RESULTS:
+            self._failed[story_id] = next(self._attempts)
         _log.info(
             "story_tidy_up",
             stage="tidy_up",
@@ -883,6 +961,190 @@ class StoryTidyUp:
                 for header in await self._stories.stories_of(member):
                     if header.story_id != story_id and header.merged_into is None:
                         chosen.setdefault(header.story_id, True)
+
+
+# --- the scheduled tidy-up (ADR-0358 §4) ---------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledTidyUpReport:
+    """What one scheduled run did, in code-owned counts. Never persisted or carried on the wire.
+
+    Attributes:
+        due: The stories due when the run read the store (ADR-0358 §4:2).
+        tidied: The tidy-ups the run started, the count its bound limits (§4:3).
+        written: Of those, the ones that wrote a summary.
+        not_written: Of those, the ones that wrote nothing: a reply refused, a write
+            the store refused, a member moved, or a store or the provider failing.
+        passed_over: Due stories the tidy-up did not start on (§4:6), which the bound
+            does not count.
+        exhausted: Whether the run reached every due story, rather than stopping at
+            its bound or its budget.
+    """
+
+    due: int = 0
+    tidied: int = 0
+    written: int = 0
+    not_written: int = 0
+    passed_over: int = 0
+    exhausted: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class _Due:
+    """A due story, with what orders it in the run (ADR-0358 §4:4)."""
+
+    story_id: str
+    oldest: datetime
+    failed: int | None
+
+    def order(self) -> tuple[bool, int, datetime]:
+        """Oldest pending first; after every story that has not failed, the oldest failure first."""
+        return (self.failed is not None, self.failed or 0, self.oldest)
+
+
+class ScheduledTidyUp:
+    """ADR-0358 §4's scheduled tidy-up: the stories that have changed enough or gone quiet.
+
+    It holds the one :class:`StoryTidyUp` planning's call runs, the story store it reads
+    what is pending through (§4:8), its three bounds and its budget. It is not a
+    Protocol, and it decides nothing itself: each tidy-up is the operation's run.
+    """
+
+    def __init__(  # noqa: PLR0913 — the operation, the store, the three bounds, the budget and the clock
+        self,
+        *,
+        tidy_up: StoryTidyUp,
+        stories: StoryStore,
+        threshold: int,
+        quiet: timedelta,
+        per_run: int,
+        budget: timedelta,
+        now: Callable[[], datetime],
+    ) -> None:
+        """Wire the run to the operation, the store and its bounds.
+
+        Args:
+            tidy_up: The one tidy-up operation, planning's call's own, so at most one
+                run is on a story at a time whoever started it (ADR-0300 §5:10).
+            stories: The story store, the one ``tidy_up`` reads and writes.
+            threshold: The count of notes and episodes pending at which a story is due
+                (ADR-0358 §4:2).
+            quiet: How long ago the newest of what is pending must have come for a
+                story with anything pending to be due (§4:2).
+            per_run: The most tidy-ups one run starts (§4:3).
+            budget: The run's budget, ``scheduler_run_budget``: once it has passed, no
+                further tidy-up starts, as the matters pass's run is bounded (§4:3).
+            now: The clock the quiet period is measured on.
+
+        Raises:
+            ValueError: If a bound or the budget is not positive.
+        """
+        if threshold < 1 or per_run < 1 or quiet <= timedelta(0) or budget <= timedelta(0):
+            msg = "the scheduled tidy-up's bounds are positive (ADR-0358 §4:3)"
+            raise ValueError(msg)
+        self._tidy_up = tidy_up
+        self._stories = stories
+        self._threshold = threshold
+        self._quiet = quiet
+        self._per_run = per_run
+        self._budget = budget
+        self._now = checked_clock(now, owner="ScheduledTidyUp")
+
+    async def run(self) -> ScheduledTidyUpReport:
+        """Tidy the stories due, one bounded run (ADR-0358 §4).
+
+        **Discovery, then tidying**, as the matters pass runs: every story's header,
+        its summary state and, where an episode is pending on it, its view are read,
+        and only then does the budget start, so the first due story is always tried.
+
+        Returns:
+            What the run did. Every count zero is a **successful** run over a store
+            with no story due.
+
+        Raises:
+            StoryStoreError: If the story store cannot be read while finding what is
+                due. A tidy-up's own failure is its outcome, never raised (§5:11).
+        """
+        due = sorted(await self._due(), key=_Due.order)
+        tidied = written = passed_over = 0
+        exhausted = True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._budget.total_seconds()
+        for index, story in enumerate(due):
+            if tidied >= self._per_run or (index and loop.time() >= deadline):
+                exhausted = False
+                break
+            outcome = await self._tidy_up.run(story.story_id)
+            if outcome.result in _PASSED_OVER:
+                passed_over += 1
+                continue
+            tidied += 1
+            if outcome.result is TidyUpResult.WRITTEN:
+                written += 1
+        report = ScheduledTidyUpReport(
+            due=len(due),
+            tidied=tidied,
+            written=written,
+            not_written=tidied - written,
+            passed_over=passed_over,
+            exhausted=exhausted,
+        )
+        _log.info(
+            "scheduled_tidy_up",
+            stage="scheduled_tidy_up",
+            due=report.due,
+            tidied=report.tidied,
+            written=report.written,
+            not_written=report.not_written,
+            passed_over=report.passed_over,
+            exhausted=report.exhausted,
+        )
+        return report
+
+    async def _due(self) -> list[_Due]:
+        """ADR-0358 §4:2: every unmerged story whose pending count or quiet makes it due."""
+        quiet_since = self._now() - self._quiet
+        found: list[_Due] = []
+        for story_id, header in (await read_headers(self._stories)).items():
+            if header.merged_into is not None:
+                continue
+            state = await self._stories.current_summary(story_id)
+            if state is None or state.story.merged_into is not None:
+                continue
+            pending = len(state.pending_notes) + len(state.pending_episodes)
+            if pending == 0:
+                continue
+            came = [note.written_at for note in state.pending_notes]
+            if state.pending_episodes:
+                came.extend(await self._linked_at(story_id, state.pending_episodes))
+            if not came:
+                # Nothing pending could be dated: what is pending was read but its links
+                # were not, a race with an unlink. Only the count can make it due.
+                if pending >= self._threshold:
+                    found.append(_Due(story_id, self._now(), self._tidy_up.last_failure(story_id)))
+                continue
+            if pending >= self._threshold or max(came) < quiet_since:
+                found.append(_Due(story_id, min(came), self._tidy_up.last_failure(story_id)))
+        return found
+
+    async def _linked_at(self, story_id: str, pending: Sequence[str]) -> list[datetime]:
+        """When each pending episode came to the story: the link that holds it there."""
+        wanted = set(pending)
+        came: list[datetime] = []
+        cursor: int | None = None
+        while True:
+            page = await self._stories.view(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+            if page is None:
+                return came
+            came.extend(
+                entry.linked_at
+                for entry in page.entries
+                if entry.member.kind is StoryMemberKind.ACTIVATION and entry.member.id in wanted
+            )
+            if page.next_cursor is None or page.next_cursor == cursor:
+                return came
+            cursor = page.next_cursor
 
 
 # --- the hub's checks (§5:6) ---------------------------------------------------------

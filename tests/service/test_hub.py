@@ -89,6 +89,7 @@ class FakeEngine:
         self.closed = 0
         self.purged = 0
         self.decided_flags = 0
+        self.tidied_stories = 0
         self.observed = 0
         self.reconsidered = 0
         self.noticed = 0
@@ -130,6 +131,12 @@ class FakeEngine:
         # *startup* rather than only the job it would have armed.
         self.decided_flags += 1
         _marker.info("fake_engine_decided_story_flags")
+
+    async def tidy_stories(self) -> None:
+        # ADR-0358 §4's scheduled tidy-up, at `consolidation_interval` just before the
+        # matters pass. Present for `decide_story_flags`'s reason exactly.
+        self.tidied_stories += 1
+        _marker.info("fake_engine_tidied_stories")
 
     async def observe_episodes(self) -> None:
         # ADR-0329 §7:6's observer row, armed by default at `observer_interval`, so

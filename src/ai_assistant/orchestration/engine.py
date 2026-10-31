@@ -26,8 +26,9 @@ projection in `interfaces/` (ADR-0073 §7).
 
 Beside those sits the **maintenance surface** ADR-0083 §8 adds for that scheduler:
 :meth:`Engine.start`'s sweeps, :meth:`Engine.purge_expired`,
-:meth:`Engine.notice_upcoming_events`, :meth:`Engine.decide_story_flags`,
-:meth:`Engine.observe_episodes` and :attr:`Engine.drain_phase`. New *concrete* surface on
+:meth:`Engine.notice_upcoming_events`, :meth:`Engine.tidy_stories`,
+:meth:`Engine.decide_story_flags`, :meth:`Engine.observe_episodes` and
+:attr:`Engine.drain_phase`. New *concrete* surface on
 this class rather than ``core`` contract surface — the scheduler holds this object from
 inside the hub, not the ``AssistantEngine`` Protocol a client sees, which names none of
 these.
@@ -371,6 +372,7 @@ if TYPE_CHECKING:
         StoryCandidates,
         StoryLinksStage,
     )
+    from ai_assistant.orchestration.story_tidy_up import ScheduledTidyUp, ScheduledTidyUpReport
     from ai_assistant.orchestration.telegram import TelegramInput, TelegramLineSeams
     from ai_assistant.orchestration.understanding import (
         Fetched,
@@ -731,6 +733,29 @@ def _matters_decided(report: MattersPassReport) -> Observation:
             "left_after_refusal": report.left_after_refusal,
             "refused": report.refused,
             "raced": report.raced,
+            "exhausted": report.exhausted,
+        }
+    )
+
+
+def _stories_tidied(report: ScheduledTidyUpReport) -> Observation:
+    """Read one scheduled tidy-up run onto its own ``OPERATION`` trace (ADR-0119 §8).
+
+    Code-owned counts only: no story id and nothing of any summary (ADR-0004 §5).
+
+    Args:
+        report: What the run found and tidied.
+
+    Returns:
+        The run's counters, keyed by literals written here (§2's second clause).
+    """
+    return Observation(
+        metrics={
+            "due": report.due,
+            "tidied": report.tidied,
+            "written": report.written,
+            "not_written": report.not_written,
+            "passed_over": report.passed_over,
             "exhausted": report.exhausted,
         }
     )
@@ -1255,23 +1280,36 @@ def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs besid
     return phases
 
 
-def _check_story_wiring(
-    *, candidates: bool, links: bool, understanding: bool, matters_pass: bool, stories: bool
+def _check_story_wiring(  # noqa: PLR0913 — one flag per piece wired
+    *,
+    candidates: bool,
+    links: bool,
+    understanding: bool,
+    matters_pass: bool,
+    scheduled_tidy_up: bool,
+    stories: bool,
 ) -> None:
     """ADR-0300 §6's two pieces are wired together or not at all, and only beside understanding.
 
-    And §9:3's matters pass only beside the story store whose records it decides.
+    And §9:3's matters pass, and ADR-0358 §4's scheduled tidy-up, only beside the story
+    store whose records they decide and tidy.
 
     Raises:
         ConfigurationError: If one is wired without the other — links proposed against
             no candidates, or candidates whose links nothing records — or either without
-            the understanding stage whose links they are; or the matters pass without
-            the story store.
+            the understanding stage whose links they are; or the matters pass or the
+            scheduled tidy-up without the story store.
     """
     if matters_pass and not stories:
         msg = (
             "the matters pass decides flags on the story store's records, so it is wired "
             "only beside that store (ADR-0300 §9:3)"
+        )
+        raise ConfigurationError(msg)
+    if scheduled_tidy_up and not stories:
+        msg = (
+            "the scheduled tidy-up tidies the story store's stories, so it is wired only "
+            "beside that store (ADR-0358 §4)"
         )
         raise ConfigurationError(msg)
     if candidates != links:
@@ -1552,6 +1590,7 @@ class Engine:
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
         matters_pass: MattersPass | None = None,
+        scheduled_tidy_up: ScheduledTidyUp | None = None,
         transcriber: SpeechTranscriber | None = None,
         synthesizer: SpeechSynthesizer | None = None,
         speakable_attested_sources: frozenset[str] = frozenset(),
@@ -1816,6 +1855,9 @@ class Engine:
             matters_pass: ADR-0300 §9:3's matters pass, which
                 :meth:`decide_story_flags` runs — or ``None``, and then that operation
                 refuses. Only beside ``stories``, the store it reads and writes.
+            scheduled_tidy_up: ADR-0358 §4's scheduled tidy-up, over the one tidy-up
+                planning's call runs, which :meth:`tidy_stories` runs — or ``None``,
+                and then that operation refuses. Only beside ``stories``.
             transcriber: The speech-recognition seam (ADR-0200 §1, §2), already
                 wrapped in whatever deadline decorator the composition root wired
                 (ADR-0118 §2), or ``None`` on a deployment with no speech engines.
@@ -2111,6 +2153,7 @@ class Engine:
             links=story_links is not None,
             understanding=understanding is not None,
             matters_pass=matters_pass is not None,
+            scheduled_tidy_up=scheduled_tidy_up is not None,
             stories=stories is not None,
         )
         self._understanding = understanding
@@ -2121,6 +2164,7 @@ class Engine:
         self._story_links = story_links
         self._story_summary_notes = _story_summary_bound(story_summary_notes)
         self._matters_pass = matters_pass
+        self._scheduled_tidy_up = scheduled_tidy_up
         if stage_record_limit < 2:  # noqa: PLR2004 — the first entry and the end entry
             msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
             raise ConfigurationError(msg)
@@ -2654,6 +2698,49 @@ class Engine:
             )
             raise ConfigurationError(msg)
         return await self._tracked(self._upcoming.notice(), "notice_upcoming_events", _noticed)
+
+    async def tidy_stories(self) -> ScheduledTidyUpReport:
+        """Tidy the stories that have changed enough or gone quiet, one bounded run (ADR-0358 §4).
+
+        The **maintenance surface**'s scheduled tidy-up, on :meth:`decide_story_flags`'s
+        shape: concrete surface on this class and not ``AssistantEngine``'s, which gains
+        nothing (§4:8), taking no argument so it is a legal ``JobBody``, and driven by
+        the scheduler's ``scheduled_tidy_up`` row at ``consolidation_interval``, the row
+        just before the matters pass's (§4:1), so the flags its tidy-ups raise are
+        decided in the same tick.
+
+        **The engine tidies nothing itself.** It delegates to
+        :class:`~ai_assistant.orchestration.story_tidy_up.ScheduledTidyUp`, which runs
+        the one tidy-up planning's call runs (§4:5). A scheduled tidy-up is background
+        maintenance of the assistant's own records, not an action under ADR-0292
+        §12:1-§12:2 (§4:7): planning does not choose it, authorizing does not check it,
+        and it runs directly on no channel, starting no activation, recording no
+        episode and telling nobody.
+
+        Tracked like every other public method, so shutdown drains the write it is in
+        the middle of before closing the stores it writes through (ADR-0042 §2).
+
+        Returns:
+            What the run found and tidied. Every count zero is a **successful** run
+            over a store with no story due.
+
+        Raises:
+            RuntimeError: If the engine is shutting down. The scheduler treats this
+                as *stop* rather than as a job failure (ADR-0083 §8).
+            ConfigurationError: If this engine was built with no scheduled tidy-up,
+                for :meth:`decide_story_flags`'s reason: an empty report would be
+                indistinguishable from a store with no story due (ADR-0022 §4a).
+            StoryStoreError: If the story store could not be read while finding what
+                is due. A tidy-up's own failure is its outcome, never raised.
+        """
+        self._reject_if_closing()
+        if self._scheduled_tidy_up is None:
+            msg = (
+                "no scheduled tidy-up is wired, so there is no story to tidy; it needs the "
+                "story tidy-up and the story store (ADR-0358 §4)"
+            )
+            raise ConfigurationError(msg)
+        return await self._tracked(self._scheduled_tidy_up.run(), "tidy_stories", _stories_tidied)
 
     async def decide_story_flags(self) -> MattersPassReport:
         """Decide the flags on the stories, one bounded run (ADR-0300 §9:3, ADR-0302 §5).
