@@ -16,6 +16,7 @@ from exchange_support import reported
 from phases_support import chat_turn, event, phases_harness, processing, written
 from task_support import seams
 
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     CallOutcomeKind,
     ChannelIdentity,
@@ -330,6 +331,53 @@ async def test_a_write_that_raises_after_sending_keeps_what_it_tried_and_where()
     assert sent.delivered.status is DeliveryStatus.UNKNOWN
     (effect,) = await harness.plans.activation_effects(["activation"])
     assert effect.outcome is ToolOutcome.INDETERMINATE
+    await harness.engine.aclose()
+
+
+class _TakingWriter:
+    """A place's writer that takes the message, done at a position."""
+
+    def fitted(self, text: str) -> Fitted:
+        return Fitted(text=text)
+
+    async def deliver(self, fitted: Fitted, *, effect_id: str) -> Delivery:
+        del effect_id
+        return Delivery(ToolOutcome.SUCCEEDED, position=7, written=fitted.text)
+
+
+async def test_a_send_the_place_took_stays_sent_when_its_record_cannot_be_finished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0356 §8:4: how it went is the writer's answer; a record's finish that fails
+    afterwards is the store's error, which the stage ends on, and changes neither."""
+    harness = phases_harness(FakeToolCallingCompleter())
+    phases = harness.engine._phases
+    assert isinstance(phases, PhasePath)
+    working = PhaseWorking(
+        activation_id="activation",
+        place=PlaceWindow(takes_message=True),
+        conversation_id=None,
+        trigger=None,
+        owner_records=True,
+        round_limit=3,
+        target=PlaceTarget(channel=_LINE, writer=_TakingWriter()),
+    )
+
+    async def unfinished(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        msg = "the plan store is down"
+        raise PlanningError(msg)
+
+    monkeypatch.setattr(harness.plans, "finish_activation_effect", unfinished)
+
+    with pytest.raises(_SendRaisedError) as raised:
+        await phases._sent(working, "Booked.", effect_id="e1", round_id="round-1", place=None)
+
+    assert isinstance(raised.value.__context__, PlanningError)
+    sent = raised.value.sent
+    assert sent.kind is CallOutcomeKind.DONE
+    assert sent.delivered is not None
+    assert (sent.delivered.words, sent.delivered.status) == ("Booked.", DeliveryStatus.SENT)
     await harness.engine.aclose()
 
 

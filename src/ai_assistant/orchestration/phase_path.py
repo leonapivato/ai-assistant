@@ -1713,6 +1713,54 @@ class _Sent:
     delivered: RecordedDelivery | None = None
 
 
+@dataclass
+class _Attempt:
+    """One message's write as tried: its text and place, and what its writer said, if it did."""
+
+    words: str
+    went: ChannelIdentity
+    delivery: Delivery | None = None
+
+
+def _sent_of(delivered: Delivery, words: str, went: ChannelIdentity) -> _Sent:
+    """What came of a ``text`` call, from what its place's writer said (ADR-0357 §3)."""
+    reason = _UNKNOWN_WRITE if delivered.outcome is ToolOutcome.INDETERMINATE else delivered.reason
+    return _Sent(
+        _WRITE_OUTCOME[delivered.outcome],
+        reason=reason,
+        delivered=RecordedDelivery(
+            words=delivered.written or words,
+            went=went,
+            status=_DELIVERY_STATUS[delivered.outcome],
+            reason=reason,
+        ),
+    )
+
+
+def _raised_send(attempted: Sequence[_Attempt]) -> _Sent:
+    """What came of a ``text`` call whose write or whose record's finish raised (§8:4).
+
+    Where the writer said how it went before the record's finish raised, that holds;
+    where the writer itself raised after it was reached, the words and the place are
+    kept, how it went unknown; where it was never reached, nothing was sent.
+    """
+    if not attempted:
+        return _Sent(CallOutcomeKind.UNKNOWN, reason=_UNKNOWN_WRITE)
+    attempt = attempted[0]
+    if attempt.delivery is not None:
+        return _sent_of(attempt.delivery, attempt.words, attempt.went)
+    return _Sent(
+        CallOutcomeKind.UNKNOWN,
+        reason=_UNKNOWN_WRITE,
+        delivered=RecordedDelivery(
+            words=attempt.words,
+            went=attempt.went,
+            status=DeliveryStatus.UNKNOWN,
+            reason=_UNKNOWN_WRITE,
+        ),
+    )
+
+
 class _SendRaisedError(Exception):
     """A ``text`` call's write raised, carrying what is known of it (ADR-0356 §8:4).
 
@@ -5483,7 +5531,7 @@ class PhasePath:
         holds the words the place took, or tried to, where they went and how. A call
         whose write never reached the place sent nothing, and holds no delivery.
         """
-        attempted: list[tuple[str, ChannelIdentity]] = []
+        attempted: list[_Attempt] = []
         try:
             wrote = await self._written(
                 working,
@@ -5497,35 +5545,11 @@ class PhasePath:
             # ADR-0356 §8:4: where the send was attempted, what it tried to send and where
             # are kept, its status unknown; the stage ends on the error, as on the round's
             # own message.
-            tried = (
-                None
-                if not attempted
-                else RecordedDelivery(
-                    words=attempted[0][0],
-                    went=attempted[0][1],
-                    status=DeliveryStatus.UNKNOWN,
-                    reason=_UNKNOWN_WRITE,
-                )
-            )
-            raise _SendRaisedError(
-                _Sent(CallOutcomeKind.UNKNOWN, reason=_UNKNOWN_WRITE, delivered=tried)
-            ) from None
+            raise _SendRaisedError(_raised_send(attempted)) from None
         if wrote is None:
             return _Sent(CallOutcomeKind.NOT_DONE, reason=_GONE)
         delivered, fitted, channel = wrote
-        reason = delivered.reason
-        if delivered.outcome is ToolOutcome.INDETERMINATE:
-            reason = _UNKNOWN_WRITE
-        return _Sent(
-            _WRITE_OUTCOME[delivered.outcome],
-            reason=reason,
-            delivered=RecordedDelivery(
-                words=delivered.written or fitted,
-                went=channel,
-                status=_DELIVERY_STATUS[delivered.outcome],
-                reason=reason,
-            ),
-        )
+        return _sent_of(delivered, fitted, channel)
 
     async def _written(  # noqa: PLR0913 — the message, its record, its place, and who is told it was tried
         self,
@@ -5535,12 +5559,14 @@ class PhasePath:
         effect_id: str,
         round_id: str | None,
         place: str | None = None,
-        attempted: list[tuple[str, ChannelIdentity]] | None = None,
+        attempted: list[_Attempt] | None = None,
     ) -> tuple[Delivery, str, ChannelIdentity] | None:
         """Claim, write and finish one message, and say what came of it and where.
 
         ``attempted``, where given, is told the text and the place's channel just before
-        the place's writer is reached, so a caller whose write raised knows it was tried.
+        the place's writer is reached, and what the writer said once it returns, so a
+        caller whose write or whose record's finish raised knows what was tried and how
+        it went.
 
         Returns:
             What the place's writer said, the text it was handed, and the place's
@@ -5563,8 +5589,9 @@ class PhasePath:
         except ClaimStopped:
             _log.info("phase_message_unwritten", stage="acting", reason="stopped")
             return None
+        attempt = _Attempt(words=fitted.text, went=target.channel)
         if attempted is not None:
-            attempted.append((fitted.text, target.channel))
+            attempted.append(attempt)
         try:
             delivered = await target.writer.deliver(fitted, effect_id=effect_id)
         except Exception:
@@ -5572,6 +5599,7 @@ class PhasePath:
             # finished so, and the stage ends on the error.
             await self._plans.finish_activation_effect(effect_id, ToolOutcome.INDETERMINATE)
             raise
+        attempt.delivery = delivered
         if delivered.written is not None:
             working.messages.append(delivered.written)
         await self._plans.finish_activation_effect(
