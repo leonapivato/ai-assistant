@@ -5577,7 +5577,10 @@ class ProjectedUnderstanding(BaseModel):
 
     Attributes:
         position: The position, in :attr:`ProjectedRound.position`'s numbering, of the
-            round before which it was recorded: the number of rounds recorded before it.
+            round before which it was recorded: ``0`` for the first version the record
+            holds, which the phases record before planning (ADR-0309 §3), and for a later
+            one the number of rounds recorded strictly before it, so a version recorded
+            at a round's instant is placed before the round that plans on it.
         version: The version's number.
         meaning: What it understood.
         unclear: What it found unclear, each point with its readings.
@@ -5644,11 +5647,19 @@ class ProjectedEvidence(BaseModel):
     Attributes:
         text: What the item says.
         outside: The mark that it came from outside content, always set.
+        position: The position, in :attr:`ProjectedRound.position`'s numbering, of the
+            round before which its digest was recorded, so the full view shows it in the
+            order it happened (ADR-0358 §10:3): ``0`` for recall's digest, which the
+            phases make before planning (ADR-0309 §3), and for a result's digest the
+            number of rounds recorded at or before it, since a result is read only by a
+            call a round proposed. ``0`` in a peer view, which places nothing among
+            rounds.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     text: ProjectedText
     outside: Literal[True] = True
+    position: int = Field(default=0, strict=True, ge=0, lt=2**31)
 
 
 class EpisodeProjection(BaseModel):

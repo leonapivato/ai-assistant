@@ -17,6 +17,7 @@ from test_planning_round_types import _LATER, _NOW, _call, _episode, _open, _rou
 
 from ai_assistant.core.episode_encoding import episode_extends, project_episode
 from ai_assistant.core.types import (
+    ActivationDigest,
     ActivationRecall,
     ActivationUnderstanding,
     BeliefBand,
@@ -24,8 +25,10 @@ from ai_assistant.core.types import (
     CallShowed,
     ControllerRule,
     ControllerStage,
+    DigestOutcome,
     EpisodeProcessingRecord,
     EpisodeProjection,
+    EvidenceItem,
     MemoryKind,
     ProcessingReason,
     ProcessingStatus,
@@ -399,3 +402,80 @@ def test_a_projection_carries_the_full_views_parts_only_in_it() -> None:
     plain = project_episode(_episode(_full_record()), excerpt_chars=50, owner_records=True)
     with pytest.raises(ValidationError, match="only the full view"):
         EpisodeProjection.model_validate(plain.model_dump() | {"calls": (shown,)})
+
+
+# --- the order things happened in (§10:3) ---------------------------------------------
+
+
+def _digest(result: str | None, at: timedelta, text: str) -> ActivationDigest:
+    return ActivationDigest(
+        result=result,
+        question="what does it say?",
+        outcome=DigestOutcome.ANSWERED,
+        evidence=(EvidenceItem(text=text, source="R1"),),
+        recorded_at=_NOW + at,
+    )
+
+
+def _ordered(at: timedelta) -> EpisodeProcessingRecord:
+    """Rounds at ``at`` and ``2 * at`` after the start, with recall's digest before them
+    and a result's digest between and after them, every part at a multiple of ``at``."""
+    record = _full_record().model_copy(
+        update={
+            "rounds": (
+                _round(
+                    "r1",
+                    notes="looking",
+                    calls=(_call("c1", "search_memory"), _call("c2")),
+                    recorded_at=_NOW + at,
+                ),
+                _round(
+                    "r2",
+                    follows="r1",
+                    notes="done",
+                    calls=(_call("c3", "read_story"),),
+                    recorded_at=_NOW + 2 * at,
+                ),
+            ),
+            "understanding": (
+                _version(1, "book the dentist", at),
+                _version(2, "book the dentist on Thursday", 2 * at),
+            ),
+            "digests": (
+                _digest(None, timedelta(0), "recalled"),
+                _digest("R1", at, "between"),
+                _digest("R2", 3 * at, "after"),
+            ),
+        }
+    )
+    return EpisodeProcessingRecord.model_validate(record.model_dump())
+
+
+def test_evidence_is_placed_before_between_and_after_the_rounds() -> None:
+    """§10:3: in the order they happened, so a digest moved past a round moves with it."""
+    projection = project_episode(
+        _episode(_ordered(timedelta(seconds=2))),
+        excerpt_chars=50,
+        owner_records=True,
+        full_view=True,
+    )
+    assert [(one.text.text, one.position) for one in projection.evidence] == [
+        ("recalled", 0),
+        ("between", 1),
+        ("after", 2),
+    ]
+
+
+def test_a_fixed_clock_still_places_what_the_phases_order() -> None:
+    """§10:3 with every part at one instant: the first understanding version and recall's
+    digest precede every round by the phases' order, a later version precedes the round
+    that plans on it, and a result's digest follows the rounds that could have read it."""
+    projection = project_episode(
+        _episode(_ordered(timedelta(0))), excerpt_chars=50, owner_records=True, full_view=True
+    )
+    assert [one.position for one in projection.understood] == [0, 0]
+    assert [(one.text.text, one.position) for one in projection.evidence] == [
+        ("recalled", 0),
+        ("between", 2),
+        ("after", 2),
+    ]

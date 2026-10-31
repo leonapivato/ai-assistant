@@ -332,12 +332,15 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
     (:class:`~ai_assistant.core.types.CallShowed`), or ``None`` where the entry keeps
     none (§11:6); and the projection also carries each version of understanding the
     record holds, with how many it elided when it recorded them, what each recall run
-    found, each record by kind and id and never by
-    the excerpt the run kept (§10:6), and each call a round proposed whose entry the
-    record does not hold, with its arguments (§10:9). Each version is placed by the
-    number of rounds recorded before it. Every part is cut to ``excerpt_chars`` as the
-    others are; nothing of a record is read here, so the caller reads each referenced
-    record again, as it is now held, under its own audience (§10:6, §6:3).
+    found, each record by kind and id and never by the excerpt the run kept (§10:6), and
+    each call a round proposed whose entry the record does not hold, with its arguments
+    (§10:9). Each version, and each item of evidence in every view, is placed among the
+    rounds by the phases' order and then the clock, as
+    :class:`~ai_assistant.core.types.ProjectedUnderstanding` and
+    :class:`~ai_assistant.core.types.ProjectedEvidence` say. Every part is cut to
+    ``excerpt_chars`` as the others are; nothing of a record is read here, so the caller
+    reads each referenced record again, as it is now held, under its own audience
+    (§10:6, §6:3).
 
     **An episode's pending candidates** (ADR-0329 §6:9) are the facts the caller
     hands in ``candidates``: which of the episode's ``remember`` calls are candidates
@@ -454,7 +457,9 @@ def project_episode(  # noqa: PLR0913 — one read function, two views (ADR-0349
         reason=processing.reason,
         derived_from_external=external,
         rounds=_projected_rounds(processing.rounds, excerpt_chars, owner_records=owner_records),
-        evidence=_projected_evidence(processing.digests, excerpt_chars) if owner_records else (),
+        evidence=_projected_evidence(processing.digests, excerpt_chars, rounds=processing.rounds)
+        if owner_records
+        else (),
         candidates=tuple(
             ProjectedText(text=fact[:excerpt_chars], full_chars=len(fact)) for fact in candidates
         ),
@@ -534,14 +539,21 @@ def _full_view_parts(
     """
     understood = tuple(
         ProjectedUnderstanding(
-            position=sum(
-                1 for planned in processing.rounds if planned.recorded_at <= one.recorded_at
+            # The first version precedes planning by the phases' order (ADR-0309 §3),
+            # whatever the clock read; a later one, recorded at a round's instant, is
+            # placed before the round that plans on it.
+            position=(
+                0
+                if index == 0
+                else sum(
+                    1 for planned in processing.rounds if planned.recorded_at < one.recorded_at
+                )
             ),
             version=one.version,
             meaning=one.meaning,
             unclear=one.unclear,
         )
-        for one in processing.understanding
+        for index, one in enumerate(processing.understanding)
     )
     runs = ((processing.recall, False), (processing.recall_second_run, True))
     recalled = tuple(
@@ -778,14 +790,33 @@ def _is_marked(one: PlanningRound) -> bool:
 
 
 def _projected_evidence(
-    digests: tuple[ActivationDigest, ...], bound: int
+    digests: tuple[ActivationDigest, ...],
+    bound: int,
+    *,
+    rounds: tuple[PlanningRound, ...] = (),
 ) -> tuple[ProjectedEvidence, ...]:
-    """Each digest's items, in order: the text and the mark, never the source label."""
+    """Each digest's items, in order: the text and the mark, never the source label.
+
+    Each placed among ``rounds`` (ADR-0358 §10:3): recall's digest before every round,
+    which the phases make before planning, whatever the clock read; a result's after
+    every round recorded at or before it, since only a round's call reads a result. The
+    peer view, which places nothing among rounds, hands in none.
+    """
     return tuple(
-        ProjectedEvidence(text=ProjectedText(text=item.text[:bound], full_chars=len(item.text)))
+        ProjectedEvidence(
+            text=ProjectedText(text=item.text[:bound], full_chars=len(item.text)),
+            position=_digest_position(digest, rounds),
+        )
         for digest in digests
         for item in digest.evidence
     )
+
+
+def _digest_position(digest: ActivationDigest, rounds: tuple[PlanningRound, ...]) -> int:
+    """Where a digest falls among the rounds, in their positions' numbering (§10:3)."""
+    if digest.result is None:
+        return 0
+    return sum(1 for one in rounds if one.recorded_at <= digest.recorded_at)
 
 
 # --- a revision of an open episode (ADR-0286 §3) -------------------------------
