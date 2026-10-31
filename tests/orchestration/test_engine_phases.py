@@ -173,6 +173,7 @@ from ai_assistant.permissions.policy import (
     ThresholdActionPolicy,
 )
 from ai_assistant.testing import (
+    FakeConversationStore,
     FakeDiagnosticSink,
     FakeEgressBinder,
     FakeForecaster,
@@ -3514,6 +3515,83 @@ async def test_a_tidy_up_naming_a_story_never_shown_beside_a_look_up_is_refused_
         assert entry.reason is not None
         assert "S9" in entry.reason
     assert entries["c1"].capability == "tidy_story"
+
+
+class _GatedWrites(FakeConversationStore):
+    """The chat's store, holding the assistant's message ``words`` until released."""
+
+    def __init__(self, words: str) -> None:
+        super().__init__(now=lambda: AT)
+        self._words = words
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def append_message(self, conversation_id: str, message: NewMessage) -> MessageReceipt:
+        if message.author is MessageAuthor.ASSISTANT and message.text == self._words:
+            self.entered.set()
+            await self.release.wait()
+        return await super().append_message(conversation_id, message)
+
+
+async def test_a_tidy_ups_entry_is_stored_as_it_starts_while_its_sibling_is_pending() -> None:
+    """ADR-0356 §8:6, §14:9: a tidy-up that starts has its entry appended when it starts,
+    with no outcome, before the round's other calls have ended."""
+    completer = FakeToolCallingCompleter.scripted(
+        _STARTED,
+        RoundResponse(
+            calls=(
+                _call("c2", "tidy_story", story="S1"),
+                _call("c3", "text", words="Tidying."),
+            )
+        ),
+        RoundResponse(),
+    )
+    stories = FakeStoryStore(now=lambda: AT)
+    writes = _GatedWrites("Tidying.")
+    harness = Harness(
+        understanding=understanding_stage(),
+        tools=(_BOOK,),
+        phases=_phases(completer, stories=stories, story_calls=True),
+        conversation_store=writes,
+    )
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "help me plan a camping trip to Riverside")
+    await asyncio.wait_for(writes.entered.wait(), _SETTLE)
+
+    async def tidy_entry_stored() -> bool:
+        for one in await harness.memory.export():
+            record = one.processing_record if isinstance(one, EpisodicMemory) else None
+            if record is not None and record.is_open:
+                return any(
+                    entry.call_id == "c2" and entry.outcome is None for entry in record.call_records
+                )
+        return False
+
+    try:
+        deadline = asyncio.get_running_loop().time() + _SETTLE
+        while not await tidy_entry_stored():
+            assert asyncio.get_running_loop().time() < deadline, "never stored as it started"
+            await asyncio.sleep(0.001)
+        stored = [
+            one
+            for one in await harness.memory.export()
+            if isinstance(one, EpisodicMemory)
+            and one.processing_record is not None
+            and one.processing_record.is_open
+        ]
+        assert stored
+        open_record = stored[0].processing_record
+        assert open_record is not None
+        assert "c3" not in {entry.call_id for entry in open_record.call_records}
+    finally:
+        writes.release.set()
+    episode = await _settled(harness, conversation)
+    record = episode.processing_record
+    assert record is not None
+    entries = {one.call_id: one for one in record.call_records}
+    assert entries["c2"].outcome is None
+    assert entries["c3"].outcome is CallOutcomeKind.DONE
 
 
 def test_the_phases_are_wired_only_beside_understanding() -> None:
