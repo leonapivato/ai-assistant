@@ -710,11 +710,15 @@ def _peer_effects(
     order, are paired with that round's messages in the order they are written: the
     round's own message where its ``text`` shows one (a round recorded before ADR-0356,
     or under its interim), then each message call whose entry holds a delivery, in the
-    order the round proposed them (#3537). The pairing is read off the counts: one
-    effect more than the deliveries, on a round whose text shows, makes the first the
-    round's own; as many as the deliveries makes each a call's. Any other count, as
-    while acting is still writing before the entries are appended, shows the message
-    with no words, so no message is shown with another's.
+    order the round proposed them (#3537). The pairing is read off the counts, and only
+    once the round's entries are settled: every call it proposed has its entry, or the
+    episode is frozen, by which every call has one (ADR-0356 §8:6), so a frozen round
+    with none was recorded before the decision. Then one effect more than the
+    deliveries, on a round whose text shows, makes the first the round's own, and as
+    many as the deliveries makes each a call's. While a round's entries are not settled,
+    as while acting is still writing, or at any other count, its messages are shown
+    with no words: no message is shown with another's words, and no text a round never
+    sent is shown as sent.
 
     Raises:
         ValueError: If an effect is another activation's.
@@ -750,6 +754,9 @@ def _message_words(
     for one in processing.rounds:
         held = claimed.get(one.id, [])
         if not held:
+            continue
+        recorded = {entry.call_id for entry in processing.call_records if entry.round == one.id}
+        if processing.is_open and any(call.call_id not in recorded for call in one.calls):
             continue
         order = {call.call_id: index for index, call in enumerate(one.calls)}
         sent = sorted(

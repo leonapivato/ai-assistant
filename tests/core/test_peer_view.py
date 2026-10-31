@@ -437,11 +437,21 @@ def _texts(*call_ids: str) -> tuple[ProposedCall, ...]:
     )
 
 
-def _calling(text: str, *call_ids: str, entries: tuple[RecordedCall, ...]) -> EpisodicMemory:
+def _calling(
+    text: str,
+    *call_ids: str,
+    entries: tuple[RecordedCall, ...],
+    calls: tuple[ProposedCall, ...] = (),
+    frozen: bool = False,
+) -> EpisodicMemory:
     planned = PlanningRound(
-        id="r1", recorded_at=_NOW, text=text, notes="the 9:40 is cheapest", calls=_texts(*call_ids)
+        id="r1",
+        recorded_at=_NOW,
+        text=text,
+        notes="the 9:40 is cheapest",
+        calls=(*_texts(*call_ids), *calls),
     )
-    return _episode(_record(rounds=(planned,), call_records=entries))
+    return _episode(_record(rounds=(planned,), call_records=entries, frozen=frozen))
 
 
 def _words(view: PeerView) -> list[str | None]:
@@ -500,6 +510,40 @@ def test_effects_the_entries_do_not_yet_account_for_show_no_words() -> None:
     effects = (_message("m1", ToolOutcome.SUCCEEDED), _message("m2", ToolOutcome.SUCCEEDED))
 
     assert _words(_peer(episode, effects)) == [None, None]
+
+
+def test_an_unsent_rounds_text_is_never_shown_for_a_call_whose_entry_is_not_yet_in() -> None:
+    """The round's own message went nowhere and its call's effect is done before its entry
+    is appended: one effect, no delivery, a text that shows. Until the round's entries are
+    settled the counts cannot say whose the effect is, so it shows no words, never the
+    text the round did not send (ADR-0349 §6:8-§6:10)."""
+    episode = _calling("Draft that was never sent.", "c1", entries=())
+
+    assert _words(_peer(episode, (_message("m1", ToolOutcome.SUCCEEDED),))) == [None]
+
+
+def test_a_rounds_own_message_waits_for_its_other_calls_entries_while_it_runs() -> None:
+    """A look-up still without its entry leaves the round unsettled, so its own message is
+    shown with no words until the entries are in, and with its text once they are."""
+    search = (ProposedCall(call_id="c9", name="search_flights", arguments={"q": "x"}),)
+    effects = (_message("m1", ToolOutcome.SUCCEEDED),)
+    running = _calling("Here are three options.", entries=(), calls=search)
+    looked = _sent("r1", "c9", "x", capability="search_flights", effect=False, delivered=None)
+    settled = _calling("Here are three options.", entries=(looked,), calls=search)
+
+    assert _words(_peer(running, effects)) == [None]
+    assert _words(_peer(settled, effects)) == ["Here are three options."]
+
+
+def test_a_frozen_round_recorded_before_the_decision_shows_its_text() -> None:
+    """ADR-0356 §8:1, §8:6: a frozen episode holds an entry for every call it proposed, so
+    a frozen round with calls and none was recorded before, its text the message."""
+    search = (ProposedCall(call_id="c9", name="search_flights", arguments={"q": "x"}),)
+    episode = _calling("Here are three options.", entries=(), calls=search, frozen=True)
+
+    assert _words(_peer(episode, (_message("m1", ToolOutcome.SUCCEEDED),))) == [
+        "Here are three options."
+    ]
 
 
 def test_a_message_calls_words_are_cut_to_the_bound() -> None:
