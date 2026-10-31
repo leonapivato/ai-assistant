@@ -24,6 +24,7 @@ from exchange_support import section, tag, tags
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActivationUnderstanding,
+    AskedCall,
     CallOutcomeKind,
     ChannelContext,
     ChannelIdentity,
@@ -42,6 +43,7 @@ from ai_assistant.core.types import (
     Profile,
     ProposedCall,
     Provenance,
+    QuestionPart,
     RecordedCall,
     RecordedChannelTrigger,
     RecordedDelivery,
@@ -62,12 +64,15 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.matters import EntryInput, InProgressEntry
 from ai_assistant.orchestration.person_block import KeptInMind, PersonBlock
+from ai_assistant.orchestration.person_calls import SET_PROFILE
 from ai_assistant.orchestration.planning import (
+    APPROVED_ACTION_TOOL,
     BRIEFING_HEADINGS,
     NEWS_OPENING,
     NOTE_REASONS,
     NOTHING_NEW,
     PLANNING_PROMPT,
+    ApprovedAction,
     CallOutcome,
     DigestedEvidence,
     DigestItem,
@@ -855,6 +860,34 @@ async def test_a_change_after_the_works_own_is_still_news() -> None:
     assert "- M2 is no longer pinned." in later
 
 
+async def test_an_own_change_undone_before_its_report_is_news() -> None:
+    """ADR-0360 §4:1, §4:4, review round 5: the result's value joins the baseline."""
+    news = await _next_round(
+        _inputs(),
+        RoundResponse(calls=(_call("c1", "set_profile", field="address", value="Lee"),)),
+        person_now=_now(),
+    )
+
+    assert "- Leo's address is no longer set." in news
+
+
+async def test_an_approved_profile_change_is_not_named_again() -> None:
+    """ADR-0360 §4:5, ADR-0321 §4:2, review round 5: an approved call is the call it ran."""
+    approved = ApprovedAction(
+        part=QuestionPart(round="round:asking", part=1),
+        call=AskedCall(part=1, tool=SET_PROFILE, values={"field": "address", "value": "Lee"}),
+    )
+    given = _inputs(approved=(approved,))
+
+    news = await _next_round(
+        given,
+        RoundResponse(calls=(_call("c1", APPROVED_ACTION_TOOL, action="A1"),)),
+        person_now=_now(address="Lee"),
+    )
+
+    assert news.endswith(NOTHING_NEW)
+
+
 async def test_a_pin_the_budget_leaves_out_is_not_told_as_unpinned() -> None:
     """ADR-0360 §4:1, review round 3: still reached, it is no news, pinned or unpinned."""
     given = _inputs(person=_block(KeptInMind(memory=BEACH, pinned=True)))
@@ -1168,6 +1201,55 @@ async def test_one_message_sent_to_two_places_is_matched_in_the_windows_own_plac
     assert "shown in the window" in str(chat.text)
     assert "shown in the window" not in str(telegram.text)
     assert "Booked." in str(telegram.text)
+
+
+async def test_a_failed_delivery_never_claims_the_window_item() -> None:
+    """ADR-0356 §3:2, review round 5: a message known not written is not the item shown."""
+    sending = _round(
+        "r1",
+        _call("c1", "text", to="Leo", words="Booked."),
+        _call("c2", "text", to="Leo", words="Booked."),
+        notes="Told him twice.",
+    )
+    record = _episode(
+        "booking",
+        rounds=(sending,),
+        calls=(
+            _entry(
+                "r1",
+                "c1",
+                "text",
+                delivered=RecordedDelivery(words="Booked.", went=CHAT, status=DeliveryStatus.SENT),
+            ),
+            _entry(
+                "r1",
+                "c2",
+                "text",
+                delivered=RecordedDelivery(
+                    words="Booked.", went=CHAT, status=DeliveryStatus.FAILED, reason="not written"
+                ),
+            ),
+        ),
+        channel=TELEGRAM,
+    )
+    window = PlaceWindow(
+        takes_message=True,
+        items=(
+            PlaceItem(
+                author=PlaceAuthor.ASSISTANT,
+                text="Booked.",
+                at=NOW - timedelta(hours=2),
+                episode_id=record.id,
+            ),
+            PlaceItem(author=PlaceAuthor.USER, text="What's on tonight?", at=NOW, is_input=True),
+        ),
+    )
+
+    briefing = await _briefing(_inputs(place=window, episodes=(record,)))
+
+    sent, failed = tag(section(briefing, "## Short-term memory"), "episode").held("did")
+    assert "shown in the window" in str(sent.text)
+    assert "shown in the window" not in str(failed.text)
 
 
 def test_a_tag_left_open_fails_at_once() -> None:

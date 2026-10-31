@@ -174,6 +174,7 @@ from ai_assistant.core.types import (
     CallShowed,
     CapabilityResult,
     ChannelIdentity,
+    DeliveryStatus,
     DiagnosticKind,
     DiagnosticSource,
     EpisodicMemory,
@@ -4047,20 +4048,23 @@ class _Request:
         longer pinned; and each field changed, with its new value, or as not set; the time
         zone saying that this work's times stay in the zone its briefing named. A pin or a
         field this work's own call changed comes back in that call's result, and is not
-        named again (§4:5): only the change the result beside it carries, to the value
-        that call left, so a later change made anywhere else is still news (§4:1).
+        named again (§4:5): the result beside the news carries it, so it joins what the
+        exchange has shown, and any later change, one undoing it among them, is news
+        (§4:1).
         """
         person = self._inputs.person_now
         if person is None:
             return []
         who = _line(self._naming.who)
+        # The changes the results beside the news carry are the exchange's already, so
+        # they join what it has shown, and a later change, even one undoing them, is news.
         own_pinned, own_unpinned, own_fields = self._chosen_here(round_id)
         lines: list[str] = []
         before = dict(shown.profile)
+        before.update((name, value) for name, value in own_fields.items() if name in before)
+        kept = (shown.kept | own_pinned) - own_unpinned
         for name, value in _profile_of(person.profile):
             if name not in before or before[name] == value:
-                continue
-            if name in own_fields and own_fields[name] == value:
                 continue
             said = name.replace("_", " ")
             if name == ProfileField.TIME_ZONE.value:
@@ -4077,11 +4081,11 @@ class _Request:
             )
         now = person.pins_reach
         for memory in person.pinned:
-            if memory.id in shown.kept or memory.id in own_pinned:
+            if memory.id in kept:
                 continue
             pinned = self._memory(memory, whole=True, extra=(("pinned", "yes"),))
             lines.append(f"- Now pinned: {pinned}")
-        for memory_id in sorted(shown.kept - now - own_unpinned):
+        for memory_id in sorted(kept - now):
             label = self._book.held(LabelKind.MEMORY, memory_id)
             if label is not None:
                 lines.append(f"- {label} is no longer pinned.")
@@ -4092,6 +4096,7 @@ class _Request:
 
         The calls whose results this report carries, and no earlier round's: the memories
         they pinned, those they unpinned, and each field with the value they set it to.
+        An approved action is read as the call its yes approved (ADR-0321 §4:2).
         """
         done = {
             one.call_id
@@ -4104,19 +4109,45 @@ class _Request:
         for planning_round in self._inputs.rounds:
             if planning_round.id != round_id:
                 continue
-            for call in planning_round.calls:
-                if call.call_id not in done:
+            for proposed in planning_round.calls:
+                if proposed.call_id not in done:
                     continue
+                call = self._as_run(proposed)
                 if call.name in {"pin", "unpin"}:
-                    named = self._book.resolve(str(call.arguments.get("memory", "")))
-                    if named is not None:
-                        (pinned if call.name == "pin" else unpinned).add(named.id)
+                    given = str(call.arguments.get("memory", ""))
+                    named = self._book.resolve(given)
+                    # An approved call's values hold the memory by its id, the label resolved.
+                    memory_id = (
+                        named.id
+                        if named is not None
+                        else given
+                        if self._book.held(LabelKind.MEMORY, given) is not None
+                        else None
+                    )
+                    if memory_id is not None:
+                        (pinned if call.name == "pin" else unpinned).add(memory_id)
                 elif call.name == "set_profile":
                     value = call.arguments.get("value")
                     fields[str(call.arguments.get("field", ""))] = (
                         value if isinstance(value, str) or value is None else str(value)
                     )
         return pinned, unpinned, fields
+
+    def _as_run(self, call: ProposedCall) -> ProposedCall:
+        """A call as it ran: an approved action as the call its yes approved (§4:2)."""
+        if call.name != APPROVED_ACTION_TOOL:
+            return call
+        named = self._book.resolve(str(call.arguments.get(APPROVED_ACTION_ARGUMENT, "")))
+        if named is None or named.kind is not LabelKind.APPROVED_ACTION:
+            return call
+        for one in self._inputs.approved:
+            if _approved_id(one.part) == named.id:
+                return ProposedCall(
+                    call_id=call.call_id,
+                    name=str(one.call.tool.capability),
+                    arguments=dict(one.call.values),
+                )
+        return call
 
     def _forgotten(self, shown: NewsShown) -> list[str]:
         """Each memory the exchange showed that the store no longer holds (#3536).
@@ -5097,6 +5128,18 @@ def _old_message_did(one: ProjectedRound, in_place: _InPlace | None) -> str:
     return _tag("did", [("from", _SYSTEM)], text)
 
 
+def _written_into(delivered: RecordedDelivery, window: str | None) -> bool:
+    """Whether a message call's message may be one the window shows, by where it went.
+
+    Into the window's own place alone, and not known to have failed, which wrote nothing.
+    """
+    return (
+        window is not None
+        and place_of(delivered.went) == window
+        and delivered.status is not DeliveryStatus.FAILED
+    )
+
+
 def _messages_in_place(
     record: EpisodicMemory, written: Sequence[str], window: str | None = None
 ) -> tuple[frozenset[int], frozenset[tuple[int, int]]]:
@@ -5108,7 +5151,8 @@ def _messages_in_place(
     one message, and the window is the conversation's most recent part, so the latest
     messages claim the items first. A message call claims an item only where it went
     into the window's own place, ``window``; one that went elsewhere is never the item,
-    whatever its words (§3:2); with no place known, none does.
+    whatever its words (§3:2); with no place known, none does; nor does one known to
+    have failed, which wrote nothing.
 
     Returns:
         The rounds whose message is shown, by position; and the message calls whose words
@@ -5126,7 +5170,7 @@ def _messages_in_place(
         round_at = position.get(entry.round)
         if entry.delivered is None or round_at is None:
             continue
-        if window is None or place_of(entry.delivered.went) != window:
+        if not _written_into(entry.delivered, window):
             continue
         calls = [one.call_id for one in processing.rounds[round_at].calls]
         index = calls.index(entry.call_id) if entry.call_id in calls else 0
