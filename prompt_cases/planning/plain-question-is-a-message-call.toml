@@ -1,11 +1,12 @@
 # ADR-0356 §11:1 case 1, §11:2: a plain question comes back as a text call answering
 # it, and not as the round's text, which reaches no one. No other reply is no other
 # message, so a call that sends none may stand beside it (the coordinator, 2026-10-31).
+# Leo told the system the time five minutes before asking, so it is answered as it stands.
 prompt = "planning"
 guards = "reply_as_note"
 came_from = "2026-10-31"
 set = "development"
-samples = 3
+samples = 6
 
 [property]
 check = "answers_by_message"

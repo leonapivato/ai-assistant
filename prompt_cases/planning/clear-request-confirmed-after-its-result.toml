@@ -7,7 +7,7 @@ set = "development"
 samples = 2
 
 [property]
-check = "only_says"
+check = "tells"
 phrases = ["9"]
 
 [input]

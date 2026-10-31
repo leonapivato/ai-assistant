@@ -606,6 +606,68 @@ def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
     )
 
 
+def test_asks_about_reads_the_first_asking_message_alone() -> None:
+    """ADR-0357 §8:3: a second asking text call is refused, so what it names is asked of none."""
+    second = RoundResponse(
+        calls=(_text("Shall I?", asks=["9.9"]), _text("Or this?", call_id="c2", asks=["1.1"]))
+    )
+
+    assert _round("asks_about", {"calls": ["1.1"]}, second) == (
+        "the round's question leaves out 1 of the named calls"
+    )
+
+
+def test_the_checks_that_decide_each_class_refuse_their_counterexamples() -> None:
+    """Review round 1: each check refuses the counterexample its class names."""
+    reliance = ProposedCall(call_id="c9", name="note_reliance", arguments={"memories": ["M1"]})
+    spawn = ProposedCall(call_id="c8", name="spawn", arguments={"instruction": "Pay the invoice."})
+    book = ProposedCall(
+        call_id="c7", name="book_table", arguments={"restaurant": "Luigi's", "party": 2}
+    )
+    parking = ProposedCall(
+        call_id="c6", name="spawn", arguments={"instruction": "Research parking near Luigi's."}
+    )
+    maren = ProposedCall(
+        call_id="c5", name="spawn", arguments={"instruction": "Remind Leo to confirm with Maren."}
+    )
+    told: dict[str, object] = {"phrases": ["mother"]}
+    assert (
+        _round("tells", told, RoundResponse(calls=(_text("Call your mother."), reliance))) is None
+    )
+    assert _round(
+        "tells", told, RoundResponse(calls=(_text("Remind you to call your mother?"),))
+    ) == ("the message asks something, rather than telling")
+    report: dict[str, object] = {"capabilities": ["text", "search_memory", "note_reliance"]}
+    assert _round("acts_within", report, RoundResponse(calls=(_text("Invoice due."),))) is None
+    assert _round("acts_within", report, RoundResponse()) == "the round makes no call"
+    assert _round("acts_within", report, RoundResponse(calls=(spawn,))) == (
+        "the round makes a call to a capability not named"
+    )
+    ends: dict[str, object] = {"capabilities": ["note_reliance"]}
+    assert _round("nothing_but", ends, RoundResponse()) is None
+    assert _round("nothing_but", ends, RoundResponse(calls=(reliance,))) is None
+    assert _round("nothing_but", ends, RoundResponse(calls=(spawn,))) == (
+        "the round makes a call to a capability not named"
+    )
+    both: dict[str, object] = {
+        "capabilities": ["book_table", "spawn"],
+        "phrases": ["Luigi", "Maren"],
+    }
+    assert _round("includes_with", both, RoundResponse(calls=(book, maren))) is None
+    assert _round("includes_with", both, RoundResponse(calls=(book, parking))) == (
+        "the named calls' arguments leave out 1 of the named phrases"
+    )
+    answer: dict[str, object] = {"phrases": ["10:30"]}
+    assert _round(
+        "answers_by_message", answer, RoundResponse(calls=(_text("Is it at 10:30?"),))
+    ) == ("the message asks something, rather than telling")
+    search = ProposedCall(call_id="c4", name="search_memory", arguments={"query": "dentist"})
+    assert _round("answers_or_searches", answer, RoundResponse(calls=(search,))) is None
+    assert _round("answers_or_searches", answer, RoundResponse(text="It is at 10:30.")) == (
+        "the answer is written as the round's text, and no message carries it"
+    )
+
+
 def test_answers_by_message_allows_a_call_that_sends_nothing_beside_the_answer() -> None:
     """ADR-0356 §11:2, as ruled: no other reply is no other message."""
     params: dict[str, object] = {"phrases": ["10:30"]}

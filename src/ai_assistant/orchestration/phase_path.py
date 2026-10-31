@@ -4540,8 +4540,8 @@ class PhasePath:
         ADR-0356 §5:5, with ADR-0359 and ADR-0360's news: before each report, each memory
         the exchange named by an ``M`` label is looked up, each matter it showed is read
         again, each running work is read for its meaning, each work it showed running is
-        checked for having ended, and the person block is assembled again, so the news can
-        say what changed. Nothing is read for a work's first round. A store that cannot be
+        checked for having ended, and the person's profile and pins are read, so the news
+        can say what changed. Nothing is read for a work's first round. A store that cannot be
         read says nothing: no memory is named forgotten, and no matter changed.
         """
         work = working.work
@@ -4562,6 +4562,11 @@ class PhasePath:
                 _log.warning("planning_stories_unreadable", stage="planning")
         meanings, ended = await self._works_now(work.shown.running, state, given)
         person = await self._person_now(state, given)
+        # ADR-0309 §5:10: a record the news shows is held among what the activation was
+        # given, so the episode inherits its placement, as any record shown is.
+        working.supplied.obtained(record for record in ended.values() if record is not None)
+        if person is not None:
+            working.supplied.obtained(person.pinned)
         return _Reread(held, matters, meanings, ended, person)
 
     async def _person_now(
@@ -4576,8 +4581,10 @@ class PhasePath:
         activation the block does not reach, or a store that could not be read.
         """
         blocks = self._person_blocks
-        person_id = None if state is None else activation_person(state.trigger)
-        if blocks is None or person_id is None or state is None or state.person_block is None:
+        if blocks is None or state is None or state.person_block is None:
+            return None
+        person_id = activation_person(state.trigger)
+        if person_id is None:
             return None
         try:
             model = await blocks.store.read(person_id)
@@ -4623,7 +4630,10 @@ class PhasePath:
                     self._memory, [episode_address(one) for one in gone], given.supply
                 )
             except MemoryStoreError:
+                # Nothing is established: none is named ended, and each is read again
+                # before the next report, so its short view is not lost.
                 _log.warning("planning_episodes_unread", stage="planning")
+                return meanings, {}
         return meanings, {one: found.get(episode_address(one)) for one in gone}
 
     async def _wait_on_older(self, state: ActivationState, working: PhaseWorking) -> None:

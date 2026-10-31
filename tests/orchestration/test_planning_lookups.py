@@ -427,3 +427,62 @@ async def test_a_story_reads_own_view_lists_the_older_notes_and_points_nowhere()
     shown = _view(completer)
     assert [one.text for one in _older(shown)] == ["the car inspection is due"]
     assert shown.get(_CUE) is None
+
+
+async def test_two_follow_ups_each_take_the_digest_of_their_own_question() -> None:
+    """ADR-0308 §6:7, ADR-0356 §5:4: digests matched by question, whatever their order."""
+    later = DigestItem("open until dusk", LabelKind.RESULT, "result:1")
+    early = DigestItem("open now", LabelKind.RESULT, "result:1")
+    evidence = (
+        DigestedEvidence("result:1", answered=True, items=(later,), question="until when"),
+        DigestedEvidence("result:1", answered=True, items=(early,), question="is it open"),
+    )
+
+    def follow(call_id: str, question: str) -> ProposedCall:
+        return ProposedCall(
+            call_id=call_id, name="follow_up", arguments={"result": "R1", "looking_for": question}
+        )
+
+    completer, _ = await _reported(
+        (follow("c1", "is it open"), follow("c2", "until when")),
+        lambda round_id: (
+            CallOutcome(round_id, "c1", CallOutcomeKind.DONE, result_id="result:1", digested=True),
+            CallOutcome(round_id, "c2", CallOutcomeKind.DONE, result_id="result:1", digested=True),
+        ),
+        later={"evidence": evidence},
+    )
+
+    first, second = reported(completer.last_call)
+    assert [one.text for one in tags(first["evidence"][0], "evidence")] == ["open now"]
+    assert [one.text for one in tags(second["evidence"][0], "evidence")] == ["open until dusk"]
+
+
+async def test_two_follow_ups_asking_alike_each_take_one_digest_in_order() -> None:
+    """Two calls asking one question of one result: one digest each, in call order."""
+    one = DigestItem("first read", LabelKind.RESULT, "result:1")
+    two = DigestItem("second read", LabelKind.RESULT, "result:1")
+    evidence = (
+        DigestedEvidence("result:1", answered=True, items=(one,), question="hours"),
+        DigestedEvidence("result:1", answered=True, items=(two,), question="hours"),
+    )
+    calls = tuple(
+        ProposedCall(
+            call_id=call_id, name="follow_up", arguments={"result": "R1", "looking_for": "hours"}
+        )
+        for call_id in ("c1", "c2")
+    )
+
+    completer, _ = await _reported(
+        calls,
+        lambda round_id: tuple(
+            CallOutcome(
+                round_id, call_id, CallOutcomeKind.DONE, result_id="result:1", digested=True
+            )
+            for call_id in ("c1", "c2")
+        ),
+        later={"evidence": evidence},
+    )
+
+    first, second = reported(completer.last_call)
+    assert [one.text for one in tags(first["evidence"][0], "evidence")] == ["first read"]
+    assert [one.text for one in tags(second["evidence"][0], "evidence")] == ["second read"]
