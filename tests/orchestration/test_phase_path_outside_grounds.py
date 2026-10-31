@@ -403,6 +403,7 @@ async def test_a_digest_the_episode_and_the_working_set_both_hold_is_one_ground(
         {"ground": "digest_answered", "record": "R1"},
         {"ground": "notes_marked", "record": marked.id},
     ]
-    # The last round's text is its notes (ADR-0356 §7:2), marked too, and named once.
-    last = [*each_once, {"ground": "notes_marked", "record": answered.id}]
-    assert _grounds(sink) == [[], each_once, last]
+    # The last round's text is its notes alone (ADR-0356 §7:2-§7:3), marked too; with no
+    # call, it has nothing to authorize, so it brings no entry of its own.
+    assert answered.notes_marked
+    assert _grounds(sink) == [[], each_once]

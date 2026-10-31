@@ -1,0 +1,15 @@
+# #3479: this work absorbed the maths question's work before it acted. Its short view
+# shows notes planning an answer and no did: nothing was sent. The round answers what
+# Leo asks now and says nothing claiming the withdrawn question was answered.
+prompt = "planning"
+guards = "unsent_told_as_sent"
+came_from = "#3479"
+set = "development"
+samples = 2
+
+[property]
+check = "read"
+read = """A text call tells Leo his dentist is tomorrow at 10:30. No text call says that the maths question was answered or that 144 was sent, and none tells Leo to ignore an earlier answer."""
+
+[input]
+file = "absorbed-work-that-sent-nothing-is-not-said-to-have-answered.json"

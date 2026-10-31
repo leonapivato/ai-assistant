@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Final
 
+from exchange_support import Tag, says, tag, text_call
 from phases_support import SETTLE, open_conversation, until
 from task_support import seams
 from test_phases_matters import (
@@ -35,7 +36,9 @@ from test_phases_matters import (
     _harness,
     _has,
     _of,
+    _offers,
     _Planner,
+    _Request,
     _start,
     _Understanding,
 )
@@ -84,28 +87,29 @@ async def _offered(harness: Harness, older: str, count: int = 1) -> None:
     await until(made, what=f"{count} offer(s) to be made")
 
 
-def _offer_label(request: dict[str, Any], words: str) -> str:
-    """The label of the offer whose input holds ``words``, or of the only one open.
+def _offer_label(request: _Request, words: str) -> str:
+    """The label of the offer whose input holds ``words``, or of the only one shown.
 
     An offering activation that has ended is shown with no input, so the only offer
-    open is named whatever it shows.
+    shown is named whatever it shows.
     """
-    offers = list(request.get("offers") or ())
+    offers = _offers(request)
     if len(offers) == 1:
-        return str(offers[0]["offer"])
+        return str(offers[0].get("label"))
     for one in offers:
-        if words in str(one.get("input")):
-            return str(one["offer"])
+        if any(words in str(said.text) for said in one.held("said")):
+            return str(one.get("label"))
     msg = f"no offer holding {words!r}"
     raise AssertionError(msg)
 
 
 def _answer_and_spawn(
     *answers: tuple[str, bool], text: str = "Changed it to 9 PM."
-) -> Callable[[dict[str, Any]], RoundResponse]:
-    """A round answering each offer named by its input's words, beside a spawn."""
+) -> Callable[[_Request], RoundResponse]:
+    """A round answering each offer named by its input's words, beside a spawn and a
+    ``text`` call sending ``text`` (a round's own text is its notes alone, ADR-0356 §7:3)."""
 
-    def reply(request: dict[str, Any]) -> RoundResponse:
+    def reply(request: _Request) -> RoundResponse:
         calls = [
             _call(
                 f"a{index}",
@@ -117,7 +121,8 @@ def _answer_and_spawn(
             for index, (words, take) in enumerate(answers, 1)
         ]
         calls.append(_call("s1", "spawn", instruction="Remind them at 9 PM.", delay_minutes=60))
-        return RoundResponse(text=text, calls=tuple(calls))
+        calls.append(text_call(text, call_id="t1"))
+        return RoundResponse(calls=tuple(calls))
 
     return reply
 
@@ -127,15 +132,16 @@ def _older_script(planner: _Planner, older_text: str, answering: Any) -> None:
     planner.script(
         older_text,
         RoundResponse(
-            text="Reminder set for 9:30 PM.",
             calls=(
+                text_call("Reminder set for 9:30 PM.", call_id="t0"),
                 _call("c1", "remember", fact="Takes vitamins.", why="a habit", rests_on_input=True),
             ),
         ),
         # Planned before the offer, so held back by ADR-0349 §7:14 and never written.
-        RoundResponse(text="Still working."),
+        says("Still working.", call_id="t-held"),
         answering,
-        RoundResponse(text="Your reminder stays at 9:30 PM for now."),
+        says("Your reminder stays at 9:30 PM for now.", call_id="t2"),
+        RoundResponse(),
     )
     planner.hold(older_text, from_round=2)
 
@@ -146,31 +152,39 @@ async def _started(understanding: _Understanding, planner: _Planner, **knobs: An
     return harness
 
 
-def _round_shown(planner: _Planner, older_text: str, number: int) -> dict[str, Any]:
-    """Round ``number`` of the older, as its round after it was shown it."""
-    later = planner.requests[older_text][number]
-    return dict(later["rounds"][number - 1])
+def _round_shown(planner: _Planner, older_text: str, number: int) -> list[dict[str, Any]]:
+    """What came of each call of round ``number`` of the older, as the round after it
+    was shown it."""
+    return planner.requests[older_text][number].results(number)
 
 
-def _answers(shown: dict[str, Any]) -> list[str]:
+def _answer_values(shown: list[dict[str, Any]]) -> list[Tag]:
+    """Each answer's result: the ``episode`` tag naming the offer and what it came to."""
     return [
-        str(one["result"]["value"]["answer"])
-        for one in shown["calls"]
+        tag(str(one["result"]["value"]), "episode")
+        for one in shown
         if one["capability"] == "answer_offer"
     ]
 
 
-def _answer_values(shown: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        dict(one["result"]["value"])
-        for one in shown["calls"]
-        if one["capability"] == "answer_offer"
-    ]
+def _answers(shown: list[dict[str, Any]]) -> list[str]:
+    return [str(one.get("answer")) for one in _answer_values(shown)]
 
 
-def _spawn_outcome(shown: dict[str, Any]) -> str:
-    (spawn,) = [one for one in shown["calls"] if one["capability"] == "spawn"]
-    return str(spawn.get("outcome"))
+def _outcome_of(shown: list[dict[str, Any]], capability: str) -> str:
+    (call,) = [one for one in shown if one["capability"] == capability]
+    return str(call.get("outcome"))
+
+
+def _spawn_outcome(shown: list[dict[str, Any]]) -> str:
+    return _outcome_of(shown, "spawn")
+
+
+def _declined(request: _Request) -> str | None:
+    """The reason the work a request waits on declined its input, as concurrent stimuli
+    show it (ADR-0349 §7:22)."""
+    waited = tag(request.section("## Concurrent stimuli"), "stimulus", waited_on="yes")
+    return waited.get("declined")
 
 
 # --- §4:2: a take that did not come to a take holds the round back ------------------------
@@ -211,14 +225,14 @@ async def test_a_take_refused_at_the_limit_dispatches_no_spawn_and_no_message(
     shown = _round_shown(planner, older_text, 3)
     assert _answers(shown) == ["declined"]
     (value,) = _answer_values(shown)
-    assert _AT_LIMIT in value["because"], "#3471: the next round is told why"
-    assert value["episode"] in value["because"], "naming the offering work by its label"
+    because = str(value.get("because"))
+    assert _AT_LIMIT in because, "#3471: the next round is told why"
+    assert str(value.get("label")) in because, "naming the offering work by its label"
     assert _NOT_TAKEN in _spawn_outcome(shown)
     assert _AT_LIMIT in _spawn_outcome(shown), "the held-back call says what it came to"
-    assert _NOT_TAKEN in shown["text_was"]
-    assert len(planner.requests[older_text]) == 4, "planning ran a round again"
-    (waited,) = planner.requests[newer_text][0]["waiting_on"]
-    assert waited["declined_this_input"] == _LIMIT_REACHED
+    assert _NOT_TAKEN in _outcome_of(shown, "text"), "and so does the held-back message"
+    assert len(planner.requests[older_text]) == 5, "planning ran a round again"
+    assert _declined(planner.requests[newer_text][0]) == _LIMIT_REACHED
     await harness.engine.aclose()
 
 
@@ -247,11 +261,13 @@ async def test_a_take_of_an_offer_withdrawn_dispatches_no_spawn_and_no_message(
     shown = _round_shown(planner, older_text, 3)
     assert _answers(shown) == ["withdrawn"]
     (value,) = _answer_values(shown)
-    assert value["because"] == value["episode"] + _WITHDRAWN, (
+    assert value.get("because") == str(value.get("label")) + _WITHDRAWN, (
         "#3477: the next round is told the offering work was stopped, by its label, and "
         "that the work its input asked for is not to be done"
     )
-    assert value["understood_as"] == newer_text, "the stopped input is named"
+    assert [one.text for one in value.held("understood")] == [newer_text], (
+        "the stopped input is named"
+    )
     assert _NOT_TAKEN in _spawn_outcome(shown)
     assert _WITHDRAWN in _spawn_outcome(shown), "the held-back call says what it came to"
     assert newer_text not in planner.requests, "the stopped input's work is not done"
@@ -290,7 +306,7 @@ async def test_two_answers_one_taken_and_one_refused_dispatch_nothing_else(
     assert await harness.plans.spawned_tasks([older]) == ()
     shown = _round_shown(planner, older_text, 3)
     assert sorted(_answers(shown)) == ["declined", "taken"]
-    assert [("because" in one) for one in _answer_values(shown)].count(True) == 1
+    assert [one.get("because") is not None for one in _answer_values(shown)].count(True) == 1
     assert _NOT_TAKEN in _spawn_outcome(shown)
     assert _AT_LIMIT in _spawn_outcome(shown)
     assert "Changed it to 9 PM." not in await _assistant(harness, conversation)
@@ -308,13 +324,13 @@ async def test_an_answer_naming_no_open_offer_dispatches_no_spawn(
     understanding, planner = _Understanding(), _Planner()
     older_text, newer_text = "remind me about vitamins at 9:30", "make it 9pm, continues: vitamins"
 
-    def misnamed(request: dict[str, Any]) -> RoundResponse:
-        (earlier,) = request["episode_window"]
+    def misnamed(request: _Request) -> RoundResponse:
+        earlier = tag(request.section("## Short-term memory"), "episode")
         return RoundResponse(
-            text="Changed it to 9 PM.",
             calls=(
-                _call("a1", "answer_offer", offer=str(earlier["label"]), take=True),
+                _call("a1", "answer_offer", offer=str(earlier.get("label")), take=True),
                 _call("s1", "spawn", instruction="Remind them at 9 PM.", delay_minutes=60),
+                text_call("Changed it to 9 PM.", call_id="t1"),
             ),
         )
 
@@ -337,11 +353,12 @@ async def test_an_answer_naming_no_open_offer_dispatches_no_spawn(
     assert await harness.plans.spawned_tasks([older]) == ()
     assert "Changed it to 9 PM." not in await _assistant(harness, conversation)
     shown = _round_shown(planner, older_text, 3)
-    (answer,) = [one for one in shown["calls"] if one["capability"] == "answer_offer"]
-    assert "names no offer open" in str(answer["outcome"])
+    assert "names no offer open" in _outcome_of(shown, "answer_offer")
     assert _NOT_TAKEN in _spawn_outcome(shown)
     assert "names no offer open to this work" in _spawn_outcome(shown)
-    assert "offers" in planner.requests[older_text][3], "the offer is still open to answer"
+    still = planner.requests[older_text][3]
+    assert _offers(still), "the offer is still open to answer"
+    assert "is no longer open" not in still.news()
     await harness.engine.aclose()
 
 
@@ -359,10 +376,10 @@ async def test_an_answer_planning_refused_before_acting_dispatches_no_spawn(
         planner,
         older_text,
         RoundResponse(
-            text="Changed it to 9 PM.",
             calls=(
                 _call("a1", "answer_offer", offer="E99", take=True),
                 _call("s1", "spawn", instruction="Remind them at 9 PM.", delay_minutes=60),
+                text_call("Changed it to 9 PM.", call_id="t1"),
             ),
         ),
     )
@@ -377,11 +394,11 @@ async def test_an_answer_planning_refused_before_acting_dispatches_no_spawn(
     assert await harness.plans.spawned_tasks([older]) == ()
     assert "Changed it to 9 PM." not in await _assistant(harness, conversation)
     shown = _round_shown(planner, older_text, 3)
-    (answer,) = [one for one in shown["calls"] if one["capability"] == "answer_offer"]
+    (answer,) = [one for one in shown if one["capability"] == "answer_offer"]
     assert "result" not in answer, "it never ran"
     assert _NOT_TAKEN in _spawn_outcome(shown)
     assert "it was not allowed, so it settled nothing" in _spawn_outcome(shown)
-    assert _NOT_TAKEN in shown["text_was"]
+    assert _NOT_TAKEN in _outcome_of(shown, "text"), "the held-back message says so too"
     await harness.engine.aclose()
 
 
@@ -504,6 +521,5 @@ async def test_a_decline_planning_chose_dispatches_the_spawn_beside_it(
     shown = _round_shown(planner, older_text, 3)
     assert _answers(shown) == ["declined"]
     assert _NOT_TAKEN not in _spawn_outcome(shown)
-    (waited,) = planner.requests[newer_text][0]["waiting_on"]
-    assert waited["declined_this_input"] == "not this work's"
+    assert _declined(planner.requests[newer_text][0]) == "not this work's"
     await harness.engine.aclose()

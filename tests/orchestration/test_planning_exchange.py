@@ -9,11 +9,10 @@ refusals a call whose condition does not hold comes back with.
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from typing import Any, Final
 
-from exchange_support import news, reported
+from exchange_support import news, reported, section, tag, tags
 from test_planning import _AT, _call, _digest, _inputs, _stage
 
 from ai_assistant.core.diagnostics import diagnosed_activation
@@ -36,6 +35,7 @@ from ai_assistant.orchestration.matter_calls import (
     STOP_ACTIVATION,
 )
 from ai_assistant.orchestration.planning import (
+    NEWS_OPENING,
     NOTHING_NEW,
     WAITING_ROUND,
     CallOutcome,
@@ -51,6 +51,13 @@ from ai_assistant.testing.parties import OWNERS_WORDS
 _A: Final = "0b8f8f0e-2a5c-4c55-9a6c-6a2c1f0b0d11"
 _B: Final = "1c9a9f1f-3b6d-4d66-8b7d-7b3d2a1c1e22"
 _CHAT: Final = ChannelIdentity(channel_type="conversation", instance_id="chat-1")
+
+
+def _after_now(text: str) -> str:
+    """The news past its first line, which says when the report was made (ADR-0360)."""
+    now, _, rest = text.partition("\n")
+    assert now.startswith("Now: ")
+    return rest
 
 
 def _next(
@@ -128,7 +135,7 @@ async def test_a_report_holds_one_result_for_each_call_in_order_then_the_news() 
     assert refused["outcome"].startswith("refused")
     assert refused["outcome"].endswith(": no such thing")
     assert tidied["outcome"].startswith("started")
-    assert report.news == NOTHING_NEW
+    assert _after_now(report.news) == NOTHING_NEW
 
 
 async def test_a_result_resting_on_outside_content_is_its_digests_evidence_marked() -> None:
@@ -155,12 +162,12 @@ async def test_a_result_resting_on_outside_content_is_its_digests_evidence_marke
         "value": "read for you by a digest, under evidence",
     }
     (evidence,) = searched["evidence"]
-    assert evidence["digest_of"] == "R1"
-    (item,) = evidence["digest"]["evidence"]
-    assert item["text"] == "It opens at nine."
-    assert item["outside_content"].startswith("rests on outside content")
+    item = tag(evidence, "evidence")
+    assert item.get("source") == "R1"
+    assert item.text == "It opens at nine."
+    assert item.get("outside") == "yes"
     # Shown once: not again as news, and the round's notes are marked.
-    assert news(completer.calls[1], 0) == NOTHING_NEW
+    assert _after_now(news(completer.calls[1], 0)) == NOTHING_NEW
     assert second.round.notes_marked
     assert second.read_outside
 
@@ -185,14 +192,18 @@ async def test_news_lists_an_offer_newly_open_and_one_that_closed_and_never_repe
     closed = _next(planned, still, offers=())
     await stage.plan(closed)
 
-    shown = news(completer.calls[1], 0)
-    assert isinstance(shown, dict)
-    (offer,) = shown["offers_open"]
-    assert offer["understood_as"] == "Two."
-    label = offer["offer"]
-    assert news(completer.calls[2], 1) == NOTHING_NEW, "never repeats what it showed"
-    assert news(completer.calls[3], 2) == {"offers_closed": [label]}
-    assert "offers" not in json.loads(completer.calls[0].exchange.briefing)
+    shown = _after_now(news(completer.calls[1], 0))
+    opening, _, offered = shown.partition("\n")
+    assert opening == NEWS_OPENING
+    offer = tag(offered, "stimulus", offered="yes")
+    assert offer.held("understood")[0].text == "Two."
+    label = offer.get("label")
+    assert label is not None
+    assert _after_now(news(completer.calls[2], 1)) == NOTHING_NEW, "never repeats what it showed"
+    assert _after_now(news(completer.calls[3], 2)) == (
+        f"{NEWS_OPENING}\n- The offer of {label} is no longer open."
+    )
+    assert tags(section(completer.calls[0].exchange.briefing, "## Concurrent stimuli")) == []
 
 
 async def test_an_offer_the_briefing_showed_is_no_news() -> None:
@@ -200,8 +211,9 @@ async def test_an_offer_the_briefing_showed_is_no_news() -> None:
     inputs = _inputs(offers=(_offer(),))
     planned = await stage.plan(inputs)
     await stage.plan(_next(planned, inputs))
-    assert json.loads(completer.calls[0].exchange.briefing)["offers"]
-    assert news(completer.calls[1], 0) == NOTHING_NEW
+    concurrent = section(completer.calls[0].exchange.briefing, "## Concurrent stimuli")
+    assert tag(concurrent, "stimulus", offered="yes").get("label") == "E1"
+    assert _after_now(news(completer.calls[1], 0)) == NOTHING_NEW
 
 
 async def test_a_message_calls_result_says_what_it_sent_where_and_how() -> None:

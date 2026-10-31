@@ -11,12 +11,12 @@ applies.
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from test_planning import FLAG_ECHO, _earlier, _flags, _inputs, _sent, _stage
+from exchange_support import reported, section, tag
+from test_planning import _inputs, _sent, _stage
 
 from ai_assistant.core.types import (
     PEER_COULDNT_FINISH_LINE,
@@ -77,6 +77,29 @@ def _view(**fields: Any) -> PeerView:
     return PeerView(**values)
 
 
+async def _results(
+    calls: tuple[ProposedCall, ...], *outcomes: CallOutcome, **fields: Any
+) -> list[dict[str, Any]]:
+    """What came of one round's ``calls``, as the next round's report shows each.
+
+    ADR-0356 §5:3-§5:4: a call's result reaches the round after it, in its report, never
+    the briefing. Each outcome is taken as the first round's, whatever round it names.
+    """
+    stage, completer, _ = _stage(RoundResponse(calls=calls), RoundResponse())
+    inputs = _inputs(**fields)
+    planned = await stage.plan(inputs)
+    await stage.plan(
+        replace(
+            inputs,
+            work=planned.work,
+            rounds=(*inputs.rounds, planned.round),
+            labels=(*inputs.labels, *planned.labels),
+            outcomes=tuple(replace(one, round_id=planned.round.id) for one in outcomes),
+        )
+    )
+    return reported(completer.calls[1], 0)
+
+
 def _matters(**fields: Any) -> dict[str, Any]:
     """Inputs of a round offered the calls on running work, with their labels."""
     values: dict[str, Any] = {
@@ -114,33 +137,36 @@ async def test_the_list_pulls_running_part_is_the_in_progress_entries() -> None:
         result_id="result:1",
         tasks=TaskListing(running=(entry, withheld), listed=True),
     )
-    stage, completer, _ = _stage(RoundResponse(text=""))
-    earlier = _earlier(calls=(ProposedCall(call_id="c1", name="list_tasks", arguments={}),))
 
-    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+    (listed,) = await _results(
+        (ProposedCall(call_id="c1", name="list_tasks", arguments={}),), outcome
+    )
 
-    running = _sent(completer)["rounds"][0]["calls"][0]["result"]["value"]["running"]
+    running = listed["result"]["value"]["running"]
     assert running[0] == {
         "episode": running[0]["episode"],
         "place": "the person's Telegram chat",
-        "input": "search flats",
+        "input": running[0]["input"],
         "has_acted": True,
     }
     assert running[0]["episode"].startswith("E")
-    assert "scheduled" in running[1]["input"], "a task's instruction is withheld, said why"
+    assert tag(running[0]["input"], "said").text == "search flats"
+    # A task's instruction is withheld: the tag says so, and carries none of it.
+    withheld_task = tag(running[1]["input"], "task")
+    assert (withheld_task.get("withheld"), withheld_task.text) == ("yes", None)
 
 
 async def test_an_offer_is_shown_under_the_offering_activations_label() -> None:
     """§7:19: the offered input, as an entry shows input, with the meaning recorded."""
-    stage, completer, _ = _stage(RoundResponse(text=""), prompt=FLAG_ECHO)
+    stage, completer, _ = _stage(RoundResponse(text=""))
     offer = OfferShown(activation_id=_B, input="only two bedrooms", meaning="Only two beds.")
 
     planned = await stage.plan(_inputs(**_matters(offers=(offer,))))
 
-    (shown,) = json.loads(completer.last_call.exchange.briefing)["offers"]
-    assert shown["offer"].startswith("E")
-    assert (shown["input"], shown["understood_as"]) == ("only two bedrooms", "Only two beds.")
-    assert {"offers", "running_work"} <= _flags(completer)
+    shown = tag(section(_sent(completer), "## Concurrent stimuli"), "stimulus", offered="yes")
+    assert (shown.get("label") or "").startswith("E")
+    assert shown.held("said")[0].text == "only two bedrooms"
+    assert shown.held("understood")[0].text == "Only two beds."
     assert any(one.id == f"activation:{_B}" for one in planned.labels)
 
 
@@ -149,7 +175,7 @@ async def test_an_answer_naming_the_offers_label_maps_to_its_episode() -> None:
     offer = OfferShown(activation_id=_B, input="only two bedrooms", meaning="Only two beds.")
     first, completer, _ = _stage(RoundResponse(text=""))
     await first.plan(_inputs(**_matters(offers=(offer,))))
-    label = json.loads(completer.last_call.exchange.briefing)["offers"][0]["offer"]
+    label = tag(_sent(completer), "stimulus", offered="yes").get("label")
     answering, _, _ = _stage(
         RoundResponse(
             calls=(
@@ -168,7 +194,7 @@ async def test_an_answer_naming_the_offers_label_maps_to_its_episode() -> None:
 
 async def test_a_waiting_round_is_shown_what_it_waits_on_and_why_it_was_declined() -> None:
     """§7:23, §7:26: each as an entry shows it, and the decline's reason."""
-    stage, completer, _ = _stage(RoundResponse(text=""), prompt=FLAG_ECHO)
+    stage, completer, _ = _stage(RoundResponse(text=""))
     waited = RunningShown(
         activation_id=_A,
         place=_LINE,
@@ -179,18 +205,16 @@ async def test_a_waiting_round_is_shown_what_it_waits_on_and_why_it_was_declined
 
     await stage.plan(_inputs(**_matters(waiting=(waited,), declined=((_A, "already booked"),))))
 
-    (shown,) = json.loads(completer.last_call.exchange.briefing)["waiting_on"]
-    assert shown["place"] == "telegram:ref/42"
-    assert (shown["input"], shown["has_acted"]) == ("book Saturday", True)
-    assert shown["declined_this_input"] == "already booked"
-    # ADR-0356 §5:2: one instruction for the whole work, so the waiting round's line in
-    # place of the rest is never sent; a call it may not make is refused (§4:5).
-    assert "waiting" not in _flags(completer)
+    shown = tag(section(_sent(completer), "## Concurrent stimuli"), "stimulus", waited_on="yes")
+    assert shown.get("origin") == "Telegram"
+    assert shown.held("said")[0].text == "book Saturday"
+    assert shown.get("acted") == "yes"
+    assert shown.get("declined") == "already booked"
 
 
 async def test_earlier_work_is_the_peer_view_read_as_provisional_with_its_marks() -> None:
     """§6:9-§6:13, §7:10: input, meaning as provisional, notes with marks, what it did."""
-    stage, completer, _ = _stage(RoundResponse(text="kept"), prompt=FLAG_ECHO)
+    stage, completer, _ = _stage(RoundResponse(text="kept"))
     view = _view(
         notes=(PeerNotes(notes=_text("Three in Leith.")), PeerNotes(notes=_text("x"), marked=True)),
         did=(
@@ -204,18 +228,19 @@ async def test_earlier_work_is_the_peer_view_read_as_provisional_with_its_marks(
         _inputs(earlier_work=(PeerShown(activation_id=_A, view=view, ended=True),))
     )
 
-    (shown,) = json.loads(completer.last_call.exchange.briefing)["earlier_work"]
-    assert shown["status"] == "ended"
-    assert shown["input"] == "search flats"
-    assert shown["doing"].startswith("provisional")
-    assert shown["found"][0] == {"notes": "Three in Leith."}
-    assert "outside_content" in shown["found"][1]
-    assert shown["did"] == [
+    shown = tag(section(_sent(completer), "## Short-term memory"), "episode")
+    assert shown.get("status") == "ended"
+    assert [one.text for one in shown.held("said")] == ["search flats"]
+    (doing,) = shown.held("understood")
+    assert (doing.text, doing.get("provisional")) == ("Search for flats.", "yes")
+    plain, marked = shown.held("notes")
+    assert (plain.text, plain.get("outside")) == ("Three in Leith.", None)
+    assert (marked.text, marked.get("outside")) == ("x", "yes")
+    assert [one.text for one in shown.held("did")] == [
         "the tool remember ran",
         "the tool book may have run; whether it did is not known",
         "sent the message: Searching.",
     ]
-    assert "earlier_work" in _flags(completer)
     assert planned.round.notes_marked, "a marked note read marks the round's notes"
 
 
@@ -234,10 +259,11 @@ async def test_a_failed_activations_couldnt_finish_is_a_fixed_line() -> None:
 
     await stage.plan(_inputs(earlier_work=(PeerShown(activation_id=_A, view=view, ended=True),)))
 
-    (shown,) = json.loads(completer.last_call.exchange.briefing)["earlier_work"]
-    assert shown["did"] == [PEER_COULDNT_FINISH_LINE]
-    assert "outside" in shown["input"]
-    assert "doing" not in shown
+    shown = tag(section(_sent(completer), "## Short-term memory"), "episode")
+    assert [one.text for one in shown.held("did")] == [PEER_COULDNT_FINISH_LINE]
+    (received,) = shown.held("input")[0].tags
+    assert (received.get("withheld"), received.text) == ("yes", None), "outside: withheld"
+    assert shown.held("understood") == []
 
 
 async def test_a_stop_calls_result_and_a_refusal_naming_its_absorber() -> None:
@@ -253,26 +279,24 @@ async def test_a_stop_calls_result_and_a_refusal_naming_its_absorber() -> None:
         "round:earlier",
         "c2",
         CallOutcomeKind.NOT_DONE,
-        reason="not done: newer work absorbed it since it was shown, so nothing was stopped",
+        reason="newer work absorbed it since it was shown, so nothing was stopped",
         peer=PeerShown(activation_id=_B, absorbed_by=_A),
     )
-    earlier = _earlier(
-        calls=(
-            ProposedCall(call_id="c1", name="stop_activation", arguments={"activation": "E1"}),
-            ProposedCall(call_id="c2", name="stop_activation", arguments={"activation": "E2"}),
-        )
+    calls = (
+        ProposedCall(call_id="c1", name="stop_activation", arguments={"activation": "E1"}),
+        ProposedCall(call_id="c2", name="stop_activation", arguments={"activation": "E2"}),
     )
-    stage, completer, _ = _stage(RoundResponse(text=""))
 
-    await stage.plan(_inputs(**_matters(rounds=(earlier,), outcomes=(stopped, refused))))
+    done, absorbed = await _results(calls, stopped, refused, **_matters())
 
-    done, absorbed = _sent(completer)["rounds"][0]["calls"]
-    value = done["result"]["value"]
-    assert value["stopped_by_this_call"] is True
-    assert value["status"] == "ended"
-    assert value["did"] == ["the tool remember ran"]
-    assert absorbed["absorbed_by"].startswith("E")
-    assert "absorbed" in absorbed["outcome"]
+    value = tag(done["result"]["value"], "episode")
+    assert value.get("stopped_by_this_call") == "yes"
+    assert value.get("status") == "ended"
+    assert [one.text for one in value.held("did")] == ["the tool remember ran"]
+    assert absorbed["absorbed_by"] == value.get("label"), "the absorber, by its label"
+    assert absorbed["outcome"] == (
+        "not done: newer work absorbed it since it was shown, so nothing was stopped"
+    )
 
 
 def _answered(call_id: str, activation_id: str, **fields: Any) -> CallOutcome:
@@ -307,46 +331,62 @@ async def test_an_answers_result_says_why_the_hub_settled_it_so() -> None:
         _answered("c3", _A, answered="taken", meaning="Move it."),
         _answered("c4", _B, answered="declined", meaning="Move it."),
     )
-    earlier = _earlier(
-        calls=tuple(
-            ProposedCall(
-                call_id=f"c{index}",
-                name="answer_offer",
-                arguments={"offer": "E1", "take": index != 4},
-            )
-            for index in range(1, 5)
+    calls = tuple(
+        ProposedCall(
+            call_id=f"c{index}",
+            name="answer_offer",
+            arguments={"offer": "E1", "take": index != 4},
         )
+        for index in range(1, 5)
     )
-    stage, completer, _ = _stage(RoundResponse(text=""))
-
-    await stage.plan(_inputs(**_matters(rounds=(earlier,), outcomes=outcomes)))
 
     withdrawn, limited, taken, declined = (
-        one["result"]["value"] for one in _sent(completer)["rounds"][0]["calls"]
+        tag(one["result"]["value"], "episode")
+        for one in await _results(calls, *outcomes, **_matters())
     )
-    assert withdrawn["answer"] == "withdrawn"
-    label = withdrawn["episode"]
-    assert withdrawn["because"] == (
+    assert withdrawn.get("answer") == "withdrawn"
+    label = withdrawn.get("label")
+    assert withdrawn.get("because") == (
         f"{label} was stopped before the answer, so the input it carried is no longer "
         "asked for, and the work that input asked for is not to be done"
     )
-    assert withdrawn["understood_as"] == "Move the floss reminder to 10 PM."
-    assert limited["answer"] == "declined"
-    assert "already holds as much input as it may" in limited["because"]
-    assert limited["because"].count(limited["episode"]) == 1, "it names the offering work"
-    assert limited["understood_as"] == "Make it 9 PM."
+    assert [one.text for one in withdrawn.held("understood")] == [
+        "Move the floss reminder to 10 PM."
+    ]
+    assert limited.get("answer") == "declined"
+    because = limited.get("because") or ""
+    assert "already holds as much input as it may" in because
+    assert because.count(limited.get("label") or "-") == 1, "it names the offering work"
+    assert [one.text for one in limited.held("understood")] == ["Make it 9 PM."]
     for one in (taken, declined):
-        assert set(one) == {"episode", "answer"}, "nothing the hub settled, so no reason"
+        assert set(one.attributes) == {"label", "answer"}, "nothing the hub settled"
+        assert one.tags == (), "so no reason, and no meaning"
 
 
-async def test_the_sections_that_may_change_within_a_work_are_held_to_one_value() -> None:
-    """ADR-0356 §5:2: a work's instruction is the same on every round, so what may change
-    between its rounds is held to one value: the offers' and the earlier work's lines are
-    always sent, and the waiting round's never; running work's still follows the tools."""
-    stage, completer, _ = _stage(RoundResponse(text=""), prompt=FLAG_ECHO)
-    await stage.plan(_inputs())
-    assert {"offers", "earlier_work"} <= _flags(completer)
-    assert not {"running_work", "waiting"} & _flags(completer)
+async def test_the_instruction_is_one_text_whatever_the_work_holds() -> None:
+    """ADR-0356 §4:2, §5:2: the instruction takes no flag, so offers, waiting, earlier
+    work and the calls on running work change none of it; they reach planning in the
+    briefing, and a call a waiting round may not make is refused (§4:5)."""
+    plain, plain_completer, _ = _stage(RoundResponse(text=""))
+    await plain.plan(_inputs())
+    full, full_completer, _ = _stage(RoundResponse(text=""))
+    waited = RunningShown(
+        activation_id=_A, place=_LINE, input="book Saturday", acted=True, parties=OWNERS_WORDS
+    )
+    offer = OfferShown(activation_id=_B, input="only two bedrooms", meaning="Only two beds.")
+    await full.plan(
+        _inputs(
+            **_matters(
+                offers=(offer,),
+                waiting=(waited,),
+                earlier_work=(PeerShown(activation_id=_A, view=_view(), ended=True),),
+            )
+        )
+    )
+    assert (
+        full_completer.last_call.exchange.instruction
+        == plain_completer.last_call.exchange.instruction
+    )
 
 
 def test_a_running_entry_round_trips_its_acted_mark_and_whose_input_it_is() -> None:
@@ -398,13 +438,11 @@ def _stop_shown(set_up: StillLive) -> CallOutcome:
 
 
 async def _set_up_shown(set_up: StillLive) -> Any:
-    earlier = _earlier(
-        calls=(ProposedCall(call_id="c1", name="stop_activation", arguments={"activation": "E1"}),)
-    )
-    stage, completer, _ = _stage(RoundResponse(text=""))
-    await stage.plan(_inputs(**_matters(rounds=(earlier,), outcomes=(_stop_shown(set_up),))))
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    return call["result"]["value"]["set_up_still_live"]
+    """What a stop's result shows, beside the stopped work's view, of what it set up."""
+    calls = (ProposedCall(call_id="c1", name="stop_activation", arguments={"activation": "E1"}),)
+    (call,) = await _results(calls, _stop_shown(set_up), **_matters())
+    assert tag(call["result"]["value"], "episode").get("label") == "E1"
+    return call["result"]["set_up_still_live"]
 
 
 async def test_a_stop_calls_result_lists_what_the_work_set_up_that_is_still_live() -> None:
@@ -442,16 +480,17 @@ async def test_a_stop_calls_result_lists_what_the_work_set_up_that_is_still_live
     reminder, withheld = shown["scheduled"]
     assert reminder["label"].startswith("T")
     assert reminder["falls_due"] == "Mon 26 Oct 2026 10:00 (UTC)"
-    assert reminder["carries"] == "check the project notes"
+    assert tag(reminder["carries"], "task").text == "check the project notes"
     assert reminder["set_by"] == "person"
     assert reminder["parent"]["is"].startswith("spawned by")
-    assert "outside" in withheld["carries"], "a marked task's text is withheld (§3:5)"
+    hidden = tag(withheld["carries"], "task")
+    assert (hidden.get("withheld"), hidden.text) == ("yes", None), "a marked task's (§3:5)"
     assert shown["more_scheduled_not_shown"] == 2
-    step, starting = shown["running"]
-    assert step["episode"].startswith("E")
-    assert "has_acted" in step
-    assert starting == {"scheduled_task": starting["scheduled_task"], "status": "starting"}
+    running, starting = shown["running"]
+    assert running["episode"].startswith("E")
+    assert "has_acted" in running
     assert starting["scheduled_task"].startswith("T")
+    assert starting["status"] == "starting"
     assert shown["more_running_not_shown"] == 1
 
 
@@ -462,34 +501,27 @@ async def test_a_stop_calls_result_says_when_nothing_it_set_up_is_still_live() -
 
 async def test_a_stop_calls_result_says_when_what_it_set_up_could_not_be_read() -> None:
     """The stop stands, and nothing is claimed of what it set up."""
-    shown = await _set_up_shown(StillLive(read=False))
-    assert "could not be read" in shown
+    assert "could not be read" in await _set_up_shown(StillLive(read=False))
 
 
-#: ADR-0352 §3:8's line, as the prompts front routed it (§3:10).
-_WORDS_COVER: Final = (
-    "Stop or cancel exactly what the person's words cover: each piece of running work and "
-    "each task they cover, by the labels you were shown, including those a stop's result "
-    "lists. Keep the rest, and where it is unclear what the words cover, ask which."
-)
+#: ADR-0352 §3:8's line, as it is said now: in the stop's own description, since a rule
+#: about one tool is said there (ADR-0357 §7:1).
+_WORDS_COVER: Final = "where it is unclear what the words cover, ask which."
 
 
-def _instruction(**flags: bool) -> str:
-    from ai_assistant.orchestration.planning import PLANNING_PROMPT  # noqa: PLC0415
-    from ai_assistant.testing.prompts import default_prompt  # noqa: PLC0415 — this case's
-
-    every = dict.fromkeys(PLANNING_PROMPT.flags, False) | flags
-    values = {
-        "approved_action_tool": "approved_action",
-        "note_reliance_capability": "note_reliance",
-        "needs_your_yes": "needs your yes",
-    }
-    return default_prompt(PLANNING_PROMPT).render(flags=every, values=values)
-
-
-def test_the_words_cover_line_renders_once_wherever_the_stop_is_offered() -> None:
-    """ADR-0352 §3:8: once, in a waiting round and in any other, and never without it."""
-    for waiting in (False, True):
-        assert _instruction(running_work=True, waiting=waiting).count(_WORDS_COVER) == 1
-    assert _WORDS_COVER not in _instruction(running_work=False)
-    assert _WORDS_COVER not in _instruction(running_work=False, waiting=True)
+async def test_the_words_cover_line_goes_with_the_stop_and_never_in_the_instruction() -> None:
+    """ADR-0352 §3:8, ADR-0357 §7:1: offered with the stop, in a waiting round and in any
+    other; never in the instruction, which takes no flag (ADR-0356 §4:2)."""
+    waited = RunningShown(
+        activation_id=_A, place=_LINE, input="book Saturday", acted=True, parties=OWNERS_WORDS
+    )
+    for fields in ({}, {"waiting": (waited,)}):
+        stage, completer, _ = _stage(RoundResponse(text=""))
+        await stage.plan(_inputs(**_matters(**fields)))
+        (stop,) = (one for one in completer.last_call.tools if one.name == "stop_activation")
+        assert stop.description.count(_WORDS_COVER) == 1
+        assert _WORDS_COVER not in completer.last_call.exchange.instruction
+    stage, completer, _ = _stage(RoundResponse(text=""))
+    await stage.plan(_inputs())
+    assert all(one.name != "stop_activation" for one in completer.last_call.tools)
+    assert _WORDS_COVER not in completer.last_call.exchange.instruction

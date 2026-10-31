@@ -10,10 +10,22 @@ call's entry keeps of what its result showed, by reference and cut to a bound.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
-from test_planning import _AT, _TOOLS, _earlier, _episode, _inputs, _remembered, _sent, _stage
+from exchange_support import tag
+from test_planning import (
+    _AT,
+    _TOOLS,
+    _earlier,
+    _episode,
+    _inputs,
+    _next_round,
+    _remembered,
+    _reported_after,
+    _stage,
+)
 from test_planning_stories import _short, _story
 
 from ai_assistant.core.episode_encoding import project_episode
@@ -30,9 +42,16 @@ from ai_assistant.core.types import (
     ShownRecord,
     ShownRecordKind,
     ShownText,
+    StoryHeader,
+    StoryNote,
+    StoryNoteAuthor,
+    StorySummary,
+    StorySummaryLine,
+    StorySummaryState,
 )
 from ai_assistant.orchestration.lookups import LOOK_UP_LABEL_ARGUMENTS, READ_STORY, SEARCH_EPISODES
 from ai_assistant.orchestration.planning import (
+    NOTHING_NEW,
     CallOutcome,
     CallOutcomeKind,
     EpisodeRead,
@@ -55,15 +74,16 @@ def _looked(name: str, **arguments: Any) -> tuple[Any, ProposedCall]:
 
 
 async def _shown(name: str, outcome_fields: dict[str, Any], **inputs: Any) -> Any:
-    """What the briefing shows of one look-up's result, and what the round recorded."""
-    earlier, _ = _looked(name)
+    """What the next round's report shows of one look-up's result, and that round.
+
+    ADR-0356 §5:3-§5:4: a call's result reaches the round after it in its report.
+    """
+    _, call = _looked(name)
     outcome = CallOutcome(
-        earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:1", **outcome_fields
+        "round:0", "c1", CallOutcomeKind.DONE, result_id="result:1", **outcome_fields
     )
-    stage, completer, _ = _stage(RoundResponse(text="ok"))
-    planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,), **inputs))
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    return call["result"]["value"], planned
+    (result,), _, planned = await _reported_after((call,), outcome, **inputs)
+    return result["result"]["value"], planned
 
 
 # --- §7, §8:1: a search of past episodes ----------------------------------------------------
@@ -89,8 +109,10 @@ async def test_a_found_episode_is_its_short_view_with_the_matters_it_belongs_to(
     value, planned = await _shown("search_episodes", {"episodes": found})
 
     one, two = value["episodes"]
-    assert one["label"] == "E1"
-    assert one["response"] == "Booked the dentist."
+    # ADR-0356 §9, ADR-0358 §7:2: each episode is its short view.
+    view = tag(one["episode"], "episode")
+    assert view.get("label") == "E1"
+    assert view.get("ended") == "completed, returned"
     assert one["in_matters"] == [
         {"label": "S1", "summary": "The dentist."},
         {
@@ -98,7 +120,7 @@ async def test_a_found_episode_is_its_short_view_with_the_matters_it_belongs_to(
             "summary": "withheld: this story has a summary, which this audience may not be shown",
         },
     ]
-    assert two["label"] == "E2"
+    assert tag(two["episode"], "episode").get("label") == "E2"
     assert two["in_matters"] == ["S1"]
     assert value["page"] == 1
     assert "page 2" in value["more"]
@@ -135,7 +157,8 @@ async def test_an_outside_episode_a_search_shows_is_withheld_and_read() -> None:
     value, planned = await _shown("search_episodes", {"episodes": found})
 
     assert "the mail's own words" not in json.dumps(value)
-    assert value["episodes"][0]["label"] == "E1"
+    view = tag(value["episodes"][0]["episode"], "episode")
+    assert (view.get("label"), view.get("outside")) == ("E1", "yes")
     assert planned.round.notes_marked
 
 
@@ -168,10 +191,10 @@ async def test_older_items_are_shown_as_the_place_window_shows_items() -> None:
     )
     value, _ = await _shown("read_older_history", {"history": history})
 
-    mine, forwarded = value["items"]
-    assert (mine["from"], mine["text"], mine["episode"]) == ("the user", "book it", "E1")
+    mine, forwarded = (tag(one, "message") for one in value["items"])
+    assert (mine.get("from"), mine.text, mine.get("episode")) == ("the owner", "book it", "E1")
     assert "a forward's own words" not in json.dumps(value)
-    assert forwarded["text"] != "a forward's own words"
+    assert (forwarded.get("withheld"), forwarded.text) == ("yes", None)
     assert "page 2" in value["more"]
 
 
@@ -181,8 +204,9 @@ async def test_earlier_episodes_of_an_episode_window_are_shown_as_short_views() 
     value, _ = await _shown("read_older_history", {"history": history})
 
     (episode,) = value["episodes"]
-    assert episode["label"] == "E1"
-    assert episode["response"] == "Booked a table earlier."
+    view = tag(episode, "episode")
+    assert view.get("label") == "E1"
+    assert view.get("ended") == "completed, returned"
 
 
 # --- §10: one episode's full record ---------------------------------------------------------
@@ -291,7 +315,8 @@ async def test_a_full_view_shows_its_parts_in_order_and_records_as_held_now() ->
     assert notes == {"round": 1, "notes": "looking for the dentist"}
     assert searched["capability"] == "search_memory"
     memory, episode, rest = searched["showed"]
-    assert (memory["label"], memory["fact"]) == ("M1", "dentist with Dr Rao")
+    remembered = tag(memory["memory"], "memory")
+    assert (remembered.get("label"), remembered.text) == ("M1", "dentist with Dr Rao")
     assert memory["shown"].startswith("as it is held now")
     assert episode == {"label": "E2", "shown": "as it is held now, not as it was then"}
     assert rest == "the rest of what it showed is no longer kept"
@@ -448,23 +473,23 @@ async def test_a_story_read_names_a_matter_an_episode_search_showed() -> None:
 
     Planning's check maps any S label it holds to the story's id, whichever result gave it.
     """
-    earlier, _ = _looked("search_episodes", query="dentist")
+    _, search = _looked("search_episodes", query="dentist")
     matter = MatterShown(story_id="story:dentist", summary_version=1, first_line="The dentist.")
     found = EpisodesFound(
         episodes=(EpisodeShown(record=_episode("activation:one"), matters=(matter,)),)
     )
-    outcome = CallOutcome(earlier.id, "c1", CallOutcomeKind.DONE, result_id="r:1", episodes=found)
     read = ProposedCall(call_id="c2", name="read_story", arguments={"story": "S1"})
-    stage, _, _ = _stage(RoundResponse(calls=(read,)))
-
-    planned = await stage.plan(
-        _inputs(
-            rounds=(earlier,),
-            outcomes=(outcome,),
-            capabilities=(*_TOOLS, READ_STORY, SEARCH_EPISODES),
-            label_arguments=LOOK_UP_LABEL_ARGUMENTS,
-        )
+    stage, _, _ = _stage(RoundResponse(calls=(search,)), RoundResponse(calls=(read,)))
+    given = _inputs(
+        capabilities=(*_TOOLS, READ_STORY, SEARCH_EPISODES),
+        label_arguments=LOOK_UP_LABEL_ARGUMENTS,
     )
+    first = await stage.plan(given)
+    outcome = CallOutcome(
+        first.round.id, "c1", CallOutcomeKind.DONE, result_id="r:1", episodes=found
+    )
+
+    planned = await _next_round(stage, given, first, outcomes=(outcome,))
 
     (call,) = planned.calls
     assert call.call.arguments["story"] == "story:dentist"
@@ -489,13 +514,38 @@ async def test_an_older_item_of_a_relayed_input_is_withheld_and_kept_by_nothing(
     outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", history=history)
 
     assert "the dentist's own words" not in json.dumps(value)
-    assert value["items"][1]["text"] == "noted"
+    assert tag(value["items"][1], "message").text == "noted"
     showed = call_showed(outcome, bound=1000)
     assert showed is not None
     assert "the dentist's own words" not in showed.model_dump_json()
     assert showed.parts == (
         ShownText(text='{"from": "assistant", "text": "noted"}'),
         ShownRecord(kind=ShownRecordKind.EPISODE, id="activation:r"),
+    )
+
+
+async def test_a_withheld_relayed_item_keeps_its_episode_link() -> None:
+    """ADR-0358 §9:3, review round 4: its words withheld, its episode still labelled."""
+    history = OlderHistory(
+        readable=True,
+        items=(
+            PlaceItem(
+                author=PlaceAuthor.USER,
+                text="the dentist's own words",
+                episode_id="activation:relayed",
+            ),
+        ),
+        relayed=frozenset({"activation:relayed"}),
+    )
+
+    value, planned = await _shown("read_older_history", {"history": history})
+
+    (item,) = value["items"]
+    shown = tag(item, "message")
+    assert (shown.get("withheld"), shown.text) == ("yes", None)
+    assert shown.get("episode") == "E1"
+    assert (
+        PlanningLabel(label="E1", kind=LabelKind.EPISODE, id="activation:relayed") in planned.labels
     )
 
 
@@ -875,3 +925,81 @@ def test_results_rendered_in_turn_read_each_under_the_labels_before_it() -> None
             )
         ),
     ]
+
+
+def _dentist_now(version: int, line: str, notes: int) -> StorySummaryState:
+    """The dentist matter as the store holds it, at ``version``, with ``notes`` pending."""
+    return StorySummaryState(
+        story=StoryHeader(
+            story_id="story:dentist", created_at=_AT - timedelta(days=3), merged_into=None
+        ),
+        summary=StorySummary(
+            version=version, lines=(StorySummaryLine(text=line),), written_at=_AT, outside=False
+        ),
+        pending_notes=tuple(
+            StoryNote(
+                note_id=one,
+                text="a note",
+                author=StoryNoteAuthor.PLANNING,
+                written_during="earlier",
+                outside=False,
+                written_at=_AT,
+            )
+            for one in range(1, notes + 1)
+        ),
+        pending_episodes=(),
+        as_of=3,
+    )
+
+
+async def test_a_matter_a_search_showed_is_named_when_it_changes() -> None:
+    """ADR-0359 §2:1, review round 3: a matter a call's result showed is one the work saw.
+
+    Its summary is compared by the version the search showed; it showed no note, so the
+    notes pending at the first read after it are its baseline, not news.
+    """
+    matter = MatterShown(story_id="story:dentist", summary_version=2, first_line="The dentist.")
+    found = EpisodesFound(
+        episodes=(EpisodeShown(record=_episode("activation:one"), matters=(matter,)),)
+    )
+    _, call = _looked("search_episodes", query="dentist")
+    listing = ProposedCall(call_id="c2", name="list_tasks", arguments={})
+    stage, completer, _ = _stage(
+        RoundResponse(calls=(call,)),
+        RoundResponse(calls=(listing,)),
+        RoundResponse(calls=(listing.model_copy(update={"call_id": "c3"}),)),
+        RoundResponse(text="ok"),
+    )
+    inputs = _inputs(owner_records=True)
+    planned = await stage.plan(inputs)
+    searched = CallOutcome(
+        planned.round.id, "c1", CallOutcomeKind.DONE, result_id="result:1", episodes=found
+    )
+    second = await _next_round(stage, inputs, planned, outcomes=(searched,))
+    assert second.work is not None
+    assert "story:dentist" in second.work.shown.matters
+    later = replace(inputs, rounds=(planned.round,), labels=planned.labels)
+    third = await _next_round(
+        stage,
+        later,
+        second,
+        outcomes=(CallOutcome(second.round.id, "c2", CallOutcomeKind.DONE),),
+        matters_now={"story:dentist": _dentist_now(2, "The dentist.", 1)},
+    )
+    assert completer.last_call.exchange.steps[-1].report.news.endswith(NOTHING_NEW)
+    later = replace(
+        later, rounds=(*later.rounds, second.round), labels=(*later.labels, *second.labels)
+    )
+    await _next_round(
+        stage,
+        later,
+        third,
+        outcomes=(CallOutcome(third.round.id, "c3", CallOutcomeKind.DONE),),
+        matters_now={"story:dentist": _dentist_now(3, "The dentist moved.", 2)},
+    )
+
+    news = completer.last_call.exchange.steps[-1].report.news
+    assert (
+        "- S1 changed: its summary was rewritten, and now begins: The dentist moved; "
+        "it gained a note."
+    ) in news

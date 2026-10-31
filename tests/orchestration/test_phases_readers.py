@@ -27,6 +27,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
+from exchange_support import says, tags, text_call
 from phases_support import (
     SETTLE,
     Gated,
@@ -230,8 +231,8 @@ async def test_a_message_where_running_work_has_acted_starts_at_once_and_never_w
     planner.script(
         older_text,
         RoundResponse(
-            text="Searching.",
             calls=(
+                text_call("Searching.", call_id="m1"),
                 _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
             ),
         ),
@@ -253,7 +254,9 @@ async def test_a_message_where_running_work_has_acted_starts_at_once_and_never_w
     )
     assert "Searching." in await _assistant(harness, conversation)
     assert f"done: {newer_text}" in await _assistant(harness, conversation)
-    assert all("waiting_on" not in one for one in planner.requests[newer_text])
+    assert all(
+        tags(one.text, "stimulus", waited_on="yes") == [] for one in planner.requests[newer_text]
+    )
     assert _state_of(harness, older).offers == {}, "nothing was offered to the older"
 
     planner.hold(older_text)[1].set()
@@ -300,8 +303,8 @@ async def test_an_act_waits_for_a_correction_still_held_in_its_places_start_wait
     planner.script(
         older_text,
         RoundResponse(
-            text="Booked for Saturday.",
             calls=(
+                text_call("Booked for Saturday.", call_id="m2"),
                 _call(
                     "c1",
                     "remember",
@@ -573,7 +576,7 @@ async def test_acting_reads_the_deadline_again_before_its_commitment_step() -> N
             await super()._act(given)
 
     harness = phases_harness(
-        FakeToolCallingCompleter.scripted(RoundResponse(text="Riverside, Friday.")),
+        FakeToolCallingCompleter.scripted(says("Riverside, Friday.", call_id="m3")),
         phases={"path": _Expired},
     )
     conversation = await open_conversation(harness)

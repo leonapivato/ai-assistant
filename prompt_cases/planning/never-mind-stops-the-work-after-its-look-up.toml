@@ -1,0 +1,16 @@
+# ADR-0349 §4:6-§4:7: "never mind the booking", once the look-up showed the booking
+# work running and the table booked: this round stops it by its label.
+prompt = "planning"
+guards = "stop_missed"
+came_from = "2026-10-26"
+set = "development"
+samples = 2
+
+[property]
+check = "calls_within"
+capabilities = ["stop_activation"]
+argument = "activation"
+value = "E1"
+
+[input]
+file = "never-mind-stops-the-work-after-its-look-up.json"

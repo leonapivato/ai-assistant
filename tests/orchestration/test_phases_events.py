@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from channel_receiver_contract import event_input
+from exchange_support import section, tag
 from phases_support import SETTLE, entries, phases_harness, processing
 from test_engine import AT
 from understanding_support import recall_stage, rendered, understanding_stage
@@ -225,7 +226,9 @@ async def test_overlapping_events_keep_separate_identity_context_and_receipts() 
     assert len({result.capture.activation_id for result in results}) == 2
     # And each planning round was handed the understanding of its own input alone.
     planned = sorted(
-        json.loads(call.exchange.briefing)["understanding"]["meaning"] for call in completer.calls
+        tag(section(call.exchange.briefing, "# Understanding"), "understanding").text or ""
+        for call in completer.calls
+        if not call.exchange.steps
     )
     assert planned == ["It reported first.", "It reported second."]
     for result, expected in zip(results, ("first", "second"), strict=True):

@@ -6,25 +6,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes two spawns: one whose replaces names T1, about the vitamin, whose rule repeats daily at 07:00 from 2026-11-12; and one with no rule and no replaces, about the vitamin, whose at is 2026-11-11T09:00. It proposes no cancel_task call."""
+read = """The round makes two spawns: one whose replaces names T1, about the vitamin, whose rule repeats daily at 07:00 from 2026-10-31; and one with no rule and no replaces, about the vitamin, whose at is 2026-10-30T09:00. It makes no cancel_task call."""
 
 [input]
 file = "tomorrow-at-9-instead-skips-and-sets-a-one-off.json"

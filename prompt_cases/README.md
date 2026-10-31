@@ -24,18 +24,31 @@ came_from = "#3104"            # the issue, or the date, 2026-10-21, it came fro
 set = "development"            # or "held_out": never shown to whoever drafts a candidate
 samples = 3                    # how often it is sent under each version (§5:2)
 
-[flags]                        # exactly the flags the prompt declares, each true or false
-takes_message = true
-
+[flags]                        # exactly the flags the prompt declares, each true or false;
+                               # left out where it declares none, as planning does
 [property]                     # a code check and its parameters, or "read"
 check = "asks_about"
 calls = ["1.1"]
 
 [input]                        # the call's request after the system message (§3:4)
-messages = [{ role = "user", content = '''...''' }]
-tools = [ ... ]                # a planning case's offered tools, and only a planning case's
-# or: file = "<case>.json", holding {"messages": [...], "tools": [...]}
+file = "<case>.json"           # or, for a completion: messages = [{ role = "user", ... }]
 ```
+
+A planning case's input is a round's exchange after its instruction, as its given entry
+records it, and its offered tools (ADR-0356 §11:4), best held in a JSON file beside it:
+
+```json
+{
+  "exchange": {"briefing": "# The stimulus\n...", "steps": [{"response": {}, "report": {}}]},
+  "tools": [{"name": "text", "description": "...", "parameters": {}}]
+}
+```
+
+`briefing` is the work's first user turn, the tagged text the stage renders (ADR-0356 §3).
+`steps`, left out for a work's first round, are its earlier rounds, each its response and
+the report on it, as `PlanningExchange` holds them, each response with no continuation
+(§6:3). The run renders the instruction from the version it sends, and sends the exchange
+whole. A completion's input is `messages`, its request after the system message.
 
 A case of the prompt `follow_up` (§3:5) asks the follow-up question about a call that has
 completed, so its input is that call whole, and its instruction is rendered as the request's

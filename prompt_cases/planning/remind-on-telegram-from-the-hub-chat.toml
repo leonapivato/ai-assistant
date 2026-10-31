@@ -7,25 +7,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes a spawn to remind them to call their mum about Sunday, falling due at 20:00 London time today (a local time with no offset, 2026-06-13T20:00, or the same instant with its offset), whose places name L2, the Telegram chat. It does not suggest only L1, the hub chat's conversation."""
+read = """The round makes a spawn to remind Leo to call his mum about Sunday, falling due at 20:00 Lisbon time today (a local time with no offset, 2026-10-29T20:00, or the same instant with its offset), whose places name L2, the Telegram chat. It does not suggest only L1, the hub chat's conversation."""
 
 [input]
 file = "remind-on-telegram-from-the-hub-chat.json"

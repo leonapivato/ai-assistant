@@ -179,7 +179,11 @@ EMAIL: Final = ToolDefinition(
     capability=EMAIL_ID,
     description=(
         "Send an email to the recipients, each a person as you were shown them or an "
-        "address, from the assistant's address or the user's, as from says."
+        "address, from the system's own address or the person's, as from says; one "
+        "from the person's address goes in their name, and never runs without their "
+        "yes. Its words are sent as you write them; set exact where the wording "
+        "itself must not change. The result says what was sent, to whom and how. "
+        "Never claim to be human."
     ),
     risk_level=RiskLevel.HIGH,
     reversibility=Reversibility.IRREVERSIBLE,

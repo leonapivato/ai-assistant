@@ -6,25 +6,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes one spawn whose replaces names T1, about watering the plants, whose rule repeats daily at 20:00 from 2026-11-12. It proposes no cancel_task call."""
+read = """The round makes one spawn whose replaces names T1, about watering the plants, whose rule repeats daily at 20:00 from 2026-10-31. It makes no cancel_task call."""
 
 [input]
 file = "skip-tomorrows-replaces-from-the-day-after.json"

@@ -2,32 +2,16 @@
 # research and a reminder tonight at 8 to check the blender notes. The round before
 # stopped the research; its result lists the reminder as still set. The words could mean
 # the research alone or the reminder too, so this round cancels nothing and asks whether
-# the reminder goes too.
+# the reminder goes too. It also guards the live finding #3478.
 prompt = "planning"
 guards = "ambiguous_task_guessed"
 came_from = "2026-10-26"
 set = "development"
 samples = 3
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = true
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes no cancel_task call. Its message tells the user the blender research is stopped and asks whether the reminder tonight at 8 to check their blender notes should go too, and uses no T, E or R label."""
+read = """The round makes no cancel_task call. A text call tells Leo the blender research is stopped and asks whether the reminder tonight at 8 to check his blender notes should go too, and its words use no T, E or R label."""
 
 [input]
 file = "never-mind-that-blender-request-asks-about-its-reminder.json"

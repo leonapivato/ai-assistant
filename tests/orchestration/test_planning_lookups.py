@@ -3,15 +3,18 @@
 Driven directly over the planning stage, each outcome built by hand as the phases' glue
 hands it over: a memory search's records under their own M labels with its outside part
 read by a digest, a story's full view with its marks, and a follow-up's digest told apart
-by the question it answered.
+by the question it answered. A look-up's result reaches the round after the one that
+called it, in that round's report (ADR-0356 §5:3-§5:4).
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from test_planning import FLAG_ECHO, _earlier, _echoed, _inputs, _remembered, _sent, _stage
+from exchange_support import Tag, reported, section, tag, tags
+from test_planning import _inputs, _remembered, _sent, _stage
 from test_planning_stories import _note, _story
 from test_story_tidy_up import _note as _tidy_note
 from test_story_tidy_up import _reply, _summary, _tidy_up, _trip
@@ -35,15 +38,66 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.story_calls import STORY_CALLS
 from ai_assistant.orchestration.story_tidy_up import TidyUpResult
-from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider
+from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import PlanningRound
-    from ai_assistant.orchestration.planning import PlanningStory
+    from collections.abc import Callable
+
+    from ai_assistant.orchestration.planning import PlannedRound, PlanningStory
+    from ai_assistant.testing import FakeToolCallingCompleter
+
+#: What came of a round's calls, built from that round's id.
+type _Outcomes = Callable[[str], tuple[CallOutcome, ...]]
 
 
 def _search(call_id: str = "c1") -> ProposedCall:
     return ProposedCall(call_id=call_id, name="search_memory", arguments={"query": "dentist"})
+
+
+async def _reported(
+    calls: tuple[ProposedCall, ...],
+    outcomes: _Outcomes,
+    *,
+    later: dict[str, Any] | None = None,
+    **fields: Any,
+) -> tuple[FakeToolCallingCompleter, PlannedRound]:
+    """A round that proposes ``calls``, then the next, reported what came of them.
+
+    Args:
+        calls: The first round's calls.
+        outcomes: What came of them, from the first round's id.
+        later: Inputs the second round holds beside the first's.
+        **fields: The first round's inputs.
+
+    Returns:
+        The completer, and the second round as planned.
+    """
+    stage, completer, _ = _stage(RoundResponse(calls=calls), RoundResponse(text="ok"))
+    inputs = _inputs(**fields)
+    first = await stage.plan(inputs)
+    planned = await stage.plan(
+        replace(
+            inputs,
+            work=first.work,
+            rounds=(first.round,),
+            labels=first.labels,
+            outcomes=outcomes(first.round.id),
+            **(later or {}),
+        )
+    )
+    return completer, planned
+
+
+def _result(completer: FakeToolCallingCompleter) -> dict[str, Any]:
+    """The one result the second round's report holds, decoded."""
+    (shown,) = reported(completer.last_call)
+    result: dict[str, Any] = shown["result"]
+    return result
+
+
+def _view(completer: FakeToolCallingCompleter) -> Tag:
+    """The matter a story read's result shows (ADR-0300 §10:6)."""
+    return tag(_result(completer)["value"], "matter")
 
 
 async def test_a_searchs_records_are_shown_under_their_own_m_labels() -> None:
@@ -52,30 +106,31 @@ async def test_a_searchs_records_are_shown_under_their_own_m_labels() -> None:
     Its outside records went to a digest, which the result says; a record whose current
     version rests on outside content is withheld, as a found one is.
     """
-    earlier = _earlier(calls=(_search(),))
     said = _remembered("said", MemorySource.USER_ASSERTED, "dentist with Dr Rao")
     turned = _remembered("turned", MemorySource.EXTERNAL, "dentist moved to 3pm")
-    outcome = CallOutcome(
-        earlier.id,
-        "c1",
-        CallOutcomeKind.DONE,
-        result_id="result:search",
-        digested=True,
-        records=(said, turned),
+
+    completer, planned = await _reported(
+        (_search(),),
+        lambda round_id: (
+            CallOutcome(
+                round_id,
+                "c1",
+                CallOutcomeKind.DONE,
+                result_id="result:search",
+                digested=True,
+                records=(said, turned),
+            ),
+        ),
     )
-    stage, completer, _ = _stage()
 
-    planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
-
-    request = completer.last_call.exchange.briefing
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    assert call["result"]["label"] == "R1"
-    value = call["result"]["value"]
-    assert [(one["label"], one["fact"]) for one in value["remembered"]] == [
-        ("M1", "dentist with Dr Rao")
-    ]
+    result = _result(completer)
+    assert result["label"] == "R1"
+    value = result["value"]
+    remembered = [tag(one, "memory") for one in value["remembered"]]
+    assert [(one.get("label"), one.text) for one in remembered] == [("M1", "dentist with Dr Rao")]
     assert value["resting_on_outside_content"] == "read for you by a digest, under evidence"
-    assert "moved to 3pm" not in request
+    report = completer.last_call.exchange.steps[-1].report
+    assert "moved to 3pm" not in "\n".join(one.text for one in report.results)
     assert planned.labels == (
         PlanningLabel(label="R1", kind=LabelKind.RESULT, id="result:search"),
         PlanningLabel(label="M1", kind=LabelKind.MEMORY, id="said"),
@@ -83,16 +138,26 @@ async def test_a_searchs_records_are_shown_under_their_own_m_labels() -> None:
 
 
 async def test_a_search_that_found_nothing_shown_says_so() -> None:
-    earlier = _earlier(calls=(_search(),))
-    outcome = CallOutcome(
-        earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:search", records=()
+    completer, _ = await _reported(
+        (_search(),),
+        lambda round_id: (
+            CallOutcome(
+                round_id, "c1", CallOutcomeKind.DONE, result_id="result:search", records=()
+            ),
+        ),
     )
-    stage, completer, _ = _stage()
 
-    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+    assert _result(completer)["value"] == {"remembered": "none"}
 
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    assert call["result"]["value"] == {"remembered": "none"}
+
+_READ: ProposedCall = ProposedCall(call_id="c1", name="read_story", arguments={"story": "S1"})
+
+
+def _read(view: PlanningStory) -> _Outcomes:
+    """A story read, done, its full view ``view``."""
+    return lambda round_id: (
+        CallOutcome(round_id, "c1", CallOutcomeKind.DONE, result_id="result:page", story=view),
+    )
 
 
 async def test_a_storys_full_view_is_shown_under_the_result_with_its_marks() -> None:
@@ -101,81 +166,69 @@ async def test_a_storys_full_view_is_shown_under_the_result_with_its_marks() -> 
     The view is rendered as a story view is, its notes under N labels, and the round's
     notes are marked, since planning read a marked note (ADR-0307 §4:3).
     """
-    earlier = _earlier(
-        calls=(ProposedCall(call_id="c1", name="read_story", arguments={"story": "S1"}),)
-    )
     view = _story(notes=(_note(4, "the venue wrote back: Saturday", outside=True),))
-    outcome = CallOutcome(
-        earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:page", story=view
-    )
-    stage, completer, _ = _stage(RoundResponse(text="ok"))
 
-    planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+    completer, planned = await _reported((_READ,), _read(view))
 
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    shown = call["result"]["value"]
-    assert call["result"]["label"] == "R1"
-    assert shown["label"] == "S1"
-    assert shown["summary"] == ["A camping trip to Riverside in mid-October."]
-    (note,) = shown["notes_since_tidied"]
-    assert note["label"] == "N1"
-    assert "outside_content" in note
+    assert _result(completer)["label"] == "R1"
+    shown = _view(completer)
+    assert shown.get("label") == "S1"
+    assert tag(shown.text or "", "summary").text == "A camping trip to Riverside in mid-October."
+    (note,) = shown.held("note")
+    assert (note.get("label"), note.get("outside")) == ("N1", "yes")
     assert planned.round.notes_marked
     assert PlanningLabel(label="N1", kind=LabelKind.NOTE, id="4") in planned.labels
 
 
 async def test_an_unmarked_full_view_marks_nothing() -> None:
-    earlier = _earlier(
-        calls=(ProposedCall(call_id="c1", name="read_story", arguments={"story": "S1"}),)
-    )
     view = _story(notes=(_note(4, "they prefer Saturdays"),))
-    outcome = CallOutcome(
-        earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:page", story=view
-    )
-    stage, _, _ = _stage(RoundResponse(text="ok"))
 
-    planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+    _, planned = await _reported((_READ,), _read(view))
 
     assert not planned.round.notes_marked
 
 
 async def test_a_follow_ups_digest_is_told_apart_by_the_question_it_answered() -> None:
-    """ADR-0308 §6:7: the same result, read again against the follow-up's question."""
-    earlier = _earlier(
-        calls=(
-            ProposedCall(call_id="c1", name="web_search", arguments={"query": "trail"}),
-            ProposedCall(call_id="c2", name="follow_up", arguments={"result": "R1"}),
-        )
-    )
-    outcomes = (
-        CallOutcome(earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:1", digested=True),
-        CallOutcome(earlier.id, "c2", CallOutcomeKind.DONE, result_id="result:1", digested=True),
-    )
+    """ADR-0308 §6:7: the same result, read again against the follow-up's question.
+
+    Each result resting on outside content is its digest's evidence (ADR-0356 §5:4), each
+    digest told apart by what it looked for; a recall digest, of no result, is news.
+    """
     item = DigestItem("open until dusk", LabelKind.RESULT, "result:1")
     evidence = (
         DigestedEvidence("result:1", answered=True, question="is it open"),
         DigestedEvidence("result:1", answered=True, items=(item,), question="until when"),
         DigestedEvidence(None, answered=True),
     )
-    stage, completer, _ = _stage()
 
-    await stage.plan(_inputs(rounds=(earlier,), outcomes=outcomes, evidence=evidence))
-
-    sent = _sent(completer)
-    first, follow_up = (call["result"] for call in sent["rounds"][0]["calls"])
-    assert (
-        first
-        == follow_up
-        == {
-            "label": "R1",
-            "value": "read for you by a digest, under evidence",
-        }
+    completer, _ = await _reported(
+        (
+            ProposedCall(call_id="c1", name="web_search", arguments={"query": "trail"}),
+            ProposedCall(call_id="c2", name="follow_up", arguments={"result": "R1"}),
+        ),
+        lambda round_id: (
+            CallOutcome(round_id, "c1", CallOutcomeKind.DONE, result_id="result:1", digested=True),
+            CallOutcome(round_id, "c2", CallOutcomeKind.DONE, result_id="result:1", digested=True),
+        ),
+        later={"evidence": evidence},
     )
-    asked, again, recalled = sent["evidence"]
-    assert (asked["digest_of"], asked["looking_for"]) == ("R1", "is it open")
-    assert (again["digest_of"], again["looking_for"]) == ("R1", "until when")
-    assert again["digest"]["evidence"][0]["text"] == "open until dusk"
-    assert "looking_for" not in recalled
+
+    first, follow_up = reported(completer.last_call)
+    assert (
+        first["result"]
+        == follow_up["result"]
+        == {"label": "R1", "value": "read for you by a digest, under evidence"}
+    )
+    # Each digest goes to one call: the search's first, the follow-up's after it.
+    (asked,) = first["evidence"]
+    (again,) = follow_up["evidence"]
+    assert asked.startswith("- A digest of R1, looking for is it open:")
+    assert again.startswith("- What a digest read of R1, looking for until when,")
+    (read,) = tags(again, "evidence")
+    assert (read.text, read.get("source"), read.get("outside")) == ("open until dusk", "R1", "yes")
+    news = completer.last_call.exchange.steps[-1].report.news
+    (recalled,) = [line for line in news.split("\n") if "the outside memories recall found" in line]
+    assert "looking for" not in recalled
 
 
 def test_a_looked_up_result_is_shown_only_under_its_id_and_as_itself() -> None:
@@ -190,14 +243,14 @@ def test_a_looked_up_result_is_shown_only_under_its_id_and_as_itself() -> None:
 # --- a story read's older notes (#2893) ------------------------------------------------------
 
 
-def _read(view: PlanningStory) -> tuple[PlanningRound, CallOutcome]:
-    """An earlier round's story read, done, its full view ``view``."""
-    earlier = _earlier(
-        calls=(ProposedCall(call_id="c1", name="read_story", arguments={"story": "S1"}),)
-    )
-    return earlier, CallOutcome(
-        earlier.id, "c1", CallOutcomeKind.DONE, result_id="result:page", story=view
-    )
+def _older(shown: Tag) -> list[Tag]:
+    """The older notes a story read's view lists: those a tidy-up took in."""
+    return [one for one in shown.held("note") if one.get("taken_in") == "yes"]
+
+
+def _newer(shown: Tag) -> list[Tag]:
+    """The notes newer than the summary a view lists."""
+    return [one for one in shown.held("note") if one.get("taken_in") is None]
 
 
 async def test_a_story_reads_older_notes_are_shown_each_under_its_own_n_label() -> None:
@@ -213,19 +266,16 @@ async def test_a_story_reads_older_notes_are_shown_each_under_its_own_n_label() 
         older_page=2,
         older_more=4,
     )
-    earlier, outcome = _read(view)
-    stage, completer, _ = _stage()
 
-    planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+    completer, planned = await _reported((_READ,), _read(view))
 
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    shown = call["result"]["value"]
-    assert [one["label"] for one in shown["notes_since_tidied"]] == ["N1"]
-    assert [(one["label"], one["text"]) for one in shown["older_notes"]] == [
+    shown = _view(completer)
+    assert [one.get("label") for one in _newer(shown)] == ["N1"]
+    assert [(one.get("label"), one.text) for one in _older(shown)] == [
         ("N2", "the car inspection is due"),
         ("N3", "Dana is driving"),
     ]
-    assert shown["more_older_notes"] == (
+    assert shown.get("more_older") == (
         "4 older not shown: read the story again with older_notes_page 3 for the next page"
     )
     labels = {(one.label, one.id) for one in planned.labels if one.kind is LabelKind.NOTE}
@@ -236,52 +286,42 @@ async def test_a_story_reads_older_notes_are_shown_each_under_its_own_n_label() 
 async def test_a_marked_older_note_is_outside_content_read() -> None:
     """ADR-0303 §3:6: a marked older note is rendered as a marked note is, and read."""
     view = _story(older=(_note(3, "the venue wrote back: Saturday", outside=True),))
-    earlier, outcome = _read(view)
-    stage, completer, _ = _stage(RoundResponse(text="ok"))
 
-    planned = await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+    completer, planned = await _reported((_READ,), _read(view))
 
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    (note,) = call["result"]["value"]["older_notes"]
-    assert "outside_content" in note
+    (note,) = _older(_view(completer))
+    assert note.get("outside") == "yes"
     assert planned.round.notes_marked
 
 
 async def test_a_note_shown_in_both_lists_keeps_one_label() -> None:
     """ADR-0307 §5:1: a note keeps the label it was first shown under, wherever shown."""
     same = _note(4, "they prefer Saturdays")
-    earlier, outcome = _read(_story(notes=(same,), older=(same,)))
-    stage, completer, _ = _stage()
 
-    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
+    completer, _ = await _reported((_READ,), _read(_story(notes=(same,), older=(same,))))
 
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    shown = call["result"]["value"]
-    assert shown["notes_since_tidied"][0]["label"] == shown["older_notes"][0]["label"] == "N1"
+    shown = _view(completer)
+    assert _newer(shown)[0].get("label") == _older(shown)[0].get("label") == "N1"
 
 
 async def test_a_read_page_with_no_older_note_says_so_and_offers_no_more() -> None:
-    earlier, outcome = _read(_story(older=()))
-    stage, completer, _ = _stage()
+    completer, _ = await _reported((_READ,), _read(_story(older=())))
 
-    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
-
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    shown = call["result"]["value"]
-    assert shown["older_notes"] == "none on this page"
-    assert "more_older_notes" not in shown
+    shown = _view(completer)
+    assert shown.get("older_notes") == "none on this page"
+    assert _older(shown) == []
+    assert "more_older" not in shown.attributes
 
 
 async def test_where_no_note_may_be_shown_a_read_says_nothing_of_older_notes() -> None:
     """ADR-0307 §6:4, ADR-0305 §4: absent, with nothing said, as every story note is."""
-    earlier, outcome = _read(_story(notes_withheld=True, older=(), older_more=3))
-    stage, completer, _ = _stage()
+    completer, _ = await _reported(
+        (_READ,), _read(_story(notes_withheld=True, older=(), older_more=3))
+    )
 
-    await stage.plan(_inputs(rounds=(earlier,), outcomes=(outcome,)))
-
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    shown = call["result"]["value"]
-    assert not {"notes_since_tidied", "older_notes", "more_older_notes"} & set(shown)
+    shown = _view(completer)
+    assert shown.held("note") == []
+    assert not {"older_notes", "more_older"} & set(shown.attributes)
 
 
 async def test_the_view_planning_is_given_each_round_shows_no_older_notes() -> None:
@@ -291,35 +331,10 @@ async def test_the_view_planning_is_given_each_round_shows_no_older_notes() -> N
 
     await stage.plan(_inputs(stories=stories))
 
-    (shown,) = _sent(completer)["stories"]
-    assert set(shown) == {
-        "label",
-        "summary",
-        "last_tidied",
-        "changes_since_tidied",
-        "notes_since_tidied",
-        "episodes_since_tidied",
-        "latest_episodes",
-    }
-
-
-@pytest.mark.parametrize("reads", [True, False], ids=["read_offered", "no_read"])
-async def test_the_template_is_handed_story_reads_where_a_story_read_is_offered(
-    reads: bool,
-) -> None:
-    """ADR-0334 §4:2; #2893, #2944: the code computes it from what the round offers.
-
-    ``story_calls`` beside it, since the story calls are offered either way, so the
-    template can say a story read shows older notes beside them.
-    """
-    sink = FakeDiagnosticSink()
-    stage, completer, _ = _stage(prompt=FLAG_ECHO, diagnostics=sink)
-    inputs = _inputs(capabilities=(*STORY_CALLS, *((READ_STORY,) if reads else ())))
-
-    flags = await _echoed(stage, completer, sink, inputs)
-
-    assert "story_calls" in flags
-    assert ("story_reads" in flags) is reads
+    (shown,) = tags(section(_sent(completer), "### Matters"))
+    assert [one.name for one in shown.tags] == ["summary", "note"]
+    assert _older(shown) == []
+    assert set(shown.attributes) == {"label", "last_tidied", "changes_since"}
 
 
 async def test_a_note_moved_away_leaves_the_story_it_left_nothing_to_tidy_until_noted() -> None:
@@ -354,8 +369,14 @@ async def test_a_note_moved_away_leaves_the_story_it_left_nothing_to_tidy_until_
 
 # --- a tidied story's summary points at the story read (#2944) ---------------------------------
 
-_CUE = "summary_built_from"
+_CUE = "older_notes"
+_CUE_TEXT = "read the story to see them by their labels"
 _STORY_READS = (*STORY_CALLS, READ_STORY)
+
+
+def _matter(completer: FakeToolCallingCompleter) -> Tag:
+    (shown,) = tags(section(_sent(completer), "### Matters"))
+    return shown
 
 
 @pytest.mark.parametrize(
@@ -372,9 +393,8 @@ async def test_a_tidied_storys_view_says_a_read_lists_any_notes_its_summary_came
 ) -> None:
     """#2944: beside the summary of a story a tidy-up has written, never otherwise.
 
-    It says "may": a summary can be built from episodes alone, and the view does not say
-    which. Where no note may be shown the notes part says nothing of notes (ADR-0305 §4),
-    so neither does this.
+    Where no note may be shown the notes part says nothing of notes (ADR-0305 §4), so
+    neither does this.
     """
     stage, completer, _ = _stage()
 
@@ -382,14 +402,7 @@ async def test_a_tidied_storys_view_says_a_read_lists_any_notes_its_summary_came
         _inputs(capabilities=_STORY_READS, stories=PlanningStories(stories=(_story(**fields),)))
     )
 
-    (shown,) = _sent(completer)["stories"]
-    assert (_CUE in shown) is cued
-    if cued:
-        assert shown[_CUE] == (
-            "what tidy-ups took in, which may include older notes: read the story to see any "
-            "by their labels"
-        )
-        assert list(shown).index(_CUE) == list(shown).index("summary") + 1
+    assert _matter(completer).get(_CUE) == (_CUE_TEXT if cued else None)
 
 
 async def test_no_view_points_at_a_story_read_where_none_is_offered() -> None:
@@ -400,18 +413,76 @@ async def test_no_view_points_at_a_story_read_where_none_is_offered() -> None:
         _inputs(capabilities=STORY_CALLS, stories=PlanningStories(stories=(_story(),)))
     )
 
-    (shown,) = _sent(completer)["stories"]
-    assert _CUE not in shown
+    assert _CUE not in _matter(completer).attributes
 
 
 async def test_a_story_reads_own_view_lists_the_older_notes_and_points_nowhere() -> None:
     """#2944: a read's view lists the older notes itself, so it carries no cue."""
-    earlier, outcome = _read(_story(older=(_note(7, "the car inspection is due"),)))
-    stage, completer, _ = _stage()
+    completer, _ = await _reported(
+        (_READ,),
+        _read(_story(older=(_note(7, "the car inspection is due"),))),
+        capabilities=_STORY_READS,
+    )
 
-    await stage.plan(_inputs(capabilities=_STORY_READS, rounds=(earlier,), outcomes=(outcome,)))
+    shown = _view(completer)
+    assert [one.text for one in _older(shown)] == ["the car inspection is due"]
+    assert shown.get(_CUE) is None
 
-    (call,) = _sent(completer)["rounds"][0]["calls"]
-    shown = call["result"]["value"]
-    assert "older_notes" in shown
-    assert _CUE not in shown
+
+async def test_two_follow_ups_each_take_the_digest_of_their_own_question() -> None:
+    """ADR-0308 §6:7, ADR-0356 §5:4: digests matched by question, whatever their order."""
+    later = DigestItem("open until dusk", LabelKind.RESULT, "result:1")
+    early = DigestItem("open now", LabelKind.RESULT, "result:1")
+    evidence = (
+        DigestedEvidence("result:1", answered=True, items=(later,), question="until when"),
+        DigestedEvidence("result:1", answered=True, items=(early,), question="is it open"),
+    )
+
+    def follow(call_id: str, question: str) -> ProposedCall:
+        return ProposedCall(
+            call_id=call_id, name="follow_up", arguments={"result": "R1", "looking_for": question}
+        )
+
+    completer, _ = await _reported(
+        (follow("c1", "is it open"), follow("c2", "until when")),
+        lambda round_id: (
+            CallOutcome(round_id, "c1", CallOutcomeKind.DONE, result_id="result:1", digested=True),
+            CallOutcome(round_id, "c2", CallOutcomeKind.DONE, result_id="result:1", digested=True),
+        ),
+        later={"evidence": evidence},
+    )
+
+    first, second = reported(completer.last_call)
+    assert [one.text for one in tags(first["evidence"][0], "evidence")] == ["open now"]
+    assert [one.text for one in tags(second["evidence"][0], "evidence")] == ["open until dusk"]
+
+
+async def test_two_follow_ups_asking_alike_each_take_one_digest_in_order() -> None:
+    """Two calls asking one question of one result: one digest each, in call order."""
+    one = DigestItem("first read", LabelKind.RESULT, "result:1")
+    two = DigestItem("second read", LabelKind.RESULT, "result:1")
+    evidence = (
+        DigestedEvidence("result:1", answered=True, items=(one,), question="hours"),
+        DigestedEvidence("result:1", answered=True, items=(two,), question="hours"),
+    )
+    calls = tuple(
+        ProposedCall(
+            call_id=call_id, name="follow_up", arguments={"result": "R1", "looking_for": "hours"}
+        )
+        for call_id in ("c1", "c2")
+    )
+
+    completer, _ = await _reported(
+        calls,
+        lambda round_id: tuple(
+            CallOutcome(
+                round_id, call_id, CallOutcomeKind.DONE, result_id="result:1", digested=True
+            )
+            for call_id in ("c1", "c2")
+        ),
+        later={"evidence": evidence},
+    )
+
+    first, second = reported(completer.last_call)
+    assert [one.text for one in tags(first["evidence"][0], "evidence")] == ["first read"]
+    assert [one.text for one in tags(second["evidence"][0], "evidence")] == ["second read"]

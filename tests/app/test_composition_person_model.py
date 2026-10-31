@@ -150,9 +150,12 @@ async def test_the_switch_reaches_planning_only_where_it_is_on(
     finally:
         await off.engine.aclose()
 
+    # Always in mind holds the person block where it is on, and its note where it is off
+    # (ADR-0356 §3:1, §4:1).
     assert "Robin Vale" in sent_on
-    assert "kept_in_mind" in sent_on
-    assert "kept_in_mind" not in sent_off
+    assert "keeps nothing in mind for the system yet" in sent_on
+    assert "keeps nothing in mind for the system yet" not in sent_off
+    assert "The system does not have it: no profile or kept memory is read" in sent_off
     assert not (tmp_path / "off" / PERSON_MODEL_FILENAME).exists()
 
 

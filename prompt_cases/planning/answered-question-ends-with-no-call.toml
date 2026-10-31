@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 1: once the answer was delivered, the next round sends no
+# further message. A note of the memory it relied on is allowed (ADR-0329 §6:8).
+prompt = "planning"
+guards = "ungrounded_extra"
+came_from = "2026-10-31"
+set = "development"
+samples = 2
+
+[property]
+check = "nothing_but"
+capabilities = ["note_reliance"]
+
+[input]
+file = "answered-question-ends-with-no-call.json"

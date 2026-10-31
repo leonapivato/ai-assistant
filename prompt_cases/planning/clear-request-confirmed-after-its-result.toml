@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 2: after the spawn came back set, the round tells Leo, as his
+# preference asks, and asks nothing.
+prompt = "planning"
+guards = "claimed_early"
+came_from = "2026-10-31"
+set = "development"
+samples = 2
+
+[property]
+check = "tells"
+phrases = ["9"]
+
+[input]
+file = "clear-request-confirmed-after-its-result.json"

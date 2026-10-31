@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from pydantic_ai.messages import (
@@ -47,24 +47,6 @@ PRIVATE: Final = "private-words-the-run-must-never-print"
 
 #: An understanding reply its stage reads, carrying :data:`PRIVATE`.
 MEANING: Final = json.dumps({"understanding": PRIVATE})
-
-#: The planning flags, every one declared, as a case gives them.
-PLANNING_FLAGS: Final = {
-    "takes_message": True,
-    "story_calls": False,
-    "story_reads": False,
-    "approved": False,
-    "candidates": False,
-    "reliance": False,
-    "person": False,
-    "suggestions": False,
-    "spawn": False,
-    "scheduled": False,
-    "running_work": False,
-    "offers": False,
-    "waiting": False,
-    "earlier_work": False,
-}
 
 WEB_SEARCH: Final = {
     "name": "web_search",
@@ -115,10 +97,10 @@ def _planning(**changes: Any) -> dict[str, Any]:
         "came_from": "#3104",
         "set": "held_out",
         "samples": 3,
-        "flags": PLANNING_FLAGS,
         "property": {"check": "asks_about", "calls": ["1.1"]},
         "input": {
-            "messages": [{"role": "user", "content": json.dumps({"rounds": PRIVATE})}],
+            # ADR-0356 §11:4: a planning case's input is its exchange after its instruction.
+            "exchange": {"briefing": f'# The stimulus\n<said from="Leo">{PRIVATE}</said>'},
             "tools": [WEB_SEARCH],
         },
     }
@@ -328,8 +310,21 @@ def test_a_malformed_case_is_a_defect_naming_its_file(
     ("case", "defect"),
     [
         (
-            _planning(input={"messages": [{"role": "user", "content": "x"}]}),
-            "['messages', 'tools']",
+            _planning(input={"messages": [{"role": "user", "content": "x"}], "tools": []}),
+            "exactly exchange and tools",
+        ),
+        (
+            _planning(input={"exchange": {"briefing": " "}, "tools": [WEB_SEARCH]}),
+            "is not the briefing's text",
+        ),
+        (
+            _planning(
+                input={
+                    "exchange": {"briefing": "x", "steps": [{"response": {"calls": "no"}}]},
+                    "tools": [WEB_SEARCH],
+                }
+            ),
+            "steps make no exchange",
         ),
         (
             _planning(property={"check": "no_label", "fields": ["meaning"], "labels": ["S"]}),
@@ -342,18 +337,13 @@ def test_a_malformed_case_is_a_defect_naming_its_file(
             "reads no reply",
         ),
         (
-            _planning(
-                input={
-                    "messages": [{"role": "user", "content": "x"}],
-                    "tools": [WEB_SEARCH, WEB_SEARCH],
-                }
-            ),
+            _planning(input={"exchange": {"briefing": "x"}, "tools": [WEB_SEARCH, WEB_SEARCH]}),
             "names one tool twice",
         ),
         (
             _planning(
                 input={
-                    "messages": [{"role": "user", "content": "x"}],
+                    "exchange": {"briefing": "x"},
                     "tools": [{"name": "t", "description": "d", "parameters": {"type": "array"}}],
                 }
             ),
@@ -567,28 +557,188 @@ def test_no_label_takes_a_label_as_a_whole_word_alone() -> None:
         assert _judge("no_label", params, "observer_scout", scouted(text)) is not None, text
 
 
-def test_no_label_reads_a_rounds_message() -> None:
-    """A round's message is the one field the check reads of it (ADR-0356 §7:2)."""
-    labelled = RoundResponse(text="Booked S1")
-
-    assert _round("no_label", {"fields": ["message"], "labels": ["S"]}, labelled) == (
-        "a label stands in message"
-    )
-    assert _round(
-        "no_label", {"fields": ["message"], "labels": ["S"]}, RoundResponse(text="hi")
-    ) is (None)
-    assert _round("no_label", {"fields": ["message"], "labels": ["S"]}, None) == (
-        "the reply is not one its stage reads"
-    )
+def _text(words: str, call_id: str = "c1", **more: Any) -> ProposedCall:
+    arguments: dict[str, Any] = {"to": "the user", "words": words, **more}
+    return ProposedCall(call_id=call_id, name="text", arguments=arguments)
 
 
-def test_asks_about_needs_a_message() -> None:
-    """No response names an asked call (ADR-0356 §7:5): the check reads the message alone."""
+def test_no_label_reads_a_rounds_notes_and_its_messages_apart() -> None:
+    """#3533: ``notes`` is a round's text (ADR-0356 §7:2); ``message``, its text calls' words."""
+    notes = RoundResponse(text="Shown S1")
+    message = RoundResponse(calls=(_text("Booked S1"),))
+    params_notes: dict[str, object] = {"fields": ["notes"], "labels": ["S"]}
+    params_message: dict[str, object] = {"fields": ["message"], "labels": ["S"]}
+
+    assert _round("no_label", params_notes, notes) == "a label stands in notes"
+    assert _round("no_label", params_message, notes) is None
+    assert _round("no_label", params_message, message) == "a label stands in message"
+    assert _round("no_label", params_notes, message) is None
+    assert _round("no_label", params_message, None) == "the reply is not one its stage reads"
+
+
+def test_asks_about_reads_the_asking_text_calls_asks() -> None:
+    """ADR-0357 §8:1: the calls a question asks about are named in its ``text`` call's ``asks``."""
     params: dict[str, object] = {"calls": ["1.1"]}
 
-    assert _round("asks_about", params, RoundResponse(text="Shall I?")) is None
-    assert _round("asks_about", params, RoundResponse(text="")) == "the round writes no message"
+    asking = RoundResponse(calls=(_text("Shall I book it?", asks=["1.1"]),))
+    assert _round("asks_about", params, asking) is None
+    unnamed = RoundResponse(text="asks 1.1", calls=(_text("Shall I?"),))
+    assert _round("asks_about", params, unnamed) == (
+        "the round's question leaves out 1 of the named calls"
+    )
     assert _round("asks_about", params, None) == "the response reads as no round"
+
+
+def test_asks_about_refuses_a_question_the_runtime_would_not_send() -> None:
+    """ADR-0357 §6:1, review round 3: blank words are refused, so nothing is asked."""
+    blank = RoundResponse(calls=(_text(" ", asks=["1.1"]),))
+
+    assert _round("asks_about", {"calls": ["1.1"]}, blank) == (
+        "the round's question is a text call the runtime refuses"
+    )
+
+
+def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
+    """ADR-0356 §11:2: a plain question comes back as a message call, not as text."""
+    params: dict[str, object] = {"phrases": ["10:30"]}
+    search = ProposedCall(call_id="c2", name="web_search", arguments={"query": "x"})
+
+    assert _round("only_says", params, RoundResponse(calls=(_text("At 10:30."),))) is None
+    assert _round("only_says", params, RoundResponse(text="At 10:30.")) == (
+        "the round makes no call, so nothing reaches anyone"
+    )
+    assert _round("only_says", params, RoundResponse(calls=(_text("Soon."),))) == (
+        "no text call's words hold every named phrase"
+    )
+    assert _round("only_says", params, RoundResponse(calls=(_text("At 10:30."), search))) == (
+        "the round makes a call other than a text call"
+    )
+
+
+def test_asks_about_reads_the_first_asking_message_alone() -> None:
+    """ADR-0357 §8:3: a second asking text call is refused, so what it names is asked of none."""
+    second = RoundResponse(
+        calls=(_text("Shall I?", asks=["9.9"]), _text("Or this?", call_id="c2", asks=["1.1"]))
+    )
+
+    assert _round("asks_about", {"calls": ["1.1"]}, second) == (
+        "the round's question leaves out 1 of the named calls"
+    )
+
+
+def test_the_checks_that_decide_each_class_refuse_their_counterexamples() -> None:
+    """Review round 1: each check refuses the counterexample its class names."""
+    reliance = ProposedCall(call_id="c9", name="note_reliance", arguments={"memories": ["M1"]})
+    spawn = ProposedCall(call_id="c8", name="spawn", arguments={"instruction": "Pay the invoice."})
+    book = ProposedCall(
+        call_id="c7", name="book_table", arguments={"restaurant": "Luigi's", "party": 2}
+    )
+    parking = ProposedCall(
+        call_id="c6", name="spawn", arguments={"instruction": "Research parking near Luigi's."}
+    )
+    maren = ProposedCall(
+        call_id="c5", name="spawn", arguments={"instruction": "Remind Leo to confirm with Maren."}
+    )
+    told: dict[str, object] = {"phrases": ["mother"]}
+    assert (
+        _round("tells", told, RoundResponse(calls=(_text("Call your mother."), reliance))) is None
+    )
+    assert _round(
+        "tells", told, RoundResponse(calls=(_text("Remind you to call your mother?"),))
+    ) == ("the message asks something, rather than telling")
+    report: dict[str, object] = {"capabilities": ["text", "search_memory", "note_reliance"]}
+    assert _round("acts_within", report, RoundResponse(calls=(_text("Invoice due."),))) is None
+    assert _round("acts_within", report, RoundResponse()) == "the round makes no call"
+    assert _round("acts_within", report, RoundResponse(calls=(spawn,))) == (
+        "the round makes a call to a capability not named"
+    )
+    ends: dict[str, object] = {"capabilities": ["note_reliance"]}
+    assert _round("nothing_but", ends, RoundResponse()) is None
+    assert _round("nothing_but", ends, RoundResponse(calls=(reliance,))) is None
+    assert _round("nothing_but", ends, RoundResponse(calls=(spawn,))) == (
+        "the round makes a call to a capability not named"
+    )
+    both: dict[str, object] = {
+        "capabilities": ["book_table", "spawn"],
+        "phrases": ["Luigi", "Maren"],
+    }
+    assert _round("includes_with", both, RoundResponse(calls=(book, maren))) is None
+    assert _round("includes_with", both, RoundResponse(calls=(book, parking))) == (
+        "the named calls' arguments leave out 1 of the named phrases"
+    )
+    answer: dict[str, object] = {"phrases": ["10:30"]}
+    assert _round(
+        "answers_by_message", answer, RoundResponse(calls=(_text("Is it at 10:30?"),))
+    ) == ("the message asks something, rather than telling")
+    search = ProposedCall(call_id="c4", name="search_memory", arguments={"query": "dentist"})
+    assert _round("answers_or_searches", answer, RoundResponse(calls=(search,))) is None
+    assert _round("answers_or_searches", answer, RoundResponse(text="It is at 10:30.")) == (
+        "the answer is written as the round's text, and no message carries it"
+    )
+
+
+def test_answers_by_message_allows_a_call_that_sends_nothing_beside_the_answer() -> None:
+    """ADR-0356 §11:2, as ruled: no other reply is no other message."""
+    params: dict[str, object] = {"phrases": ["10:30"]}
+    reliance = ProposedCall(call_id="c2", name="note_reliance", arguments={"memories": ["M1"]})
+    search = ProposedCall(call_id="c3", name="search_memory", arguments={"query": "x"})
+
+    assert (
+        _round("answers_by_message", params, RoundResponse(calls=(_text("At 10:30."), reliance)))
+        is None
+    )
+    assert _round("answers_by_message", params, RoundResponse(calls=(search,))) == (
+        "the round sends no message, so nothing reaches anyone"
+    )
+    assert _round(
+        "answers_by_message",
+        params,
+        RoundResponse(calls=(_text("At 10:30."), _text("Bye.", call_id="c4"))),
+    ) == ("the round sends more than one message")
+    assert _round("answers_by_message", params, RoundResponse(calls=(_text("Soon."),))) == (
+        "the message's words do not hold every named phrase"
+    )
+
+
+def test_the_capability_checks_read_the_rounds_calls() -> None:
+    spawn = ProposedCall(call_id="c1", name="spawn", arguments={"instruction": "x"})
+    both = RoundResponse(calls=(spawn, _text("Set.", call_id="c2")))
+
+    assert _round("calls_are", {"capabilities": ["spawn"]}, RoundResponse(calls=(spawn,))) is None
+    assert _round("calls_are", {"capabilities": ["spawn"]}, both) == (
+        "the round calls 2 capabilities, 1 of the 1 named"
+    )
+    assert _round("calls_include", {"capabilities": ["spawn"]}, both) is None
+    assert _round("calls_include", {"capabilities": ["book_table"]}, both) == (
+        "the round leaves out 1 of the named capabilities"
+    )
+    assert _round("no_call", {}, RoundResponse(text="done")) is None
+    assert _round("no_call", {}, both) == "the round makes 2 call(s)"
+    reliance = ProposedCall(call_id="c3", name="note_reliance", arguments={"memories": ["M1"]})
+    assert _round("no_message", {}, RoundResponse(calls=(reliance,))) is None
+    assert _round("no_message", {}, both) == "the round sends 1 message(s)"
+    pay: dict[str, object] = {"capabilities": ["pay_bill"]}
+    paying = ProposedCall(call_id="c4", name="pay_bill", arguments={"amount": "1"})
+    assert _round("none_of", pay, both) is None
+    assert _round("none_of", pay, RoundResponse(calls=(paying,))) == (
+        "the round calls a named capability"
+    )
+    twice = RoundResponse(calls=(_text("a"), _text("b", call_id="c2")))
+    assert _round("none_of", pay, twice) == "the round sends more than one message"
+    within: dict[str, object] = {
+        "capabilities": ["stop_activation", "look_up_activation"],
+        "argument": "activation",
+        "value": "E1",
+    }
+    look = ProposedCall(call_id="c5", name="look_up_activation", arguments={"activation": "E1"})
+    elsewhere = ProposedCall(call_id="c6", name="stop_activation", arguments={"activation": "E2"})
+    assert _round("calls_within", within, RoundResponse(calls=(look,))) is None
+    assert _round("calls_within", within, RoundResponse(calls=(look, elsewhere))) == (
+        "a call names another value, or none"
+    )
+    assert _round("calls_within", within, both) == (
+        "the round makes a call to a capability not named"
+    )
 
 
 def test_the_framing_check_reads_whether_any_memory_is_kept() -> None:
@@ -721,10 +871,16 @@ def test_a_planning_case_is_sent_as_a_round_with_its_tools_and_its_message_read(
     tmp_path: Path,
 ) -> None:
     """The case's tools alone are offered: no tool name is reserved (ADR-0356 §7:4)."""
-    directory = _cases(tmp_path, ("planning/one.toml", _planning(samples=3)))
+    text = {"name": "text", "description": "Send a message.", "parameters": {"type": "object"}}
+    case = _planning(samples=3)
+    case["input"]["tools"] = [WEB_SEARCH, text]
+    directory = _cases(tmp_path, ("planning/one.toml", case))
     answers: Iterator[list[ModelResponsePart]] = iter(
         [
-            [TextPart("Shall I book it? " + PRIVATE)],
+            [
+                TextPart(PRIVATE),
+                ToolCallPart("text", {"to": "Leo", "words": "Shall I?", "asks": ["1.1"]}),
+            ],
             [ToolCallPart("web_search", {"query": PRIVATE})],
             [TextPart("Shall I book it?"), ToolCallPart("web_search", "not json")],
         ]
@@ -734,10 +890,10 @@ def test_a_planning_case_is_sent_as_a_round_with_its_tools_and_its_message_read(
 
     _suite(directory, model, reports, results=tmp_path / "results")
 
-    assert model.tools == [["web_search"]] * 3
+    assert model.tools == [["text", "web_search"]] * 3
     lines = _lines(tmp_path / "results")
     assert [one["passed"] for one in lines] == [True, False, False]
-    assert lines[1]["reason"] == "the round writes no message"
+    assert lines[1]["reason"] == "the round's question leaves out 1 of the named calls"
     assert lines[2]["read_as_round"] is False
     assert lines[2]["reason"] == "the response reads as no round"
     assert lines[0]["response"]["parts"][0]["content"].endswith(PRIVATE)
@@ -1178,3 +1334,30 @@ def test_proposes_and_answers_offer_read_the_rounds_calls() -> None:
     assert _round("answers_offer", {"answer": "take", "offer": "E1"}, elsewhere) is not None
     assert _round("answers_offer", {"answer": "decline", "offer": "E1"}, decline) is None
     assert _round("answers_offer", {"answer": "decline", "offer": "E1"}, _calls()) is not None
+
+
+def test_a_later_rounds_follow_up_is_asked_of_its_whole_exchange() -> None:
+    """ADR-0337 §7:2, review round 2: the follow-up's request carries the case's steps."""
+    seen: list[object] = []
+
+    class _Caller:
+        async def follow_up_round(
+            self, messages: Any, tools: Any, response: Any, question: str, steps: Any = ()
+        ) -> str:
+            del messages, tools, response, question
+            seen.append(tuple(steps))
+            return "answered"
+
+    follow_up = replay_tool.FollowUp(
+        candidate=replay_tool.default_candidate(replay_tool.FOLLOW_UP_PROMPT),
+        question="Why?",
+    )
+    steps = ("a step",)
+    asked = asyncio.run(
+        replay_tool.ask_follow_up(
+            follow_up, cast("Any", _Caller()), (), (), {"response": {"parts": []}}, steps
+        )
+    )
+
+    assert asked is not None
+    assert seen == [steps]

@@ -262,8 +262,22 @@ SPAWN: Final = _declared(
     SPAWN_CAPABILITY,
     (
         "Set up work that runs later or separately: a scheduled task, which starts an "
-        "activation of its own when it falls due, reading what it carries. Give at most "
-        "one of at, delay_minutes, after and rule; with none it falls due now."
+        "activation of its own when it falls due, reading what it carries. Spawn only "
+        "work that runs later or separately. Give at most one of at, delay_minutes, "
+        "after and rule; with none it falls due now. A task suggests only places on "
+        "your place list. A task you were shown by its T label is replaced by one "
+        'spawn naming it in replaces; find any other with list_tasks first. "Snooze '
+        '10 minutes" or "again tomorrow", after a task\'s message, is a new spawn: a '
+        "one-off task with the same instruction, written from what you were shown of "
+        "the episode that wrote the message, suggesting the place the person said it "
+        "in. Skipping a rule's next occurrence (\"skip tomorrow's\") is a spawn "
+        "replacing it with the same rule from the local date after the skipped one, "
+        'or its cancel where none would follow before its until. "Tomorrow at 9 '
+        'instead" is that skip and a one-off task at the new time, in the same round. '
+        "Write a local time with no UTC offset unless the person named one, and give "
+        "a zone only where the person named one. Say a task back from its read_back, "
+        "never from your own reckoning of the time. Where the words could mean more "
+        "than one task, ask which."
     ),
     {
         "type": "object",
@@ -358,7 +372,15 @@ SPAWN: Final = _declared(
 
 CANCEL_TASK: Final = _declared(
     CANCEL_TASK_CAPABILITY,
-    "Cancel what is still pending of a scheduled task. It stops nothing already running.",
+    (
+        "Cancel what is still pending of a scheduled task. It stops nothing already "
+        "running. A task you were shown by its T label is cancelled by one call; find "
+        "any other with list_tasks first. Skipping a one-off task is its cancel. "
+        '"Done" or "I already took it" before a task\'s message is that skip, and '
+        "after its message is no call. Cancel exactly what the person's words cover, "
+        "by the labels you were shown, and keep the rest; where the words could mean "
+        "more than one task, ask which."
+    ),
     {
         "type": "object",
         "properties": {
@@ -381,7 +403,8 @@ LIST_TASKS: Final = _declared(
     LIST_TASKS_CAPABILITY,
     (
         "List the person's work: what is running, the scheduled tasks still pending, "
-        "and the scheduled work that ended most recently."
+        "and the scheduled work that ended most recently. Use it to find a task you "
+        "were not shown by its T label before you replace or cancel it."
     ),
     {"type": "object", "properties": {}, "additionalProperties": False},
     writes=False,

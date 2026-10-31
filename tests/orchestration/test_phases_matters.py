@@ -38,11 +38,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from exchange_support import request_view
+from exchange_support import Tag, says, section, tag, tags, text_call
 from phases_support import (
     SETTLE,
     Gated,
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
         ConversationState,
         EpisodeProcessingRecord,
         EpisodicMemory,
+        ExchangeStep,
         Message,
         OfferedTool,
         PlanningExchange,
@@ -149,15 +151,72 @@ class _Understanding(FakeModelProvider):
         return await super().complete(messages, model=model)
 
 
-type _Reply = RoundResponse | Callable[[dict[str, Any]], RoundResponse]
+@dataclass(frozen=True)
+class _Request:
+    """One round's exchange, read as planning's model reads it: by what it was shown.
+
+    The briefing, then each earlier round's response and report (ADR-0356 §5): a case
+    reads a section by its heading, the results of a round's calls decoded, and the news.
+    """
+
+    exchange: PlanningExchange
+
+    @property
+    def briefing(self) -> str:
+        return self.exchange.briefing
+
+    @property
+    def rounds(self) -> tuple[ExchangeStep, ...]:
+        """The work's earlier rounds, each its response and its report."""
+        return self.exchange.steps
+
+    @property
+    def text(self) -> str:
+        """Everything the round was shown: the briefing, then each report in order."""
+        parts = [self.briefing]
+        for step in self.rounds:
+            parts.extend(one.text for one in step.report.results)
+            parts.append(step.report.news)
+        return "\n".join(parts)
+
+    @property
+    def meaning(self) -> str:
+        """What the latest understanding the round was shown says the input means."""
+        found = tags(self.text, "understanding")
+        return "" if not found else str(found[-1].text)
+
+    def section(self, heading: str) -> str:
+        return section(self.briefing, heading)
+
+    def results(self, round_number: int) -> list[dict[str, Any]]:
+        """What came of each call of round ``round_number``, decoded, with its call."""
+        step = self.rounds[round_number - 1]
+        return [
+            {
+                "capability": call.name,
+                "arguments": call.model_dump()["arguments"],
+                **json.loads(one.text),
+            }
+            for call, one in zip(step.response.calls, step.report.results, strict=True)
+        ]
+
+    def news(self) -> str:
+        """Every report's news, in order."""
+        return "\n".join(step.report.news for step in self.rounds)
+
+
+type _Reply = RoundResponse | Callable[[_Request], RoundResponse]
 
 
 class _Planner(FakeToolCallingCompleter):
     """Planning's model, routed by what the round's understanding says the input means.
 
     Each input's rounds are answered from its own script in turn, a callable answering
-    from the rendered request; past its script, a round writes ``done: <input>``. A held
-    input's rounds wait for its release.
+    from the rendered request; past its script, a work's first such round sends
+    ``done: <input>`` by a ``text`` call, and each after it proposes nothing, so the work
+    ends (a round's own text is its notes alone, ADR-0356 §7:3). A script whose last
+    reply is a message ends with an empty round of its own. A held input's rounds wait
+    for its release.
     """
 
     def __init__(self) -> None:
@@ -167,7 +226,7 @@ class _Planner(FakeToolCallingCompleter):
         self._from: dict[str, int] = {}
         self._within: list[str] = []
         self._pauses: dict[tuple[str, int], tuple[asyncio.Event, asyncio.Event]] = {}
-        self.requests: dict[str, list[dict[str, Any]]] = {}
+        self.requests: dict[str, list[_Request]] = {}
         self.offered: dict[str, list[list[str]]] = {}
 
     def script(self, text: str, *replies: _Reply) -> None:
@@ -199,9 +258,8 @@ class _Planner(FakeToolCallingCompleter):
     ) -> RoundResponse:
         del model
         # The briefing and the reports since, read as one request (ADR-0356 §5).
-        request: dict[str, Any] = request_view(exchange)
-        understanding = request.get("understanding")
-        key = str(understanding["meaning"]) if isinstance(understanding, dict) else ""
+        request = _Request(exchange)
+        key = request.meaning
         key = next((one for one in self._within if one in key), key)
         self.requests.setdefault(key, []).append(request)
         self.offered.setdefault(key, []).append([one.name for one in tools])
@@ -215,7 +273,12 @@ class _Planner(FakeToolCallingCompleter):
             await paused[1].wait()
         script = self._scripts.get(key) or []
         if not script:
-            return RoundResponse(text=f"done: {key}")
+            said = any(
+                one.call_id == "done" for step in exchange.steps for one in step.response.calls
+            )
+            if said:
+                return RoundResponse()
+            return RoundResponse(calls=(text_call(f"done: {key}", call_id="done"),))
         reply = script.pop(0)
         return reply(request) if callable(reply) else reply
 
@@ -337,20 +400,31 @@ async def _understood(harness: Harness, activation_id: str) -> None:
     await until(recorded, what="the understanding to be recorded")
 
 
-def _label_of(request: dict[str, Any], key: str) -> str:
-    """The ``E`` label a request shows running work under, in its rounds or its sections."""
-    text = json.dumps(request)
-    for section in ("offers", "waiting_on"):
-        for one in request.get(section) or ():
-            return str(one.get("offer") or one["episode"])
-    for one in request.get("rounds") or ():
-        for call in one["calls"]:
+def _label_of(request: _Request, key: str) -> str:
+    """The ``E`` label a request shows other work under: an offer, work it waits on, or
+    running work a list pull's result shows (ADR-0356 §3:2, §5:5)."""
+    for one in tags(request.text, "stimulus"):
+        if "yes" in (one.get("offered"), one.get("waited_on")):
+            return str(one.get("label"))
+    for number in range(1, len(request.rounds) + 1):
+        for call in request.results(number):
             value = call.get("result", {}).get("value", {})
-            for running in value.get("running") or ():
+            for running in (value.get("running") if isinstance(value, dict) else None) or ():
                 if isinstance(running, dict):
                     return str(running["episode"])
-    msg = f"no running work shown for {key}: {text[:200]}"
+    msg = f"no running work shown for {key}: {request.text[:200]}"
     raise AssertionError(msg)
+
+
+def _round_limit(harness: Harness, limit: int) -> None:
+    """Bound the hub's activations at ``limit`` rounds.
+
+    A round's message is a ``text`` call, whose round brings another (ADR-0356 §7:3,
+    ADR-0315 §2:1), so a case that pulls, acts and then answers needs a fourth.
+    """
+    phases = harness.engine._phases
+    assert phases is not None
+    phases._round_limit = limit
 
 
 # --- §7:4-§7:8: the newest absorbs what it continues ---------------------------------
@@ -418,7 +492,14 @@ async def test_separate_work_continues_nothing_and_each_runs_on_its_own() -> Non
         "acted": "no",
     }
     assert entry["at"], "ADR-0353 §2:5: when its input arrived"
-    assert "in_progress" not in planner.requests["what's the weather there?"][0]
+    # Planning is shown it as a concurrent stimulus, not acted, its input as written
+    # (ADR-0356 §3:2).
+    (running,) = tags(
+        planner.requests["what's the weather there?"][0].section("## Concurrent stimuli"),
+        "stimulus",
+    )
+    assert running.get("acted") == "no"
+    assert [one.text for one in running.held("said")] == ["book Riverside"]
 
 
 async def test_running_work_cited_and_belonged_to_alone_is_never_taken_over() -> None:
@@ -594,8 +675,8 @@ async def test_an_activation_that_has_acted_waits_for_nothing_on_another_place()
     planner.script(
         "book Riverside",
         RoundResponse(
-            text="Looking.",
             calls=(
+                text_call("Looking.", call_id="m1"),
                 _call(
                     "c1", "remember", fact="Likes Riverside.", why="a taste", rests_on_input=True
                 ),
@@ -629,15 +710,6 @@ async def test_an_activation_that_has_acted_waits_for_nothing_on_another_place()
     await _frozen(harness, 2)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ADR-0356 P1's interim (the coordinator's ruling A): a round's text is its notes "
-        "and still its message, so A cannot keep notes without having written, and work "
-        "that wrote is waited on, not absorbed. P3 makes the text notes alone (§7:3), and "
-        "this case passes again; strict, so P3 must drop this mark."
-    ),
-)
 async def test_the_absorbers_planning_is_shown_what_it_took_over_read_from_the_source() -> None:
     """§7:10, §1:5's case: A's findings reach C through B, read fresh from A's own episode."""
     understanding, planner = _Understanding(), _Planner()
@@ -664,10 +736,10 @@ async def test_the_absorbers_planning_is_shown_what_it_took_over_read_from_the_s
     found = await _frozen(harness, 3)
 
     assert [processing(one).activation_id for one in found_c] == [c]
-    (request,) = planner.requests[c_text]
-    shown = request["earlier_work"]
+    request, _ = planner.requests[c_text]
+    shown = tags(request.section("## Short-term memory"), "episode")
     assert len(shown) == 2, "A's work and B's, each from its own episode"
-    notes = json.dumps(shown)
+    notes = [note.text for one in shown for note in one.held("notes")]
     assert "The Grand had a view last time." in notes
     stopped(_episode(found, a))
     stopped(_episode(found, b))
@@ -684,15 +756,15 @@ async def test_input_continuing_work_that_acted_elsewhere_waits_on_it_with_no_of
     planner.script(
         "search apartments",
         RoundResponse(
-            text="Searching.",
             calls=(
+                text_call("Searching.", call_id="m2"),
                 _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
             ),
         ),
     )
     planner.hold("search apartments", from_round=2)
     newer_text = "only two bedrooms, continues: apartments"
-    planner.script(newer_text, RoundResponse(text="I'll filter to two bedrooms once it ends."))
+    planner.script(newer_text, says("I'll filter to two bedrooms once it ends.", call_id="m10"))
     harness = _harness(understanding, planner)
     await open_conversation(harness)
     first, _ = await _start(harness, "search apartments", message_id="a-1")
@@ -713,16 +785,17 @@ async def test_input_continuing_work_that_acted_elsewhere_waits_on_it_with_no_of
     assert record.joined == ()
     assert record.status is not None
     assert record.status.value == "completed", "the wait did not count against its deadline"
-    first_round, second_round = planner.requests[newer_text]
-    (waited,) = first_round["waiting_on"]
-    assert waited["has_acted"] is True
+    first_round, second_round, _ = planner.requests[newer_text]
+    waited = tag(first_round.section("## Concurrent stimuli"), "stimulus", waited_on="yes")
+    assert waited.get("acted") == "yes"
     # ADR-0356 §4:3, §4:5: the waiting round is offered every call, as every round is,
     # and a call but the stop or a message comes back refused.
     assert planner.offered[newer_text][0] == planner.offered[newer_text][1]
-    (work,) = second_round["earlier_work"]
-    assert work["status"] == "ended"
-    assert work["input"] == "search apartments"
-    assert work["did"] == [
+    assert "- Finished work newly read:" in second_round.news()
+    work = tag(second_round.news(), "episode")
+    assert work.get("status") == "ended"
+    assert [one.text for one in work.held("said")] == ["search apartments"]
+    assert [one.text for one in work.held("did")] == [
         "sent the message: Searching.",
         "the tool remember ran",
         "sent the message: done: search apartments",
@@ -732,6 +805,11 @@ async def test_input_continuing_work_that_acted_elsewhere_waits_on_it_with_no_of
         "I'll filter to two bedrooms once it ends.",
         f"done: {newer_text}",
     ]
+
+
+def _offers(request: _Request) -> list[Tag]:
+    """The offers a request was shown open: each a stimulus tag offered to the work."""
+    return tags(request.text, "stimulus", offered="yes")
 
 
 def _has(planner: _Planner, text: str, count: int) -> Callable[[], Any]:
@@ -770,17 +848,18 @@ async def test_an_offer_taken_ends_the_offering_one_silent_and_the_reply_covers_
     planner.script(
         older_text,
         RoundResponse(
-            text="Searching.",
             calls=(
+                text_call("Searching.", call_id="m3"),
                 _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
             ),
         ),
         # Planned before the offer, so held back (§7:14) and never written.
-        RoundResponse(text="Still searching."),
+        says("Still searching.", call_id="m11"),
         lambda request: RoundResponse(
             calls=(_call("c2", "answer_offer", offer=_label_of(request, older_text), take=True),)
         ),
-        RoundResponse(text="Two-bedroom flats: three found."),
+        says("Two-bedroom flats: three found.", call_id="m12"),
+        RoundResponse(),
     )
     planner.hold(older_text, from_round=2)
     harness = _harness(understanding, planner)
@@ -811,20 +890,22 @@ async def test_an_offer_taken_ends_the_offering_one_silent_and_the_reply_covers_
         "Searching.",
         "Two-bedroom flats: three found.",
     ], "the offering one wrote nothing, and the older's reply covers both"
-    assert "offers" not in planner.requests[older_text][1], "planned before the offer"
-    (shown,) = planner.requests[older_text][2]["offers"]
-    assert shown["understood_as"] == newer_text
-    assert shown["input"] == newer_text
+    assert not _offers(planner.requests[older_text][1]), "planned before the offer"
+    (shown,) = _offers(planner.requests[older_text][2])
+    assert [one.text for one in shown.held("understood")] == [newer_text]
+    assert [one.text for one in shown.held("said")] == [newer_text]
     assert "answer_offer" in planner.offered[older_text][2]
-    # §7:21: once taken, the input is the older's own, shown to its planning as input
-    # of the place, once, with when it was sent.
+    # §7:21: once taken, the input is the older's own, shown to its planning as a new
+    # message of the place, once, by its writer and with when it was sent; the offer is
+    # said closed (ADR-0356 §5:5).
     after = planner.requests[older_text][3]
-    taken = [one for one in after["place_window"] if one["text"] == newer_text]
+    news = after.rounds[-1].report.news
+    taken = [one for one in tags(news, "message") if one.text == newer_text]
     assert len(taken) == 1
-    assert taken[0]["is_the_input"] is True
-    assert taken[0]["from"] == after["place_window"][0]["from"]
-    assert "at" in taken[0]
-    assert "offers" not in after, "a taken offer is no longer open"
+    assert taken[0].get("from") == tag(after.briefing, "said").get("from")
+    assert taken[0].get("at") is not None
+    (offer,) = _offers(after)
+    assert f"- The offer of {offer.get('label')} is no longer open." in news
 
 
 async def test_an_offer_declined_sends_the_newer_one_to_wait_with_the_reason(
@@ -836,14 +917,14 @@ async def test_an_offer_declined_sends_the_newer_one_to_wait_with_the_reason(
     planner.script(
         older_text,
         RoundResponse(
-            text="Booking.",
             calls=(
+                text_call("Booking.", call_id="m4"),
                 _call(
                     "c1", "remember", fact="Books Saturdays.", why="a habit", rests_on_input=True
                 ),
             ),
         ),
-        RoundResponse(text="Still booking."),
+        says("Still booking.", call_id="m13"),
         lambda request: RoundResponse(
             calls=(
                 _call(
@@ -878,12 +959,13 @@ async def test_an_offer_declined_sends_the_newer_one_to_wait_with_the_reason(
     found = await _frozen(harness, 2)
 
     rounds = planner.requests[newer_text]
-    (waited,) = rounds[0]["waiting_on"]
-    assert waited["declined_this_input"] == "already booked"
-    (work,) = rounds[-1]["earlier_work"]
-    assert work["input"] == older_text
-    assert "the tool remember ran" in work["did"], "it plans from the older's finished work"
-    assert "sent the message: done: book Saturday" in work["did"]
+    waited = tag(rounds[0].section("## Concurrent stimuli"), "stimulus", waited_on="yes")
+    assert waited.get("declined") == "already booked"
+    work = tag(rounds[-1].news(), "episode")
+    assert [one.text for one in work.held("said")] == [older_text]
+    did = [one.text for one in work.held("did")]
+    assert "the tool remember ran" in did, "it plans from the older's finished work"
+    assert "sent the message: done: book Saturday" in did
     assert _of(found, newer).joined == ()
     assert _of(found, older).joined == ()
 
@@ -897,15 +979,16 @@ async def test_an_older_one_ending_without_answering_has_declined(
     planner.script(
         older_text,
         RoundResponse(
-            text="Booking.",
             calls=(
+                text_call("Booking.", call_id="m5"),
                 _call(
                     "c1", "remember", fact="Books Saturdays.", why="a habit", rests_on_input=True
                 ),
             ),
         ),
-        RoundResponse(text="Booked."),
-        RoundResponse(text="Booked."),
+        says("Booked.", call_id="m14"),
+        says("Booked.", call_id="m15"),
+        RoundResponse(),
     )
     planner.hold(older_text, from_round=2)
     harness = _harness(understanding, planner)
@@ -931,9 +1014,8 @@ async def test_an_older_one_ending_without_answering_has_declined(
     found = await _frozen(harness, 2)
 
     assert _of(found, newer).joined == ()
-    (work,) = planner.requests[newer_text][-1]["earlier_work"]
-    assert "sent the message: Booked." in work["did"]
-    assert any("earlier_work" in one for one in planner.requests[newer_text]), (
+    work = tag(planner.requests[newer_text][-1].text, "episode", status="ended")
+    assert "sent the message: Booked." in [one.text for one in work.held("did")], (
         "it plans from the older's finished work"
     )
 
@@ -947,8 +1029,8 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
     planner.script(
         older_text,
         RoundResponse(
-            text="Booking.",
             calls=(
+                text_call("Booking.", call_id="m6"),
                 _call(
                     "c1", "remember", fact="Books Saturdays.", why="a habit", rests_on_input=True
                 ),
@@ -956,8 +1038,8 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
         ),
         # Planned before the offer: a write and its message, both held back (§7:14).
         RoundResponse(
-            text="Booked for Saturday.",
             calls=(
+                text_call("Booked for Saturday.", call_id="m7"),
                 _call(
                     "c2",
                     "remember",
@@ -970,7 +1052,8 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
         lambda request: RoundResponse(
             calls=(_call("c3", "answer_offer", offer=_label_of(request, older_text), take=True),)
         ),
-        RoundResponse(text="Booked for Sunday instead."),
+        says("Booked for Sunday instead.", call_id="m16"),
+        RoundResponse(),
     )
     planner.hold(older_text, from_round=2)
     harness = _harness(understanding, planner)
@@ -999,12 +1082,15 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
     stopped(_episode(found, newer))
     record = _of(found, older)
     assert [one.taken_over_from for one in record.joined] == [newer]
-    assert "offers" not in planner.requests[older_text][1]
+    assert not _offers(planner.requests[older_text][1])
     replanned = planner.requests[older_text][2]
-    assert "offers" in replanned
-    (withheld,) = replanned["rounds"][1]["calls"]
-    assert "offered to this work before this round acted" in withheld["outcome"]
-    assert replanned["rounds"][1]["text_was"] != "written into the place"
+    assert _offers(replanned)
+    # The held-back round's message and write each come back not run (ADR-0349 §7:14).
+    held_back = replanned.results(2)
+    assert [one["capability"] for one in held_back] == ["text", "remember"]
+    assert all(
+        "offered to this work before this round acted" in one["outcome"] for one in held_back
+    )
     remembered = [
         one
         for one in await harness.plans.activation_effects([older])
@@ -1016,15 +1102,18 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
 # --- §4:6-§4:11, §6:1-§6:6: the stop call and the look-up --------------------------------
 
 
-def _stop_result(request: dict[str, Any], round_number: int) -> dict[str, Any]:
+def _stop_result(request: _Request, round_number: int) -> dict[str, Any]:
     """What a stop call a round made came back with, as a later round is shown it."""
     (call,) = [
-        one
-        for one in request["rounds"][round_number - 1]["calls"]
-        if one["capability"] == "stop_activation"
+        one for one in request.results(round_number) if one["capability"] == "stop_activation"
     ]
-    value: dict[str, Any] = call["result"]["value"]
-    return value
+    result: dict[str, Any] = call["result"]
+    return result
+
+
+def _stopped_work(result: dict[str, Any]) -> Tag:
+    """The work a stop call's result shows, as the ``episode`` tag its value is."""
+    return tag(str(result["value"]), "episode")
 
 
 async def test_the_stop_call_stops_committed_work_and_its_task_stays_and_is_listed() -> None:
@@ -1034,8 +1123,10 @@ async def test_the_stop_call_stops_committed_work_and_its_task_stays_and_is_list
     planner.script(
         older_text,
         RoundResponse(
-            text="I'll remind you.",
-            calls=(_call("c1", "spawn", instruction="Remind them to stretch.", delay_minutes=60),),
+            calls=(
+                text_call("I'll remind you.", call_id="remind"),
+                _call("c1", "spawn", instruction="Remind them to stretch.", delay_minutes=60),
+            ),
         ),
     )
     planner.hold(older_text, from_round=2)
@@ -1045,9 +1136,11 @@ async def test_the_stop_call_stops_committed_work_and_its_task_stays_and_is_list
         lambda request: RoundResponse(
             calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
         ),
-        RoundResponse(text="Stopped; the reminder is still set."),
+        says("Stopped; the reminder is still set.", call_id="m17"),
+        RoundResponse(),
     )
     harness = _harness(understanding, planner, task_scheduler=seams())
+    _round_limit(harness, 4)
     await harness.engine.start()
     await open_conversation(harness)
     _, older = await _start(harness, older_text, message_id="a-1")
@@ -1066,15 +1159,18 @@ async def test_the_stop_call_stops_committed_work_and_its_task_stays_and_is_list
     (task,) = await harness.plans.spawned_tasks([older])
     assert task.pending, "what the stopped work set up stays (ADR-0352 §2:4)"
     result = _stop_result(planner.requests[newer_text][2], 2)
-    assert result["stopped_by_this_call"] is True
-    assert any("spawn" in one for one in result["did"]), "its result shows what had finished"
+    work = _stopped_work(result)
+    assert work.get("stopped_by_this_call") == "yes"
+    assert any("spawn" in str(one.text) for one in work.held("did")), (
+        "its result shows what had finished"
+    )
     left = result["set_up_still_live"]
     (shown,) = left["scheduled"]
     assert shown["label"].startswith("T")
     assert shown["state"] == "pending"
     assert shown["falls_due"]
     assert shown["set_by"] == "person"
-    assert shown["carries"] == "Remind them to stretch."
+    assert tag(shown["carries"], "task").text == "Remind them to stretch."
     assert left["running"] == "none"
     await harness.engine.aclose()
 
@@ -1096,9 +1192,11 @@ async def test_a_stop_call_naming_work_that_set_up_nothing_says_nothing_is_still
         lambda request: RoundResponse(
             calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
         ),
-        RoundResponse(text="Stopped."),
+        says("Stopped.", call_id="m18"),
+        RoundResponse(),
     )
     harness = _harness(understanding, planner, task_scheduler=seams(), phases={"look_ups": True})
+    _round_limit(harness, 4)
     await harness.engine.start()
     await open_conversation(harness)
     _, _older = await _start(harness, older_text, message_id="a-1")
@@ -1109,7 +1207,7 @@ async def test_a_stop_call_naming_work_that_set_up_nothing_says_nothing_is_still
     await _frozen(harness, 2)
 
     result = _stop_result(planner.requests[newer_text][2], 2)
-    assert result["stopped_by_this_call"] is True
+    assert _stopped_work(result).get("stopped_by_this_call") == "yes"
     assert result["set_up_still_live"] == "nothing it set up is still live"
     await harness.engine.aclose()
 
@@ -1128,14 +1226,16 @@ async def test_a_stop_calls_result_lists_running_work_below_which_the_next_round
     planner.script(
         older_text,
         RoundResponse(
-            text="Researching.",
-            calls=(_call("c1", "spawn", instruction=step, delay_minutes=5),),
+            calls=(
+                text_call("Researching.", call_id="research"),
+                _call("c1", "spawn", instruction=step, delay_minutes=5),
+            ),
         ),
     )
     planner.hold(older_text, from_round=2)
     planner.hold(step)
 
-    def stop_below(request: dict[str, Any]) -> RoundResponse:
+    def stop_below(request: _Request) -> RoundResponse:
         listed = _stop_result(request, 2)["set_up_still_live"]["running"]
         return RoundResponse(
             calls=(_call("c3", "stop_activation", activation=listed[0]["episode"]),)
@@ -1148,7 +1248,8 @@ async def test_a_stop_calls_result_lists_running_work_below_which_the_next_round
             calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
         ),
         stop_below,
-        RoundResponse(text="Stopped the research and its reading."),
+        says("Stopped the research and its reading.", call_id="m19"),
+        RoundResponse(),
     )
     planner.hold(newer_text, from_round=2)
     clock = _Clock()
@@ -1173,14 +1274,14 @@ async def test_a_stop_calls_result_lists_running_work_below_which_the_next_round
     planner.hold(step)[1].set()
     found = await _frozen(harness, 3)
 
-    listing = planner.requests[newer_text][0]["rounds"]
-    assert listing == [], "the list pull's round was planned before the step started"
+    listing = planner.requests[newer_text][0].rounds
+    assert listing == (), "the list pull's round was planned before the step started"
     first = _stop_result(planner.requests[newer_text][2], 2)
     (listed,) = first["set_up_still_live"]["running"]
     assert listed["input"], "shown as the list pull's running part shows one"
     assert first["set_up_still_live"]["scheduled"] == "none"
     second = _stop_result(planner.requests[newer_text][3], 3)
-    assert second["stopped_by_this_call"] is True
+    assert _stopped_work(second).get("stopped_by_this_call") == "yes"
     stopped(_episode(found, older))
     stopped(_episode(found, running_step))
     held = await harness.plans.export()
@@ -1223,9 +1324,11 @@ async def test_a_look_up_shows_what_running_work_has_found_so_far() -> None:
         lambda request: RoundResponse(
             calls=(_call("c2", "look_up_activation", activation=_label_of(request, newer_text)),)
         ),
-        RoundResponse(text="The Grand, at 180."),
+        says("The Grand, at 180.", call_id="m20"),
+        RoundResponse(),
     )
     harness = _harness(understanding, planner, task_scheduler=seams(), phases={"look_ups": True})
+    _round_limit(harness, 4)
     await harness.engine.start()
     await open_conversation(harness)
     _, older = await _start(harness, older_text, message_id="a-1")
@@ -1234,9 +1337,9 @@ async def test_a_look_up_shows_what_running_work_has_found_so_far() -> None:
     found = await _frozen(harness, 1)
 
     assert [processing(one).activation_id for one in found] == [newer]
-    result = planner.requests[newer_text][2]["rounds"][1]["calls"][0]["result"]["value"]
-    assert result["status"] == "running"
-    assert "The Grand is 180 a night." in json.dumps(result)
+    found_so_far = tag(planner.requests[newer_text][2].results(2)[0]["result"]["value"], "episode")
+    assert found_so_far.get("status") == "running"
+    assert [one.text for one in found_so_far.held("notes")] == ["The Grand is 180 a night."]
     assert older not in (await harness.plans.export()).stopped_activations
     planner.hold(older_text)[1].set()
     await _frozen(harness, 2)
@@ -1254,8 +1357,10 @@ async def test_a_stop_call_waits_and_a_newer_input_absorbs_the_stopping_one() ->
     planner.script(
         older_text,
         RoundResponse(
-            text="I'll remind you.",
-            calls=(_call("c1", "spawn", instruction="Remind them to stretch.", delay_minutes=60),),
+            calls=(
+                text_call("I'll remind you.", call_id="remind"),
+                _call("c1", "spawn", instruction="Remind them to stretch.", delay_minutes=60),
+            ),
         ),
     )
     planner.hold(older_text, from_round=2)
@@ -1305,8 +1410,8 @@ async def test_a_waiting_round_is_shown_no_approved_action_and_the_round_after_i
     planner.script(
         "search apartments",
         RoundResponse(
-            text="Searching.",
             calls=(
+                text_call("Searching.", call_id="m8"),
                 _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
             ),
         ),
@@ -1335,20 +1440,20 @@ async def test_a_waiting_round_is_shown_no_approved_action_and_the_round_after_i
     await _frozen(harness, 2)
 
     waiting_round, after = planner.requests[newer_text][:2]
-    assert "waiting_on" in waiting_round
-    assert "approved_actions" not in waiting_round
+    assert tags(waiting_round.section("## Concurrent stimuli"), "stimulus", waited_on="yes")
+    assert tags(waiting_round.text, "approved") == []
     # ADR-0356 §4:3, §5:2: every round of a work is offered what its first was, and its
     # briefing is rendered once, so an approval the waiting round was not shown is not
     # shown after it either; where approved actions render is still undecided, and
     # approvals stay stopped (§15, ADR-0353 §11).
     assert planner.offered[newer_text][0] == planner.offered[newer_text][1]
-    assert "approved_actions" not in after
+    assert tags(after.text, "approved") == []
 
 
 # --- ADR-0352 §5: what a conversation shows after a hand-over ---------------------------
 
 
-def _fails(_request: dict[str, Any]) -> RoundResponse:
+def _fails(_request: _Request) -> RoundResponse:
     msg = "the model is down"
     raise ModelError(msg)
 
@@ -1387,16 +1492,17 @@ async def test_a_take_within_one_conversation_never_reads_stopped_then_reads_the
     planner.script(
         older_text,
         RoundResponse(
-            text="Searching.",
             calls=(
+                text_call("Searching.", call_id="m9"),
                 _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
             ),
         ),
-        RoundResponse(text="Still searching."),
+        says("Still searching.", call_id="m21"),
         lambda request: RoundResponse(
             calls=(_call("c2", "answer_offer", offer=_label_of(request, older_text), take=True),)
         ),
-        RoundResponse(text="Two-bedroom flats: three found."),
+        says("Two-bedroom flats: three found.", call_id="m22"),
+        RoundResponse(),
     )
     planner.hold(older_text, from_round=2)
     paused = planner.pause(older_text, 4)

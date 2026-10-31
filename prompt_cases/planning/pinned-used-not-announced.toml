@@ -1,5 +1,5 @@
-# The user asks for a quick dinner idea. They pinned that they are vegetarian. Someone who
-# knows them suggests a dish with no meat or fish, without saying that they know it or
+# Leo asks for a quick dinner idea. He pinned that he is vegetarian. Someone who
+# knows him suggests a dish with no meat or fish, without saying that they know it or
 # remembered it (ADR-0338 §7:8, §11:3).
 prompt = "planning"
 guards = "kept_in_mind_announced"
@@ -7,27 +7,9 @@ came_from = "2026-10-21"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = true
-suggestions = false
-spawn = false
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The message suggests at least one quick dinner with no meat and no fish, and does \
-not announce what it knows: no "since you're vegetarian", "as you've told me", "I remember" \
-or any other line saying that it knows or kept in mind that they are vegetarian."""
+read = """A text call suggests at least one quick dinner with no meat and no fish, and does not announce what it knows: no "since you're vegetarian", "as you've told me", "I remember" or any other line saying that it knows or kept in mind that he is vegetarian."""
 
 [input]
 file = "pinned-used-not-announced.json"

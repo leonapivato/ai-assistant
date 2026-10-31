@@ -8,21 +8,24 @@ request as planning's model would: by the labels it was shown.
 from __future__ import annotations
 
 import asyncio
-import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
-from exchange_support import request_view
+from exchange_support import labels as shown_labels
+from exchange_support import section, tag, text_call
 from phases_support import open_conversation, phases_harness, said, until, working, written
 from task_support import AT, activation, seams, spawn_effect, write_task
 from telegram_support import CHAT as LINE_CHAT
 from telegram_support import REFERENCE, YieldingTelegram
 from understanding_support import understanding_stage
 
+from ai_assistant.core.channel_validation import TASK_SCHEDULER, origin_kind
 from ai_assistant.core.errors import ModelError, PlanningError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActivationStop,
+    CallOutcomeKind,
     ChannelIdentity,
     DueAfterTasks,
     DueAt,
@@ -39,7 +42,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.orchestration.task_manager import PlaceLists
-from ai_assistant.orchestration.task_scheduler import SCHEDULE, TASK_SCHEDULER_DESCRIPTION
+from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.orchestration.telegram import TelegramLineSeams
 from ai_assistant.testing import (
     FakeModelProvider,
@@ -57,30 +60,68 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import ConversationStore
     from ai_assistant.core.types import (
         Conversation,
+        ExchangeStep,
         OfferedTool,
         PlanningExchange,
         ScheduledTask,
     )
     from ai_assistant.testing import FakeConversationStore
 
+_SCHEDULE_KIND = origin_kind(TASK_SCHEDULER)
+assert _SCHEDULE_KIND is not None
+#: How the briefing names the Task Scheduler's origin (ADR-0353 §4:4).
+_THE_SCHEDULE: Final = _SCHEDULE_KIND.name
 
-def _request(exchange: PlanningExchange) -> dict[str, Any]:
+
+@dataclass(frozen=True)
+class _Request:
+    """One round's exchange, read as planning's model reads it: by what it was shown."""
+
+    exchange: PlanningExchange
+
+    @property
+    def rounds(self) -> tuple[ExchangeStep, ...]:
+        """The work's earlier rounds, each with its report."""
+        return self.exchange.steps
+
+    @property
+    def situation(self) -> str:
+        return section(self.exchange.briefing, "## The situation")
+
+    @property
+    def stimulus(self) -> str:
+        """The stimulus section: the input's framing and its words."""
+        return section(self.exchange.briefing, "# The stimulus")
+
+    @property
+    def places(self) -> list[str]:
+        """The place list's ``L`` labels, in order (ADR-0357 §2:13)."""
+        return shown_labels(self.situation, "place")
+
+    @property
+    def takes_message(self) -> bool:
+        """Whether the situation says a reply can be written at the origin."""
+        return "A reply can be written there." in self.situation
+
+
+def _request(exchange: PlanningExchange) -> _Request:
     """The round's exchange, read as one request: its briefing and its reports since."""
-    return request_view(exchange)
+    return _Request(exchange)
 
 
-def _started_by_a_task(request: dict[str, Any]) -> bool:
-    return bool(request["place"].get("description") == TASK_SCHEDULER_DESCRIPTION)
+def _started_by_a_task(request: _Request) -> bool:
+    """Whether the stimulus came from the Task Scheduler: its origin is the schedule."""
+    return f"- The origin: {_THE_SCHEDULE}," in request.situation
 
 
-def _first_place(request: dict[str, Any]) -> str:
+def _first_place(request: _Request) -> str:
     """The first place label on the place list."""
-    return str(request["places"][0]["places"][0]["label"])
+    return request.places[0]
 
 
 def _responder(
-    person: Callable[[dict[str, Any]], RoundResponse],
-    task: Callable[[dict[str, Any]], RoundResponse],
+    person: Callable[[_Request], RoundResponse],
+    task: Callable[[_Request], RoundResponse],
 ) -> FakeToolCallingCompleter:
     def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
         request = _request(exchange)
@@ -89,11 +130,29 @@ def _responder(
     return FakeToolCallingCompleter(response=respond)
 
 
-def _spawning(**arguments: object) -> Callable[[dict[str, Any]], RoundResponse]:
+def _texting(words: str, *, via: str | None = None) -> Callable[[_Request], RoundResponse]:
+    """A task's activation that sends ``words`` in its first round, then says nothing.
+
+    The message goes where its ``text`` call's ``via`` names, the first place on the list
+    unless ``via`` names another (ADR-0357 §2:13); a round's own text reaches no one
+    (ADR-0356 §7:3).
+    """
+
+    def task(request: _Request) -> RoundResponse:
+        if request.rounds:
+            return RoundResponse()
+        return RoundResponse(
+            calls=(text_call(words, via=via if via is not None else _first_place(request)),)
+        )
+
+    return task
+
+
+def _spawning(**arguments: object) -> Callable[[_Request], RoundResponse]:
     """A person's activation that spawns in its first round and then says nothing."""
 
-    def person(request: dict[str, Any]) -> RoundResponse:
-        if request["rounds"]:
+    def person(request: _Request) -> RoundResponse:
+        if request.rounds:
             return RoundResponse(text="")
         named: dict[str, Any] = {
             key: [_first_place(request)] if value == "first place" else value
@@ -112,7 +171,7 @@ def _spawning(**arguments: object) -> Callable[[dict[str, Any]], RoundResponse]:
     return person
 
 
-def _silent(_request: dict[str, Any]) -> RoundResponse:
+def _silent(_request: _Request) -> RoundResponse:
     return RoundResponse(text="")
 
 
@@ -139,10 +198,7 @@ async def _until_no_tasks(harness: Harness) -> None:
 
 async def test_a_spawn_to_start_now_starts_an_activation_that_speaks_where_it_names() -> None:
     """§3:2, §6:7: every spawn goes through the Task Scheduler, now included."""
-    completer = _responder(
-        _spawning(places="first place"),
-        lambda request: RoundResponse(text=f"{_first_place(request)}: hello from the schedule"),
-    )
+    completer = _responder(_spawning(places="first place"), _texting("hello from the schedule"))
     harness = phases_harness(completer, task_scheduler=seams())
     await harness.engine.start()
     try:
@@ -159,10 +215,12 @@ async def test_a_spawn_to_start_now_starts_an_activation_that_speaks_where_it_na
         await until(spoken, what="the task's message")
         assert episode.processing_record is not None
         assert episode.processing_record.status is ProcessingStatus.COMPLETED
-        # §12:8: the round records the place its message went into, its label stripped.
-        (round_,) = episode.processing_record.rounds
-        assert round_.text == "hello from the schedule"
-        assert round_.place == ChannelIdentity(
+        # §12:8: the message's call records the place it went into, which its ``via``
+        # named by its label (ADR-0357 §2:13); the round's own text is its notes alone.
+        (sent,) = [one for one in episode.processing_record.call_records if one.delivered]
+        assert sent.delivered is not None
+        assert sent.delivered.words == "hello from the schedule"
+        assert sent.delivered.went == ChannelIdentity(
             channel_type="conversation", instance_id=conversation
         )
         # §12:9: the transcript records the message with the claim it was written under.
@@ -179,10 +237,7 @@ async def test_a_spawn_to_start_now_starts_an_activation_that_speaks_where_it_na
 
 async def test_a_message_naming_a_place_off_its_list_is_refused() -> None:
     """§6:7, §13:3: refused by authorizing; *couldn't finish* goes to its suggested place."""
-    completer = _responder(
-        _spawning(places="first place"),
-        lambda _request: RoundResponse(text="L9: somewhere else"),
-    )
+    completer = _responder(_spawning(places="first place"), _texting("somewhere else", via="L9"))
     harness = phases_harness(completer, task_scheduler=seams())
     await harness.engine.start()
     try:
@@ -215,11 +270,11 @@ async def test_two_occurrences_due_at_one_instant_start_two_activations() -> Non
 
 async def test_a_deleted_conversation_cancels_nothing_and_with_no_line_nothing_is_written() -> None:
     """§5:8-§5:9, §13:3: the occurrence still runs, and its empty list writes nothing."""
-    spoken: list[dict[str, Any]] = []
+    spoken: list[_Request] = []
 
-    def task(request: dict[str, Any]) -> RoundResponse:
+    def task(request: _Request) -> RoundResponse:
         spoken.append(request)
-        return RoundResponse(text="L1: hello")
+        return _texting("hello", via="L1")(request)
 
     harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
     gone = await harness.conversation_store.start()
@@ -231,9 +286,10 @@ async def test_a_deleted_conversation_cancels_nothing_and_with_no_line_nothing_i
         (episode,) = await _until_scheduled(harness, 1)
         assert episode.processing_record is not None
         assert episode.processing_record.status is ProcessingStatus.COMPLETED
-        (request,) = spoken
-        assert request["places"] == []
-        assert request["place"]["takes_message"] is False
+        request, _ = spoken
+        assert request.places == []
+        assert "- Places a message can be sent by its label: none." in request.situation
+        assert not request.takes_message
     finally:
         await harness.engine.aclose()
 
@@ -258,9 +314,9 @@ async def test_a_message_to_a_place_deleted_after_its_list_was_built_is_refused_
     """§5:9, §6:7, #3448: authorizing refuses it, so no message of the round is claimed."""
     space: list[_DeletedWhilePlanning] = []
 
-    def task(request: dict[str, Any]) -> RoundResponse:
+    def task(request: _Request) -> RoundResponse:
         space[0].planned = True
-        return RoundResponse(text=f"{_first_place(request)}: time to move the car")
+        return _texting("time to move the car")(request)
 
     harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
     gone = await harness.conversation_store.start()
@@ -273,8 +329,8 @@ async def test_a_message_to_a_place_deleted_after_its_list_was_built_is_refused_
         (episode,) = await _until_scheduled(harness, 1)
         record = episode.processing_record
         assert record is not None
-        (round_,) = record.rounds
-        assert round_.place == place
+        (refused,) = record.call_records
+        assert (refused.capability, refused.outcome) == ("text", CallOutcomeKind.REFUSED)
         effects = await harness.plans.activation_effects([record.activation_id])
         assert [one for one in effects if not one.is_call and one.round is not None] == []
     finally:
@@ -346,7 +402,7 @@ async def test_a_stop_command_leaves_what_its_activation_spawned_and_it_still_fa
             if _started_by_a_task(request):
                 reminded.append("ran")
                 return RoundResponse(text="")
-            if not request["rounds"]:
+            if not request.rounds:
                 return RoundResponse(
                     calls=(
                         ProposedCall(
@@ -394,9 +450,8 @@ async def test_a_late_occurrence_says_so_in_its_input() -> None:
     """§8:9: pushed however late, and its input says so with the instant it was due."""
     seen: list[str] = []
 
-    def task(request: dict[str, Any]) -> RoundResponse:
-        (current,) = [one for one in request["place_window"] if one.get("is_the_input")]
-        seen.append(str(current["text"]))
+    def task(request: _Request) -> RoundResponse:
+        seen.append(request.stimulus)
         return RoundResponse(text="")
 
     harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
@@ -482,9 +537,9 @@ async def test_a_push_whose_admission_read_failed_is_settled_and_pushed_again() 
 
 async def test_an_outside_marked_tasks_text_is_withheld_from_planning() -> None:
     """ADR-0307 §9:2, ADR-0350 §6:3: its input is outside content, read by understanding."""
-    seen: list[dict[str, Any]] = []
+    seen: list[_Request] = []
 
-    def task(request: dict[str, Any]) -> RoundResponse:
+    def task(request: _Request) -> RoundResponse:
         seen.append(request)
         return RoundResponse(text="")
 
@@ -514,7 +569,8 @@ async def test_an_outside_marked_tasks_text_is_withheld_from_planning() -> None:
         assert episode.processing_record is not None
         assert parties_are_outside(episode.processing_record.trigger.parties)
         (request,) = seen
-        assert "parcel number" not in json.dumps(request)
+        assert "parcel number" not in request.exchange.briefing
+        assert tag(request.stimulus, "received").get("withheld") == "yes"
     finally:
         await harness.engine.aclose()
 
@@ -532,9 +588,7 @@ async def test_a_task_whose_conversation_was_deleted_speaks_on_the_line() -> Non
         start_wait=timedelta(milliseconds=5),
     )
     harness = phases_harness(
-        _responder(
-            _silent, lambda request: RoundResponse(text=f"{_first_place(request)}: time to call")
-        ),
+        _responder(_silent, _texting("time to call")),
         task_scheduler=seams(),
         telegram=line,
     )
@@ -609,11 +663,10 @@ async def test_a_child_that_ends_before_its_scheduled_parent_is_removed_with_it(
             self, exchange: PlanningExchange, tools: Sequence[OfferedTool], **_: Any
         ) -> RoundResponse:
             request = _request(exchange)
-            window = json.dumps(request["place_window"])
-            if "the child step" in window:
+            if "the child step" in request.stimulus:
                 child_done.set()
                 return RoundResponse(text="")
-            if not request["rounds"]:
+            if not request.rounds:
                 spawn = ProposedCall(
                     call_id="spawn-1",
                     name="spawn",
@@ -641,8 +694,8 @@ async def test_a_child_that_ends_before_its_scheduled_parent_is_removed_with_it(
 async def test_a_known_outcome_the_store_failed_to_take_is_written_as_decided() -> None:
     """§7:6: a step that spawned its next and completed ends done, never interrupted."""
 
-    def step(request: dict[str, Any]) -> RoundResponse:
-        if request["rounds"]:
+    def step(request: _Request) -> RoundResponse:
+        if request.rounds:
             return RoundResponse(text="")
         spawn = ProposedCall(
             call_id="spawn-1",
@@ -693,8 +746,8 @@ class _OutcomeWriteHeld(FakePlanStore):
 async def test_a_stop_of_an_ended_activation_awaiting_its_outcome_changes_nothing() -> None:
     """ADR-0295 §1:6, ADR-0350 §9:6: no cascade record, and its pending child is kept."""
 
-    def step(request: dict[str, Any]) -> RoundResponse:
-        if request["rounds"]:
+    def step(request: _Request) -> RoundResponse:
+        if request.rounds:
             return RoundResponse(text="")
         spawn = ProposedCall(
             call_id="spawn-1",
@@ -765,7 +818,7 @@ class _Step(FakeToolCallingCompleter):
         self, exchange: PlanningExchange, tools: Sequence[OfferedTool], **_: Any
     ) -> RoundResponse:
         request = _request(exchange)
-        if not request["rounds"]:
+        if not request.rounds:
             return RoundResponse(
                 calls=(
                     ProposedCall(

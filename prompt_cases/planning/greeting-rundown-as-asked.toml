@@ -1,38 +1,17 @@
-# The mirror of `greeting-no-recap-as-asked`: the same window of earlier matters, one of
-# them due tomorrow, but this person said they like a short rundown of what's coming up when
-# they say good morning, kept as a style memory (ADR-0338 §5). The prompts hold no greeting
-# rule, so their stated preference governs: the round greets them back and, briefly, brings
-# up what is due soon, and recites nothing of the person block (ADR-0338 §7:8).
+# The mirror of `greeting-no-recap-as-asked`: the same earlier matters, one of them due
+# tomorrow, but Leo said he likes a short rundown of what's coming up when he says good
+# morning, kept as a style memory (ADR-0338 §5). The prompts hold no greeting rule, so his
+# stated preference governs: the round greets him back and, briefly, brings up what is due
+# soon, and recites nothing of always in mind (ADR-0338 §7:8).
 prompt = "planning"
 guards = "preference_ignored"
 came_from = "2026-10-21"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = true
-suggestions = false
-spawn = false
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The message greets the user back, may call them Maren, and, because they said they \
-like a short rundown of what's coming up when they say good morning, briefly brings up what \
-is due soon: at least the dentist appointment tomorrow, Friday 10 April at 15:00, and it may \
-mention Saturday's trains or the gift for Ines. It recites nothing of the person block: not \
-their full name, zone or language, and it does not say that it knows or was told that they \
-like a rundown."""
+read = """A text call greets Leo back, may call him Leo, and, because he said he likes a short rundown of what's coming up when he says good morning, briefly brings up what is due soon: at least the dentist appointment tomorrow, Friday 30 October at 10:30, and it may mention Saturday's trains or the gift for Ines. It recites nothing of always in mind: not his zone or language, and it does not say that it knows or was told that he likes a rundown."""
 
 [input]
 file = "greeting-rundown-as-asked.json"

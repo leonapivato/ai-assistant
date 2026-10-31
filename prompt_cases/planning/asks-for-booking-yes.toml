@@ -1,28 +1,12 @@
-# Round 1 proposed the booking the user asked for, and it came back needing their yes,
-# offered for asking as 1.1. This round asks them: it writes the question as its message
-# and names the call in asks, so the system shows its exact details below the message. A
-# message saying the booking waits for their yes, with no call named in asks, asks nothing.
+# Round 1 proposed the booking Leo asked for, and it came back needing his yes,
+# offered for asking as 1.1. This round asks him: a text call asks the question and names
+# the call in its asks, so the system shows its exact details after his words. A text call
+# saying the booking waits for his yes, with no call named in asks, asks nothing.
 prompt = "planning"
 guards = "yes_without_question"
 came_from = "#3104"
 set = "development"
 samples = 3
-
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = false
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
 
 [property]
 check = "asks_about"

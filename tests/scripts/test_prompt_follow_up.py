@@ -325,8 +325,10 @@ class _Cut:
         del messages, reply, question
         raise asyncio.CancelledError
 
-    async def follow_up_round(self, messages: Any, tools: Any, response: Any, question: str) -> str:
-        del messages, tools, response, question
+    async def follow_up_round(
+        self, messages: Any, tools: Any, response: Any, question: str, steps: Any = ()
+    ) -> str:
+        del messages, tools, response, question, steps
         raise asyncio.CancelledError
 
 

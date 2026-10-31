@@ -1,0 +1,14 @@
+# ADR-0356 §11:1 case 7: a reminder coming due is a stimulus from the system itself,
+# handled as what it was set up to do: a text to Leo to call his mother.
+prompt = "planning"
+guards = "misread_system_stimulus"
+came_from = "2026-10-31"
+set = "development"
+samples = 3
+
+[property]
+check = "read"
+read = """One text call to Leo that reminds him now to call his mother. It does not ask whether he still wants the reminder, promise to remind him later, or set or change a task."""
+
+[input]
+file = "reminder-coming-due-reminds.json"

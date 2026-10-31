@@ -62,9 +62,10 @@ NOTE_RELIANCE: Final = ToolDefinition(
     id=NOTE_RELIANCE_CAPABILITY,
     capability=NOTE_RELIANCE_CAPABILITY,
     description=(
-        "Note the memories you relied on, by their M labels, and say what the reliance "
-        "shaped: a suggestion, an answer or an action. Nothing runs; the note is kept "
-        "with this round."
+        "Note the memories you relied on, by their M labels, and say what the "
+        "reliance shaped: a suggestion, an answer or an action. Note only a memory "
+        "that shaped one, never one only mentioned in passing. Nothing runs; the note "
+        "is kept with this round."
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,

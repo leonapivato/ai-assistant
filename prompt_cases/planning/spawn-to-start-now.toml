@@ -1,5 +1,5 @@
-# ADR-0350 §13:4: a spawn to start now. The user asks for research to run as separate
-# work, reported back, while they keep working with the assistant on something else. Every
+# ADR-0350 §13:4: a spawn to start now. Leo asks for research to run as separate
+# work, reported back, while he keeps working with the system on something else. Every
 # spawn goes through the Task Scheduler, now included (§3:2): the round spawns the research
 # with no when, so it starts at once in an activation of its own, rather than doing it in
 # this one.
@@ -9,25 +9,9 @@ came_from = "2026-10-25"
 set = "development"
 samples = 2
 
-[flags]
-takes_message = true
-story_calls = false
-story_reads = false
-approved = false
-candidates = false
-reliance = false
-person = false
-suggestions = false
-spawn = true
-scheduled = false
-running_work = false
-offers = false
-waiting = false
-earlier_work = false
-
 [property]
 check = "read"
-read = """The round proposes a spawn whose instruction is the flight research for Porto over the long weekend, with no at, delay_minutes or after, so it falls due now. It does not start the research itself in this round, and its message, if any, says the research is being looked into separately, never that anything was found."""
+read = """The round makes a spawn whose instruction is the flight research for Porto over the long weekend, with no at, delay_minutes or after, so it falls due now. It does not start the research itself in this round, and any text call it makes says the research is being looked into separately, never that anything was found."""
 
 [input]
 file = "spawn-to-start-now.json"
