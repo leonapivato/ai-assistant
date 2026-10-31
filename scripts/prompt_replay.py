@@ -2491,7 +2491,9 @@ def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:
     for one in reply.round.calls:
         named = one.arguments.get("asks") if one.name == "text" else None
         if isinstance(named, list | tuple):
+            # ADR-0357 §8:3: a second asking message is refused, and asks nothing.
             asked.update(str(name) for name in named)
+            break
     missing = [one for one in cast("list[str]", params["calls"]) if one not in asked]
     if missing:
         return f"the round's question leaves out {len(missing)} of the named calls"
@@ -2535,11 +2537,98 @@ def _answers_by_message(reply: Reply, params: Mapping[str, object]) -> Judgement
         return "the round sends no message, so nothing reaches anyone"
     if len(said) > 1:
         return "the round sends more than one message"
-    phrases = [one.casefold() for one in cast("list[str]", params["phrases"])]
     if any(one.name != "text" for one in reply.round.calls if one.name in _MESSAGE_CALLS):
         return "the round's message is not a text call"
-    if not all(one in said[0].casefold() for one in phrases):
+    return _told(said[0], params)
+
+
+def _told(words: str, params: Mapping[str, object]) -> Judgement:
+    """A message's words hold each named phrase, in any case, and ask nothing."""
+    phrases = [one.casefold() for one in cast("list[str]", params["phrases"])]
+    if not all(one in words.casefold() for one in phrases):
         return "the message's words do not hold every named phrase"
+    if "?" in words:
+        return "the message asks something, rather than telling"
+    return None
+
+
+def _tells(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """One text call telling the named phrases, asking nothing; beside it only a reliance note.
+
+    A message that tells: it holds each phrase, carries no question, and goes alone, a
+    note of the memories relied on (ADR-0329 §6:8) apart.
+    """
+    if reply.round is None:
+        return "the response reads as no round"
+    others = [one.name for one in reply.round.calls if one.name not in {"text", "note_reliance"}]
+    if others:
+        return "the round makes a call other than a text call and a reliance note"
+    said = _said(reply.round)
+    if len(said) != 1:
+        return f"the round sends {len(said)} messages, not one"
+    return _told(said[0], params)
+
+
+def _nothing_but(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """The round's calls are only to the named capabilities, or there are none."""
+    if reply.round is None:
+        return "the response reads as no round"
+    named = set(cast("list[str]", params["capabilities"]))
+    if any(one.name not in named for one in reply.round.calls):
+        return "the round makes a call to a capability not named"
+    return None
+
+
+def _acts_within(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """The round makes a call, each to a named capability, with at most one message."""
+    if reply.round is None:
+        return "the response reads as no round"
+    if not reply.round.calls:
+        return "the round makes no call"
+    judged = _nothing_but(reply, params)
+    if judged is not None:
+        return judged
+    if len(_said(reply.round)) > 1:
+        return "the round sends more than one message"
+    return None
+
+
+def _includes_with(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """Each named capability is called, and the calls' arguments hold each named phrase."""
+    judged = _calls_include(reply, {"capabilities": params["capabilities"]})
+    if judged is not None or reply.round is None:
+        return judged
+    named = set(cast("list[str]", params["capabilities"]))
+    held = " ".join(
+        json.dumps(one.model_dump(mode="json")["arguments"], ensure_ascii=False)
+        for one in reply.round.calls
+        if one.name in named
+    ).casefold()
+    missing = [one for one in cast("list[str]", params["phrases"]) if one.casefold() not in held]
+    if missing:
+        return f"the named calls' arguments leave out {len(missing)} of the named phrases"
+    return None
+
+
+def _answers_or_searches(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """A text call answers, or a memory search runs, and no answer is the text alone.
+
+    ADR-0356 §11:1 case 1's variant, by the owner's ruling of 2026-10-31: where the memory
+    the answer rests on is old, a search for what may have changed may come first. Either
+    way the round sends at most one message, and never answers in its text alone.
+    """
+    if reply.round is None:
+        return "the response reads as no round"
+    phrases = [one.casefold() for one in cast("list[str]", params["phrases"])]
+    said = _said(reply.round)
+    if len(said) > 1:
+        return "the round sends more than one message"
+    if said:
+        return _answers_by_message(reply, params)
+    if all(one in reply.round.text.casefold() for one in phrases):
+        return "the answer is written as the round's text, and no message carries it"
+    if not any(one.name == "search_memory" for one in reply.round.calls):
+        return "the round neither answers by a text call nor searches memory"
     return None
 
 
@@ -2801,6 +2890,41 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
             frozenset({PLANNING}),
             {"phrases": "strings"},
             _answers_by_message,
+        ),
+        CodeCheck(
+            "tells",
+            "one text call holding each named phrase and asking nothing; beside it, a note",
+            frozenset({PLANNING}),
+            {"phrases": "strings"},
+            _tells,
+        ),
+        CodeCheck(
+            "nothing_but",
+            "the round's calls, if any, are only to the named capabilities",
+            frozenset({PLANNING}),
+            {"capabilities": "strings"},
+            _nothing_but,
+        ),
+        CodeCheck(
+            "acts_within",
+            "the round makes a call, each to a named capability, with at most one message",
+            frozenset({PLANNING}),
+            {"capabilities": "strings"},
+            _acts_within,
+        ),
+        CodeCheck(
+            "includes_with",
+            "each named capability is called, its arguments holding each named phrase",
+            frozenset({PLANNING}),
+            {"capabilities": "strings", "phrases": "strings"},
+            _includes_with,
+        ),
+        CodeCheck(
+            "answers_or_searches",
+            "a text call answers with the named phrases, or a memory search runs; no other message",
+            frozenset({PLANNING}),
+            {"phrases": "strings"},
+            _answers_or_searches,
         ),
         CodeCheck(
             "calls_are",

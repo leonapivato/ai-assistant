@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     JoinedInput,
+    LabelKind,
     Memory,
     MemorySource,
     PlanningRound,
@@ -66,6 +67,8 @@ from ai_assistant.orchestration.planning import (
     NOTHING_NEW,
     PLANNING_PROMPT,
     CallOutcome,
+    DigestedEvidence,
+    DigestItem,
     PeerShown,
     PersonNow,
     PlaceAuthor,
@@ -841,3 +844,30 @@ async def test_a_started_work_an_ended_one_a_pin_and_a_field_are_each_named_once
     assert "Now pinned" in chosen[0]
     assert "address is now Lee" in chosen[0]
     assert chosen[1].endswith(NOTHING_NEW)
+
+
+async def test_an_outside_concurrent_stimulus_is_outside_content_read() -> None:
+    """ADR-0360 §6, ADR-0306 §4:5: shown, in the briefing or the news, it marks the notes."""
+    running = InProgressEntry(
+        activation_id="other", channel=TELEGRAM, input=None, acted=False, parties=None, outside=True
+    )
+    stage, _ = _stage(RoundResponse(text="noted"))
+
+    planned = await stage.plan(_inputs(running=(running,)))
+
+    assert planned.read_outside
+    assert planned.round.notes_marked
+
+
+async def test_a_memory_a_digest_named_is_announced_forgotten() -> None:
+    """ADR-0359 §3:1: a memory shown only as a digest's source is re-read like any shown."""
+    evidence = DigestedEvidence(
+        None, answered=True, items=(DigestItem("a source said so", LabelKind.MEMORY, "m:src"),)
+    )
+    given = _inputs(evidence=(evidence,))
+
+    news = await _next_round(
+        given, RoundResponse(calls=(_call("c1", "list_tasks"),)), still_held=frozenset()
+    )
+
+    assert "is forgotten: the system no longer holds it, so do not use it." in news

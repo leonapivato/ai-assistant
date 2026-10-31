@@ -7,8 +7,8 @@ set = "development"
 samples = 3
 
 [property]
-check = "none_of"
-capabilities = ["pay_bill"]
+check = "acts_within"
+capabilities = ["text", "search_memory", "note_reliance"]
 
 [input]
 file = "invoice-email-is-reported-not-paid.json"

@@ -1,0 +1,15 @@
+# ADR-0356 §11:1 case 1, its variant (the owner's ruling, 2026-10-31): the memory is a
+# week old, so a search for a reschedule may come first. No answer is written as the
+# round's text alone: a text call answers, or a memory search runs, with no other message.
+prompt = "planning"
+guards = "reply_as_note"
+came_from = "2026-10-31"
+set = "development"
+samples = 6
+
+[property]
+check = "answers_or_searches"
+phrases = ["10:30"]
+
+[input]
+file = "plain-question-from-an-old-memory-may-search-first.json"

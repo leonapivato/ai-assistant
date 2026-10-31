@@ -1101,7 +1101,8 @@ def _rendering(
         now=_SHOWING_AT,
         zone=ZoneInfo("UTC"),
     )
-    request._result_value(outcome)
+    # The result as its report renders it, what a stop set up still live included.
+    request._result(outcome, outcome.result_id or "showed")
     for one in started:
         request._story(one)
     return request
@@ -3085,6 +3086,7 @@ class _Request:
         attributes.append(("acted", "yes" if acted else "no"))
         if outside:
             attributes.append(("outside", "yes"))
+            self.shown.marked = True
         held = list(tags)
         if offer is not None:
             attributes.append(("offered", "yes"))
@@ -3737,19 +3739,16 @@ class _Request:
         if not one.items:
             return [f"- A digest of {source}{looking}: {_NOTHING_ANSWERED}."]
         lines = [f"- What a digest read of {source}{looking}, resting on outside content:"]
-        lines.extend(
-            "  "
-            + _tag(
-                "evidence",
-                [
-                    ("from", _SYSTEM),
-                    ("source", self._book.label(item.source_kind, item.source_id)),
-                    ("outside", "yes"),
-                ],
-                item.text,
-            )
-            for item in one.items
-        )
+        for item in one.items:
+            if item.source_kind is LabelKind.MEMORY:
+                # ADR-0359 §3:1: re-read before each report, so its forgetting is news.
+                self._memories.add(item.source_id)
+            attributes = [
+                ("from", _SYSTEM),
+                ("source", self._book.label(item.source_kind, item.source_id)),
+                ("outside", "yes"),
+            ]
+            lines.append("  " + _tag("evidence", attributes, item.text))
         return lines
 
     def _evidence(self, one: DigestedEvidence) -> str:
@@ -4908,15 +4907,19 @@ def _digests_by_call(
     ]
     taken: set[int] = set()
     given: dict[str, list[tuple[int, DigestedEvidence]]] = {}
-    for call, result_id in digested:
+    for number, (call, result_id) in enumerate(digested):
         wanted = call.arguments.get(LOOKING_FOR)
         matched = [
             (at, one)
             for at, one in fresh
             if one.result_id == result_id and at not in taken and one.question == wanted
         ]
-        given[call.call_id] = matched
-        taken.update(at for at, _ in matched)
+        alike = any(
+            other == result_id and later.arguments.get(LOOKING_FOR) == wanted
+            for later, other in digested[number + 1 :]
+        )
+        given[call.call_id] = matched[:1] if alike else matched
+        taken.update(at for at, _ in given[call.call_id])
     for number, (call, result_id) in enumerate(digested):
         if given[call.call_id]:
             continue
