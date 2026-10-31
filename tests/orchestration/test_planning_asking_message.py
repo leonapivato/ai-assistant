@@ -8,6 +8,7 @@ round records as asked (ADR-0321 §2:6, §2:8), and a second asking call refused
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Final
 
 import pytest
@@ -226,3 +227,57 @@ async def test_the_judge_leaves_a_text_calls_via_as_written_for_the_phases() -> 
     planned, _ = await _planned(_text(words="Hi.", via="telegram"), outcomes=(), rounds=())
     (call,) = planned.calls
     assert call.call.arguments["via"] == "telegram"
+
+
+async def _three_rounds(*responses: RoundResponse, asked_between: bool = False) -> tuple[Any, ...]:
+    """Three rounds of one work: a booking needing the user, then ``responses``."""
+    stage, _, recorder = _stage(RoundResponse(calls=(_call("c1", "book", slot=_SLOT),)), *responses)
+    first_inputs = _inputs(capabilities=(*_TOOLS, TEXT_CALL))
+    first = await stage.plan(first_inputs)
+    second_inputs = replace(
+        first_inputs,
+        work=first.work,
+        rounds=(first.round,),
+        labels=first.labels,
+        outcomes=(_needs_you(first.round.id, "c1", _booking()),),
+    )
+    second = await stage.plan(second_inputs)
+    later = () if asked_between else (CallOutcome(second.round.id, "t1", CallOutcomeKind.DONE),)
+    third = await stage.plan(
+        replace(
+            second_inputs,
+            work=second.work,
+            rounds=(first.round, second.round),
+            labels=(*first.labels, *second.labels),
+            outcomes=(*second_inputs.outcomes, *later),
+        )
+    )
+    return second, third, recorder
+
+
+async def test_a_reference_an_earlier_step_showed_may_be_asked_rounds_later() -> None:
+    """§8:1: the exchange is never re-rendered, so a reference shown in an earlier report
+    still names its call after an intervening round."""
+    second, third, recorder = await _three_rounds(
+        RoundResponse(calls=(_text("t1", words="Checking something first."),)),
+        RoundResponse(calls=(_text("t2", words="Shall I book it?", asks=["1.1"]),)),
+    )
+
+    assert second.round.asked == ()
+    (asked,) = third.round.asked
+    assert asked.values["slot"] == _SLOT
+    assert third.questions == {"t2": _LINE}
+    assert recorder.questions[-1] == {"t2": _LINE}
+
+
+async def test_a_reference_asked_about_since_is_not_asked_again() -> None:
+    """ADR-0321 §4:11: once a round of this activation asked it, it is not askable again."""
+    second, third, _ = await _three_rounds(
+        RoundResponse(calls=(_text("t1", words="Shall I book it?", asks=["1.1"]),)),
+        RoundResponse(calls=(_text("t2", words="Shall I, really?", asks=["1.1"]),)),
+        asked_between=True,
+    )
+
+    assert len(second.round.asked) == 1
+    assert third.round.asked == ()
+    assert third.questions == {}

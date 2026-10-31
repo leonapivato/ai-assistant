@@ -276,6 +276,7 @@ from ai_assistant.core.types import (
     ApprovalGiver,
     CapabilityEffect,
     CapabilityResult,
+    ChannelIdentity,
     ControllerRule,
     ControllerStage,
     DeletedMessage,
@@ -368,11 +369,16 @@ from ai_assistant.orchestration.matters import (
     is_pure_read,
 )
 from ai_assistant.orchestration.message_tools import (
+    EMAIL_CAPABILITY,
+    EMAIL_CHANNEL_TYPE,
+    EXACT_ARGUMENT,
     PLACE_LABEL,
     PLATFORMS,
     TEXT_CALL,
     TEXT_CAPABILITY,
+    WORDS_ARGUMENT,
     TextArguments,
+    emailed_to,
     platform_name,
     platform_type,
     reworded,
@@ -465,7 +471,6 @@ if TYPE_CHECKING:
         ActivationDigest,
         ActivationUnderstanding,
         AnsweredQuestion,
-        ChannelIdentity,
         ForecastOutcome,
         FrozenJson,
         JoinedInput,
@@ -2412,7 +2417,13 @@ class PhaseWorking:
                         effect=one.effects.get(capability, False),
                         outcome=None if outcome is None else outcome.kind,
                         reason=None if outcome is None else outcome.reason,
-                        delivered=None if sent is None else sent.delivered,
+                        delivered=(
+                            sent.delivered
+                            if sent is not None
+                            else None
+                            if outcome is None
+                            else outcome.delivered
+                        ),
                         recorded_at=at,
                         marked=one.planned.read_outside
                         or (outcome is not None and outcome.digested),
@@ -2658,9 +2669,48 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
                 result_id=one.result_id,
                 result=one.output if one.route is ResultRoute.PLANNING else None,
                 digested=digested,
+                delivered=_emailed(one),
             )
         )
     return tuple(outcomes)
+
+
+#: How an email that acting ran went, by what acting made of it (ADR-0357 §3:1-§3:3).
+_EMAIL_STATUS: Final = {
+    ActedOutcome.DONE: DeliveryStatus.SENT,
+    ActedOutcome.NOT_DONE: DeliveryStatus.FAILED,
+    ActedOutcome.UNKNOWN: DeliveryStatus.UNKNOWN,
+}
+
+
+def _emailed(one: ActedCall) -> RecordedDelivery | None:
+    """What an email acting ran sent, where and how, or ``None`` (ADR-0357 §3:1).
+
+    For an ``email`` whose submission was attempted, under the effect record it was
+    claimed under: its words as the wording step rendered them, the platform and its
+    recipients, and sent, failed or unknown, as acting found it, with the reason. *Sent*
+    is the medium's last word by the time the call returns (§3:2). ``None`` for every
+    other call, and for an email refused before it was claimed, such as an accidental
+    repeat, which sent nothing.
+    """
+    request = one.call.call.request
+    if str(request.tool.capability) != EMAIL_CAPABILITY or one.outcome is ActedOutcome.NEEDS_YOU:
+        return None
+    if one.effect_id is None:
+        return None
+    words = request.parameters.get(WORDS_ARGUMENT)
+    where = emailed_to(request.parameters)
+    if not isinstance(words, str) or not words.strip() or where is None:
+        return None
+    exact = request.parameters.get(EXACT_ARGUMENT) is True
+    status = _EMAIL_STATUS[one.outcome]
+    reason = None if status is DeliveryStatus.SENT else (one.reason or _UNKNOWN_WRITE)
+    return RecordedDelivery(
+        words=reworded(words, exact=exact),
+        went=ChannelIdentity(channel_type=EMAIL_CHANNEL_TYPE, instance_id=where),
+        status=status,
+        reason=reason,
+    )
 
 
 def _text_outcome(

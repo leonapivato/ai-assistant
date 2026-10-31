@@ -980,6 +980,10 @@ class PlanningWork:
         round_id: The last round's id, which its calls' outcomes name.
         number: The last round's number in the work, from 1.
         shown: What the exchange has shown of the inputs the news reports on.
+        askable: Every call the exchange has shown as needing the user's yes and not yet
+            asked about, by the reference it was shown under, which a later round's
+            asking ``text`` call may name (ADR-0357 §8:1): the exchange is never
+            re-rendered, so a reference shown rounds ago still stands.
     """
 
     exchange: PlanningExchange
@@ -988,6 +992,7 @@ class PlanningWork:
     round_id: str
     number: int
     shown: NewsShown
+    askable: Mapping[str, CallOutcome] = field(default_factory=dict)
 
 
 # --- the round's decision ----------------------------------------------------------------
@@ -2899,6 +2904,18 @@ class _Request:
             shown["not_replacing"] = _not_replacing(withheld)
         return shown
 
+    def still_askable(self, carried: Mapping[str, CallOutcome]) -> dict[str, CallOutcome]:
+        """Those of ``carried`` no round of this activation has asked about since.
+
+        Where a later round's question asked about one, it is already asked and waiting
+        (ADR-0321 §4:11), so its reference no longer names a call to ask about.
+        """
+        return {
+            reference: outcome
+            for reference, outcome in carried.items()
+            if outcome.request is not None and self._asked_earlier(outcome.request) is None
+        }
+
     def _asked_earlier(self, request: ActionRequest) -> tuple[int, AskedCall] | None:
         """The earlier round of this activation that asked about this call, if one did."""
         for number, asked in self._asked_before:
@@ -3759,6 +3776,9 @@ class PlanningStage:
             # §5:1-§5:3: every later round appends the last round's response, as the
             # completer returned it, and its report; nothing earlier is re-rendered.
             report, shown = request.report(work)
+            # ADR-0357 §8:1: a reference an earlier step showed may still be named, unless
+            # a round of this activation has asked about its call since.
+            request.askable = {**request.still_askable(work.askable), **request.askable}
             exchange = PlanningExchange(
                 instruction=work.exchange.instruction,
                 briefing=work.exchange.briefing,
@@ -3847,6 +3867,7 @@ class PlanningStage:
                 round_id=planning_round.id,
                 number=number,
                 shown=shown,
+                askable=dict(request.askable),
             ),
             read_outside=read_outside,
             questions=questions,
