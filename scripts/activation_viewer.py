@@ -1073,8 +1073,10 @@ class _Timeline:
                 thinking = True
             elif kind == "tool-call":
                 name = _text(shown.get("tool_name")) or "?"
-                if name == ROUND_TOOL:
+                if name == ROUND_TOOL and held.get("exchange") is not True:
                     # The round's own tool: its `another_round` asks for another round.
+                    # ADR-0356 §7:4 reserves no name since, so a call of that name in
+                    # a work's exchange is a call like any other.
                     arguments = _mapping(_arguments(shown.get("args")))
                     marked = marked or arguments.get("another_round") is True
                 else:
@@ -2395,8 +2397,12 @@ def _round_tool_parts(raw: object, call_id: str | None) -> list[dict[str, object
     return parts
 
 
-def _response_part(part: object) -> list[dict[str, object]]:
-    """One part of a provider's response, as the view shows it."""
+def _response_part(part: object, *, exchange: bool = False) -> list[dict[str, object]]:
+    """One part of a provider's response, as the view shows it.
+
+    The round's own tool is read as notes and asks only on a round recorded before
+    ADR-0356; since, no name is reserved (§7:4), and a call of that name is a call.
+    """
     shown = _mapping(part)
     kind = shown.get("part_kind")
     content = shown.get("content")
@@ -2409,7 +2415,7 @@ def _response_part(part: object) -> list[dict[str, object]]:
         name = _text(shown.get("tool_name")) or "?"
         call_id = _text(shown.get("tool_call_id"))
         raw = shown.get("args")
-        if name == ROUND_TOOL:
+        if name == ROUND_TOOL and not exchange:
             return _round_tool_parts(raw, call_id)
         text = _arguments_text(raw, _arguments(raw))
         return [_sized(text, kind="call", title=f"Call · {name}", id=call_id)]
@@ -2417,8 +2423,11 @@ def _response_part(part: object) -> list[dict[str, object]]:
     return [_sized(_pretty(part), kind="other", title=title)]
 
 
-def _did(source: str, body: object) -> dict[str, object]:
-    """What the model did: the response's parts in order, its usage, and any failure."""
+def _did(source: str, body: object, *, exchange: bool = False) -> dict[str, object]:
+    """What the model did: the response's parts in order, its usage, and any failure.
+
+    ``exchange`` says a planning round's request was its work's exchange (ADR-0356 §13:6).
+    """
     held = _mapping(body)
     parts: list[dict[str, object]] = []
     did: dict[str, object] = {"parts": parts}
@@ -2429,7 +2438,7 @@ def _did(source: str, body: object) -> dict[str, object]:
     did["model"] = model
     did["cost"] = estimated_cost(model, usage)
     if source == "planning":
-        return _did_round(held, did, parts)
+        return _did_round(held, did, parts, exchange=exchange)
     did["finish_reason"] = _text(held.get("finish_reason"))
     _thinking_first(parts, held)
     reply = held.get("reply")
@@ -2450,13 +2459,17 @@ def _did(source: str, body: object) -> dict[str, object]:
 
 
 def _did_round(
-    held: Mapping[str, object], did: dict[str, object], parts: list[dict[str, object]]
+    held: Mapping[str, object],
+    did: dict[str, object],
+    parts: list[dict[str, object]],
+    *,
+    exchange: bool,
 ) -> dict[str, object]:
     """What a planning round did: its response's parts, and how the round read it."""
     response = _mapping(held.get("response"))
     listed = response.get("parts")
     for part in _sequence(listed):
-        parts.extend(_response_part(part))
+        parts.extend(_response_part(part, exchange=exchange))
     _thinking_first(parts, held)
     if did["usage"] is None:
         did["usage_note"] = "This response records no token usage."
@@ -2721,7 +2734,11 @@ def _read_call(source: str, given: Entry | None, returned: Entry | None) -> dict
     if returned is None:
         notes.append("No returned entry was recorded for this call: what it did is not here.")
     else:
-        view["did"] = _did(source, returned.body)
+        view["did"] = _did(
+            source,
+            returned.body,
+            exchange=given is not None and _exchange_of(given.body) is not None,
+        )
     return view
 
 
@@ -4257,7 +4274,7 @@ def _proposed(body: Mapping[str, object], *, exchange: bool = False) -> dict[str
             name = _text(part.get("tool_name")) or "?"
             raw = part.get("args")
             parsed = _arguments(raw)
-            if name == ROUND_TOOL:
+            if name == ROUND_TOOL and not exchange:
                 held = _mapping(parsed)
                 said = held.get("notes")
                 listed = _strings(said)
@@ -4275,7 +4292,8 @@ def _proposed(body: Mapping[str, object], *, exchange: bool = False) -> dict[str
                     messages.append({"id": call_id, "words": words})
     text = "".join(texts)
     if exchange:
-        notes = text or notes
+        # §7:2: the notes are the response's text, and nothing else.
+        notes = text or None
         text = ""
     return {
         "calls": calls,
