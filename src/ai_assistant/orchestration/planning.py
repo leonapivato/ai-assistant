@@ -1050,14 +1050,43 @@ class _Showing:
             self.record(ShownRecordKind.EPISODE, episode.id)
 
     def running(self, tasks: TaskListing | None, peer: PeerShown | None) -> None:
-        """A call on the Task Scheduler or on running work: each activation, by episode."""
-        listed = () if tasks is None else (*tasks.running, *tasks.recent)
-        for entry in listed:
-            self.record(ShownRecordKind.EPISODE, episode_address(entry.activation_id))
+        """A call on the Task Scheduler or on running work: each episode it labelled.
+
+        Every episode the result's rendering shows under its ``E`` label, in the order
+        :meth:`_Request._listing` and :meth:`_Request._peer` show them: each activation
+        listed, each task's parent, and what a stopped activation set up that is still
+        live; and nothing of an input's or a task's words (§10:6).
+        """
+        if tasks is not None:
+            self.listing(tasks)
         if peer is not None:
-            self.record(ShownRecordKind.EPISODE, episode_address(peer.activation_id))
+            self.episode(peer.activation_id)
             if peer.absorbed_by is not None:
-                self.record(ShownRecordKind.EPISODE, episode_address(peer.absorbed_by))
+                self.episode(peer.absorbed_by)
+            left = peer.set_up
+            if peer.answered is None and left is not None and left.read and not left.nothing:
+                for task in left.tasks:
+                    self.episode(task.parent)
+                for one in left.activations:
+                    if not isinstance(one, StartingEntry):
+                        self.episode(one.activation_id)
+
+    def listing(self, tasks: TaskListing) -> None:
+        """A call on the Task Scheduler's result, as :meth:`_Request._listing` shows it."""
+        for task in (tasks.spawned, tasks.cancelled):
+            if task is not None:
+                self.episode(task.parent)
+        if tasks.listed:
+            for entry in tasks.running:
+                self.episode(entry.activation_id)
+            for task in tasks.scheduled:
+                self.episode(task.parent)
+            for entry in tasks.recent:
+                self.episode(entry.activation_id)
+
+    def episode(self, activation_id: str) -> None:
+        """An activation's episode, by its address, as its ``E`` label names it."""
+        self.record(ShownRecordKind.EPISODE, episode_address(activation_id))
 
     def full(self, read: EpisodeRead) -> None:
         """A full view's page: the episode, then each record it showed again as held now."""

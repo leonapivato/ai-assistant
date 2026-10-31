@@ -536,3 +536,54 @@ def test_a_task_listing_keeps_its_activations_by_episode_and_none_of_their_words
     assert showed == CallShowed(
         parts=(ShownRecord(kind=ShownRecordKind.EPISODE, id="activation:busy"),)
     )
+
+
+def test_every_episode_a_stop_or_a_listing_labelled_is_kept() -> None:
+    """§11:2: each task's parent, and each activation a stopped one set up still live."""
+    from ai_assistant.orchestration.planning import PeerShown  # noqa: PLC0415
+    from ai_assistant.orchestration.task_scheduler import (  # noqa: PLC0415
+        ActivationEntry,
+        StillLive,
+        TaskEntry,
+        TaskListing,
+    )
+
+    def task(task_id: str, parent: str) -> TaskEntry:
+        return TaskEntry(
+            task_id=task_id,
+            state="pending",
+            falls_due="tomorrow 09:00",
+            instruction="Remind them of the dentist",
+            outside=False,
+            places=(),
+            author="the user",
+            parent=parent,
+            parent_text="the reminder they asked for",
+        )
+
+    child = ActivationEntry(
+        activation_id="child",
+        started="09:00",
+        place="the hub chat",
+        status="running",
+        input="My private appointment details",
+        outside=False,
+    )
+    stopped = PeerShown(
+        activation_id="parent",
+        stopped=True,
+        set_up=StillLive(read=True, tasks=(task("t1", "planner"),), activations=(child,)),
+    )
+    listing = TaskListing(scheduled=(task("t2", "asker"),), listed=True)
+
+    for value, expected in (
+        ({"peer": stopped}, ("activation:parent", "activation:planner", "activation:child")),
+        ({"tasks": listing}, ("activation:asker",)),
+    ):
+        outcome = CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="x", **value)
+        showed = call_showed(outcome, bound=1000)
+        assert showed == CallShowed(
+            parts=tuple(ShownRecord(kind=ShownRecordKind.EPISODE, id=one) for one in expected)
+        )
+        assert "Remind them" not in showed.model_dump_json()
+        assert "private appointment" not in showed.model_dump_json()
