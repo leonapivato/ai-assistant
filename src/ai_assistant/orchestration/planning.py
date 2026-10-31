@@ -1387,6 +1387,9 @@ class PlanningInputs:
         matters_now: Each matter the work's exchange has shown, by the story's id, as
             the story store holds it now, re-read before a report, or ``None`` where it
             no longer holds it; a matter left out is not compared.
+        matter_members: How many members each matter this round may show or compare held
+            as the story store holds it now, by the story's id, so a member leaving it,
+            a split moving no note among them, is news (ADR-0359 §2:2).
         meanings: For each running activation ``running`` shows, the meaning its latest
             understanding recorded, where it recorded one, which the news names a newly
             started work by (ADR-0360).
@@ -1436,6 +1439,7 @@ class PlanningInputs:
     still_held: frozenset[str] | None = None
     matters_now: Mapping[str, StorySummaryState | None] = field(default_factory=dict)
     meanings: Mapping[str, str] = field(default_factory=dict)
+    matter_members: Mapping[str, int] = field(default_factory=dict)
     ended: Mapping[str, EpisodicMemory | None] = field(default_factory=dict)
     person_now: PersonNow | None = None
 
@@ -1450,7 +1454,11 @@ class MatterSeen:
         notes: The ids of its pending notes the exchange showed.
         merged_into: The story it had been merged into, or ``None``.
         written_at: When the summary shown was written, where the view says; ``None`` for
-            a view that does not, whose summary is then compared by its words.
+            a view that does not.
+        version: The summary's version, where the view or the store says; a rewrite is
+            told by it, never by a bounded view's words.
+        members: How many members the story held, where it was read; a member leaving
+            it is told by it, a split moving no note among them.
     """
 
     summary: tuple[str, ...] = ()
@@ -1458,6 +1466,8 @@ class MatterSeen:
     notes: frozenset[int] = frozenset()
     merged_into: str | None = None
     written_at: datetime | None = None
+    version: int | None = None
+    members: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3331,6 +3341,8 @@ class _Request:
                 notes=frozenset(int(note.note_id) for note in one.notes),
                 merged_into=None if one.standing is None else one.standing.story.merged_into,
                 written_at=one.tidied_at,
+                version=one.summary_version,
+                members=self._inputs.matter_members.get(one.story_id),
             ),
         )
         return lines
@@ -3408,6 +3420,8 @@ class _Request:
                 summary=tuple(line.text for line in view.lines),
                 written=view.written,
                 notes=frozenset(int(note.note_id) for note in view.notes),
+                version=view.summary_version,
+                members=self._inputs.matter_members.get(view.story_id),
             ),
         )
         return _container("matter", attributes, tags)
@@ -4121,6 +4135,8 @@ class _Request:
             rewritten = True
         elif summary is None:
             rewritten = False
+        elif seen.version is not None:
+            rewritten = summary.version != seen.version
         elif seen.written_at is not None:
             rewritten = summary.written_at != seen.written_at
         else:
@@ -4132,26 +4148,55 @@ class _Request:
         elif rewritten:
             said.append("its summary was rewritten")
         pending = frozenset(int(note.note_id) for note in state.pending_notes)
-        if visible:
-            gained = [
-                note
-                for note in state.pending_notes
-                if int(note.note_id) not in seen.notes
-                and note.written_during != self._inputs.activation_id
-            ]
-            if gained:
-                said.append(
-                    "it gained a note" if len(gained) == 1 else f"it gained {len(gained)} notes"
-                )
-            if not rewritten and seen.notes - pending:
-                said.append("some of what it held was moved or split off into another matter")
+        members = self._inputs.matter_members.get(state.story.story_id)
+        said.extend(
+            self._notes_changed(seen, state, rewritten=rewritten, members=members, merged=merged)
+        )
         return said, MatterSeen(
             summary=texts,
             written=summary is not None,
             notes=pending if visible else seen.notes,
             merged_into=merged,
             written_at=None if summary is None else summary.written_at,
+            version=None if summary is None else summary.version,
+            members=members if members is not None else seen.members,
         )
+
+    def _notes_changed(
+        self,
+        seen: MatterSeen,
+        state: StorySummaryState,
+        *,
+        rewritten: bool,
+        members: int | None,
+        merged: str | None,
+    ) -> list[str]:
+        """A matter's notes gained, and what left it, since the exchange showed it.
+
+        A bounded view shows the newest notes, so a note is new where it is newer than
+        every note the exchange showed (note ids rise as notes are written), and only on a
+        pass that may show notes (ADR-0359 §5:1). What left it is told by a member count
+        that fell, a split moving no note among them, or by a note no longer pending where
+        no rewrite took it in.
+        """
+        said: list[str] = []
+        pending = frozenset(int(note.note_id) for note in state.pending_notes)
+        moved = members is not None and seen.members is not None and members < seen.members
+        if self._inputs.owner_records:
+            newest = max(seen.notes, default=0)
+            gained = [
+                note
+                for note in state.pending_notes
+                if int(note.note_id) > newest and note.written_during != self._inputs.activation_id
+            ]
+            if gained:
+                said.append(
+                    "it gained a note" if len(gained) == 1 else f"it gained {len(gained)} notes"
+                )
+            moved = moved or (not rewritten and bool(seen.notes - pending))
+        if moved and merged is None:
+            said.append("some of what it held was moved or split off into another matter")
+        return said
 
     # --- a call's result ---
 
@@ -5017,7 +5062,10 @@ def _did_text(
     delivered = call.delivered
     if delivered is not None:
         where = place_of(delivered.went)
-        went = place(LabelKind.PLACE, where) or _origin_name(delivered.went)
+        went = (
+            place(LabelKind.PLACE, where)
+            or f"{_origin_name(delivered.went)} ({delivered.went.instance_id})"
+        )
         how = delivered.status.value
         why = "" if delivered.reason is None else f": {delivered.reason}"
         if shown:

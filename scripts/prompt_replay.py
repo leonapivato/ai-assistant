@@ -1175,8 +1175,13 @@ class Caller(Protocol):
         tools: Sequence[OfferedTool],
         response: Mapping[str, object],
         question: str,
+        steps: Sequence[ExchangeStep] = (),
     ) -> str:
-        """Ask the follow-up of a planning round through the follow-up's seam (ADR-0337 §7:3)."""
+        """Ask the follow-up of a planning round through the follow-up's seam (ADR-0337 §7:3).
+
+        ``steps`` are the followed round's earlier rounds and their reports, so the
+        follow-up is asked of the request exactly as it was sent (§7:2).
+        """
         ...
 
 
@@ -1385,12 +1390,13 @@ class ModelCaller:
         tools: Sequence[OfferedTool],
         response: Mapping[str, object],
         question: str,
+        steps: Sequence[ExchangeStep] = (),
     ) -> str:
         """Ask a planning round's follow-up once, to the run's model alone (§7:3)."""
         once = self._once()
         async with asyncio.timeout(self._timeout):
             return await follow_up_round(
-                _briefing_only(messages), tools, response, question, model=once
+                _briefing_only(messages, steps), tools, response, question, model=once
             )
 
 
@@ -1482,12 +1488,13 @@ def cut_follow_up(follow_up: FollowUp, stopped: BaseException) -> dict[str, obje
     return {**follow_up.head(), "failure": failure_body(stopped)}
 
 
-async def ask_follow_up(
+async def ask_follow_up(  # noqa: PLR0913 — the follow-up, its caller, and the followed request whole
     follow_up: FollowUp,
     caller: Caller,
     messages: Sequence[Message],
     tools: Sequence[OfferedTool] | None,
     outcome: Mapping[str, object],
+    steps: Sequence[ExchangeStep] = (),
 ) -> dict[str, object] | None:
     """Ask the follow-up of one recorded response, or ``None`` where none was recorded.
 
@@ -1502,7 +1509,7 @@ async def ask_follow_up(
         reply = outcome.get("reply")
         if tools is not None and isinstance(response, dict):
             answer = await caller.follow_up_round(
-                messages, tools, cast("Mapping[str, object]", response), follow_up.question
+                messages, tools, cast("Mapping[str, object]", response), follow_up.question, steps
             )
         elif tools is None and isinstance(reply, str):
             answer = await caller.follow_up(messages, reply, follow_up.question)
@@ -3731,7 +3738,7 @@ async def send_suite(  # noqa: PLR0913 — keyword-only past the calls, caller a
         if follow_up is not None and asks_follow_up(call.case):
             try:
                 asked = await ask_follow_up(
-                    follow_up, caller, call.messages, call.case.tools, outcome
+                    follow_up, caller, call.messages, call.case.tools, outcome, call.case.steps
                 )
             except asyncio.CancelledError as exc:
                 # The sample's response came back, so it is written before the run stops.

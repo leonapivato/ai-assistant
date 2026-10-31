@@ -7,8 +7,8 @@ set = "development"
 samples = 2
 
 [property]
-check = "proposes"
-capability = "stop_activation"
+check = "calls_within"
+capabilities = ["stop_activation"]
 argument = "activation"
 value = "E1"
 

@@ -106,3 +106,25 @@ async def test_a_store_that_cannot_be_read_names_no_work_ended() -> None:
 
     assert reread.ended == {}
     assert working.supplied.obtained_records == []
+
+
+async def test_an_ended_work_whose_episode_is_not_frozen_is_read_again() -> None:
+    """Review round 2: an episode still open names no work ended, so it is read again."""
+    record = _episode("activation:other")
+    processing = record.processing_record
+    assert processing is not None
+    still_open = record.model_copy(
+        update={
+            "processing_record": processing.model_copy(
+                update={"ended_at": None, "status": None, "reason": None}
+            )
+        }
+    )
+    path = _path(_Memory(held={record.id: still_open}))
+    working = _working(frozenset({"other"}))
+
+    reread = await path._shown_now(
+        working, cast("Any", object()), cast("Any", SimpleNamespace(supply=_SUPPLY))
+    )
+
+    assert reread.ended == {}
