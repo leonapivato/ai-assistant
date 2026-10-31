@@ -10,6 +10,7 @@ cut to the composition root's bound, the cut carried.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -360,4 +361,42 @@ async def test_an_episode_search_finished_before_the_round_was_cancelled_keeps_i
     assert entries["c1"].outcome is CallOutcomeKind.DONE
     assert entries["c1"].showed == _FOUND
     assert entries["c2"].outcome is None
+    await harness.engine.aclose()
+
+
+# --- successor round 3: a story call keeps the stories its report shows ---------------
+
+
+async def test_a_story_started_keeps_the_story_its_report_showed() -> None:
+    """§11:2, ADR-0356 §5:4: a story call done shows, in the next round's report, the
+    story it brought the activation into, and its entry keeps that story by reference."""
+    from test_engine_phases import _conversation, _harness, _say, _settled  # noqa: PLC0415
+
+    from ai_assistant.core.types import StoryMember, StoryMemberKind  # noqa: PLC0415
+    from ai_assistant.testing import FakeStoryStore  # noqa: PLC0415
+
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "start_story", notes=["A camping trip to Riverside."]),)),
+        RoundResponse(text="Noted."),
+    )
+    stories = FakeStoryStore(now=lambda: _AT)
+    harness = _harness(completer, stories=stories, story_calls=True)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "help me plan a camping trip to Riverside")
+    episode = await _settled(harness, conversation)
+
+    record = processing(episode)
+    member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=record.activation_id)
+    (header,) = await stories.stories_of(member)
+    second = json.dumps(completer.calls[1].exchange.model_dump(mode="json"))
+    assert "S1" in second, "the next round's report showed the story"
+    entry = _entries(episode)["c1"]
+    assert entry.outcome is CallOutcomeKind.DONE
+    assert entry.showed is not None
+    assert [
+        one.id
+        for one in entry.showed.parts
+        if isinstance(one, ShownRecord) and one.kind is ShownRecordKind.STORY
+    ] == [str(header.story_id)]
     await harness.engine.aclose()

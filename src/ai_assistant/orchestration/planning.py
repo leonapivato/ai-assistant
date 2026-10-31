@@ -954,6 +954,7 @@ def call_showed(
     bound: int,
     owner_records: bool = True,
     labels: ShowingLabels | None = None,
+    started: Sequence[PlanningStory] = (),
 ) -> CallShowed | None:
     """What a done call's result showed planning directly, as its entry keeps it.
 
@@ -984,6 +985,9 @@ def call_showed(
             alone, which decides what a full view's page shows (§10:5).
         labels: The labels planning holds as the result is rendered, which the
             rendering adds to; ``None`` for none.
+        started: The stories the call's report shows beside its result, the round's
+            first story call done showing the stories it brought the activation into
+            (:meth:`_Request._stories_started`); none for every other call.
 
     Returns:
         What it showed, or ``None`` for a call that was not done (§11:2).
@@ -1006,12 +1010,13 @@ def call_showed(
         outcome.history,
         outcome.full,
     )
-    if all(one is None for one in looked):
-        if outcome.digested or outcome.result is None:
-            return CallShowed()
-        words = json.dumps(_thawed(outcome.result), ensure_ascii=False, sort_keys=True)
-        return shown_within((ShownText(text=words),), bound)
     parts: list[ShownText | ShownRecord] = []
+    if all(one is None for one in looked):
+        if not (outcome.digested or outcome.result is None):
+            words = json.dumps(_thawed(outcome.result), ensure_ascii=False, sort_keys=True)
+            parts.append(ShownText(text=words))
+        if not started:
+            return shown_within(parts, bound)
     history = outcome.history
     if history is not None:
         # An older message's words, as planning was shown them: a withheld one's never.
@@ -1021,7 +1026,10 @@ def call_showed(
             if not history.withheld(item)
         )
     versions = _summary_versions(
-        outcome, ShowingLabels() if labels is None else labels, owner_records=owner_records
+        outcome,
+        ShowingLabels() if labels is None else labels,
+        started,
+        owner_records=owner_records,
     )
     parts.extend(
         ShownRecord(
@@ -1029,7 +1037,7 @@ def call_showed(
             id=one.id,
             summary_version=versions.get(one.id) if one.kind is LabelKind.STORY else None,
         )
-        for one in _labelled(outcome, owner_records=owner_records)
+        for one in _labelled(outcome, started, owner_records=owner_records)
         if one.kind in _SHOWN_KINDS
     )
     return shown_within(parts, bound)
@@ -1064,8 +1072,18 @@ class ShowingLabels:
         self._book = _LabelBook(held)
 
 
-def _rendering(outcome: CallOutcome, book: _LabelBook, *, owner_records: bool) -> _Request:
-    """``outcome``'s result rendered over ``book``, as planning renders it."""
+def _rendering(
+    outcome: CallOutcome,
+    book: _LabelBook,
+    started: Sequence[PlanningStory],
+    *,
+    owner_records: bool,
+) -> _Request:
+    """``outcome``'s result rendered over ``book``, as planning renders it.
+
+    Then the stories its report shows beside it, ``started``, as
+    :meth:`_Request._stories_started` renders them.
+    """
     request = _Request(
         PlanningInputs(
             activation_id="showed",
@@ -1079,18 +1097,26 @@ def _rendering(outcome: CallOutcome, book: _LabelBook, *, owner_records: bool) -
         zone=ZoneInfo("UTC"),
     )
     request._result_value(outcome)
+    for one in started:
+        request._story(one)
     return request
 
 
-def _labelled(outcome: CallOutcome, *, owner_records: bool) -> tuple[PlanningLabel, ...]:
-    """Every thing the rendering of ``outcome``'s result names under a label, in order."""
+def _labelled(
+    outcome: CallOutcome, started: Sequence[PlanningStory], *, owner_records: bool
+) -> tuple[PlanningLabel, ...]:
+    """Every thing the rendering of ``outcome``'s report names under a label, in order."""
     book = _LabelBook(())
-    _rendering(outcome, book, owner_records=owner_records)
+    _rendering(outcome, book, started, owner_records=owner_records)
     return tuple(book.minted)
 
 
 def _summary_versions(
-    outcome: CallOutcome, labels: ShowingLabels, *, owner_records: bool
+    outcome: CallOutcome,
+    labels: ShowingLabels,
+    started: Sequence[PlanningStory],
+    *,
+    owner_records: bool,
 ) -> dict[str, int]:
     """The summary version each story's summary was first rendered at (ADR-0358 §11:2).
 
@@ -1099,7 +1125,7 @@ def _summary_versions(
     label; a story whose summary is withheld showed none, and one named by its label
     alone, a matter planning already held a label for among them, showed none either.
     """
-    rendered = _rendering(outcome, labels._book, owner_records=owner_records)
+    rendered = _rendering(outcome, labels._book, started, owner_records=owner_records)
     return {key: value for key, value in rendered.summaries_shown.items() if value is not None}
 
 
