@@ -888,6 +888,19 @@ async def test_an_approved_profile_change_is_not_named_again() -> None:
     assert news.endswith(NOTHING_NEW)
 
 
+async def test_a_pinned_memory_forgotten_is_told_only_as_forgotten() -> None:
+    """ADR-0360 §4:5, ADR-0359 §3, review round 6: one notice, the forgetting's."""
+    news = await _next_round(
+        _inputs(),
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        still_held=frozenset(),
+        person_now=PersonNow(profile=Profile(name="Leo", time_zone="Europe/Lisbon")),
+    )
+
+    assert "- M1 is forgotten: the system no longer holds it, so do not use it." in news
+    assert "no longer pinned" not in news
+
+
 async def test_a_pin_the_budget_leaves_out_is_not_told_as_unpinned() -> None:
     """ADR-0360 §4:1, review round 3: still reached, it is no news, pinned or unpinned."""
     given = _inputs(person=_block(KeptInMind(memory=BEACH, pinned=True)))
@@ -1250,6 +1263,62 @@ async def test_a_failed_delivery_never_claims_the_window_item() -> None:
     sent, failed = tag(section(briefing, "## Short-term memory"), "episode").held("did")
     assert "shown in the window" in str(sent.text)
     assert "shown in the window" not in str(failed.text)
+
+
+async def test_an_episode_whose_parties_are_unknown_is_not_the_persons() -> None:
+    """ADR-0351 §2:5, ADR-0353 §4:3, review round 6: unknown stays unknown."""
+    record = _episode("legacy", channel=TELEGRAM)
+    processing = record.processing_record
+    assert processing is not None
+    legacy = record.model_copy(
+        update={
+            "processing_record": processing.model_copy(
+                update={
+                    "trigger": _trigger(
+                        "Book Luigi's for Friday",
+                        channel=TELEGRAM,
+                        parties=None,
+                        at=NOW - timedelta(hours=2),
+                    )
+                }
+            )
+        }
+    )
+
+    briefing = await _briefing(_inputs(episodes=(legacy,)))
+
+    episode = tag(section(briefing, "## Short-term memory"), "episode", label="E1")
+    (words,) = episode.held("input")[0].tags
+    assert words.name == "received"
+    assert words.get("from") != "Leo"
+
+
+async def test_a_scheduled_tasks_work_is_the_persons_last_stimulus() -> None:
+    """ADR-0353 §6:2, ADR-0349 §5:3, review round 6: a task's person is the one it is for."""
+    scheduled = ChannelIdentity(channel_type="task_scheduler", instance_id="task-1")
+    record = _episode("reminded", channel=TELEGRAM, at=NOW - timedelta(minutes=30))
+    processing = record.processing_record
+    assert processing is not None
+    ran = record.model_copy(
+        update={
+            "processing_record": processing.model_copy(
+                update={
+                    "trigger": _trigger(
+                        "Remind Leo to call his mother.",
+                        channel=scheduled,
+                        parties=None,
+                        at=NOW - timedelta(minutes=30),
+                    )
+                }
+            )
+        }
+    )
+
+    briefing = await _briefing(_inputs(episodes=(ran,)))
+
+    (line,) = [one for one in briefing.splitlines() if "last stimulus" in one]
+    assert "holds none earlier" not in line
+    assert "5:10 pm" in line
 
 
 def test_a_tag_left_open_fails_at_once() -> None:

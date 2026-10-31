@@ -598,6 +598,20 @@ def test_asks_about_refuses_a_question_the_runtime_would_not_send() -> None:
     )
 
 
+def test_asks_about_reads_a_malformed_first_asking_call_as_the_question() -> None:
+    """ADR-0357 §8:3, review round 6: it takes the slot, so the well-formed one asks nothing."""
+    malformed = RoundResponse(
+        calls=(
+            _text("Shall I?", asks="1.1"),
+            _text("Shall I book it?", call_id="c2", asks=["1.1"]),
+        )
+    )
+
+    assert _round("asks_about", {"calls": ["1.1"]}, malformed) == (
+        "the round's question is a text call the runtime refuses"
+    )
+
+
 def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
     """ADR-0356 §11:2: a plain question comes back as a message call, not as text."""
     params: dict[str, object] = {"phrases": ["10:30"]}
@@ -1334,6 +1348,36 @@ def test_proposes_and_answers_offer_read_the_rounds_calls() -> None:
     assert _round("answers_offer", {"answer": "take", "offer": "E1"}, elsewhere) is not None
     assert _round("answers_offer", {"answer": "decline", "offer": "E1"}, decline) is None
     assert _round("answers_offer", {"answer": "decline", "offer": "E1"}, _calls()) is not None
+
+
+def test_a_replayed_exchange_hands_back_no_continuation() -> None:
+    """ADR-0356 §6:3, §13, review round 6: thinking is never sent under another instruction."""
+    from ai_assistant.core.types import (  # noqa: PLC0415 — this test's own records
+        ExchangeStep,
+        Message,
+        Role,
+        RoundContinuation,
+        RoundReport,
+    )
+
+    step = ExchangeStep(
+        response=RoundResponse(
+            text="Looking.",
+            continuation=RoundContinuation(model="test:planner", parts={"signed": "thinking"}),
+        ),
+        report=RoundReport(news="Now: then."),
+    )
+    messages = (
+        Message(role=Role.SYSTEM, content="a candidate's instruction"),
+        Message(role=Role.USER, content="the briefing"),
+    )
+
+    exchange = replay_tool._briefing_only(messages, (step,))
+
+    (sent,) = exchange.steps
+    assert sent.response.continuation is None
+    assert sent.response.text == "Looking."
+    assert exchange.instruction == "a candidate's instruction"
 
 
 def test_a_later_rounds_follow_up_is_asked_of_its_whole_exchange() -> None:

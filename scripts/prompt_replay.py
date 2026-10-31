@@ -148,7 +148,7 @@ from ai_assistant.models import (
 from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT, follow_up_round
 from ai_assistant.orchestration.digesting import DigestReply
 from ai_assistant.orchestration.matters_pass import MattersPassReply
-from ai_assistant.orchestration.message_tools import text_arguments
+from ai_assistant.orchestration.message_tools import carries_asks, text_arguments
 from ai_assistant.orchestration.observer.prompts import PERSON_FLAG
 from ai_assistant.orchestration.observer.replies import (
     FramingReplyShape,
@@ -1408,7 +1408,10 @@ def _briefing_only(
 
     The seams send a round's exchange (ADR-0356 §13); a request recorded as two messages
     is the exchange of its instruction and its briefing, then the work's earlier rounds
-    and their reports, where a case holds them (§11:4).
+    and their reports, where a case holds them (§11:4). The instruction sent is the run's,
+    a candidate's or the default's, and the steps carry no record of the one they were
+    written under, so no response is handed back with its continuation: thinking written
+    under another instruction is never sent with this one (§6:3, §13).
 
     Raises:
         ModelError: If the request is not one system message and one user message, or its
@@ -1418,9 +1421,15 @@ def _briefing_only(
     if roles != [Role.SYSTEM, Role.USER]:
         msg = "a planning round's recorded request is one system and one user message"
         raise ModelError(msg)
+    bare = tuple(
+        step.model_copy(
+            update={"response": step.response.model_copy(update={"continuation": None})}
+        )
+        for step in steps
+    )
     try:
         return PlanningExchange(
-            instruction=messages[0].content, briefing=messages[1].content, steps=tuple(steps)
+            instruction=messages[0].content, briefing=messages[1].content, steps=bare
         )
     except ValidationError:
         msg = "a planning case's steps make no exchange"
@@ -2498,14 +2507,14 @@ def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:
     if reply.round is None:
         return "the response reads as no round"
     asked: set[str] = set()
-    for one in reply.round.calls:
-        named = one.arguments.get("asks") if one.name == "text" else None
-        if isinstance(named, list | tuple):
-            if isinstance(text_arguments(one.arguments), str):
-                return "the round's question is a text call the runtime refuses"
-            # ADR-0357 §8:3: a second asking message is refused, and asks nothing.
-            asked.update(str(name) for name in named)
-            break
+    # ADR-0357 §8:3: the first call the runtime takes as asking is the round's asking
+    # message, malformed or not; a second is refused, and asks nothing.
+    asking = next((one for one in reply.round.calls if carries_asks(one.name, one.arguments)), None)
+    if asking is not None:
+        checked = text_arguments(asking.arguments)
+        if isinstance(checked, str):
+            return "the round's question is a text call the runtime refuses"
+        asked.update(checked.asks)
     missing = [one for one in cast("list[str]", params["calls"]) if one not in asked]
     if missing:
         return f"the round's question leaves out {len(missing)} of the named calls"
