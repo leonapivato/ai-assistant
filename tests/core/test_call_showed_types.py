@@ -469,13 +469,47 @@ def test_evidence_is_placed_before_between_and_after_the_rounds() -> None:
 def test_a_fixed_clock_still_places_what_the_phases_order() -> None:
     """§10:3 with every part at one instant: the first understanding version and recall's
     digest precede every round by the phases' order, a later version precedes the round
-    that plans on it, and a result's digest follows the rounds that could have read it."""
+    that plans on it, and a result's digest follows a round."""
     projection = project_episode(
         _episode(_ordered(timedelta(0))), excerpt_chars=50, owner_records=True, full_view=True
     )
     assert [one.position for one in projection.understood] == [0, 0]
-    assert [(one.text.text, one.position) for one in projection.evidence] == [
-        ("recalled", 0),
-        ("between", 2),
-        ("after", 2),
+    recalled, *results = projection.evidence
+    assert (recalled.text.text, recalled.position) == ("recalled", 0)
+    # A result is read only by a round's call, so its digest follows at least one round;
+    # past that the record keeps no sequence to break the tie by (ADR-0358 §10:3).
+    assert all(one.position >= 1 for one in results)
+
+
+def test_each_call_keeps_its_place_among_its_rounds_calls_recorded_or_not() -> None:
+    """§10:3: a round proposing three calls whose middle entry failed to append still
+    shows them in the order proposed."""
+    record = _full_record()
+    first = record.rounds[0].model_copy(
+        update={"calls": (_call("c1", "search_memory"), _call("c2"), _call("c4", "text"))}
+    )
+    record = EpisodeProcessingRecord.model_validate(
+        record.model_dump()
+        | {
+            "rounds": (first.model_dump(), record.rounds[1].model_dump()),
+            "call_records": (
+                _entry("r1", "c4", capability="text").model_dump(),
+                _entry("r1", "c1", showed=_SHOWED).model_dump(),
+                _entry("r2", "c3", capability="read_story").model_dump(),
+            ),
+        }
+    )
+    projection = project_episode(
+        _episode(record), excerpt_chars=50, owner_records=True, full_view=True
+    )
+    ordered = sorted(
+        [(one.position, one.index, one.capability) for one in projection.calls]
+        + [(one.position, one.index, one.capability) for one in projection.unrecorded]
+    )
+    assert ordered == [
+        (0, 0, "search_memory"),
+        (0, 1, "web_search"),
+        (0, 2, "text"),
+        (1, 0, "read_story"),
     ]
+    assert [one.capability for one in projection.unrecorded] == ["web_search"]

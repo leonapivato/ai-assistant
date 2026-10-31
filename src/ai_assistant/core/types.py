@@ -5526,6 +5526,9 @@ class ProjectedCall(BaseModel):
 
     Attributes:
         position: Its round's position, in :attr:`ProjectedRound.position`'s numbering.
+        index: Its index among the calls its round proposed, from ``0``, so the full view
+            orders it among its round's calls, an unrecorded one's included
+            (ADR-0358 §10:3).
         capability: The capability it called.
         arguments: The arguments its round recorded, as canonical JSON, cut to the
             projection's excerpt bound.
@@ -5541,6 +5544,7 @@ class ProjectedCall(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     position: int = Field(strict=True, ge=0, lt=2**31)
+    index: int = Field(default=0, strict=True, ge=0, lt=2**31)
     capability: NonBlankEncodableText
     arguments: ProjectedText
     effect: bool
@@ -5561,6 +5565,8 @@ class ProjectedProposal(BaseModel):
 
     Attributes:
         position: Its round's position, in :attr:`ProjectedRound.position`'s numbering.
+        index: Its index among the calls its round proposed, in
+            :attr:`ProjectedCall.index`'s numbering.
         capability: The capability it named.
         arguments: The arguments its round recorded, as canonical JSON, cut to the
             projection's excerpt bound.
@@ -5568,6 +5574,7 @@ class ProjectedProposal(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     position: int = Field(strict=True, ge=0, lt=2**31)
+    index: int = Field(strict=True, ge=0, lt=2**31)
     capability: NonBlankEncodableText
     arguments: ProjectedText
 
@@ -5582,7 +5589,8 @@ class ProjectedUnderstanding(BaseModel):
             one the number of rounds recorded strictly before it, so a version recorded
             at a round's instant is placed before the round that plans on it.
         version: The version's number.
-        meaning: What it understood.
+        meaning: What it understood, whole, as the projection carries the latest
+            version's ``meaning``.
         unclear: What it found unclear, each point with its readings.
     """
 
@@ -5652,8 +5660,10 @@ class ProjectedEvidence(BaseModel):
             order it happened (ADR-0358 §10:3): ``0`` for recall's digest, which the
             phases make before planning (ADR-0309 §3), and for a result's digest the
             number of rounds recorded at or before it, since a result is read only by a
-            call a round proposed. ``0`` in a peer view, which places nothing among
-            rounds.
+            call a round proposed. The record keeps instants and no sequence across its
+            rounds and digests, so where a digest's instant ties a later round's, as
+            under a stopped clock, it is placed after that round too. ``0`` in a peer
+            view, which places nothing among rounds.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
