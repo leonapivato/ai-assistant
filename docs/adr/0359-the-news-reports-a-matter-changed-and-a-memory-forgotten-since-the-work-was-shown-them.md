@@ -1,6 +1,6 @@
 # 359. The news reports a matter changed and a memory forgotten since the work was shown them
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-31
 - Scope: what a report's news (ADR-0356 §5:5) adds now that a work's briefing is rendered once and never re-rendered (ADR-0356 §5:2): a matter the work was shown that has changed since (§2), and a memory it was shown that the memory store no longer holds (§3). How ADR-0338 §7:10 reads for a work's own exchange (§4), the audience the news is told under (§5), the instruction (§6), and who builds it (§7).
 - Dependency: [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md), whose exchange and news this decision adds to; [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md), whose §7:10 it reads for the exchange; [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), whose labels (§5:1) and audience rule (§6:4) the news uses; and [ADR-0282](0282-phases-read-and-write-the-working-episode-and-recall-searches-past-the-windows.md), whose audience predicate (§2:8) every fetch applies. All Accepted, as their status lines leave them.
