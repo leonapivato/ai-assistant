@@ -1244,11 +1244,13 @@ class Matters:
     ) -> Answered:
         """Take or decline the offer ``offering_id`` made ``older``, in one step (§7:21).
 
-        A take appends every offered input to the older, naming the offering activation,
-        sets that activation's stop mark and committed mark, and records the hand-over in
-        both takeover decisions. Where the offering activation no longer runs with its
-        stop mark unset, the offer is withdrawn and nothing changes; where a take would
-        hold more than ``held_input_limit``, it is refused and counts as a decline.
+        A take appends every offered input to the older, naming the offering activation
+        and stamped with when it was taken, the instant it joined the older (ADR-0332
+        §3), never when the offer was made; sets that activation's stop mark and
+        committed mark; and records the hand-over in both takeover decisions. Where the
+        offering activation no longer runs with its stop mark unset, the offer is
+        withdrawn and nothing changes; where a take would hold more than
+        ``held_input_limit``, it is refused and counts as a decline.
 
         Returns:
             What it came to, with a decline's reason, and why it did not come to what
@@ -1281,14 +1283,14 @@ class Matters:
                 not_as_asked=NotAsAsked.AT_LIMIT,
                 meaning=offer.meaning,
             )
+        # Read before anything changes, so nothing it reads can fail the step midway.
+        inputs = _marked_now(offer.inputs, offering, taken_at=_taken_at(older))
         offering.stop()
         offering.committed = True
         offering.handed_to = older.activation_id
         offering.offered_to = None
         self._handed[offering_id] = str(older.activation_id)
-        older.take_inputs(
-            _marked_now(offer.inputs, offering), merged=(*offering.merged, offering_id)
-        )
+        older.take_inputs(inputs, merged=(*offering.merged, offering_id))
         older.offers_untaken -= 1
         offer.decision.became = Became.TAKEN
         older.took.append(Named(offering_id, None, Became.TAKEN))
@@ -1391,15 +1393,44 @@ def held_inputs(state: ActivationState, *, at: datetime) -> tuple[JoinedInput, .
     )
 
 
+def _taken_at(older: ActivationState) -> datetime | None:
+    """When a take is made, by the clock the taking activation was admitted by.
+
+    ``None`` where the state holds no clock, or its reading failed or is no UTC instant:
+    the take still runs, and its inputs keep the offer's instant.
+    """
+    if older.clock is None:
+        return None
+    try:
+        reading = older.clock()
+        offset = reading.utcoffset()
+    except Exception:  # the take is not the clock's to fail; its inputs keep a stamp
+        _log.warning("matter_take_unclocked", stage="acting", reason="clock")
+        return None
+    if offset is None or offset:
+        _log.warning("matter_take_unclocked", stage="acting", reason="not_utc")
+        return None
+    return reading
+
+
 def _marked_now(
-    inputs: Sequence[JoinedInput], offering: ActivationState
+    inputs: Sequence[JoinedInput], offering: ActivationState, *, taken_at: datetime | None
 ) -> tuple[JoinedInput, ...]:
-    """An offer's inputs, each with its relay mark as the take reads it (ADR-0351 §5:14).
+    """An offer's inputs as the take appends them: marked and stamped as it reads them.
 
     The offer was made from what the offering activation held then. A relay mark is never
-    dropped (§5:9), so the take reads it again: the trigger's input, the first, is relayed
-    where the offering activation's latest version now marks it.
+    dropped (ADR-0351 §5:9), so the take reads it again: the trigger's input, the first,
+    is relayed where the offering activation's latest version now marks it (§5:14).
+
+    Each input joins the older activation when the take is made, so each records
+    ``taken_at`` as when it joined (ADR-0332 §3), which places it among the older's
+    rounds (ADR-0356 §13's ``ProjectedJoin``); ``None`` keeps the offer's instant.
     """
-    if not inputs or inputs[0].relayed or not relayed_by(offering.understanding):
-        return tuple(inputs)
-    return (inputs[0].model_copy(update={"relayed": True}), *inputs[1:])
+    taken = tuple(
+        inputs
+        if taken_at is None
+        else (one.model_copy(update={"joined_at": taken_at}) for one in inputs)
+    )
+    if not taken or taken[0].relayed or not relayed_by(offering.understanding):
+        return taken
+    return (taken[0].model_copy(update={"relayed": True}), *taken[1:])

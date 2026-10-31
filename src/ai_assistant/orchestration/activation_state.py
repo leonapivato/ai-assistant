@@ -228,6 +228,11 @@ class ActivationState:
     #: on its trigger (ADR-0323 §5:4); the hub chat's trigger records none, so its
     #: messages are held here.
     input_messages: tuple[RecordedInputMessage, ...] = ()
+    #: The clock it was admitted by, the engine's: what a take of an offer reads when
+    #: it was taken, which each input it appends records as when it joined (ADR-0332
+    #: §3, ADR-0349 §7:21), as the absorption step's own instant stamps an absorption's.
+    #: ``None`` for a state built without one, whose takes keep the offer's instant.
+    clock: Clock | None = field(default=None, repr=False, compare=False)
     #: ADR-0349 §7:7: the activation that absorbed this one, where one did.
     absorbed_by: str | None = field(default=None, init=False)
     #: §7:21: the older activation that took this one's offered input, where one did.
@@ -669,6 +674,7 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
             else None
         ),
         stage_limit=stage_limit,
+        clock=clock,
     )
 
 
