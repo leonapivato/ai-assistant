@@ -10,14 +10,14 @@ are not done with the reason (§8:7); a pending suggestion is accepted in the sa
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from test_activation_state import _admitted
 from test_person_block import NOW, _ended, _fact, _World
 
-from ai_assistant.core.errors import PersonModelStoreError
+from ai_assistant.core.errors import PersonModelStoreError, PlanningError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActionRequest,
@@ -25,6 +25,9 @@ from ai_assistant.core.types import (
     ApprovalEnd,
     ApprovalGiven,
     ApprovalGiver,
+    ApprovalRequest,
+    ApprovalRequestState,
+    ApprovalTap,
     AskedCall,
     CapabilityEffect,
     CapabilityResult,
@@ -38,8 +41,11 @@ from ai_assistant.core.types import (
     ProfileField,
     ProposedSuggestion,
     QuestionPart,
+    RequestedCall,
     SuggestionKind,
     SupportOrigin,
+    TapOnCard,
+    TicketState,
     ToolCall,
     ToolOutcome,
     YesToQuestion,
@@ -59,7 +65,7 @@ from ai_assistant.testing import FakePersonModelStore
 from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
     from ai_assistant.core.protocols import PersonModelStore
     from ai_assistant.core.types import (
@@ -545,3 +551,184 @@ async def test_the_panel_pins_through_the_same_checks() -> None:
     assert first.write.kind is PersonModelWriteKind.WRITTEN
     assert (second.write, second.refused) == (None, PinRefusal.OVER_BUDGET)
     assert gone.refused is PinRefusal.NOT_CURRENT
+
+
+# --- under a ticket (ADR-0362 §2:1, §2:4-§2:5) ---------------------------------------------
+
+_ASKED_AT: Final = _YES_AT - timedelta(hours=1)
+#: The approval's own activation, the one its outcome was pushed to (ADR-0361 §3:4).
+_APPROVALS_OWN: Final = "act-approval"
+
+
+def _request(tool: ToolDefinition, **arguments: Any) -> ApprovalRequest:
+    """A request for ``tool``'s call, approved by a tap, its ticket spent, its outcome pushed."""
+    return ApprovalRequest(
+        id="request:1",
+        person=OWNER_PERSON_ID,
+        activation_id="act-ask",
+        round="round:ask",
+        call=RequestedCall(tool=tool, values=arguments),
+        why="You asked me to.",
+        written_at=_ASKED_AT,
+        expires_at=_ASKED_AT + timedelta(hours=24),
+        state=ApprovalRequestState.APPROVED,
+        answer=ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=_YES_AT),
+        ticket=TicketState.USED,
+        spent_by="effect:1",
+        pushed_to=_APPROVALS_OWN,
+    )
+
+
+def _ticketed(request: ApprovalRequest, *, held_by: str = "act-taken") -> ToolCall:
+    """The call ``request``'s ticket holds, allowed under the tap, in the work ``held_by``.
+
+    By default a work the approval's input joined by a take, so that the episode an act
+    names is told from the work that ran the ticket.
+    """
+    held = request.call
+    call = ActionRequest(tool=held.tool, parameters=held.values)
+    decision = PermissionDecision.from_request(
+        call,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="allowed"),
+        id="decision:1",
+        decided_at=_YES_AT,
+        effect="effect:1",
+        approval=Approval(
+            who=ApprovalGiver.USER_TAP_ON_HUB_PANEL,
+            how=TapOnCard(
+                request=request.id,
+                activation_id=request.activation_id,
+                round=request.round,
+                expires_at=request.expires_at,
+            ),
+            given=ApprovalGiven(activation_id=held_by, at=_YES_AT),
+            ends=ApprovalEnd.WHEN_USED_OR_EXPIRED,
+        ),
+    )
+    return ToolCall(request=call, decision=decision)
+
+
+class _Requests:
+    """The plan store's read of approval requests, holding ``held``, or failing."""
+
+    def __init__(self, *held: ApprovalRequest, fails: bool = False) -> None:
+        self.held = {one.id: one for one in held}
+        self.fails = fails
+        self.read: list[str] = []
+
+    async def __call__(self, request_ids: Sequence[str]) -> tuple[ApprovalRequest, ...]:
+        if self.fails:
+            msg = "test: the plan store failed"
+            raise PlanningError(msg)
+        self.read.extend(request_ids)
+        return tuple(self.held[one] for one in request_ids if one in self.held)
+
+
+#: The act a ticket's call makes: the request, and the approval's own episode (§2:1).
+_BY_TICKET: Final = PersonModelAct(
+    how=PersonActHow.APPROVAL,
+    by=OWNER_PERSON_ID,
+    request="request:1",
+    episode_id=f"activation:{_APPROVALS_OWN}",
+)
+
+
+async def test_a_set_profile_under_a_ticket_names_the_request_and_the_approvals_episode(
+    owners: None,
+) -> None:
+    """§2:1, §2:4: the approval's own episode, not the work that ran the ticket after a take."""
+    world = _World()
+    request = _request(SET_PROFILE, field="address", value="Robin")
+    requests = _Requests(request)
+
+    answer = await PersonModelCalls(blocks=world.blocks, requests=requests).run(_ticketed(request))
+
+    assert _done(answer) == "set"
+    model = await world.people.read(OWNER_PERSON_ID)
+    assert model is not None
+    assert model.profile.address == "Robin"
+    (change,) = model.changes
+    assert change.act == _BY_TICKET
+    assert requests.read == ["request:1"]
+
+
+async def test_a_pin_under_a_ticket_names_the_request_and_the_approvals_episode(
+    owners: None,
+) -> None:
+    """§2:4: a pin is made with the request form's act, through the same checks (§4:2)."""
+    world = _World()
+    await world.held(_fact("m:diet", "Eats no meat."))
+    request = _request(PIN, memory="m:diet")
+
+    answer = await PersonModelCalls(blocks=world.blocks, requests=_Requests(request)).run(
+        _ticketed(request)
+    )
+
+    assert _done(answer) == "pinned"
+    model = await world.people.read(OWNER_PERSON_ID)
+    assert model is not None
+    (pin,) = model.standing_pins
+    assert (pin.memory_id, pin.act) == ("m:diet", _BY_TICKET)
+
+
+async def test_an_unpin_under_a_ticket_records_no_act_and_reads_no_request(owners: None) -> None:
+    """§2:5: the pin is marked removed, keeping the act that made it."""
+    world = _World()
+    await world.held(_fact("m:diet", "Eats no meat."))
+    await world.pin("m:diet")
+    requests = _Requests()
+
+    answer = await PersonModelCalls(blocks=world.blocks, requests=requests).run(
+        _ticketed(_request(UNPIN, memory="m:diet"))
+    )
+
+    assert _done(answer) == "unpinned"
+    model = await world.people.read(OWNER_PERSON_ID)
+    assert model is not None
+    (pin,) = model.pins
+    assert pin.removed_at is not None
+    assert pin.act.how is PersonActHow.PANEL
+    assert requests.read == []
+
+
+@pytest.mark.parametrize(
+    "held",
+    [
+        pytest.param({}, id="not-held"),
+        pytest.param({"person": "person:someone-else"}, id="another-persons"),
+        pytest.param({"call": RequestedCall(tool=PIN, values={"memory": "m:x"})}, id="other-call"),
+    ],
+)
+async def test_a_ticket_whose_request_does_not_hold_the_call_changes_nothing(
+    owners: None, held: dict[str, Any]
+) -> None:
+    """§2:4: the call is the request's person's, by that ticket, and none other."""
+    world = _World()
+    request = _request(SET_PROFILE, field="address", value="Robin")
+    requests = _Requests(request.model_copy(update=held)) if held else _Requests()
+
+    answer = await PersonModelCalls(blocks=world.blocks, requests=requests).run(_ticketed(request))
+
+    assert "only on their yes" in _reason(answer)
+    model = await world.people.read(OWNER_PERSON_ID)
+    assert model is not None
+    assert model.profile.address is None
+
+
+async def test_a_ticket_with_no_request_reader_or_a_failing_one_changes_nothing(
+    owners: None,
+) -> None:
+    """§2:1: with no request read, no act can name the approval's episode, so none is made."""
+    world = _World()
+    request = _request(SET_PROFILE, field="address", value="Robin")
+
+    unread = await PersonModelCalls(blocks=world.blocks).run(_ticketed(request))
+    failed = await PersonModelCalls(blocks=world.blocks, requests=_Requests(fails=True)).run(
+        _ticketed(request)
+    )
+
+    assert "only on their yes" in _reason(unread)
+    assert "could not be read or written" in _reason(failed)
+    model = await world.people.read(OWNER_PERSON_ID)
+    assert model is not None
+    assert model.profile.address is None

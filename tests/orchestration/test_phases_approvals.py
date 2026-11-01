@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from exchange_support import tags, text_call
 from phases_support import open_conversation, phases_harness, said, until
+from task_support import activation, write_task
 from task_support import seams as task_seams
 from test_engine import AT
 
@@ -29,20 +31,37 @@ from ai_assistant.core.types import (
     ApprovalRequestState,
     ApprovalTap,
     CapabilityEffect,
+    DueAt,
     EpisodicMemory,
+    OccurrenceState,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    PersonActHow,
+    PersonModelAct,
     ProcessingStatus,
+    ProfileField,
     ProposedCall,
+    ProposedSuggestion,
     RoundResponse,
+    ScheduledTaskAuthor,
+    SuggestionKind,
     TicketState,
+    ToolOutcome,
 )
 from ai_assistant.orchestration.approval_calls import ApprovalsSeams
 from ai_assistant.orchestration.approvals import THE_APPROVALS
 from ai_assistant.orchestration.authorizer import AuthorizingStage
+from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.orchestration.phase_path import PhasePath
-from ai_assistant.testing import FakePlanStore, FakeToolCallingCompleter
+from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.testing import (
+    FakeMemoryStore,
+    FakePersonModelStore,
+    FakePlanStore,
+    FakeToolCallingCompleter,
+)
+from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -51,7 +70,13 @@ if TYPE_CHECKING:
     import pytest
     from test_engine import Harness
 
-    from ai_assistant.core.types import OfferedTool, PlanningExchange
+    from ai_assistant.core.types import (
+        FrozenJson,
+        OfferedTool,
+        PersonModel,
+        PlanningExchange,
+        ScheduledTask,
+    )
 
 _DAY: Final = timedelta(hours=24)
 _DATE: Final = "2026-11-02"
@@ -319,37 +344,6 @@ async def test_a_nested_call_failing_its_schema_or_denied_writes_no_request() ->
         await harness.engine.aclose()
 
 
-async def test_no_request_asks_for_a_call_no_ticket_can_run_yet() -> None:
-    """#3568: a spawn's write claims itself, so no request asks for it, writing nothing."""
-    told: list[dict[str, Any]] = []
-
-    async def person(exchange: PlanningExchange) -> RoundResponse:
-        if not exchange.steps:
-            spawn = ProposedCall(
-                call_id="ask-1",
-                name="request_approval",
-                arguments={
-                    "call": {"capability": "spawn", "arguments": {"instruction": "say hello"}},
-                    "why": "You asked me to remind you.",
-                },
-            )
-            return RoundResponse(calls=(spawn,))
-        told.extend(_results(exchange))
-        return RoundResponse()
-
-    planner = _Planner(person)
-    harness = _harness(planner, task_scheduler=task_seams())
-    await harness.engine.start()
-    try:
-        await _start(harness)
-        await until(lambda: _settled(told), what="the second round")
-        (refused,) = told
-        assert "cannot be approved on a card yet" in refused["outcome"]
-        assert await _requests(harness) == ()
-    finally:
-        await harness.engine.aclose()
-
-
 async def test_a_second_identical_pending_request_is_refused_as_waiting() -> None:
     """§2:7-§2:8, §9:4: done once written; the same call again says it already waits."""
     told: list[list[dict[str, Any]]] = []
@@ -390,6 +384,7 @@ class _Running:
     """The person's work: it asks, waits in its second round, takes the offer, runs."""
 
     gate: asyncio.Event = field(default_factory=asyncio.Event)
+    asks: ProposedCall = field(default_factory=_ask)
     waited: bool = False
     took: bool = False
     ran: int = 0
@@ -398,7 +393,7 @@ class _Running:
     async def __call__(self, exchange: PlanningExchange) -> RoundResponse:
         self.results.append(_results(exchange))
         if not exchange.steps:
-            return RoundResponse(calls=(_ask(),))
+            return RoundResponse(calls=(self.asks,))
         if not self.waited:
             self.waited = True
             await self.gate.wait()
@@ -677,3 +672,322 @@ def test_a_message_into_a_taken_place_gone_since_goes_nowhere(
     own = PhasePath._target(path, cast("Any", working), "conversation:c-1")
     assert own is not None
     assert own.place == "conversation:c-1"
+
+
+# --- ADR-0362: the person model's calls and the Task Scheduler's under a ticket ------------
+
+_DIET: Final = memory("m:diet", "Eats no meat.", said_support(when=AT, added_at=AT))
+#: A delay that keeps a spawned task pending while a case reads it.
+_LATER: Final = 600
+
+
+def _asking(capability: str, call_id: str, **arguments: FrozenJson) -> ProposedCall:
+    """A request for the person's yes to one call, its arguments as planning sends them."""
+    return ProposedCall(
+        call_id=call_id,
+        name="request_approval",
+        arguments={
+            "call": {"capability": capability, "arguments": arguments},
+            "why": f"You asked me to {capability}.",
+        },
+    )
+
+
+def _memory_label(exchange: PlanningExchange) -> str:
+    """The M label the work was shown its one memory under."""
+    (shown,) = {one.get("label") for one in tags(_text(exchange), "memory")}
+    assert shown is not None
+    return shown
+
+
+def _task_labels(exchange: PlanningExchange) -> list[str]:
+    """The T labels the last round's results named, in the order they first appear."""
+    held = " ".join(one.text for one in exchange.steps[-1].report.results)
+    return list(dict.fromkeys(re.findall(r'"(T[1-9][0-9]*)"', held)))
+
+
+async def _run_each_ticket(exchange: PlanningExchange) -> RoundResponse:
+    """An approval's activation: it runs the ticket it holds in its first round, once."""
+    ticket = _ticket(exchange)
+    if exchange.steps or ticket is None:
+        return RoundResponse()
+    return RoundResponse(calls=(_run(ticket),))
+
+
+@dataclass
+class _People:
+    """A person-model store beside the hub's memory store, holding the diet memory."""
+
+    memory: FakeMemoryStore = field(default_factory=lambda: FakeMemoryStore(now=lambda: AT))
+    store: FakePersonModelStore = field(
+        default_factory=lambda: FakePersonModelStore(now=lambda: AT)
+    )
+
+    @property
+    def stores(self) -> dict[str, Any]:
+        """The harness's knobs: the memory store, and the person block over both."""
+        return {
+            "memory": self.memory,
+            "person_blocks": PersonBlocks(store=self.store, memory=self.memory),
+        }
+
+    async def model(self) -> PersonModel:
+        model = await self.store.read(OWNER_PERSON_ID)
+        assert model is not None
+        return model
+
+
+async def _asked_and_tapped(harness: Harness, count: int) -> tuple[ApprovalRequest, ...]:
+    """Wait for ``count`` requests and the asking work to end, then approve each by a tap."""
+    requests = await _until_requests(harness, count)
+    await _frozen(harness, str(requests[0].activation_id))
+    for one in requests:
+        await _tap(harness, one)
+    return requests
+
+
+async def _until_used(
+    harness: Harness, requests: Sequence[ApprovalRequest]
+) -> list[ApprovalRequest]:
+    """Wait until every request's ticket is used, and return each as the store holds it."""
+
+    async def used() -> bool:
+        held = [await _held(harness, str(one.id)) for one in requests]
+        return all(one.ticket is TicketState.USED for one in held)
+
+    await until(used, what="every ticket to be used")
+    return [await _held(harness, str(one.id)) for one in requests]
+
+
+def _by_capability(requests: Sequence[ApprovalRequest]) -> dict[str, ApprovalRequest]:
+    return {str(one.call.tool.capability): one for one in requests}
+
+
+async def _tasks(harness: Harness) -> tuple[ScheduledTask, ...]:
+    return (await harness.plans.export()).scheduled_tasks
+
+
+async def test_a_set_profile_and_a_pin_each_run_under_a_ticket_naming_the_request() -> None:
+    """ADR-0362 §2:1, §2:4, §6:3: asked by request_approval, tapped, and run by run_approved,
+    each recorded with the request form's act: the request, and the approval's own episode."""
+    people = _People()
+    await people.memory.add(_DIET)
+    # The observer's pin suggestion shows the memory to planning under an M label.
+    await people.store.record_suggestion(
+        OWNER_PERSON_ID,
+        ProposedSuggestion(kind=SuggestionKind.PIN, memory_id=_DIET.id, episode_id="activation:a0"),
+    )
+
+    async def person(exchange: PlanningExchange) -> RoundResponse:
+        if exchange.steps:
+            return RoundResponse()
+        return RoundResponse(
+            calls=(
+                _asking("set_profile", "ask-1", field="address", value="Leo"),
+                _asking("pin", "ask-2", memory=_memory_label(exchange)),
+            )
+        )
+
+    planner = _Planner(person, _run_each_ticket)
+    harness = _harness(planner, **people.stores)
+    await harness.engine.start()
+    try:
+        await _start(harness, "call me Leo, and keep in mind that I eat no meat")
+        requests = await _asked_and_tapped(harness, 2)
+        held = _by_capability(await _until_used(harness, requests))
+        model = await people.model()
+    finally:
+        await harness.engine.aclose()
+
+    assert model.profile.address == "Leo"
+    (change,) = [one for one in model.changes if one.field is ProfileField.ADDRESS]
+    (pin,) = model.standing_pins
+    assert pin.memory_id == _DIET.id
+    for act, capability in ((change.act, "set_profile"), (pin.act, "pin")):
+        request = held[capability]
+        assert request.pushed_to is not None
+        assert act == PersonModelAct(
+            how=PersonActHow.APPROVAL,
+            by=OWNER_PERSON_ID,
+            request=request.id,
+            episode_id=episode_address(str(request.pushed_to)),
+        ), "the request, and the approval's own episode, where the yes was given"
+        assert request.pushed_to != request.activation_id
+
+
+async def test_an_unpin_under_a_ticket_removes_the_pin_and_leaves_the_act_that_made_it() -> None:
+    """ADR-0362 §2:5, §6:3: an unpin records no act; its ticket is on its effect record."""
+    people = _People()
+    await people.memory.add(_DIET)
+    made = PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID)
+    await people.store.add_pin(OWNER_PERSON_ID, _DIET.id, act=made)
+
+    async def person(exchange: PlanningExchange) -> RoundResponse:
+        if exchange.steps:
+            return RoundResponse()
+        return RoundResponse(calls=(_asking("unpin", "ask-1", memory=_memory_label(exchange)),))
+
+    planner = _Planner(person, _run_each_ticket)
+    harness = _harness(planner, **people.stores)
+    await harness.engine.start()
+    try:
+        await _start(harness, "you can stop keeping my diet in mind")
+        (request,) = await _until_used(harness, await _asked_and_tapped(harness, 1))
+        model = await people.model()
+        effects = await harness.plans.activation_effects([str(request.pushed_to)])
+    finally:
+        await harness.engine.aclose()
+
+    (pin,) = model.pins
+    assert pin.removed_at is not None
+    assert pin.act == made, "the act that made the pin is left as it was"
+    assert model.standing_pins == ()
+    (spent,) = [one for one in effects if one.id == request.spent_by]
+    assert spent.ticket == request.id
+    assert spent.capability == "unpin"
+
+
+async def test_a_ticketed_spawn_runs_in_the_approvals_own_activation_as_the_persons() -> None:
+    """ADR-0362 §3:3-§3:5, §6:3: the approval's own activation, which ADR-0350 §3:4 does not
+    admit, runs the spawn its ticket holds; its input carries no authority, and the task's
+    author is the person. The write spends the ticket in its own step."""
+
+    async def person(exchange: PlanningExchange) -> RoundResponse:
+        if exchange.steps:
+            return RoundResponse()
+        ask = _asking("spawn", "ask-1", instruction="say hello", delay_minutes=_LATER)
+        return RoundResponse(calls=(ask,))
+
+    planner = _Planner(person, _run_each_ticket)
+    harness = _harness(planner, task_scheduler=task_seams())
+    await harness.engine.start()
+    try:
+        await _start(harness, "remind me to say hello in ten hours")
+        (request,) = await _until_used(harness, await _asked_and_tapped(harness, 1))
+        (task,) = await _tasks(harness)
+        effects = await harness.plans.activation_effects([str(request.pushed_to)])
+    finally:
+        await harness.engine.aclose()
+
+    assert task.author is ScheduledTaskAuthor.PERSON
+    assert task.instruction == "say hello"
+    assert task.parent == request.pushed_to, "spawned by the approval's own activation"
+    assert task.set_in == THE_APPROVALS
+    (spent,) = [one for one in effects if one.id == request.spent_by]
+    assert spent.ticket == request.id
+    assert spent.capability == "spawn"
+
+
+async def test_a_ticketed_spawn_taken_by_the_running_work_is_the_persons() -> None:
+    """ADR-0362 §3:4-§3:5, §6:3: after a take, the work holding the input runs the spawn."""
+    running = _Running(
+        asks=_asking("spawn", "ask-1", instruction="say hello", delay_minutes=_LATER)
+    )
+    planner = _Planner(running)
+    harness = _harness(planner, task_scheduler=task_seams())
+    await harness.engine.start()
+    try:
+        await _start(harness, "remind me to say hello in ten hours")
+        (request,) = await _until_requests(harness, 1)
+        asking = str(request.activation_id)
+        await _tap(harness, request)
+
+        async def offered() -> bool:
+            state = harness.engine._running_state(asking)
+            return state is not None and bool(state.offers)
+
+        await until(offered, what="the approval's input to be offered to the asking work")
+        running.gate.set()
+        await _frozen(harness, asking)
+        (held,) = await _until_used(harness, [request])
+        tasks = await _tasks(harness)
+    finally:
+        await harness.engine.aclose()
+
+    assert running.took
+    assert planner.approval == []
+    (task,) = tasks
+    assert task.author is ScheduledTaskAuthor.PERSON
+    assert task.parent == asking, "spawned by the work the input joined"
+    assert held.spent_by is not None
+
+
+async def test_a_ticketed_cancel_and_replace_reach_tasks_the_running_work_did_not_spawn() -> None:
+    """ADR-0362 §3:5, §6:3: under a ticket, the call may cancel or replace any of the
+    person's tasks, though the approval's activation spawned neither and its input carries
+    no authority."""
+    plans = FakePlanStore(now=lambda: AT)
+    elsewhere = activation()
+    later = DueAt(at=AT + timedelta(days=2))
+    kept = await write_task(plans, elsewhere, when=later, instruction="water the plants")
+    moved = await write_task(plans, elsewhere, when=later, instruction="call the vet")
+
+    async def person(exchange: PlanningExchange) -> RoundResponse:
+        if not exchange.steps:
+            listing = ProposedCall(call_id="list-1", name="list_tasks", arguments={})
+            return RoundResponse(calls=(listing,))
+        if len(exchange.steps) > 1:
+            return RoundResponse()
+        first, second = _task_labels(exchange)
+        cancel = _asking("cancel_task", "ask-1", task=first)
+        replace = _asking(
+            "spawn", "ask-2", instruction="call the vet", delay_minutes=_LATER, replaces=second
+        )
+        return RoundResponse(calls=(cancel, replace))
+
+    planner = _Planner(person, _run_each_ticket)
+    harness = _harness(planner, plans=plans, task_scheduler=task_seams())
+    await harness.engine.start()
+    try:
+        await _start(harness, "drop the plants reminder and move the vet call")
+        requests = await _asked_and_tapped(harness, 2)
+        held = _by_capability(await _until_used(harness, requests))
+        tasks = {one.id: one for one in await _tasks(harness)}
+        cancelling = held["cancel_task"]
+        effects = await harness.plans.activation_effects([str(cancelling.pushed_to)])
+    finally:
+        await harness.engine.aclose()
+
+    assert dict(cancelling.call.values) == {"task": kept.id}
+    (spent,) = [one for one in effects if one.id == cancelling.spent_by]
+    assert spent.outcome is ToolOutcome.SUCCEEDED, "the cancel ran, under its ticket"
+    for gone in (kept.id, moved.id):
+        # Cancelled, and tidied away once nothing of it is live (ADR-0350 §7:8).
+        assert gone not in tasks or tasks[gone].occurrences[0].state is OccurrenceState.CANCELLED
+    (replacing,) = [one for one in tasks.values() if one.id not in {kept.id, moved.id}]
+    assert replacing.author is ScheduledTaskAuthor.PERSON
+    assert replacing.parent == elsewhere, "a replace takes the replaced task's parent"
+    assert replacing.instruction == "call the vet"
+
+
+async def test_a_request_for_a_call_the_asking_activation_cannot_run_writes_nothing() -> None:
+    """ADR-0362 §3:6, §6:3: the approval's own activation, which ADR-0350 §3:4 does not
+    admit, may ask, but a spawn would come back not here, so no request is written."""
+    told: list[dict[str, Any]] = []
+
+    async def person(exchange: PlanningExchange) -> RoundResponse:
+        return RoundResponse(calls=(_ask(),)) if not exchange.steps else RoundResponse()
+
+    async def approval(exchange: PlanningExchange) -> RoundResponse:
+        if not exchange.steps:
+            ask = _asking("spawn", "ask-9", instruction="say hello", delay_minutes=_LATER)
+            return RoundResponse(calls=(ask,))
+        told.extend(_results(exchange))
+        return RoundResponse()
+
+    planner = _Planner(person, approval)
+    harness = _harness(planner, task_scheduler=task_seams())
+    await harness.engine.start()
+    try:
+        await _start(harness)
+        await _asked_and_tapped(harness, 1)
+        await until(lambda: _settled(told), what="the approval's second round")
+        requests = await _requests(harness)
+        tasks = await _tasks(harness)
+    finally:
+        await harness.engine.aclose()
+
+    (refused,) = told
+    assert "cannot run here" in refused["outcome"]
+    assert len(requests) == 1, "only the person's work's request"
+    assert tasks == ()
