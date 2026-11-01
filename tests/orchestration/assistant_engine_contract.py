@@ -70,6 +70,7 @@ from itertools import count
 from typing import TYPE_CHECKING, ClassVar, Final, Protocol, get_type_hints
 
 import pytest
+from approvals_panel_contract import ApprovalsPanelContract
 from channel_receiver_contract import ChannelReceiverContract
 from chat_reader_lifecycle_contract import ChatReaderLifecycleContract
 from chat_surface_contract import (
@@ -1196,6 +1197,7 @@ class AssistantEngineContract(
     ChatReaderLifecycleContract,
     PendingCandidatesContract,
     PersonModelContract,
+    ApprovalsPanelContract,
     ABC,
 ):
     """What every ``AssistantEngine`` implementation must do."""

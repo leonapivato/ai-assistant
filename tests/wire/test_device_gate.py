@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import pytest
+from approvals_panel_contract import APPROVALS_AT, hold_request
 
 from ai_assistant.core.device_context import acting_for, current_requesting_device
 from ai_assistant.core.errors import (
@@ -38,13 +39,16 @@ from ai_assistant.core.types import (
     HUB_DEVICE_ID,
     HUB_REQUESTING_DEVICE,
     OWNER_PERSON_ID,
+    ApprovalChoice,
+    ApprovalPanelTapAnswer,
+    ApprovalRequestState,
     ChatDevice,
     DeviceAccess,
     DeviceRole,
     RequestingDevice,
 )
 from ai_assistant.orchestration.person_block import PersonBlocks
-from ai_assistant.testing import FakeAssistantEngine, FakePersonModelStore
+from ai_assistant.testing import FakeAssistantEngine, FakePersonModelStore, FakePlanStore
 from ai_assistant.testing.memories import memory
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.client import HubEngineClient
@@ -279,6 +283,38 @@ async def test_the_remote_listeners_connecting_device_is_its_admitted_identity(
             await server.wait_closed()
     assert answer.kind is env.FrameKind.RESULT
     assert roster.asked == [("laptop.tailnet", None)]
+
+
+async def test_a_panel_tap_from_a_device_not_admitted_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    """ADR-0361 §4:8, through a served connection: a tap from the hub page is carried out
+    only from a device admitted under ADR-0124.
+
+    A device without the command role is refused the panel's read and its tap before
+    dispatch, so the request stays pending and no tap is recorded; the owner's device
+    then answers it.
+    """
+    engine = FakeAssistantEngine()
+    engine.plan_store = FakePlanStore(now=lambda: APPROVALS_AT)
+    engine.approval_clock = lambda: APPROVALS_AT
+    await hold_request(engine.plan_store, "approval:1")
+    roster = _Roster(devices={"bare": _BARE, "phone": _PHONE})
+    async with _client(engine, roster, tmp_path) as client:
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as read:
+            await client.approvals()
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as tapped:
+            await client.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
+        (held,) = await engine.plan_store.approval_requests(["approval:1"])
+        assert held.state is ApprovalRequestState.PENDING
+        assert held.answer is None
+        assert engine.approvals_woken == 0
+        with acting_for("phone"):
+            answered = await client.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
+    assert read.value.reason is DeviceRefusal.NOT_ALLOWED
+    assert tapped.value.reason is DeviceRefusal.NOT_ALLOWED
+    assert answered.answer is ApprovalPanelTapAnswer.ANSWERED
+    assert [name for name, _ in engine.calls] == ["tap_approval"]
 
 
 async def test_a_persons_model_is_refused_to_a_device_without_the_command_role(

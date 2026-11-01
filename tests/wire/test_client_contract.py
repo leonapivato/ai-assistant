@@ -44,6 +44,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
+from approvals_panel_contract import APPROVALS_AT, APPROVALS_LIMIT, ApprovalsPanelSubject
 from assistant_engine_contract import (
     _BELIEF_LIMIT,
     _DECISION_LIMIT,
@@ -228,6 +229,21 @@ async def _pending(tmp_path: Path) -> AsyncIterator[PendingCandidatesSubject]:
 
 
 @contextlib.asynccontextmanager
+async def _approvals(tmp_path: Path) -> AsyncIterator[ApprovalsPanelSubject]:
+    """A client of a hub whose fake engine reads the injected stores, clocked there."""
+    memory = FakeMemoryStore(now=lambda: APPROVALS_AT)
+    plans = FakePlanStore(now=lambda: APPROVALS_AT)
+    backing = FakeAssistantEngine(max_payload_bytes=APPROVALS_LIMIT)
+    backing.episode_memory = memory
+    backing.plan_store = plans
+    backing.approval_clock = lambda: APPROVALS_AT
+    async with serving(
+        backing, tmp_path / "hub.sock", max_frame_bytes=APPROVALS_LIMIT + ENVELOPE_RESERVE_BYTES
+    ) as client:
+        yield ApprovalsPanelSubject(engine=client, plans=plans, memory=memory)
+
+
+@contextlib.asynccontextmanager
 async def _person_model(tmp_path: Path, *, wired: bool) -> AsyncIterator[PersonModelSubject]:
     """A client of a hub whose fake engine holds the injected stores; wired or not."""
     people, memory = person_model_stores()
@@ -329,6 +345,12 @@ class TestHubEngineClientContract(AssistantEngineContract):
     async def person_model_off(self, tmp_path: Path) -> AsyncIterator[PersonModelSubject]:
         """The same, the hub's switch off: the client has no switch of its own."""
         async with _person_model(tmp_path, wired=False) as subject:
+            yield subject
+
+    @pytest.fixture
+    async def approvals_subject(self, tmp_path: Path) -> AsyncIterator[ApprovalsPanelSubject]:
+        """The panel's members over an authenticated local socket."""
+        async with _approvals(tmp_path) as subject:
             yield subject
 
     @pytest.fixture

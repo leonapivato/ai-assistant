@@ -25,6 +25,7 @@ from itertools import count
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
+from approvals_panel_contract import APPROVALS_AT, APPROVALS_LIMIT, ApprovalsPanelSubject
 from assistant_engine_contract import (
     _BELIEF_LIMIT,
     _DECISION_LIMIT,
@@ -330,6 +331,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     phases: Mapping[str, Any] | None = None,
     plans: FakePlanStore | None = None,
     person_blocks: PersonBlocks | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -381,6 +383,9 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ``person_blocks`` is the person block's assembly over a person-model store and
     ``memory``, as the composition root wires it where ``Settings.person_model`` is on
     (ADR-0338 §7:1); ``None``, the default, is the switch off (§11:2).
+
+    ``now`` is the engine's clock, a knob so the approvals panel's suite reads its requests
+    and stamps its taps at the instant its stores are clocked at; ``None`` is the system's.
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -476,6 +481,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         stories=stories,
         chat_reader=chat_reader,
         person_blocks=person_blocks,
+        now=(lambda: datetime.now(UTC)) if now is None else now,
         # ADR-0309 §2:6: the phases plan what the chat's reader takes in and every event,
         # as they will on every deployment once the switch lane lands; they are wired
         # only beside the reader, so a subject with it off has none. Over the same
@@ -503,6 +509,20 @@ async def _pending() -> AsyncIterator[PendingCandidatesSubject]:
     await built.start()
     try:
         yield PendingCandidatesSubject(engine=built, memory=memory, plans=plans)
+    finally:
+        await built.aclose()
+
+
+async def _approvals() -> AsyncIterator[ApprovalsPanelSubject]:
+    """An engine at the approvals panel's bound, its stores injected, clocked there."""
+    memory = FakeMemoryStore(now=lambda: APPROVALS_AT)
+    plans = FakePlanStore(now=lambda: APPROVALS_AT)
+    built = _wire(
+        memory=memory, plans=plans, max_payload_bytes=APPROVALS_LIMIT, now=lambda: APPROVALS_AT
+    )
+    await built.start()
+    try:
+        yield ApprovalsPanelSubject(engine=built, plans=plans, memory=memory)
     finally:
         await built.aclose()
 
@@ -592,6 +612,12 @@ class TestEngineContract(AssistantEngineContract):
     async def person_model_off(self) -> AsyncIterator[PersonModelSubject]:
         """The production engine as the root builds it with the switch off: no store."""
         async for subject in _person_model(wired=False):
+            yield subject
+
+    @pytest.fixture
+    async def approvals_subject(self) -> AsyncIterator[ApprovalsPanelSubject]:
+        """The production engine over injected stores, clocked at the panel's instant."""
+        async for subject in _approvals():
             yield subject
 
     @pytest.fixture

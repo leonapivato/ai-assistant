@@ -20,6 +20,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from approvals_panel_contract import APPROVALS_AT, APPROVALS_LIMIT, ApprovalsPanelSubject
 from assistant_engine_contract import (
     _BELIEF_LIMIT,
     _DECISION_LIMIT,
@@ -182,6 +183,15 @@ def _pending() -> PendingCandidatesSubject:
     return PendingCandidatesSubject(engine=built, memory=memory, plans=plans)
 
 
+def _approvals() -> ApprovalsPanelSubject:
+    """A fake at the approvals panel's bound, its stores injected, clocked there."""
+    built = FakeAssistantEngine(max_payload_bytes=APPROVALS_LIMIT)
+    built.plan_store = FakePlanStore(now=lambda: APPROVALS_AT)
+    built.episode_memory = FakeMemoryStore(now=lambda: APPROVALS_AT)
+    built.approval_clock = lambda: APPROVALS_AT
+    return ApprovalsPanelSubject(engine=built, plans=built.plan_store, memory=built.episode_memory)
+
+
 def _person_model(*, wired: bool) -> PersonModelSubject:
     """A fake at the person model's bound, its two stores injected; wired or not."""
     people, memory = person_model_stores()
@@ -241,6 +251,11 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def person_model_off(self) -> PersonModelSubject:
         """The same fake with no store, as a hub with the switch off."""
         return _person_model(wired=False)
+
+    @pytest.fixture
+    def approvals_subject(self) -> ApprovalsPanelSubject:
+        """The canonical fake over injected stores, clocked at the panel's instant."""
+        return _approvals()
 
     @pytest.fixture
     def engine(self) -> AssistantEngine:
