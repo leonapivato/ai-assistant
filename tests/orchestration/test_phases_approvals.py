@@ -876,6 +876,8 @@ async def test_a_ticketed_spawn_runs_in_the_approvals_own_activation_as_the_pers
     (spent,) = [one for one in effects if one.id == request.spent_by]
     assert spent.ticket == request.id
     assert spent.capability == "spawn"
+    shown = " ".join(one.text for one in planner.approval[-1].steps[-1].report.results)
+    assert "the person's tap on a card in the approvals" in shown, "said as the person's"
 
 
 async def test_a_ticketed_spawn_taken_by_the_running_work_is_the_persons() -> None:

@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from ai_assistant.core.channel_validation import APPROVALS
 from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreError,
@@ -983,6 +984,10 @@ class TaskManager:
         who = (
             "a scheduled step"
             if started_in.channel_type == SCHEDULE.channel_type
+            # ADR-0362 §3:4-§3:5: a ticket's spawn in the approval's own activation is the
+            # person's by their tap on its card, not by a message.
+            else "the person's tap on a card"
+            if started_in.channel_type == APPROVALS
             else "the person's message"
             if task.author is ScheduledTaskAuthor.PERSON
             else "the assistant"
