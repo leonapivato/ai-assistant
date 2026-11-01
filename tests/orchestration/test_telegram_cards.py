@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     TELEGRAM_MESSAGE_LIMIT,
@@ -134,7 +135,7 @@ class _Rig:
         self._updates = iter(range(1, 1000))
         self._asked = iter(range(1, 1000))
 
-    def over(self, fake: FakeTelegramBotClient) -> TelegramCards:
+    def over(self, fake: FakeTelegramBotClient, *, person: str = OWNER_PERSON_ID) -> TelegramCards:
         """Cards over ``fake`` and this rig's stores, as a fresh process would build them."""
         cards = TelegramCards(
             client=fake,
@@ -143,7 +144,7 @@ class _Rig:
             send_bound=timedelta(seconds=1),
             plans=self.plans,
             memory=self.memory,
-            person=OWNER_PERSON_ID,
+            person=person,
             now=self.clock,
             sleep=self._rest,
         )
@@ -444,18 +445,88 @@ async def test_a_tap_held_already_carries_nothing_out_again() -> None:
     assert len(rig.fake.answered) == 1
 
 
-async def test_a_tap_on_a_card_no_longer_known_changes_nothing() -> None:
-    """A token no card carries finds no request; the tap is answered and nothing changes."""
+class _TokenReadFails(FakePlanStore):
+    """A plan store whose read by card token fails while ``failing`` is set."""
+
+    failing = False
+
+    async def approval_request_by_token(self, token: str, /) -> ApprovalRequest | None:
+        if self.failing:
+            raise PlanningError("the store is down")
+        return await super().approval_request_by_token(token)
+
+
+async def _changes_nothing(rig: _Rig, request: ApprovalRequest, update_id: int) -> None:
+    """ADR-0362 §4:4: no answer went, nothing was marked, edited, recorded or woken."""
+    assert rig.fake.answered == ()
+    assert await rig.request(str(request.id)) == request
+    assert rig.edits() == 0
+    assert rig.woken == 0
+    assert await rig.intake.recorded([update_id]) == {}, "recorded nowhere (ADR-0323 §5:2)"
+
+
+@pytest.mark.parametrize(
+    "data",
+    ["no-such-token:y", "no-such-token:n", "no-separator", "token:maybe", ":y", "", None],
+    ids=["unknown-approve", "unknown-deny", "no-verb", "another-verb", "no-token", "empty", "none"],
+)
+async def test_a_tap_whose_token_resolves_to_no_request_is_not_answered(data: str | None) -> None:
+    """ADR-0362 §4:4: an answer goes ahead only where the token resolves to a request, so
+    a token no card carries, or data that is no token, is answered nothing and changes
+    nothing; the callback's spinner times out on the phone."""
     rig = _Rig()
     _, request = await rig.ask()
-    update = rig.fake.tap(9, message_id=500, data="no-such-token:y")
+    update = rig.fake.tap(9, message_id=500, data=data)
     assert update.callback is not None
 
-    await rig.tapped(update.callback)
+    await rig.tapped(update.callback, 9)
 
-    assert (await rig.request(str(request.id))).state is ApprovalRequestState.PENDING
-    (answer,) = rig.fake.answered
-    assert "no longer known" in answer[1]
+    await _changes_nothing(rig, request, 9)
+
+
+async def test_a_tap_whose_token_the_store_cannot_read_is_not_answered() -> None:
+    """ADR-0362 §4:4: where the store cannot say the token resolves to a request, no
+    answer goes ahead and nothing changes; a later tap, once it can, is carried out."""
+    plans = _TokenReadFails(now=_Clock())
+    rig = _Rig(plans=plans)
+    _, request = await rig.ask()
+    callback = rig.tap(request)
+    plans.failing = True
+
+    await rig.tapped(callback, 9)
+
+    await _changes_nothing(rig, request, 9)
+    plans.failing = False
+    await rig.tapped(callback, 10)
+    assert rig.fake.answered == (("callback-1", "Approved."),)
+    assert (await rig.request(str(request.id))).state is ApprovalRequestState.APPROVED
+
+
+async def test_a_tap_on_another_persons_request_is_not_answered() -> None:
+    """ADR-0362 §4:4, ADR-0361 §4:8: an answer goes ahead only where the update comes
+    from the request's person; a request of another person's is answered nothing."""
+    rig = _Rig()
+    _, request = await rig.ask()
+    elsewhere = rig.over(rig.fake, person="someone-else")
+
+    await elsewhere.tap(rig.tap(request), partial(rig.intake.claim_reply, 9))
+
+    await _changes_nothing(rig, request, 9)
+
+
+async def test_a_tap_on_a_known_card_after_an_unknown_one_is_still_answered() -> None:
+    """A tap that resolved to nothing leaves the next tap on a known card as it was."""
+    rig = _Rig()
+    _, request = await rig.ask()
+    known = rig.tap(request)
+    unknown = rig.fake.tap(9, message_id=500, data="no-such-token:y")
+    assert unknown.callback is not None
+    await rig.tapped(unknown.callback, 9)
+
+    await rig.tapped(known, 10)
+
+    assert rig.fake.answered == ((known.callback_id, "Approved."),)
+    assert (await rig.request(str(request.id))).state is ApprovalRequestState.APPROVED
 
 
 async def test_a_tap_whose_answer_was_rate_limited_is_answered_again() -> None:

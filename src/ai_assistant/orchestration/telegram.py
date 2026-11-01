@@ -85,7 +85,8 @@ card in place as its request's state changes (§4:5), from the reader's own loop
 reads the requests its cards are on after every poll. **A tap is a command** (§4:7): a
 button's callback, told apart by its structure, never perceived, carried out only from
 the configured account in its chat (ADR-0323 §4:1, as ADR-0332 §8:1 applies it to
-``/stop``), and dealt with as any other account's update otherwise (§5:2). It is recorded
+``/stop``) and only where its token resolves to a request of the person's (ADR-0362
+§4:4), and dealt with as any other account's update otherwise (§5:2). It is recorded
 answered on the intake record as ``/stop`` is, which claims its answer's call (§13:2), so a
 repeated fetch carries it out once.
 
@@ -258,8 +259,6 @@ _TAP_ALREADY: Final = {
     ApprovalRequestState.EXPIRED: "This request has expired.",
 }
 _TAP_EXPIRED: Final = "This request has expired."
-_TAP_UNKNOWN: Final = "This card is no longer known here. See the hub page's approvals panel."
-_TAP_NOT_YOURS: Final = "This request is not yours to answer."
 _TAP_UNRECORDED: Final = "Your answer could not be recorded. Try again, or answer on the hub page."
 
 #: A card's callback data: its token, then the button's verb (ADR-0361 §4:10).
@@ -876,7 +875,8 @@ class TelegramCards:
     changed while the hub was down is edited too.
 
     **The tap** (:meth:`tap`, §4:7-§4:10) is a command: its token is resolved by the
-    store's read by card token, the request marked approved or denied with the tap's
+    store's read by card token, a tap whose token resolves to no request of the person's
+    left unanswered (ADR-0362 §4:4), the request marked approved or denied with the tap's
     instant as the line's ``ApprovalGiver``, in one step where the first tap wins, the
     callback answered, the card edited and the Approvals sensor woken.
     """
@@ -1302,6 +1302,11 @@ class TelegramCards:
     ) -> None:
         """Carry out a tap from the request's person: mark, answer, edit and wake (§4:9).
 
+        The tap goes ahead only where its token resolves to a request of this person's
+        (ADR-0362 §4:4). Where it resolves to none, or the store cannot say, nothing is
+        claimed, marked or answered, and the callback's spinner times out on the phone,
+        as ADR-0323 §5:2 leaves another account's update.
+
         ``claim`` is the intake record's claim of the tap's answer, which records the
         update answered, as ``/stop``'s does: a tap the record already holds was carried
         out, and a repeated fetch changes nothing and answers nothing.
@@ -1310,42 +1315,58 @@ class TelegramCards:
             TelegramIntakeRecordError: If the record cannot be written for the claim;
                 nothing is then changed.
         """
+        resolved = await self._resolved(callback)
+        if resolved is None:
+            return  # ADR-0362 §4:4: no request of this person's, so no answer goes ahead
+        request, state = resolved
         first = await claim()
         if first is None:
             return  # held already: a repeat carries nothing out (§5:9)
-        words, request = await self._decided(callback)
+        words, shown = await self._marked(request, state)
         await self._answered(callback, words, first, claim)
-        if request is not None:
-            self._watched[str(request.id)] = None
-            await self._edited(request, _EDITS_PER_READ)
+        self._watched[str(shown.id)] = None
+        await self._edited(shown, _EDITS_PER_READ)
 
-    async def _decided(  # noqa: PLR0911 — each way a tap ends is an answer of its own
+    async def _resolved(
         self, callback: TelegramCallback
-    ) -> tuple[str, ApprovalRequest | None]:
-        """Resolve the tap's token and mark its request; what to answer, and the request.
+    ) -> tuple[ApprovalRequest, ApprovalRequestState] | None:
+        """The tap's request and the state its button asks for, or ``None`` (ADR-0362 §4:4).
 
-        The first tap to land wins, and a later one is answered with the request's state
-        (§4:9). Never raises but for a cancellation: a store that fails is answered so.
+        ``None`` where the data is malformed, the token names no card of this channel's,
+        the request is another person's, or the store failed to read it. Never raises
+        but for a cancellation.
         """
         data = callback.data or ""
         token, _, verb = data.rpartition(_VERB_SEPARATOR)
         if not token or verb not in {_APPROVE_VERB, _DENY_VERB}:
-            return _TAP_UNKNOWN, None
+            _log.info("approval_tap_ignored", stage="reader", reason="malformed")
+            return None
         try:
             request = await self._plans.approval_request_by_token(token)
         except PlanningError:
             _log.warning("approval_tap_unread", stage="reader", reason="store_failed")
-            return _TAP_UNRECORDED, None
+            return None
         if request is None or not any(
             one.token == token and one.place == self._channel for one in request.cards
         ):
-            return _TAP_UNKNOWN, None
+            _log.info("approval_tap_ignored", stage="reader", reason="unknown_token")
+            return None
         if request.person != self._person:
             _log.info("approval_tap_refused", stage="reader", reason="not_the_persons")
-            return _TAP_NOT_YOURS, None
+            return None
         state = (
             ApprovalRequestState.APPROVED if verb == _APPROVE_VERB else ApprovalRequestState.DENIED
         )
+        return request, state
+
+    async def _marked(
+        self, request: ApprovalRequest, state: ApprovalRequestState
+    ) -> tuple[str, ApprovalRequest]:
+        """Mark ``request`` as the tap asks; what to answer, and the request as it stands.
+
+        The first tap to land wins, and a later one is answered with the request's state
+        (§4:9). Never raises but for a cancellation: a store that fails is answered so.
+        """
         try:
             step = await self._plans.answer_approval_request(
                 str(request.id),
