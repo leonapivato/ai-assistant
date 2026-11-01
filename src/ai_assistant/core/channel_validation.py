@@ -364,6 +364,16 @@ _ORIGINS: Final = {
         act="",
         content="this text",
     ),
+    # ADR-0361 §3:6: the Approvals channel's origin, in the Task Scheduler's style.
+    APPROVALS: OriginKind(
+        name="the approvals",
+        where="on the approvals",
+        described=(
+            "the system's requests for {person}'s yes, each answered on a card; no one is there"
+        ),
+        act="",
+        content="this text",
+    ),
 }
 
 
