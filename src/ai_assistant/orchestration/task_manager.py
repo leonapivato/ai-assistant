@@ -71,6 +71,7 @@ from ai_assistant.core.types import (
     OccurrenceState,
     RuleDay,
     ScheduledTaskAuthor,
+    TapOnCard,
     TaskRefusal,
     TaskRuleKind,
     TaskSpawn,
@@ -79,7 +80,7 @@ from ai_assistant.core.types import (
     ToolResult,
     parties_are_assistants,
 )
-from ai_assistant.orchestration.acting import Unwritten
+from ai_assistant.orchestration.acting import TICKET_CLAIM_TEXT, Unwritten
 from ai_assistant.orchestration.channel_kinds import place_channel, place_of
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
@@ -1243,6 +1244,11 @@ class ScheduledTaskCalls:
     call runs directly against the plan store, through the one :class:`TaskManager`, and
     is awaited to its end. Who calls is read from :func:`current_spawner`, which the
     phases open around acting, never from what the call carries.
+
+    **Under a ticket** (ADR-0362 §3:3-§3:5), a call runs in the work holding the ticket's
+    input, the approval's own activation included, and is the person's: its input's
+    authority is read as carried for that call alone. A spawn's write spends the ticket
+    in its one step, and its refusal of the ticket writes nothing.
     """
 
     def __init__(self, *, manager: TaskManager, now: Clock) -> None:
@@ -1257,7 +1263,7 @@ class ScheduledTaskCalls:
 
     async def run(self, call: ToolCall) -> OwnRecordsAnswer:
         """Run a cancel or a list pull; a spawn reaches :meth:`run_claiming` alone."""
-        spawner = current_spawner()
+        spawner = _caller(call)
         if spawner is None:
             return NotDone(reason=_NOT_OFFERED)
         capability = str(call.request.tool.capability)
@@ -1324,7 +1330,7 @@ class ScheduledTaskCalls:
         Raises:
             ClaimStopped: If the store holds a stop record for the spawning activation.
         """
-        spawner = current_spawner()
+        spawner = _caller(call)
         if spawner is None or str(call.request.tool.capability) != SPAWN_CAPABILITY:
             return Unwritten(reason=_NOT_OFFERED)
         arguments = call.request.parameters
@@ -1355,18 +1361,51 @@ class ScheduledTaskCalls:
             )
         except ValueError:
             return Unwritten(reason=_MALFORMED)
-        if written.answer is TaskWriteAnswer.ALREADY_DONE:
-            return ActivationEffectClaim.ALREADY_DONE
-        if written.answer is TaskWriteAnswer.ALREADY_USED:
-            return ActivationEffectClaim.ALREADY_USED
-        if written.task is None:
-            reason = TaskRefusal.UNKNOWN_TASK if written.reason is None else written.reason
-            _log.info("task_call_not_done", stage="acting", reason=reason.value)
-            return Unwritten(reason=_REFUSAL_TEXT[reason])
+        refused = _refused(written)
+        if refused is not None:
+            return refused
+        assert written.task is not None  # noqa: S101 — a write not refused carries its task
         listing = TaskListing(
             spawned=await self._manager.described(written.task, zone, spawner=spawner)
         )
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=encode_listing(listing))
+
+
+def _refused(written: ScheduledTaskWrite) -> ClaimingAnswer | None:
+    """What a spawn's write that wrote nothing answers acting, or ``None`` where it wrote.
+
+    The backstop's and the spend's answers as a claim's; the ticket's refusal in the words
+    a ticket's refusal of any other call is said in (ADR-0362 §3:1); and a refusal as not
+    done with its reason (§4:5).
+    """
+    if written.answer is TaskWriteAnswer.ALREADY_DONE:
+        return ActivationEffectClaim.ALREADY_DONE
+    if written.answer is TaskWriteAnswer.ALREADY_USED:
+        return ActivationEffectClaim.ALREADY_USED
+    if written.answer is TaskWriteAnswer.TICKET_REFUSED and written.ticket is not None:
+        # Nothing was written, so the ticket is as it was.
+        _log.info("task_call_not_done", stage="acting", reason=f"ticket_{written.ticket.value}")
+        return Unwritten(reason=TICKET_CLAIM_TEXT[written.ticket])
+    if written.task is None:
+        reason = TaskRefusal.UNKNOWN_TASK if written.reason is None else written.reason
+        _log.info("task_call_not_done", stage="acting", reason=reason.value)
+        return Unwritten(reason=_REFUSAL_TEXT[reason])
+    return None
+
+
+def _caller(call: ToolCall) -> Spawner | None:
+    """Who calls the Task Scheduler, as :func:`current_spawner` holds it, for ``call`` alone.
+
+    ADR-0362 §3:5: for a call run under a ticket, the rules reading whether the calling
+    activation's input carries the person's authority read it as carried, for that call
+    alone: the task it spawns is the person's (ADR-0350 §3:7), and it may replace or cancel
+    any of the person's tasks (§4:4). The person approved that exact call on its card.
+    """
+    spawner = current_spawner()
+    approval = call.decision.approval
+    if spawner is None or approval is None or not isinstance(approval.how, TapOnCard):
+        return spawner
+    return replace(spawner, users_authority=True)
 
 
 def _suggested(

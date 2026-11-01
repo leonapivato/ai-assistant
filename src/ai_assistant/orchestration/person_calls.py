@@ -26,9 +26,14 @@ one, and nothing changes.
 
 **Only under the person's yes.** A call runs where it was rebuilt from a question the
 person said yes to (ADR-0321 §4:2), and is recorded as their act by that yes: the
-approval's part and the episode the yes was given in (ADR-0338 §3:5, §4:1). A call that
-reaches the runner any other way is not done. The person is the activation's, read from
-its recorded trigger (§2:2), never from what the call carries.
+approval's part and the episode the yes was given in (ADR-0338 §3:5, §4:1). **Or under a
+ticket** (ADR-0362 §2:4-§2:5): acting has claimed it by ``claim_ticket_call``, spending the
+ticket, and a ``set_profile`` or a ``pin`` is recorded with the request form's act, naming
+the request and the approval's own episode, where the yes was given, whichever work ran
+the ticket (§2:1). An ``unpin`` records no act, as none is recorded for one: its ticket is
+on its effect record, keyed by the request. A call that reaches the runner any other way
+is not done. The person is the activation's, read from its recorded trigger (§2:2), never
+from what the call carries.
 
 **Not done, with the reason** (§8:7). A ``set_profile`` whose value the store refuses
 (§3:2) and a ``pin`` of a memory that is not current (§4:2), or that would take the
@@ -56,7 +61,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from ai_assistant.core.errors import MemoryStoreError, PersonModelStoreError
+from ai_assistant.core.errors import MemoryStoreError, PersonModelStoreError, PlanningError
 from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
@@ -71,6 +76,7 @@ from ai_assistant.core.types import (
     ProfileField,
     Reversibility,
     RiskLevel,
+    TapOnCard,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -81,9 +87,15 @@ from ai_assistant.orchestration.person_block import PinRefusal, activation_perso
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from ai_assistant.core.types import AskedCall, FrozenJson, PersonModelWrite, ToolCall
+    from ai_assistant.core.types import (
+        ApprovalRequest,
+        AskedCall,
+        FrozenJson,
+        PersonModelWrite,
+        ToolCall,
+    )
     from ai_assistant.orchestration.person_block import PersonBlocks
 
 __all__ = [
@@ -250,6 +262,11 @@ def worded_argument(capability: str, /) -> str | None:
     return None
 
 
+#: Reads the approval requests named, from the plan store, as
+#: ``PlanStore.approval_requests`` does.
+type RequestsReader = Callable[[Sequence[str]], Awaitable[Sequence[ApprovalRequest]]]
+
+
 @dataclass(frozen=True, slots=True)
 class NotDone:
     """A call on the assistant's own records refused, with its reason (ADR-0338 §8:7).
@@ -321,29 +338,79 @@ class PersonModelCalls:
     otherwise: never ``indeterminate``.
     """
 
-    def __init__(self, *, blocks: PersonBlocks) -> None:
+    def __init__(self, *, blocks: PersonBlocks, requests: RequestsReader | None = None) -> None:
         """Wire the runner to the stores the person block is assembled from.
 
         Args:
             blocks: The person block's assembly: its person-model store, the memory store
                 a pin's memory is read from, and the slot's budget a pin is checked
                 against (ADR-0338 §6:3), walked as the block walks a pin (§4:8).
+            requests: Reads the approval requests a ticket's call names, from the plan
+                store, for the approval's own episode its act names (ADR-0362 §2:1);
+                ``None`` where no Approvals channel is wired, and a ``set_profile`` or a
+                ``pin`` under a ticket is then not done.
         """
         self._blocks = blocks
+        self._requests = requests
 
-    async def run(self, call: ToolCall) -> NotDone:
-        """Refuse a call that does not run under a yes: these change nothing without one.
+    async def run(self, call: ToolCall) -> ToolResult | NotDone:
+        """Run a call under a ticket; refuse any other, which changes nothing without a yes.
 
         Args:
-            call: The authorized call.
+            call: The authorized call. Under a ticket its decision names the tap's
+                approval, and acting has claimed it, spending the ticket (ADR-0362 §2:4).
 
         Returns:
-            :class:`NotDone`, always: authorizing needs the person's yes for every one
-            of these calls (ADR-0338 §8:5), so a call reaching here without one is not
-            done.
+            ``succeeded`` with what it did, or :class:`NotDone` with the reason. A call
+            reaching here under no ticket is not done: authorizing needs the person's yes
+            for every one of these calls (ADR-0338 §8:5), and a question's yes reaches
+            :meth:`run_approved`.
         """
-        del call
-        return _not_done(_UNAPPROVED, "unapproved")
+        approval = call.decision.approval
+        if approval is None or not isinstance(approval.how, TapOnCard):
+            return _not_done(_UNAPPROVED, "unapproved")
+        try:
+            return await self._ticketed(call, approval.how)
+        except ValueError:
+            return _not_done(_MALFORMED, "malformed")
+        except PersonModelStoreError, MemoryStoreError, PlanningError:
+            _log.warning("person_model_call_not_done", stage="acting", reason="store_fault")
+            return NotDone(reason=_STORE_FAULT)
+
+    async def _ticketed(self, call: ToolCall, tap: TapOnCard) -> ToolResult | NotDone:
+        """The call its ticket holds, as the request's person's (ADR-0362 §2:4-§2:5).
+
+        An ``unpin`` records no act. A ``set_profile`` and a ``pin`` are recorded with the
+        request form's act: the request, and the approval's own episode, the activation
+        its outcome was pushed to (ADR-0361 §3:4), read from the request as the plan store
+        holds it.
+        """
+        state = active_state()
+        person = None if state is None else activation_person(state.trigger)
+        if person is None:
+            return _not_done(_NO_PERSON, "no_person")
+        capability = str(call.request.tool.capability)
+        if capability == UNPIN_CAPABILITY:
+            return await self._unpin(person, _memory_id(call.request.parameters))
+        if self._requests is None:
+            return _not_done(_UNAPPROVED, "no_request_reader")
+        found = await self._requests([str(tap.request)])
+        request = found[0] if found else None
+        if (
+            request is None
+            or request.id != tap.request
+            or request.person != person
+            or request.pushed_to is None
+            or str(request.call.tool.capability) != capability
+        ):
+            return _not_done(_UNAPPROVED, "unapproved_ticket")
+        act = PersonModelAct(
+            how=PersonActHow.APPROVAL,
+            by=person,
+            request=request.id,
+            episode_id=episode_address(str(request.pushed_to)),
+        )
+        return await self._ran(call, person, act)
 
     async def run_approved(self, call: ToolCall, asked: AskedCall) -> ToolResult | NotDone:
         """Run the call a yes approved, as the person's act by that yes (ADR-0338 §8:5).

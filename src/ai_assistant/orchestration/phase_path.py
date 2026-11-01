@@ -3906,7 +3906,9 @@ class PhasePath:
         if self._person_calls is not None:
             msg = "the person model's calls are attached once"
             raise ValueError(msg)
-        calls = PersonModelCalls(blocks=blocks)
+        # ADR-0362 §2:1: a change made under a ticket names the approval's own episode,
+        # read from its request.
+        calls = PersonModelCalls(blocks=blocks, requests=self._plans.approval_requests)
         self._tools.add_own_records(PERSON_MODEL_CALLS)
         self._acting.add_own_records(dict.fromkeys(PERSON_MODEL_CAPABILITIES, calls))
         self._label_arguments.update(PERSON_MODEL_LABEL_ARGUMENTS)

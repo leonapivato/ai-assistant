@@ -146,6 +146,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.held_results import HeldResults
 
 __all__ = [
+    "TICKET_CLAIM_TEXT",
     "ActedCall",
     "ActedOutcome",
     "ActedRound",
@@ -204,16 +205,15 @@ _ALREADY_USED: Final = "already used: the yes that approved this call has let it
 _ANOTHER_ACTIVATIONS: Final = (
     "not run: the yes that approved this call was given to another activation"
 )
-#: ADR-0361 §5:3-§5:5: what the claim under a ticket answered, where it wrote nothing.
-_TICKET_CLAIMS: Final = {
+#: ADR-0361 §5:3-§5:5: what the claim under a ticket answered, where it wrote nothing; a
+#: spawn's write under a ticket answers its refusals in these words too (ADR-0362 §3:1).
+TICKET_CLAIM_TEXT: Final = {
     TicketClaim.NOT_GRANTED: "not run: no ticket was granted for this call",
     TicketClaim.USED: "not run: the ticket is used, and it runs its call once",
     TicketClaim.VOID: "not run: the ticket is void",
     TicketClaim.EXPIRED: "not run: the ticket has expired; running the call takes a new request",
     TicketClaim.ALREADY_DONE: _ALREADY_DONE,
 }
-#: A ticket's call whose runner claims its own record: the two claims cannot be one step.
-_TICKET_UNCLAIMABLE: Final = "not run: a ticket cannot run this call, whose write claims itself"
 
 _REFUSED: Final = "refused before the call was made"
 _NEEDS_YOU: Final = "needs you: nothing was written, and this needs your yes first"
@@ -334,7 +334,9 @@ class ClaimingOwnRecordsCalls(Protocol):
     ADR-0350 §3:3: a spawn's write is one plan-store step that writes the task and claims
     the spawn's effect record together, so acting does not claim it first. Acting hands
     the runner the record it would have claimed and the backstop's match, and finishes
-    the record from the runner's answer, as it finishes any claimed call's.
+    the record from the runner's answer, as it finishes any claimed call's. A record
+    carrying a ticket is handed on the same way, and the write spends the ticket in that
+    step (ADR-0362 §3:1, §3:3): acting refuses no ticket for it.
     """
 
     async def run_claiming(
@@ -846,6 +848,25 @@ class ActingStage:
                 part=call.decision.approved_part,
                 ticket=ticket,
             )
+            claiming = (
+                _claiming(self._own_records, str(tool.capability))
+                if tool.effect is CapabilityEffect.OWN_RECORDS
+                else None
+            )
+            if claiming is not None:
+                # ADR-0350 §3:3: the runner's write claims the record in its own step,
+                # awaited to its end as every call on the assistant's own records is; under
+                # a ticket, the record carries it, and that step spends it (ADR-0362 §3:1,
+                # §3:3).
+                work = asyncio.ensure_future(
+                    _handed_back(
+                        self._claimed_by_runner(
+                            claiming, one, record, None if tool.safe_to_repeat else match, held
+                        ),
+                        hand_back,
+                    )
+                )
+                return await drain_registered(work, cancel_on_interrupt=False)
             if ticket is not None:
                 # ADR-0361 §5:5: the ticket is spent in the step that claims its call.
                 claimed = await self._ticket_claimed(one, record, match)
@@ -859,23 +880,6 @@ class ActingStage:
                     )
                     return await drain_registered(work, cancel_on_interrupt=False)
                 return await self._through_invoker(one, effect_id, round_id, held)
-            claiming = (
-                _claiming(self._own_records, str(tool.capability))
-                if tool.effect is CapabilityEffect.OWN_RECORDS
-                else None
-            )
-            if claiming is not None:
-                # ADR-0350 §3:3: the runner's write claims the record in its own step,
-                # awaited to its end as every call on the assistant's own records is.
-                work = asyncio.ensure_future(
-                    _handed_back(
-                        self._claimed_by_runner(
-                            claiming, one, record, None if tool.safe_to_repeat else match, held
-                        ),
-                        hand_back,
-                    )
-                )
-                return await drain_registered(work, cancel_on_interrupt=False)
             try:
                 answer = await self._plans.claim_activation_effect(
                     record,
@@ -907,12 +911,6 @@ class ActingStage:
         ``None`` where the claim was written and the call runs.
         """
         tool = one.call.request.tool
-        if (
-            tool.effect is CapabilityEffect.OWN_RECORDS
-            and _claiming(self._own_records, str(tool.capability)) is not None
-        ):
-            _log.info("acting_call_not_done", stage="acting", reason="ticket_unclaimable")
-            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_TICKET_UNCLAIMABLE)
         try:
             answer = await self._plans.claim_ticket_call(
                 record,
@@ -925,7 +923,7 @@ class ActingStage:
         if answer is TicketClaim.CLAIMED:
             return None
         _log.info("acting_call_not_done", stage="acting", reason=f"ticket_{answer.value}")
-        return ActedCall(one, ActedOutcome.NOT_DONE, reason=_TICKET_CLAIMS[answer])
+        return ActedCall(one, ActedOutcome.NOT_DONE, reason=TICKET_CLAIM_TEXT[answer])
 
     async def _claimed_by_runner(  # noqa: PLR0911 — each answer a claiming runner gives
         self,
