@@ -56,6 +56,7 @@ store for the round that asks.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -64,6 +65,7 @@ import structlog
 from ai_assistant.core.errors import MemoryStoreError, PersonModelStoreError, PlanningError
 from ai_assistant.core.types import (
     WORDED_CAPABILITIES,
+    ApprovalRequest,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
@@ -88,10 +90,9 @@ from ai_assistant.orchestration.person_block import PinRefusal, activation_perso
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Mapping
 
     from ai_assistant.core.types import (
-        ApprovalRequest,
         AskedCall,
         FrozenJson,
         PersonModelWrite,
