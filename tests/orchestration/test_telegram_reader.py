@@ -36,13 +36,18 @@ from telegram_support import (
 )
 
 from ai_assistant.core.types import (
+    CallOutcomeKind,
     ChannelIdentity,
+    DeliveryStatus,
     EpisodicMemory,
     JoinedInput,
     MessageAuthor,
     PlanningRound,
     ProcessingReason,
     ProcessingStatus,
+    ProposedCall,
+    RecordedCall,
+    RecordedDelivery,
     RecordedInputMessage,
     TelegramCallKind,
     TelegramCallOutcome,
@@ -718,6 +723,212 @@ async def test_a_reply_to_the_last_part_of_a_long_message_finds_its_question_who
     assert said.text.endswith("Would you prefer Tuesday?")
     assert window.asked == {26: AskedIn(round="round:1", parts=(1,))}
     assert window.input_messages[0].replies_to == 26
+
+
+# --- the window under ADR-0356: a message call's words, from its entry (§8:1, §8:4) ------
+
+#: A hub conversation, where a message call of a line's activation may also go.
+_CONVERSATION = ChannelIdentity(channel_type="conversation", instance_id="c-1")
+
+
+def _sent(
+    round_id: str,
+    call_id: str,
+    words: str,
+    *,
+    went: ChannelIdentity,
+    status: DeliveryStatus = DeliveryStatus.SENT,
+) -> RecordedCall:
+    """A ``text`` call's entry: what it sent, where and how (ADR-0356 §8:4)."""
+    outcome = {
+        DeliveryStatus.SENT: CallOutcomeKind.DONE,
+        DeliveryStatus.FAILED: CallOutcomeKind.NOT_DONE,
+        DeliveryStatus.UNKNOWN: CallOutcomeKind.UNKNOWN,
+    }[status]
+    reason = None if status is DeliveryStatus.SENT else "it did not go"
+    return RecordedCall(
+        round=round_id,
+        call_id=call_id,
+        capability="text",
+        effect=True,
+        outcome=outcome,
+        reason=reason,
+        delivered=RecordedDelivery(words=words, went=went, status=status, reason=reason),
+        recorded_at=AT,
+    )
+
+
+def _calling_episode(
+    activation_id: str,
+    channel_messages: tuple[RecordedInputMessage, ...],
+    *,
+    channel: ChannelIdentity,
+    rounds: tuple[tuple[str, tuple[str, ...]], ...],
+    entries: tuple[RecordedCall, ...],
+) -> EpisodicMemory:
+    """A frozen episode on the line in ADR-0356's shape: rounds with no text, and entries.
+
+    Each round is its id and its calls' ids, every one a ``text`` call; ``entries`` are
+    the episode's call entries, in the order they were appended.
+    """
+    record = _line_episode(activation_id, channel_messages, channel=channel)
+    processing = record.processing_record
+    assert processing is not None
+    return record.model_copy(
+        update={
+            "processing_record": processing.model_copy(
+                update={
+                    "rounds": tuple(
+                        PlanningRound(
+                            id=round_id,
+                            recorded_at=AT,
+                            calls=tuple(
+                                ProposedCall(call_id=one, name="text", arguments={"words": "x"})
+                                for one in calls
+                            ),
+                        )
+                        for round_id, calls in rounds
+                    ),
+                    "call_records": entries,
+                }
+            )
+        }
+    )
+
+
+async def _window_of(
+    memory: FakeMemoryStore, writes: Mapping[int, WrittenBy], *, at: int = 40
+) -> tuple[tuple[int, MessageAuthor, str], ...]:
+    """The window the line builds over ``memory`` and ``writes``, for an input at ``at``."""
+
+    async def written(
+        place: str, activations: Sequence[str], positions: Sequence[int] | None
+    ) -> Mapping[int, WrittenBy]:
+        return writes
+
+    line = _Line(memory=memory, written=written)
+    line.fake.hold(text(at, "and then?", message_id=at))
+    line.start()
+    await line.until(lambda: bool(line.inputs), what="the input was taken in")
+    await line.stop()
+    return tuple((one.position, one.author, one.text) for one in line.inputs[0].window.messages)
+
+
+async def test_the_window_shows_what_a_text_call_sent_and_an_older_rounds_text() -> None:
+    """ADR-0356 §8:1, §8:4: a round with no text shows its ``text`` call's delivered words.
+
+    An episode recorded before the decision keeps its round's text as its message (#3569).
+    """
+    memory = FakeMemoryStore(now=lambda: AT)
+    channel = line_channel(REFERENCE, CHAT)
+    await memory.add(
+        _line_episode(
+            "act-old",
+            (RecordedInputMessage(text="Book Friday?", sent_at=AT, position=10),),
+            rounds=(("round:1", "Shall I book Friday?"),),
+            channel=channel,
+        )
+    )
+    await memory.add(
+        _calling_episode(
+            "act-new",
+            (RecordedInputMessage(text="And Saturday?", sent_at=AT, position=20),),
+            channel=channel,
+            rounds=(("round:1", ("call-1",)),),
+            entries=(_sent("round:1", "call-1", "Saturday is free too.", went=channel),),
+        )
+    )
+
+    window = await _window_of(
+        memory,
+        {
+            11: WrittenBy(activation_id="act-old", round="round:1"),
+            21: WrittenBy(activation_id="act-new", round="round:1"),
+        },
+    )
+
+    assert window == (
+        (10, MessageAuthor.USER, "Book Friday?"),
+        (11, MessageAuthor.ASSISTANT, "Shall I book Friday?"),
+        (20, MessageAuthor.USER, "And Saturday?"),
+        (21, MessageAuthor.ASSISTANT, "Saturday is free too."),
+    )
+
+
+async def test_a_rounds_messages_are_its_calls_sent_into_the_line_in_the_rounds_order() -> None:
+    """Several ``text`` calls in one round: by position, the round's calls in its order.
+
+    A call whose message went into another place, or failed, wrote nothing into the
+    line's chat, so it is no message there; the entries' own order is not the calls'.
+    """
+    memory = FakeMemoryStore(now=lambda: AT)
+    channel = line_channel(REFERENCE, CHAT)
+    await memory.add(
+        _calling_episode(
+            "act-a",
+            (RecordedInputMessage(text="Plan Saturday", sent_at=AT, position=20),),
+            channel=channel,
+            rounds=(("round:1", ("call-1", "call-2", "call-3", "call-4")),),
+            entries=(
+                _sent("round:1", "call-4", "Then dinner at eight.", went=channel),
+                _sent("round:1", "call-2", "Noted in the hub.", went=_CONVERSATION),
+                _sent(
+                    "round:1", "call-3", "never went", went=channel, status=DeliveryStatus.FAILED
+                ),
+                _sent("round:1", "call-1", "Lunch at noon first.", went=channel),
+            ),
+        )
+    )
+
+    window = await _window_of(
+        memory,
+        {
+            21: WrittenBy(activation_id="act-a", round="round:1"),
+            23: WrittenBy(activation_id="act-a", round="round:1"),
+        },
+    )
+
+    assert window == (
+        (20, MessageAuthor.USER, "Plan Saturday"),
+        (21, MessageAuthor.ASSISTANT, "Lunch at noon first."),
+        (23, MessageAuthor.ASSISTANT, "Then dinner at eight."),
+    )
+
+
+async def test_a_round_whose_messages_and_entries_do_not_pair_shows_none_of_them() -> None:
+    """Two entries sent and one message done: which entry it is is not known (#3569).
+
+    So nothing of that round is shown, never one message's words at another's position,
+    while the next round, whose one message pairs with its one entry, is shown.
+    """
+    memory = FakeMemoryStore(now=lambda: AT)
+    channel = line_channel(REFERENCE, CHAT)
+    await memory.add(
+        _calling_episode(
+            "act-a",
+            (RecordedInputMessage(text="Plan Saturday", sent_at=AT, position=20),),
+            channel=channel,
+            rounds=(("round:1", ("call-1", "call-2")), ("round:2", ("call-3",))),
+            entries=(
+                _sent("round:1", "call-1", "Lunch at noon first.", went=channel),
+                _sent("round:1", "call-2", "Then dinner at eight.", went=channel),
+                _sent("round:2", "call-3", "All booked.", went=channel),
+            ),
+        )
+    )
+
+    window = await _window_of(
+        memory,
+        {
+            22: WrittenBy(activation_id="act-a", round="round:1"),
+            23: WrittenBy(activation_id="act-a", round="round:2"),
+        },
+    )
+
+    assert window == (
+        (20, MessageAuthor.USER, "Plan Saturday"),
+        (23, MessageAuthor.ASSISTANT, "All booked."),
+    )
 
 
 # --- holding while one runs (ADR-0332 §2:4, until ADR-0349 §1:4's step 3) ----------------

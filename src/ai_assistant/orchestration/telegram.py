@@ -104,6 +104,8 @@ from ai_assistant.core.types import (
     ApprovalGiver,
     ChannelIdentity,
     ClaimedAuthor,
+    DeliveryStatus,
+    EpisodeProcessingRecord,
     EpisodicMemory,
     MessageAuthor,
     ProcessingReason,
@@ -1366,14 +1368,8 @@ class TelegramReader:
             links[one.position] = activation_id
             if one.forwarded_from is not None:
                 forwarded[one.position] = one.forwarded_from
-        rounds = {one.id: one.text for one in processing.rounds}
         at = processing.ended_at or episode.occurred_at
-        for position, writer in writes.items():
-            if writer.activation_id != activation_id or position < 1:
-                continue
-            text = COULDNT_FINISH if writer.round is None else rounds.get(writer.round, "")
-            if not text.strip():
-                continue
+        for position, text in _assistant_words(processing, writes, self._place).items():
             shown[position] = LineMessage(
                 position=position,
                 written_at=at,
@@ -1450,6 +1446,61 @@ class TelegramReader:
                 if writer.asked is not None:
                     asked[quoted.message_id] = writer.asked
         return tuple(one for _, one in sorted(replied.items())), claimed
+
+
+#: How a message call's delivery reads where the line's chat took its message: the
+#: statuses under which its effect record is done, at a position (ADR-0356 §8:4).
+_TAKEN: Final = frozenset({DeliveryStatus.SENT, DeliveryStatus.DELIVERED, DeliveryStatus.READ})
+
+
+def _assistant_words(
+    processing: EpisodeProcessingRecord, writes: Mapping[int, WrittenBy], place: str
+) -> dict[int, str]:
+    """The words of each message the activation wrote into ``place``, by its position.
+
+    Each message is one of ``writes``, the effect records done in the place at a position,
+    that names this activation (ADR-0306 §5:3). The *couldn't finish* message names no
+    round and is its fixed text (ADR-0307 §10). A round recorded before ADR-0356 carries
+    its message as its ``text``, which every message it wrote shows, as before (§8:1).
+
+    A round recorded under ADR-0356 carries no text: what each of its ``text`` calls sent
+    is its call entry's delivery (§8:4). An entry names no position and an effect record
+    no call, so they are paired by the order they share. The round's ``text`` calls are
+    sent one after another, in the round's order (ADR-0356 §7:7-§7:8), and the medium's
+    positions rise with each, so the round's messages, by position, are its entries
+    delivered into the place, by their calls' order in the round. A message done in the
+    place is always such an entry, but an entry may have no such message, where its
+    record's finish did not hold. So they are paired only where their counts match, and
+    where they do not, nothing of the round is shown, since which entry has no message is
+    not known: the window never shows a message's position with another message's words.
+    """
+    activation_id = processing.activation_id
+    by_round: dict[str | None, list[int]] = {}
+    for position, writer in sorted(writes.items()):
+        if writer.activation_id == activation_id and position >= 1:
+            by_round.setdefault(writer.round, []).append(position)
+    words = dict.fromkeys(by_round.pop(None, ()), COULDNT_FINISH)
+    for one in processing.rounds:
+        positions = by_round.get(one.id)
+        if not positions:
+            continue
+        if one.text.strip():
+            words.update(dict.fromkeys(positions, one.text))
+            continue
+        order = {call.call_id: at for at, call in enumerate(one.calls)}
+        sent = sorted(
+            (
+                (order[entry.call_id], entry.delivered.words)
+                for entry in processing.call_records
+                if entry.round == one.id
+                and entry.delivered is not None
+                and entry.delivered.status in _TAKEN
+                and place_of(entry.delivered.went) == place
+            ),
+        )
+        if len(sent) == len(positions):
+            words.update(zip(positions, (said for _, said in sent), strict=True))
+    return words
 
 
 def _cut_off(record: EpisodicMemory) -> bool:
