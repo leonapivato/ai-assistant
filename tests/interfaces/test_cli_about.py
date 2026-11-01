@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     PersonActHow,
     PersonModelAct,
     ProfileField,
+    QuestionPart,
     belief_view,
 )
 from ai_assistant.interfaces import cli, person_inspection
@@ -43,6 +44,22 @@ if TYPE_CHECKING:
     from ai_assistant.testing import FakeMemoryStore, FakePersonModelStore
 
 _PANEL = PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID)
+
+#: A yes on a card, by the request its ticket ran (ADR-0362 §2:1).
+_CARD_YES = PersonModelAct(
+    how=PersonActHow.APPROVAL,
+    by=OWNER_PERSON_ID,
+    request="approval:938d954a",
+    episode_id="episode:approval",
+)
+
+#: A yes to a question, as stored acts of the retired path still hold it (ADR-0361 §8:5).
+_QUESTION_YES = PersonModelAct(
+    how=PersonActHow.APPROVAL,
+    by=OWNER_PERSON_ID,
+    approval=QuestionPart(round="r-ask", part=1),
+    episode_id="episode:asked",
+)
 
 
 @pytest.fixture
@@ -196,6 +213,26 @@ def test_the_log_is_read_a_page_at_a_time_most_recent_first(
     assert "“Rob” → “Robin”" in said
     assert "not set → “Rob”" not in said
     assert "That is a full page; there may be more." in said
+
+
+def test_a_yes_on_a_card_names_its_request_and_a_yes_to_a_question_keeps_its_words(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0362 §2:1: a change a ticket ran is said as a yes on that request's card, and a
+    stored act of the question form is said as it always was (ADR-0361 §8:5)."""
+    engine, people, _ = _on()
+    asyncio.run(people.set_field(OWNER_PERSON_ID, ProfileField.NAME, "Rob", act=_QUESTION_YES))
+    asyncio.run(people.set_field(OWNER_PERSON_ID, ProfileField.ADDRESS, "Test19", act=_CARD_YES))
+    _wire(monkeypatch, engine)
+
+    assert _invoke("log") == 0
+
+    said = output.getvalue().splitlines()
+    card = next(one for one in said if one.startswith("  What I call you: "))
+    question = next(one for one in said if one.startswith("  Your name: "))
+    assert card.endswith(' · by your yes on the card for request "approval:938d954a"')
+    assert "question" not in card
+    assert question.endswith(" · by your yes to my question")
 
 
 # --- the writes ----------------------------------------------------------------

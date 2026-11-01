@@ -78,6 +78,11 @@ def test_every_way_a_change_is_made_is_said_in_the_terminals_words() -> None:
     assert table == {how.value: person_inspection.HOW_WORDS[how] for how in PersonActHow}
 
 
+def test_a_yes_on_a_card_is_said_in_the_terminals_words() -> None:
+    """ADR-0362 §2:1: a change naming a request is said as a yes on its card, both places."""
+    assert f'const CARD_YES_WORDS = "{person_inspection.CARD_YES_WORDS}";' in _code("app.js")
+
+
 def test_every_reason_the_slot_leaves_a_memory_out_is_said_in_the_terminals_words() -> None:
     """§6:2 and §6:4, totally over ``LeftOutReason``."""
     table = _table(_code("app.js"), "LEFT_OUT_WORDS")

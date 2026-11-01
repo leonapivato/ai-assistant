@@ -258,6 +258,34 @@ async def test_the_change_log_is_read_a_page_at_a_time_most_recent_first() -> No
         ("name", "Rob", "Robin", "panel")
     ]
     assert [(one["old"], one["new"]) for one in second["changes"]] == [(None, "Rob")]
+    assert [one["request"] for one in first["changes"] + second["changes"]] == [None, None]
+
+
+async def test_a_change_made_by_a_yes_on_a_card_names_its_request() -> None:
+    """ADR-0362 §2:1: the request crosses for the log to name; the episode does not."""
+    engine = FakeAssistantEngine()
+    people, _ = switch_on(engine)
+    card = PersonModelAct(
+        how=PersonActHow.APPROVAL,
+        by=OWNER_PERSON_ID,
+        request="approval:938d954a",
+        episode_id="episode:approval",
+    )
+    await people.set_field(OWNER_PERSON_ID, ProfileField.ADDRESS, "Test19", act=card)
+
+    async with _harness(engine) as one:
+        _, body = await one.whole("POST", "/person/changes", {"person_id": OWNER_PERSON_ID})
+
+    assert body["changes"] == [
+        {
+            "field": "address",
+            "old": None,
+            "new": "Test19",
+            "at": body["changes"][0]["at"],
+            "how": "approval",
+            "request": "approval:938d954a",
+        }
+    ]
 
 
 # --- the writes ----------------------------------------------------------------

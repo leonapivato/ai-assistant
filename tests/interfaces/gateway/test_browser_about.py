@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     PersonActHow,
     PersonModelAct,
     ProfileField,
+    QuestionPart,
 )
 from ai_assistant.testing.memories import memory, pinned_support
 
@@ -241,6 +242,49 @@ async def test_the_panel_shows_every_part_of_the_model_in_words(
         assert _lines(changes[0])[0] == "Your name: not set → “Robin”"
         assert _lines(changes[0])[1].endswith("· by you, on the panel or the command line")
         assert await _overflow(page) <= 0
+        assert heard == []
+
+
+@_WIDTHS
+async def test_a_yes_on_a_card_is_logged_by_its_request_and_a_yes_to_a_question_as_before(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """ADR-0362 §2:1: a change a ticket ran is said as a yes on that request's card; a
+    stored act of the question form keeps its words (ADR-0361 §8:5)."""
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        heard = _complaints(drive.page)
+        people, _ = switch_on(drive.engine)
+        # A request id is a uuid's 32 hex digits, unbroken: at a phone's width it wraps.
+        request = "approval:938d954a1f2e4c6b8a0d3e5f7a9b1c2d"
+        asked = PersonModelAct(
+            how=PersonActHow.APPROVAL,
+            by=OWNER_PERSON_ID,
+            approval=QuestionPart(round="r-ask", part=1),
+            episode_id="episode:asked",
+        )
+        tapped = PersonModelAct(
+            how=PersonActHow.APPROVAL,
+            by=OWNER_PERSON_ID,
+            request=request,
+            episode_id="episode:approval",
+        )
+        await people.set_field(OWNER_PERSON_ID, ProfileField.NAME, "Rob", act=asked)
+        await people.set_field(OWNER_PERSON_ID, ProfileField.ADDRESS, "Test19", act=tapped)
+
+        await _open(drive)
+
+        rows = drive.page.locator("#change-list > .about-row")
+        await expect(rows).to_have_count(2)
+        await expect(rows.nth(0).locator(".hint")).to_have_text(
+            re.compile(r' · by your yes on the card for request "' + request + '"$')
+        )
+        await expect(rows.nth(0)).to_contain_text("What I call you: not set → “Test19”")
+        await expect(rows.nth(0)).not_to_contain_text("question")
+        await expect(rows.nth(1).locator(".hint")).to_have_text(
+            re.compile(r" · by your yes to my question$")
+        )
+        await expect(rows.nth(1)).to_contain_text("Your name: not set → “Rob”")
+        assert await _overflow(drive.page) <= 0
         assert heard == []
 
 
