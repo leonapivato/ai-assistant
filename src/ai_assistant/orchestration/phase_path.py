@@ -6086,8 +6086,11 @@ class PhasePath:
         ADR-0338 §8:6, ADR-0361 §2:11: the card's exact line shows, in place of the
         memory's label, its wording as the store holds it when the asking round is
         recorded, read live here as a question's is (:meth:`_worded`). Only a memory the
-        live read returns current is worded so (ADR-0342 §5:1); one that is not, or
-        cannot be read, leaves the call with no wording, and its request is not written.
+        live read returns current is worded so (ADR-0342 §5:1), and only one resting on
+        no outside content, since the wording reaches planning with the ticket and the
+        approval's input, and planning never reads raw outside content (ADR-0307 §9:2).
+        Any other, or one that cannot be read, leaves the call with no wording, and its
+        request is not written.
         A wording read is among what the activation obtained (ADR-0309 §5:10).
         """
         named: dict[str, str] = {}
@@ -6107,7 +6110,11 @@ class PhasePath:
         worded = dict(requested)
         for decision_id, memory_id in named.items():
             record = held.get(memory_id)
-            if not isinstance(record, Memory) or record.status is not MemoryStatus.CURRENT:
+            if (
+                not isinstance(record, Memory)
+                or record.status is not MemoryStatus.CURRENT
+                or record.rests_on_outside_content
+            ):
                 continue
             working.supplied.obtained((record,))
             worded[decision_id] = requested[decision_id].model_copy(

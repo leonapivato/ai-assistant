@@ -103,10 +103,11 @@ _UNRULED: Final = "the call to approve was not ruled on, so no request was writt
 #: Why a request could not be built: its ``why`` is past its bound, or its call does not fit.
 _MALFORMED: Final = "the request is malformed: why is too long, or the call does not fit"
 #: ADR-0338 §8:6, ADR-0361 §2:11: a pin's or an unpin's card shows its memory's wording as
-#: the asking round read it, so one whose memory that read did not return current is not
-#: asked about.
+#: the asking round read it, so one whose memory that read did not return current, or found
+#: resting on outside content (ADR-0307 §9:2), is not asked about.
 _UNWORDED: Final = (
-    "the memory is not current, so the card could not show its wording; nothing was asked"
+    "the memory is not current, or rests on outside content, so the card could not show "
+    "its wording; nothing was asked"
 )
 #: Why a request could not be written: the hub's records could not be written.
 _STORE_FAULT: Final = "the request could not be written: the hub's records failed"
