@@ -848,9 +848,12 @@ class ActingStage:
                 part=call.decision.approved_part,
                 ticket=ticket,
             )
+            # A record the call gets only because it runs under an approval (ADR-0321
+            # §4:10), as a cancel's or a list pull's under a ticket does, is no write's own:
+            # acting claims it, as it claims any call's (ADR-0362 §3:4).
             claiming = (
                 _claiming(self._own_records, str(tool.capability))
-                if tool.effect is CapabilityEffect.OWN_RECORDS
+                if tool.effect is CapabilityEffect.OWN_RECORDS and gets_effect_record(tool)
                 else None
             )
             if claiming is not None:
