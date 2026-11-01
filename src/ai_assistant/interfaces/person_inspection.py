@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         KeptMemoryView,
         LeftOutMemory,
+        PersonModelAct,
         PersonModelEdit,
         PersonModelView,
         ProfileChange,
@@ -95,6 +96,12 @@ HOW_WORDS: Final[Mapping[PersonActHow, str]] = MappingProxyType(
         PersonActHow.SEED: "by the hub, when it was first set up",
     }
 )
+
+#: How a change made by a yes on a card is said, before the request it names (ADR-0362
+#: §2:1, ADR-0338 §3:5 as it amends it). ``HOW_WORDS``' approval is the question form's,
+#: which stored acts still hold; the question path is retired (ADR-0361 §8:5), so a yes
+#: whose act names a request was a tap on that request's card, and no question was shown.
+CARD_YES_WORDS: Final = "by your yes on the card for request"
 
 #: Why the slot left a memory out (ADR-0338 §6:2, §6:4).
 LEFT_OUT_WORDS: Final[Mapping[LeftOutReason, str]] = MappingProxyType(
@@ -374,6 +381,18 @@ def render_model(console: Console, view: PersonModelView, *, offset: int) -> Non
             _section(console, one, offset=offset)
 
 
+def how_words(act: PersonModelAct) -> str:
+    """How a change was made, in words: a yes on a card by the request it names (§2:1).
+
+    An act names a request exactly where a ticket ran its call, so that act is said as a
+    yes on the request's card, the id quoted as the rest of this module's are; every
+    other act, a stored yes to a question included, by ``HOW_WORDS``.
+    """
+    if act.request is not None:
+        return f"{CARD_YES_WORDS} {quoted(act.request)}"
+    return HOW_WORDS[act.how]
+
+
 def render_changes(console: Console, changes: Sequence[ProfileChange], *, full: bool) -> None:
     """Render one page of the change log, the most recent first (ADR-0338 §3:5).
 
@@ -390,13 +409,14 @@ def render_changes(console: Console, changes: Sequence[ProfileChange], *, full: 
         _print(
             console,
             f"  {FIELD_WORDS[change.field]}: {_value(change.old)} → {_value(change.new)}"
-            f" · {change.at.isoformat()} · {HOW_WORDS[change.act.how]}",
+            f" · {change.at.isoformat()} · {how_words(change.act)}",
         )
     if full:
         _print(console, "  That is a full page; there may be more. Ask for the next with --offset.")
 
 
 __all__ = [
+    "CARD_YES_WORDS",
     "DONE_WORDS",
     "FIELD_WORDS",
     "HOW_WORDS",
@@ -407,6 +427,7 @@ __all__ = [
     "REFUSAL_WORDS",
     "UNSET_WORDS",
     "edit_text",
+    "how_words",
     "pasteable",
     "render_changes",
     "render_model",

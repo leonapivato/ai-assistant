@@ -5238,6 +5238,18 @@ const CHANGE_HOW_WORDS = {
   seed: "by the hub, when it was first set up",
 };
 
+// How a change made by a yes on a card is said, before the request it names (ADR-0362
+// §2:1), as the CLI says it. The approval above is the question form's, which stored
+// changes still hold; a change naming a request was a tap on its card.
+const CARD_YES_WORDS = "by your yes on the card for request";
+
+function changeHow(change) {
+  if (change.request) {
+    return `${CARD_YES_WORDS} "${change.request}"`;
+  }
+  return CHANGE_HOW_WORDS[change.how] || change.how;
+}
+
 // Why the slot left a memory out (ADR-0338 §6:2, §6:4), as the CLI says it.
 const LEFT_OUT_WORDS = {
   budget: "Left out: there is no room left for it in what I keep in mind.",
@@ -5742,7 +5754,7 @@ function renderChange(list, change) {
   );
   line(
     item,
-    `${localTime(change.at)} · ${CHANGE_HOW_WORDS[change.how] || change.how}`,
+    `${localTime(change.at)} · ${changeHow(change)}`,
     "hint"
   );
 }

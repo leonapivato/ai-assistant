@@ -11,9 +11,12 @@ page and the command line cannot show two different models of one person.
 
 **The ids that cross are the ones a control names**: a memory's for pin and unpin, a
 style mark's for its removal and a suggestion's for accepting or dismissing it, each
-verbatim as the person model holds it (§10:4). A pin's own id and a person's role, the
-approval and episode a change names and the instant a person was created cross
-nowhere, because no control on either panel names them.
+verbatim as the person model holds it (§10:4). **One more id crosses, to be read**: the
+approval request a change made by a yes on a card names, since the change log says
+which request's card it was (ADR-0362 §2:1, ADR-0338 §3:5 as it amends it). A pin's own
+id and a person's role, the question part and episode a change names and the instant a
+person was created cross nowhere, because neither a control nor a line on either panel
+names them.
 """
 
 from __future__ import annotations
@@ -128,13 +131,18 @@ def person_model_view(view: PersonModelView) -> dict[str, Any]:
 
 
 def profile_change_view(change: ProfileChange) -> dict[str, Any]:
-    """One change-log entry: the field, its old and new values, when, and how (§3:5)."""
+    """One change-log entry: the field, its old and new values, when, and how (§3:5).
+
+    ``request`` is the approval request a yes on a card names (ADR-0362 §2:1), and
+    ``null`` for every other act, a stored yes to a question included.
+    """
     return {
         "field": change.field.value,
         "old": change.old,
         "new": change.new,
         "at": change.at.isoformat(),
         "how": change.act.how.value,
+        "request": change.act.request,
     }
 
 
