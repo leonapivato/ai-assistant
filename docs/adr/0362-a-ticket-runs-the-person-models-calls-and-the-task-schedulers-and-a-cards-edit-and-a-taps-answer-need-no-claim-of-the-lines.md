@@ -70,8 +70,12 @@ the structured approval input to a decision of its own.
 > change log and the pins cross the wire to the panels (ADR-0124 §9, ADR-0361 §8:7).
 
 > **Normative.** A `set_profile`, `pin` or `unpin` call run under a ticket is the request's
-> person's act by that ticket. It is claimed by `claim_ticket_call` (ADR-0361 §5:5), then run
-> against the person-model store with the request form's act.
+> person's, by that ticket. It is claimed by `claim_ticket_call` (ADR-0361 §5:5), then run
+> against the person-model store: a `set_profile` and a `pin` with the request form's act.
+
+> **Normative.** An `unpin` run under a ticket records no act, as none is recorded today: a
+> removed pin keeps the act that made it and gains only when it was removed (ADR-0338 §4:1,
+> §4:7). Its ticket is on its effect record, keyed by the request.
 
 The work that ran the ticket is not on the act: the request's `spent_by` names the effect
 record, which names that work, and the person-model store keeps pointers only (ADR-0338 §10:3).
@@ -161,7 +165,7 @@ its deploy:
    canonical fakes of `PersonModelStore` and `PlanStore`; the person-model store with §2:2's
    test; both plan stores in `planning/`; and `PROTOCOL_VERSION` (§2:3).
 2. **AP7, the consumer lane,** in `orchestration/`: removing AP2's exclusion and acting's
-   refusal of a ticketed spawn (§3:3); the person model's calls under a ticket (§2:4); the
+   refusal of a ticketed spawn (§3:3); the person model's calls under a ticket (§2:4–§2:5); the
    Task Scheduler's calls under a ticket (§3:4–§3:5); and the tests and prompt cases below.
 
 > **Normative.** AP6 may touch `core`, `testing`, `memory/person_model_store.py`, `planning`
@@ -172,8 +176,9 @@ its deploy:
 > **Normative.** AP6 merges before AP7, and AP7 is briefed only after AP6 has merged
 > (ADR-0137 §4:1).
 
-> **Normative.** The tests include: a `set_profile`, a `pin` and an `unpin` each run under a
-> ticket, whose act names the request and the approval's episode; a stored act of each earlier
+> **Normative.** The tests include: a `set_profile` and a `pin` each run under a ticket, whose
+> act names the request and the approval's episode; an `unpin` run under a ticket, which
+> removes the pin and leaves the act that made it unchanged; a stored act of each earlier
 > form read back unchanged; a spawn under a ticket that writes its task and spends the ticket
 > in one step; a second run of that ticket refused; a spawn under a used, void or expired
 > ticket writing nothing; a spawn under a ticket refused by the pending limit, leaving the
