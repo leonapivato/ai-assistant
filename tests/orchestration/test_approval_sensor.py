@@ -10,6 +10,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActivationEffect,
@@ -189,3 +190,32 @@ async def test_the_loop_wakes_on_a_write_and_stops_with_the_hub() -> None:
     assert pushes.pushed == [("approval:a", None)]
     sensor.close()
     await asyncio.wait_for(running, 1)
+
+
+async def test_a_restart_push_that_fails_is_owed_again() -> None:
+    """§3:7: a push again after a restart that fails leaves the pass owed, not settled."""
+    plans, memory, clock = FakePlanStore(), FakeMemoryStore(), _Clock()
+    await _written(plans, "approval:a")
+    await plans.answer_approval_request("approval:a", ApprovalRequestState.APPROVED, _TAP)
+    await plans.mark_approval_outcome_pushed("approval:a", "act-never")
+    tries: list[str | None] = []
+
+    async def failing(request: ApprovalRequest, activation_id: str | None) -> None:
+        del request
+        tries.append(activation_id)
+        if len(tries) == 1:
+            msg = "the store is down"
+            raise PlanningError(msg)
+
+    sensor = ApprovalsSensor(
+        plans=plans,
+        memory=memory,
+        push=failing,
+        is_running=lambda _activation: False,
+        closing=lambda: False,
+        recheck=_RECHECK,
+        now=clock,
+    )
+    assert not await sensor.settle_restart(), "a failed push leaves it unsettled"
+    assert await sensor.settle_restart()
+    assert tries == ["act-never", "act-never"]

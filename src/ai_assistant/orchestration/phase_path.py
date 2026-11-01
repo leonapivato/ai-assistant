@@ -249,6 +249,7 @@ import asyncio
 import contextlib
 import contextvars
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Protocol
@@ -334,9 +335,12 @@ from ai_assistant.orchestration.approval_calls import ApprovalAsker, ApprovalCal
 from ai_assistant.orchestration.approvals import (
     APPROVAL_CAPABILITIES,
     APPROVALS_DESCRIPTION,
+    ARGUMENTS_KEY,
+    CALL_ARGUMENT,
     REQUEST_APPROVAL,
     REQUEST_APPROVAL_CAPABILITY,
     Ticket,
+    nested_call,
 )
 from ai_assistant.orchestration.authorizer import (
     AllowedCall,
@@ -476,7 +480,6 @@ if TYPE_CHECKING:
         Coroutine,
         Iterable,
         Iterator,
-        Mapping,
         MutableMapping,
         Sequence,
     )
@@ -1903,9 +1906,13 @@ class _SendRaisedError(Exception):
         self.sent = sent
 
 
-#: ADR-0361 §5:6: the engine's read of the tickets an activation holds now, each approved
-#: and still held, as the plan store holds it.
-type TicketsHeld = Callable[[ActivationState], Awaitable[tuple[Ticket, ...]]]
+class TicketsHeld(Protocol):
+    """ADR-0361 §5:6: the engine's read of the tickets an activation holds now."""
+
+    def __call__(self, state: ActivationState, /) -> Awaitable[tuple[Ticket, ...]]:
+        """Each ticket ``state`` holds, approved and still held, as the store holds it."""
+        ...
+
 
 #: The channel types whose places take a message from the assistant: the hub chat's
 #: conversations and the line's chat (ADR-0350 §5:11).
@@ -4968,7 +4975,9 @@ class PhasePath:
         """
         standing = None if state is None else state.standing
         if standing is None or standing.author is None:
-            return frozenset()
+            # ADR-0361 §6:4: an approval's input is offered by code's link to its asking
+            # work, a scheduled task's included, which answers it as any offer.
+            return frozenset({ANSWER_OFFER_CAPABILITY}) if offers else frozenset()
         names = {LOOK_UP_ACTIVATION_CAPABILITY}
         if working.users_authority:
             names.add(STOP_ACTIVATION_CAPABILITY)
@@ -5440,7 +5449,7 @@ class PhasePath:
         planned = latest.planned
         calls = [
             CallToAuthorize(
-                call=await self._tools.filled(one.call),
+                call=await self._filled(one.call),
                 deliberate_repeat=one.deliberate_repeat,
                 approved_part=one.approved_part,
                 ticket=one.ticket,
@@ -5987,6 +5996,28 @@ class PhasePath:
                 continue
             key = one.result_id if one.result_id is not None else one.call.call.decision.id
             working.peers[key] = shown
+
+    async def _filled(self, call: ProposedCall) -> ProposedCall:
+        """``call`` with the arguments the hub fills; a request's nested call's too (§2:3).
+
+        A ``request_approval`` call is ruled by the call it asks about, which is prepared
+        as that call would be made directly, so its hub-owned arguments are the hub's.
+        """
+        nested = nested_call(call.arguments) if call.name == REQUEST_APPROVAL_CAPABILITY else None
+        if nested is None:
+            return await self._tools.filled(call)
+        capability, arguments = nested
+        inner = await self._tools.filled(
+            ProposedCall(call_id=call.call_id, name=capability, arguments=arguments)
+        )
+        held = call.arguments.get(CALL_ARGUMENT)
+        shaped = dict(held) if isinstance(held, Mapping) else {}
+        shaped[ARGUMENTS_KEY] = dict(inner.arguments)
+        return ProposedCall(
+            call_id=call.call_id,
+            name=call.name,
+            arguments={**call.arguments, CALL_ARGUMENT: shaped},
+        )
 
     def _asker(self, working: PhaseWorking, decided: RoundAuthorization) -> ApprovalAsker | None:
         """Who calls ``request_approval`` in this round, and what each asks (ADR-0361 §2).

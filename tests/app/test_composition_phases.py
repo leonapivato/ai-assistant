@@ -268,6 +268,20 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
             call = ProposedCall(call_id="c1", name=name, arguments={"date": "2026-10-02"})
             filled = await phases._tools.filled(call)
             assert filled.arguments == {"date": "2026-10-02", "origin": endpoint}, name
+        # ADR-0361 §2:3: a request's nested call is prepared as the direct call is.
+        asking = ProposedCall(
+            call_id="ask-1",
+            name=REQUEST_APPROVAL_CAPABILITY,
+            arguments={
+                "call": {"capability": "book_stay", "arguments": {"date": "2026-10-02"}},
+                "why": "You asked me to book it.",
+            },
+        )
+        prepared = await phases._filled(asking)
+        assert prepared.arguments["call"] == {
+            "capability": "book_stay",
+            "arguments": {"date": "2026-10-02", "origin": endpoint},
+        }
     finally:
         await engine.aclose()
 

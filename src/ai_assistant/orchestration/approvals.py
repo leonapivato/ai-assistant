@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import ApprovalRequest, FrozenJson
 
 __all__ = [
+    "ALREADY_ON_A_CARD",
     "APPROVALS_DESCRIPTION",
     "APPROVALS_KIND",
     "APPROVAL_CAPABILITIES",
@@ -139,6 +140,14 @@ ARGUMENTS_KEY: Final = "arguments"
 #: The nested call's deliberate-repeat mark, as planning's check moves it out of the
 #: nested arguments (ADR-0306 §2:10): the request records it (ADR-0361 §2:6).
 NESTED_REPEAT_KEY: Final = "deliberate_repeat"
+
+#: ADR-0361 §2:2, §5:4: why a direct call comes back needing the person while a request
+#: for the very same call still waits on them: it is not asked about again, and nothing
+#: is approved. Shared by authorizing, which rules it, and planning, which says it.
+ALREADY_ON_A_CARD: Final = (
+    "already asked for on a card, and the request waits on the person: it is not asked "
+    "again, and nothing is approved"
+)
 
 #: ``run_approved``'s one argument (§5:2).
 RUN_APPROVED_LABEL: Final = "label"

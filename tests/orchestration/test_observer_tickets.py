@@ -101,8 +101,14 @@ async def _ran(harness: Harness, request: ApprovalRequest, ran_in: str) -> None:
     await harness.plans.finish_activation_effect(effect.id, ToolOutcome.SUCCEEDED)
 
 
-@pytest.mark.parametrize("ran_in", ["appr", "taker"], ids=["its-own-activation", "after-a-take"])
-async def test_a_card_approved_remember_is_confirmed_at_the_approvals_episode(ran_in: str) -> None:
+@pytest.mark.parametrize(
+    ("ran_in", "open_"),
+    [("appr", False), ("taker", False), ("taker", True)],
+    ids=["its-own-activation", "after-a-take", "after-a-take-its-approval-still-open"],
+)
+async def test_a_card_approved_remember_is_confirmed_at_the_approvals_episode(
+    ran_in: str, open_: bool
+) -> None:
     """§5:10, §9:4: the approval's own episode, the request named, the work beside it; a
     contrary statement made between the request and the tap ranks below it."""
     harness = Harness()
@@ -115,7 +121,7 @@ async def test_a_card_approved_remember_is_confirmed_at_the_approvals_episode(ra
     held = [
         episode("ask", at=_WRITTEN),
         episode("contrary", at=_CONTRARY, text="Actually I like window seats."),
-        episode("appr", at=_TAPPED, rounds=(run,) if ran_in == "appr" else ()),
+        episode("appr", at=_TAPPED, rounds=(run,) if ran_in == "appr" else (), open_=open_),
     ]
     if ran_in == "taker":
         held.append(episode("taker", at=_WRITTEN, rounds=(run,)))

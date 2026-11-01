@@ -155,25 +155,25 @@ class ApprovalsSensor:
         for one in due.outcomes:
             if self._done():
                 break
-            await self._pushed(one, None)
+            if not await self._pushed(one, None):
+                # The pushed mark may have landed: the restart's pass settles what it left.
+                self._restart_owed = True
         if due.next_expiry_at is None:
             return recheck
         return max(0.0, min(recheck, (due.next_expiry_at - self._now()).total_seconds()))
 
-    async def _pushed(self, request: ApprovalRequest, activation_id: str | None) -> None:
-        """Push one outcome; a failure is logged and the loop goes on."""
+    async def _pushed(self, request: ApprovalRequest, activation_id: str | None) -> bool:
+        """Push one outcome; whether it was. A failure is logged and the loop goes on."""
         try:
             await self._push(request, activation_id)
         except asyncio.CancelledError:
             raise
         except PlanningError:
-            # The pushed mark may have landed: the restart's pass settles what it left.
-            self._restart_owed = True
             _log.warning(
                 "approval_sensor_push_failed", stage="approval_sensor", reason="store_failed"
             )
+            return False
         except Exception as exc:  # the sensor runs as long as the hub: a defect is logged
-            self._restart_owed = True
             if is_defect(exc):
                 log_defect(
                     "approval_sensor_push_failed", exc, stage="approval_sensor", activation_id=None
@@ -182,6 +182,8 @@ class ApprovalsSensor:
                 _log.warning(
                     "approval_sensor_push_failed", stage="approval_sensor", reason="failed"
                 )
+            return False
+        return True
 
     async def settle_restart(self) -> bool:
         """Push again each outcome never admitted, and void what a cut-off holder held (§3:7).
@@ -216,7 +218,7 @@ class ApprovalsSensor:
                 complete = False
                 continue
             _log.info("approval_restart_pushed_again", stage="approval_sensor")
-            await self._pushed(request, activation_id)
+            complete = await self._pushed(request, activation_id) and complete
         return complete
 
     async def _void_held(self, request: ApprovalRequest) -> None:

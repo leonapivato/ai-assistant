@@ -36,7 +36,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
-from ai_assistant.orchestration.approvals import REQUEST_APPROVAL
+from ai_assistant.orchestration.approvals import ALREADY_ON_A_CARD, REQUEST_APPROVAL
 from ai_assistant.orchestration.authorizer import (
     AuthorizingStage,
     CallToAuthorize,
@@ -86,6 +86,12 @@ _BOOK: Final = ToolDefinition(
 )
 
 
+#: A call the policy allows outright, which a request may still ask about (§2:3).
+_ALLOWED: Final = _BOOK.model_copy(
+    update={"id": "note", "capability": "note", "effect": CapabilityEffect.OWN_RECORDS}
+)
+
+
 class _Policy:
     """A call in the world needs the person, one for the date ``never`` is denied."""
 
@@ -122,7 +128,7 @@ class _Hub:
         self.plans = FakePlanStore()
         self.trail = FakeAuditTrail(now=lambda: self.at)
         self.stage = AuthorizingStage(
-            registry=FakeToolRegistry((_BOOK, REQUEST_APPROVAL)),
+            registry=FakeToolRegistry((_BOOK, _ALLOWED, REQUEST_APPROVAL)),
             policy=_Policy(),
             trail=self.trail,
             stories=FakeStoryStore(now=lambda: self.at),
@@ -350,3 +356,48 @@ def _ticket_round(
         person=OWNER_PERSON_ID,
         tickets=tickets,
     )
+
+
+async def test_a_direct_call_a_pending_request_holds_waits_on_the_card() -> None:
+    """ADR-0361 §2:8, ADR-0321 §4:11 as §11 amends it: it runs nothing before the tap."""
+    hub = _Hub()
+    await _approved(hub.plans, state=ApprovalRequestState.APPROVED)
+    pending = ApprovalRequest(
+        id="approval:2",
+        person=OWNER_PERSON_ID,
+        activation_id=_ASKER,
+        round="round:ask",
+        call=RequestedCall(tool=_ALLOWED, values={"date": "2026-11-02"}),
+        why="You asked me to note it.",
+        written_at=_AT,
+        expires_at=_AT + _DAY,
+    )
+    effect = ActivationEffect(
+        id="effect:ask-2",
+        activation_id=_ASKER,
+        round="round:ask",
+        capability="request_approval",
+        values_digest="1" * 64,
+        decision_id="decision:ask-2",
+        claimed_at=_AT,
+        request=pending.id,
+    )
+    await hub.plans.write_approval_request(pending, effect, match=None)
+    call = CallToAuthorize(
+        ProposedCall(call_id="note-1", name="note", arguments={"date": "2026-11-02"})
+    )
+    decided = await hub.stage.authorize(
+        RoundToAuthorize(
+            activation_id=_ACTIVATION,
+            round=PlanningRound(id="round:1", recorded_at=_AT, calls=(call.call,)),
+            working=WorkingRecord(),
+            calls=(call,),
+            input_place="conversation:c-1",
+            person=OWNER_PERSON_ID,
+        )
+    )
+
+    (verdict,) = decided.verdicts
+    assert verdict.verdict is Verdict.NEEDS_YOU
+    assert verdict.reason == ALREADY_ON_A_CARD
+    assert decided.allowed == ()

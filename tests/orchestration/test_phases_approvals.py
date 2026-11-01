@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from exchange_support import tags, text_call
 from phases_support import open_conversation, phases_harness, said, until
+from task_support import seams as task_seams
 from test_engine import AT
 
 from ai_assistant.core.types import (
@@ -39,6 +40,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.approval_calls import ApprovalsSeams
 from ai_assistant.orchestration.approvals import THE_APPROVALS
 from ai_assistant.orchestration.authorizer import AuthorizingStage
+from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.testing import FakePlanStore, FakeToolCallingCompleter
 
 if TYPE_CHECKING:
@@ -310,6 +312,37 @@ async def test_a_nested_call_failing_its_schema_or_denied_writes_no_request() ->
         unfit, denied = told
         assert "do not fit" in unfit["outcome"]
         assert "do not ask" in denied["outcome"]
+        assert await _requests(harness) == ()
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_no_request_asks_for_a_call_no_ticket_can_run_yet() -> None:
+    """#3568: a spawn's write claims itself, so no request asks for it, writing nothing."""
+    told: list[dict[str, Any]] = []
+
+    async def person(exchange: PlanningExchange) -> RoundResponse:
+        if not exchange.steps:
+            spawn = ProposedCall(
+                call_id="ask-1",
+                name="request_approval",
+                arguments={
+                    "call": {"capability": "spawn", "arguments": {"instruction": "say hello"}},
+                    "why": "You asked me to remind you.",
+                },
+            )
+            return RoundResponse(calls=(spawn,))
+        told.extend(_results(exchange))
+        return RoundResponse()
+
+    planner = _Planner(person)
+    harness = _harness(planner, task_scheduler=task_seams())
+    await harness.engine.start()
+    try:
+        await _start(harness)
+        await until(lambda: _settled(told), what="the second round")
+        (refused,) = told
+        assert "cannot be approved on a card yet" in refused["outcome"]
         assert await _requests(harness) == ()
     finally:
         await harness.engine.aclose()
@@ -592,3 +625,15 @@ async def test_an_outcome_marked_pushed_and_never_admitted_is_pushed_again_at_st
         assert (await _held(restarted, str(request.id))).pushed_to == left
     finally:
         await restarted.engine.aclose()
+
+
+def test_work_no_author_established_for_answers_an_offer_code_linked_to_it() -> None:
+    """§6:4: a scheduled task's work, which sees no running work, still answers the offer."""
+    offered = PhasePath._running_calls(
+        cast("PhasePath", None), None, cast("Any", None), offers=True
+    )
+    assert offered == frozenset({"answer_offer"})
+    assert (
+        PhasePath._running_calls(cast("PhasePath", None), None, cast("Any", None), offers=False)
+        == frozenset()
+    )
