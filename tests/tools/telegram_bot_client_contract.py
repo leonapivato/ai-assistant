@@ -48,7 +48,11 @@ import pytest
 
 from ai_assistant.core.protocols import TelegramBotClient
 from ai_assistant.core.types import (
+    TELEGRAM_BUTTONS_MAX,
+    TELEGRAM_CALLBACK_ANSWER_MAX_CHARS,
     TELEGRAM_MESSAGE_LIMIT,
+    TelegramButton,
+    TelegramCallback,
     TelegramFailure,
     TelegramMessage,
     TelegramUpdate,
@@ -72,6 +76,22 @@ A_WAIT: Final = timedelta(seconds=20)
 
 #: The attempt every case names: the claimed record's id.
 ATTEMPT: Final = "effect-0001"
+
+#: The card's two buttons, as the line posts them (ADR-0361 §4:2).
+BUTTONS: Final = (
+    TelegramButton(label="Approve", data="tok-1:y"),
+    TelegramButton(label="Deny", data="tok-1:n"),
+)
+
+#: The Bot API's inline keyboard for :data:`BUTTONS`, one row.
+KEYBOARD: Final = {
+    "inline_keyboard": [
+        [
+            {"text": "Approve", "callback_data": "tok-1:y"},
+            {"text": "Deny", "callback_data": "tok-1:n"},
+        ]
+    ]
+}
 
 #: How long a case waits for something it is owed. Failing here is a hang.
 _WAIT_SECONDS: Final = 5.0
@@ -107,6 +127,30 @@ class Prepared:
     client: TelegramBotClient
     reached: Callable[[], tuple[Reached, ...]]
     opened: Callable[[], tuple[str, ...]]
+
+
+def a_tap(update_id: int, *, data: str = "tok-1:y", sender: int = 424242) -> TelegramUpdate:
+    """An update carrying a tap on a button of message 900, in the owner's chat.
+
+    Args:
+        update_id: Telegram's id for the update.
+        data: The button's callback data.
+        sender: The account that tapped; the owner's by default.
+
+    Returns:
+        The update.
+    """
+    return TelegramUpdate(
+        update_id=update_id,
+        callback=TelegramCallback(
+            callback_id=f"cb-{update_id}",
+            sender_id=sender,
+            chat_id=424242,
+            private_chat=True,
+            message_id=900,
+            data=data,
+        ),
+    )
 
 
 def an_update(
@@ -427,11 +471,229 @@ class TelegramBotClientContract:
 
         assert outcome.failure is TelegramFailure.REFUSED
 
+    # --- the card: buttons, an edit and a callback's answer (ADR-0361 §8:3) -----
+
+    async def test_a_message_with_buttons_carries_its_one_row(self) -> None:
+        """A card is one ``sendMessage`` with an inline keyboard of one row (§4:2)."""
+        prepared = await self.accepting(message_id=41)
+        chat = prepared.client.chat_id
+
+        outcome = await prepared.client.send_with_buttons(
+            attempt=ATTEMPT, chat_id=chat, text="Approve this?", buttons=BUTTONS, timeout=A_BOUND
+        )
+
+        assert outcome.done
+        assert outcome.message_id == 41
+        assert prepared.reached() == (
+            Reached(
+                "sendMessage", {"chat_id": chat, "text": "Approve this?", "reply_markup": KEYBOARD}
+            ),
+        )
+
+    async def test_buttons_to_another_chat_reach_nothing(self) -> None:
+        """The channel's rule holds for a card as for a message (§6:1, ADR-0361 §4:12)."""
+        prepared = await self.accepting(message_id=1)
+
+        sent = await prepared.client.send_with_buttons(
+            attempt=ATTEMPT,
+            chat_id=prepared.client.chat_id + 1,
+            text="hi",
+            buttons=BUTTONS,
+            timeout=A_BOUND,
+        )
+        edited = await prepared.client.edit_message(
+            attempt=ATTEMPT,
+            chat_id=prepared.client.chat_id + 1,
+            message_id=1,
+            text="hi",
+            buttons=(),
+            timeout=A_BOUND,
+        )
+        answered = await prepared.client.answer_callback(
+            attempt=ATTEMPT,
+            chat_id=prepared.client.chat_id + 1,
+            callback_id="cb-1",
+            text="Approved.",
+            timeout=A_BOUND,
+        )
+
+        assert sent.failure is edited.failure is answered.failure is TelegramFailure.OTHER_CHAT
+        assert prepared.reached() == ()
+
+    @pytest.mark.parametrize(
+        "buttons",
+        [
+            (),
+            "Approve",
+            (BUTTONS[0], BUTTONS[0]),
+            (BUTTONS[0], "Deny"),
+            tuple(
+                TelegramButton(label=f"b{at}", data=f"d{at}")
+                for at in range(TELEGRAM_BUTTONS_MAX + 1)
+            ),
+        ],
+        ids=["none", "a-string", "one-data-twice", "not-a-button", "past-the-bound"],
+    )
+    async def test_buttons_no_message_could_carry_are_refused_before_anything(
+        self, buttons: object
+    ) -> None:
+        """A row Telegram could not carry, or a tap could not tell apart, is refused."""
+        prepared = await self.accepting(message_id=1)
+
+        with pytest.raises(ValueError, match="buttons"):
+            await prepared.client.send_with_buttons(
+                attempt=ATTEMPT,
+                chat_id=prepared.client.chat_id,
+                text="hi",
+                buttons=buttons,  # type: ignore[arg-type]  # the refusal is the point
+                timeout=A_BOUND,
+            )
+
+        assert prepared.reached() == ()
+
+    async def test_an_edit_replaces_the_text_and_takes_the_buttons_away(self) -> None:
+        """``editMessageText`` with an empty keyboard: the card's state, no buttons (§4:5)."""
+        prepared = await self.accepting(message_id=42)
+        chat = prepared.client.chat_id
+        posted = await prepared.client.send_with_buttons(
+            attempt=ATTEMPT, chat_id=chat, text="Approve this?", buttons=BUTTONS, timeout=A_BOUND
+        )
+        assert posted.message_id is not None
+
+        outcome = await prepared.client.edit_message(
+            attempt=ATTEMPT,
+            chat_id=chat,
+            message_id=posted.message_id,
+            text="Approved.",
+            buttons=(),
+            timeout=A_BOUND,
+        )
+
+        assert outcome.done
+        assert prepared.reached()[-1] == Reached(
+            "editMessageText",
+            {
+                "chat_id": chat,
+                "message_id": posted.message_id,
+                "text": "Approved.",
+                "reply_markup": {"inline_keyboard": []},
+            },
+        )
+
+    async def test_a_refused_edit_is_not_done(self) -> None:
+        """Classed as a send's is, and not retried."""
+        prepared = await self.refusing()
+
+        outcome = await prepared.client.edit_message(
+            attempt=ATTEMPT,
+            chat_id=prepared.client.chat_id,
+            message_id=5,
+            text="Denied.",
+            buttons=(),
+            timeout=A_BOUND,
+        )
+
+        assert outcome.failure is TelegramFailure.REFUSED
+        assert len(prepared.reached()) == 1
+
+    @pytest.mark.parametrize("message_id", [0, -1, True, "5"], ids=["zero", "neg", "bool", "str"])
+    async def test_an_edit_naming_no_message_is_refused_before_anything(
+        self, message_id: object
+    ) -> None:
+        """A message id is the positive ``int`` Telegram gave."""
+        prepared = await self.accepting(message_id=1)
+
+        with pytest.raises(ValueError, match="message_id"):
+            await prepared.client.edit_message(
+                attempt=ATTEMPT,
+                chat_id=prepared.client.chat_id,
+                message_id=message_id,  # type: ignore[arg-type]  # the refusal is the point
+                text="hi",
+                buttons=(),
+                timeout=A_BOUND,
+            )
+
+        assert prepared.reached() == ()
+
+    async def test_a_callback_is_answered_by_one_answer_callback_query(self) -> None:
+        """The tapper is shown the answer; nothing is written into the chat (§4:9)."""
+        prepared = await self.accepting(message_id=1)
+
+        outcome = await prepared.client.answer_callback(
+            attempt=ATTEMPT,
+            chat_id=prepared.client.chat_id,
+            callback_id="cb-7",
+            text="Approved.",
+            timeout=A_BOUND,
+        )
+
+        assert outcome.done
+        assert prepared.reached() == (
+            Reached("answerCallbackQuery", {"callback_query_id": "cb-7", "text": "Approved."}),
+        )
+
+    @pytest.mark.parametrize(
+        ("callback_id", "text", "named"),
+        [
+            ("", "Approved.", "callback_id"),
+            (None, "Approved.", "callback_id"),
+            ("cb-1", "", "text"),
+            ("cb-1", "x" * (TELEGRAM_CALLBACK_ANSWER_MAX_CHARS + 1), "text"),
+        ],
+        ids=["blank-id", "no-id", "blank-text", "long-text"],
+    )
+    async def test_an_answer_no_call_could_make_is_refused_before_anything(
+        self, callback_id: object, text: object, named: str
+    ) -> None:
+        """The id is the callback's, and the text fits Telegram's answer."""
+        prepared = await self.accepting(message_id=1)
+
+        with pytest.raises(ValueError, match=named):
+            await prepared.client.answer_callback(
+                attempt=ATTEMPT,
+                chat_id=prepared.client.chat_id,
+                callback_id=callback_id,  # type: ignore[arg-type]  # the refusal is the point
+                text=text,  # type: ignore[arg-type]  # the refusal is the point
+                timeout=A_BOUND,
+            )
+
+        assert prepared.reached() == ()
+
+    async def test_a_disconnected_line_posts_edits_and_answers_nothing(self) -> None:
+        """No active connection, no token and no byte, for the card's calls too (§11:4)."""
+        prepared = await self.disconnected()
+        chat = prepared.client.chat_id
+
+        sent = await prepared.client.send_with_buttons(
+            attempt=ATTEMPT, chat_id=chat, text="hi", buttons=BUTTONS, timeout=A_BOUND
+        )
+        edited = await prepared.client.edit_message(
+            attempt=ATTEMPT, chat_id=chat, message_id=3, text="hi", buttons=(), timeout=A_BOUND
+        )
+        answered = await prepared.client.answer_callback(
+            attempt=ATTEMPT, chat_id=chat, callback_id="cb-1", text="ok", timeout=A_BOUND
+        )
+
+        assert sent.failure is edited.failure is answered.failure is TelegramFailure.UNAVAILABLE
+        assert prepared.reached() == ()
+
     # --- a poll (§5, §11:10 to §11:11) ----------------------------------------
 
     async def test_a_poll_hands_back_what_telegram_holds(self) -> None:
         """The updates come back typed, in order (§5)."""
         updates = (an_update(10), an_update(11, text="and this"))
+        prepared = await self.holding(*updates)
+
+        outcome = await prepared.client.poll(
+            attempt=ATTEMPT, offset=None, wait=A_WAIT, timeout=A_BOUND
+        )
+
+        assert outcome.done
+        assert outcome.updates == updates
+
+    async def test_a_poll_hands_back_a_tap_as_a_callback(self) -> None:
+        """A button's callback comes back typed, beside messages, in order (§8:3)."""
+        updates = (an_update(30), a_tap(31), a_tap(32, data="tok-1:n", sender=7))
         prepared = await self.holding(*updates)
 
         outcome = await prepared.client.poll(
@@ -476,7 +738,10 @@ class TelegramBotClientContract:
         )
 
         assert prepared.reached() == (
-            Reached("getUpdates", {"timeout": 20, "allowed_updates": ["message"], "offset": 10}),
+            Reached(
+                "getUpdates",
+                {"timeout": 20, "allowed_updates": ["message", "callback_query"], "offset": 10},
+            ),
         )
 
     async def test_a_poll_with_no_offset_confirms_nothing(self) -> None:
@@ -572,6 +837,31 @@ class TelegramBotClientContract:
                 attempt=attempt,  # type: ignore[arg-type]  # the refusal is the point
                 offset=None,
                 wait=A_WAIT,
+                timeout=A_BOUND,
+            )
+        with pytest.raises(ValueError, match="attempt"):
+            await prepared.client.send_with_buttons(
+                attempt=attempt,  # type: ignore[arg-type]  # the refusal is the point
+                chat_id=chat,
+                text="hi",
+                buttons=BUTTONS,
+                timeout=A_BOUND,
+            )
+        with pytest.raises(ValueError, match="attempt"):
+            await prepared.client.edit_message(
+                attempt=attempt,  # type: ignore[arg-type]  # the refusal is the point
+                chat_id=chat,
+                message_id=1,
+                text="hi",
+                buttons=(),
+                timeout=A_BOUND,
+            )
+        with pytest.raises(ValueError, match="attempt"):
+            await prepared.client.answer_callback(
+                attempt=attempt,  # type: ignore[arg-type]  # the refusal is the point
+                chat_id=chat,
+                callback_id="cb-1",
+                text="ok",
                 timeout=A_BOUND,
             )
 

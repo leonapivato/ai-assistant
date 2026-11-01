@@ -253,6 +253,7 @@ if TYPE_CHECKING:
         StoryViewPage,
         StructuredReply,
         TaskSpawn,
+        TelegramButton,
         TelegramCallRecord,
         TelegramIntake,
         TelegramIntakeExport,
@@ -13373,12 +13374,13 @@ class TelegramBotClient(Protocol):
     what Telegram answered holds of the relay's answers unchanged (§4).
 
     **The line's one route to Telegram** (§11). Every Bot API call the line makes —
-    a poll for new messages, a message sent, the typing indicator renewed — is made
-    by the one production implementation of this contract, in
-    ``ai_assistant.tools.egress`` and in no other module (§11:1, ADR-0330 §9:1), and
-    the line's reader and writer in ``orchestration`` reach it through this Protocol
-    alone (§15). Named for the thing it talks to, as :class:`OutboundTransport` is:
-    what a caller holds is the bot, and what it can ask of it is these three calls.
+    a poll for new messages and buttons' callbacks, a message sent, the typing
+    indicator renewed, and an approval request's card posted, edited and its tap
+    answered (ADR-0361 §8:3) — is made by the one production implementation of this
+    contract, in ``ai_assistant.tools.egress`` and in no other module (§11:1, ADR-0330
+    §9:1), and the line's reader and writer in ``orchestration`` reach it through this
+    Protocol alone (§15). Named for the thing it talks to, as :class:`OutboundTransport`
+    is: what a caller holds is the bot, and what it can ask of it is these six calls.
 
     **These are not egress calls in ADR-0148's sense** (§11:2): no ``ActionRequest``,
     binding or ruling exists for them, and the approval that covers what they carry
@@ -13424,7 +13426,7 @@ class TelegramBotClient(Protocol):
     is the caller's to claim and to complete with the outcome returned here: this
     contract holds no ledger, as :class:`Forecaster` holds none. What it
     does hold is that **every call names the attempt it is the claimed record's**:
-    ``attempt`` is required on all three members and refused blank, so a call
+    ``attempt`` is required on every member and refused blank, so a call
     written without a claim in hand does not have a value to pass, and what the
     implementation records of the call is filed under it.
 
@@ -13453,6 +13455,12 @@ class TelegramBotClient(Protocol):
     :mod:`ai_assistant.testing` (``CONTRIBUTING.md`` → "Adding a Protocol"). Rules 3
     and 5 are restated for relayed mode by ADR-0330 §12:1, again with the suite, and
     with no member, argument, result or ``TelegramFailure`` member changed (§12:2).
+    ADR-0361 §8:3 widens it again, with the suite and the fake: sending a message with
+    buttons (:meth:`send_with_buttons`), editing a message (:meth:`edit_message`) and
+    answering a button's callback (:meth:`answer_callback`), and a poll asks for
+    callbacks beside messages (:attr:`~ai_assistant.core.types.TelegramUpdate.callback`).
+    All three keep the five rules above, and the connect act's approval covers them for
+    the one chat the settings name (ADR-0361 §4:12).
     """
 
     @property
@@ -13475,7 +13483,8 @@ class TelegramBotClient(Protocol):
     ) -> TelegramPollOutcome:
         """Ask Telegram for new messages, confirming what ``offset`` says was dealt with.
 
-        One ``getUpdates`` call, asking for new messages only, which Telegram holds
+        One ``getUpdates`` call, asking for new messages and buttons' callbacks only
+        (ADR-0361 §8:3), which Telegram holds
         open for at most ``wait`` while none is waiting (§11:10). **The offset
         confirms**: Telegram forgets every update whose id is below it, so a caller
         passes one only for updates already dealt with (§5:6) — and ``None`` confirms
@@ -13591,6 +13600,131 @@ class TelegramBotClient(Protocol):
             ValueError: If ``attempt`` is blank, ``chat_id`` is not an ``int``, or
                 ``timeout`` is not a strictly positive ``timedelta``. Raised before
                 anything is read.
+            CancelledError: Re-raised after the channel is closed, when the call is
+                cancelled from outside (ADR-0060 §1).
+        """
+        ...
+
+    async def send_with_buttons(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        text: str,
+        buttons: Sequence[TelegramButton],
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12); an outer `asyncio.timeout` could not tell a written request from one never sent
+    ) -> TelegramSendOutcome:
+        """Send one message of plain text with a row of buttons under it (ADR-0361 §4:2).
+
+        One ``sendMessage`` call carrying an inline keyboard of one row, and **never a
+        retry**, as :meth:`send`. A tap on a button comes back on a later poll as an
+        update's :attr:`~ai_assistant.core.types.TelegramUpdate.callback`, carrying the
+        button's data. Every rule :meth:`send` keeps holds here: the chat, the text, the
+        bound and the outcome.
+
+        Args:
+            attempt: The id of the durable record the caller claimed for this message
+                (§13:2). Non-blank.
+            chat_id: The chat to send to. Anything but :attr:`chat_id` is refused as
+                :attr:`~ai_assistant.core.types.TelegramFailure.OTHER_CHAT`.
+            text: The message's text, as :meth:`send` takes it: within one message.
+            buttons: The buttons, in order on one row: one to
+                :data:`~ai_assistant.core.types.TELEGRAM_BUTTONS_MAX`, each a
+                :class:`~ai_assistant.core.types.TelegramButton`, their data distinct.
+            timeout: The bound on this send. Strictly positive.
+
+        Returns:
+            Done, with the message id Telegram returned; or a failure, classed as
+            :meth:`send` classes it.
+
+        Raises:
+            ValueError: If an argument is one :meth:`send` refuses, or ``buttons`` is a
+                bare string, not a sequence of buttons, empty, longer than the bound, or
+                carries one data twice. Raised before anything is read.
+            CancelledError: Re-raised after the channel is closed, when the send is
+                cancelled from outside (ADR-0060 §1).
+        """
+        ...
+
+    async def edit_message(  # noqa: PLR0913 — the call's six keywords, each the Bot API's
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        buttons: Sequence[TelegramButton],
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12); an outer `asyncio.timeout` could not tell a written request from one never sent
+    ) -> TelegramOutcome:
+        """Replace the text and the buttons of a message the bot sent (ADR-0361 §4:5).
+
+        One ``editMessageText`` call, and **never a retry**. The message keeps its id
+        and its place in the chat; its text becomes ``text`` and its buttons
+        ``buttons``, and an empty ``buttons`` takes every button away. Telegram refuses
+        an edit that would change nothing, and that refusal is
+        :attr:`~ai_assistant.core.types.TelegramFailure.REFUSED` as any other is: the
+        caller edits only where what it shows changed.
+
+        Args:
+            attempt: The id of the durable record the caller claimed for this edit
+                (§13:2). Non-blank.
+            chat_id: The chat the message is in. Anything but :attr:`chat_id` is
+                refused as :attr:`~ai_assistant.core.types.TelegramFailure.OTHER_CHAT`.
+            message_id: The id Telegram gave the message: a positive ``int``.
+            text: The message's new text, as :meth:`send` takes it.
+            buttons: The buttons it shows after the edit, as :meth:`send_with_buttons`
+                takes them, or none.
+            timeout: The bound on this call. Strictly positive.
+
+        Returns:
+            Done, or a failure classed as a send's is.
+
+        Raises:
+            ValueError: If an argument is one :meth:`send` refuses, ``message_id`` is
+                not a positive ``int``, or ``buttons`` is not a sequence of buttons
+                :meth:`send_with_buttons` would send, empty allowed. Raised before
+                anything is read.
+            CancelledError: Re-raised after the channel is closed, when the call is
+                cancelled from outside (ADR-0060 §1).
+        """
+        ...
+
+    async def answer_callback(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        callback_id: str,
+        text: str,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12); an outer `asyncio.timeout` could not tell a written request from one never sent
+    ) -> TelegramOutcome:
+        """Answer one button's callback, showing ``text`` on the tapper's screen (§4:9).
+
+        One ``answerCallbackQuery`` call, and **never a retry**. Telegram shows the text
+        briefly over the chat and writes nothing into it. ``chat_id`` is the chat the
+        tapped message is in, which the caller read off the callback: a callback from
+        any chat but :attr:`chat_id` is no callback the line answers.
+
+        Args:
+            attempt: The id of the durable record the caller claimed for this answer
+                (§13:2). Non-blank.
+            chat_id: The chat the callback came from. Anything but :attr:`chat_id` is
+                refused as :attr:`~ai_assistant.core.types.TelegramFailure.OTHER_CHAT`.
+            callback_id: Telegram's id for the callback query, as the update carried
+                it: non-blank, within
+                :data:`~ai_assistant.core.types.TELEGRAM_CALLBACK_ID_MAX_CHARS`.
+            text: What to show: non-blank, with a UTF-8 form, within
+                :data:`~ai_assistant.core.types.TELEGRAM_CALLBACK_ANSWER_MAX_CHARS`.
+            timeout: The bound on this call. Strictly positive.
+
+        Returns:
+            Done, or a failure classed as a send's is.
+
+        Raises:
+            ValueError: If ``attempt`` is blank, ``chat_id`` is not an ``int``,
+                ``callback_id`` or ``text`` is not one this member sends, or ``timeout``
+                is not a strictly positive ``timedelta``. Raised before anything is
+                read.
             CancelledError: Re-raised after the channel is closed, when the call is
                 cancelled from outside (ADR-0060 §1).
         """

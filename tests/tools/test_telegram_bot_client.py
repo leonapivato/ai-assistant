@@ -38,6 +38,7 @@ from telegram_bot_client_contract import (
 from ai_assistant.core.errors import ConnectionStoreError, TransportError
 from ai_assistant.core.types import (
     ProvisioningState,
+    TelegramCallback,
     TelegramFailure,
     TelegramForwardKind,
     TelegramForwardOrigin,
@@ -149,6 +150,27 @@ def update_json(update: TelegramUpdate) -> dict[str, Any]:
     raw: dict[str, Any] = {"update_id": update.update_id}
     if update.message is not None:
         raw["message"] = message_json(update.message)
+    if update.callback is not None:
+        raw["callback_query"] = callback_json(update.callback)
+    return raw
+
+
+def callback_json(callback: TelegramCallback) -> dict[str, Any]:
+    """A button's callback as the Bot API writes one (ADR-0361 §4:7)."""
+    raw: dict[str, Any] = {
+        "id": callback.callback_id,
+        "from": {"id": callback.sender_id, "is_bot": callback.sender_is_bot, "first_name": "O"},
+        "chat_instance": "-1",
+    }
+    if callback.message_id is not None:
+        raw["message"] = {"message_id": callback.message_id, "date": 1_700_000_000}
+        if callback.chat_id is not None:
+            raw["message"]["chat"] = {
+                "id": callback.chat_id,
+                "type": "private" if callback.private_chat else "group",
+            }
+    if callback.data is not None:
+        raw["data"] = callback.data
     return raw
 
 
@@ -385,7 +407,13 @@ class TestHttpsTelegramBotClientContract(TelegramBotClientContract):
         """Telegram accepts: a message with ``message_id``, ``true``, or no updates."""
         sent = done({"message_id": message_id, "chat": {"id": CHAT, "type": "private"}})
         telegram = AnsweringTransport(
-            {"sendMessage": sent, "sendChatAction": done(True), "getUpdates": done([])}
+            {
+                "sendMessage": sent,
+                "sendChatAction": done(True),
+                "getUpdates": done([]),
+                "editMessageText": sent,
+                "answerCallbackQuery": done(True),
+            }
         )
         return (await harness(transport=telegram)).prepared()
 
@@ -1122,3 +1150,79 @@ def test_a_client_for_no_line_does_not_construct(reference: str, chat_id: int) -
             secrets=Keyring(),
             exchange=HttpsExchange(transport=FakeOutboundTransport(), max_response_bytes=1024),
         )
+
+
+# --- ADR-0361 §4:7, §8:3: a button's callback, as a poll reads it -------------------
+
+
+def _tap_raw(**fields: Any) -> dict[str, Any]:
+    """A ``callback_query`` as the Bot API writes one, with ``fields`` replaced."""
+    raw: dict[str, Any] = {
+        "id": "4417",
+        "from": {"id": CHAT, "is_bot": False, "first_name": "O"},
+        "chat_instance": "-9",
+        "message": {
+            "message_id": 77,
+            "date": 1_700_000_000,
+            "chat": {"id": CHAT, "type": "private"},
+        },
+        "data": "tok:y",
+    }
+    raw.update(fields)
+    return raw
+
+
+async def _tapped(raw: object) -> TelegramUpdate:
+    """The one update a poll handing back ``raw`` as its callback reads."""
+    rig = await harness(done([{"update_id": 9, "callback_query": raw}]))
+    outcome = await rig.client.poll(attempt=ATTEMPT, offset=None, wait=A_WAIT, timeout=A_BOUND)
+    (update,) = outcome.updates
+    return update
+
+
+async def test_a_callback_is_read_with_who_tapped_where_and_its_data() -> None:
+    """The id its answer names, the tapper, the card's chat and id, and the data."""
+    update = await _tapped(_tap_raw())
+
+    assert update.message is None
+    assert update.callback == TelegramCallback(
+        callback_id="4417",
+        sender_id=CHAT,
+        chat_id=CHAT,
+        private_chat=True,
+        message_id=77,
+        data="tok:y",
+    )
+
+
+async def test_a_callback_on_a_message_telegram_no_longer_gives_whole_keeps_its_place() -> None:
+    """An inaccessible message (``date`` 0) still names its chat and its id."""
+    update = await _tapped(
+        _tap_raw(message={"message_id": 77, "date": 0, "chat": {"id": CHAT, "type": "private"}})
+    )
+
+    assert update.callback is not None
+    assert update.callback.message_id == 77
+    assert update.callback.chat_id == CHAT
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"id": 4417},
+        {"id": ""},
+        {"from": None},
+        {"from": {"id": "x"}},
+        {"message": [1]},
+        {"message": {"message_id": 77, "chat": "x"}},
+        {"data": 5},
+    ],
+    ids=["id-a-number", "id-blank", "no-sender", "sender-id", "message", "chat", "data"],
+)
+async def test_a_callback_not_in_the_documented_shape_is_carried_as_none(
+    fields: dict[str, Any],
+) -> None:
+    """Its update still has an id to confirm (§5:2), so only the callback is dropped."""
+    update = await _tapped(_tap_raw(**fields))
+
+    assert update == TelegramUpdate(update_id=9)

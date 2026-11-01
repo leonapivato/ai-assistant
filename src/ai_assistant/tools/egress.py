@@ -117,7 +117,7 @@ import re
 import ssl
 import string
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -135,10 +135,15 @@ from ai_assistant.core.errors import (
     TransportError,
 )
 from ai_assistant.core.types import (
+    TELEGRAM_BUTTONS_MAX,
+    TELEGRAM_CALLBACK_ANSWER_MAX_CHARS,
+    TELEGRAM_CALLBACK_ID_MAX_CHARS,
     TELEGRAM_MESSAGE_LIMIT,
     TRANSPORT_OCTET_CEILING,
     DestinationProtocol,
     ProvisioningState,
+    TelegramButton,
+    TelegramCallback,
     TelegramFailure,
     TelegramForwardKind,
     TelegramForwardOrigin,
@@ -157,7 +162,7 @@ from ai_assistant.tools.destinations import DestinationProtocol as SeamProtocol
 from ai_assistant.tools.http_reading import decoded_object
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
     from ai_assistant.core.protocols import ByteChannel, OutboundTransport, Secrets
     from ai_assistant.core.types import EgressBinding, FrozenJson, SecretName
@@ -4082,15 +4087,18 @@ _TELEGRAM_TOKEN_CHARACTERS: Final = frozenset(string.ascii_letters + string.digi
 #: in the hub's keyring never reaches a relay (§6:3).
 _RELAY_CREDENTIAL_CHARACTERS: Final = _TELEGRAM_TOKEN_CHARACTERS - {":"}
 
-#: The Bot API methods the line calls, and nothing else (§11, §15's table row).
+#: The Bot API methods the line calls, and nothing else (§11, §15's table row, and the
+#: card's two of ADR-0361 §8:3; a card's post is a ``sendMessage``).
 _GET_UPDATES: Final = "getUpdates"
 _SEND_MESSAGE: Final = "sendMessage"
 _SEND_CHAT_ACTION: Final = "sendChatAction"
+_EDIT_MESSAGE_TEXT: Final = "editMessageText"
+_ANSWER_CALLBACK_QUERY: Final = "answerCallbackQuery"
 
-#: The one kind of update a poll asks for: a new message (§5:1). Telegram keeps the
-#: last list a bot asked with, so asking every time is what keeps edits and every
-#: other kind away whatever was asked before.
-_ALLOWED_UPDATES: Final = ("message",)
+#: The kinds of update a poll asks for: a new message (§5:1) and a button's callback
+#: (ADR-0361 §4:7, §8:3). Telegram keeps the last list a bot asked with, so asking every
+#: time is what keeps edits and every other kind away whatever was asked before.
+_ALLOWED_UPDATES: Final = ("message", "callback_query")
 
 #: The status a done Bot API call answers with.
 _OK: Final = 200
@@ -4429,6 +4437,131 @@ class HttpsTelegramBotClient:
             attempt=attempt,
             method=_SEND_CHAT_ACTION,
             payload={"chat_id": chat, "action": "typing"},
+            bound=bound,
+            read=_shown,
+        )
+        if isinstance(reply, _Failed):
+            return TelegramOutcome(failure=reply.failure, retry_after_seconds=reply.retry_after)
+        return TelegramOutcome()
+
+    async def send_with_buttons(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        text: str,
+        buttons: Sequence[TelegramButton],
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12)
+    ) -> TelegramSendOutcome:
+        """Send one message with a row of buttons under it (see the Protocol).
+
+        Args:
+            attempt: The claimed record's id.
+            chat_id: The chat to send to, which must be :attr:`chat_id`.
+            text: The text, within one Telegram message.
+            buttons: The buttons, one to the bound, their data distinct.
+            timeout: The bound on this send.
+
+        Returns:
+            The outcome.
+        """
+        attempt = _checked_attempt(attempt)
+        chat = _checked_chat(chat_id)
+        body = _checked_text(text)
+        row = _checked_buttons(buttons, empty=False)
+        bound = _checked_duration(timeout, name="timeout", floor="positive")
+        if chat != self._chat_id:
+            return TelegramSendOutcome(failure=self._other_chat(attempt, _SEND_MESSAGE))
+        reply = await self._call(
+            attempt=attempt,
+            method=_SEND_MESSAGE,
+            payload={"chat_id": chat, "text": body, "reply_markup": _keyboard(row)},
+            bound=bound,
+            read=_sent_id,
+        )
+        if isinstance(reply, _Failed):
+            return TelegramSendOutcome(failure=reply.failure, retry_after_seconds=reply.retry_after)
+        return TelegramSendOutcome(message_id=reply)
+
+    async def edit_message(  # noqa: PLR0913 — the contract's six keywords
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        buttons: Sequence[TelegramButton],
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12)
+    ) -> TelegramOutcome:
+        """Replace a message's text and buttons (see the Protocol).
+
+        Args:
+            attempt: The claimed record's id.
+            chat_id: The chat, which must be :attr:`chat_id`.
+            message_id: The message's id.
+            text: The new text, within one Telegram message.
+            buttons: The buttons it shows after, or none.
+            timeout: The bound on this call.
+
+        Returns:
+            The outcome.
+        """
+        attempt = _checked_attempt(attempt)
+        chat = _checked_chat(chat_id)
+        message = _checked_message_id(message_id)
+        body = _checked_text(text)
+        row = _checked_buttons(buttons, empty=True)
+        bound = _checked_duration(timeout, name="timeout", floor="positive")
+        if chat != self._chat_id:
+            return TelegramOutcome(failure=self._other_chat(attempt, _EDIT_MESSAGE_TEXT))
+        reply = await self._call(
+            attempt=attempt,
+            method=_EDIT_MESSAGE_TEXT,
+            payload={
+                "chat_id": chat,
+                "message_id": message,
+                "text": body,
+                "reply_markup": _keyboard(row),
+            },
+            bound=bound,
+            read=_edited,
+        )
+        if isinstance(reply, _Failed):
+            return TelegramOutcome(failure=reply.failure, retry_after_seconds=reply.retry_after)
+        return TelegramOutcome()
+
+    async def answer_callback(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        callback_id: str,
+        text: str,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0323 §11:12)
+    ) -> TelegramOutcome:
+        """Answer one button's callback (see the Protocol).
+
+        Args:
+            attempt: The claimed record's id.
+            chat_id: The chat the callback came from, which must be :attr:`chat_id`.
+            callback_id: The callback query's id.
+            text: What to show the tapper.
+            timeout: The bound on this call.
+
+        Returns:
+            The outcome.
+        """
+        attempt = _checked_attempt(attempt)
+        chat = _checked_chat(chat_id)
+        query = _checked_callback_id(callback_id)
+        shown = _checked_answer(text)
+        bound = _checked_duration(timeout, name="timeout", floor="positive")
+        if chat != self._chat_id:
+            return TelegramOutcome(failure=self._other_chat(attempt, _ANSWER_CALLBACK_QUERY))
+        reply = await self._call(
+            attempt=attempt,
+            method=_ANSWER_CALLBACK_QUERY,
+            payload={"callback_query_id": query, "text": shown},
             bound=bound,
             read=_shown,
         )
@@ -4785,6 +4918,130 @@ def _checked_text(text: object) -> str:
     return text
 
 
+def _checked_buttons(buttons: object, *, empty: bool) -> tuple[TelegramButton, ...]:
+    """Refuse buttons Telegram could not carry on one row (ADR-0361 §4:2, §8:3).
+
+    Args:
+        buttons: The value the caller passed.
+        empty: Whether no buttons at all is allowed, as an edit taking them away is.
+
+    Returns:
+        The buttons, in order.
+
+    Raises:
+        ValueError: If it is a bare string or not a sequence of
+            :class:`~ai_assistant.core.types.TelegramButton`, is empty where that is
+            not allowed, holds more than the bound, or carries one data twice. No label
+            or data is named.
+    """
+    if isinstance(buttons, str | bytes) or not isinstance(buttons, Sequence):
+        msg = "buttons is a sequence of TelegramButton"
+        raise ValueError(msg)
+    row = tuple(buttons)
+    if any(not isinstance(one, TelegramButton) for one in row):
+        msg = "buttons is a sequence of TelegramButton"
+        raise ValueError(msg)
+    if not row and not empty:
+        msg = "buttons holds at least one button"
+        raise ValueError(msg)
+    if len(row) > TELEGRAM_BUTTONS_MAX:
+        msg = f"buttons holds at most {TELEGRAM_BUTTONS_MAX} buttons, on one row"
+        raise ValueError(msg)
+    if len({one.data for one in row}) != len(row):
+        msg = "buttons carry distinct data, so a tap names the button tapped"
+        raise ValueError(msg)
+    return row
+
+
+def _keyboard(row: Sequence[TelegramButton]) -> dict[str, object]:
+    """An inline keyboard of one row, as the Bot API's ``reply_markup`` takes it.
+
+    An empty row is a keyboard with no buttons, which takes every button away.
+
+    Args:
+        row: The buttons, in order.
+
+    Returns:
+        The ``InlineKeyboardMarkup``.
+    """
+    if not row:
+        return {"inline_keyboard": []}
+    return {"inline_keyboard": [[{"text": one.label, "callback_data": one.data} for one in row]]}
+
+
+def _checked_message_id(message_id: object) -> int:
+    """Refuse a message id that names no message Telegram gave.
+
+    Args:
+        message_id: The value the caller passed.
+
+    Returns:
+        The id.
+
+    Raises:
+        ValueError: If it is not an exact positive ``int`` within Telegram's range.
+    """
+    if type(message_id) is not int or not 1 <= message_id < 2**63:
+        msg = "message_id is the positive int Telegram gave the message"
+        raise ValueError(msg)
+    return message_id
+
+
+def _checked_callback_id(callback_id: object) -> str:
+    """Refuse a callback query id no update could have carried.
+
+    Args:
+        callback_id: The value the caller passed.
+
+    Returns:
+        The id.
+
+    Raises:
+        ValueError: If it is not a non-blank ``str`` within the bound with a UTF-8 form.
+    """
+    if (
+        type(callback_id) is not str
+        or not callback_id.strip()
+        or len(callback_id) > TELEGRAM_CALLBACK_ID_MAX_CHARS
+    ):
+        msg = "callback_id is the callback query's id, a non-blank string within its bound"
+        raise ValueError(msg)
+    try:
+        callback_id.encode("utf-8")
+    except UnicodeEncodeError:
+        msg = "callback_id has no UTF-8 form"
+        raise ValueError(msg) from None
+    return callback_id
+
+
+def _checked_answer(text: object) -> str:
+    """Refuse a callback answer's text Telegram would not show.
+
+    Args:
+        text: The value the caller passed.
+
+    Returns:
+        The text, unchanged.
+
+    Raises:
+        ValueError: If it is not a non-blank ``str`` with a UTF-8 form, within
+            :data:`~ai_assistant.core.types.TELEGRAM_CALLBACK_ANSWER_MAX_CHARS`. The
+            text is never named.
+    """
+    if type(text) is not str or not text.strip():
+        msg = "text is a non-blank string"
+        raise ValueError(msg)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        msg = "text has no UTF-8 form, so it cannot be sent"
+        raise ValueError(msg) from None
+    if len(text) > TELEGRAM_CALLBACK_ANSWER_MAX_CHARS:
+        msg = f"text is longer than a callback's answer ({TELEGRAM_CALLBACK_ANSWER_MAX_CHARS})"
+        raise ValueError(msg)
+    return text
+
+
 def _checked_duration(value: object, *, name: str, floor: str) -> timedelta:
     """Refuse a duration a call could not be bounded or asked by (ADR-0241 §1).
 
@@ -4879,6 +5136,21 @@ def _shown(result: object) -> bool | None:
     return True if result is True else None
 
 
+def _edited(result: object) -> bool | None:
+    """``True`` where an ``editMessageText`` result is the edited message, as documented.
+
+    The Bot API answers an edit of a bot's own message with that message, and ``true``
+    only for a message sent through inline mode, which this line never sends.
+
+    Args:
+        result: The answer's ``result``.
+
+    Returns:
+        ``True``, or ``None`` for any other result.
+    """
+    return True if isinstance(result, Mapping) or result is True else None
+
+
 def _sent_id(result: object) -> int | None:
     """The message id a ``sendMessage`` result carries, or ``None`` (§6:2).
 
@@ -4921,8 +5193,58 @@ def _polled(result: object) -> tuple[TelegramUpdate, ...] | None:
             return None
         if updates and update_id <= updates[-1].update_id:
             return None
-        updates.append(TelegramUpdate(update_id=update_id, message=_message_of(raw.get("message"))))
+        updates.append(
+            TelegramUpdate(
+                update_id=update_id,
+                message=_message_of(raw.get("message")),
+                callback=_callback_of(raw.get("callback_query")),
+            )
+        )
     return tuple(updates)
+
+
+def _callback_of(raw: object) -> TelegramCallback | None:
+    """A button's callback as the line reads it, or ``None`` where it cannot be read whole.
+
+    ADR-0361 §4:7: a ``callback_query``'s id, who tapped, the chat and the id of the
+    message the button is under, and its data. Its message may be one Telegram no
+    longer gives whole (``date`` 0); its chat and id are still read. Anything not in
+    the shape the Bot API documents is no callback, and its update still has an id to
+    confirm (§5:2).
+
+    Args:
+        raw: An update's ``callback_query`` member.
+
+    Returns:
+        The callback, or ``None``.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    sender, message = raw.get("from"), raw.get("message")
+    if not isinstance(sender, Mapping) or (
+        message is not None and not isinstance(message, Mapping)
+    ):
+        return None
+    chat = None if message is None else message.get("chat")
+    if chat is not None and not isinstance(chat, Mapping):
+        return None
+    data = raw.get("data")
+    if data is not None and type(data) is not str:
+        return None
+    try:
+        return TelegramCallback.model_validate(
+            {
+                "callback_id": raw.get("id"),
+                "sender_id": sender.get("id"),
+                "sender_is_bot": sender.get("is_bot") is True,
+                "chat_id": None if chat is None else chat.get("id"),
+                "private_chat": chat is not None and chat.get("type") == "private",
+                "message_id": None if message is None else message.get("message_id"),
+                "data": data,
+            }
+        )
+    except ValidationError:
+        return None
 
 
 def _message_of(raw: object) -> TelegramMessage | None:

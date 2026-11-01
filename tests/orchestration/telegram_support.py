@@ -112,3 +112,14 @@ class YieldingTelegram:
 
     async def show_typing(self, **arguments: Any) -> TelegramOutcome:
         return await self.fake.show_typing(**arguments)
+
+    async def send_with_buttons(self, **arguments: Any) -> TelegramSendOutcome:
+        if self.failing_sends:
+            self.fake.fail_next(self.failing_sends.pop(0))
+        return await self.fake.send_with_buttons(**arguments)
+
+    async def edit_message(self, **arguments: Any) -> TelegramOutcome:
+        return await self.fake.edit_message(**arguments)
+
+    async def answer_callback(self, **arguments: Any) -> TelegramOutcome:
+        return await self.fake.answer_callback(**arguments)

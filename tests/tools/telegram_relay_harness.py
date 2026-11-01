@@ -401,6 +401,10 @@ def fake_relay(
             "sendMessage": done({"message_id": 1, "chat": {"id": 1, "type": "private"}}),
             "sendChatAction": done(True),
             "getUpdates": done([]),
+            # ADR-0361 §4:12: the card's edit and a callback's answer, which a relay
+            # passes on as it does the line's other calls (ADR-0330 §4:16).
+            "editMessageText": done({"message_id": 1, "chat": {"id": 1, "type": "private"}}),
+            "answerCallbackQuery": done(True),
         }
     )
     loop = asyncio.new_event_loop()
