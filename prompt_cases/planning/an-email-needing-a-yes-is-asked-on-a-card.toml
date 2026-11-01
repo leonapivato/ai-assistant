@@ -1,0 +1,15 @@
+# ADR-0361 §9:5's first case: round 1 sent the email Leo asked for, from his own address,
+# and it came back needing his yes and saying to ask through request_approval with the
+# same arguments (§2:4). This round asks for it on a card, never by a question in words.
+prompt = "planning"
+guards = "yes_without_question"
+came_from = "2026-11-01"
+set = "development"
+samples = 3
+
+[property]
+check = "calls_include"
+capabilities = ["request_approval"]
+
+[input]
+file = "an-email-needing-a-yes-is-asked-on-a-card.json"

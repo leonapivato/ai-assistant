@@ -1,0 +1,16 @@
+# ADR-0361 §9:5's third case, its decline: Leo approved, on a card, an email to Maren's
+# old address, and before the tap told the system her address changed. The approval's
+# activation holds the ticket and declines it (§5:8): it runs neither the ticket nor the
+# email to the old address.
+prompt = "planning"
+guards = "substituted"
+came_from = "2026-11-01"
+set = "development"
+samples = 3
+
+[property]
+check = "none_of"
+capabilities = ["run_approved", "email"]
+
+[input]
+file = "a-ticket-whose-situation-changed-is-declined-and-asked-again.json"
