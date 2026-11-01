@@ -5104,10 +5104,12 @@ function renderApprovals(panel) {
 }
 
 // What a request too long for any one answer of the hub's to carry says: its card is
-// shown by its start, and a yes is to the exact call shown, so it is not offered.
-const APPROVAL_CUT =
-  "This request is too long to show here whole, so only its start is shown, and it " +
-  "cannot be approved here. Deny it if you do not want it done.";
+// shown by its start, so the state its card ends with is said here instead; and a yes
+// is to the exact call shown, so a pending one offers Deny alone.
+const APPROVAL_CUT = "This request is too long to show here whole, so only its start is shown.";
+const APPROVAL_CUT_PENDING =
+  "It cannot be approved here, since it cannot be shown whole. Deny it if you do not " +
+  "want it done.";
 
 // One request: its card's text, when, and on a pending one its buttons — Deny alone on
 // one that could not be shown whole.
@@ -5116,7 +5118,11 @@ function renderApproval(list, entry, open) {
   item.className = "approval-row";
   line(item, entry.text, "reply");
   if (entry.whole === false) {
+    line(item, APPROVAL_STATE_WORDS[entry.state] || entry.state, "reply");
     line(item, APPROVAL_CUT, "hint");
+    if (open) {
+      line(item, APPROVAL_CUT_PENDING, "hint");
+    }
   }
   line(item, approvalWhen(entry), "hint");
   if (open) {
