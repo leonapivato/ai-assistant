@@ -1900,6 +1900,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     12. A peer at 123 refuses the new field as extra (ADR-0124 §9:2). **The method set
     does not move and stays at 69**: no ``Protocol`` gains a member.
 
+    **125 is ADR-0361 §8:7, on wire-carried core types alone.** ``ApprovalGiver`` gains
+    the two taps' members, ``ApprovalEnd`` the expiry, ``Approval.how`` the
+    ``TapOnCard`` form, and ``ConfirmationPart`` its request form, each carried on a
+    decision or a memory. A peer at 124 refuses the new members as unknown and the new
+    fields as extra (ADR-0124 §9:2). **The method set does not move and stays at 69**:
+    ``PlanStore`` gains members, and no engine method.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1908,7 +1915,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (69, 124), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (69, 125), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

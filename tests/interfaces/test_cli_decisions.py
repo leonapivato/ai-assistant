@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import TYPE_CHECKING, Final
 
@@ -62,6 +62,7 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     SpanCoverage,
+    TapOnCard,
     ToolCost,
     ToolDefinition,
     YesToQuestion,
@@ -1821,3 +1822,44 @@ def test_a_yes_given_on_the_telegram_line_names_the_line(
 
     assert "by you, through Telegram, in activation a-yes" in rendered
     assert "through the hub chat" not in rendered
+
+
+def test_a_call_under_a_ticket_names_the_tap_on_its_card(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0361 §5:4, §8:1: a tap's approval is rendered as the tap on the request's card.
+
+    It names the request, the round and activation that asked, and when it expires; who
+    tapped, by the surface's giver; and that it ends when used or expired. It names no
+    question and no part, since its key is the request.
+    """
+    expires = _YES_AT + timedelta(hours=24)
+    for giver, words in (
+        (ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, "by you, by a tap on its card on Telegram"),
+        (ApprovalGiver.USER_TAP_ON_HUB_PANEL, "by you, by a tap on the hub page"),
+    ):
+        approval = Approval(
+            who=giver,
+            how=TapOnCard(request="q-1", activation_id="a-ask", round="r-ask", expires_at=expires),
+            given=ApprovalGiven(activation_id="a-approval", at=_YES_AT),
+            ends=ApprovalEnd.WHEN_USED_OR_EXPIRED,
+        )
+        output.seek(0)
+        output.truncate()
+        rendered = _listing(
+            output, monkeypatch, _decision("d-ticket", approval=approval, effect="e-1")
+        )
+
+        assert (
+            f"Your yes: given 2026-03-01 08:59:30.000000 UTC {words}, in activation "
+            "a-approval (a tap on the card for request q-1)"
+        ) in rendered
+        assert (
+            "to the request written by round r-ask, asked in activation a-ask; it expires "
+            "2026-03-02 08:59:30.000000 UTC"
+        ) in rendered
+        assert (
+            "It covers that request's one call, and it ends when used or when its request "
+            "expires: it covers its call once"
+        ) in rendered
+        assert "of that question" not in rendered

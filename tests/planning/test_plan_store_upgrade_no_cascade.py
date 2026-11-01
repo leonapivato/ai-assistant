@@ -56,7 +56,7 @@ _TABLES_BEFORE = {
     "scheduled_tasks",
     "cascade_records",
 }
-_TABLES_AFTER = _TABLES_BEFORE - {"cascade_records"}
+_TABLES_AFTER = (_TABLES_BEFORE - {"cascade_records"}) | {"approval_requests"}
 
 _TASKS = [
     "t-below-pending",
@@ -139,7 +139,7 @@ async def test_a_pending_occurrence_below_a_cascade_record_ends_cancelled(legacy
     """
     tasks, _ = await _opened(legacy)
 
-    assert _label(legacy) == "18"
+    assert _label(legacy) == "19"
     assert list(tasks) == _TASKS
     for task_id in ("t-below-pending", "t-grandchild"):
         (occurrence,) = tasks[task_id].occurrences
@@ -215,7 +215,7 @@ async def test_the_upgraded_file_reopens_as_it_is(legacy: Path) -> None:
 
     assert await _opened(legacy) == first
     assert _dump(legacy) == dumped
-    assert _label(legacy) == "18"
+    assert _label(legacy) == "19"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

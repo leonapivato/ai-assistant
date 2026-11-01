@@ -61,7 +61,7 @@ _TABLES = {
     "cascade_records",
 }
 #: The tables once the step past 17 retires ``cascade_records`` (ADR-0352 §6:4).
-_TABLES_AFTER = _TABLES - {"cascade_records"}
+_TABLES_AFTER = (_TABLES - {"cascade_records"}) | {"approval_requests"}
 
 
 def _now() -> datetime:
@@ -127,8 +127,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "18"
-    assert export.schema_version == 26
+    assert _label(legacy) == "19"
+    assert export.schema_version == 27
     assert export.stopped_activations == ("act-before-stopped",)
     effects = {one.id: one for one in export.activation_effects}
     assert effects["spawn-pending"].outcome is ToolOutcome.SUCCEEDED
@@ -156,7 +156,7 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     after = _dump(legacy)
     assert set(after) == _TABLES_AFTER
     assert {table: after[table] for table in _TABLES_AFTER if table != "meta"} == {
-        table: before[table] for table in _TABLES_AFTER if table != "meta"
+        table: before.get(table, []) for table in _TABLES_AFTER if table != "meta"
     }
 
 
@@ -207,7 +207,7 @@ async def test_the_upgraded_file_holds_a_rule_and_keeps_what_it_carried(legacy: 
         assert [one.id for one in carried] == ["t-done", "t-step"]
     finally:
         reopened.close()
-    assert _label(legacy) == "18"
+    assert _label(legacy) == "19"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

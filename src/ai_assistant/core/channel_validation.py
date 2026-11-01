@@ -23,6 +23,11 @@ its parties per input, the assistant's statement naming the task's instruction, 
 unknown added for a task carrying the outside-content mark (ADR-0351 §3:6), and it
 establishes no author as the user in its place.
 
+**Nor is the Approvals channel's** (ADR-0361 §3:1, §3:6). It is a built-in channel whose
+sensor pushes each approval request answered or expired in the hub alone; it establishes
+no author as the user in its place, and the register declares its inputs' parties empty:
+an approval's input carries no one's words (ADR-0351 §2:4, ADR-0361 §6:1).
+
 **The parties each kind declares** (ADR-0351 §3's table), per input, set by code at
 admission from the declaration and the record the sensor brings (§2:8): the hub chat's
 input, and each message it takes in, carry the owner's words; the line's carry the
@@ -78,6 +83,14 @@ _REPLY = TypeAdapter[ReplyCapability | None](ReplyCapability | None)
 #: :data:`_ESTABLISHES_THE_USER`, and nothing a caller hands ``receive`` is one: its
 #: sensor pushes each occurrence in the hub alone (§7).
 TASK_SCHEDULER: Final = "task_scheduler"
+
+#: ADR-0361 §3:1, §3:6: the channel type of **Approvals**, the built-in channel whose one
+#: place, the approvals, holds the approval requests ``request_approval`` writes. Its kind
+#: establishes no author as the user (§3:6), so it is absent from
+#: :data:`_ESTABLISHES_THE_USER`, and its inputs' parties are empty (ADR-0351 §2:4): an
+#: approval's input is structured and carries no one's words (§6:1-§6:2). Nothing a caller
+#: hands ``receive`` is one: its sensor pushes each outcome in the hub alone (§3:4).
+APPROVALS: Final = "approvals"
 
 #: ADR-0351 §3:1, §3:2: the channel types whose every message its sender wrote carries
 #: the owner's words, the one person a party names until a decision on identified
@@ -220,6 +233,9 @@ def _parties(
         if carries_outside_mark:
             return canonical_parties((statement, SupportHolder.unknown()))
         return (statement,)
+    if kind == APPROVALS:
+        # ADR-0361 §3:6, §6:1: empty, for an input carrying no one's words.
+        return ()
     msg = "the channel type declares no parties for its input (ADR-0351 §3:1)"
     raise ValueError(msg)
 
@@ -238,7 +254,8 @@ def declared_input(
     parties (§2:6), or, for an input that records none, the one set its kind declares:
     the owner on the hub chat and the line, the source an informational event names,
     or the assistant's statement on the Task Scheduler, with unknown added for a task
-    carrying the outside-content mark (§3:6). Admission never records ``None`` (§2:5).
+    carrying the outside-content mark (§3:6); and none on Approvals, whose input carries
+    no one's words (ADR-0361 §3:6). Admission never records ``None`` (§2:5).
 
     Args:
         target: The admitted input's target.

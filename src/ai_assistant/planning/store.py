@@ -22,10 +22,13 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     ActivationEffectClaim,
+    ApprovalRequestWrite,
+    ApprovalWriteAnswer,
     ObservationRecord,
     PlanExport,
     ScheduledTaskWrite,
     TaskWriteAnswer,
+    TicketClaim,
 )
 from ai_assistant.planning.activation_effects import (
     checked_effect_id,
@@ -36,6 +39,38 @@ from ai_assistant.planning.activation_effects import (
     requested_activations,
     requested_parts,
     revalidated_claim,
+)
+from ai_assistant.planning.approvals import (
+    Book,
+    by_token,
+    checked_at,
+    checked_card,
+    checked_new_request,
+    checked_plain_effect,
+    checked_request_effect,
+    checked_request_id,
+    checked_tap,
+    checked_ticket_effect,
+    checked_token,
+    decide_answer,
+    decide_card,
+    decide_expiry,
+    decide_outcome_push,
+    decide_request_write,
+    decide_ticket,
+    decide_void,
+    requested_request_ids,
+    requested_request_states,
+    spend_ticket,
+    write_request,
+)
+from ai_assistant.planning.approvals import (
+    by_person as requests_by_person,
+)
+from ai_assistant.planning.approvals import checked_person as checked_request_person
+from ai_assistant.planning.approvals import due as approvals_due
+from ai_assistant.planning.approvals import (
+    pushed as pushed_outcomes,
 )
 from ai_assistant.planning.observations import (
     checked_expected_revision,
@@ -79,6 +114,13 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
         ActivationEffect,
+        ApprovalCard,
+        ApprovalDue,
+        ApprovalOutcomePush,
+        ApprovalRequest,
+        ApprovalRequestState,
+        ApprovalRequestStep,
+        ApprovalTap,
         OccurrencePush,
         OccurrenceState,
         QuestionPart,
@@ -120,6 +162,8 @@ class InMemoryPlanStore:
         self._observations: dict[str, ObservationRecord] = {}
         # ADR-0350 §12:3: the Task Scheduler's tasks by id, in the order written.
         self._tasks: dict[str, ScheduledTask] = {}
+        # ADR-0361 §8:2: the Approvals channel's requests by id, in the order written.
+        self._requests: dict[str, ApprovalRequest] = {}
         # The last revision issued. Never reset, `clear` included: an issuer reset by
         # it would reissue a stamp a writer may still hold (ADR-0329 §16:9).
         self._issued = 0
@@ -164,7 +208,7 @@ class InMemoryPlanStore:
                 a reason or a position, or ``match`` names an id with no UTF-8
                 encoding.
         """
-        record = revalidated_claim(effect)
+        record = checked_plain_effect(revalidated_claim(effect))
         named = matched_activations(match)
         answer = decide_activation_claim(
             record,
@@ -317,7 +361,7 @@ class InMemoryPlanStore:
                 already held.
         """
         asked = checked_spawn(spawn)
-        record = checked_spawn_effect(revalidated_claim(effect))
+        record = checked_spawn_effect(checked_plain_effect(revalidated_claim(effect)))
         named = matched_activations(match)
         chain = checked_limit(chain_limit, "chain limit")
         pending = checked_limit(pending_limit, "pending limit")
@@ -516,6 +560,219 @@ class InMemoryPlanStore:
         self._tasks = schedule.tasks
         return removed
 
+    # --- the Approvals channel's requests (ADR-0361 §8:2) ------------------
+
+    def _decided(
+        self, record: ActivationEffect, named: tuple[str, ...] | None, deliberate_repeat: bool
+    ) -> ActivationEffectClaim:
+        """Decide a claim's stop, held id and backstop, as ``claim_activation_effect`` does."""
+        return decide_activation_claim(
+            record,
+            match=named,
+            deliberate_repeat=deliberate_repeat,
+            stopped=record.activation_id in self._stopped,
+            held_ids=self._activation_effects,
+            matched=(
+                ()
+                if named is None
+                else [
+                    held
+                    for held in self._activation_effects.values()
+                    if held.activation_id in named
+                ]
+            ),
+            spent=False,
+        )
+
+    def _book(self) -> Book:
+        """The requests one step decides over: a copy, so a raise leaves those held."""
+        return Book(requests=dict(self._requests))
+
+    async def write_approval_request(
+        self,
+        request: ApprovalRequest,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+    ) -> ApprovalRequestWrite:
+        """Write a request with ``request_approval``'s effect claim, in one step (§2:8-§2:9).
+
+        Decided and written with no ``await`` between, which is this store's
+        indivisible step.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the asking activation.
+            PlanningError: If the request or the effect is not valid, or an id is held.
+        """
+        asked = checked_new_request(request)
+        record = checked_request_effect(revalidated_claim(effect), asked)
+        named = matched_activations(match)
+        self._decided(record, None, deliberate_repeat)
+        book = self._book()
+        waiting = decide_request_write(book, asked)
+        if waiting is not None:
+            return waiting.model_copy(deep=True)
+        if self._decided(record, named, deliberate_repeat) is not ActivationEffectClaim.CLAIMED:
+            return ApprovalRequestWrite(answer=ApprovalWriteAnswer.ALREADY_DONE)
+        written = write_request(book, asked)
+        self._requests = book.requests
+        self._activation_effects[record.id] = record
+        return written.model_copy(deep=True)
+
+    async def approval_requests(self, request_ids: Sequence[str], /) -> tuple[ApprovalRequest, ...]:
+        """Return the named requests the store holds, in the order named.
+
+        Raises:
+            PlanningError: If ``request_ids`` is not a sequence of encodable strings.
+        """
+        named = requested_request_ids(request_ids)
+        return tuple(
+            self._requests[one].model_copy(deep=True) for one in named if one in self._requests
+        )
+
+    async def person_approval_requests(
+        self, person: str, states: Sequence[ApprovalRequestState], /
+    ) -> tuple[ApprovalRequest, ...]:
+        """Return a person's requests in any of ``states``, in the order written (§4:6).
+
+        Raises:
+            PlanningError: If ``person`` or ``states`` is not valid.
+        """
+        whose = checked_request_person(person)
+        wanted = requested_request_states(states)
+        return tuple(
+            one.model_copy(deep=True) for one in requests_by_person(self._requests, whose, wanted)
+        )
+
+    async def approval_request_by_token(self, token: str, /) -> ApprovalRequest | None:
+        """Return the request one of whose cards carries ``token``, or ``None`` (§4:10).
+
+        Raises:
+            PlanningError: If ``token`` is blank or has no UTF-8 encoding.
+        """
+        found = by_token(self._requests, checked_token(token))
+        return None if found is None else found.model_copy(deep=True)
+
+    async def record_approval_card(self, request_id: str, card: ApprovalCard, /) -> ApprovalRequest:
+        """Record one of a request's cards and its token, in one step (§4:3, §4:10).
+
+        Raises:
+            PlanningError: If an argument is not valid, no such request is held, or the
+                token is already carried.
+        """
+        named = checked_request_id(request_id)
+        posted = checked_card(card)
+        book = self._book()
+        written = decide_card(book, named, posted)
+        self._requests = book.requests
+        return written.model_copy(deep=True)
+
+    async def answer_approval_request(
+        self, request_id: str, state: ApprovalRequestState, tap: ApprovalTap, /
+    ) -> ApprovalRequestStep:
+        """Answer a pending request by a tap, the first to land winning (§4:9).
+
+        Raises:
+            PlanningError: If an argument is not valid, or no such request is held.
+        """
+        named = checked_request_id(request_id)
+        answer, tapped = checked_tap(state, tap)
+        book = self._book()
+        step = decide_answer(book, named, answer, tapped)
+        self._requests = book.requests
+        return step.model_copy(deep=True)
+
+    async def expire_approval_request(
+        self, request_id: str, at: datetime, /
+    ) -> ApprovalRequestStep:
+        """Expire a request, or void its held ticket, at its expiry (§3:5, §5:7).
+
+        Raises:
+            PlanningError: If an argument is not valid, no such request is held, or
+                ``at`` is before its expiry.
+        """
+        named = checked_request_id(request_id)
+        instant = checked_at(at)
+        book = self._book()
+        step = decide_expiry(book, named, instant)
+        self._requests = book.requests
+        return step.model_copy(deep=True)
+
+    async def void_approval_ticket(self, request_id: str, /) -> ApprovalRequestStep:
+        """Make a request's held ticket void (§5:7).
+
+        Raises:
+            PlanningError: If ``request_id`` is not valid, or no such request is held.
+        """
+        named = checked_request_id(request_id)
+        book = self._book()
+        step = decide_void(book, named)
+        self._requests = book.requests
+        return step.model_copy(deep=True)
+
+    async def due_approval_outcomes(self, at: datetime, /) -> ApprovalDue:
+        """Return the outcomes to push, the requests expiring, and the next expiry (§3:4).
+
+        Raises:
+            PlanningError: If ``at`` is not a timezone-aware instant.
+        """
+        return approvals_due(self._requests, checked_at(at)).model_copy(deep=True)
+
+    async def pushed_approval_outcomes(self) -> tuple[ApprovalRequest, ...]:
+        """Return every request whose outcome is marked pushed, in the order written (§3:7)."""
+        return tuple(one.model_copy(deep=True) for one in pushed_outcomes(self._requests))
+
+    async def mark_approval_outcome_pushed(
+        self, request_id: str, activation_id: str, /
+    ) -> ApprovalOutcomePush:
+        """Mark a request's outcome pushed, naming its activation, in one step (§3:4).
+
+        Raises:
+            PlanningError: If an id is not valid, no such request is held, or the
+                activation was already pushed to.
+        """
+        named = checked_request_id(request_id)
+        pushed_to = checked_request_id(activation_id, "activation")
+        book = self._book()
+        answer = decide_outcome_push(book, named, pushed_to)
+        self._requests = book.requests
+        return answer
+
+    async def claim_ticket_call(
+        self,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+    ) -> TicketClaim:
+        """Claim a call under a ticket, keyed by its request, spending it (§5:3-§5:5).
+
+        Decided and written with no ``await`` between, which is this store's
+        indivisible step.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the activation.
+            PlanningError: If the effect is not valid, its id is held, or its capability
+                is not the ticket's call's.
+        """
+        record = checked_ticket_effect(revalidated_claim(effect))
+        named = matched_activations(match)
+        self._decided(record, None, deliberate_repeat)
+        book = self._book()
+        carried = any(held.ticket == record.ticket for held in self._activation_effects.values())
+        refused = decide_ticket(book, record, carried=carried)
+        if refused is not None:
+            return refused
+        if self._decided(record, named, deliberate_repeat) is not ActivationEffectClaim.CLAIMED:
+            return TicketClaim.ALREADY_DONE
+        spend_ticket(book, record)
+        self._requests = book.requests
+        self._activation_effects[record.id] = record
+        return TicketClaim.CLAIMED
+
     async def export(self) -> PlanExport:
         """Return a portable, internally consistent snapshot (ADR-0004 §6).
 
@@ -543,6 +800,8 @@ class InMemoryPlanStore:
             ),
             # ADR-0350 §12:3: every scheduled task, in the order written.
             scheduled_tasks=tuple(one.model_copy(deep=True) for one in self._tasks.values()),
+            # ADR-0361 §8:2: every approval request, in the order written.
+            approval_requests=tuple(one.model_copy(deep=True) for one in self._requests.values()),
         )
 
     async def clear(self) -> int:
@@ -556,9 +815,11 @@ class InMemoryPlanStore:
             + len(self._activation_effects)
             + len(self._observations)
             + len(self._tasks)
+            + len(self._requests)
         )
         self._stopped.clear()
         self._activation_effects.clear()
         self._observations.clear()
         self._tasks.clear()
+        self._requests.clear()
         return removed

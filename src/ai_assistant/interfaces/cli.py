@@ -306,6 +306,7 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportHolder,
     SupportOrigin,
+    TapOnCard,
     ToolOutcome,
     TranscriptMessage,
     UserMessage,
@@ -8363,6 +8364,10 @@ def _approval_giver(giver: ApprovalGiver) -> str:
             return "by you, through the hub chat"
         case ApprovalGiver.USER_THROUGH_TELEGRAM:
             return "by you, through Telegram"
+        case ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD:
+            return "by you, by a tap on its card on Telegram"
+        case ApprovalGiver.USER_TAP_ON_HUB_PANEL:
+            return "by you, by a tap on the hub page"
     assert_never(giver)
 
 
@@ -8374,10 +8379,12 @@ def _approval_end(end: ApprovalEnd) -> str:
     match end:
         case ApprovalEnd.WHEN_USED:
             return "it ends when used: each part covers its call once"
+        case ApprovalEnd.WHEN_USED_OR_EXPIRED:
+            return "it ends when used or when its request expires: it covers its call once"
     assert_never(end)
 
 
-def _render_approval(approval: Approval, part: QuestionPart) -> None:
+def _render_approval(approval: Approval, part: QuestionPart | None) -> None:
     """The approval a row names, in ADR-0321 §4:8's own terms (#3073).
 
     §4:8: "Every decision about a call that runs under an approval names the
@@ -8396,14 +8403,33 @@ def _render_approval(approval: Approval, part: QuestionPart) -> None:
     rendered because a round names its message (ADR-0307 §3:1) and no other name
     for it reaches this surface; nothing here resolves one.
 
+    **A tap on a card** (ADR-0361 §5:4) is rendered as what it is: the request it
+    approved, named by its id, and the round and activation that asked. Its key is the
+    request, so the row names no part.
+
     Every value is neutralised for this terminal (ADR-0186 §7's last clause).
 
     Args:
         approval: The approval the row names.
-        part: The part of the approval's question this call is (``approved_part``).
+        part: The part of the approval's question this call is (``approved_part``), or
+            ``None`` for a tap's approval.
     """
     given = approval.given
     how = approval.how
+    if isinstance(how, TapOnCard):
+        _print(
+            f"  [bold]Your yes:[/] given {_decided_at(given.at)} "
+            f"{_approval_giver(approval.who)}, in activation {_safe(given.activation_id)} "
+            f"[dim](a tap on the card for request {_safe(how.request)})[/]"
+        )
+        _print(
+            f"    to the request written by round {_safe(how.round)}, asked in activation "
+            f"{_safe(how.activation_id)}; it expires {_decided_at(how.expires_at)}"
+        )
+        _print(f"    It covers that request's one call, and {_approval_end(approval.ends)}")
+        return
+    if part is None:  # pragma: no cover - a question's approval always names its part
+        return
     covers = ", ".join(str(one.part) for one in approval.covers)
     _print(
         f"  [bold]Your yes:[/] given {_decided_at(given.at)} "
@@ -8828,7 +8854,7 @@ def _render_decision(decision: PermissionDecision) -> None:
             else ""
         )
         _print(f"  [bold]Resolves the ruling:[/] {_safe(decision.resolves)}{after_a_yes}")
-    if approval is not None and decision.approved_part is not None:
+    if approval is not None:
         _render_approval(approval, decision.approved_part)
     if decision.ruling.outcome is PermissionOutcome.ALLOW:
         _print(f"  {_authorisation_line(decision)}")

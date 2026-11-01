@@ -108,8 +108,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "18"
-    assert export.schema_version == 26
+    assert _label(legacy) == "19"
+    assert export.schema_version == 27
     assert export.stopped_activations == ("act-before-stopped",)
     effects = {one.id: one for one in export.activation_effects}
     assert list(effects) == ["effect-before-call", "effect-before-message", "effect-before-part"]
@@ -121,7 +121,7 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     assert export.scheduled_tasks == ()
     # The steps move the label and add the one empty table, and rewrite no row.
     after = _dump(legacy)
-    assert set(after) == {*_TABLES_BEFORE, "scheduled_tasks"}
+    assert set(after) == {*_TABLES_BEFORE, "scheduled_tasks", "approval_requests"}
     assert after["scheduled_tasks"] == []
     assert {table: after[table] for table in before if table != "meta"} == {
         table: rows for table, rows in before.items() if table != "meta"
@@ -174,7 +174,7 @@ async def test_the_upgraded_file_holds_a_scheduled_task_and_keeps_what_it_carrie
         assert [one.id for one in spent] == ["effect-before-part"]
     finally:
         reopened.close()
-    assert _label(legacy) == "18"
+    assert _label(legacy) == "19"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

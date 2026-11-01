@@ -351,7 +351,7 @@ def test_an_approval_has_the_five_slots() -> None:
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
-        pytest.param({"covers": ()}, "at least 1", id="covers-nothing"),
+        pytest.param({"covers": ()}, "at least one part", id="covers-nothing"),
         pytest.param({"covers": (_PART, _PART)}, "once", id="a-part-twice"),
         pytest.param(
             {"covers": (QuestionPart(round="q-other", part=1),)},

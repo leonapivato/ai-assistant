@@ -87,10 +87,12 @@ def test_receive_admits_no_telegram_input(reply: WholeTextReply | None) -> None:
 
 
 def test_the_line_has_its_own_approval_giver() -> None:
-    """§4:9: added beside the hub chat's, never renaming it."""
+    """§4:9: added beside the hub chat's, never renaming it; ADR-0361 §4:9 adds the taps'."""
     assert {one.value for one in ApprovalGiver} == {
         "user_through_hub_chat",
         "user_through_telegram",
+        "user_tap_on_telegram_card",
+        "user_tap_on_hub_panel",
     }
 
 
