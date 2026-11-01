@@ -179,6 +179,7 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     OWNER_PERSON_ID,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
+    ApprovalChoice,
     Attestation,
     Belief,
     BeliefBand,
@@ -221,7 +222,7 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.interfaces.devices import this_device
-from ai_assistant.interfaces.gateway import person_views, streams
+from ai_assistant.interfaces.gateway import approval_views, person_views, streams
 from ai_assistant.interfaces.gateway.change_stream import paced
 from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream, write_stream
 from ai_assistant.interfaces.gateway.edge import (
@@ -463,6 +464,19 @@ _REMOVE_STYLE_MARK_PATH: Final = "/person/style-mark/remove"
 _ACCEPT_SUGGESTION_PATH: Final = "/person/suggestion/accept"
 _DISMISS_SUGGESTION_PATH: Final = "/person/suggestion/dismiss"
 
+#: ADR-0361 §4:6-§4:9's approvals panel: its query and its tap, one path per
+#: ``AssistantEngine`` member §8:4 adds. A read and a write never share a path, for the
+#: reason the person model's do not: the door classifies "from its method and path
+#: alone" (ADR-0168 §6). ADR-0177 §1:1's enumeration gains both by ADR-0361 §11's record.
+#:
+#: **Neither carries a person**: the panel and its tap are the person's own, established
+#: by the device being admitted under ADR-0124 (§4:8), so the page names no one and the
+#: gateway supplies no one. **Who may tap is not decided here either**: both sit in the
+#: hub's route table's command row, so a device without the command role is refused at
+#: the hub before dispatch, and this gateway relays that refusal as every other.
+_APPROVALS_PATH: Final = "/approvals"
+_TAP_APPROVAL_PATH: Final = "/approval/tap"
+
 #: ADR-0177 §10's notification review surface. Five paths for five operations, and
 #: **none of them is** :data:`_DELIVERIES_PATH`: what these operate on is the
 #: notification *record* (ADR-0130), where a delivery is what the gateway's own poll
@@ -539,6 +553,8 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _REMOVE_STYLE_MARK_PATH): "remove_style_mark",
     ("POST", _ACCEPT_SUGGESTION_PATH): "accept_person_suggestion",
     ("POST", _DISMISS_SUGGESTION_PATH): "dismiss_person_suggestion",
+    ("POST", _APPROVALS_PATH): "approvals",
+    ("POST", _TAP_APPROVAL_PATH): "tap_approval",
     ("POST", _NOTIFICATIONS_PATH): "notifications",
     ("POST", _DISMISS_NOTIFICATION_PATH): "dismiss_notification",
     ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
@@ -1516,6 +1532,8 @@ class Gateway:
             _REMOVE_STYLE_MARK_PATH: self._remove_style_mark,
             _ACCEPT_SUGGESTION_PATH: self._accept_person_suggestion,
             _DISMISS_SUGGESTION_PATH: self._dismiss_person_suggestion,
+            _APPROVALS_PATH: self._approvals,
+            _TAP_APPROVAL_PATH: self._tap_approval,
             _NOTIFICATIONS_PATH: self._notifications,
             _DISMISS_NOTIFICATION_PATH: self._dismiss_notification,
             _FORGET_NOTIFICATION_PATH: self._forget_notification,
@@ -3955,6 +3973,47 @@ class Gateway:
             fault=_person_model_fault,
         )
         return _rendered({"edit": person_views.edit_view(edit)})
+
+    # --- ADR-0361 §4:6-§4:9: the approvals panel ------------------------------
+    #
+    # Each handler is one engine call with the browser's own arguments, none of them a
+    # person: the panel is the person's own, whom the admitted device establishes
+    # (§4:8). A tap is a command, never perceived (§4:7), and what it came to is the
+    # hub's store's to say; the gateway relays it.
+
+    async def _approvals(self, request: Request) -> Response:
+        """Read the person's requests, as the approvals panel shows them (ADR-0361 §4:6).
+
+        Args:
+            request: The admitted request, carrying an optional ``limit``.
+
+        Returns:
+            The pending requests and the most recently ended, each as its card shows it.
+        """
+        payload = _payload(request)
+        panel = await self._relayed(
+            partial(self._engine.approvals, limit=_page(payload, "limit", DEFAULT_PAGE_SIZE))
+        )
+        return _rendered({"approvals": approval_views.panel_view(panel)})
+
+    async def _tap_approval(self, request: Request) -> Response:
+        """Tap Approve or Deny on one of the person's requests (ADR-0361 §4:7-§4:9).
+
+        Args:
+            request: The admitted request, carrying ``request_id`` and ``choice``.
+
+        Returns:
+            What the tap came to, and the request as the panel now shows it.
+        """
+        payload = _payload(request)
+        tapped = await self._relayed(
+            partial(
+                self._engine.tap_approval,
+                _required_string(payload, "request_id"),
+                choice=_member(payload, "choice", ApprovalChoice),
+            )
+        )
+        return _rendered({"tap": approval_views.tap_view(tapped)})
 
     # --- ADR-0078 §8: the deferred-question surface -----------------------
 

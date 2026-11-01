@@ -85,6 +85,7 @@
                 interesting thing about it would be which of the two had gone stale.
               -->
               <nav id="panel-index" class="panel-index" aria-label="Panels on this page" hidden></nav>
+              <button type="button" id="approvals-button">Approvals</button>
               <button type="button" id="conversations-button">Conversations</button>
               <button type="button" id="about-button">About you</button>
               <button type="button" id="beliefs-button">Beliefs</button>
@@ -364,6 +365,33 @@
       <section id="acts" class="panel" hidden>
         <h3>What happened</h3>
         <div id="act-log"></div>
+      </section>
+
+      <!--
+        ADR-0361 §4:6's approvals panel: the requests waiting on your yes or no, each as
+        its card in the line's chat shows it, with Approve and Deny, and below them the
+        ones answered or expired most recently, with where each stands. Every row is
+        built by `app.js` from one read; each text is the card's own, rendered by the hub
+        through the one renderer every surface shows a request by (§2:11), and shown
+        whole, so a request too long for a Telegram message is answered here (§4:4).
+
+        A tap is a command, never a message (§4:7): nothing here is read by a model. It
+        is carried out only from a device admitted to the hub (§4:8), which is the hub's
+        route table's rule and not this page's: a device without the commands role is
+        refused before anything changes, and that refusal reaches the panel as every
+        other does. The first tap to land, here or on the card, wins (§4:9).
+      -->
+      <section id="approvals" class="panel" hidden>
+        <h3>Approvals</h3>
+        <p class="hint">
+          What I have asked you to approve before I do it. A yes lets me do exactly what
+          the request shows, once; a yes typed in a conversation approves nothing.
+        </p>
+        <p class="hint" id="approvals-outcome" aria-live="polite"></p>
+        <h4>Waiting for your answer</h4>
+        <div id="approvals-pending"></div>
+        <h4>Answered recently</h4>
+        <div id="approvals-recent"></div>
       </section>
 
       <!--

@@ -4980,6 +4980,177 @@ async function forgetBelief(id) {
   }
 }
 
+// --- the approvals panel (ADR-0361 §4:6-§4:9) ------------------------------------
+//
+// One read of the person's requests fills the panel: those waiting for an answer, the
+// oldest first, each with Approve and Deny, and those answered or expired most recently.
+// Every request's text is its card's own, rendered by the hub through the one renderer
+// every surface shows a request by (§2:11), so this page words no request itself and
+// cannot show one differently from the card in the line's chat. It is shown whole,
+// which is where a request too long for one Telegram message is answered (§4:4).
+//
+// **A tap is a command** (§4:7), sent once and never retried: what it came to is the
+// hub's to say, and the panel is read again after it. The first tap to land, here or on
+// the card, wins (§4:9), and a later one is said with where the request now stands.
+//
+// **Carried out only from a device admitted to the hub** (§4:8), which is the hub's
+// route table's rule and not this page's: a device without the commands role is refused
+// before anything changes, and that refusal reaches the panel as every other does.
+
+// Where a request stands, as its card says it (§2:11, §4:5), for a tap answered with the
+// request's state.
+const APPROVAL_STATE_WORDS = {
+  pending: "Waiting for your answer.",
+  approved: "Approved: not used yet.",
+  used: "Approved and used.",
+  not_used: "Approved, not used.",
+  denied: "Denied.",
+  expired: "Expired: it was not answered in time.",
+};
+
+// Where a tap came from, by the hub's name for who answered (§4:9).
+const APPROVAL_GIVER_WORDS = {
+  user_tap_on_hub_panel: "on this page",
+  user_tap_on_telegram_card: "on its card in Telegram",
+};
+
+// What a tap came to, in words.
+function approvalTapWords(choice, tap) {
+  if (tap.answer === "answered") {
+    return choice === "approve"
+      ? "Approved. I may now do exactly what it shows, once."
+      : "Denied. I will not do it.";
+  }
+  if (tap.answer === "expired") {
+    return "That request expired before your answer arrived, so nothing changed.";
+  }
+  if (tap.answer === "unknown") {
+    return "That request is not one waiting on you here, so nothing changed.";
+  }
+  const stands = APPROVAL_STATE_WORDS[tap.entry.state] || tap.entry.state;
+  return `That was already answered, so nothing changed. It stands: ${stands}`;
+}
+
+// When a request was asked, or when and where it was answered.
+function approvalWhen(entry) {
+  if (entry.answered_by !== null) {
+    const where = APPROVAL_GIVER_WORDS[entry.answered_by] || "";
+    return `Answered ${where} · ${localTime(entry.answered_at)}`;
+  }
+  return `Asked ${localTime(entry.written_at)}`;
+}
+
+// Which read of the panel is current: an answer to a read the panel has since started
+// again — opened from the menu, or read after a tap — renders nothing.
+const approvalsRuns = { current: 0 };
+
+// The panel's own entry, and the read every tap ends with. `kept` is whether the line
+// saying what the last tap did stays: it does after a tap, and is cleared when the panel
+// is opened from the menu.
+async function openApprovals(kept) {
+  if (kept !== true) {
+    el("approvals-outcome").textContent = "";
+  }
+  approvalsRuns.current += 1;
+  const run = approvalsRuns.current;
+  fault(null, "approvals");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(half, "/approvals", { limit: PAGE }, "approvals");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null || run !== approvalsRuns.current) {
+      return;
+    }
+    renderApprovals(body.approvals);
+    show("approvals", true);
+  } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "approvals");
+  }
+}
+
+// Both lists from one answer.
+function renderApprovals(panel) {
+  const pending = el("approvals-pending");
+  const recent = el("approvals-recent");
+  clearNode(pending);
+  clearNode(recent);
+  if (panel.pending.length === 0) {
+    line(pending, "Nothing is waiting for your answer.", "hint");
+  }
+  panel.pending.forEach((one) => renderApproval(pending, one, true));
+  if (panel.recent.length === 0) {
+    line(recent, "Nothing yet.", "hint");
+  }
+  panel.recent.forEach((one) => renderApproval(recent, one, false));
+}
+
+// One request: its card's text, when, and on a pending one its two buttons.
+function renderApproval(list, entry, open) {
+  const item = document.createElement("div");
+  item.className = "approval-row";
+  line(item, entry.text, "reply");
+  line(item, approvalWhen(entry), "hint");
+  if (open) {
+    const made = [];
+    made.push(control("Approve", () => tapApproval(entry.request_id, "approve", made)));
+    made.push(control("Deny", () => tapApproval(entry.request_id, "deny", made)));
+    controls(item, made);
+  }
+  list.appendChild(item);
+}
+
+// One tap, said on the outcome line, then the panel read again. The row's buttons are
+// held while it is out, so a second press is not a second tap; a tap that did not land
+// is said, and the person may tap again, which the hub answers with the request's state.
+async function tapApproval(requestId, choice, buttons) {
+  fault(null, "approvals");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  const hold = (held) => {
+    buttons.forEach((one) => {
+      one.disabled = held;
+    });
+  };
+  hold(true);
+  try {
+    const asked = { request_id: requestId, choice: choice };
+    const body = await relay(half, "/approval/tap", asked, "approvals");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      hold(false);
+      return;
+    }
+    el("approvals-outcome").textContent = approvalTapWords(choice, body.tap);
+    await openApprovals(true);
+  } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    hold(false);
+    fault(GATEWAY_GONE, "approvals");
+  }
+}
+
 // --- the person model: the About you panel and pinning (ADR-0338 §8:2-§8:3) -------
 //
 // One read of the person's model fills the panel, every list of it a page beside its
@@ -7120,6 +7291,7 @@ function renderConnectionAct(list, one) {
 }
 
 const CONTROL_PANELS = [
+  "approvals",
   "about",
   "sources",
   "standing",
@@ -7287,6 +7459,7 @@ window.addEventListener("online", chatOnline);
 el("sources-button").addEventListener("click", fromMenu("sources", listSources));
 el("standing-button").addEventListener("click", fromMenu("standing", listStanding));
 el("history-button").addEventListener("click", fromMenu("history", listGrantHistory));
+el("approvals-button").addEventListener("click", fromMenu("approvals", openApprovals));
 el("about-button").addEventListener("click", fromMenu("about", openAbout));
 el("beliefs-button").addEventListener("click", fromMenu("beliefs", openBeliefs));
 // A band changed is a different question, so it starts the listing again rather than
