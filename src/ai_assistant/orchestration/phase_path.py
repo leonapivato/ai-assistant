@@ -6351,22 +6351,18 @@ class PhasePath:
         scheduling = working.scheduling
         if scheduling is not None and scheduling.speaks_by_label:
             return None if place is None else scheduling.targets.get(place)
-        if (
-            place is not None
-            and scheduling is not None
-            and place in _taken_places(active_state(), None)
-            and (taken := scheduling.targets.get(place)) is not None
-        ):
-            # ADR-0361 §7:3: a place an input taken by a take came from, on its list.
-            return taken
-        if working.target is not None:
-            return working.target
-        if working.conversation_id is None:
-            return None
-        return PlaceTarget(
-            channel=conversation_channel(working.conversation_id),
-            writer=_ConversationWriter(self._writer, working.conversation_id),
-        )
+        own: PlaceTarget | None = working.target
+        if own is None and working.conversation_id is not None:
+            own = PlaceTarget(
+                channel=conversation_channel(working.conversation_id),
+                writer=_ConversationWriter(self._writer, working.conversation_id),
+            )
+        own_place = None if own is None else own.place
+        if place is not None and place in _taken_places(active_state(), own_place):
+            # ADR-0361 §7:3: a place an input taken by a take came from, on its list; one
+            # gone since goes nowhere, never into another place.
+            return None if scheduling is None else scheduling.targets.get(place)
+        return own
 
     async def _approved(
         self, given: PhasePass, working: PhaseWorking
