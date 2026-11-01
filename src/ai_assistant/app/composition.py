@@ -133,7 +133,7 @@ from ai_assistant.orchestration.story_tidy_up import (
     StoryTidyUp,
 )
 from ai_assistant.orchestration.task_manager import TaskManagerLimits, TaskSchedulerSeams
-from ai_assistant.orchestration.telegram import TelegramLineSeams
+from ai_assistant.orchestration.telegram import TelegramCards, TelegramLineSeams, line_channel
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
     RecentEpisodes,
@@ -1938,24 +1938,40 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 line_transport = StreamOutboundTransport()
             else:
                 line_transport = StreamOutboundTransport(anchors=telegram_relay.anchors)
-            telegram_line = TelegramLineSeams(
-                client=HttpsTelegramBotClient(
-                    reference=settings.telegram_connection,
-                    chat_id=settings.telegram_user_id,
-                    records=connections,
-                    secrets=integration_secrets,
-                    exchange=HttpsExchange(
-                        transport=line_transport,
-                        max_response_bytes=settings.telegram_max_response_bytes,
-                    ),
-                    relay=telegram_relay,
+            line_client = HttpsTelegramBotClient(
+                reference=settings.telegram_connection,
+                chat_id=settings.telegram_user_id,
+                records=connections,
+                secrets=integration_secrets,
+                exchange=HttpsExchange(
+                    transport=line_transport,
+                    max_response_bytes=settings.telegram_max_response_bytes,
                 ),
+                relay=telegram_relay,
+            )
+            # ADR-0361 §4:2-§4:10: the line's approval cards, over the same bot, its
+            # records and one chat: `request_approval` posts through them, the reader
+            # edits them and carries a tap out. The line is the owner's, so a tap
+            # answers only the owner's requests (ADR-0338 §2:2).
+            line_cards = TelegramCards(
+                client=line_client,
+                intake=telegram_intake,
+                channel=line_channel(settings.telegram_connection, settings.telegram_user_id),
+                send_bound=settings.telegram_send_bound,
+                plans=plans,
+                memory=memory,
+                person=OWNER_PERSON_ID,
+                now=_utcnow,
+            )
+            telegram_line = TelegramLineSeams(
+                client=line_client,
                 intake=telegram_intake,
                 reference=settings.telegram_connection,
                 poll_wait=settings.telegram_poll_wait,
                 poll_bound=settings.telegram_poll_bound,
                 send_bound=settings.telegram_send_bound,
                 start_wait=settings.telegram_start_wait,
+                cards=line_cards,
             )
         engine = Engine(
             plans=plans,
@@ -2130,12 +2146,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             ),
             # ADR-0361 §3:4-§3:5: the Approvals channel, on every deployment: its sensor
             # starts with the hub and stops with it, rechecking as the Task Scheduler's
-            # does, and a request expires 24 hours after it is written. The line's card
-            # is AP3's (§9:3): until its poster is wired, no card is posted and a request
-            # waits on the hub page's panel alone.
+            # does, and a request expires 24 hours after it is written. Where the line
+            # is configured its cards are posted on it (§4:2); where it is not, no card
+            # is posted and a request waits on the hub page's panel alone.
             approvals=ApprovalsSeams(
                 expiry=APPROVAL_EXPIRY,
                 recheck=settings.task_scheduler_recheck_interval,
+                cards=None if telegram_line is None else telegram_line.cards,
             ),
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
@@ -2415,6 +2432,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             chat_composing_lapse=settings.chat_composing_lapse,
             chat_composing_cap=settings.chat_composing_cap,
         )
+        # ADR-0361 §3:4: a tap on a card that changed a request wakes the Approvals sensor.
+        _wake_cards(telegram_line, engine)
         # The **same** trace store again, narrowed a third way (ADR-0119 §7): a
         # ``TraceSink`` for `service`'s startup stamp, which appends one
         # ``CONFIGURATION`` trace and can no more walk the store than an emitter
@@ -3763,6 +3782,16 @@ def _uuid() -> str:
     ``SourceGrant``" on.
     """
     return str(uuid.uuid4())
+
+
+def _wake_cards(line: TelegramLineSeams | None, engine: Engine) -> None:
+    """Have the line's cards wake the Approvals sensor, once the engine is built.
+
+    The cards are built with the line's seams, before the engine that holds the sensor
+    (ADR-0361 §3:4, §4:9).
+    """
+    if line is not None and line.cards is not None:
+        line.cards.wake_with(engine.approvals_changed)
 
 
 def _utcnow() -> datetime:
