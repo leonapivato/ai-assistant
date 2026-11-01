@@ -1,6 +1,8 @@
 # ADR-0361 §9:5's first case: round 1 sent the email Leo asked for, from his own address,
 # and it came back needing his yes and saying to ask through request_approval with the
 # same arguments (§2:4). This round asks for it on a card, never by a question in words.
+# A code check that request_approval was called passes a request for another call beside
+# a question in words, so this property is read.
 prompt = "planning"
 guards = "yes_without_question"
 came_from = "2026-11-01"
@@ -8,8 +10,8 @@ set = "development"
 samples = 3
 
 [property]
-check = "calls_include"
-capabilities = ["request_approval"]
+check = "read"
+read = "Calls request_approval for the email call of round 1, to maren@example.org from Leo's own address with the same subject and words, and asks Leo no question in words about sending it."
 
 [input]
 file = "an-email-needing-a-yes-is-asked-on-a-card.json"

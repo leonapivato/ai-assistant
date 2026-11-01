@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+import pytest
+
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActionRequest,
@@ -401,3 +403,31 @@ async def test_a_direct_call_a_pending_request_holds_waits_on_the_card() -> None
     assert verdict.verdict is Verdict.NEEDS_YOU
     assert verdict.reason == ALREADY_ON_A_CARD
     assert decided.allowed == ()
+
+
+@pytest.mark.parametrize("asked_first", [True, False], ids=["request-first", "direct-first"])
+async def test_a_direct_call_this_rounds_request_asks_about_waits_on_its_card(
+    asked_first: bool,
+) -> None:
+    """§2:3, §2:8: planning narrowed it, in either order, so it runs only under a ticket."""
+    asking = CallToAuthorize(
+        ProposedCall(
+            call_id="ask-1",
+            name="request_approval",
+            arguments={
+                "call": {"capability": "note", "arguments": {"date": "2026-11-02"}},
+                "why": "You asked me to note it.",
+            },
+        )
+    )
+    direct = CallToAuthorize(
+        ProposedCall(call_id="note-1", name="note", arguments={"date": "2026-11-02"})
+    )
+    calls = (asking, direct) if asked_first else (direct, asking)
+    decided = await _Hub().authorize(*calls, person=OWNER_PERSON_ID)
+
+    verdicts = {one.call_id: one for one in decided.verdicts}
+    assert verdicts["ask-1"].verdict is Verdict.ALLOWED
+    assert verdicts["note-1"].verdict is Verdict.NEEDS_YOU
+    assert verdicts["note-1"].reason == ALREADY_ON_A_CARD
+    assert [one.call.request.tool.capability for one in decided.allowed] == ["request_approval"]

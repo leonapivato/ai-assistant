@@ -13,6 +13,7 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from exchange_support import tags, text_call
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from datetime import datetime
 
+    import pytest
     from test_engine import Harness
 
     from ai_assistant.core.types import OfferedTool, PlanningExchange
@@ -637,3 +639,41 @@ def test_work_no_author_established_for_answers_an_offer_code_linked_to_it() -> 
         PhasePath._running_calls(cast("PhasePath", None), None, cast("Any", None), offers=False)
         == frozenset()
     )
+
+
+def test_a_message_into_a_taken_place_gone_since_goes_nowhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0361 §7:3, ADR-0357 §2:4: never redirected into the activation's own place."""
+    from ai_assistant.core.types import (  # noqa: PLC0415
+        ChannelIdentity,
+        JoinedInput,
+        RecordedInputMessage,
+    )
+    from ai_assistant.orchestration import phase_path  # noqa: PLC0415
+    from ai_assistant.orchestration.matters import Became, Named  # noqa: PLC0415
+
+    taken = ChannelIdentity(channel_type="conversation", instance_id="c-2")
+    state = SimpleNamespace(
+        took=[Named("act-newer", None, Became.TAKEN)],
+        joined=[
+            JoinedInput(
+                joined_at=AT,
+                channel=taken,
+                messages=(RecordedInputMessage(text="only two bedrooms", sent_at=AT),),
+                taken_over_from="act-newer",
+            )
+        ],
+    )
+    monkeypatch.setattr(phase_path, "active_state", lambda: state)
+    working = SimpleNamespace(
+        scheduling=SimpleNamespace(speaks_by_label=False, targets={}),
+        target=None,
+        conversation_id="c-1",
+    )
+    path = cast("PhasePath", SimpleNamespace(_writer=None))
+    target = PhasePath._target(path, cast("Any", working), "conversation:c-2")
+    assert target is None, "gone since the list was built: nowhere"
+    own = PhasePath._target(path, cast("Any", working), "conversation:c-1")
+    assert own is not None
+    assert own.place == "conversation:c-1"

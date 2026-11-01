@@ -283,6 +283,41 @@ _TICKET_NOT_THE_CALL: Final = (
 )
 
 
+def _held_by_this_rounds_requests(state: _Round) -> None:
+    """A direct call this round's own request asks about waits on its card (§2:3, §2:8).
+
+    The round's calls are ruled before any request of it is written, so a direct call
+    identical to the call a ``request_approval`` of the same round asks about, in either
+    order, is held back as already asked: planning narrowed it, and it runs only under
+    the ticket a tap grants.
+    """
+    asked = [one.requested for one in state.allowed if one.requested is not None]
+    if not asked:
+        return
+    held: set[str] = set()
+    for one in state.allowed:
+        if one.requested is not None or one.call.decision.approval is not None:
+            continue
+        request = one.call.request
+        try:
+            same = RequestedCall(
+                tool=request.tool, values=request.parameters, binding=request.egress_binding
+            )
+        except ValidationError, ValueError:
+            continue
+        if any(each.same_call(same) for each in asked):
+            held.add(str(one.call.decision.id))
+    if not held:
+        return
+    state.allowed = [one for one in state.allowed if str(one.call.decision.id) not in held]
+    state.verdicts = [
+        replace(one, verdict=Verdict.NEEDS_YOU, reason=ALREADY_ON_A_CARD)
+        if one.decision_id in held
+        else one
+        for one in state.verdicts
+    ]
+
+
 def _not_asked(reason: str | None) -> str:
     """ADR-0361 §2:3: a nested call refused by the ruling is not to be asked about."""
     why = "" if reason is None else f" ({reason})"
@@ -1319,6 +1354,7 @@ class AuthorizingStage:
         progress.append(state)
         for one in snapshot.calls:
             await self._check(one, state)
+        _held_by_this_rounds_requests(state)
         stories: tuple[str, ...] = ()
         if any(not one.call.request.tool.safe_to_repeat for one in state.allowed):
             stories = await self._stories_of(state)
