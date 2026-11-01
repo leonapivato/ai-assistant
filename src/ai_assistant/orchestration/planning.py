@@ -3015,6 +3015,30 @@ class _Request:
                 lines.append(f"    {_tag('place', attributes, one.description)}")
         return lines
 
+    def _places_added(self) -> list[str]:
+        """Each place newly on the work's list, under its ``L`` label (ADR-0361 §7:3).
+
+        A place an input taken by a take came from joins the list mid-work; a ``text``
+        call may name it by ``via`` once it is shown here.
+        """
+        fresh = [
+            one
+            for one in self._inputs.places or ()
+            if self._book.held(LabelKind.PLACE, one.place) is None
+        ]
+        lines: list[str] = []
+        for one in fresh:
+            attributes = [
+                ("label", self._book.label(LabelKind.PLACE, one.place)),
+                ("from", _SYSTEM),
+            ]
+            if one.suggested:
+                attributes.append(("suggested", "yes"))
+            lines.append(
+                f"- A place is now on your place list: {_tag('place', attributes, one.description)}"
+            )
+        return lines
+
     # --- the origin's window (ADR-0353 §2, ADR-0356 §3:2) ---
 
     def _origin_sections(self) -> tuple[list[str], list[str]]:
@@ -4069,6 +4093,7 @@ class _Request:
         for digest in evidence:
             news.extend(self._evidence_lines(digest))
         news.extend(self.tickets_news())
+        news.extend(self._places_added())
         news.extend(self._matters_changed())
         news.extend(self._forgotten(shown))
         news.extend(self._works_changed(shown))

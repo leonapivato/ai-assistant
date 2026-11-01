@@ -118,6 +118,7 @@ if TYPE_CHECKING:
         EvaluationTrace,
         MemoryRecord,
     )
+    from ai_assistant.orchestration.approval_calls import ApprovalsSeams
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.matters_pass import MattersPass
     from ai_assistant.orchestration.person_block import PersonBlocks
@@ -343,6 +344,8 @@ class Harness:
         # ADR-0350's Task Scheduler. `None` is every other case's deployment: no sensor,
         # no spawn, and a stop that cascades nothing.
         task_scheduler: TaskSchedulerSeams | None = None,
+        # ADR-0361's Approvals channel. `None` is every other case's deployment.
+        approvals: ApprovalsSeams | None = None,
     ) -> None:
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
         # half a pipeline. Defaulted to the canonical fakes, and kept on the harness so
@@ -471,6 +474,7 @@ class Harness:
             person_blocks=person_blocks,
             chat_start_wait=chat_start_wait,
             task_scheduler=task_scheduler,
+            approvals=approvals,
         )
 
 
