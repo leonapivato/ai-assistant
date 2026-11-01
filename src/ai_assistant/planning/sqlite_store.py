@@ -263,6 +263,11 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: record's ``ticket`` and ``request`` (§5:5, §2:9) ride in its blob, empty on every record
 #: written before them. A build reading 18 refuses a file at 19, whose table it would
 #: leave outside export and clear (ADR-0326 §5:3).
+#:
+#: A request's call's ``wording`` (ADR-0338 §8:6, ADR-0361 §2:11) rides in the request's
+#: blob too, left out where unset, so a version 19 file written before it reads unchanged:
+#: its upgrade is the empty one ADR-0326 §4's note names, the label stays, and
+#: ``tests/planning/test_plan_store_upgrade_request_wording.py`` is its test.
 _SCHEMA_VERSION = 19
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the

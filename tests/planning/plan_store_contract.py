@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     ApprovalStepAnswer,
     ApprovalTap,
     ApprovalWriteAnswer,
+    CapabilityEffect,
     ChannelIdentity,
     CostBasis,
     DueAfterTasks,
@@ -1035,6 +1036,45 @@ def _spawn_tool() -> ToolDefinition:
     )
 
 
+def _memory_tool(capability: str) -> ToolDefinition:
+    """A ``pin`` or an ``unpin``, naming one memory by its id (ADR-0338 §8:3)."""
+    return ToolDefinition(
+        **with_phase_declaration(  # type: ignore[arg-type]  # heterogeneous test kwargs
+            {
+                "id": capability,
+                "capability": capability,
+                "description": f"The {capability} call.",
+                "risk_level": RiskLevel.LOW,
+                "reversibility": Reversibility.RECOVERABLE,
+                # As ADR-0338 §8:4 declares it: the assistant's own records, safe to repeat.
+                "side_effecting": True,
+                "effect": CapabilityEffect.OWN_RECORDS,
+                "leaves_hub": False,
+                "outcome_can_be_unknown": False,
+                "safe_to_repeat": True,
+                "reads": (),
+                "writes": (),
+                "discloses": (),
+                "cost": ToolCost(basis=CostBasis.FREE),
+                "idempotency": Idempotency.NATURAL,
+                "parameters_schema": {
+                    "type": "object",
+                    "properties": {"memory": {"type": "string"}},
+                    "required": ["memory"],
+                },
+            }
+        )
+    )
+
+
+def _worded_request(
+    request_id: str, capability: str, memory: str, *, wording: str | None
+) -> ApprovalRequest:
+    """A request for a ``pin`` or an ``unpin``, with the wording its round recorded (§8:6)."""
+    call = RequestedCall(tool=_memory_tool(capability), values={"memory": memory}, wording=wording)
+    return _request(request_id).model_copy(update={"call": call})
+
+
 async def _spawn_approved(store: PlanStore, request_id: str) -> ApprovalRequest:
     """Write a request whose call is a spawn and approve it by a tap, holding its ticket."""
     request = _request(request_id).model_copy(
@@ -1449,7 +1489,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 27
+        assert export.schema_version == 28
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -2078,7 +2118,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 27
+        assert export.schema_version == 28
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -2325,7 +2365,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 27
+        assert export.schema_version == 28
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -3067,7 +3107,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 27
+        assert exported.schema_version == 28
         assert [one.id for one in exported.scheduled_tasks] == ["t2", "t1"]
         assert removed == 4
         cleared = await store.export()
@@ -3457,7 +3497,7 @@ class PlanStoreContract:
     async def test_the_export_carries_a_rule_whole_and_clear_erases_it(
         self, store: PlanStore
     ) -> None:
-        """ADR-0340 §9:3: every occurrence, in order, at ``schema_version`` 27 (ADR-0361 §8:2)."""
+        """ADR-0340 §9:3: every occurrence, in order, at ``schema_version`` 28 (ADR-0338 §8:6)."""
         await _rule_written(store, "t1")
         await store.mark_occurrence_pushed(
             "t1", 1, "act-1", rule=RulePush(skipped=(_due(1),), latest=_due(2), successor=_due(3))
@@ -3467,7 +3507,7 @@ class PlanStoreContract:
         exported = await store.export()
         await store.clear()
 
-        assert exported.schema_version == 27
+        assert exported.schema_version == 28
         assert exported.scheduled_tasks == (held,)
         assert len(exported.scheduled_tasks[0].occurrences) == 4
         assert (await store.export()).scheduled_tasks == ()
@@ -4209,12 +4249,74 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 27
+        assert exported.schema_version == 28
         assert exported.approval_requests == held
         # Two requests and their two effect records.
         assert removed == 4
         assert (await store.export()).approval_requests == ()
         assert await store.approval_request_by_token("tok") is None
+
+    async def test_a_pins_request_keeps_its_recorded_wording_through_every_step(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0338 §8:6, ADR-0361 §2:11: the wording is held as written, never re-read.
+
+        A pin's request is written with the wording the asking round read, and every read
+        of it returns that wording: by id, by person, by its card's token, after the tap,
+        after its ticket is spent, and in the export, which ``clear`` then erases. An
+        unpin's request with no wording, as one written before it was recorded, reads
+        back with none.
+        """
+        pin = _worded_request("q-pin", "pin", "m:diet", wording="Robin is vegetarian.")
+        unpin = _worded_request("q-unpin", "unpin", "m:sister", wording=None)
+        written = await _asked(store, pin)
+        await _asked(store, unpin)
+        await store.record_approval_card("q-pin", _card("tok-pin", position=7))
+        by_token = await store.approval_request_by_token("tok-pin")
+        await store.answer_approval_request("q-pin", ApprovalRequestState.APPROVED, _tap())
+        claimed = await store.claim_ticket_call(
+            _spending_ticket("e-pin", "q-pin").model_copy(update={"capability": "pin"}),
+            match=None,
+        )
+        (spent,) = await store.approval_requests(["q-pin"])
+        by_person = await store.person_approval_requests(
+            _PERSON, [ApprovalRequestState.APPROVED, ApprovalRequestState.PENDING]
+        )
+        exported = await store.export()
+
+        assert claimed is TicketClaim.CLAIMED
+        assert written.call.wording == "Robin is vegetarian."
+        assert by_token is not None
+        assert by_token.call.wording == "Robin is vegetarian."
+        assert (spent.ticket, spent.call) == (TicketState.USED, pin.call)
+        assert [(one.id, one.call.wording) for one in by_person] == [
+            ("q-pin", "Robin is vegetarian."),
+            ("q-unpin", None),
+        ]
+        assert exported.approval_requests == by_person
+        assert "wording" not in exported.approval_requests[1].call.model_dump(mode="json")
+        await store.clear()
+        assert (await store.export()).approval_requests == ()
+
+    async def test_a_pin_waiting_with_one_wording_is_the_same_call_with_another(
+        self, store: PlanStore
+    ) -> None:
+        """§2:8: sameness is capability, values and binding, so the wording is no part.
+
+        A second request for the same pin, its memory's wording read anew, writes nothing
+        and finds the one waiting, which keeps the wording it was written with.
+        """
+        first = await _asked(
+            store, _worded_request("q1", "pin", "m:diet", wording="Robin is vegetarian.")
+        )
+        again = _worded_request("q2", "pin", "m:diet", wording="Robin eats no meat.")
+
+        answer = await store.write_approval_request(again, _asking(again), match=None)
+
+        assert answer.answer is ApprovalWriteAnswer.ALREADY_WAITING
+        assert answer.request == first
+        (held,) = (await store.export()).approval_requests
+        assert held.call.wording == "Robin is vegetarian."
 
     # --- cancellation (ADR-0060) -------------------------------------------
 

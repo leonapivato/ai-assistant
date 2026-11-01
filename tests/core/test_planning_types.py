@@ -280,28 +280,28 @@ def test_a_scalar_output_with_a_lone_surrogate_is_rejected() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 27
+    assert export.schema_version == 28
     assert export.activation_effects == ()
     assert export.observations == ()
     assert export.scheduled_tasks == ()
     assert export.approval_requests == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_twenty_seven() -> None:
+def test_export_pins_the_schema_version_to_exactly_twenty_eight() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[27]`` refuses an explicit ``26`` — a document without the approval
-    requests (ADR-0361 §8:2) — and any other value, so the advertised version cannot
-    be mislabelled. The positive default is what a producer gets for free; only the
-    rejections pin it.
+    ``Literal[28]`` refuses an explicit ``27`` — a document whose requests' calls carry
+    no recorded wording (ADR-0338 §8:6) — and any other value, so the advertised version
+    cannot be mislabelled. The positive default is what a producer gets for free; only
+    the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``26`` is
-    the shape this contract had one decision ago and ``28`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``27`` is
+    the shape this contract had one decision ago and ``29`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=27).schema_version == 27
-    for stale in (*range(1, 27), 28):
+    assert PlanExport(exported_at=_WHEN, schema_version=28).schema_version == 28
+    for stale in (*range(1, 28), 29):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)
 
