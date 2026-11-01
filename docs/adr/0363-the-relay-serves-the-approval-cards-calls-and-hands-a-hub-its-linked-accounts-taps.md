@@ -1,6 +1,6 @@
 # 363. The relay serves the approval card's calls, and hands a hub its linked account's taps
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-01
 - Scope: the relay's contract with a hub (ADR-0330 §4), widened by the calls an approval card makes on the line (ADR-0361 §4): a post with buttons, its edits, a tap handed to the hub and the tap's answer. Milestone 19, "Approvals by card". The relay is the private repository's, and §6 is its lane.
 - Dependency: [ADR-0330](0330-a-hubs-telegram-line-may-run-through-a-relay-on-the-box-which-serves-it-the-bot-api-for-one-linked-account-and-the-hub-trusts-it-by-a-certificate-configured-at-setup.md), whose §4 this amends; [ADR-0361](0361-approvals-are-cards-the-person-taps-and-a-yes-is-a-one-time-ticket-for-the-exact-call.md), whose §4:12 has the relay serve the card's calls; [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md); and [ADR-0362](0362-a-ticket-runs-the-person-models-calls-and-the-task-schedulers-and-a-cards-edit-and-a-taps-answer-need-no-claim-of-the-lines.md), whose §4 rules how the hub gates and records a card's edit and a callback's answer; all as their status lines leave them.
