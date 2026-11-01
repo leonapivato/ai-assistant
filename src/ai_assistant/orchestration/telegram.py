@@ -269,10 +269,11 @@ _APPROVE_VERB: Final = "y"
 _DENY_VERB: Final = "n"
 _VERB_SEPARATOR: Final = ":"
 
-#: How far back the line looks, at its first read after a start, for cards whose
-#: request may have changed while the hub was down: a request changes no later than
-#: just after its expiry (ADR-0361 §3:5, §5:7), so a day past it holds every change.
-_SETTLE_WINDOW: Final = timedelta(days=1)
+#: How far past its expiry a settled request's card is still edited once after a start
+#: (ADR-0361 §4:5): its last change came at or before its expiry (§3:5, §5:7), and an
+#: edit of it lost to a stop within a poll of that change is put right by any start
+#: within this window. A request that can still change is watched whatever its age.
+_SETTLE_WINDOW: Final = timedelta(days=7)
 
 #: The fixed message sent after a restart cut the chat's last activation off (§6:10).
 INTERRUPTED_LINE: Final = (
@@ -1034,18 +1035,29 @@ class TelegramCards:
                 self._settled = True
             if not self._watched:
                 return
-            found = await self._plans.approval_requests(sorted(self._watched))
+            asked = set(self._watched)
+            found = await self._plans.approval_requests(sorted(asked))
         except PlanningError:
             _log.warning("approval_cards_unread", stage="reader", reason="store_failed")
             return
-        held = {str(one.id) for one in found}
-        self._watched &= held
+        # A card posted while the read was out is not in it, and stays watched.
+        self._watched -= asked - {str(one.id) for one in found}
         for request in found:
             if await self._edited(request) and _settled_state(request):
                 self._watched.discard(str(request.id))
 
     async def _settle(self) -> None:
-        """Read the person's recent requests once after a start, to watch their cards.
+        """Read the person's requests once after a start, to watch the cards that may be stale.
+
+        No request changes while the hub is down, since every change is the hub's: a
+        tap, the sensor's expiry, a ticket used or voided. So a card may be stale after a
+        start where its request can still change, pending or holding its ticket, whatever
+        its age, and every such one is watched; or where its last change came so near the
+        stop that its edit did not land. Which edits landed is held in memory alone, so
+        every settled request whose expiry is within :data:`_SETTLE_WINDOW` is edited once
+        more, and an older one whose edit was lost to a stop is left as it is: telling it
+        apart takes a durable record of each edit, which ADR-0362 decides (ADR-0323
+        §13:2).
 
         Raises:
             PlanningError: If the store cannot be read.
@@ -1057,31 +1069,38 @@ class TelegramCards:
         self._watched.update(
             str(one.id)
             for one in requests
-            if one.expires_at > since and any(self._on_line(card) for card in one.cards)
+            if (not _settled_state(one) or one.expires_at > since)
+            and any(self._on_line(card) for card in one.cards)
         )
 
-    async def written(self, activation_ids: Sequence[str]) -> dict[int, WrittenBy]:
+    async def on_line(self) -> dict[int, WrittenBy]:
         """Which activation posted each card on the line, by its position (ADR-0361 §4:3).
 
-        Read from the activations' ``request_approval`` effect records, each naming its
-        request, and the requests' cards: a card at a position the line's chat holds is
-        its asking activation's message, posted by the round that wrote its request. A
-        store that cannot be read links none, the conservative direction, and the window
-        is still brought in.
+        The newest cards the line's chat holds, as many as a window shows, whatever place
+        asked (§4:2): each its asking activation's message, posted by the round that wrote
+        its request. A store that cannot be read links none, the conservative direction,
+        and the window is still brought in.
         """
         try:
-            effects = await self._plans.activation_effects(list(activation_ids))
-            named = list(dict.fromkeys(str(one.request) for one in effects if one.request))
-            requests = await self._plans.approval_requests(named) if named else ()
+            requests = await self._plans.person_approval_requests(
+                self._person, tuple(ApprovalRequestState)
+            )
         except PlanningError:
             _log.warning("approval_cards_unread", stage="reader", reason="store_failed")
             return {}
-        return {
-            card.position: WrittenBy(activation_id=str(one.activation_id), round=str(one.round))
-            for one in requests
-            for card in one.cards
-            if self._on_line(card) and card.position is not None
-        }
+        placed = sorted(
+            (
+                (
+                    card.position,
+                    WrittenBy(activation_id=str(one.activation_id), round=str(one.round)),
+                )
+                for one in requests
+                for card in one.cards
+                if self._on_line(card) and card.position is not None
+            ),
+            key=lambda item: item[0],
+        )
+        return dict(placed[-CHAT_WINDOW_SIZE:])
 
     def _on_line(self, card: ApprovalCard) -> bool:
         """Whether ``card`` is in the line's chat, at a position the hub can edit it by."""
@@ -1105,9 +1124,13 @@ class TelegramCards:
             if not self._on_line(card):
                 continue
             assert card.position is not None  # noqa: S101 — _on_line read it
-            long = card.token is None
-            text = card_notice(request, now=now) if long else card_text(request, facts, now=now)
-            buttons = _buttons(card.token) if pending and card.token is not None else ()
+            text = card_text(request, facts, now=now)
+            # §4:4: a card that no longer fits one message, as its state grew it, shows
+            # what a card too long to post shows, with no buttons.
+            long = card.token is None or telegram_length(text) > TELEGRAM_MESSAGE_LIMIT
+            if long:
+                text = card_notice(request, now=now)
+            buttons = _buttons(card.token) if pending and not long and card.token else ()
             key = (str(request.id), card.position)
             if self._shown.get(key) == (text, bool(buttons)):
                 continue
@@ -1910,10 +1933,9 @@ class TelegramReader:
             if self._written is None or not activations
             else await self._written(self._place, activations, None)
         )
-        # ADR-0361 §4:3: an approval request's card is its asking activation's message.
-        carded: Mapping[int, WrittenBy] = (
-            {} if self._cards is None or not activations else await self._cards.written(activations)
-        )
+        # ADR-0361 §4:3: an approval request's card is its asking activation's message,
+        # whatever place asked (§4:2): its episode is read where the window holds none.
+        carded: Mapping[int, WrittenBy] = {} if self._cards is None else await self._cards.on_line()
         inputs = tuple(self._input_message(one) for one in messages)
         taken = {one.position for one in inputs}
         shown: dict[int, LineMessage] = {}
@@ -1922,6 +1944,8 @@ class TelegramReader:
         forwarded: dict[int, ClaimedAuthor] = {}
         for episode in episodes:
             self._episode_items(episode, writes, shown, links, forwarded, carded)
+        for episode in await self._card_episodes(carded, activations):
+            self._card_items(episode, carded, shown, links)
         for position, writer in writes.items():
             if position in shown and writer.asked is not None:
                 asked[position] = writer.asked
@@ -1993,6 +2017,47 @@ class TelegramReader:
                 text=text,
             )
             links[position] = activation_id
+
+    async def _card_episodes(
+        self, carded: Mapping[int, WrittenBy], held: Sequence[str]
+    ) -> list[EpisodicMemory]:
+        """The episodes of the activations that posted a card here, the window holding none.
+
+        Raises:
+            MemoryStoreError: If an episode cannot be read.
+        """
+        wanted = dict.fromkeys(
+            one.activation_id for one in carded.values() if one.activation_id not in held
+        )
+        found: list[EpisodicMemory] = []
+        for activation_id in wanted:
+            record = await self._memory.get(f"activation:{activation_id}")
+            if isinstance(record, EpisodicMemory) and record.processing_record is not None:
+                found.append(record)
+        return found
+
+    def _card_items(
+        self,
+        episode: EpisodicMemory,
+        carded: Mapping[int, WrittenBy],
+        shown: dict[int, LineMessage],
+        links: dict[int, str],
+    ) -> None:
+        """The cards an activation from another place posted here, and nothing else of it.
+
+        ADR-0361 §4:2-§4:3: its input was never the line's, so its episode shows only the
+        cards it posted into the line's chat, each its message, as a scheduled task's
+        activation shows only what it wrote (ADR-0350 §9:1).
+        """
+        processing = episode.processing_record
+        if processing is None:
+            return
+        at = processing.ended_at or episode.occurred_at
+        for position, text in _assistant_words(processing, {}, self._place, carded).items():
+            shown[position] = LineMessage(
+                position=position, written_at=at, author=MessageAuthor.ASSISTANT, text=text
+            )
+            links[position] = processing.activation_id
 
     def _input_message(self, message: TelegramMessage) -> LineMessage:
         """One message of the input, at its Telegram id and time (§5:4)."""

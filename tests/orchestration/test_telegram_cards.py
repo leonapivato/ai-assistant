@@ -8,7 +8,7 @@ so the result's words and the call's delivery are read where the phases read the
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Final
@@ -50,7 +50,9 @@ from ai_assistant.orchestration.approval_calls import (
     OUTSIDE_LINE,
     ApprovalAsker,
     ApprovalCalls,
+    CardFacts,
     asking,
+    card_text,
 )
 from ai_assistant.orchestration.approvals import REQUEST_APPROVAL
 from ai_assistant.orchestration.telegram import (
@@ -560,3 +562,83 @@ async def test_after_a_start_a_card_whose_request_changed_meanwhile_is_edited() 
     text = rig.shown(await rig.request(str(request.id)))
     assert text.endswith("Approved: not used yet.")
     assert OUTSIDE_LINE in text, "no episode says otherwise: the cautious reading"
+
+
+async def test_a_card_posted_while_a_refresh_reads_stays_watched() -> None:
+    """A card posted while the refresh's read is out is not in that read, and is still
+    edited when its request changes (review round 1)."""
+    rig = _Rig()
+    _, first = await rig.ask(date="2026-11-02")
+    reading = asyncio.Event()
+    release = asyncio.Event()
+    read = rig.plans.approval_requests
+
+    async def held_read(request_ids: Sequence[str], /) -> tuple[ApprovalRequest, ...]:
+        found = await read(request_ids)
+        reading.set()
+        await release.wait()
+        return found
+
+    rig.plans.approval_requests = held_read  # type: ignore[method-assign]  # the read held open
+    refreshing = asyncio.ensure_future(rig.cards.refresh())
+    await reading.wait()
+    _, second = await rig.ask(date="2026-11-03")
+    release.set()
+    await refreshing
+    rig.plans.approval_requests = read  # type: ignore[method-assign]
+    await rig.plans.answer_approval_request(
+        str(second.id),
+        ApprovalRequestState.DENIED,
+        ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT),
+    )
+
+    await rig.cards.refresh()
+
+    assert rig.shown(await rig.request(str(second.id))).endswith("Denied.")
+    assert first.id != second.id
+
+
+async def test_after_days_down_a_card_still_pending_at_the_stop_shows_it_expired() -> None:
+    """A card pending when the hub stopped is watched after a start whatever its age, so
+    the expiry the sensor records at its first look is shown (review round 1)."""
+    rig = _Rig()
+    _, request = await rig.ask()
+    rig.clock.at = AT + timedelta(days=3)
+    restarted = rig.over(rig.fake)
+
+    await restarted.refresh()
+    await rig.plans.expire_approval_request(str(request.id), rig.clock.at)
+    await restarted.refresh()
+
+    assert rig.shown(await rig.request(str(request.id))).endswith(
+        "Expired: it was not answered in time."
+    )
+    assert rig.fake.buttons == {}
+
+
+async def test_a_card_at_the_limit_whose_state_outgrows_it_shows_the_short_card() -> None:
+    """§4:4-§4:5: a pending card of one full message that expires shows the card too long
+    to post, with no buttons, rather than keeping its pending text (review round 1)."""
+    rig = _Rig()
+    probe = ApprovalRequest(
+        id="approval:probe",
+        person=OWNER_PERSON_ID,
+        activation_id="act-ask",
+        round="round:ask",
+        call=RequestedCall(tool=_BOOK, values={"date": ""}),
+        why="You asked me to book the table.",
+        written_at=AT,
+        expires_at=AT + DAY,
+    )
+    base = telegram_length(card_text(probe, CardFacts(origin=None, read_outside=False), now=AT))
+    _, request = await rig.ask(date="x" * (TELEGRAM_MESSAGE_LIMIT - base))
+    assert telegram_length(rig.shown(request)) == TELEGRAM_MESSAGE_LIMIT
+    assert rig.fake.buttons, "posted whole, with its buttons"
+    rig.clock.at = AT + DAY
+
+    await rig.cards.refresh()
+
+    text = rig.shown(request)
+    assert CARD_TOO_LONG_LINE in text
+    assert text.endswith("Expired: it was not answered in time.")
+    assert rig.fake.buttons == {}
