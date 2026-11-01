@@ -55,7 +55,7 @@ from telegram_relay_harness import (
     refused,
 )
 
-from ai_assistant.core.types import TelegramFailure, TelegramUpdate
+from ai_assistant.core.types import TelegramCallback, TelegramFailure, TelegramUpdate
 from ai_assistant.testing import FakeOutboundTransport
 from ai_assistant.testing.telegram import TELEGRAM_DIRECT_ORIGIN
 from ai_assistant.tools.egress import (
@@ -105,6 +105,27 @@ def update_json(update: TelegramUpdate) -> dict[str, Any]:
                     "length": len(message.command.encode("utf-16-le")) // 2,
                 }
             ]
+    if update.callback is not None:
+        raw["callback_query"] = callback_json(update.callback)
+    return raw
+
+
+def callback_json(callback: TelegramCallback) -> dict[str, Any]:
+    """A button's callback as the Bot API writes one, which a relay hands on unaltered."""
+    raw: dict[str, Any] = {
+        "id": callback.callback_id,
+        "from": {"id": callback.sender_id, "is_bot": callback.sender_is_bot, "first_name": "O"},
+        "chat_instance": "-1",
+    }
+    if callback.message_id is not None:
+        raw["message"] = {"message_id": callback.message_id, "date": 1_700_000_000}
+        if callback.chat_id is not None:
+            raw["message"]["chat"] = {
+                "id": callback.chat_id,
+                "type": "private" if callback.private_chat else "group",
+            }
+    if callback.data is not None:
+        raw["data"] = callback.data
     return raw
 
 

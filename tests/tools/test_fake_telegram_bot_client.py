@@ -27,7 +27,7 @@ from telegram_bot_client_contract import (
     an_update,
 )
 
-from ai_assistant.core.types import TelegramFailure, TelegramUpdate
+from ai_assistant.core.types import TelegramButton, TelegramFailure, TelegramUpdate
 from ai_assistant.testing import FakeTelegramBotClient
 from ai_assistant.testing.telegram import TELEGRAM_DIRECT_ORIGIN
 
@@ -283,3 +283,57 @@ def test_held_updates_ascend() -> None:
 def test_the_repr_names_counts_and_no_text() -> None:
     """Nothing written is rendered."""
     assert "hello" not in repr(FakeTelegramBotClient().hold(an_update(1)))
+
+
+# --- the fake's own Telegram, for the card (ADR-0361 §8:3) ----------------------------
+
+
+async def test_the_fake_keeps_a_cards_buttons_until_an_edit_takes_them() -> None:
+    """A card's buttons are on its message until an edit replaces them."""
+    fake = FakeTelegramBotClient(first_message_id=5)
+    buttons = (
+        TelegramButton(label="Approve", data="t:y"),
+        TelegramButton(label="Deny", data="t:n"),
+    )
+    bound = timedelta(seconds=5)
+    sent = await fake.send_with_buttons(
+        attempt="a", chat_id=fake.chat_id, text="Approve?", buttons=buttons, timeout=bound
+    )
+    assert fake.buttons == {5: buttons}
+
+    edited = await fake.edit_message(
+        attempt="b", chat_id=fake.chat_id, message_id=5, text="Approved.", buttons=(), timeout=bound
+    )
+
+    assert sent.message_id == 5
+    assert edited.done
+    assert fake.messages == ((5, "Approved."),)
+    assert fake.buttons == {}
+
+
+async def test_the_fake_refuses_an_edit_of_no_message_and_one_changing_nothing() -> None:
+    """Telegram's own two refusals of an edit: no such message, and "not modified"."""
+    fake = FakeTelegramBotClient(first_message_id=5)
+    bound = timedelta(seconds=5)
+    await fake.send(attempt="a", chat_id=fake.chat_id, text="Same.", timeout=bound)
+
+    missing = await fake.edit_message(
+        attempt="b", chat_id=fake.chat_id, message_id=6, text="x", buttons=(), timeout=bound
+    )
+    unchanged = await fake.edit_message(
+        attempt="c", chat_id=fake.chat_id, message_id=5, text="Same.", buttons=(), timeout=bound
+    )
+
+    assert missing.failure is unchanged.failure is TelegramFailure.REFUSED
+
+
+async def test_the_fakes_tap_is_held_as_a_callback_from_the_owner() -> None:
+    """A tap is held until confirmed, carrying its data, from the owner by default."""
+    fake = FakeTelegramBotClient()
+
+    update = fake.tap(3, message_id=9, data="t:y")
+
+    assert fake.held == (update,)
+    assert update.callback is not None
+    assert update.callback.sender_id == fake.chat_id
+    assert update.callback.chat_id == fake.chat_id

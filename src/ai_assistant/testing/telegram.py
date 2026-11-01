@@ -19,6 +19,13 @@ bound — the honest route to an expiry, and the lever a cancellation case needs
 active. :attr:`~ai_assistant.core.types.TelegramFailure.OTHER_CHAT` is not arrangeable:
 it is decided by the arguments, here as in production.
 
+**And it carries an approval request's card** (ADR-0361 §8:3): a message sent with
+buttons keeps them (:attr:`~FakeTelegramBotClient.buttons`), an edit replaces a
+message's text and buttons as Telegram does, refusing one that names no message the bot
+sent or would change nothing, and :meth:`~FakeTelegramBotClient.tap` holds the callback
+a tap on a button sends, from the owner or from anyone a case names. Every callback
+answered is kept (:attr:`~FakeTelegramBotClient.answered`).
+
 **It records every call on entry**, with whether its request reached Telegram, so a
 case asserting that something was *not* sent reads a record rather than an absence.
 It holds no token and records no target: there is none to record.
@@ -42,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
@@ -50,7 +58,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Self, final
 
 from ai_assistant.core.types import (
+    TELEGRAM_BUTTONS_MAX,
+    TELEGRAM_CALLBACK_ANSWER_MAX_CHARS,
+    TELEGRAM_CALLBACK_ID_MAX_CHARS,
     TELEGRAM_MESSAGE_LIMIT,
+    TelegramButton,
+    TelegramCallback,
     TelegramFailure,
     TelegramOutcome,
     TelegramPollOutcome,
@@ -75,6 +88,11 @@ TELEGRAM_DIRECT_ORIGIN: Final = "https://api.telegram.org:443"
 GET_UPDATES: Final = "getUpdates"
 SEND_MESSAGE: Final = "sendMessage"
 SEND_CHAT_ACTION: Final = "sendChatAction"
+EDIT_MESSAGE_TEXT: Final = "editMessageText"
+ANSWER_CALLBACK_QUERY: Final = "answerCallbackQuery"
+
+#: The kinds of update a poll asks for, as the production client asks (ADR-0361 §8:3).
+ALLOWED_UPDATES: Final = ("message", "callback_query")
 
 #: How many updates one poll hands back at most, Telegram's own default ``limit``.
 _POLL_LIMIT: Final = 100
@@ -100,8 +118,9 @@ class TelegramCall:
 
     Attributes:
         attempt: The claimed record's id the caller named.
-        method: The Bot API method: :data:`GET_UPDATES`, :data:`SEND_MESSAGE` or
-            :data:`SEND_CHAT_ACTION`.
+        method: The Bot API method: :data:`GET_UPDATES`, :data:`SEND_MESSAGE`,
+            :data:`SEND_CHAT_ACTION`, :data:`EDIT_MESSAGE_TEXT` or
+            :data:`ANSWER_CALLBACK_QUERY`.
         parameters: The request's JSON body, as the production client writes it — so
             a case can assert the offset a poll confirmed or the text a send carried.
         reached: Whether the request reached Telegram. ``False`` for a call refused
@@ -141,12 +160,15 @@ class FakeTelegramBotClient:
     """
 
     __slots__ = (
+        "_answered",
         "_arranged",
+        "_buttons",
         "_calls",
         "_chat_id",
         "_connected",
         "_held",
         "_messages",
+        "_next_callback",
         "_next_message_id",
         "_origin",
         "_typing",
@@ -175,6 +197,9 @@ class FakeTelegramBotClient:
         self._arranged: deque[_Arranged] = deque()
         self._calls: list[TelegramCall] = []
         self._messages: list[tuple[int, str]] = []
+        self._buttons: dict[int, tuple[TelegramButton, ...]] = {}
+        self._answered: list[tuple[str, str]] = []
+        self._next_callback = 1
         self._typing = 0
         self._connected = True
 
@@ -266,6 +291,44 @@ class FakeTelegramBotClient:
         self._arranged.append(_Arranged(failure=None, hang=True, written=written))
         return self
 
+    def tap(  # noqa: PLR0913 — every part of a callback a case may vary
+        self,
+        update_id: int,
+        *,
+        message_id: int,
+        data: str | None,
+        sender: int | None = None,
+        chat: int | None = None,
+        private: bool = True,
+    ) -> TelegramUpdate:
+        """Hold the callback a tap on a button sends, and return its update (ADR-0361 §4:7).
+
+        Args:
+            update_id: Telegram's id for the update, above every update held.
+            message_id: The message the tapped button is under.
+            data: The button's callback data, as Telegram hands it back.
+            sender: The account that tapped; the owner's by default.
+            chat: The chat the message is in; the owner's chat by default.
+            private: Whether that chat is a private one.
+
+        Returns:
+            The update held.
+        """
+        update = TelegramUpdate(
+            update_id=update_id,
+            callback=TelegramCallback(
+                callback_id=f"callback-{self._next_callback}",
+                sender_id=self._chat_id if sender is None else sender,
+                chat_id=self._chat_id if chat is None else chat,
+                private_chat=private,
+                message_id=message_id,
+                data=data,
+            ),
+        )
+        self._next_callback += 1
+        self.hold(update)
+        return update
+
     def disconnect(self) -> None:
         """Stand for the line's connection no longer being active.
 
@@ -288,6 +351,16 @@ class FakeTelegramBotClient:
     def messages(self) -> tuple[tuple[int, str], ...]:
         """Every message the chat holds, as ``(message_id, text)``, in order."""
         return tuple(self._messages)
+
+    @property
+    def buttons(self) -> Mapping[int, tuple[TelegramButton, ...]]:
+        """The buttons each message in the chat shows now, by its id; none where empty."""
+        return MappingProxyType({key: value for key, value in self._buttons.items() if value})
+
+    @property
+    def answered(self) -> tuple[tuple[str, str], ...]:
+        """Every callback answered, as ``(callback_id, text)``, in order."""
+        return tuple(self._answered)
 
     @property
     def held(self) -> tuple[TelegramUpdate, ...]:
@@ -345,7 +418,7 @@ class FakeTelegramBotClient:
             raise ValueError(msg)
         parameters: dict[str, object] = {
             "timeout": int(held.total_seconds()),
-            "allowed_updates": ["message"],
+            "allowed_updates": list(ALLOWED_UPDATES),
         }
         if offset is not None:
             parameters["offset"] = offset
@@ -433,6 +506,174 @@ class FakeTelegramBotClient:
                 failure=ended.failure, retry_after_seconds=ended.retry_after_seconds
             )
         self._typing += 1
+        return TelegramOutcome()
+
+    async def send_with_buttons(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        text: str,
+        buttons: Sequence[TelegramButton],
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1)
+    ) -> TelegramSendOutcome:
+        """Put one message with buttons into the chat, or end as arranged.
+
+        Args:
+            attempt: The claimed record's id.
+            chat_id: The chat, which must be :attr:`chat_id`.
+            text: The text, within one Telegram message.
+            buttons: The buttons, one to the bound, their data distinct.
+            timeout: The bound on the send.
+
+        Returns:
+            The outcome.
+
+        Raises:
+            ValueError: As the contract states, before anything is recorded.
+        """
+        attempt = _checked_attempt(attempt)
+        chat = _checked_chat(chat_id)
+        body = _checked_text(text)
+        row = _checked_buttons(buttons, empty=False)
+        bound = _checked_duration(timeout, name="timeout", positive=True)
+        parameters = {"chat_id": chat, "text": body, "reply_markup": _keyboard(row)}
+        if chat != self._chat_id:
+            self._record(attempt, SEND_MESSAGE, parameters, TelegramFailure.OTHER_CHAT)
+            return TelegramSendOutcome(failure=TelegramFailure.OTHER_CHAT)
+        ended = await self._ended(attempt, SEND_MESSAGE, parameters, bound, poll=False)
+        if ended is not None:
+            if ended.delivered:
+                self._buttons[self._deliver(body)] = row
+            return TelegramSendOutcome(
+                failure=ended.failure, retry_after_seconds=ended.retry_after_seconds
+            )
+        message_id = self._deliver(body)
+        self._buttons[message_id] = row
+        return TelegramSendOutcome(message_id=message_id)
+
+    async def edit_message(  # noqa: PLR0913 — the contract's six keywords
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        buttons: Sequence[TelegramButton],
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1)
+    ) -> TelegramOutcome:
+        """Replace a message's text and buttons, or end as arranged.
+
+        Telegram refuses an edit of a message the bot did not send, and one that would
+        change nothing, so the fake refuses both, as :attr:`TelegramFailure.REFUSED`.
+
+        Args:
+            attempt: The claimed record's id.
+            chat_id: The chat, which must be :attr:`chat_id`.
+            message_id: The message's id.
+            text: The new text.
+            buttons: The buttons it shows after, or none.
+            timeout: The bound on the call.
+
+        Returns:
+            The outcome.
+
+        Raises:
+            ValueError: As the contract states, before anything is recorded.
+        """
+        attempt = _checked_attempt(attempt)
+        chat = _checked_chat(chat_id)
+        if type(message_id) is not int or not 1 <= message_id < 2**63:
+            msg = "message_id is the positive int Telegram gave the message"
+            raise ValueError(msg)
+        body = _checked_text(text)
+        row = _checked_buttons(buttons, empty=True)
+        bound = _checked_duration(timeout, name="timeout", positive=True)
+        parameters = {
+            "chat_id": chat,
+            "message_id": message_id,
+            "text": body,
+            "reply_markup": _keyboard(row),
+        }
+        if chat != self._chat_id:
+            self._record(attempt, EDIT_MESSAGE_TEXT, parameters, TelegramFailure.OTHER_CHAT)
+            return TelegramOutcome(failure=TelegramFailure.OTHER_CHAT)
+        index = next(
+            (at for at, (held, _) in enumerate(self._messages) if held == message_id), None
+        )
+        unchanged = (
+            index is not None
+            and self._messages[index][1] == body
+            and self._buttons.get(message_id, ()) == row
+        )
+        if (index is None or unchanged) and self._connected and not self._arranged:
+            # Telegram's own refusals: no such message, or "message is not modified".
+            self._record(attempt, EDIT_MESSAGE_TEXT, parameters, TelegramFailure.REFUSED)
+            return TelegramOutcome(failure=TelegramFailure.REFUSED)
+        ended = await self._ended(attempt, EDIT_MESSAGE_TEXT, parameters, bound, poll=False)
+        if ended is not None and not ended.delivered:
+            return TelegramOutcome(
+                failure=ended.failure, retry_after_seconds=ended.retry_after_seconds
+            )
+        if index is not None:
+            self._messages[index] = (message_id, body)
+            self._buttons[message_id] = row
+        if ended is not None:
+            return TelegramOutcome(failure=ended.failure)
+        return TelegramOutcome()
+
+    async def answer_callback(
+        self,
+        *,
+        attempt: str,
+        chat_id: int,
+        callback_id: str,
+        text: str,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1)
+    ) -> TelegramOutcome:
+        """Show ``text`` to the tapper, or end as arranged.
+
+        Args:
+            attempt: The claimed record's id.
+            chat_id: The chat the callback came from, which must be :attr:`chat_id`.
+            callback_id: The callback query's id.
+            text: What to show.
+            timeout: The bound on the call.
+
+        Returns:
+            The outcome.
+
+        Raises:
+            ValueError: As the contract states, before anything is recorded.
+        """
+        attempt = _checked_attempt(attempt)
+        chat = _checked_chat(chat_id)
+        if (
+            type(callback_id) is not str
+            or not callback_id.strip()
+            or len(callback_id) > TELEGRAM_CALLBACK_ID_MAX_CHARS
+        ):
+            msg = "callback_id is the callback query's id, a non-blank string within its bound"
+            raise ValueError(msg)
+        _encodable(callback_id, name="callback_id")
+        if type(text) is not str or not text.strip():
+            msg = "text is a non-blank string"
+            raise ValueError(msg)
+        _encodable(text, name="text")
+        if len(text) > TELEGRAM_CALLBACK_ANSWER_MAX_CHARS:
+            msg = f"text is longer than a callback's answer ({TELEGRAM_CALLBACK_ANSWER_MAX_CHARS})"
+            raise ValueError(msg)
+        bound = _checked_duration(timeout, name="timeout", positive=True)
+        parameters = {"callback_query_id": callback_id, "text": text}
+        if chat != self._chat_id:
+            self._record(attempt, ANSWER_CALLBACK_QUERY, parameters, TelegramFailure.OTHER_CHAT)
+            return TelegramOutcome(failure=TelegramFailure.OTHER_CHAT)
+        ended = await self._ended(attempt, ANSWER_CALLBACK_QUERY, parameters, bound, poll=False)
+        if ended is not None:
+            return TelegramOutcome(
+                failure=ended.failure, retry_after_seconds=ended.retry_after_seconds
+            )
+        self._answered.append((callback_id, text))
         return TelegramOutcome()
 
     # --- the far end --------------------------------------------------------
@@ -591,6 +832,43 @@ def _checked_text(text: object) -> str:
     return text
 
 
+def _encodable(text: str, *, name: str) -> None:
+    """Refuse a text with no UTF-8 form, as the production client does."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        msg = f"{name} has no UTF-8 form"
+        raise ValueError(msg) from None
+
+
+def _checked_buttons(buttons: object, *, empty: bool) -> tuple[TelegramButton, ...]:
+    """Refuse buttons Telegram could not carry on one row, as the production client does."""
+    if isinstance(buttons, str | bytes) or not isinstance(buttons, Sequence):
+        msg = "buttons is a sequence of TelegramButton"
+        raise ValueError(msg)
+    row = tuple(buttons)
+    if any(not isinstance(one, TelegramButton) for one in row):
+        msg = "buttons is a sequence of TelegramButton"
+        raise ValueError(msg)
+    if not row and not empty:
+        msg = "buttons holds at least one button"
+        raise ValueError(msg)
+    if len(row) > TELEGRAM_BUTTONS_MAX:
+        msg = f"buttons holds at most {TELEGRAM_BUTTONS_MAX} buttons, on one row"
+        raise ValueError(msg)
+    if len({one.data for one in row}) != len(row):
+        msg = "buttons carry distinct data, so a tap names the button tapped"
+        raise ValueError(msg)
+    return row
+
+
+def _keyboard(row: Sequence[TelegramButton]) -> dict[str, object]:
+    """An inline keyboard of one row, as the production client writes it."""
+    if not row:
+        return {"inline_keyboard": []}
+    return {"inline_keyboard": [[{"text": one.label, "callback_data": one.data} for one in row]]}
+
+
 def _checked_duration(value: object, *, name: str, positive: bool) -> timedelta:
     """Refuse a duration no call could be bounded or asked by, as production does."""
     if not isinstance(value, timedelta):
@@ -608,7 +886,10 @@ def _checked_duration(value: object, *, name: str, positive: bool) -> timedelta:
 
 
 __all__ = [
+    "ALLOWED_UPDATES",
+    "ANSWER_CALLBACK_QUERY",
     "DEFAULT_TELEGRAM_CHAT_ID",
+    "EDIT_MESSAGE_TEXT",
     "GET_UPDATES",
     "SEND_CHAT_ACTION",
     "SEND_MESSAGE",

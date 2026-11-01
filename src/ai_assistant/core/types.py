@@ -23830,6 +23830,86 @@ class TelegramMessage(BaseModel):
         return self
 
 
+#: The most bytes a button's callback data may hold, in UTF-8: Telegram's own bound on
+#: ``callback_data`` (ADR-0361 §4:10).
+TELEGRAM_CALLBACK_DATA_MAX_BYTES: Final = 64
+
+#: The most characters a button's label may hold. Telegram documents no bound; the line
+#: writes short words ("Approve", "Deny"), and a label past this is a caller's fault.
+TELEGRAM_BUTTON_LABEL_MAX_CHARS: Final = 64
+
+#: The most buttons one message carries, all on one row (ADR-0361 §4:2).
+TELEGRAM_BUTTONS_MAX: Final = 8
+
+#: The most characters a callback answer's text may hold: Telegram's bound on
+#: ``answerCallbackQuery``'s ``text`` (0-200 characters).
+TELEGRAM_CALLBACK_ANSWER_MAX_CHARS: Final = 200
+
+#: The most characters a callback query's id is read in. Telegram's ids are short
+#: decimal strings; one past this is not an id this line answers.
+TELEGRAM_CALLBACK_ID_MAX_CHARS: Final = 128
+
+
+def _callback_data_fits(data: str) -> str:
+    """Refuse callback data Telegram would not carry (ADR-0361 §4:10).
+
+    Raises:
+        ValueError: If it is longer than :data:`TELEGRAM_CALLBACK_DATA_MAX_BYTES` in UTF-8.
+    """
+    if len(data.encode("utf-8")) > TELEGRAM_CALLBACK_DATA_MAX_BYTES:
+        msg = f"callback data holds at most {TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes"
+        raise ValueError(msg)
+    return data
+
+
+class TelegramButton(BaseModel):
+    """One inline button under a message the line sends (ADR-0361 §4:2, §8:3).
+
+    A tap on it comes back as a :class:`TelegramCallback` carrying ``data``, which is
+    an opaque token the line minted and which names no record (§4:10, ADR-0323 §12:4).
+
+    Attributes:
+        label: The words on the button.
+        data: The callback data Telegram hands back when it is tapped: non-blank, at
+            most :data:`TELEGRAM_CALLBACK_DATA_MAX_BYTES` in UTF-8.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    label: NonBlankEncodableText = Field(max_length=TELEGRAM_BUTTON_LABEL_MAX_CHARS)
+    data: Annotated[NonBlankEncodableText, AfterValidator(_callback_data_fits)]
+
+
+class TelegramCallback(BaseModel):
+    """A button's callback, as an update carries it (ADR-0361 §4:7, §8:3).
+
+    What Telegram's ``callback_query`` says, in the terms the line reads, and carried
+    unjudged: whether the tap is the user's, in their chat, is the reader's to decide by
+    ADR-0323 §4:1's test, as it decides a message's (ADR-0332 §8:1).
+
+    Attributes:
+        callback_id: Telegram's id for the callback query, which its answer names.
+        sender_id: The account that tapped.
+        sender_is_bot: Whether that account is a bot.
+        chat_id: The chat of the message the button is under, where Telegram says.
+        private_chat: Whether Telegram says that chat is a private one.
+        message_id: The id of the message the button is under, where Telegram says.
+        data: The tapped button's callback data, or ``None`` where it carries none.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    callback_id: NonBlankEncodableText = Field(max_length=TELEGRAM_CALLBACK_ID_MAX_CHARS)
+    sender_id: int = Field(strict=True, ge=_TELEGRAM_ID_FLOOR, lt=_TELEGRAM_ID_CEILING)
+    sender_is_bot: bool = Field(default=False, strict=True)
+    chat_id: int | None = Field(
+        default=None, strict=True, ge=_TELEGRAM_ID_FLOOR, lt=_TELEGRAM_ID_CEILING
+    )
+    private_chat: bool = Field(default=False, strict=True)
+    message_id: int | None = Field(default=None, strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+    data: EncodableText | None = None
+
+
 class TelegramUpdate(BaseModel):
     """One update a poll took off Telegram (§5).
 
@@ -23838,12 +23918,30 @@ class TelegramUpdate(BaseModel):
             (§5:6) and the intake record keys on (§5:8).
         message: The new message it carries, or ``None`` where it carries none this
             line reads — which is still an update to confirm once it is seen.
+        callback: The button's callback it carries (ADR-0361 §4:7, §8:3), or ``None``.
+            An update carries a message or a callback, never both.
+
+    Raises:
+        ValueError: If it carries both a message and a callback.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     update_id: int = Field(strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
     message: TelegramMessage | None = None
+    callback: TelegramCallback | None = None
+
+    @model_validator(mode="after")
+    def _one_kind(self) -> Self:
+        """Refuse an update carrying both kinds.
+
+        Raises:
+            ValueError: If it carries a message and a callback.
+        """
+        if self.message is not None and self.callback is not None:
+            msg = "an update carries a message or a button's callback, never both"
+            raise ValueError(msg)
+        return self
 
 
 class TelegramOutcome(BaseModel):

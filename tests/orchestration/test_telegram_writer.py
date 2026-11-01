@@ -81,6 +81,15 @@ class _FailingNthSend:
     async def show_typing(self, **arguments: Any) -> TelegramOutcome:
         return await self._fake.show_typing(**arguments)
 
+    async def send_with_buttons(self, **arguments: Any) -> TelegramSendOutcome:
+        return await self._fake.send_with_buttons(**arguments)
+
+    async def edit_message(self, **arguments: Any) -> TelegramOutcome:
+        return await self._fake.edit_message(**arguments)
+
+    async def answer_callback(self, **arguments: Any) -> TelegramOutcome:
+        return await self._fake.answer_callback(**arguments)
+
 
 class _Rig:
     """A writer over a fake Telegram and a fake intake record, its waits recorded."""
