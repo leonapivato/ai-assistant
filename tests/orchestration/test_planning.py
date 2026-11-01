@@ -28,7 +28,10 @@ from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.types import (
     ActivationDigest,
     ActivationUnderstanding,
-    AskedCall,
+    ApprovalGiver,
+    ApprovalRequest,
+    ApprovalRequestState,
+    ApprovalTap,
     Attestation,
     BeliefBand,
     CapabilityEffect,
@@ -57,9 +60,9 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     ProposedCall,
     Provenance,
-    QuestionPart,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RequestedCall,
     Reversibility,
     RiskLevel,
     RoundResponse,
@@ -68,6 +71,7 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     SupportDirection,
+    TicketState,
     ToolCost,
     ToolDefinition,
     TrackRecordEntry,
@@ -78,6 +82,7 @@ from ai_assistant.core.types import (
     WholeTextReply,
     band_of,
 )
+from ai_assistant.orchestration.approvals import Ticket
 from ai_assistant.orchestration.planning import (
     BRIEFING_HEADINGS,
     DELIBERATE_REPEAT,
@@ -85,7 +90,6 @@ from ai_assistant.orchestration.planning import (
     NOTE_REASONS,
     NOTHING_NEW,
     PLANNING_PROMPT,
-    ApprovedAction,
     CallOutcome,
     CallOutcomeKind,
     DigestedEvidence,
@@ -126,7 +130,7 @@ from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN, FAKE_WEB_SEARCH
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.types import PlanningExchange, SupportHolder
@@ -214,20 +218,14 @@ class _Recorder:
     def __init__(self, *, fails: bool = False) -> None:
         self.fails = fails
         self.recorded: list[tuple[PlanningRound, tuple[PlanningLabel, ...]]] = []
-        self.questions: list[Mapping[str, str]] = []
 
     async def record(
-        self,
-        planning_round: PlanningRound,
-        labels: tuple[PlanningLabel, ...],
-        *,
-        questions: Mapping[str, str] | None = None,
+        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
     ) -> None:
         if self.fails:
             msg = "the append failed"
             raise RuntimeError(msg)
         self.recorded.append((planning_round, labels))
-        self.questions.append(questions or {})
 
 
 #: A template of the test's own (ADR-0334 §9:2). The instruction declares no flag
@@ -2123,26 +2121,39 @@ async def test_a_referent_with_a_blank_id_is_still_labelled() -> None:
         ),
     ],
 )
-async def test_an_approved_call_no_longer_offered_shows_planning_none_of_its_arguments(
+async def test_a_ticket_no_longer_offered_shows_planning_none_of_its_arguments(
     tool: ToolDefinition, values: dict[str, Any], hidden: tuple[str, ...]
 ) -> None:
     """Fail closed: the hub cannot say which arguments it filled, so it shows none.
 
-    A forecast read asked, its forecaster was then unconfigured, and the yes came: no
-    forecast read is offered on this pass, so no offered copy says the coordinate is the
-    hub's. The approved action's line shows the capability alone, and planning's prompt
-    carries no coordinate (ADR-0260 §3:2, ADR-0324 §3); a search's carries no origin.
+    A forecast read was requested, its forecaster was then unconfigured, and the tap
+    came: no forecast read is offered on this pass, so no offered copy says the
+    coordinate is the hub's. The ticket's line shows the capability alone, and planning's
+    prompt carries no coordinate (ADR-0260 §3:2, ADR-0324 §3); a search's carries no
+    origin (ADR-0361 §5:1).
     """
-    approved = ApprovedAction(
-        part=QuestionPart(round="round:asking", part=1),
-        call=AskedCall(part=1, tool=tool, values=values),
+    at = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
+    request = ApprovalRequest(
+        id="approval:1",
+        person="owner",
+        activation_id="act-asking",
+        round="round:asking",
+        call=RequestedCall(tool=tool, values=values),
+        why="You asked for it.",
+        written_at=at,
+        expires_at=at + timedelta(days=1),
+        state=ApprovalRequestState.APPROVED,
+        answer=ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=at),
+        ticket=TicketState.HELD,
     )
     stage, completer, _ = _stage(RoundResponse(text="That can't be done now."))
     offered = tuple(one for one in _TOOLS if str(one.capability) != str(tool.capability))
 
-    await stage.plan(_inputs(capabilities=offered, approved=(approved,)))
+    await stage.plan(
+        _inputs(capabilities=offered, tickets=(Ticket(request=request),), approvals=True)
+    )
 
-    shown = tag(section(_sent(completer), "# Understanding"), "approved")
+    shown = tag(section(_sent(completer), "# Understanding"), "ticket")
     assert (shown.get("label"), shown.text) == ("A1", str(tool.capability))
     prompt = completer.last_call.exchange.briefing
     for value in hidden:

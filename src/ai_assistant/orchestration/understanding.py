@@ -73,9 +73,8 @@ by each ``R`` label, to the activation the call showed under it, into ``continue
 ``R`` label in ``cites`` resolves to a ``running`` referent, and one in ``belongs_to`` to
 the running activation as an activation member (§10:1-§10:3).
 
-**No question is marked, and no answer pointer is read** (ADR-0353 §11). The windows
-still bring each assistant message's question with them (``TranscriptWindow.asked``,
-``WrittenBy.asked``), and this stage no longer reads it.
+**No question is marked, and no answer pointer is read** (ADR-0353 §11). No window
+brings a question with a message any more (ADR-0361 §8:5).
 
 **The instruction is a template that takes no flag** (ADR-0334, ADR-0353 §8:3): the
 system message is :data:`UNDERSTANDING_PROMPT`'s template, which the composition root
@@ -178,7 +177,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "UNDERSTANDING_PROMPT",
-    "AskedIn",
     "ChannelWindow",
     "EpisodeSelector",
     "LineMessage",
@@ -308,10 +306,6 @@ class TranscriptWindow:
             further store to resolve a message. A message missing here links to
             nothing: neither the bookkeeping nor an effect record names an activation
             for it, as for an assistant message the old path wrote (ADR-0303 §7:5).
-        asked: The question each assistant message ``links`` names its writer for is,
-            by its position, where it is one (ADR-0322 §4:2), as the reader brings it
-            with the window. Since ADR-0353 §11:1 understanding is shown no question
-            mark, and the stage no longer reads it.
         forwarded: The original sender of each message that is a forward, by its
             position, claimed (ADR-0323 §4:10). A forward is rendered as its original
             sender's, never as the user's, and planning is never shown its raw text
@@ -332,7 +326,6 @@ class TranscriptWindow:
     input_messages: tuple[TranscriptMessage | LineMessage, ...] = ()
     replied_to: tuple[TranscriptMessage | LineMessage | DeletedMessage, ...] = ()
     links: Mapping[int, str] = field(default_factory=dict)
-    asked: Mapping[int, AskedIn] = field(default_factory=dict)
     forwarded: Mapping[int, ClaimedAuthor] = field(default_factory=dict)
     claimed: frozenset[int] = frozenset()
 
@@ -368,34 +361,16 @@ class LineMessage:
 
 
 @dataclass(frozen=True, slots=True)
-class AskedIn:
-    """The question a message is, by its records (ADR-0322 §4:1-§4:3).
-
-    Attributes:
-        round: The planning round that wrote the message, as its effect record names
-            it, which recorded the calls the message asked about (ADR-0321 §2:8).
-        parts: The parts its mark shows, as ``project_episode`` projects that round of
-            the writer's episode, ``1`` to *n*; never read from the message's text.
-    """
-
-    round: str
-    parts: tuple[int, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class WrittenBy:
     """What wrote an assistant message, by its effect record (ADR-0303 §7:1, ADR-0306 §5:3).
 
     Attributes:
         activation_id: The activation the record names as having written it.
-        asked: The question the message is, where its round asked about calls and the
-            writer's episode marks it; ``None`` for every other message.
         round: The planning round the record names as having written it; ``None`` for
             the *couldn't finish* message, which names none (ADR-0307 §10).
     """
 
     activation_id: str
-    asked: AskedIn | None = None
     round: str | None = None
 
 

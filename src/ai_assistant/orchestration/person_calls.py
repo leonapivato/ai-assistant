@@ -24,11 +24,9 @@ phases are attached to a person-model store, which the engine does exactly where
 handed the person block's assembly; with none, no declaration is offered, no call names
 one, and nothing changes.
 
-**Only under the person's yes.** A call runs where it was rebuilt from a question the
-person said yes to (ADR-0321 §4:2), and is recorded as their act by that yes: the
-approval's part and the episode the yes was given in (ADR-0338 §3:5, §4:1). **Or under a
-ticket** (ADR-0362 §2:4-§2:5): acting has claimed it by ``claim_ticket_call``, spending the
-ticket, and a ``set_profile`` or a ``pin`` is recorded with the request form's act, naming
+**Only under the person's yes, as a ticket** (ADR-0362 §2:4-§2:5): acting has claimed it
+by ``claim_ticket_call``, spending the ticket, and a ``set_profile`` or a ``pin`` is
+recorded as the person's act (ADR-0338 §3:5, §4:1) with the request form's act, naming
 the request and the approval's own episode, where the yes was given, whichever work ran
 the ticket (§2:1). An ``unpin`` records no act, as none is recorded for one: its ticket is
 on its effect record, keyed by the request. A call that reaches the runner any other way
@@ -93,7 +91,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from ai_assistant.core.types import (
-        AskedCall,
         FrozenJson,
         PersonModelWrite,
         RequestedCall,
@@ -354,11 +351,11 @@ def _refused(written: PersonModelWrite) -> NotDone:
 class PersonModelCalls:
     """Run a ``set_profile``, ``pin`` or ``unpin`` call under the person's yes (ADR-0306 §3:3).
 
-    Structurally acting's ``OwnRecordsCalls`` and its ``ApprovedOwnRecordsCalls``: acting
-    awaits it to its end, with no deadline and no cancellation, and its outcome is what
-    the person-model store answered. It answers ``succeeded`` with a code-owned word
-    where the call was done or changed nothing, and :class:`NotDone` with the reason
-    otherwise: never ``indeterminate``.
+    Structurally acting's ``OwnRecordsCalls``: acting awaits it to its end, with no
+    deadline and no cancellation, and its outcome is what the person-model store
+    answered. It answers ``succeeded`` with a code-owned word where the call was done or
+    changed nothing, and :class:`NotDone` with the reason otherwise: never
+    ``indeterminate``.
     """
 
     def __init__(self, *, blocks: PersonBlocks, requests: RequestsReader | None = None) -> None:
@@ -386,8 +383,8 @@ class PersonModelCalls:
         Returns:
             ``succeeded`` with what it did, or :class:`NotDone` with the reason. A call
             reaching here under no ticket is not done: authorizing needs the person's yes
-            for every one of these calls (ADR-0338 §8:5), and a question's yes reaches
-            :meth:`run_approved`.
+            for every one of these calls (ADR-0338 §8:5), and a yes is a ticket alone
+            (ADR-0361 §5:1).
         """
         approval = call.decision.approval
         if approval is None or not isinstance(approval.how, TapOnCard):
@@ -434,28 +431,6 @@ class PersonModelCalls:
             episode_id=episode_address(str(request.pushed_to)),
         )
         return await self._ran(call, person, act)
-
-    async def run_approved(self, call: ToolCall, asked: AskedCall) -> ToolResult | NotDone:
-        """Run the call a yes approved, as the person's act by that yes (ADR-0338 §8:5).
-
-        Args:
-            call: The authorized call, its decision naming the approval.
-            asked: The asked call the yes approved, which ``call`` was rebuilt from.
-
-        Returns:
-            ``succeeded`` with what it did, or :class:`NotDone` with the reason.
-        """
-        acted = _approved_act(call, asked)
-        if isinstance(acted, NotDone):
-            return acted
-        person, act = acted
-        try:
-            return await self._ran(call, person, act)
-        except ValueError:
-            return _not_done(_MALFORMED, "malformed")
-        except PersonModelStoreError, MemoryStoreError:
-            _log.warning("person_model_call_not_done", stage="acting", reason="store_fault")
-            return NotDone(reason=_STORE_FAULT)
 
     async def _ran(self, call: ToolCall, person: str, act: PersonModelAct) -> ToolResult | NotDone:
         """The call run against the store, by its capability."""
@@ -530,37 +505,6 @@ def _partly(removed: int, showing: int) -> NotDone:
             "not be, so it is still pinned; unpinning it again finishes it"
         )
     )
-
-
-def _approved_act(call: ToolCall, asked: AskedCall) -> tuple[str, PersonModelAct] | NotDone:
-    """Whose act the call is, and how: the person's, by the yes it runs under (§3:5, §4:1).
-
-    The call runs under an approval whose approved part is ``asked``'s, of the same
-    capability; the person is the activation's, read from its recorded trigger (§2:2).
-    The act names the approval by the part it spends, and the episode the yes was given
-    in. Otherwise the call is not done.
-    """
-    decision = call.decision
-    approval = decision.approval
-    part = decision.approved_part
-    if (
-        approval is None
-        or part is None
-        or part.part != asked.part
-        or str(asked.tool.capability) != str(call.request.tool.capability)
-    ):
-        return _not_done(_UNAPPROVED, "unapproved")
-    state = active_state()
-    person = None if state is None else activation_person(state.trigger)
-    if person is None:
-        return _not_done(_NO_PERSON, "no_person")
-    act = PersonModelAct(
-        how=PersonActHow.APPROVAL,
-        by=person,
-        approval=part,
-        episode_id=episode_address(approval.given.activation_id),
-    )
-    return person, act
 
 
 def _memory_id(parameters: Mapping[str, FrozenJson]) -> str:

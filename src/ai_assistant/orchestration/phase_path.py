@@ -230,11 +230,7 @@ below is reached. Attached, ``set_profile``, ``pin`` and ``unpin`` are advertise
 the own records' other declarations and offered to every round, refused in an
 activation given no person block (ADR-0356 §4:5); a ``pin``'s and an ``unpin``'s memory
 is named by ``M`` label; each runs through acting's own-records seam, by
-:class:`~ai_assistant.orchestration.person_calls.PersonModelCalls`. Before each round,
-the memory each such call that needs the user names is read from the memory store, so
-its question shows the memory's wording in place of its label (§8:6); one whose memory
-is gone, or rests on outside content, which no question shows (ADR-0307 §9:2), cannot be
-asked about.
+:class:`~ai_assistant.orchestration.person_calls.PersonModelCalls`.
 
 **Left to later lanes:** the calendar pull (ADR-0324 §4, §6), which needs its grant use,
 ``PULL``; the weather pull is built (§5).
@@ -258,7 +254,6 @@ from uuid import uuid4
 import structlog
 
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.core.episode_encoding import project_episode, question_marks
 from ai_assistant.core.errors import (
     ActivationStoppedError,
     ClaimStopped,
@@ -275,7 +270,6 @@ from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEffect,
     ActivationRecall,
-    ApprovalGiver,
     CallShowed,
     CapabilityEffect,
     CapabilityResult,
@@ -302,7 +296,6 @@ from ai_assistant.core.types import (
     ProjectedRecall,
     ProjectedRound,
     ProposedCall,
-    QuestionPart,
     RecallOutcome,
     RecordedCall,
     RecordedDelivery,
@@ -352,7 +345,6 @@ from ai_assistant.orchestration.authorizer import (
     RoundToAuthorize,
     Verdict,
     WorkingRecord,
-    YesContext,
 )
 from ai_assistant.orchestration.candidates import pending_candidates
 from ai_assistant.orchestration.channel_kinds import place_of
@@ -368,7 +360,6 @@ from ai_assistant.orchestration.defects import ToleratedStageError, is_defect, l
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_lookups import OlderSource
-from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.lookups import (
     OLDER_NOTES_PAGE,
@@ -407,7 +398,6 @@ from ai_assistant.orchestration.message_tools import (
     reworded,
     text_arguments,
     who_it_is_for,
-    with_question,
 )
 from ai_assistant.orchestration.outside_content import joined_parties, rests_on_outside_content
 from ai_assistant.orchestration.person_block import activation_person, still_held
@@ -420,7 +410,6 @@ from ai_assistant.orchestration.person_calls import (
 )
 from ai_assistant.orchestration.planning import (
     WAITING_ROUND,
-    ApprovedAction,
     CallOutcome,
     CallOutcomeKind,
     DigestedEvidence,
@@ -470,7 +459,7 @@ from ai_assistant.orchestration.task_scheduler import (
     decode_listing,
     spawning,
 )
-from ai_assistant.orchestration.understanding import AskedIn, WrittenBy, fetch_held
+from ai_assistant.orchestration.understanding import WrittenBy, fetch_held
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -500,7 +489,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActivationDigest,
         ActivationUnderstanding,
-        AnsweredQuestion,
         ForecastOutcome,
         FrozenJson,
         JoinedInput,
@@ -681,13 +669,6 @@ _HOLDING: Final[contextvars.ContextVar[SuppliedRecords | None]] = contextvars.Co
 #: reads its answer (ADR-0324 §2:4).
 _ATTRIBUTING: Final[contextvars.ContextVar[MutableMapping[str, str] | None]] = (
     contextvars.ContextVar("phase_tools_attributing", default=None)
-)
-
-#: The activation whose round planning is deciding, set around planning's call, which
-#: records the round inside it: the recorder reads from it whether the round's message
-#: would be shown whole (ADR-0321 §4:4).
-_PLANNING: Final[contextvars.ContextVar[PhaseWorking | None]] = contextvars.ContextVar(
-    "phase_path_planning", default=None
 )
 
 
@@ -2001,9 +1982,7 @@ class PhaseWorking:
         round_limit: int,
         labels: Sequence[PlanningLabel] = (),
         users_authority: bool = False,
-        given_at: datetime | None = None,
         target: PlaceTarget | None = None,
-        giver: ApprovalGiver = ApprovalGiver.USER_THROUGH_HUB_CHAT,
     ) -> None:
         """Start an activation's working set, before its first round.
 
@@ -2026,14 +2005,9 @@ class PhaseWorking:
                 or on the Telegram line from their own account, not forwarding.
                 ``False``, the default, wherever it cannot be established. A relay mark
                 takes it away for the rest of the activation (ADR-0351 §6:5).
-            given_at: When the input was given, timezone-aware: a yes it carries is
-                given then (ADR-0321 §4:6). ``None`` where it is not known, and then
-                no yes is read from it.
             target: The place a message is written into and its writer, where it is
                 not one of the hub chat's conversations, as the Telegram line's chat
                 (ADR-0323 §6:1). Never given beside ``conversation_id``.
-            giver: Who a yes the input carries is given by: the user, through the
-                channel the input came on (ADR-0323 §4:9).
 
         Raises:
             ValueError: If ``round_limit`` is below 1, or both a conversation and a
@@ -2056,14 +2030,7 @@ class PhaseWorking:
         # is; each, once set, holds for the rest of the activation.
         self.trigger_relayed = False
         self.joined_relayed = False
-        self.given_at = given_at
         self.target = target
-        self.giver = giver
-        # The actions the input's yes approved, as the records show them, by the pointers
-        # they were read for, read once (ADR-0321 §4:2, ADR-0322 §3:4).
-        self.approvable: tuple[tuple[AnsweredQuestion, ...], tuple[ApprovedAction, ...]] | None = (
-            None
-        )
         self._round_limit = round_limit
         self.labels = ActivationLabels(labels)
         self.held = HeldResults(on_hold=self._on_hold)
@@ -2389,8 +2356,6 @@ class PhaseWorking:
                         ),
                     )
                 )
-                if self.given_at is not None and message.sent_at > self.given_at:
-                    self.given_at = message.sent_at
         if sent:
             # The window is oldest first, and a renewed offer brings the absorber's own
             # input before what it absorbed, and a later take an earlier message, so
@@ -2457,9 +2422,9 @@ class PhaseWorking:
         outcomes: list[CallOutcome] = []
         for one in self._rounds:
             names = {call.call_id: call.name for call in one.planned.round.calls}
-            # The capability a call ran as: an approved action is proposed under the
-            # approved-action tool's name and runs as the capability its question
-            # showed (ADR-0321 §4:2), so a remember a yes approved is rendered as one.
+            # The capability a call ran as: a ticket is run under run_approved's name and
+            # runs as the capability its request holds (ADR-0361 §5:2), so a remember a
+            # tap approved is rendered as one.
             ran = (
                 {}
                 if one.acted is None
@@ -2663,7 +2628,7 @@ class PhaseWorking:
                     handed=one.handed,
                 )
             }
-            # An approved action is proposed under its tool and runs as its capability.
+            # A ticket is run under run_approved and runs as its capability (ADR-0361 §5:2).
             named = {planned.call.call_id: planned.call.name for planned in one.planned.calls}
             for call in one.planned.round.calls:
                 if (round_id, call.call_id) in self._entered:
@@ -2789,28 +2754,6 @@ class PhaseWorking:
             or any(one.outcome is DigestOutcome.ANSWERED for one in self.digests)
         )
 
-    def yes(self, understanding: ActivationUnderstanding | None) -> YesContext | None:
-        """The yes the input carries, as authorizing takes it (ADR-0321 §3:1, §4:4).
-
-        Every pointer understanding recorded (ADR-0322 §3:1), with when the input was
-        given and whether it carries the user's authority; ``None`` where understanding
-        recorded none, or where when the input was given is not known, and then no call
-        runs under an approval (ADR-0321 §4:5). It grants nothing by itself: authorizing
-        checks each pointer against the records.
-        """
-        # ADR-0353 §11:2-§11:3: understanding records no answer pointer until the
-        # authority run, so authorizing's rules find none.
-        del understanding
-        answers: tuple[AnsweredQuestion, ...] = ()
-        if not answers or self.given_at is None:
-            return None
-        return YesContext(
-            answers=answers,
-            given_at=self.given_at,
-            users_authority=self.users_authority,
-            who=self.giver,
-        )
-
     def outcome(self) -> str | None:
         """The episode's ``outcome``: the messages written, joined by a blank line (§10)."""
         return "\n\n".join(self.messages) if self.messages else None
@@ -2882,12 +2825,10 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
     A ``text`` call is what its write came to, with what it sent, or refused by the
     message place check, where it was not allowed (ADR-0356 §7:7-§7:8, §8:4). Any
     other call planning's own check refused, or authorizing found not done, is refused;
-    one authorizing sent to the user needs you, carrying the request a question about it
-    shows and records, or the part of the question it already waits on (ADR-0321 §2:8,
-    §4:11); and one it allowed is what acting made of it, its result under the id acting
-    minted (ADR-0306 §5:1, §5:14), or needing you where the memory writer asked at write
-    time, with the assertions its question shows replaced (ADR-0321 §5:5). A call with no
-    decision yet has no outcome.
+    one authorizing sent to the user needs you, with its reason; and one it allowed is
+    what acting made of it, its result under the id acting minted (ADR-0306 §5:1,
+    §5:14), or needing you where the memory writer asked at write time (ADR-0321 §5:5).
+    A call with no decision yet has no outcome.
 
     Where acting raised or was cancelled and so made nothing of the round (``acted`` is
     ``None``), a call it ``handed`` back as it finished is what acting made of it, and
@@ -2922,18 +2863,9 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
         if verdict is None:
             continue
         if verdict.verdict is Verdict.NEEDS_YOU:
-            # ADR-0321 §2:8, §4:11: what a question about it shows and records, or the
-            # part of the question it is already waiting on.
+            # ADR-0361 §2:4: it ran nothing, and is asked for by request_approval alone.
             outcomes.append(
-                CallOutcome(
-                    round_id,
-                    call_id,
-                    CallOutcomeKind.NEEDS_YOU,
-                    reason=verdict.reason,
-                    request=verdict.request,
-                    deliberate_repeat=verdict.deliberate_repeat,
-                    already_asked=verdict.already_asked,
-                )
+                CallOutcome(round_id, call_id, CallOutcomeKind.NEEDS_YOU, reason=verdict.reason)
             )
             continue
         if verdict.verdict is Verdict.NOT_DONE:
@@ -2952,18 +2884,9 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
                 )
             continue
         if one.outcome is ActedOutcome.NEEDS_YOU:
-            # ADR-0321 §5:5: a remember the writer asked about at write time needs you,
-            # showing the assertions it would replace (#2845).
+            # ADR-0321 §5:5: a remember the writer asked about at write time needs you.
             outcomes.append(
-                CallOutcome(
-                    round_id,
-                    call_id,
-                    CallOutcomeKind.NEEDS_YOU,
-                    reason=one.reason,
-                    request=one.call.call.request,
-                    deliberate_repeat=one.call.deliberate_repeat,
-                    replaces=one.replaces,
-                )
+                CallOutcome(round_id, call_id, CallOutcomeKind.NEEDS_YOU, reason=one.reason)
             )
             continue
         kind = {
@@ -3051,16 +2974,12 @@ def _text_outcome(
 
 
 def authorized_round(decided: RoundAuthorization) -> AuthorizedRound:
-    """Authorizing's decision as acting's input: the allowed calls, in the round's order.
-
-    A call that runs under an approval carries the asked call it was rebuilt from
-    (ADR-0321 §4:2), whose ``replaces`` a remember retires on the yes (§5:5).
-    """
+    """Authorizing's decision as acting's input: the allowed calls, in the round's order."""
     return AuthorizedRound(
         activation_id=decided.activation_id,
         round_id=decided.round_id,
         calls=tuple(
-            AuthorizedCall(one.call, deliberate_repeat=one.deliberate_repeat, asked=one.asked)
+            AuthorizedCall(one.call, deliberate_repeat=one.deliberate_repeat)
             for one in decided.allowed
         ),
         story_activations=decided.story_activations,
@@ -3104,23 +3023,12 @@ class _RoundRecorder:
         self._path = path
 
     async def record(
-        self,
-        planning_round: PlanningRound,
-        labels: tuple[PlanningLabel, ...],
-        *,
-        questions: Mapping[str, str] | None = None,
+        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
     ) -> None:
-        """Add the round and its labels to the activation's record, and extend it.
-
-        A round whose question would not be shown whole is recorded asking about
-        nothing (:meth:`PhasePath.shown_whole`).
-        """
+        """Add the round and its labels to the activation's record, and extend it."""
         state = active_state()
         if state is None:
             return
-        working = _PLANNING.get()
-        if working is not None:
-            planning_round = self._path.shown_whole(working, planning_round, questions, labels)
         state.recorded_round(planning_round, labels)
         await _extended(state, self._path.append)
 
@@ -3195,31 +3103,6 @@ def _new_effect_id() -> str:
 def _place_id(conversation_id: str) -> str:
     """The place a message goes into: the conversation, by its id (ADR-0306 §6)."""
     return place_of(conversation_channel(conversation_id))
-
-
-def _delivered_round(effects: Sequence[ActivationEffect], pointer: AnsweredQuestion) -> str | None:
-    """The round whose message the pointer names, where its delivery is done.
-
-    As authorizing reads ADR-0321 §4:4's *shown*: the asking activation's message
-    record for the pointer's round, at its place and position where the pointer names
-    them, its outcome done and its position written (ADR-0306 §5:5). The *couldn't
-    finish* message names no round and is never a question.
-    """
-    for one in effects:
-        if (
-            not one.is_call
-            and one.activation_id == pointer.activation_id
-            and one.outcome is ToolOutcome.SUCCEEDED
-            and one.position is not None
-            and one.round is not None
-            and (pointer.round is None or one.round == pointer.round)
-            and (
-                pointer.place is None
-                or (one.place == pointer.place and one.position == pointer.position)
-            )
-        ):
-            return one.round
-    return None
 
 
 #: Why a call of a round held back for an offer was not done (ADR-0349 §7:14), as
@@ -4055,7 +3938,6 @@ class PhasePath:
                 and bool(taken)
                 and all(one.author is MessageAuthor.USER for one in taken)
             ),
-            given_at=max((one.written_at for one in taken), default=None),
         )
         # ADR-0358 §9:2: the chat's window is read from its transcript, so its older
         # history is the transcript before the oldest recent message the window showed.
@@ -4073,7 +3955,6 @@ class PhasePath:
         window: TranscriptWindow,
         target: PlaceTarget,
         description: str,
-        giver: ApprovalGiver,
         trigger: RecordedChannelTrigger | None,
         owner_records: bool,
         labels: Sequence[PlanningLabel] = (),
@@ -4088,8 +3969,7 @@ class PhasePath:
         where the trigger's parties are the user alone (ADR-0351 §6:1, §6:3) and **every
         message taken in is the user's, established, and none is a forward** (§4:6): a
         forward's party is its original sender, claimed (ADR-0351 §2:7), and an input
-        taking one in is an outside trigger (§5:3). A yes it carries is given by
-        ``giver`` when its latest message was sent (§4:9).
+        taking one in is an outside trigger (§5:3).
 
         Args:
             activation_id: The activation.
@@ -4097,7 +3977,6 @@ class PhasePath:
             target: The line's chat and its writer.
             description: The line's kind's description, which planning is shown with
                 the place (ADR-0292 §8:1).
-            giver: Who a yes on the line is: the user, through it (§4:9).
             trigger: The activation's recorded trigger, whose parties say whose words its
                 input carries.
             owner_records: Whether a record placed for the owner alone may be shown.
@@ -4124,9 +4003,7 @@ class PhasePath:
                     for one in taken
                 )
             ),
-            given_at=max((one.written_at for one in taken), default=None),
             target=target,
-            giver=giver,
         )
         # ADR-0358 §9:2, ADR-0323 §10:1: a line's window is its recent episodes on the
         # channel and place, so its older history is the earlier episodes there, bounded
@@ -4179,7 +4056,6 @@ class PhasePath:
             round_limit=self._round_limit,
             labels=labels,
             users_authority=False,
-            given_at=self._now(),
         )
 
     def begin_task(
@@ -4221,7 +4097,6 @@ class PhasePath:
             round_limit=self._round_limit,
             labels=labels,
             users_authority=False,
-            given_at=self._now(),
         )
 
     def begin_approval(
@@ -4261,7 +4136,6 @@ class PhasePath:
             round_limit=self._round_limit,
             labels=labels,
             users_authority=False,
-            given_at=self._now(),
         )
 
     async def written(
@@ -4283,12 +4157,6 @@ class PhasePath:
         position no record names is simply missing, as is every one where the records
         cannot be read: the message is then not linkable, the conservative direction
         (§7:5), and the window is still brought in.
-
-        Each such message is also the question its round asked, where it is one
-        (ADR-0322 §4:1-§4:3): its record names the round, and the writer's stored
-        episode, projected, marks that round with the parts it asked about, read from
-        the round's recorded asked calls and never from the message's text. Where the
-        episodes cannot be read, no message is a question, failing closed.
 
         Args:
             place: The place the messages are in, as their effect records name it
@@ -4318,50 +4186,11 @@ class PhasePath:
             and one.position is not None
             and (wanted is None or one.position in wanted)
         ]
-        marks = await self._question_marks(
-            [one.activation_id for one in done if one.round is not None]
-        )
         return {
-            one.position: WrittenBy(
-                activation_id=one.activation_id,
-                asked=None
-                if one.round is None or (parts := marks.get((one.activation_id, one.round))) is None
-                else AskedIn(round=one.round, parts=parts),
-                round=one.round,
-            )
+            one.position: WrittenBy(activation_id=one.activation_id, round=one.round)
             for one in done
             if one.position is not None
         }
-
-    async def _question_marks(
-        self, activation_ids: Sequence[str]
-    ) -> dict[tuple[str, str], tuple[int, ...]]:
-        """The parts each marked round of these activations' episodes asked about (§4:3).
-
-        Read through ``project_episode``, by the activation and the round, since a round's
-        id names it only within its activation: a message is marked from its own round's
-        record and never another's. An episode still open, or one the store no longer
-        holds, marks nothing, and a store that cannot be read marks nothing, so its
-        messages carry no mark.
-        """
-        if not activation_ids:
-            return {}
-        addresses = list(dict.fromkeys(episode_address(one) for one in activation_ids))
-        try:
-            found = without_open_episodes(await self._memory.get_many(addresses))
-        except Exception:  # the store is down: no message is marked a question
-            _log.warning("phase_questions_unread", stage="reader", reason="store_failed")
-            return {}
-        marks: dict[tuple[str, str], tuple[int, ...]] = {}
-        for record in found.values():
-            processing = record.processing_record if isinstance(record, EpisodicMemory) else None
-            if isinstance(record, EpisodicMemory) and processing is not None:
-                projection = project_episode(record, excerpt_chars=1)
-                marks.update(
-                    ((processing.activation_id, round_id), one.asked)
-                    for round_id, one in question_marks(record, projection)
-                )
-        return marks
 
     def stages(self) -> tuple[ControllerStageRun[PhasePass], ...]:
         """The four phase stages, as the controller runs them (ADR-0309 §3)."""
@@ -4545,7 +4374,7 @@ class PhasePath:
         left = max(given.deadline - asyncio.get_running_loop().time(), 0.0)
         return min(bound, timedelta(seconds=left))
 
-    async def _plan(self, given: PhasePass) -> None:  # noqa: PLR0915 — every input the round is given, gathered in one place
+    async def _plan(self, given: PhasePass) -> None:
         """One planning round, over everything the thin path gives it (ADR-0307 §6).
 
         **The waits on an older activation come first** (ADR-0349 §7:25-§7:28): while
@@ -4575,13 +4404,9 @@ class PhasePath:
                 found = await self._found(given, working)
                 stories = await self._stories(given, working)
                 await self._searched(given, working)
-                # The yes's records are read inside the activation's deadline, as
-                # every read before the round is (ADR-0280 §5).
-                approved = await self._approved(given, working)
                 pending = await self._pending(given, working)
                 person = await self._person(working)
-                # ADR-0338 §8:6: a pin's or an unpin's memory, worded for its question.
-                outcomes = await self._worded(working)
+                outcomes = working.outcomes()
                 # ADR-0350 §5:8, §9:1: the place list built as it is shown, and the
                 # scheduled task each linked activation ran.
                 await self._scheduled(working)
@@ -4642,10 +4467,6 @@ class PhasePath:
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
             stories=stories,
-            # ADR-0349 §7:26: a waiting round is offered the stop call alone, so the
-            # actions the input's yes approved wait, with the rest of its work, for the
-            # rounds after the wait.
-            approved=() if waiting else approved,
             pending=pending,
             overtaken=working.overtaken(),
             not_taken=working.not_taken(),
@@ -4677,20 +4498,12 @@ class PhasePath:
             tickets=() if waiting else tickets,
             approvals=self._approval_calls is not None,
         )
-        # The round is recorded inside planning's call, so the recorder reads what it
-        # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
-        planning = _PLANNING.set(working)
         try:
             async with asyncio.timeout_at(given.deadline):
                 planned = await self._planning.plan(inputs)
                 planned = await self._notes_checked(planned, working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
-        finally:
-            _PLANNING.reset(planning)
-        whole = self.shown_whole(working, planned.round, planned.questions, planned.labels)
-        if whole is not planned.round:
-            planned = replace(planned, round=whole)
         working.planned(
             planned,
             offers_shown=frozenset(one.activation_id for one in offers),
@@ -5185,52 +4998,6 @@ class PhasePath:
             state.recorded_calls(entries)
             await _extended(state, self.append)
 
-    async def _worded(self, working: PhaseWorking) -> tuple[CallOutcome, ...]:
-        """What came of every round's calls, a pin's or an unpin's memory worded.
-
-        ADR-0338 §8:6: the question about a ``pin`` or an ``unpin`` call that needs the
-        user shows the memory's wording as the memory store holds it, read live here for
-        the round that may ask, in place of its label. Only a memory the live read
-        returns current is shown so (ADR-0342 §5:1): one that is gone, retired since it
-        was shown, or rests on outside content, which no question shows (ADR-0307 §9:2),
-        or one that cannot be read, leaves the call handed on with no request, so it
-        cannot be asked about. A wording read for a question is among what the
-        activation obtained (ADR-0309 §5:10).
-        """
-        outcomes = working.outcomes()
-        if self._person_calls is None:
-            return outcomes
-        named: dict[int, tuple[str, str]] = {}
-        for index, one in enumerate(outcomes):
-            request = one.request
-            if one.kind is not CallOutcomeKind.NEEDS_YOU or request is None:
-                continue
-            argument = worded_argument(str(request.tool.capability))
-            memory_id = None if argument is None else request.parameters.get(argument)
-            if argument is not None and isinstance(memory_id, str):
-                named[index] = (argument, memory_id)
-        if not named:
-            return outcomes
-        held: Mapping[str, MemoryRecord]
-        try:
-            held = await self._memory.get_many(sorted({one for _, one in named.values()}))
-        except MemoryStoreError:
-            _log.warning("planning_wording_unread", stage="planning", reason="memory_fault")
-            held = {}
-        worded = list(outcomes)
-        for index, (argument, memory_id) in named.items():
-            record = held.get(memory_id)
-            if (
-                not isinstance(record, Memory)
-                or record.status is not MemoryStatus.CURRENT
-                or record.rests_on_outside_content
-            ):
-                worded[index] = replace(outcomes[index], request=None, deliberate_repeat=False)
-                continue
-            working.supplied.obtained((record,))
-            worded[index] = replace(outcomes[index], worded=((argument, record.content),))
-        return tuple(worded)
-
     async def _notes_checked(self, planned: PlannedRound, working: PhaseWorking) -> PlannedRound:
         """Refuse whole, before authorizing, a move or a split naming a note not held.
 
@@ -5475,7 +5242,6 @@ class PhasePath:
             CallToAuthorize(
                 call=await self._filled(one.call),
                 deliberate_repeat=one.deliberate_repeat,
-                approved_part=one.approved_part,
                 ticket=one.ticket,
             )
             for one in planned.calls
@@ -5532,7 +5298,6 @@ class PhasePath:
             input_place=None if places is not None else place,
             message=message,
             call_messages=call_messages,
-            yes=working.yes(given.understanding),
             places=places,
             gone=gone,
             person=None if state is None else activation_person(state.trigger),
@@ -6217,8 +5982,8 @@ class PhasePath:
 
         The round's own message, then each ``text`` call allowed, in the round's order
         (ADR-0356 §7:7-§7:8), each claimed and written as a message is: its words as the
-        wording step renders them, and an asking call's exact lines after them (ADR-0357
-        §4, §8:2).
+        wording step renders them (ADR-0357 §4), with no exact line after them (ADR-0361
+        §8:5).
         """
         decided = latest.authorization
         if decided is None:
@@ -6241,7 +6006,6 @@ class PhasePath:
                 place=verdict.place,
             )
         texts = {one.call.call_id: one.call for one in latest.planned.calls}
-        questions = latest.planned.questions
         for one in decided.call_messages:
             call = texts.get(one.call_id or "")
             if not one.allowed or one.effect_id is None or call is None:
@@ -6249,11 +6013,8 @@ class PhasePath:
             checked = text_arguments(call.arguments)
             if isinstance(checked, str):  # pragma: no cover — checked before authorizing
                 continue
-            # ADR-0357 §4, §8:2: the words as the wording step renders them, and after
-            # them the exact lines of the question it asks, which are never reworded.
-            words = with_question(
-                reworded(checked.words, exact=checked.exact), questions.get(call.call_id)
-            )
+            # ADR-0357 §4: the words as the wording step renders them.
+            words = reworded(checked.words, exact=checked.exact)
             try:
                 latest.sent[call.call_id] = await self._sent(
                     working,
@@ -6345,69 +6106,6 @@ class PhasePath:
         working.digests.append(digested.digest)
         working.evidence.append(digested_evidence(digested, working.labels.labels))
 
-    # --- the yes path (ADR-0321) ---
-
-    def shown_whole(
-        self,
-        working: PhaseWorking,
-        planning_round: PlanningRound,
-        questions: Mapping[str, str] | None = None,
-        labels: Sequence[PlanningLabel] = (),
-    ) -> PlanningRound:
-        """``planning_round``, asking about nothing where its question would not be shown whole.
-
-        The dispatcher's ruling on ADR-0321 §4:4's *shown*: a message cut to fit is not
-        shown, since its exact lines come last (§2:5) and any cut takes them. The question
-        is the round's asking ``text`` call, the one ``questions`` holds lines for
-        (ADR-0357 §8:2), as it would be written: its words as reworded and the lines after
-        them, into the place it names or resolves. So a round whose asking call would be
-        cut, by the transcript's bound or the writer's, or could go nowhere, its person or
-        place not found, records no asked call: by §2:2 nothing waits on the user that
-        they were not clearly asked about, so no yes to that message approves anything,
-        no proposal is held back as already asked, and the call may be asked about again
-        whole. Where whether it fits cannot be told, it is taken not to, failing closed.
-        ``labels`` are the round's own, which the working set does not hold yet.
-
-        Returns:
-            ``planning_round`` itself where it asks about nothing or its question would be
-            shown whole; otherwise a copy that asks about nothing.
-        """
-        if not planning_round.asked:
-            return planning_round
-        lines = questions or {}
-        asking = next((one for one in planning_round.calls if one.call_id in lines), None)
-        target, text = None, ""
-        if asking is not None:
-            checked = text_arguments(asking.arguments)
-            if (
-                not isinstance(checked, str)
-                and who_it_is_for(checked.to, named=self._named(working)) is None
-            ):
-                place = self._text_place(working, checked, (*working.labels.labels, *labels))
-                if isinstance(place, str):
-                    target = self._target(working, place)
-                    if target is not None and target.place != place:
-                        target = None  # it would not go where the place check allows
-                    text = with_question(
-                        reworded(checked.words, exact=checked.exact), lines[asking.call_id]
-                    )
-        whole = False
-        if target is not None:
-            try:
-                whole = not self._fitted(target, text).cut_off
-            except Exception as exc:  # whether it fits is not known: not shown whole
-                if is_defect(exc):
-                    log_defect(
-                        "phase_question_unmeasured",
-                        exc,
-                        stage="planning",
-                        activation_id=working.activation_id,
-                    )
-        if whole:
-            return planning_round
-        _log.info("phase_question_cut", stage="planning", asked=len(planning_round.asked))
-        return planning_round.model_copy(update={"asked": ()})
-
     @staticmethod
     def _fitted(target: PlaceTarget, text: str) -> Fitted:
         """``text`` as the place would write it: within its bounds, its writer's to say.
@@ -6442,99 +6140,6 @@ class PhasePath:
             # gone since goes nowhere, never into another place.
             return None if scheduling is None else scheduling.targets.get(place)
         return own
-
-    async def _approved(
-        self, given: PhasePass, working: PhaseWorking
-    ) -> tuple[ApprovedAction, ...]:
-        """The actions the input's yes approved, as planning is shown them (ADR-0321 §4:2).
-
-        Gathered from every pointer understanding recorded, in its order (ADR-0322
-        §3:4), each read from the records it leads to: the asking activation's message
-        delivery record names the question's round, by the pointer's round or by its
-        place and position, and the asking episode's round records the calls it asked
-        about (§2:8). The parts approved are those the pointer names, or every part
-        shown where it names none (§3:6), less those an effect record has already used
-        (§4:9), so a second yes shows nothing to run.
-
-        None where the input does not carry the user's authority (§3:3) or the place
-        takes no message (§7:3); none from a pointer naming this activation's own
-        question (§4:1) or resolving to nothing; and none from one whose records cannot
-        be read. This shows and grants nothing that authorizing does not check again
-        (§4:4).
-        """
-        # ADR-0353 §11:2-§11:3: understanding records no answer pointer until the
-        # authority run, so none shows an approved action.
-        del given
-        pointers: tuple[AnsweredQuestion, ...] = ()
-        if not pointers or not working.users_authority or self._target(working) is None:
-            return ()
-        if working.approvable is None or working.approvable[0] != pointers:
-            # Each part once: no two pointers name one question (ADR-0322 §2:7), so none
-            # is repeated. A part reached from two asking activations cannot be told
-            # apart by its label, so neither is shown, failing closed (§3:3).
-            gathered: dict[QuestionPart, ApprovedAction] = {}
-            askers: dict[QuestionPart, set[str]] = {}
-            for pointer in pointers:
-                if pointer.activation_id == working.activation_id:
-                    continue
-                for action in await self._approvable(pointer, working):
-                    gathered.setdefault(action.part, action)
-                    askers.setdefault(action.part, set()).add(pointer.activation_id)
-            working.approvable = (
-                pointers,
-                tuple(one for part, one in gathered.items() if len(askers[part]) == 1),
-            )
-        actions = working.approvable[1]
-        if not actions:
-            return ()
-        try:
-            spent = await self._plans.part_effects([one.part for one in actions])
-        except Exception as exc:  # the store is down: nothing is shown as approved
-            self._unread(exc, working)
-            return ()
-        used = {one.part for one in spent}
-        return tuple(one for one in actions if one.part not in used)
-
-    async def _approvable(
-        self, pointer: AnsweredQuestion, working: PhaseWorking
-    ) -> tuple[ApprovedAction, ...]:
-        """The calls the pointer's question asked about and approves, as recorded."""
-        try:
-            effects = await self._plans.activation_effects([pointer.activation_id])
-            round_id = _delivered_round(effects, pointer)
-            if round_id is None:
-                return ()
-            record = await self._memory.get(episode_address(pointer.activation_id))
-        except Exception as exc:  # a store is down: nothing is shown as approved
-            self._unread(exc, working)
-            return ()
-        if not isinstance(record, EpisodicMemory) or record.processing_record is None:
-            return ()
-        asked = next(
-            (one.asked for one in record.processing_record.rounds if one.id == round_id), ()
-        )
-        recorded = {one.part: one for one in asked}
-        actions = tuple(
-            ApprovedAction(part=QuestionPart(round=round_id, part=number), call=recorded[number])
-            for number in (pointer.parts or sorted(recorded))
-            if number in recorded
-        )
-        if actions:
-            # What planning may be shown of it was obtained from the asking episode, so
-            # the episode and what this activation remembers are placed by it too
-            # (ADR-0309 §5:10, ADR-0217 §3:12).
-            working.supplied.obtained((record,))
-        return actions
-
-    @staticmethod
-    def _unread(exc: Exception, working: PhaseWorking) -> None:
-        """Log a failed read of the yes's records, a defect as one (#2904)."""
-        if is_defect(exc):
-            log_defect(
-                "phase_approved_unread", exc, stage="planning", activation_id=working.activation_id
-            )
-        else:
-            _log.warning("phase_approved_unread", stage="planning", reason="store_failed")
 
     # --- the place ---
 

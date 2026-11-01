@@ -42,7 +42,7 @@ activation's stories are read from the story store as they stand now, and handed
 
 **A candidate** (ADR-0329 §5). A ``remember`` call records a candidate and passes no
 ``MemoryPolicy`` (§5:6): the observer's writes do. Authorizing rules by rule, with no
-model, that one with *confirm* set needs you (§5:2), and under a yes it runs as any
+model, that one with *confirm* set needs you (§5:2), and under a ticket it runs as any
 approved call does, the policy's recorded allow its deciding decision (§5:3). A candidate
 it cannot read is not done. ADR-0328 §13's interim, under which remembering passed
 ``MemoryPolicy`` here, is retired with the composition root's switch.
@@ -57,8 +57,9 @@ deciding decision, so it never runs without their yes to that exact email (§2:1
 **The person model's calls** (ADR-0338 §8:5). Every ``set_profile``, ``pin`` and
 ``unpin`` call needs the person's yes, by rule and with no model: a source of *needs you*
 beside the policy's confirm, the stand-in's and a candidate's *confirm*, with the
-policy's recorded allow as the deciding decision (ADR-0321 §4:17). Under a yes it runs as
-any approved call does (§4); a deny still refuses it, and the policy's confirm still asks.
+policy's recorded allow as the deciding decision (ADR-0321 §4:17). Under a ticket it runs
+as any approved call does (ADR-0361 §5:4); a deny still refuses it, and the policy's
+confirm still asks.
 
 **It logs stage and code-owned reason only**, never arguments or rulings' text (ADR-0275
 §8).
@@ -90,7 +91,6 @@ from ai_assistant.core.diagnostics import failure_body, write_diagnostic
 from ai_assistant.core.errors import (
     AuditError,
     EgressBindingError,
-    MemoryStoreError,
     PlanningError,
     StoryStoreError,
 )
@@ -98,13 +98,10 @@ from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     ActionRequest,
     ActivationDigest,
-    AnsweredQuestion,
     Approval,
     ApprovalEnd,
     ApprovalGiven,
-    ApprovalGiver,
     ApprovalRequestState,
-    AskedCall,
     CapabilityEffect,
     CarriedProvenance,
     DiagnosticKind,
@@ -119,7 +116,6 @@ from ai_assistant.core.types import (
     PlanningLabel,
     PlanningRound,
     ProposedCall,
-    QuestionPart,
     RequestedCall,
     SpanCoverage,
     StoryMember,
@@ -129,7 +125,6 @@ from ai_assistant.core.types import (
     TicketState,
     ToolCall,
     ToolOutcome,
-    YesToQuestion,
     canonical_json_bytes,
     rests_on_recorded_external_content,
 )
@@ -140,7 +135,6 @@ from ai_assistant.orchestration.approvals import (
     REQUEST_APPROVAL_CAPABILITY,
     nested_call,
 )
-from ai_assistant.orchestration.channel_kinds import users_place
 from ai_assistant.orchestration.message_tools import (
     ATTACHMENTS_ARGUMENT,
     BCC_ARGUMENT,
@@ -200,7 +194,6 @@ __all__ = [
     "RoundToAuthorize",
     "Verdict",
     "WorkingRecord",
-    "YesContext",
     "gets_effect_record",
     "read_outside_content",
     "shown_values",
@@ -263,7 +256,6 @@ _UNKNOWN_REPEAT: Final = (
     "a deliberate repeat of a call whose earlier outcome is unknown or not yet written "
     "needs the user's yes"
 )
-_ALREADY_ASKED: Final = "the user was already asked about this exact call, and it waits on them"
 
 #: ADR-0361 §2:3: why ``request_approval``'s own decision allows it.
 _RULED_BY_ITS_CALL: Final = (
@@ -324,21 +316,6 @@ def _not_asked(reason: str | None) -> str:
     return f"not allowed{why}, so no request was written: do not ask the person about it"
 
 
-# The facts an approval rests on (ADR-0321 §3:3, §4:4 to §4:5), each a code-owned word
-# for the diagnostic record and the log when it fails.
-_NO_POINTER: Final = "no_pointer"
-_NOT_THE_USERS: Final = "not_the_users_authority"
-_NO_RECORDS: Final = "no_plan_store"
-_ASKED_HERE: Final = "asked_in_this_activation"
-_NOT_SHOWN: Final = "not_shown"
-_NOT_APPROVED: Final = "part_not_approved"
-_NOT_RECORDED: Final = "not_recorded"
-_NOT_THE_CALL: Final = "not_the_call_shown"
-_ALREADY_RUN: Final = "already_run"
-_AMBIGUOUS: Final = "question_ambiguous"
-_UNREADABLE: Final = "records_unreadable"
-
-
 class Verdict(StrEnum):
     """What authorizing made of one call (ADR-0306 §4:8 to §4:9)."""
 
@@ -366,11 +343,6 @@ class CallToAuthorize:
         call: The call with ids in place of labels, and without its *looking for* or
             *deliberate repeat* (ADR-0306 §2:10).
         deliberate_repeat: Whether planning marked it a deliberate repeat.
-        approved_part: Where planning proposed the call by an approved action's label
-            (ADR-0321 §4:2), the question part that label names; ``None`` otherwise.
-            It is a claim to check, never a grant: the call runs under an approval only
-            where the records bear it out (§4:4 to §4:5), and is then rebuilt from the
-            call the question showed, whatever else the proposal carries.
         ticket: Where planning ran a ticket by its ``A`` label (ADR-0361 §5:2), the
             approval request it names; ``None`` otherwise. It is a claim to check: the
             call runs under the ticket only where §5:3's checks hold against the request
@@ -379,7 +351,6 @@ class CallToAuthorize:
 
     call: ProposedCall
     deliberate_repeat: bool = False
-    approved_part: QuestionPart | None = None
     ticket: str | None = None
 
 
@@ -449,62 +420,6 @@ class WorkingRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class YesContext:
-    """The yes this activation's input may carry, as authorizing takes it (ADR-0321 §3, §4).
-
-    The lane that wires the phases fills it from understanding's recorded pointers
-    (``ActivationUnderstanding.answers``) and from the input itself. It is a reading and
-    a fact about the input, and grants nothing by itself (ADR-0276 §7:7): an approval is
-    assembled only from the records a pointer leads to, where §4:4's facts hold, one
-    per question (ADR-0322 §3:1-§3:2).
-
-    The question's asked calls are not carried here: authorizing reads them from the
-    asking activation's stored episode, the record the round wrote them to (§2:8, §4:4),
-    so the facts are checked against the records and not against a copy of them.
-
-    Attributes:
-        answers: Every recorded pointer, at least one: each a question's message, by its
-            asking activation and its round or its place and position, and the parts
-            approved, every part shown where it names none (§3:6). No two name one
-            question (ADR-0322 §2:7).
-        given_at: When the input carrying the yes was given, timezone-aware; the
-            approval's *given* (§4:6).
-        users_authority: Whether the input carries the user's authority (§3:3,
-            ADR-0292 §5:5): an input whose author its channel's kind establishes as
-            the user, sent as an instruction (ADR-0323 §4:7). An email, an event or a
-            forward saying yes approves nothing.
-        who: The approval's *who* (§4:6): the user, through the channel the yes came
-            on (ADR-0323 §4:9). The phases set it from the input's kind; authorizing
-            copies it onto the approval and reads nothing of the channel from it
-            (§4:5).
-
-    Raises:
-        ValueError: If it carries no pointer, names one question twice, or ``given_at``
-            is naive.
-    """
-
-    answers: tuple[AnsweredQuestion, ...]
-    given_at: datetime
-    users_authority: bool = False
-    who: ApprovalGiver = ApprovalGiver.USER_THROUGH_HUB_CHAT
-
-    def __post_init__(self) -> None:
-        """A yes carries a pointer, and when it was given is an instant."""
-        if not self.answers:
-            msg = "a yes carries at least one pointer; an input with none carries no yes"
-            raise ValueError(msg)
-        rounds = [(one.activation_id, one.round) for one in self.answers if one.round]
-        places = [(one.activation_id, one.place, one.position) for one in self.answers]
-        places = [one for one in places if one[1] is not None]
-        if len(set(rounds)) != len(rounds) or len(set(places)) != len(places):
-            msg = "a yes names each question it approves once (ADR-0322 §2:7)"
-            raise ValueError(msg)
-        if self.given_at.tzinfo is None or self.given_at.utcoffset() is None:
-            msg = "when a yes was given is timezone-aware"
-            raise ValueError(msg)
-
-
-@dataclass(frozen=True, slots=True)
 class RoundToAuthorize:
     """One recorded planning round, as authorizing takes it.
 
@@ -522,9 +437,6 @@ class RoundToAuthorize:
             the message it is (ADR-0356 §7:7), in the round's order: checked by its place
             alone, never by the policy or the outside-content rule, and so never among
             ``calls``.
-        yes: The yes the activation's input carries, where understanding recorded a
-            pointer (ADR-0321 §3:1, ADR-0322 §2:1); ``None`` where it recorded none, and
-            then no call runs under an approval (§4:5).
         places: For an activation the Task Scheduler started, the places on its place
             list as built for the round, which its message may go into in place of the
             place its input came from (ADR-0350 §6:7); ``None`` for every other.
@@ -541,9 +453,9 @@ class RoundToAuthorize:
     Raises:
         ValueError: If two calls or message calls share a call id, a message call names
             no call the round proposed, or a call is not one the round proposed under
-            that id and name. A call proposed by an approved action's
-            label is recorded under the label's tool and handed on as its capability's
-            call (ADR-0321 §4:2), so it is matched by its id alone.
+            that id and name. A ticket run by its label is recorded under
+            ``run_approved`` and handed on as its capability's call (ADR-0361 §5:2), so it
+            is matched by its id alone.
     """
 
     activation_id: str
@@ -553,7 +465,6 @@ class RoundToAuthorize:
     input_place: str | None = None
     message: RoundMessage | None = None
     call_messages: tuple[RoundMessage, ...] = ()
-    yes: YesContext | None = None
     places: tuple[str, ...] | None = None
     gone: tuple[str, ...] = ()
     person: str | None = None
@@ -573,8 +484,7 @@ class RoundToAuthorize:
             raise ValueError(msg)
         for one in self.calls:
             named = proposed.get(one.call.call_id)
-            approved = one.approved_part is not None or one.ticket is not None
-            if named is None or (not approved and named != one.call.name):
+            if named is None or (one.ticket is None and named != one.call.name):
                 msg = "authorizing checks only the calls the round proposed"
                 raise ValueError(msg)
 
@@ -593,15 +503,6 @@ class CallVerdict:
         decision_id: The recorded ``PermissionDecision``, where a ruling was sought.
         effect_id: The effect record the call is or would be claimed under, where its
             capability's calls get one, or where it runs under an approval.
-        request: On a needs-you verdict, the request as ruled on, with the values the
-            hub filled in and its binding: what a question about it shows and what the
-            round that asks records (ADR-0321 §2:5, §2:8). ``None`` on every other
-            verdict.
-        deliberate_repeat: On a needs-you verdict, whether the call is a deliberate
-            repeat (§2:8); set only on a call to a capability not safe to repeat.
-        already_asked: Where the call is identical to one the user was already asked
-            about, shown, and not yet used (§4:11), that call's question part: it goes
-            back as already asked and waiting, not to be asked about again.
     """
 
     call_id: str
@@ -609,9 +510,6 @@ class CallVerdict:
     reason: str | None = None
     decision_id: str | None = None
     effect_id: str | None = None
-    request: ActionRequest | None = None
-    deliberate_repeat: bool = False
-    already_asked: QuestionPart | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,10 +521,7 @@ class AllowedCall:
             authorises it, which names the effect record where the call gets one.
         deliberate_repeat: Whether planning marked the call a deliberate repeat; set only
             on a call to a capability that is not safe to repeat. For a call that runs
-            under an approval, the mark recorded with the question (ADR-0321 §2:8).
-        asked: Where the call runs under an approval, the asked call it was rebuilt
-            from (ADR-0321 §4:2), whose ``replaces`` a remember retires on the yes
-            (§5:5); ``None`` on every other call.
+            under a ticket, the mark recorded with its request (ADR-0361 §2:6).
         requested: For a ``request_approval`` call, the call it asks about as ruled
             here, with the values the hub filled in and its binding (ADR-0361 §2:3,
             §2:6), which its request records; ``None`` on every other call.
@@ -634,7 +529,6 @@ class AllowedCall:
 
     call: ToolCall
     deliberate_repeat: bool = False
-    asked: AskedCall | None = None
     requested: RequestedCall | None = None
 
 
@@ -912,7 +806,7 @@ def _declared(tool: ToolDefinition) -> tuple[object, ...]:
 
 
 def shown_values(tool: ToolDefinition, values: FrozenJsonMapping) -> dict[str, FrozenJson]:
-    """A call's values as a question shows them (ADR-0321 §2:5, §4:4).
+    """A call's values as an exact line shows them (ADR-0321 §2:5).
 
     Every value but those the declaration names ``system_supplied``, which the hub fills
     in itself; the *looking for* argument and the *deliberate repeat* mark never reach
@@ -984,18 +878,6 @@ def _same_model(one: BaseModel | None, other: BaseModel | None) -> bool:
     ) == canonical_json_bytes(cast("FrozenJson", other.model_dump(mode="json")))
 
 
-def _detached_yes(given: YesContext | None) -> YesContext | None:
-    """Revalidate and detach the yes's context."""
-    if given is None:
-        return None
-    return YesContext(
-        answers=tuple(AnsweredQuestion.model_validate(one.model_dump()) for one in given.answers),
-        given_at=given.given_at,
-        users_authority=given.users_authority is True,
-        who=ApprovalGiver(given.who),
-    )
-
-
 def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
     """Revalidate and detach the round, so nothing a caller still holds is ruled on."""
     message = given.message
@@ -1017,11 +899,6 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
             CallToAuthorize(
                 call=ProposedCall.model_validate(one.call.model_dump()),
                 deliberate_repeat=bool(one.deliberate_repeat),
-                approved_part=(
-                    None
-                    if one.approved_part is None
-                    else QuestionPart.model_validate(one.approved_part.model_dump())
-                ),
                 ticket=None if one.ticket is None else str(one.ticket),
             )
             for one in given.calls
@@ -1029,7 +906,6 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
         input_place=None if given.input_place is None else str(given.input_place),
         message=None if message is None else _detached_message(message),
         call_messages=tuple(_detached_message(one) for one in given.call_messages),
-        yes=_detached_yes(given.yes),
         places=None if given.places is None else tuple(str(one) for one in given.places),
         gone=tuple(str(one) for one in given.gone),
         person=None if given.person is None else str(given.person),
@@ -1071,29 +947,16 @@ class _Ruled:
 
 @dataclass(frozen=True, slots=True)
 class _Shown:
-    """A call the records show was approved: §4:4's facts held (ADR-0321 §4:6).
+    """A ticket's call, its checks held (ADR-0361 §5:3-§5:4).
 
-    ``request`` is the call rebuilt from ``asked``, its binding through
-    ``EgressBinder.rebind`` (§4:2), and ``approval`` the approval assembled from the
-    records, of which ``part`` is this call's. A ticket's (ADR-0361 §5:4) has no asked
-    call and no part: its approval's form names its request. ``repeat`` is the
-    deliberate-repeat mark the question or the request recorded.
+    ``request`` is the call rebuilt from the request's, its binding through
+    ``EgressBinder.rebind`` (§5:2, ADR-0321 §4:2), and ``approval`` the tap's, whose form
+    names the request. ``repeat`` is the deliberate-repeat mark the request recorded.
     """
 
-    asked: AskedCall | None
-    part: QuestionPart | None
     approval: Approval
     request: ActionRequest
     repeat: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class _AskedHere:
-    """A call asked about in this activation or its stories' episodes (ADR-0321 §4:11)."""
-
-    activation_id: str
-    round_id: str
-    asked: AskedCall
 
 
 @dataclass
@@ -1103,18 +966,16 @@ class _Round:
     ``checks`` holds, by call id, each check a call reached, for the diagnostic record
     (ADR-0314 §4); ``None`` where the record is off, so nothing is noted. ``rounds`` are
     this activation's rounds the working set holds, the one being authorized included;
-    ``stories`` and ``asked_here`` are read once, the first time a call needs them.
+    ``stories`` are read once, the first time a call needs them.
     """
 
     activation_id: str
     read_outside: bool
-    yes: YesContext | None = None
     rounds: tuple[PlanningRound, ...] = ()
     verdicts: list[CallVerdict] = field(default_factory=list)
     allowed: list[AllowedCall] = field(default_factory=list)
     checks: dict[str, list[dict[str, object]]] | None = None
     stories: tuple[str, ...] | None = None
-    asked_here: tuple[_AskedHere, ...] | None = None
     person: str | None = None
     tickets: frozenset[str] = frozenset()
 
@@ -1255,12 +1116,12 @@ class AuthorizingStage:
             stories: The story store the backstop's match is collected from (§5:10).
             memory: The memory store the activation's record is read from.
             binder: The egress binding seam, or ``None`` where none is wired.
-            plans: The plan store whose effect records the yes path's facts are read
-                from (ADR-0321 §4:4, §4:11, §6:1): a question's delivery, a part's
-                spend, and the effects a deliberate repeat's claim would match. ``None``
-                where none is wired, and then no call runs under an approval (§4:5),
-                nothing is found already asked, and a deliberate repeat is left to the
-                claim, which refuses one matching an unknown effect.
+            plans: The plan store whose records a ticket's checks and a pending
+                request's are read from (ADR-0361 §2:8, §5:3), and the effects a
+                deliberate repeat's claim would match (ADR-0321 §6:1). ``None`` where
+                none is wired, and then no ticket runs, nothing is found waiting on a
+                card, and a deliberate repeat is left to the claim, which refuses one
+                matching an unknown effect.
             preference: The deployment's tool preference sequence (ADR-0144 §4).
             registered_search: The ids of the tools that are this deployment's own
                 registered search (ADR-0247 §4), whose calls carry ``closed_loop``.
@@ -1345,7 +1206,6 @@ class AuthorizingStage:
         state = _Round(
             activation_id=snapshot.activation_id,
             read_outside=read_outside,
-            yes=snapshot.yes,
             rounds=(*held.rounds, snapshot.round),
             checks={} if noting else None,
             person=snapshot.person,
@@ -1427,14 +1287,11 @@ class AuthorizingStage:
             self._diagnostics, DiagnosticSource.AUTHORIZING, DiagnosticKind.RETURNED, body
         )
 
-    async def _check(self, one: CallToAuthorize, state: _Round) -> None:  # noqa: C901 — a ticket, a request and an approved action each take their own path first
+    async def _check(self, one: CallToAuthorize, state: _Round) -> None:
         """Select, rule, record, and apply the checks after the policy, for one call.
 
-        A call proposed as an approved action (ADR-0321 §4:2) has §4:4's facts checked
-        first, whatever the fresh checks will rule (the dispatcher's ruling for M44):
-        where they hold, it is rebuilt from the call the question showed and runs under
-        the approval, checked fresh (§4:3); where any fails, it is an ordinary call,
-        checked as every call is, and runs under no approval (§4:5).
+        A ticket (ADR-0361 §5:2) and a ``request_approval`` (§2:3) each take their own
+        path first; every other call is checked as every call is.
         """
         if one.ticket is not None:
             await self._check_ticket(one, state)
@@ -1442,14 +1299,6 @@ class AuthorizingStage:
         if one.call.name == REQUEST_APPROVAL_CAPABILITY:
             await self._check_request(one, state)
             return
-        if one.approved_part is not None:
-            shown = await self._shown(one, state)
-            if isinstance(shown, _Shown):
-                state.note(one.call, "approval", "held", None)
-                await self._check_approved(one, shown, state)
-                return
-            _log.info("authorizing_approval_failed", stage="authorizing", reason=shown)
-            state.note(one.call, "approval", "failed", shown)
         if one.call.name == EMAIL_CAPABILITY:
             # ADR-0357 §2:7-§2:9, §6:1: the email tool's own checks, before the ruling.
             back = _email_comes_back(one.call.arguments)
@@ -1480,9 +1329,7 @@ class AuthorizingStage:
             state.note(one.call, "repeat", Verdict.NEEDS_YOU.value, _UNKNOWN_REPEAT)
             verdict = replace(verdict, verdict=Verdict.NEEDS_YOU, reason=_UNKNOWN_REPEAT)
         if verdict.verdict is not Verdict.NOT_DONE:
-            verdict = await self._needing_you(
-                one.call, verdict, ruled.request, state, repeat=repeat
-            )
+            verdict = await self._needing_you(one.call, verdict, ruled.request, state)
         state.verdicts.append(verdict)
         if verdict.verdict is Verdict.ALLOWED:
             state.allowed.append(
@@ -1493,48 +1340,20 @@ class AuthorizingStage:
             )
 
     async def _needing_you(
-        self,
-        call: ProposedCall,
-        verdict: CallVerdict,
-        request: ActionRequest,
-        state: _Round,
-        *,
-        repeat: bool,
+        self, call: ProposedCall, verdict: CallVerdict, request: ActionRequest, state: _Round
     ) -> CallVerdict:
-        """The repeat check, and what a needs-you verdict carries for asking (§2:8, §4:11).
+        """A call identical to one a pending request holds waits on its card (ADR-0361 §2:8).
 
-        A call identical to one the user was already asked about and has not answered
-        goes back as already asked and waiting on them, carrying that question's part,
-        whether the fresh checks would allow it or need the user: a call allowed now
-        that ran while its question waited would run again on the yes that answers it.
-        A refusal stays a refusal, and a call that runs under an approval never reaches
-        here. A needs-you verdict carries the request as ruled on and the repeat mark,
-        which the round that asks records; an allowed one is returned as it was.
+        Whether the fresh checks would allow it or need the person: a call allowed now
+        that ran while its request waited would run again on the ticket a tap grants
+        (ADR-0321 §4:12 as ADR-0361 §11 amends it). A refusal stays a refusal, and a call
+        that runs under a ticket never reaches here.
         """
         if await self._waiting_on_a_card(request, state):
-            # ADR-0361 §2:2, ADR-0321 §4:11 as §11 amends it: a call identical to one a
-            # pending request holds waits on the person, whatever the fresh checks rule,
-            # so a direct call cannot run it before the person answers the card.
             _log.info("authorizing_call_already_requested", stage="authorizing")
             state.note(call, "requested", "waiting", ALREADY_ON_A_CARD)
-            return replace(
-                verdict, verdict=Verdict.NEEDS_YOU, reason=ALREADY_ON_A_CARD, request=request
-            )
-        waiting = await self._waiting(request, state)
-        if waiting is not None:
-            _log.info("authorizing_call_already_asked", stage="authorizing")
-            state.note(call, "asked", "waiting", _ALREADY_ASKED)
-            return replace(
-                verdict,
-                verdict=Verdict.NEEDS_YOU,
-                reason=verdict.reason or _ALREADY_ASKED,
-                request=request,
-                deliberate_repeat=repeat,
-                already_asked=waiting,
-            )
-        if verdict.verdict is not Verdict.NEEDS_YOU:
-            return verdict
-        return replace(verdict, request=request, deliberate_repeat=repeat)
+            return replace(verdict, verdict=Verdict.NEEDS_YOU, reason=ALREADY_ON_A_CARD)
+        return verdict
 
     async def _waiting_on_a_card(self, request: ActionRequest, state: _Round) -> bool:
         """Whether a pending request for the person holds this very call (ADR-0361 §2:8).
@@ -1680,7 +1499,6 @@ class AuthorizingStage:
             resolves=resolves,
             effect=effect_id,
             approval=None if shown is None else shown.approval,
-            approved_part=None if shown is None else shown.part,
         )
         await self._trail.record(decision)
         recorded = await self._trail.get(decision.id)
@@ -1892,16 +1710,9 @@ class AuthorizingStage:
         if self._now() >= request.expires_at:
             return _TICKET_EXPIRED
         held = request.call
-        asked = AskedCall(
-            part=1,
-            tool=held.tool,
-            values=held.values,
-            binding=held.binding,
-            deliberate_repeat=held.deliberate_repeat,
-        )
         if one.call.name != held.tool.capability:
             return _TICKET_NOT_THE_CALL
-        rebuilt = await self._rebuilt(asked)
+        rebuilt = await self._rebuilt(held)
         if rebuilt is None:
             return _TICKET_NOT_THE_CALL
         approval = Approval(
@@ -1915,211 +1726,14 @@ class AuthorizingStage:
             given=ApprovalGiven(activation_id=state.activation_id, at=answer.at),
             ends=ApprovalEnd.WHEN_USED_OR_EXPIRED,
         )
-        return _Shown(
-            asked=None,
-            part=None,
-            approval=approval,
-            request=rebuilt,
-            repeat=held.deliberate_repeat,
-        )
+        return _Shown(approval=approval, request=rebuilt, repeat=held.deliberate_repeat)
 
-    # --- the yes path (ADR-0321 §4) ------------------------------------------------------
+    async def _rebuilt(self, asked: RequestedCall) -> ActionRequest | None:
+        """The call a request holds, rebuilt from its record, or ``None`` where it differs.
 
-    async def _shown(self, one: CallToAuthorize, state: _Round) -> _Shown | str:
-        """Check, by rule against the records, that ``one`` runs under an approval.
-
-        ADR-0321 §4:4's three facts, and those §3:3 and §3:6 add, each failing closed
-        (§4:5):
-
-        - the input carries the user's authority (§3:3);
-        - **shown**: some pointer's question message has a done delivery record, the
-          asking activation's message effect for the pointer's round, or at its place
-          and position, with its outcome done and its position written (ADR-0306 §5:5),
-          in a place whose kind establishes the user as an author (ADR-0323 §4:8);
-        - the approval covers the part: the call is checked against the pointer whose
-          question asked it, by its round (ADR-0322 §3:1, §3:3), and that pointer names
-          the part or names no part, which is every part shown (§3:6);
-        - **exactly the call shown**: the asking round recorded a call under that part
-          (§2:8), the proposal names its capability, the registry still offers its very
-          declaration, and the call rebuilt from its values rebinds, through
-          ``EgressBinder.rebind``, to the declaration, the values and the binding
-          recorded (§4:2, §4:16);
-        - **not already run**: no effect record carries the part (§4:9).
-
-        The approval it assembles covers parts of that one question alone, so a yes that
-        approves several questions gives one approval per question (ADR-0322 §3:2). A
-        record this call's facts are read from that cannot be read fails this call
-        alone, closed: it goes back as needing you, and the round's other calls are
-        checked against their own records (§3:1).
-
-        Returns:
-            The rebuilt call and its approval where every fact holds; otherwise the
-            code-owned word naming the first fact that failed.
-        """
-        part = one.approved_part
-        yes = state.yes
-        if part is None or yes is None:
-            return _NO_POINTER
-        if not yes.users_authority:
-            return _NOT_THE_USERS
-        if self._plans is None:
-            return _NO_RECORDS
-        try:
-            return await self._held(one, part, yes, self._plans, state)
-        except PlanningError, MemoryStoreError:
-            _log.warning("authorizing_approval_unread", stage="authorizing")
-            return _UNREADABLE
-
-    async def _held(  # noqa: PLR0911 — each fact able to fail, in order
-        self,
-        one: CallToAuthorize,
-        part: QuestionPart,
-        yes: YesContext,
-        plans: PlanStore,
-        state: _Round,
-    ) -> _Shown | str:
-        """:meth:`_shown`'s facts read from the records, once the input may approve.
-
-        Raises:
-            PlanningError: If the plan store cannot be read.
-            MemoryStoreError: If the memory store cannot be read.
-        """
-        found = await self._pointer_for(plans, yes.answers, part, state)
-        if isinstance(found, str):
-            return found
-        pointer, delivered = found
-        if pointer.parts and part.part not in pointer.parts:
-            return _NOT_APPROVED
-        asked_calls = await self._asked_calls(pointer.activation_id, delivered)
-        asked = next((each for each in asked_calls if each.part == part.part), None)
-        if asked is None:
-            return _NOT_RECORDED
-        if one.call.name != asked.tool.capability:
-            return _NOT_THE_CALL
-        request = await self._rebuilt(asked)
-        if request is None:
-            return _NOT_THE_CALL
-        if await plans.part_effects([part]):
-            return _ALREADY_RUN
-        recorded = {each.part for each in asked_calls}
-        covers = tuple(
-            QuestionPart(round=delivered, part=number)
-            for number in (pointer.parts or sorted(recorded))
-            if number in recorded
-        )
-        approval = Approval(
-            who=yes.who,
-            how=YesToQuestion(activation_id=pointer.activation_id, round=delivered),
-            covers=covers,
-            given=ApprovalGiven(activation_id=state.activation_id, at=yes.given_at),
-            ends=ApprovalEnd.WHEN_USED,
-        )
-        return _Shown(
-            asked=asked,
-            part=part,
-            approval=approval,
-            request=request,
-            repeat=asked.deliberate_repeat,
-        )
-
-    async def _pointer_for(
-        self,
-        plans: PlanStore,
-        pointers: Sequence[AnsweredQuestion],
-        part: QuestionPart,
-        state: _Round,
-    ) -> tuple[AnsweredQuestion, str] | str:
-        """The pointer whose question asked ``part``, with its round (ADR-0322 §3:1, §3:3).
-
-        The call is checked against its own question's records alone: a pointer naming
-        another round is passed over unread, so another question's records, readable or
-        not, never decide this call. A pointer naming its question by place and position
-        alone is resolved to its round by its own delivery record. A pointer naming this
-        activation's own question is passed over (ADR-0321 §4:1). Where two pointers of
-        different asking activations both resolve to the part's round, which question
-        asked the call cannot be told, and the call fails closed (ADR-0322 §3:3).
-
-        Returns:
-            The pointer and its delivered round; otherwise the code-owned word naming
-            why none applies: every pointer names this activation's question, none
-            names the question that asked the part, none names a delivered message, or
-            more than one does.
-
-        Raises:
-            PlanningError: If the plan store cannot be read.
-        """
-        others = [one for one in pointers if one.activation_id != state.activation_id]
-        if not others:
-            return _ASKED_HERE
-        candidates = [one for one in others if one.round in {part.round, None}]
-        if not candidates:
-            return _NOT_APPROVED
-        shown = False
-        matching: list[AnsweredQuestion] = []
-        for pointer in candidates:
-            delivered = await self._delivered(plans, pointer)
-            shown = shown or delivered is not None
-            if delivered == part.round:
-                matching.append(pointer)
-        if len({one.activation_id for one in matching}) > 1:
-            return _AMBIGUOUS
-        if matching:
-            return matching[0], part.round
-        return _NOT_APPROVED if shown else _NOT_SHOWN
-
-    @staticmethod
-    async def _delivered(plans: PlanStore, pointer: AnsweredQuestion) -> str | None:
-        """The round whose message the pointer names, where its delivery is done.
-
-        The message is the asking activation's message effect for the pointer's round,
-        at its place and position where the pointer names them, its outcome done and its
-        position written (ADR-0306 §5:5), **in a place whose kind establishes the user as
-        an author there** (ADR-0323 §4:8): one of the user's conversations, or the line's
-        chat. The place is read off the record through the kinds' declarations
-        (:func:`~ai_assistant.orchestration.channel_kinds.users_place`), so no rule here
-        names a channel (§4:5). The *couldn't finish* message names no round and is
-        never a question.
-
-        Raises:
-            PlanningError: If the plan store cannot be read.
-        """
-        for effect in await plans.activation_effects([pointer.activation_id]):
-            if (
-                _is_delivered(effect)
-                and users_place(effect.place)
-                and effect.round is not None
-                and (pointer.round is None or effect.round == pointer.round)
-                and (
-                    pointer.place is None
-                    or (effect.place == pointer.place and effect.position == pointer.position)
-                )
-            ):
-                return effect.round
-        return None
-
-    async def _asked_calls(self, activation_id: str, round_id: str) -> tuple[AskedCall, ...]:
-        """The calls a round's message asked about, as the stored episode keeps them (§2:8).
-
-        Read from the asking activation's episode, the record the round was appended to;
-        a round the store does not hold asked about nothing that can be approved.
-
-        Raises:
-            MemoryStoreError: If the memory store cannot be read.
-        """
-        record = await self._memory.get(episode_address(activation_id))
-        if not isinstance(record, EpisodicMemory) or record.processing_record is None:
-            return ()
-        for planned in record.processing_record.rounds:
-            if planned.id == round_id:
-                return planned.asked
-        return ()
-
-    async def _rebuilt(self, asked: AskedCall) -> ActionRequest | None:
-        """The call a question showed, rebuilt from its record, or ``None`` where it differs.
-
-        The registry must still offer the very declaration the question showed, and the
-        values recorded with the question are the values it sends, whatever the proposal
-        carries beside the label (ADR-0321 §4:2). Its binding comes through
+        The registry must still offer the very declaration the card showed, and the
+        values recorded with the request are the values it sends, whatever the proposal
+        carries beside the label (ADR-0361 §5:2, ADR-0321 §4:2). Its binding comes through
         ``EgressBinder.rebind``, which re-derives it and refuses one unequal to the
         binding shown (§4:16), so the coverage is the binding that was shown, never one
         derived over the proposal's arguments (#2847).
@@ -2151,7 +1765,7 @@ class AuthorizingStage:
             return None
 
     async def _check_approved(self, one: CallToAuthorize, shown: _Shown, state: _Round) -> None:
-        """Rule a call that runs under an approval fresh, and record it (ADR-0321 §4:3-§4:17).
+        """Rule a ticket's call fresh, and record it (ADR-0361 §5:4, ADR-0321 §4:3-§4:17).
 
         The policy is asked as for every call. A deny refuses it, and is recorded naming
         no approval: a yes never overrides one (§4:12). A confirm, the lineage rule's
@@ -2201,7 +1815,6 @@ class AuthorizingStage:
             AllowedCall(
                 ToolCall(request=request, decision=decision),
                 deliberate_repeat=shown.repeat and not tool.safe_to_repeat,
-                asked=shown.asked,
             )
         )
 
@@ -2229,90 +1842,6 @@ class AuthorizingStage:
             and effect.outcome in {None, ToolOutcome.INDETERMINATE}
             for effect in await self._plans.activation_effects(match)
         )
-
-    async def _waiting(self, request: ActionRequest, state: _Round) -> QuestionPart | None:
-        """The part of a question still waiting on the user about this exact call (§4:11).
-
-        A call asked about in this activation or in its stories' episodes, with the same
-        declaration, the same values a question shows and the same binding, whose
-        question was shown (its message delivered, as §4:4 reads it) and whose part no
-        effect record has used. ``None`` where there is none.
-
-        Raises:
-            PlanningError: If the plan store cannot be read.
-            MemoryStoreError: If the memory store cannot be read.
-            StoryStoreError: If the story store cannot be read.
-        """
-        if self._plans is None:
-            return None
-        values = shown_values(request.tool, request.parameters)
-        same = [
-            each
-            for each in await self._asked_here(state)
-            if _same_model(each.asked.tool, request.tool)
-            and _same_model(each.asked.binding, request.egress_binding)
-            and _same_values(shown_values(each.asked.tool, each.asked.values), values)
-        ]
-        if not same:
-            return None
-        activations = list(dict.fromkeys(each.activation_id for each in same))
-        delivered = {
-            (effect.activation_id, effect.round)
-            for effect in await self._plans.activation_effects(activations)
-            if _is_delivered(effect)
-        }
-        parts = [
-            QuestionPart(round=each.round_id, part=each.asked.part)
-            for each in same
-            if (each.activation_id, each.round_id) in delivered
-        ]
-        if not parts:
-            return None
-        used = {effect.part for effect in await self._plans.part_effects(parts)}
-        return next((part for part in parts if part not in used), None)
-
-    async def _asked_here(self, state: _Round) -> tuple[_AskedHere, ...]:
-        """Every call asked about in this activation or its stories' episodes, read once.
-
-        This activation's rounds as its stored episode and the working set hold them,
-        each once by its id, and the rounds of the episodes of the activations its
-        stories hold, as the store holds them now.
-
-        Raises:
-            MemoryStoreError: If the memory store cannot be read.
-            StoryStoreError: If the story store cannot be read.
-        """
-        if state.asked_here is not None:
-            return state.asked_here
-        found: list[_AskedHere] = []
-        own = await self._memory.get(episode_address(state.activation_id))
-        stored = (
-            own.processing_record.rounds
-            if isinstance(own, EpisodicMemory) and own.processing_record is not None
-            else ()
-        )
-        seen: set[str] = set()
-        for planned in (*stored, *state.rounds):
-            if planned.id in seen:
-                continue
-            seen.add(planned.id)
-            found.extend(
-                _AskedHere(state.activation_id, planned.id, each) for each in planned.asked
-            )
-        others = [each for each in await self._stories_of(state) if each != state.activation_id]
-        if others:
-            episodes = await self._memory.get_many([episode_address(each) for each in others])
-            for activation in others:
-                episode = episodes.get(episode_address(activation))
-                if not isinstance(episode, EpisodicMemory) or episode.processing_record is None:
-                    continue
-                found.extend(
-                    _AskedHere(activation, planned.id, each)
-                    for planned in episode.processing_record.rounds
-                    for each in planned.asked
-                )
-        state.asked_here = tuple(found)
-        return state.asked_here
 
     async def _stories_of(self, state: _Round) -> tuple[str, ...]:
         """The activations of this activation's stories, read once per round (§5:10)."""

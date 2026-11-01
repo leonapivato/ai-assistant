@@ -52,7 +52,6 @@ async def test_an_email_from_the_users_address_never_runs_without_their_yes() ->
     assert verdict.verdict is Verdict.NEEDS_YOU
     assert verdict.reason is not None
     assert "user's own address" in verdict.reason
-    assert verdict.request is not None  # a question about it shows the exact call
     assert decided.allowed == ()
     # The policy's allow stays the deciding decision, recorded as ruled.
     assert verdict.decision_id is not None

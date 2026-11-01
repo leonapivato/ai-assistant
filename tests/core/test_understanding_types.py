@@ -12,7 +12,6 @@ from ai_assistant.core.errors import AssistantError, UnderstandingError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationUnderstanding,
-    AnsweredQuestion,
     ChannelContext,
     EpisodeProcessingRecord,
     NewConversation,
@@ -102,9 +101,8 @@ def test_the_two_enumerations_carry_exactly_the_members_the_adr_lists() -> None:
     ],
 )
 def test_the_seven_retired_types_leave_core(name: str) -> None:
-    """ADR-0353 §9:9: removed from ``core/types.py``; ``AnsweredQuestion`` stays."""
+    """ADR-0353 §9:9: removed from ``core/types.py``."""
     assert not hasattr(core_types, name)
-    assert hasattr(core_types, "AnsweredQuestion")
 
 
 def test_processing_reason_gains_understanding_failed() -> None:
@@ -128,11 +126,10 @@ def test_neither_the_proposal_nor_the_record_carries_an_answer_pointer() -> None
         _understanding(answers=[{"activation_id": "a-1", "round": "r-1"}])
 
 
-def test_an_answered_question_still_names_one_message() -> None:
-    """§9:9: ``AnsweredQuestion`` stays for authorizing's approval rules (§11:3)."""
-    assert AnsweredQuestion(activation_id="a-1", round="r-1").parts == ()
-    with pytest.raises(ValidationError):
-        AnsweredQuestion(activation_id="a-1")
+def test_the_answer_pointers_type_leaves_core_with_the_rules_that_read_it() -> None:
+    """ADR-0361 §8:6, §11: ``AnsweredQuestion`` was ADR-0353 §9:9's to keep only while
+    authorizing's approval rules held it; they retire, and no stored record holds one."""
+    assert not hasattr(core_types, "AnsweredQuestion")
 
 
 def test_understanding_error_is_an_assistant_error_with_the_standard_constructor() -> None:

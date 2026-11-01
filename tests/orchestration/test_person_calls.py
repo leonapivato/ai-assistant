@@ -28,7 +28,6 @@ from ai_assistant.core.types import (
     ApprovalRequest,
     ApprovalRequestState,
     ApprovalTap,
-    AskedCall,
     CapabilityEffect,
     CapabilityResult,
     InputPart,
@@ -80,14 +79,14 @@ pytestmark = pytest.mark.anyio
 _YES_AT: Final = datetime(2026, 10, 21, 10, 0, tzinfo=UTC)
 _PART: Final = QuestionPart(round="round:asked", part=1)
 _PANEL: Final = PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID)
-#: The act a yes in ``act-1`` makes, naming the part it spends and its episode (§3:5).
-_BY_YES: Final = PersonModelAct(
-    how=PersonActHow.APPROVAL, by=OWNER_PERSON_ID, approval=_PART, episode_id="activation:act-1"
-)
 
 
-def _approved(tool: ToolDefinition, **arguments: Any) -> tuple[ToolCall, AskedCall]:
-    """A call allowed under a yes in ``act-1``, and the asked call it was rebuilt from."""
+def _under_a_question(tool: ToolDefinition, **arguments: Any) -> ToolCall:
+    """A call allowed under the retired form of approval, a yes to a question.
+
+    No such approval is made since ADR-0361 §8:5; a decision recorded with one still
+    reads (§8:6), and a call carrying one runs nothing.
+    """
     request = ActionRequest(tool=tool, parameters=arguments)
     decision = PermissionDecision.from_request(
         request,
@@ -104,8 +103,7 @@ def _approved(tool: ToolDefinition, **arguments: Any) -> tuple[ToolCall, AskedCa
         ),
         approved_part=_PART,
     )
-    asked = AskedCall(part=_PART.part, tool=tool, values=arguments)
-    return ToolCall(request=request, decision=decision), asked
+    return ToolCall(request=request, decision=decision)
 
 
 class _Owners:
@@ -125,8 +123,10 @@ def owners() -> Iterator[None]:
 
 
 async def _run(world: _World, tool: ToolDefinition, **arguments: Any) -> ToolResult | NotDone:
-    call, asked = _approved(tool, **arguments)
-    return await PersonModelCalls(blocks=world.blocks).run_approved(call, asked)
+    """Run ``tool``'s call under a ticket, as acting hands it on (ADR-0362 §2:4)."""
+    request = _request(tool, **arguments)
+    calls = PersonModelCalls(blocks=world.blocks, requests=_Requests(request))
+    return await calls.run(_ticketed(request))
 
 
 def _done(answer: ToolResult | NotDone) -> object:
@@ -161,12 +161,13 @@ def test_a_pin_and_an_unpin_show_their_memory_by_its_wording() -> None:
     assert worded_argument(str(SET_PROFILE.capability)) is None
 
 
-# --- only under the person's yes (§8:5) -------------------------------------------------
+# --- only under the person's yes, a ticket (§8:5, ADR-0362 §2:4) -----------------------------
 
 
-async def test_a_call_that_does_not_run_under_a_yes_is_not_done() -> None:
+async def test_a_call_under_a_yes_to_a_question_is_not_done() -> None:
+    """ADR-0361 §5:1, §11: a yes is a ticket alone; a question's approval runs nothing."""
     world = _World()
-    call, _ = _approved(SET_PROFILE, field="address", value="Robin")
+    call = _under_a_question(SET_PROFILE, field="address", value="Robin")
 
     answer = await PersonModelCalls(blocks=world.blocks).run(call)
 
@@ -174,16 +175,6 @@ async def test_a_call_that_does_not_run_under_a_yes_is_not_done() -> None:
     model = await world.people.read(OWNER_PERSON_ID)
     assert model is not None
     assert model.profile.address is None
-
-
-async def test_an_asked_call_of_another_part_runs_nothing(owners: None) -> None:
-    world = _World()
-    call, asked = _approved(SET_PROFILE, field="address", value="Robin")
-    other = asked.model_copy(update={"part": 2})
-
-    answer = await PersonModelCalls(blocks=world.blocks).run_approved(call, other)
-
-    assert "only on their yes" in _reason(answer)
 
 
 async def test_with_no_activation_current_there_is_no_person_and_nothing_runs() -> None:
@@ -211,7 +202,7 @@ async def test_a_field_is_set_by_the_yes_and_logged_as_its_act(owners: None) -> 
         ProfileField.ADDRESS,
         None,
         "Robin",
-        _BY_YES,
+        _BY_TICKET,
     )
 
 
@@ -275,12 +266,13 @@ async def test_a_field_suggestion_is_accepted_in_the_same_write(owners: None) ->
 )
 async def test_a_malformed_set_profile_is_not_done(owners: None, arguments: dict[str, Any]) -> None:
     world = _World()
-    call, asked = _approved(SET_PROFILE, field="name", value="Robin")
+    request = _request(SET_PROFILE, field="name", value="Robin")
+    call = _ticketed(request)
     malformed = call.model_copy(
         update={"request": call.request.model_copy(update={"parameters": arguments})}
     )
 
-    answer = await PersonModelCalls(blocks=world.blocks).run_approved(malformed, asked)
+    answer = await PersonModelCalls(blocks=world.blocks, requests=_Requests(request)).run(malformed)
 
     assert _reason(answer) == "the call's arguments are malformed"
 
@@ -307,7 +299,7 @@ async def test_a_current_memory_is_pinned_by_the_yes(owners: None) -> None:
     model = await world.people.read(OWNER_PERSON_ID)
     assert model is not None
     (pin,) = model.standing_pins
-    assert (pin.memory_id, pin.act) == ("m:diet", _BY_YES)
+    assert (pin.memory_id, pin.act) == ("m:diet", _BY_TICKET)
 
 
 async def test_pinning_a_pinned_memory_changes_nothing(owners: None) -> None:

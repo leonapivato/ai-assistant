@@ -1,17 +1,15 @@
-"""ADR-0321 end to end, as ADR-0353 §11 leaves it: a question asked, and a yes that runs nothing.
+"""A yes typed in a conversation approves nothing, end to end (ADR-0361 §4:10, §8:5, §11).
 
 The phases as the composition root wires them, driven through the engine across
-several activations, for #3058's scenarios. Each case scripts planning's rounds and
-understanding's reading, because the model's own judgment is QA's to test live; what
-these cases pin is what the code owns: who carries the user's authority. Approvals stop
-until the authority run (ADR-0353 §11): understanding is shown no question mark and
-records no answer pointer whatever its reply holds, so authorizing's rules, which stand
-unchanged, find none, and every call that needs the user goes back to planning as
-needing them. The cases a yes ran a call in, ADR-0322 §5's among them, fail again until
-approvals are redesigned, and are not here. No part of a response names the calls a
-message asks about any more (ADR-0356 §7:5), so planning appends no exact line and
-records no asked call; the cases that pinned how a question was asked and recorded went
-with the naming, and a question here is the round's prose alone.
+several activations, for #3058's scenarios as ADR-0361 leaves them. Each case scripts
+planning's rounds and understanding's reading, because the model's own judgment is QA's
+to test live; what these cases pin is what the code owns: who carries the user's
+authority, and that no input approves anything, whatever it says. The conversational
+question path is retired (ADR-0361 §11): understanding is shown no question mark and
+records no answer pointer, no message carries exact lines, no round records an asked
+call, and no tool runs an approved action of a question's. A yes is a tap on a card
+alone (§4); these phases wire no Approvals channel, so every call that needs the user
+goes back to planning as one that cannot be asked about here.
 """
 
 from __future__ import annotations
@@ -32,9 +30,8 @@ from test_engine import AT, Harness
 from test_planning import _recorded_trigger
 from understanding_support import TextAsStructured, recall_stage
 
-from ai_assistant.core.errors import ClassifiedToolError, OversizedValueError
+from ai_assistant.core.errors import ClassifiedToolError
 from ai_assistant.core.types import (
-    ApprovalGiver,
     AskedCall,
     CapabilityEffect,
     CapabilityResult,
@@ -45,10 +42,8 @@ from ai_assistant.core.types import (
     DataTier,
     Idempotency,
     MessageAuthor,
-    NewMessage,
     PermissionOutcome,
     PermissionRuling,
-    PlanningRound,
     ProposedCall,
     RecordedChannelTrigger,
     Reversibility,
@@ -71,6 +66,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.activation_state import active_state
+from ai_assistant.orchestration.approvals import RUN_APPROVED_LABEL, RUN_APPROVED_TOOL
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
@@ -84,7 +80,7 @@ from ai_assistant.orchestration.phase_path import (
     PlaceTarget,
     place_window,
 )
-from ai_assistant.orchestration.planning import APPROVED_ACTION_TOOL, PLANNING_PROMPT, PlaceAuthor
+from ai_assistant.orchestration.planning import PLANNING_PROMPT, PlaceAuthor
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE, CandidateCalls
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.telegram import TelegramLineSeams, line_channel
@@ -121,7 +117,6 @@ if TYPE_CHECKING:
         EpisodicMemory,
         FrozenJson,
         Message,
-        MessageReceipt,
         OfferedTool,
         PermissionDecision,
         PlanningExchange,
@@ -172,11 +167,6 @@ _DIGESTED: Final = json.dumps({"evidence": [{"text": "It opens at nine.", "sourc
 
 #: The question's text, which understanding's reading finds the question by.
 _ASKING: Final = "Shall I book a table for Friday?"
-#: The booking's exact line, as the question shows it (§2:5).
-_FRIDAY_LINE: Final = 'book — date: "Friday"'
-#: A question as a round recorded asking about the booking shows it: the text, then the
-#: fixed line above the exact line (the owner's ruling on #3094), then the line.
-_QUESTION: Final = f"{_ASKING}\n\nNeeds your yes:\n{_FRIDAY_LINE}"
 
 
 class _Policy:
@@ -495,8 +485,8 @@ def _ask(text: str = _ASKING) -> RoundResponse:
 
 
 def _run_approved(label: str = "A1") -> RoundResponse:
-    """A round proposing the approved action ``label`` names, by its label alone."""
-    return RoundResponse(calls=(_call("c1", APPROVED_ACTION_TOOL, action=label),))
+    """A round running the ticket ``label`` names, by its label alone (ADR-0361 §5:2)."""
+    return RoundResponse(calls=(_call("c1", RUN_APPROVED_TOOL, **{RUN_APPROVED_LABEL: label}),))
 
 
 _DONE: Final = says("Done.", call_id="done")
@@ -522,9 +512,9 @@ def _asked_calls(episode: EpisodicMemory) -> list[tuple[AskedCall, ...]]:
 
 
 async def test_a_booking_is_asked_and_a_yes_runs_nothing() -> None:
-    """ADR-0353 §11:1-§11:3: the question is asked in prose and records no asked call; a
-    yes to it records no pointer, so planning is shown no approved action, and the
-    booking proposed again goes back as needing the user."""
+    """ADR-0361 §4:10, §8:5: the question is prose and records no asked call; a yes to it
+    records no pointer, so planning is shown no ticket, and the booking proposed again
+    goes back as needing the user."""
     hub = _Hub()
     conversation, asking = await _asked(hub)
 
@@ -532,7 +522,7 @@ async def test_a_booking_is_asked_and_a_yes_runs_nothing() -> None:
     assert question.text == _ASKING
     assert not question.cut_off
     assert all(one == () for one in _asked_calls(asking))
-    assert "needs a yes, and is not yet asked" in hub.planner.shown(1)
+    assert "needs a yes, and it cannot be asked about" in hub.planner.shown(1)
     assert hub.world.of("book") == []
 
     hub.reader.yes()
@@ -540,9 +530,9 @@ async def test_a_booking_is_asked_and_a_yes_runs_nothing() -> None:
     _, yes = await hub.turn("Yes please.", conversation=conversation, message_id="m-2")
 
     assert hub.world.of("book") == []
-    assert "<approved " not in hub.planner.shown(2)
-    assert APPROVED_ACTION_TOOL not in hub.planner.offered(2)
-    assert "needs a yes, and is not yet asked" in hub.planner.shown(3)
+    assert "<ticket " not in hub.planner.shown(2)
+    assert "run_approved_action" not in hub.planner.offered(2)
+    assert "needs a yes, and it cannot be asked about" in hub.planner.shown(3)
     assert all(one == () for one in _asked_calls(yes))
     assert "answers" not in processing(yes).understanding[-1].model_dump()
     # Understanding was shown the question's message, and no mark on it.
@@ -567,7 +557,7 @@ async def test_a_no_runs_nothing() -> None:
     hub.planner.then(says("All right, I won't.", call_id="m2"))
     await hub.turn("No, leave it.", conversation=conversation, message_id="m-2")
     assert hub.world.of("book") == []
-    assert "<approved " not in hub.planner.shown(2)
+    assert "<ticket " not in hub.planner.shown(2)
 
 
 async def test_an_unclear_reply_runs_nothing() -> None:
@@ -579,7 +569,7 @@ async def test_an_unclear_reply_runs_nothing() -> None:
     await hub.turn("Hmm, maybe.", conversation=conversation, message_id="m-2")
 
     assert hub.world.of("book") == []
-    assert "<approved " not in hub.planner.shown(2)
+    assert "<ticket " not in hub.planner.shown(2)
 
 
 # --- only the user approves (§8:3) --------------------------------------------------------
@@ -603,8 +593,8 @@ async def test_a_yes_arriving_as_an_event_approves_nothing() -> None:
     )
 
     assert hub.world.of("book") == []
-    assert "<approved " not in hub.planner.shown(2)
-    assert "this activation cannot ask anyone" in hub.planner.shown(3)
+    assert "<ticket " not in hub.planner.shown(2)
+    assert "it cannot be asked about" in hub.planner.shown(3)
     assert result.capture.episode_id is not None
     event = await hub.memory.get(result.capture.episode_id)
     assert event is not None
@@ -669,7 +659,6 @@ def test_only_the_users_own_chat_message_carries_their_authority(
     )
 
     assert working.users_authority is expected
-    assert working.given_at == (messages[-1].written_at if messages else None)
 
 
 class _NoWrites:
@@ -725,14 +714,11 @@ def test_on_the_line_only_the_owners_own_messages_none_forwarded_carry_authority
         window=window,
         target=PlaceTarget(channel=_LINE, writer=_NoWrites()),
         description="the line",
-        giver=ApprovalGiver.USER_THROUGH_TELEGRAM,
         trigger=_recorded_trigger(parties),
         owner_records=True,
     )
 
     assert working.users_authority is expected
-    assert working.given_at == taken[-1].written_at
-    assert working.giver is ApprovalGiver.USER_THROUGH_TELEGRAM
     assert working.conversation_id is None
     assert working.target is not None
     assert working.target.place == f"telegram:{_LINE.instance_id}"
@@ -759,7 +745,6 @@ def test_a_lines_older_history_is_bounded_by_the_activations_start() -> None:
             window=window,
             target=PlaceTarget(channel=_LINE, writer=_NoWrites()),
             description="the line",
-            giver=ApprovalGiver.USER_THROUGH_TELEGRAM,
             trigger=_recorded_trigger(OWNERS_WORDS),
             owner_records=True,
         )
@@ -809,7 +794,7 @@ async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> 
     _, bare = await hub.turn("Yes.")
 
     assert "answers" not in processing(bare).understanding[-1].model_dump()
-    assert "<approved " not in hub.planner.shown(0)
+    assert "<ticket " not in hub.planner.shown(0)
     assert hub.world.ran == []
 
 
@@ -830,137 +815,6 @@ async def test_a_deny_is_never_asked_about() -> None:
     (said,) = await hub.said(conversation)
     assert said.text == "Your settings do not allow that."
     assert hub.world.ran == []
-
-
-# --- a question cut to fit is not shown (§4:4) --------------------------------------------
-
-
-class _Narrow(ChatWriter):
-    """The chat's writer under a payload bound that cuts any message longer than 40."""
-
-    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
-        if len(message.text) <= 40:
-            return message
-        return message.model_copy(update={"text": message.text[:40], "cut_off": True})
-
-
-class _Unmeasurable(ChatWriter):
-    """A writer under a bound no non-blank prefix fits."""
-
-    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
-        msg = "too small for any message"
-        raise OversizedValueError(msg, limit=1, size=len(message.text))
-
-    async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
-        raise AssertionError  # pragma: no cover - nothing is written in these cases
-
-
-def _asking_round(words: str, **arguments: object) -> PlanningRound:
-    """A round whose asking ``text`` call ``t1`` asks about the booking (ADR-0357 §8:1)."""
-    return PlanningRound(
-        id="round:1",
-        recorded_at=AT,
-        calls=(_call("t1", "text", to="the user", words=words, asks=["1.1"], **arguments),),
-        asked=(AskedCall(part=1, tool=_BOOK, values={"date": "Friday"}),),
-    )
-
-
-#: The exact lines the asking call carries, as planning hands them on (ADR-0357 §8:2).
-_LINES: Final = {"t1": _FRIDAY_LINE}
-
-
-@pytest.mark.parametrize(
-    ("writer", "words", "whole"),
-    [
-        pytest.param(ChatWriter, _ASKING, True, id="fits"),
-        pytest.param(_Narrow, _ASKING, False, id="cut-by-the-writer"),
-        pytest.param(_Unmeasurable, "Shall I?", False, id="cannot-be-measured"),
-    ],
-)
-def test_a_round_whose_asking_call_the_writer_would_cut_asks_about_nothing(
-    writer: type[ChatWriter], words: str, whole: bool
-) -> None:
-    """ADR-0321 §4:4, ADR-0357 §8:2: measured as it would go, the words then the lines."""
-    hub = _Hub()
-    path = hub.phases(
-        hub.harness,
-        writer=writer(
-            conversations=hub.harness.conversation_store,
-            max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
-        ),
-    )
-    working = path.begin(
-        activation_id="a-1",
-        window=_window(),
-        conversation_id=CONVERSATION.instance_id,
-        trigger=_recorded_trigger(OWNERS_WORDS),
-        owner_records=True,
-    )
-    planned = _asking_round(words)
-
-    shown = path.shown_whole(working, planned, _LINES)
-
-    assert (shown is planned) is whole
-    assert len(shown.asked) == (1 if whole else 0)
-    assert shown.calls == planned.calls
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        pytest.param({"to": "Anna"}, id="for-no-one-it-reaches"),
-        pytest.param({"via": "L9"}, id="into-a-place-never-shown"),
-        pytest.param({"via": "telegram"}, id="by-a-platform-the-input-is-not-on"),
-    ],
-)
-def test_a_round_whose_asking_call_could_go_nowhere_asks_about_nothing(
-    arguments: dict[str, object],
-) -> None:
-    """ADR-0321 §4:4: a question that would not go out whole, or at all, asked nothing."""
-    hub = _Hub()
-    path = hub.phases(hub.harness)
-    working = path.begin(
-        activation_id="a-1",
-        window=_window(),
-        conversation_id=CONVERSATION.instance_id,
-        trigger=_recorded_trigger(OWNERS_WORDS),
-        owner_records=True,
-    )
-    planned = _asking_round(_ASKING)
-    planned = planned.model_copy(
-        update={
-            "calls": (_call("t1", "text", **{**dict(planned.calls[0].arguments), **arguments}),)
-        }
-    )
-
-    assert path.shown_whole(working, planned, _LINES).asked == ()
-
-
-def test_a_round_with_no_lines_for_its_asking_call_asks_about_nothing() -> None:
-    """Failing closed: asked calls with no question to carry them were never shown."""
-    hub = _Hub()
-    path = hub.phases(hub.harness)
-    working = path.begin(
-        activation_id="a-1",
-        window=_window(),
-        conversation_id=CONVERSATION.instance_id,
-        trigger=_recorded_trigger(OWNERS_WORDS),
-        owner_records=True,
-    )
-
-    assert path.shown_whole(working, _asking_round(_ASKING), {}).asked == ()
-
-
-def test_a_round_in_a_place_that_takes_no_message_asks_about_nothing() -> None:
-    hub = _Hub()
-    path = hub.phases(hub.harness)
-    working = path.begin_event(
-        activation_id="a-1",
-        trigger=_recorded_trigger(UNIDENTIFIED_WORDS),
-        owner_records=True,
-    )
-
-    assert path.shown_whole(working, _asking_round("Shall I?"), _LINES).asked == ()
 
 
 # --- the Telegram line (ADR-0323 §4:7-§4:9, §7) ---------------------------------------------
@@ -1006,8 +860,8 @@ def _reply(update_id: int, words: str, question_id: int, **marks: Any) -> Telegr
 
 
 async def test_a_typed_yes_on_the_line_approves_nothing() -> None:
-    """§4:7-§4:9, §7:2, ADR-0353 §11:3: a typed reply to the question records no pointer,
-    so nothing runs and planning is shown no approved action."""
+    """ADR-0361 §4:10: a typed reply to the question approves nothing, so nothing runs and
+    planning is shown no ticket."""
     hub, fake, question_id, _ = await _asked_on_the_line()
     assert hub.world.of("book") == []
 
@@ -1017,7 +871,7 @@ async def test_a_typed_yes_on_the_line_approves_nothing() -> None:
     await hub.harness.engine.aclose()
 
     assert hub.world.of("book") == []
-    assert "<approved " not in hub.planner.shown(2)
+    assert "<ticket " not in hub.planner.shown(2)
     assert "answers" not in processing(yes).understanding[-1].model_dump()
 
 
@@ -1032,4 +886,4 @@ async def test_a_forward_saying_yes_on_the_line_approves_nothing() -> None:
     await hub.harness.engine.aclose()
 
     assert hub.world.of("book") == []
-    assert "<approved " not in hub.planner.shown(2)
+    assert "<ticket " not in hub.planner.shown(2)

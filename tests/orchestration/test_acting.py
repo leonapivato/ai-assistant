@@ -8,7 +8,6 @@ will, and reads what came back and what the canonical ``FakePlanStore`` holds.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -24,7 +23,6 @@ from ai_assistant.core.types import (
     ApprovalEnd,
     ApprovalGiven,
     ApprovalGiver,
-    AskedCall,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
@@ -54,7 +52,6 @@ from ai_assistant.orchestration.acting import (
     AuthorizedRound,
     HeldByIds,
     NamedResult,
-    OwnRecordsByCapability,
     ResultRoute,
     gets_effect_record,
     values_digest,
@@ -1124,7 +1121,7 @@ async def test_a_deliberate_retry_under_an_approval_passes_an_unknown_outcome() 
     assert approved.calls[0].outcome is ActedOutcome.DONE
 
 
-# --- ADR-0321 §5:5, #2845: a call that needs you, and §5:2: the asked call it rides with --
+# --- ADR-0321 §5:5, #2845: a call that needs you --------------------------------------------
 
 
 def _assertion() -> Memory:
@@ -1132,30 +1129,15 @@ def _assertion() -> Memory:
     return memory("assertion:1", "never drinks coffee", said_support(when=_AT, added_at=_AT))
 
 
-def _asked(part: int = 1) -> AskedCall:
-    """The asked call ``_approved("remember")`` was rebuilt from."""
-    return AskedCall(
-        part=part,
-        tool=_tool("remember"),
-        values={"date": "2026-11-01"},
-        replaces=("assertion:1",),
-    )
-
-
 class _Approving:
-    """An own-records seam that takes the asked call, answering ``answer``."""
+    """An own-records seam answering ``answer``."""
 
     def __init__(self, answer: OwnRecordsAnswer | None = None) -> None:
         self.answer = answer or ToolResult(outcome=ToolOutcome.SUCCEEDED)
         self.run_calls: list[ToolCall] = []
-        self.approved: list[tuple[ToolCall, AskedCall]] = []
 
     async def run(self, call: ToolCall) -> OwnRecordsAnswer:
         self.run_calls.append(call)
-        return self.answer
-
-    async def run_approved(self, call: ToolCall, asked: AskedCall) -> OwnRecordsAnswer:
-        self.approved.append((call, asked))
         return self.answer
 
 
@@ -1204,65 +1186,15 @@ async def test_a_call_that_needs_you_carries_detached_records() -> None:
     assert shown is not assertion
 
 
-async def test_an_approved_call_reaches_its_seam_with_the_asked_call() -> None:
-    """§5:2: the asked call it was rebuilt from rides with it, detached."""
-    seam = _Approving()
-    asked = _asked()
-    approved = replace(_approved("remember"), asked=asked)
-
-    acted = await _over(FakePlanStore(now=_now), seam).act(
-        held=HeldResults(), authorized=_round(approved)
-    )
-
-    assert acted.calls[0].outcome is ActedOutcome.DONE
-    ((_, handed),) = seam.approved
-    assert handed == asked
-    assert handed is not asked
-    assert seam.run_calls == []
-
-
-async def test_a_call_with_no_asked_call_runs_as_any_other() -> None:
-    """A call that did not come from a question reaches the seam's plain run."""
+async def test_an_approved_call_runs_through_the_seams_plain_run() -> None:
+    """ADR-0361 §8:5: no asked call rides with an approved call; the seam runs it."""
     seam = _Approving()
 
     await _over(FakePlanStore(now=_now), seam).act(
         held=HeldResults(), authorized=_round(_approved("remember"))
     )
 
-    assert seam.approved == []
     assert len(seam.run_calls) == 1
-
-
-async def test_a_seam_that_takes_no_asked_call_runs_the_call_as_any_other() -> None:
-    """A seam with no ``run_approved`` runs the call; the asked call reaches nothing."""
-    own = _OwnRecords()
-
-    acted = await _stage(FakePlanStore(now=_now), own=own).act(
-        held=HeldResults(), authorized=_round(replace(_approved("remember"), asked=_asked()))
-    )
-
-    assert acted.calls[0].outcome is ActedOutcome.DONE
-    assert len(own.calls) == 1
-
-
-async def test_the_filled_seam_hands_the_asked_call_through() -> None:
-    """``OwnRecordsByCapability`` hands it to the capability's runner that takes one."""
-    runner = _Approving()
-    seam = OwnRecordsByCapability({"remember": runner})
-
-    await _over(FakePlanStore(now=_now), seam).act(
-        held=HeldResults(), authorized=_round(replace(_approved("remember"), asked=_asked()))
-    )
-
-    assert [asked for _, asked in runner.approved] == [_asked()]
-
-
-def test_an_asked_call_rides_only_on_the_call_its_yes_approved() -> None:
-    """§4:2: the asked call names the part the decision approved, and no other."""
-    with pytest.raises(ValueError, match="approved part"):
-        replace(_approved("remember"), asked=_asked(part=2))
-    with pytest.raises(ValueError, match="approved part"):
-        replace(_authorized("remember", effect="e1"), asked=_asked())
 
 
 def test_only_a_call_that_needs_you_carries_what_it_replaces() -> None:

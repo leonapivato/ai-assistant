@@ -60,7 +60,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import AskedCall, FrozenJson, ToolCall
+    from ai_assistant.core.types import FrozenJson, ToolCall
 
 __all__ = [
     "ASSISTANT_MESSAGES_ARGUMENT",
@@ -455,7 +455,7 @@ class SimilarMemories(Protocol):
 class CandidateCalls:
     """Record a candidate, and look up the memories similar to it (ADR-0329 §3-§4).
 
-    Structurally acting's ``OwnRecordsCalls`` and its ``ApprovedOwnRecordsCalls``. A
+    Structurally acting's ``OwnRecordsCalls``. A
     candidate is the call as its round records it, joined to the effect record acting
     claimed it under (§3:3), so recording it is that record finished done: this runner
     writes nothing, passes no ``MemoryPolicy`` and builds no
@@ -510,20 +510,3 @@ class CandidateCalls:
             outcome=ToolOutcome.SUCCEEDED,
             output={SIMILAR_KEY: [record.id for record in found]},
         )
-
-    async def run_approved(self, call: ToolCall, asked: AskedCall) -> ToolResult:
-        """Record a candidate a yes approved, and nothing else (ADR-0329 §5:3).
-
-        The yes's activation records it, under the approval its effect record spends;
-        the confirmation it carries is read from those records later (§5:5), so nothing
-        is built from ``asked`` here.
-
-        Args:
-            call: The authorized remember call, its decision naming the approval.
-            asked: The asked call the yes approved.
-
-        Returns:
-            What :meth:`run` answers.
-        """
-        del asked
-        return await self.run(call)

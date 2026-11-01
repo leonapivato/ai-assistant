@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import Any, Final
 
 import pytest
 from test_lookups import BOUNDED, UNBOUNDED, _Down, _fact, _Searched, _store
@@ -44,9 +44,6 @@ from ai_assistant.orchestration.remembering import (
     candidate_similar,
     is_candidate_result,
 )
-
-if TYPE_CHECKING:
-    from ai_assistant.core.types import AskedCall
 
 _AT: Final = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 
@@ -218,13 +215,12 @@ async def test_a_failed_lookup_leaves_the_candidate_recorded_and_says_so() -> No
     assert candidate_similar(result.output) is None
 
 
-async def test_a_candidate_a_yes_approved_is_recorded_the_same_way() -> None:
-    """§5:3: under a yes it records the candidate, under the approval, and nothing else."""
+async def test_a_candidate_a_tap_approved_is_recorded_the_same_way() -> None:
+    """§5:3, ADR-0361 §5:10: under a ticket it records the candidate, and nothing else."""
     runner = CandidateCalls(similar=_Similar(()), limit=3)
     call = _call(_arguments(rests_on_input=True, confirm=True, **_FILLED))
-    asked: AskedCall = object()  # type: ignore[assignment]  # never read: nothing is built from it
 
-    result = await runner.run_approved(call, asked)
+    result = await runner.run(call)
 
     assert result.outcome is ToolOutcome.SUCCEEDED
     assert result.output == {SIMILAR_KEY: ()}

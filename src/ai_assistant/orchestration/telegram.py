@@ -159,7 +159,6 @@ from ai_assistant.orchestration.chat import CHAT_WINDOW_SIZE, COULDNT_FINISH
 from ai_assistant.orchestration.defects import is_defect, log_defect
 from ai_assistant.orchestration.phase_path import Delivery, Fitted
 from ai_assistant.orchestration.understanding import (
-    AskedIn,
     LineMessage,
     TranscriptWindow,
     WrittenBy,
@@ -2038,20 +2037,16 @@ class TelegramReader:
         taken = {one.position for one in inputs}
         shown: dict[int, LineMessage] = {}
         links: dict[int, str] = {}
-        asked: dict[int, AskedIn] = {}
         forwarded: dict[int, ClaimedAuthor] = {}
         for episode in episodes:
             self._episode_items(episode, writes, shown, links, forwarded)
         for position, (card, asked_by) in carded.items():
             shown[position] = card
             links[position] = asked_by
-        for position, writer in writes.items():
-            if position in shown and writer.asked is not None:
-                asked[position] = writer.asked
         recent = tuple(one for position, one in sorted(shown.items()) if position not in taken)[
             -CHAT_WINDOW_SIZE:
         ]
-        replied, claimed = self._replied(messages, inputs, recent, writes, links, asked)
+        replied, claimed = self._replied(messages, inputs, recent, writes, links)
         for one in messages:
             if one.forward_origin is not None:
                 forwarded[one.message_id] = ClaimedAuthor(
@@ -2064,7 +2059,6 @@ class TelegramReader:
             input_messages=inputs,
             replied_to=replied,
             links={position: one for position, one in links.items() if position in kept},
-            asked={position: one for position, one in asked.items() if position in kept},
             forwarded={position: one for position, one in forwarded.items() if position in kept},
             claimed=frozenset(claimed),
         )
@@ -2132,14 +2126,13 @@ class TelegramReader:
             replies_to=replies_to,
         )
 
-    def _replied(  # noqa: PLR0913 — the input, as Telegram sent it and as taken in, the window, and the three links it extends
+    def _replied(
         self,
         messages: Sequence[TelegramMessage],
         inputs: Sequence[LineMessage],
         recent: Sequence[LineMessage],
         writes: Mapping[int, WrittenBy],
         links: dict[int, str],
-        asked: dict[int, AskedIn],
     ) -> tuple[tuple[LineMessage, ...], set[int]]:
         """Each message the input replies to that the window does not show (§4:12-§4:13).
 
@@ -2181,8 +2174,6 @@ class TelegramReader:
             writer = writes.get(quoted.message_id) if bot else None
             if writer is not None:
                 links[quoted.message_id] = writer.activation_id
-                if writer.asked is not None:
-                    asked[quoted.message_id] = writer.asked
         return tuple(one for _, one in sorted(replied.items())), claimed
 
 

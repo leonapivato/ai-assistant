@@ -3797,16 +3797,17 @@ class UnclearPoint(BaseModel):
     readings: tuple[NonBlankEncodableText, ...] = Field(min_length=1)
 
 
-# --- a question, its answer, and the approval a yes makes (ADR-0321) -----------
+# --- a question's part, and the approval a yes makes (ADR-0321, ADR-0361) -----------
 #
-# A question is an ordinary message a planning round writes (ADR-0307 §3:6), and each
-# call it asks about is one of its parts (ADR-0321 §2:6). An answer is an activation
-# like any other, whose understanding recorded a pointer naming the question and the
-# parts it approves (§3:1). Where authorizing's three facts hold, code assembles an
-# approval from those records (§4:6), and each part is spent once (§4:9). Understanding
-# records no pointer until the authority run (ADR-0353 §11:2), so authorizing's rules,
-# which stand unchanged, find none (§11:3); :class:`AnsweredQuestion` stays as the type
-# they hold (§9:9).
+# ADR-0321's question was an ordinary message a planning round wrote, each call it asked
+# about one of its parts (§2:6), and a yes to it made an approval spent per part (§4:6,
+# §4:9). Since ADR-0361 a person approves by tapping a card, and a yes is a ticket for
+# the request's call (§5): nothing produces a question, an asked call or an approval of
+# the question's form any more (§8:5). The question's types stay only where a stored
+# record holds them, and are read as they were (§8:6): a part is held by an effect
+# record's spending key, a decision's approved part, a confirmation support's question
+# form and a person-model act, and the question's form of an approval by the decisions
+# that name one.
 #
 # Declared here, ahead of :class:`UserConfirmation`, which names the part it answers;
 # the rule above :data:`Identifier` decides the placement. The asked call itself is
@@ -3814,20 +3815,6 @@ class UnclearPoint(BaseModel):
 
 #: The ceiling on a question's part number, as on every other stored count here.
 QUESTION_PART_MAX: Final[int] = 2**31 - 1
-
-
-def _distinct_parts(parts: Sequence[int], *, ordered: bool) -> None:
-    """Refuse a part named twice, or, where ``ordered``, parts not in ascending order.
-
-    Raises:
-        ValueError: If the parts are not distinct, or not ascending where required.
-    """
-    if len(set(parts)) != len(parts):
-        msg = "a question's parts are named once each"
-        raise ValueError(msg)
-    if ordered and list(parts) != sorted(parts):
-        msg = "a recorded question's parts are named in ascending order"
-        raise ValueError(msg)
 
 
 class QuestionPart(BaseModel):
@@ -3842,50 +3829,6 @@ class QuestionPart(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     round: Identifier
     part: int = Field(strict=True, ge=1, le=QUESTION_PART_MAX)
-
-
-class AnsweredQuestion(BaseModel):
-    """One answer pointer: a question an input approves, by ids (ADR-0321 §3:1).
-
-    It carries no label (ADR-0276 §2:4). No understanding records one until the
-    authority run redesigns approvals (ADR-0353 §11:2), and authorizing's rules, which
-    read it, stand unchanged (§11:3). It names the question's message by the records
-    its writer and its delivery keep: ``activation_id`` is the activation that asked,
-    and the message is then named by the round that wrote it, by its place and
-    position in that place, or by both.
-    Either names exactly one message, because a round writes at most one and a place
-    holds one message at a position, and either reaches the message's delivery record,
-    an :class:`ActivationEffect` of that activation carrying the round, the place and
-    the position (ADR-0306 §5:5), and through its round the asked calls the round
-    recorded (§2:8).
-
-    ``parts`` are the parts approved, ascending; empty means every part the question
-    showed (§3:6). The pointer is a reading and grants nothing by itself (ADR-0276
-    §7:7): authorizing checks it against the records (ADR-0321 §4:4).
-
-    Raises:
-        ValueError: If it names neither the round nor the place and position, names a
-            place without a position or a position without a place, or names a part
-            twice or out of order.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    activation_id: Identifier
-    round: Identifier | None = None
-    place: Identifier | None = None
-    position: int | None = Field(default=None, strict=True, ge=0, lt=2**63)
-    parts: tuple[Annotated[int, Field(strict=True, ge=1, le=QUESTION_PART_MAX)], ...] = ()
-
-    @model_validator(mode="after")
-    def _names_one_message(self) -> Self:
-        if (self.place is None) != (self.position is None):
-            msg = "a question's message is named by its place and its position together"
-            raise ValueError(msg)
-        if self.round is None and self.position is None:
-            msg = "a question's message is named by its round, its place and position, or both"
-            raise ValueError(msg)
-        _distinct_parts(self.parts, ordered=True)
-        return self
 
 
 class ApprovalGiver(StrEnum):
@@ -3939,7 +3882,9 @@ class YesToQuestion(BaseModel):
 
     ``activation_id`` is the activation that asked, and ``round`` the round whose
     message is the question. ``kind`` tells this form from any later one: a later kind
-    of approval adds a form beside it rather than reshaping it.
+    of approval adds a form beside it rather than reshaping it. **No approval of this
+    form is made since ADR-0361 §8:5**: it stays because recorded decisions name one,
+    and they are read as they were (§8:6).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -4732,7 +4677,8 @@ class PlanningRound(BaseModel):
     values it sends, its binding and its deliberate-repeat mark. The decision trail keeps
     only a parameters digest, so the round keeps the values. Their parts are ``1`` to
     the number asked about, in that order (§2:6). A round written before the field
-    validates unchanged.
+    validates unchanged. **No round records an asked call since ADR-0361 §8:5**: the
+    field stays because stored rounds hold it, and they are read as they were (§8:6).
 
     ``place`` (ADR-0350 §12:8) is the place the round's message goes into, for an
     activation the Task Scheduler started: the place its message's place label resolved
@@ -16625,6 +16571,9 @@ class AskedCall(BaseModel):
     values are checked against the declaration's schema and the binding against the
     values here, as :class:`ActionRequest` checks them, so a call that could not be
     ruled on cannot be recorded as asked about.
+
+    **Nothing records an asked call since ADR-0361 §8:5**: the type stays because stored
+    rounds hold it, and they are read as they were (§8:6).
 
     Raises:
         ValueError: If the values or the binding would not make an

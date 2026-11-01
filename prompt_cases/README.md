@@ -27,8 +27,8 @@ samples = 3                    # how often it is sent under each version (§5:2)
 [flags]                        # exactly the flags the prompt declares, each true or false;
                                # left out where it declares none, as planning does
 [property]                     # a code check and its parameters, or "read"
-check = "asks_about"
-calls = ["1.1"]
+check = "none_of"
+capabilities = ["email", "run_approved"]
 
 [input]                        # the call's request after the system message (§3:4)
 file = "<case>.json"           # or, for a completion: messages = [{ role = "user", ... }]

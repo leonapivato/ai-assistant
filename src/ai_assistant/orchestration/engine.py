@@ -100,7 +100,6 @@ from ai_assistant.core.types import (
     ApprovalRequestState,
     ApprovalStepAnswer,
     ApprovalTap,
-    AskedCall,
     Belief,
     BeliefSummary,
     ChannelContext,
@@ -307,7 +306,6 @@ from ai_assistant.orchestration.task_scheduler import (
 )
 from ai_assistant.orchestration.task_sensor import SensorLimits, TaskSchedulerSensor
 from ai_assistant.orchestration.telegram import (
-    LINE_GIVER,
     TELEGRAM,
     TelegramReader,
     TelegramWriter,
@@ -6663,7 +6661,6 @@ class Engine:
                 window=taken.window,
                 target=target,
                 description=TELEGRAM.description,
-                giver=LINE_GIVER,
                 trigger=trigger,
                 owner_records=True,
             ),
@@ -7114,13 +7111,7 @@ class Engine:
         kind = None if place is None else origin_kind(place.channel_type)
         call = request.call
         line = exact_line(
-            AskedCall(
-                part=1,
-                tool=call.tool,
-                values=call.values,
-                binding=call.binding,
-                deliberate_repeat=call.deliberate_repeat,
-            ),
+            call,
             filled=call.tool.system_supplied,
             worded=recorded_wording(call),
         )

@@ -477,7 +477,8 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     result, judged above; ``Digested`` is the recorded digest, its labels and a
     code-owned failure word; ``ActivationLabels`` takes nothing but ``PlanningLabel``s.
 
-    **The yes path's records** (ADR-0321 §2:8, §3:1). ``AskedCall`` is a call a round's
+    **The yes path's records** (ADR-0321 §2:8, §3:1), held only as stored rounds hold
+    them since ADR-0361 §8:5 retired the question path. ``AskedCall`` is a call a round's
     message asked about: its part, the ``ToolDefinition`` judged above, the values it
     sends as frozen JSON (the arguments planning wrote and the hub filled, which a
     proposed call already carries), its ``EgressBinding`` and the ids of the assertions
@@ -487,12 +488,8 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     account's connection reference and identity, which name a connection and are not
     its credential — that stays in the keyring, read by ``tools/`` alone. No answer
     pointer is in the graph: understanding records none until the authority run
-    (ADR-0353 §11:2). On
-    planning's side (ADR-0321 §2:8, §4:2), ``CallOutcome.request`` is an
-    ``ActionRequest``: the ``ToolDefinition`` and ``EgressBinding`` judged here and the
-    values as frozen JSON, exactly what the ``AskedCall`` made from it holds.
-    ``QuestionPart`` is a round's id and a part number, and ``ApprovedAction`` pairs one
-    with the ``AskedCall`` it names.
+    (ADR-0353 §11:2), and planning is handed no request and no approved action of a
+    question's (ADR-0361 §8:5). ``QuestionPart`` is a round's id and a part number.
 
     **A ticket** (ADR-0361 §5:1). ``Ticket`` holds the ``ApprovalRequest`` a tap approved:
     the request's ids, its person, planning's ``why`` in its own words, instants, its
@@ -500,8 +497,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``ApprovalCard``s it was posted as (a place, a position and an opaque token minted
     for the card, naming no record, ADR-0323 §12:4), and its ``RequestedCall``: the same
     ``ToolDefinition``, frozen values and ``EgressBinding`` an ``AskedCall`` holds, judged
-    above. Nothing of a credential. ``AskedIn`` (ADR-0322 §4:2), on the chat's window,
-    is the question a message is: a round's id and part numbers.
+    above. Nothing of a credential. No window carries a question mark (ADR-0361 §8:5).
 
     **The person block** (ADR-0338 §7). ``PersonBlock``, on understanding's ``person``
     and planning's, is a person's id, their ``Profile`` — five fields they typed, the
@@ -518,8 +514,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     reachable = _seams_reach()
 
     assert set(reachable) == {
-        "ActionRequest",
-        "AskedIn",
         "ActivationDigest",
         "ActivationLabels",
         "ActivationRecall",
@@ -527,7 +521,6 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ApprovalCard",
         "ApprovalRequest",
         "ApprovalTap",
-        "ApprovedAction",
         "AskedCall",
         "Attestation",
         "BoundAccount",
