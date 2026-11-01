@@ -17,6 +17,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast
 
+import pytest
 from exchange_support import tags, text_call
 from phases_support import open_conversation, phases_harness, said, until
 from task_support import activation, write_task
@@ -61,13 +62,12 @@ from ai_assistant.testing import (
     FakePlanStore,
     FakeToolCallingCompleter,
 )
-from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.memories import memory, remembered_support, said_support
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from datetime import datetime
 
-    import pytest
     from test_engine import Harness
 
     from ai_assistant.core.types import (
@@ -677,6 +677,17 @@ def test_a_message_into_a_taken_place_gone_since_goes_nowhere(
 # --- ADR-0362: the person model's calls and the Task Scheduler's under a ticket ------------
 
 _DIET: Final = memory("m:diet", "Eats no meat.", said_support(when=AT, added_at=AT))
+#: The same memory, still current, once it also rests on a remember call made over
+#: outside content (ADR-0328 §7:6).
+_REMEMBERED_DIET: Final = memory(
+    "m:remembered-diet", "Eats no meat.", remembered_support(when=AT, added_at=AT)
+)
+_OUTSIDE_DIET: Final = memory(
+    _REMEMBERED_DIET.id,
+    _REMEMBERED_DIET.content,
+    *_REMEMBERED_DIET.supports,
+    remembered_support(effect="effect-2", outside=True, when=AT, added_at=AT),
+)
 #: A delay that keeps a spawned task pending while a case reads it.
 _LATER: Final = 600
 
@@ -749,14 +760,23 @@ async def _asked_and_tapped(harness: Harness, count: int) -> tuple[ApprovalReque
 async def _until_used(
     harness: Harness, requests: Sequence[ApprovalRequest]
 ) -> list[ApprovalRequest]:
-    """Wait until every request's ticket is used, and return each as the store holds it."""
+    """Wait until every ticket is used and the work that ran it has ended, then read each.
+
+    A ticket is spent when its call is claimed, before the call runs, so each approval's
+    own activation, which ran it or whose input a take carried to the work that did, is
+    waited on to freeze before anything the call wrote is read.
+    """
 
     async def used() -> bool:
         held = [await _held(harness, str(one.id)) for one in requests]
         return all(one.ticket is TicketState.USED for one in held)
 
     await until(used, what="every ticket to be used")
-    return [await _held(harness, str(one.id)) for one in requests]
+    held = [await _held(harness, str(one.id)) for one in requests]
+    for one in held:
+        assert one.pushed_to is not None
+        await _frozen(harness, str(one.pushed_to))
+    return held
 
 
 def _by_capability(requests: Sequence[ApprovalRequest]) -> dict[str, ApprovalRequest]:
@@ -1012,22 +1032,36 @@ async def test_a_request_for_a_call_the_asking_activation_cannot_run_writes_noth
     assert tasks == ()
 
 
-async def test_a_pin_request_whose_memory_is_not_current_is_not_written() -> None:
-    """ADR-0338 §8:6, ADR-0361 §2:11: the card could not show its wording, so no request."""
+@pytest.mark.parametrize("capability", ["pin", "unpin"])
+@pytest.mark.parametrize("change", ["gone", "outside"])
+async def test_a_worded_request_whose_memory_cannot_be_shown_is_not_written(
+    capability: str, change: str
+) -> None:
+    """ADR-0338 §8:6, ADR-0361 §2:11, ADR-0307 §9:2: a memory gone, or resting on outside
+    content, since the round saw it leaves its card no wording to show, so no request."""
     people = _People()
-    await people.memory.add(_DIET)
-    await people.store.record_suggestion(
-        OWNER_PERSON_ID,
-        ProposedSuggestion(kind=SuggestionKind.PIN, memory_id=_DIET.id, episode_id="activation:a0"),
-    )
+    await people.memory.add(_REMEMBERED_DIET)
+    if capability == "pin":
+        await people.store.record_suggestion(
+            OWNER_PERSON_ID,
+            ProposedSuggestion(
+                kind=SuggestionKind.PIN, memory_id=_REMEMBERED_DIET.id, episode_id="activation:a0"
+            ),
+        )
+    else:
+        made = PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID)
+        await people.store.add_pin(OWNER_PERSON_ID, _REMEMBERED_DIET.id, act=made)
     told: list[dict[str, Any]] = []
 
     async def person(exchange: PlanningExchange) -> RoundResponse:
         if not exchange.steps:
             label = _memory_label(exchange)
-            # Gone between the round that saw it and that round's acting.
-            await people.memory.delete(_DIET.id)
-            return RoundResponse(calls=(_asking("pin", "ask-1", memory=label),))
+            # Changed between the round that saw it and that round's acting.
+            if change == "gone":
+                await people.memory.delete(_REMEMBERED_DIET.id)
+            else:
+                await people.memory.add(_OUTSIDE_DIET)
+            return RoundResponse(calls=(_asking(capability, "ask-1", memory=label),))
         told.extend(_results(exchange))
         return RoundResponse()
 
@@ -1035,12 +1069,13 @@ async def test_a_pin_request_whose_memory_is_not_current_is_not_written() -> Non
     harness = _harness(planner, **people.stores)
     await harness.engine.start()
     try:
-        await _start(harness, "keep in mind that I eat no meat")
+        await _start(harness, "about my diet")
         await until(lambda: _settled(told), what="the second round")
         requests = await _requests(harness)
     finally:
         await harness.engine.aclose()
 
+    assert _OUTSIDE_DIET.rests_on_outside_content
     (refused,) = told
     assert "could not show its wording" in str(refused)
     assert requests == ()
