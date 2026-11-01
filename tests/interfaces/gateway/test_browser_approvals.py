@@ -285,3 +285,34 @@ async def test_more_waiting_than_one_read_holds_is_said(
         )
         assert await _overflow(drive.page) <= 0
         assert heard == []
+
+
+async def test_a_request_no_answer_can_carry_is_shown_cut_with_deny_alone(
+    gateway_browser: Browser, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A card longer than one answer of the hub's may carry is shown by its start, says
+    so, and offers Deny alone: a yes is to the exact call shown (ADR-0321 §2:7)."""
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        heard = _complaints(drive.page)
+        plans = _stores(drive)
+        monkeypatch.setattr(drive.engine, "_max_payload_bytes", 16 * 1024)
+        await hold_request(plans, "approval:huge", ago=timedelta(hours=2), date="d" * 40_000)
+        await hold_request(plans, "approval:small", ago=timedelta(hours=1), date="Sunday")
+        await _open(drive)
+        rows = drive.page.locator("#approvals-pending .approval-row")
+        await expect(rows).to_have_count(2)
+        await expect(rows.first).to_contain_text("This request is too long to show here whole")
+        await expect(rows.first.locator("button")).to_have_text(["Deny"])
+        await expect(rows.nth(1).locator("button")).to_have_text(["Approve", "Deny"])
+        assert await _overflow(drive.page) <= 0
+
+        async with drive.page.expect_response("**/approval/tap"):
+            await rows.first.get_by_role("button", name="Deny").click()
+
+        await expect(drive.page.locator("#approvals-outcome")).to_have_text(
+            "Denied. I will not do it."
+        )
+        await expect(rows).to_have_count(1)
+        (held,) = await plans.approval_requests(["approval:huge"])
+        assert held.state is ApprovalRequestState.DENIED
+        assert heard == []

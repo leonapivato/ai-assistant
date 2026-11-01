@@ -35,6 +35,7 @@ def entry_view(entry: ApprovalPanelEntry) -> dict[str, Any]:
         "expires_at": entry.expires_at.isoformat(),
         "answered_by": None if entry.answered_by is None else entry.answered_by.value,
         "answered_at": _instant(entry.answered_at),
+        "whole": entry.whole,
     }
 
 

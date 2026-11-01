@@ -1176,6 +1176,7 @@ class FakeAssistantEngine:
             chosen,
             person=OWNER_PERSON_ID,
             now=self.approval_clock(),
+            max_bytes=self._max_payload_bytes,
         )
         if landed:
             self.approvals_woken += 1
