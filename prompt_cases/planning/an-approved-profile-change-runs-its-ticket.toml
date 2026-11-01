@@ -9,9 +9,10 @@ set = "development"
 samples = 3
 
 [property]
-check = "includes_with"
-capabilities = ["run_approved"]
-phrases = ["A1"]
+check = "proposes"
+capability = "run_approved"
+argument = "label"
+value = "A1"
 
 [input]
 file = "an-approved-profile-change-runs-its-ticket.json"
