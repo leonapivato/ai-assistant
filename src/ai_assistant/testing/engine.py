@@ -1155,6 +1155,7 @@ class FakeAssistantEngine:
             person=OWNER_PERSON_ID,
             now=self.approval_clock(),
             limit=limit,
+            max_bytes=self._max_payload_bytes,
         )
         return self._checked(panel, "approvals")
 
