@@ -705,3 +705,25 @@ async def test_edits_failing_again_and_again_stay_within_a_reads_bound() -> None
         made.append(rig.edits() - before)
 
     assert made == [8, 8, 8, 8]
+
+
+async def test_pending_cards_never_starve_a_starts_check_of_a_settled_one() -> None:
+    """Eight pending cards and one denied before its edit: after a start the denied card
+    is put right within two reads, and later reads cost nothing (review round 4)."""
+    rig = _Rig()
+    asked = [(await rig.ask(date=f"2026-11-{day:02d}"))[1] for day in range(1, 10)]
+    denied = asked[0]
+    await rig.plans.answer_approval_request(
+        str(denied.id),
+        ApprovalRequestState.DENIED,
+        ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT),
+    )
+    restarted = rig.over(rig.fake)
+
+    await restarted.refresh()
+    await restarted.refresh()
+    settled = rig.edits()
+    await restarted.refresh()
+
+    assert rig.shown(await rig.request(str(denied.id))).endswith("Denied.")
+    assert rig.edits() == settled, "the pending cards, checked once, cost no further edit"
