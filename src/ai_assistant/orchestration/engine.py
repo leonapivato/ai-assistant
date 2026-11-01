@@ -8860,9 +8860,6 @@ class Engine:
 # outside content. The engine and the canonical fake both answer through these, so the
 # suite compares two implementations of the surface rather than two readings of a card.
 
-#: Reads what each request's card shows beside it, by the request's id.
-type CardFactsReader = Callable[[Sequence[ApprovalRequest]], Awaitable[Mapping[str, CardFacts]]]
-
 #: What a card shows where the asking activation cannot be read: where it was asked is
 #: not recorded, and the outside-content line is shown, the cautious reading.
 _UNREAD_FACTS: Final = CardFacts(origin=None, read_outside=True)
@@ -8970,7 +8967,7 @@ def _ended_at(request: ApprovalRequest) -> datetime:
 
 async def approval_panel(  # noqa: PLR0913 — the store, the reader, and one knob per bound
     plans: PlanStore,
-    facts_of: CardFactsReader,
+    facts_of: Callable[[Sequence[ApprovalRequest]], Awaitable[Mapping[str, CardFacts]]],
     *,
     person: str,
     now: datetime,
@@ -9101,7 +9098,7 @@ def _cut_entry(
 
 async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, its person, instant and bound
     plans: PlanStore,
-    facts_of: CardFactsReader,
+    facts_of: Callable[[Sequence[ApprovalRequest]], Awaitable[Mapping[str, CardFacts]]],
     request_id: str,
     choice: ApprovalChoice,
     *,
@@ -9168,7 +9165,6 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
 
 
 __all__ = [
-    "CardFactsReader",
     "Engine",
     "approval_card_facts",
     "approval_panel",
