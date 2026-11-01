@@ -1458,3 +1458,54 @@ async def test_the_lines_window_shows_a_card_the_hub_chat_asked_for_and_nothing_
         (card.position, MessageAuthor.ASSISTANT, card_words),
     )
     assert window.links[card.position or 0] == "act-ask"
+
+
+async def test_two_cards_of_one_round_each_show_their_own_request() -> None:
+    """ADR-0361 §4:3: a card is linked to its request by its own record, never by order,
+    so two cards one round posted out of its order each show their own words (review
+    round 2)."""
+    plans = FakePlanStore(now=lambda: AT)
+    line = _Line(plans=plans)
+    asked: list[ApprovalRequest] = []
+    for n, date in ((1, "2026-11-02"), (2, "2026-11-03")):
+        request = ApprovalRequest(
+            id=f"approval:{n}",
+            person=OWNER_PERSON_ID,
+            activation_id="act-ask",
+            round="round:1",
+            call=RequestedCall(
+                tool=REQUEST_APPROVAL,
+                values={"call": {"capability": "book", "arguments": {"date": date}}, "why": "w"},
+            ),
+            why=f"Booking {date}.",
+            written_at=AT,
+            expires_at=AT + timedelta(hours=24),
+        )
+        effect = ActivationEffect(
+            id=f"effect:{n}",
+            activation_id="act-ask",
+            round="round:1",
+            capability="request_approval",
+            values_digest="0" * 64,
+            decision_id=f"decision:{n}",
+            claimed_at=AT,
+            request=f"approval:{n}",
+        )
+        await plans.write_approval_request(request, effect, match=None)
+        asked.append(request)
+    assert line.cards is not None
+    facts = CardFacts(origin=line.seams.channel, read_outside=False)
+    for request in reversed(asked):
+        await line.cards.post(request, facts)
+    line.fake.hold(text(40, "and then?", message_id=990))
+    line.start()
+    await line.until(lambda: bool(line.inputs), what="the input was taken in")
+    await line.stop()
+
+    sent = dict(line.fake.messages)
+    shown = {one.position: one.text for one in line.inputs[0].window.messages}
+    for request in await plans.approval_requests(["approval:1", "approval:2"]):
+        (card,) = request.cards
+        assert card.position is not None
+        assert shown[card.position] == sent[card.position]
+        assert f"Why: {request.why}" in shown[card.position]
