@@ -11941,7 +11941,14 @@ class ScheduledDue(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 27 because the document gained ``approval_requests``**
+    **``schema_version`` is 28 because a request's call gained ``wording``**
+    (ADR-0338 §8:6, ADR-0361 §2:11): the wording of the memory a ``pin`` or an ``unpin``
+    names, as the store held it in the asking round. No member is added, since it rides
+    inside ``approval_requests``, and a dump leaves it out where it is unset, but a reader
+    of 27 refuses it as extra wherever it is set, so the label moves (ADR-0039 §10). The
+    closure rule is extended by nothing: the wording names no record.
+
+    **It was 27 because the document gained ``approval_requests``**
     (ADR-0361 §8:2): the Approvals channel's content, each request with its call, its
     answer, its ticket, its cards and its pushed mark, in the order written. A request
     names activations, an effect record and places, none of which is checked against the
@@ -12039,12 +12046,12 @@ class PlanExport(BaseModel):
     # Its approval requests hold the person's call arguments (ADR-0145 §8).
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
-    schema_version: Literal[27] = Field(
-        default=27,
+    schema_version: Literal[28] = Field(
+        default=28,
         description=(
-            "Shape of this export, pinned to exactly 27 (ADR-0039 §10, ADR-0361 §8:2): an "
+            "Shape of this export, pinned to exactly 28 (ADR-0039 §10, ADR-0338 §8:6): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[27]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[28]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -16713,6 +16720,13 @@ class TicketState(StrEnum):
     VOID = "void"
 
 
+#: The capabilities whose exact line shows, in place of the memory the call names, that
+#: memory's wording as the store held it when the round was recorded (ADR-0338 §8:3,
+#: §8:6): ``pin`` and ``unpin``. A request's call carries a :attr:`RequestedCall.wording`
+#: only for one of these.
+WORDED_CAPABILITIES: Final[frozenset[str]] = frozenset({"pin", "unpin"})
+
+
 class RequestedCall(BaseModel):
     """The call an approval request holds, as ADR-0321 §2:8 recorded a question's (§2:6).
 
@@ -16725,6 +16739,15 @@ class RequestedCall(BaseModel):
     the card shows (§2:11) and the call a ticket runs (§5:2): code fills in these values
     and rebinds this binding, and nothing planning sends changes them.
 
+    ``wording`` is, for a call of :data:`WORDED_CAPABILITIES`, the wording of the memory
+    it names as the memory store held it in the asking round: what its exact line shows
+    in place of the memory, wherever the request is shown (ADR-0338 §8:6, ADR-0361
+    §2:11). It is recorded with the request, never read again at a render, so every card,
+    every edit of one and the panel show what the person was first shown (ADR-0362 §4:2).
+    It is ``None`` for any other call, and for a request written before it was recorded,
+    and a dump leaves it out where it is ``None``. It is shown, never sent: it is no part
+    of the call a ticket runs, of :attr:`request`, or of :meth:`same_call`'s sameness.
+
     The record **is** a request's content, checked as :class:`AskedCall` checks its own:
     :attr:`request` is the request it makes, so a call that could not be ruled on cannot
     be asked about.
@@ -16732,7 +16755,8 @@ class RequestedCall(BaseModel):
     Raises:
         ValueError: If the values or the binding would not make an
             :class:`ActionRequest`, a call to a capability safe to repeat is marked a
-            deliberate repeat, or an assertion is named twice in ``replaces``.
+            deliberate repeat, an assertion is named twice in ``replaces``, or a
+            ``wording`` is carried by a call whose exact line shows no memory's wording.
     """
 
     # The values are the person's Tier 1 arguments, kept out of validation errors as
@@ -16744,6 +16768,9 @@ class RequestedCall(BaseModel):
     binding: Annotated[EgressBinding | None, AfterValidator(_detached_binding)] = None
     deliberate_repeat: bool = False
     replaces: tuple[NonBlankEncodableText, ...] = ()
+    # Left out of a dump where it is unset, so a request of every earlier form is stored
+    # and exported exactly as it was before ADR-0338 §8:6's wording was recorded with it.
+    wording: NonBlankEncodableText | None = Field(default=None, exclude_if=_is_none)
 
     @property
     def request(self) -> ActionRequest:
@@ -16797,6 +16824,13 @@ class RequestedCall(BaseModel):
             raise ValueError(msg)
         if len(set(self.replaces)) != len(self.replaces):
             msg = "a requested call names each assertion it replaces once"
+            raise ValueError(msg)
+        if self.wording is not None and self.tool.capability not in WORDED_CAPABILITIES:
+            # The message names no capability and no wording: both are the call's own.
+            msg = (
+                "only a call whose exact line shows a memory's wording, a pin's or an "
+                "unpin's, carries one (ADR-0338 §8:6)"
+            )
             raise ValueError(msg)
         return self
 

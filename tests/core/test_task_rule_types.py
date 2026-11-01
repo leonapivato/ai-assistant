@@ -307,5 +307,5 @@ def test_the_export_carries_a_task_with_a_rule() -> None:
     task = _task(_done(1, _AT, "a1"), ScheduledOccurrence(number=2, due_at=_AT + _DAY))
     export = PlanExport(exported_at=_AT, scheduled_tasks=(task,))
 
-    assert export.schema_version == 27
+    assert export.schema_version == 28
     assert PlanExport.model_validate_json(export.model_dump_json()) == export
