@@ -101,6 +101,7 @@ async def test_the_read_carries_each_request_as_its_card_shows_it() -> None:
     assert (recent["request_id"], recent["state"]) == ("approval:2", "denied")
     assert recent["answered_by"] == "user_tap_on_telegram_card"
     assert recent["answered_at"] == APPROVALS_AT.isoformat()
+    assert body["approvals"]["pending_total"] == 1
     assert set(pending) == {
         "request_id",
         "text",

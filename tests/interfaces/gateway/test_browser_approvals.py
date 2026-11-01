@@ -259,3 +259,29 @@ async def test_a_tap_the_hub_refuses_for_the_device_changes_nothing(
         (held,) = await plans.approval_requests(["approval:1"])
         assert held.state is ApprovalRequestState.PENDING
         assert held.answer is None
+
+
+async def test_more_waiting_than_one_read_holds_is_said(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The oldest are shown and the page says how many more wait, past the page's count
+    or past what one answer may carry (ADR-0085 §8, §4:4)."""
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        heard = _complaints(drive.page)
+        plans = _stores(drive)
+        for index in range(26):
+            await hold_request(
+                plans,
+                f"approval:{index:02d}",
+                ago=timedelta(hours=3, minutes=-index),
+                date=f"{index}",
+            )
+
+        await _open(drive)
+
+        await expect(drive.page.locator("#approvals-pending .approval-row")).to_have_count(25)
+        await expect(drive.page.locator("#approvals-pending > .hint")).to_have_text(
+            "1 more request waits after these. Answer these to see the rest."
+        )
+        assert await _overflow(drive.page) <= 0
+        assert heard == []

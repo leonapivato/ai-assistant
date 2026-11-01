@@ -25156,16 +25156,22 @@ class ApprovalPanel(BaseModel):
 
     ``pending`` are the requests a tap can still answer, the oldest first, since it
     expires first; ``recent`` the ones answered or expired most recently, the most
-    recent first, each with its state. Each list holds at most the read's ``limit``.
+    recent first, each with its state. Each list holds at most the read's ``limit``, and
+    **only as many as fit the contract's size limit** (ADR-0085 §8): a panel that would
+    not fit leaves out the oldest recent ones first, then the newest pending ones, so a
+    read always answers and the oldest waiting request is always the first shown, whole.
+    ``pending_total`` says how many requests wait in all, so a page holding fewer says
+    that more wait.
 
     Raises:
-        ValueError: If a pending entry is not pending, a recent one is, or a request is
-            shown twice.
+        ValueError: If a pending entry is not pending, a recent one is, a request is
+            shown twice, or more are pending than wait in all.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     pending: tuple[ApprovalPanelEntry, ...] = ()
     recent: tuple[ApprovalPanelEntry, ...] = ()
+    pending_total: int = Field(default=0, strict=True, ge=0)
 
     @model_validator(mode="after")
     def _each_in_its_list(self) -> Self:
@@ -25178,6 +25184,9 @@ class ApprovalPanel(BaseModel):
         shown = [one.request_id for one in (*self.pending, *self.recent)]
         if len(shown) != len(set(shown)):
             msg = "the panel shows each request once"
+            raise ValueError(msg)
+        if len(self.pending) > self.pending_total:
+            msg = "the panel shows no more pending requests than wait in all"
             raise ValueError(msg)
         return self
 

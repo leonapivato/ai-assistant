@@ -39,9 +39,10 @@ def entry_view(entry: ApprovalPanelEntry) -> dict[str, Any]:
 
 
 def panel_view(panel: ApprovalPanel) -> dict[str, Any]:
-    """The pending requests, oldest first, and the most recently ended (§4:6)."""
+    """The pending requests, oldest first, how many wait, and the most recently ended."""
     return {
         "pending": [entry_view(one) for one in panel.pending],
+        "pending_total": panel.pending_total,
         "recent": [entry_view(one) for one in panel.recent],
     }
 

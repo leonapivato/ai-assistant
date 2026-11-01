@@ -252,6 +252,7 @@ from ai_assistant.orchestration.notifications import RulingPolicy, hand_off
 from ai_assistant.orchestration.outside_content import relayed_by
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
+    canonical_payload,
     check_arguments,
     check_keyless_call,
     check_payload,
@@ -6932,6 +6933,7 @@ class Engine:
                 person=OWNER_PERSON_ID,
                 now=self._now(),
                 limit=limit,
+                max_bytes=self._max_payload_bytes,
             ),
             "approvals",
             checked=True,
@@ -8965,20 +8967,22 @@ def _ended_at(request: ApprovalRequest) -> datetime:
     return request.expires_at if request.answer is None else request.answer.at
 
 
-async def approval_panel(
+async def approval_panel(  # noqa: PLR0913 — the store, the reader, and one knob per bound
     plans: PlanStore,
     facts_of: CardFactsReader,
     *,
     person: str,
     now: datetime,
     limit: int,
+    max_bytes: int,
 ) -> ApprovalPanel:
     """The person's requests, as the hub page's approvals panel shows them (§4:6).
 
     The pending ones, the oldest first, and the ones answered or expired most recently,
-    the most recent first, at most ``limit`` of each. A request still pending at or
-    after its expiry is shown expired among the recent ones: no tap can approve it now
-    (§3:5), whether or not the sensor has ended it.
+    the most recent first, at most ``limit`` of each, and only as many as fit
+    ``max_bytes`` (:func:`fit_approval_panel`), with how many wait in all. A request
+    still pending at or after its expiry is shown expired among the recent ones: no tap
+    can approve it now (§3:5), whether or not the sensor has ended it.
 
     Args:
         plans: The plan store, which holds the Approvals channel's content.
@@ -8986,6 +8990,7 @@ async def approval_panel(
         person: The person whose requests are shown.
         now: The instant the panel is read at.
         limit: The most entries each list holds.
+        max_bytes: The contract's size limit, which the panel is fitted to.
 
     Returns:
         The panel.
@@ -9004,10 +9009,39 @@ async def approval_panel(
         reverse=True,
     )[:limit]
     facts = await facts_of((*waiting, *ended))
-    return ApprovalPanel(
+    panel = ApprovalPanel(
         pending=tuple(approval_panel_entry(one, facts[str(one.id)], now=now) for one in waiting),
         recent=tuple(approval_panel_entry(one, facts[str(one.id)], now=now) for one in ended),
+        pending_total=sum(1 for one in held if card_state(one, now=now) == "pending"),
     )
+    return fit_approval_panel(panel, max_bytes=max_bytes)
+
+
+def fit_approval_panel(panel: ApprovalPanel, *, max_bytes: int) -> ApprovalPanel:
+    """The panel, leaving out what does not fit the contract's size limit (ADR-0085 §8).
+
+    The oldest recent entries go first, then the newest pending ones, so the read always
+    answers, and the request that expires first is the last to go: a panel too large to
+    send would leave every request it holds unanswerable here, where a request too long
+    for a Telegram card is answered (§4:4). ``pending_total`` still counts every waiting
+    request, so the page says that more wait than it shows.
+
+    Args:
+        panel: The panel as read.
+        max_bytes: The contract's size limit.
+
+    Returns:
+        The largest panel of that shape that fits.
+    """
+    pending, recent = list(panel.pending), list(panel.recent)
+    fitted = panel
+    while len(canonical_payload(fitted)) > max_bytes and (pending or recent):
+        if recent:
+            recent.pop()
+        else:
+            pending.pop()
+        fitted = panel.model_copy(update={"pending": tuple(pending), "recent": tuple(recent)})
+    return fitted
 
 
 async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, and its person and instant
@@ -9074,5 +9108,6 @@ __all__ = [
     "approval_panel_entry",
     "conversation_summary",
     "episode_card_facts",
+    "fit_approval_panel",
     "tap_on_approval_panel",
 ]

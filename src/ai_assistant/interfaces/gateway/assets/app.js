@@ -5090,6 +5090,13 @@ function renderApprovals(panel) {
     line(pending, "Nothing is waiting for your answer.", "hint");
   }
   panel.pending.forEach((one) => renderApproval(pending, one, true));
+  // More wait than one read holds — past its count, or past the size one answer may be
+  // — so the oldest are shown, and the rest follow as these are answered.
+  const more = panel.pending_total - panel.pending.length;
+  if (more > 0) {
+    const waits = more === 1 ? "1 more request waits" : `${more} more requests wait`;
+    line(pending, `${waits} after these. Answer these to see the rest.`, "hint");
+  }
   if (panel.recent.length === 0) {
     line(recent, "Nothing yet.", "hint");
   }

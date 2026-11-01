@@ -27,7 +27,6 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
-from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import (
     APPROVAL_WHY_MAX_CHARS,
     OWNER_PERSON_ID,
@@ -438,22 +437,55 @@ class ApprovalsPanelContract:
         assert f"Why: {why}" in entry.text
         assert len(entry.text) > 4096
 
-    async def test_a_panel_past_the_contract_limit_is_refused(
+    async def test_a_panel_past_the_contract_limit_is_fitted_and_still_answers(
         self, approvals_subject: ApprovalsPanelSubject
     ) -> None:
-        """ADR-0085 §8: the result is measured before it is returned."""
+        """ADR-0085 §8, §4:4: requests too long for a card, more than one answer holds.
+
+        The panel leaves out what does not fit, the newest pending last of all after every
+        recent one, and says how many wait in all, so the oldest request is shown whole
+        and answered here, and the rest follow as these are answered.
+        """
         subject = approvals_subject
+        await hold_request(subject.plans, "approval:old-no", ago=timedelta(hours=9))
+        await card_tap(
+            subject.plans, "approval:old-no", ApprovalRequestState.DENIED, ago=timedelta(hours=8)
+        )
         for index in range(20):
             await hold_request(
                 subject.plans,
-                f"approval:{index}",
+                f"approval:{index:02d}",
                 why="w" * APPROVAL_WHY_MAX_CHARS,
                 date=f"d{index}",
-                ago=timedelta(minutes=30 + index),
+                ago=timedelta(hours=5, minutes=-index),
             )
 
-        with pytest.raises(OversizedValueError):
-            await subject.engine.approvals()
+        panel = await subject.engine.approvals()
+
+        assert panel.pending_total == 20
+        assert panel.recent == ()
+        shown = [one.request_id for one in panel.pending]
+        assert 1 <= len(shown) < 20
+        assert shown == [f"approval:{index:02d}" for index in range(len(shown))]
+        tapped = await subject.engine.tap_approval(shown[0], choice=ApprovalChoice.APPROVE)
+        assert tapped.answer is ApprovalPanelTapAnswer.ANSWERED
+        after = await subject.engine.approvals()
+        assert after.pending_total == 19
+        assert after.pending[0].request_id == "approval:01"
+
+    async def test_the_total_counts_what_the_limit_left_out(
+        self, approvals_subject: ApprovalsPanelSubject
+    ) -> None:
+        subject = approvals_subject
+        for index in range(3):
+            await hold_request(
+                subject.plans, f"approval:{index}", ago=timedelta(hours=3 - index), date=f"{index}"
+            )
+
+        panel = await subject.engine.approvals(limit=1)
+
+        assert [one.request_id for one in panel.pending] == ["approval:0"]
+        assert panel.pending_total == 3
 
     @pytest.mark.parametrize("limit", [-1, 2**63])
     async def test_a_limit_out_of_range_is_refused(
