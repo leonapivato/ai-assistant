@@ -681,3 +681,27 @@ async def test_a_starts_checks_of_settled_cards_are_made_a_few_at_each_read() ->
     assert rig.edits() == 12
     assert rig.shown(await rig.request(str(asked[-1].id))).endswith("Denied.")
     assert rig.shown(await rig.request(str(asked[0].id))).endswith("Denied.")
+
+
+async def test_edits_failing_again_and_again_stay_within_a_reads_bound() -> None:
+    """A read makes at most eight edits, retries included, so edits that keep failing
+    never grow into a run that holds the reader's loop (review round 3)."""
+    rig = _Rig()
+    asked = [(await rig.ask(date=f"2026-11-{day:02d}"))[1] for day in range(1, 25)]
+    for one in asked:
+        await rig.plans.answer_approval_request(
+            str(one.id),
+            ApprovalRequestState.DENIED,
+            ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT),
+        )
+    restarted = rig.over(rig.fake)
+    for _ in range(100):
+        rig.fake.fail_next(TelegramFailure.NOT_WRITTEN)
+
+    made: list[int] = []
+    for _ in range(4):
+        before = rig.edits()
+        await restarted.refresh()
+        made.append(rig.edits() - before)
+
+    assert made == [8, 8, 8, 8]

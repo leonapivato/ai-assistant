@@ -39,8 +39,10 @@ from telegram_support import (
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActivationEffect,
+    ApprovalGiver,
     ApprovalRequest,
     ApprovalRequestState,
+    ApprovalTap,
     CallOutcomeKind,
     ChannelIdentity,
     DeliveryStatus,
@@ -66,7 +68,7 @@ from ai_assistant.core.types import (
     TelegramQuotedMessage,
     TelegramUpdate,
 )
-from ai_assistant.orchestration.approval_calls import CardFacts
+from ai_assistant.orchestration.approval_calls import OUTSIDE_LINE, CardFacts
 from ai_assistant.orchestration.approvals import REQUEST_APPROVAL
 from ai_assistant.orchestration.matters import HeldInput
 from ai_assistant.orchestration.telegram import (
@@ -1509,3 +1511,101 @@ async def test_two_cards_of_one_round_each_show_their_own_request() -> None:
         assert card.position is not None
         assert shown[card.position] == sent[card.position]
         assert f"Why: {request.why}" in shown[card.position]
+
+
+async def test_the_window_shows_a_card_as_posted_when_its_edit_did_not_land() -> None:
+    """ADR-0361 §4:3, §4:5: an edit is no message, so the window shows the card in the
+    words it was posted with, even where its edit was refused (review round 3)."""
+    plans = FakePlanStore(now=lambda: AT)
+    line = _Line(plans=plans)
+    request = await _card_on_the_line(line, plans)
+    (card,) = request.cards
+    posted = dict(line.fake.messages)[card.position or 0]
+    await plans.answer_approval_request(
+        "approval:1",
+        ApprovalRequestState.DENIED,
+        ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT),
+    )
+    line.fake.fail_next(TelegramFailure.REFUSED)
+    assert line.cards is not None
+    await line.cards.refresh()
+    assert dict(line.fake.messages)[card.position or 0] == posted, "the edit did not land"
+    line.fake.hold(text(40, "and then?", message_id=990))
+    line.start()
+    await line.until(lambda: bool(line.inputs), what="the input was taken in")
+    await line.stop()
+
+    shown = {one.position: one.text for one in line.inputs[0].window.messages}
+    assert shown[card.position or 0] == posted
+    assert posted.endswith("Waiting for your answer.")
+
+
+async def test_after_a_start_the_window_shows_each_card_by_its_entry() -> None:
+    """A fresh process reads a card's posted words from its call's entry, each matched to
+    its own request, two of one round included (review round 3)."""
+    memory = FakeMemoryStore(now=lambda: AT)
+    plans = FakePlanStore(now=lambda: AT)
+    first = _Line(memory=memory, plans=plans)
+    facts = CardFacts(origin=_CONVERSATION, read_outside=True)
+    entries: list[RecordedCall] = []
+    for n, date in ((1, "2026-11-02"), (2, "2026-11-03")):
+        request = ApprovalRequest(
+            id=f"approval:{n}",
+            person=OWNER_PERSON_ID,
+            activation_id="act-ask",
+            round="round:1",
+            call=RequestedCall(
+                tool=REQUEST_APPROVAL,
+                values={"call": {"capability": "book", "arguments": {"date": date}}, "why": "w"},
+            ),
+            why=f"Booking {date}.",
+            written_at=AT,
+            expires_at=AT + timedelta(hours=24),
+        )
+        effect = ActivationEffect(
+            id=f"effect:{n}",
+            activation_id="act-ask",
+            round="round:1",
+            capability="request_approval",
+            values_digest="0" * 64,
+            decision_id=f"decision:{n}",
+            claimed_at=AT,
+            request=f"approval:{n}",
+        )
+        await plans.write_approval_request(request, effect, match=None)
+        assert first.cards is not None
+        posted = await first.cards.post(request, facts)
+        assert posted.delivered is not None
+        entries.append(
+            RecordedCall(
+                round="round:1",
+                call_id=f"call-{n}",
+                capability="request_approval",
+                effect=True,
+                outcome=CallOutcomeKind.DONE,
+                delivered=posted.delivered,
+                recorded_at=AT,
+            )
+        )
+    await memory.add(
+        _calling_episode(
+            "act-ask",
+            (RecordedInputMessage(text="Book both", sent_at=AT, position=3),),
+            channel=_CONVERSATION,
+            rounds=(("round:1", ("call-1", "call-2")),),
+            entries=tuple(entries),
+        )
+    )
+    restarted = _Line(memory=memory, plans=plans, client=first.fake)
+    restarted.fake.hold(text(40, "and then?", message_id=990))
+    restarted.start()
+    await restarted.until(lambda: bool(restarted.inputs), what="the input was taken in")
+    await restarted.stop()
+
+    sent = dict(first.fake.messages)
+    shown = {one.position: one.text for one in restarted.inputs[0].window.messages}
+    for request in await plans.approval_requests(["approval:1", "approval:2"]):
+        (card,) = request.cards
+        assert card.position is not None
+        assert shown[card.position] == sent[card.position]
+        assert OUTSIDE_LINE in shown[card.position]

@@ -268,10 +268,10 @@ _APPROVE_VERB: Final = "y"
 _DENY_VERB: Final = "n"
 _VERB_SEPARATOR: Final = ":"
 
-#: How many settled cards owed a check after a start are edited at each read (ADR-0361
-#: §4:5), newest first: every one is checked, a few at a time, so a start never holds
-#: the reader's loop on a long run of edits.
-_RECONCILE_PER_READ: Final = 8
+#: How many card edits one read makes at most (ADR-0361 §4:5), retries and a start's
+#: checks included: the rest wait for the next read, oldest first, so the reader's
+#: loop is never held on a long run of edits.
+_EDITS_PER_READ: Final = 8
 
 #: The fixed message sent after a restart cut the chat's last activation off (§6:10).
 INTERRUPTED_LINE: Final = (
@@ -927,12 +927,15 @@ class TelegramCards:
         self._facts: dict[str, CardFacts] = {}
         #: What each card shows now, as last sent or edited, by request and position.
         self._shown: dict[tuple[str, int], tuple[str, bool]] = {}
-        #: The requests whose cards on the line may still change.
-        self._watched: set[str] = set()
+        #: The requests whose cards on the line may still need an edit, in the order
+        #: they are next looked at: one looked at goes to the end.
+        self._watched: dict[str, None] = {}
         #: Whether the first read after a start is still owed.
         self._settled = False
         #: The settled requests whose cards a start owes one more edit, newest first.
         self._owed: list[str] = []
+        #: The words each card was posted with, by its request, as this process sent it.
+        self._posted: dict[str, str] = {}
 
     def wake_with(self, wake: Callable[[], None]) -> None:
         """Have a tap that changed a request wake the Approvals sensor (§3:4).
@@ -989,7 +992,8 @@ class TelegramCards:
             await self._recorded(request_id, outcome.message_id, token if buttons else None)
             if outcome.message_id is not None:
                 self._shown[request_id, outcome.message_id] = (text, bool(buttons))
-            self._watched.add(request_id)
+                self._posted[request_id] = text
+            self._watched[request_id] = None
         card = (
             CardOutcome.SENT if failure is None else _POST_FAILED.get(failure, CardOutcome.NOT_DONE)
         )
@@ -1033,21 +1037,32 @@ class TelegramCards:
             if not self._settled:
                 await self._settle()
                 self._settled = True
-            # A start's owed checks, a few at each read; each is watched until it shows.
-            self._watched.update(self._owed[:_RECONCILE_PER_READ])
-            del self._owed[:_RECONCILE_PER_READ]
+            # A start's owed checks join the watch as room is made for them.
+            room = max(0, _EDITS_PER_READ - len(self._watched))
+            self._watched.update(dict.fromkeys(self._owed[:room]))
+            del self._owed[:room]
             if not self._watched:
                 return
-            asked = set(self._watched)
-            found = await self._plans.approval_requests(sorted(asked))
+            asked = list(self._watched)
+            found = {str(one.id): one for one in await self._plans.approval_requests(sorted(asked))}
         except PlanningError:
             _log.warning("approval_cards_unread", stage="reader", reason="store_failed")
             return
-        # A card posted while the read was out is not in it, and stays watched.
-        self._watched -= asked - {str(one.id) for one in found}
-        for request in found:
-            if await self._edited(request) and _settled_state(request):
-                self._watched.discard(str(request.id))
+        budget = _EDITS_PER_READ
+        for request_id in asked:
+            request = found.get(request_id)
+            if request is None:
+                # Gone from the store. A card posted while the read was out is not in
+                # ``asked``, and stays watched.
+                self._watched.pop(request_id, None)
+                continue
+            if budget <= 0:
+                break
+            done, tried = await self._edited(request, budget)
+            budget -= tried
+            self._watched.pop(request_id, None)
+            if not (done and _settled_state(request)):
+                self._watched[request_id] = None  # to the end: looked at again later
 
     async def _settle(self) -> None:
         """Read the person's requests once after a start, to check every card on the line.
@@ -1056,9 +1071,10 @@ class TelegramCards:
         state its request has left: one whose edit a stop cut off, whatever its age, or
         one whose request the sensor ended before this first read. So every card is
         checked once. A request that can still change, pending or holding its ticket, is
-        watched at once; a settled one is owed one more edit, a few at each read, newest
-        first (:data:`_RECONCILE_PER_READ`). Telegram refuses an edit that would change
-        nothing, which costs a call and changes nothing.
+        watched at once; a settled one is owed one more edit, newest first, which joins
+        the watch as there is room within a read's edits (:data:`_EDITS_PER_READ`).
+        Telegram refuses an edit that would change nothing, which costs a call and
+        changes nothing.
 
         Raises:
             PlanningError: If the store cannot be read.
@@ -1067,7 +1083,9 @@ class TelegramCards:
             self._person, tuple(ApprovalRequestState)
         )
         carded = [one for one in requests if any(self._on_line(card) for card in one.cards)]
-        self._watched.update(str(one.id) for one in carded if not _settled_state(one))
+        self._watched.update(
+            dict.fromkeys(str(one.id) for one in carded if not _settled_state(one))
+        )
         self._owed = [str(one.id) for one in reversed(carded) if _settled_state(one)]
 
     async def on_line(self) -> dict[int, tuple[LineMessage, str]]:
@@ -1077,6 +1095,11 @@ class TelegramCards:
         position, linked to its request's asking activation by the card's own record,
         and in the words the chat shows: the card as it stands. A store that cannot be
         read shows none, the conservative direction, and the window is still brought in.
+
+        The window shows a card in the words it was posted with, which its call's entry
+        holds (§4:3, ADR-0356 §8:4): an edit is no message (§4:5), and one that did not
+        land would otherwise show words the chat never held. A card whose posted words
+        cannot be told, as one whose episode cannot be read, is not shown.
 
         Returns:
             Each card as the window shows it, and the activation that asked, by its
@@ -1098,13 +1121,11 @@ class TelegramCards:
             ),
             key=lambda item: item[0],
         )[-CHAT_WINDOW_SIZE:]
-        now = self._now()
         shown: dict[int, tuple[LineMessage, str]] = {}
         for position, request, card in placed:
-            facts = await self._facts_of(request)
-            if facts is None:
+            text = await self._posted_words(request, card)
+            if text is None:
                 continue
-            text, _ = self._rendered(request, card, facts, now=now)
             message = LineMessage(
                 position=position,
                 written_at=request.written_at,
@@ -1118,19 +1139,23 @@ class TelegramCards:
         """Whether ``card`` is in the line's chat, at a position the hub can edit it by."""
         return card.place == self._channel and card.position is not None
 
-    async def _edited(self, request: ApprovalRequest) -> bool:
-        """Edit the request's cards on the line to show it as it stands; whether all show it.
+    async def _edited(self, request: ApprovalRequest, budget: int) -> tuple[bool, int]:
+        """Edit the request's cards to show it as it stands, within ``budget`` edits.
 
         A card whose rendering has not changed is not edited. An edit Telegram may retry
         leaves the card owed, and any other outcome settles it, so the same rendering is
         never sent twice: an edit Telegram refused or never answered is not tried again
         until the request changes.
+
+        Returns:
+            Whether every card shows it, and how many edits were made.
         """
         now = self._now()
         facts = await self._facts_of(request)
         if facts is None:
-            return False
+            return False, 0
         settled = True
+        tried = 0
         for card in request.cards:
             if not self._on_line(card):
                 continue
@@ -1139,12 +1164,64 @@ class TelegramCards:
             key = (str(request.id), card.position)
             if self._shown.get(key) == (text, bool(buttons)):
                 continue
+            if tried >= budget:
+                settled = False
+                continue
+            tried += 1
             outcome = await self._edit(str(request.id), card.position, text, buttons)
             if outcome.failure is not None and outcome.failure.retryable:
                 settled = False
                 continue
             self._shown[key] = (text, bool(buttons))
-        return settled
+        return settled, tried
+
+    async def _posted_words(self, request: ApprovalRequest, card: ApprovalCard) -> str | None:
+        """The words a card was posted with: as this process sent them, or by its entry.
+
+        After a start, from the asking episode: the ``request_approval`` entry of the
+        request's round delivered into the line's chat whose words are this card as it
+        was posted, pending, with the origin its trigger records and with or without the
+        outside line, so two cards of one round are never confused. ``None`` where no
+        entry holds them.
+        """
+        held = self._posted.get(str(request.id))
+        if held is not None:
+            return held
+        try:
+            record = await self._memory.get(f"activation:{request.activation_id}")
+        except MemoryStoreError:
+            _log.warning("approval_card_facts_unread", stage="reader", reason="store_failed")
+            return None
+        processing = record.processing_record if isinstance(record, EpisodicMemory) else None
+        if processing is None:
+            return None
+        sent = {
+            one.delivered.words
+            for one in processing.call_records
+            if one.round == request.round
+            and one.capability == REQUEST_APPROVAL_CAPABILITY
+            and one.delivered is not None
+            and one.delivered.went == self._channel
+        }
+        target = processing.trigger.channel or processing.trigger.target
+        origin = target if isinstance(target, ChannelIdentity) else None
+        as_posted = request.model_copy(
+            update={
+                "state": ApprovalRequestState.PENDING,
+                "answer": None,
+                "ticket": None,
+                "spent_by": None,
+                "pushed_to": None,
+            }
+        )
+        for read_outside in (False, True):
+            facts = CardFacts(origin=origin, read_outside=read_outside)
+            text, _ = self._rendered(as_posted, card, facts, now=request.written_at)
+            if text in sent:
+                self._posted[str(request.id)] = text
+                self._facts.setdefault(str(request.id), facts)
+                return text
+        return None
 
     @staticmethod
     def _rendered(
@@ -1190,14 +1267,20 @@ class TelegramCards:
     async def _facts_of(self, request: ApprovalRequest) -> CardFacts | None:
         """What the request's card shows beside it: posted here, or read from its episode.
 
-        After a start, from the asking activation's episode: its trigger's channel, and
-        whether its ``request_approval`` entries in the request's round rest on outside
-        content (ADR-0356 §8:7). An episode holding no such entry shows the outside
-        line, the cautious reading. ``None`` where the episode cannot be read now.
+        After a start, from the asking activation's episode: the facts its card's entry
+        shows it was posted with (:meth:`_posted_words`); or, where no entry holds it,
+        its trigger's channel and whether its ``request_approval`` entries in the
+        request's round rest on outside content (ADR-0356 §8:7), an episode holding no
+        such entry showing the outside line, the cautious reading. ``None`` where the
+        episode cannot be read now.
         """
         held = self._facts.get(str(request.id))
         if held is not None:
             return held
+        card = next((one for one in request.cards if self._on_line(one)), None)
+        if card is not None and await self._posted_words(request, card) is not None:
+            # Its entry held the card as posted, and so the facts it was posted with.
+            return self._facts[str(request.id)]
         try:
             record = await self._memory.get(f"activation:{request.activation_id}")
         except MemoryStoreError:
@@ -1241,8 +1324,8 @@ class TelegramCards:
         words, request = await self._decided(callback)
         await self._answered(callback, words, first, claim)
         if request is not None:
-            self._watched.add(str(request.id))
-            await self._edited(request)
+            self._watched[str(request.id)] = None
+            await self._edited(request, _EDITS_PER_READ)
 
     async def _decided(  # noqa: PLR0911 — each way a tap ends is an answer of its own
         self, callback: TelegramCallback
