@@ -249,6 +249,7 @@ from ai_assistant.orchestration.message_tools import (
     platform_name,
 )
 from ai_assistant.orchestration.person_block import activation_person, person_zone
+from ai_assistant.orchestration.person_calls import recorded_wording
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
@@ -2824,9 +2825,13 @@ class _Request:
         ]
         if request.call.tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
             attributes.append(("result", "may carry text someone else wrote: give looking_for"))
-        return _tag(
-            "ticket", attributes, exact_line(call, filled=_filled(self._inputs.capabilities, call))
+        # ADR-0338 §8:6: a pin's or an unpin's memory by the wording its card showed.
+        line = exact_line(
+            call,
+            filled=_filled(self._inputs.capabilities, call),
+            worded=recorded_wording(request.call),
         )
+        return _tag("ticket", attributes, line)
 
     def tickets_news(self) -> list[str]:
         """The tickets this work holds that the exchange has not shown, each labelled now."""

@@ -48,6 +48,7 @@ from pydantic import ValidationError
 from ai_assistant.core.channel_validation import origin_kind
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
+    WORDED_CAPABILITIES,
     ActivationEffectClaim,
     ApprovalRequest,
     ApprovalRequestState,
@@ -62,7 +63,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.acting import Unwritten
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.approvals import REQUEST_APPROVAL_CAPABILITY, WHY_ARGUMENT
-from ai_assistant.orchestration.person_calls import NotDone
+from ai_assistant.orchestration.person_calls import NotDone, recorded_wording
 from ai_assistant.orchestration.planning import exact_line
 
 if TYPE_CHECKING:
@@ -101,6 +102,12 @@ _NOT_OFFERED: Final = "request_approval runs only in an activation that is a per
 _UNRULED: Final = "the call to approve was not ruled on, so no request was written"
 #: Why a request could not be built: its ``why`` is past its bound, or its call does not fit.
 _MALFORMED: Final = "the request is malformed: why is too long, or the call does not fit"
+#: ADR-0338 §8:6, ADR-0361 §2:11: a pin's or an unpin's card shows its memory's wording as
+#: the asking round read it, so one whose memory that read did not return current is not
+#: asked about.
+_UNWORDED: Final = (
+    "the memory is not current, so the card could not show its wording; nothing was asked"
+)
 #: Why a request could not be written: the hub's records could not be written.
 _STORE_FAULT: Final = "the request could not be written: the hub's records failed"
 
@@ -306,6 +313,9 @@ class ApprovalCalls:
             or not why.strip()
         ):
             return Unwritten(reason=_UNRULED)
+        if str(requested.tool.capability) in WORDED_CAPABILITIES and requested.wording is None:
+            _log.info("approval_not_written", stage="acting", reason="unworded")
+            return Unwritten(reason=_UNWORDED)
         written_at = self._now()
         try:
             request = ApprovalRequest(
@@ -454,6 +464,7 @@ def card_text(request: ApprovalRequest, facts: CardFacts, *, now: datetime) -> s
         ),
         filled=call.tool.system_supplied,
         replacing=call.replaces,
+        worded=recorded_wording(call),
     )
     kind = None if facts.origin is None else origin_kind(facts.origin.channel_type)
     where = "Where it was asked is not recorded." if kind is None else f"Asked {kind.where}."
