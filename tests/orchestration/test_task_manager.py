@@ -30,12 +30,25 @@ from ai_assistant.core.errors import ClaimStopped, ConversationStoreError, Plann
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActionRequest,
+    ActivationEffect,
+    Approval,
+    ApprovalEnd,
+    ApprovalGiven,
+    ApprovalGiver,
+    ApprovalRequest,
+    ApprovalRequestState,
+    ApprovalTap,
+    ApprovalWriteAnswer,
     DueAfterTasks,
     DueAt,
     OccurrenceState,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    RequestedCall,
+    ScheduledTaskAuthor,
+    TapOnCard,
+    TicketState,
     ToolCall,
     ToolOutcome,
     ToolResult,
@@ -69,7 +82,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.types import (
-        ActivationEffect,
         Conversation,
         FrozenJson,
         MemoryRecord,
@@ -906,3 +918,133 @@ async def test_a_parent_still_running_is_not_read_through_and_the_task_is_descri
         "spawned by the person's message in a conversation in the hub's chat, "
         "Thu 01 Jan 2026 00:00 (UTC)"
     )
+
+
+# --- under a ticket (ADR-0362 §3:1, §3:3-§3:5) ---------------------------------------------
+
+
+async def _ticket(
+    world: _World,
+    tool: ToolDefinition,
+    values: Mapping[str, FrozenJson] | None = None,
+    *,
+    approve: bool = True,
+) -> ApprovalRequest:
+    """A request for one call of ``tool``, written with its effect, and approved by a tap."""
+    asking = activation()
+    request = ApprovalRequest(
+        id=f"request:{activation()}",
+        person=OWNER_PERSON_ID,
+        activation_id=asking,
+        round="round:ask",
+        call=RequestedCall(
+            tool=tool, values={"instruction": "check back"} if values is None else values
+        ),
+        why="You asked me to.",
+        written_at=AT,
+        expires_at=AT + timedelta(hours=24),
+    )
+    effect = ActivationEffect(
+        id=f"effect:{activation()}",
+        activation_id=asking,
+        round="round:ask",
+        capability="request_approval",
+        values_digest="0" * 64,
+        decision_id=f"decision:{activation()}",
+        claimed_at=AT,
+        request=request.id,
+    )
+    written = await world.plans.write_approval_request(request, effect, match=None)
+    assert written.answer is ApprovalWriteAnswer.WRITTEN, written
+    if approve:
+        tap = ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT)
+        await world.plans.answer_approval_request(request.id, ApprovalRequestState.APPROVED, tap)
+    return request
+
+
+def _under(
+    request: ApprovalRequest, tool: ToolDefinition, arguments: dict[str, FrozenJson]
+) -> ToolCall:
+    """``tool``'s call allowed under ``request``'s ticket, as authorizing allows it (§5:4)."""
+    call = ActionRequest(tool=tool, parameters=arguments)
+    decision = PermissionDecision.from_request(
+        call,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="allowed"),
+        id=f"decision:{activation()}",
+        decided_at=AT,
+        effect=f"effect:{activation()}",
+        approval=Approval(
+            who=ApprovalGiver.USER_TAP_ON_HUB_PANEL,
+            how=TapOnCard(
+                request=request.id,
+                activation_id=request.activation_id,
+                round=request.round,
+                expires_at=request.expires_at,
+            ),
+            given=ApprovalGiven(activation_id=activation(), at=AT),
+            ends=ApprovalEnd.WHEN_USED_OR_EXPIRED,
+        ),
+    )
+    return ToolCall(request=call, decision=decision)
+
+
+async def _spawn_under(
+    world: _World, request: ApprovalRequest, spawner: Spawner, **arguments: FrozenJson
+) -> object:
+    call = _under(request, SPAWN, {"instruction": "check back", **arguments})
+    effect = spawn_effect(spawner.activation_id).model_copy(update={"ticket": request.id})
+    with spawning(spawner):
+        return await world.calls.run_claiming(call, effect, match=None, deliberate_repeat=False)
+
+
+async def test_a_spawn_under_a_ticket_is_the_persons_though_its_input_carries_no_authority() -> (
+    None
+):
+    """§3:5: its author is the person, and it may replace a task its work did not spawn."""
+    world = _World()
+    request = await _ticket(world, SPAWN)
+    other = await write_task(world.plans, activation(), when=DueAt(at=AT + timedelta(hours=1)))
+    spawner = _spawner(activation(), users_authority=False)
+
+    spawned = await _spawn_under(world, request, spawner, delay_minutes=30, replaces=other.id)
+
+    assert isinstance(spawned, ToolResult), spawned
+    listing = decode_listing(spawned.output)
+    assert listing is not None
+    assert listing.spawned is not None
+    assert listing.spawned.author == ScheduledTaskAuthor.PERSON.value
+    assert await world.held(other.id) is None, "the replaced task is cancelled and tidied"
+    (held,) = await world.plans.approval_requests([request.id])
+    assert held.ticket is TicketState.USED
+
+
+async def test_a_spawn_whose_ticket_is_refused_writes_nothing_and_says_why() -> None:
+    """§3:1: the write's refusal of the ticket, in the words a ticket's refusal is said in."""
+    world = _World()
+    request = await _ticket(world, SPAWN, approve=False)
+
+    refused = await _spawn_under(world, request, _spawner(activation()), delay_minutes=30)
+
+    assert isinstance(refused, Unwritten)
+    assert refused.reason == "not run: no ticket was granted for this call"
+    assert (
+        await world.plans.person_scheduled_tasks(OWNER_PERSON_ID, [OccurrenceState.PENDING]) == ()
+    )
+
+
+async def test_a_cancel_under_a_ticket_reaches_a_task_its_work_did_not_spawn() -> None:
+    """§3:5: under a ticket, the input's authority is read as carried, for that call alone."""
+    world = _World()
+    task = await write_task(world.plans, activation(), when=DueAt(at=AT + timedelta(hours=1)))
+    request = await _ticket(world, CANCEL_TASK, {"task": task.id})
+    spawner = _spawner(activation(), users_authority=False)
+
+    with spawning(spawner):
+        refused = await world.calls.run(_call(CANCEL_TASK, {"task": task.id}))
+        done = await world.calls.run(_under(request, CANCEL_TASK, {"task": task.id}))
+
+    assert isinstance(refused, NotDone)
+    assert "only a task it spawned" in refused.reason, "under no ticket, its own spawns alone"
+    assert isinstance(done, ToolResult), done
+    assert done.outcome is ToolOutcome.SUCCEEDED
+    assert await world.held(task.id) is None

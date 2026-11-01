@@ -1,0 +1,16 @@
+# ADR-0362 §6:4's pin, its ask: round 1 pinned the memory that Leo eats no meat, and it came
+# back needing his yes and saying to ask through request_approval with the same arguments
+# (ADR-0361 §2:4). This round asks on a card for that pin, naming the memory by its label.
+prompt = "planning"
+guards = "yes_without_question"
+came_from = "2026-11-01"
+set = "development"
+samples = 3
+
+[property]
+check = "includes_with"
+capabilities = ["request_approval"]
+phrases = ["pin", "M2"]
+
+[input]
+file = "a-pin-needing-a-yes-is-asked-on-a-card.json"

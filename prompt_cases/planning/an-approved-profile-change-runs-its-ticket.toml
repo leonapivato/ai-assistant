@@ -1,0 +1,17 @@
+# ADR-0362 §6:4's profile change, its run: Leo approved, on a card, being addressed as
+# Leonardo, and the approval's activation holds the ticket (ADR-0361 §5:1). Nothing has
+# changed since he asked, so it runs the ticket with run_approved, rather than asking again
+# or setting the field by a call of its own.
+prompt = "planning"
+guards = "second_guessed"
+came_from = "2026-11-01"
+set = "development"
+samples = 3
+
+[property]
+check = "includes_with"
+capabilities = ["run_approved"]
+phrases = ["A1"]
+
+[input]
+file = "an-approved-profile-change-runs-its-ticket.json"

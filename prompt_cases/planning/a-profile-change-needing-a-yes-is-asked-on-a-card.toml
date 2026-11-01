@@ -1,0 +1,17 @@
+# ADR-0362 §6:4's profile change, its ask: round 1 set how Leo is addressed, and it came back
+# needing his yes and saying to ask through request_approval with the same arguments
+# (ADR-0361 §2:4). Now that a ticket runs the person model's calls, this round asks on a
+# card, for the same call.
+prompt = "planning"
+guards = "yes_without_question"
+came_from = "2026-11-01"
+set = "development"
+samples = 3
+
+[property]
+check = "includes_with"
+capabilities = ["request_approval"]
+phrases = ["set_profile", "address", "Leonardo"]
+
+[input]
+file = "a-profile-change-needing-a-yes-is-asked-on-a-card.json"
