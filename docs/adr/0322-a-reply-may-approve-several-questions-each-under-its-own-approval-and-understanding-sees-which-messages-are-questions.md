@@ -1,6 +1,6 @@
 # 322. A reply may approve several questions, each under its own approval, and understanding sees which messages are questions
 
-- Status: Partially superseded by ADR-0353 (§2:1–§2:7, whole; §4:1, §4:2 and §4:4–§4:9, whole; each until a later decision: understanding is shown no mark and records no pointer)
+- Status: Partially superseded by ADR-0353 (§2:1–§2:7, whole; §4:1, §4:2 and §4:4–§4:9, whole; each until a later decision: understanding is shown no mark and records no pointer) and ADR-0361 (§3 and §4:3, whole: no question is marked or approved)
 - Date: 2026-10-15
 - Scope: the authority milestone, M44 ([milestone #11](https://github.com/leonapivato/ai-assistant/milestone/11)), acceptance [#3058](https://github.com/leonapivato/ai-assistant/issues/3058), batch [#3059](https://github.com/leonapivato/ai-assistant/issues/3059): how many questions one reply may approve, and how understanding tells a question from a message that only asked in words.
 - Dependency: [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md), Accepted, and the yes path its lanes built, on `main` at `8257e6fa`.
@@ -11,6 +11,7 @@
   [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) (§3:3's label scheme and §2:1's field sets, in the additions alone) and
   [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) (§8:1's projection, in the addition alone).
 - Partially superseded: 2026-10-27 by ADR-0353 — §2:1–§2:7, whole; §4:1, §4:2 and §4:4–§4:9, whole; each until a later decision redesigns approvals: understanding is shown no question mark and no `Q` label, and records no pointer (ADR-0353 §11). §4:3's projection of a round's asked parts stands. Every other clause stands. This replacement takes effect on ratification of ADR-0353. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-10-31 by [ADR-0361](0361-approvals-are-cards-the-person-taps-and-a-yes-is-a-one-time-ticket-for-the-exact-call.md) — §3 and §4:3, whole: no input approves anything, so no reply's approval is assembled and a projected round carries no asked parts (ADR-0361 §4:11, §8:5). Every other clause stands. This replacement takes effect on ratification of ADR-0361. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
