@@ -1009,6 +1009,79 @@ async def _request_held(store: PlanStore, request_id: str) -> ApprovalRequest:
     return held
 
 
+def _spawn_tool() -> ToolDefinition:
+    """The Task Scheduler's spawn, as a ticket's call holds it (ADR-0362 §3:1)."""
+    return ToolDefinition(
+        **with_phase_declaration(  # type: ignore[arg-type]  # heterogeneous test kwargs
+            {
+                "id": "tasks",
+                "capability": "spawn",
+                "description": "Set a task to run later.",
+                "risk_level": RiskLevel.HIGH,
+                "reversibility": Reversibility.REVERSIBLE,
+                "side_effecting": True,
+                "reads": (),
+                "writes": (),
+                "discloses": (),
+                "cost": ToolCost(basis=CostBasis.FREE),
+                "idempotency": Idempotency.NONE,
+                "parameters_schema": {
+                    "type": "object",
+                    "properties": {"instruction": {"type": "string"}},
+                    "required": ["instruction"],
+                },
+            }
+        )
+    )
+
+
+async def _spawn_approved(store: PlanStore, request_id: str) -> ApprovalRequest:
+    """Write a request whose call is a spawn and approve it by a tap, holding its ticket."""
+    request = _request(request_id).model_copy(
+        update={
+            "call": RequestedCall(tool=_spawn_tool(), values={"instruction": f"do {request_id}"})
+        }
+    )
+    await _asked(store, request)
+    step = await store.answer_approval_request(request_id, ApprovalRequestState.APPROVED, _tap())
+    assert step.answer is ApprovalStepAnswer.CHANGED, step
+    return step.request
+
+
+def _ticketed_spawn_effect(
+    effect_id: str,
+    request_id: str,
+    *,
+    activation: str = "act-approval",
+    at: datetime = _TAP_AT,
+) -> ActivationEffect:
+    """A spawn's effect record, run under the ticket of ``request_id`` (ADR-0362 §3:1)."""
+    return _spawn_effect(effect_id, activation=activation).model_copy(
+        update={"ticket": request_id, "claimed_at": at}
+    )
+
+
+async def _write_under(  # noqa: PLR0913 — every part a case below varies
+    store: PlanStore,
+    task_id: str,
+    effect: ActivationEffect,
+    *,
+    match: tuple[str, ...] | None = None,
+    deliberate_repeat: bool = False,
+    pending_limit: int = _PENDING_LIMIT,
+    **spawn: Any,
+) -> ScheduledTaskWrite:
+    """Write one task under the ticket ``effect`` carries."""
+    return await store.write_scheduled_task(
+        _spawn(task_id, **spawn),
+        effect,
+        match=match,
+        deliberate_repeat=deliberate_repeat,
+        chain_limit=_CHAIN_LIMIT,
+        pending_limit=pending_limit,
+    )
+
+
 class _ApprovalsOp:
     """A locked Approvals operation (ADR-0361 §8:2), driven as every other is.
 
@@ -3903,6 +3976,227 @@ class PlanStoreContract:
 
         assert (repeated, refused) == (TicketClaim.CLAIMED, TicketClaim.ALREADY_DONE)
         assert (await _request_held(store, "q2")).ticket is TicketState.HELD
+
+    # --- a spawn under a ticket (ADR-0362 §3:1-§3:2) -------------------------------
+
+    async def test_a_spawn_under_a_ticket_writes_its_task_and_spends_it_in_one_step(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0362 §3:1: the task, its record carrying the key, and the ticket used by it."""
+        await _spawn_approved(store, "q1")
+
+        written = await _write_under(store, "t1", _ticketed_spawn_effect("spawn-t1", "q1"))
+
+        assert written.answer is TaskWriteAnswer.WRITTEN, written
+        assert written.task is not None
+        assert written.task.parent == "act-approval"
+        assert written.task.chain_length == 1
+        assert await _held(store, "t1") == written.task
+        (effect,) = await store.activation_effects(["act-approval"])
+        assert (effect.id, effect.ticket, effect.outcome) == ("spawn-t1", "q1", None)
+        held = await _request_held(store, "q1")
+        assert (held.ticket, held.spent_by) == (TicketState.USED, "spawn-t1")
+
+    async def test_a_second_run_of_a_spawns_ticket_is_refused_and_writes_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0361 §5:5: the ticket runs its call once, by a spawn or by a claim."""
+        await _spawn_approved(store, "q1")
+        await _write_under(store, "t1", _ticketed_spawn_effect("spawn-t1", "q1"))
+
+        again = await _write_under(
+            store, "t2", _ticketed_spawn_effect("spawn-t2", "q1", activation="act-ask")
+        )
+        claimed = await store.claim_ticket_call(
+            _ticketed_spawn_effect("spawn-t3", "q1"), match=None
+        )
+
+        assert again == ScheduledTaskWrite(
+            answer=TaskWriteAnswer.TICKET_REFUSED, ticket=TicketClaim.USED
+        )
+        assert claimed is TicketClaim.USED
+        assert await store.scheduled_tasks(["t2"]) == ()
+        assert [one.id for one in await store.activation_effects(["act-approval"])] == ["spawn-t1"]
+        assert [one.id for one in await store.activation_effects(["act-ask"])] == ["ask-q1"]
+        assert (await _request_held(store, "q1")).spent_by == "spawn-t1"
+
+    async def test_a_spawn_under_a_ticket_a_claim_spent_is_refused(self, store: PlanStore) -> None:
+        """ADR-0361 §5:5: a key a record already carries refuses the spawn's write too."""
+        await _spawn_approved(store, "q1")
+        assert (
+            await store.claim_ticket_call(_ticketed_spawn_effect("e1", "q1"), match=None)
+            is TicketClaim.CLAIMED
+        )
+
+        refused = await _write_under(store, "t1", _ticketed_spawn_effect("spawn-t1", "q1"))
+
+        assert refused.ticket is TicketClaim.USED
+        assert await store.scheduled_tasks(["t1"]) == ()
+
+    async def test_a_spawn_under_a_void_or_expired_ticket_writes_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0361 §5:3, §5:7: void by the work ending, or past its request's expiry."""
+        await _spawn_approved(store, "q-void")
+        await store.void_approval_ticket("q-void")
+        await _spawn_approved(store, "q-late")
+
+        void = await _write_under(store, "t1", _ticketed_spawn_effect("spawn-t1", "q-void"))
+        late = await _write_under(
+            store, "t2", _ticketed_spawn_effect("spawn-t2", "q-late", at=_EXPIRY)
+        )
+
+        assert (void.answer, void.ticket) == (TaskWriteAnswer.TICKET_REFUSED, TicketClaim.VOID)
+        assert (late.answer, late.ticket) == (
+            TaskWriteAnswer.TICKET_REFUSED,
+            TicketClaim.EXPIRED,
+        )
+        assert await store.scheduled_tasks(["t1", "t2"]) == ()
+        assert await store.activation_effects(["act-approval"]) == ()
+        assert (await _request_held(store, "q-late")).ticket is TicketState.HELD
+
+    async def test_a_spawn_under_no_granted_ticket_writes_nothing(self, store: PlanStore) -> None:
+        """ADR-0361 §5:9: a deny, a pending request and an unknown one grant none."""
+        await _asked(store, _request("q-denied"))
+        await store.answer_approval_request("q-denied", ApprovalRequestState.DENIED, _tap())
+        await _asked(store, _request("q-pending", hotel="the Savoy"))
+
+        answers = [
+            await _write_under(store, f"t-{one}", _ticketed_spawn_effect(f"e-{one}", one))
+            for one in ("q-denied", "q-pending", "q-unheld")
+        ]
+
+        assert [one.ticket for one in answers] == [TicketClaim.NOT_GRANTED] * 3
+        assert (await store.export()).scheduled_tasks == ()
+        assert await store.activation_effects(["act-approval"]) == ()
+
+    async def test_a_spawn_refused_by_the_pending_limit_leaves_its_ticket_held(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0362 §3:2: the limit holds in the same step, and a refusal spends nothing.
+
+        Once the person's pending task is cancelled, the same ticket runs.
+        """
+        await _written(store, "t0", pending_limit=1)
+        await _spawn_approved(store, "q1")
+
+        refused = await _write_under(
+            store, "t1", _ticketed_spawn_effect("spawn-t1", "q1"), pending_limit=1
+        )
+
+        assert (refused.answer, refused.reason) == (
+            TaskWriteAnswer.REFUSED,
+            TaskRefusal.PENDING_LIMIT,
+        )
+        assert await store.scheduled_tasks(["t1"]) == ()
+        assert await store.activation_effects(["act-approval"]) == ()
+        held = await _request_held(store, "q1")
+        assert (held.ticket, held.spent_by) == (TicketState.HELD, None)
+
+        await store.cancel_scheduled_task("t0")
+        ran = await _write_under(
+            store, "t1", _ticketed_spawn_effect("spawn-t1-again", "q1"), pending_limit=1
+        )
+
+        assert ran.answer is TaskWriteAnswer.WRITTEN
+        assert (await _request_held(store, "q1")).spent_by == "spawn-t1-again"
+
+    @pytest.mark.parametrize(
+        ("spawn", "reason"),
+        [
+            ({"replaces": "t-unheld"}, TaskRefusal.UNKNOWN_TASK),
+            ({"when": DueAfterTasks(tasks=("t-unheld",))}, TaskRefusal.INVALID_WAIT),
+            ({"when": _DAILY, "first_due_at": _FIRST}, TaskRefusal.ASSISTANTS_RULE),
+        ],
+        ids=["replace", "wait", "rule"],
+    )
+    async def test_every_other_check_of_the_spawn_holds_under_a_ticket(
+        self, store: PlanStore, spawn: dict[str, Any], reason: TaskRefusal
+    ) -> None:
+        """ADR-0362 §3:2: the replace, the wait and the rule's author, each spending nothing."""
+        await _spawn_approved(store, "q1")
+
+        refused = await _write_under(store, "t1", _ticketed_spawn_effect("spawn-t1", "q1"), **spawn)
+
+        assert refused.reason is reason
+        assert await store.scheduled_tasks(["t1"]) == ()
+        assert (await _request_held(store, "q1")).ticket is TicketState.HELD
+
+    async def test_the_backstop_reads_a_spawn_under_a_ticket_as_under_an_approval(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0362 §3:1, ADR-0321 §6:2: a deliberate repeat passes an unknown outcome."""
+        first = _spawn_effect("spawn-t0", activation="act-approval")
+        await store.write_scheduled_task(
+            _spawn("t0"), first, match=None, chain_limit=_CHAIN_LIMIT, pending_limit=_PENDING_LIMIT
+        )
+        await _spawn_approved(store, "q1")
+        await _spawn_approved(store, "q2")
+        same = {"values_digest": first.values_digest}
+
+        refused = await _write_under(
+            store,
+            "t1",
+            _ticketed_spawn_effect("spawn-t1", "q1").model_copy(update=same),
+            match=("act-approval",),
+        )
+        repeated = await _write_under(
+            store,
+            "t2",
+            _ticketed_spawn_effect("spawn-t2", "q2").model_copy(update=same),
+            match=("act-approval",),
+            deliberate_repeat=True,
+        )
+
+        assert refused == ScheduledTaskWrite(answer=TaskWriteAnswer.ALREADY_DONE)
+        assert (await _request_held(store, "q1")).ticket is TicketState.HELD
+        assert repeated.answer is TaskWriteAnswer.WRITTEN
+        assert (await _request_held(store, "q2")).ticket is TicketState.USED
+
+    async def test_two_spawns_racing_under_one_ticket_land_once(self, store: PlanStore) -> None:
+        """ADR-0362 §3:1: the spend and the write are one step, so the second finds it used."""
+        await _spawn_approved(store, "q1")
+
+        answers = await asyncio.gather(
+            _write_under(store, "t1", _ticketed_spawn_effect("spawn-t1", "q1")),
+            _write_under(store, "t2", _ticketed_spawn_effect("spawn-t2", "q1")),
+        )
+
+        assert sorted(one.answer for one in answers) == sorted(
+            [TaskWriteAnswer.WRITTEN, TaskWriteAnswer.TICKET_REFUSED]
+        )
+        assert len((await store.export()).scheduled_tasks) == 1
+        assert len(await store.activation_effects(["act-approval"])) == 1
+
+    async def test_a_stopped_activation_spawns_nothing_under_a_ticket(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0297 §2: the stop refuses the spawn, and the ticket stays held."""
+        await _spawn_approved(store, "q1")
+        await store.record_stop("act-approval")
+
+        with pytest.raises(ClaimStopped):
+            await _write_under(store, "t1", _ticketed_spawn_effect("spawn-t1", "q1"))
+        assert await store.scheduled_tasks(["t1"]) == ()
+        assert (await _request_held(store, "q1")).ticket is TicketState.HELD
+
+    async def test_a_spawn_runs_only_a_ticket_holding_a_spawn(self, store: PlanStore) -> None:
+        """ADR-0361 §5:4: the record written under a ticket is a call to its capability."""
+        await _approved(store, "q-stay")
+
+        with pytest.raises(PlanningError):
+            await _write_under(store, "t1", _ticketed_spawn_effect("spawn-t1", "q-stay"))
+        assert await store.scheduled_tasks(["t1"]) == ()
+        assert (await _request_held(store, "q-stay")).ticket is TicketState.HELD
+
+    async def test_a_spawns_record_carrying_a_request_is_refused(self, store: PlanStore) -> None:
+        """ADR-0361 §2:9: ``request_approval``'s record is written with its request alone."""
+        with pytest.raises(PlanningError):
+            await _write_under(
+                store, "t1", _spawn_effect("spawn-t1").model_copy(update={"request": "q1"})
+            )
+        assert await store.scheduled_tasks(["t1"]) == ()
+        assert await store.activation_effects(["act-1"]) == ()
 
     async def test_the_export_carries_the_requests_and_clear_erases_them(
         self, store: PlanStore

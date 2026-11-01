@@ -60,6 +60,7 @@ from ai_assistant.testing._approvals import (
     checked_plain_effect,
     checked_request_effect,
     checked_request_id,
+    checked_spawn_key,
     checked_tap,
     checked_ticket_effect,
     checked_token,
@@ -73,6 +74,7 @@ from ai_assistant.testing._approvals import (
     requested_request_ids,
     requested_request_states,
     spend_ticket,
+    ticket_refused_write,
     write_request,
 )
 from ai_assistant.testing._approvals import by_person as requests_by_person
@@ -678,23 +680,30 @@ class FakePlanStore:
     ) -> ScheduledTaskWrite:
         """Write a scheduled task with its spawn's effect claim, in one step (§3:3).
 
-        The claim, the replace, the wait, the limits and both writes are decided under
-        the modelled resource, with no ``await`` between.
+        The claim, a ticket the spawn runs under, the replace, the wait, the limits,
+        both writes and the ticket's spend are decided under the modelled resource, with
+        no ``await`` between. A refusal leaves the ticket held (ADR-0362 §3:1-§3:2).
 
         Raises:
             ClaimStopped: If the store holds a stop record for the spawning activation.
-            PlanningError: If the spawn, the effect or a limit is not valid, or an id is
-                already held.
+            PlanningError: If the spawn, the effect or a limit is not valid, an id is
+                already held, or the effect's capability is not its ticket's call's.
         """
         asked = checked_spawn(spawn)
-        record = checked_spawn_effect(checked_plain_effect(_claimable_effect(effect)))
+        record = checked_spawn_effect(checked_spawn_key(_claimable_effect(effect)))
         named = _named_activations(match)
         chain = checked_limit(chain_limit, "chain limit")
         pending = checked_limit(pending_limit, "pending limit")
         async with self._resource.held():
-            answer = self._decided_claim(record, named, deliberate_repeat=deliberate_repeat)
-            if answer is not ActivationEffectClaim.CLAIMED:
-                return ScheduledTaskWrite(answer=TaskWriteAnswer(answer.value))
+            book: Book | None = None
+            if record.ticket is None:
+                answer = self._decided_claim(record, named, deliberate_repeat=deliberate_repeat)
+                if answer is not ActivationEffectClaim.CLAIMED:
+                    return ScheduledTaskWrite(answer=TaskWriteAnswer(answer.value))
+            else:
+                book, refused = self._ticket_refusal(record, named, deliberate_repeat)
+                if refused is not None:
+                    return ticket_refused_write(refused)
             schedule = self._schedule()
             written = decide_task_write(
                 schedule,
@@ -705,6 +714,9 @@ class FakePlanStore:
                 pending_limit=pending,
             )
             if written.answer is TaskWriteAnswer.WRITTEN:
+                if book is not None:
+                    spend_ticket(book, record)
+                    self._requests = book.requests
                 self._tasks = schedule.tasks
                 self._activation_effects[record.id] = record
             return written.model_copy(deep=True)
@@ -897,6 +909,27 @@ class FakePlanStore:
         """A copy of the requests one step decides over, so a raise leaves those held."""
         return Book(requests=dict(self._requests))
 
+    def _ticket_refusal(
+        self, record: ActivationEffect, named: tuple[str, ...] | None, deliberate_repeat: bool
+    ) -> tuple[Book, TicketClaim | None]:
+        """Decide a call under a ticket up to its write, as ``claim_ticket_call`` does.
+
+        In order (ADR-0361 §5:3-§5:5): the stop and the held id, the ticket and its key,
+        and the backstop, a call under a ticket counting as one under an approval. It
+        answers the book the step decides over, and the refusal, or ``None`` where the
+        caller writes the record and spends the ticket in the same step.
+        """
+        self._decided_claim(record, None, deliberate_repeat=deliberate_repeat)
+        book = self._book()
+        carried = any(held.ticket == record.ticket for held in self._activation_effects.values())
+        refused = decide_ticket(book, record, carried=carried)
+        if refused is not None:
+            return book, refused
+        answer = self._decided_claim(record, named, deliberate_repeat=deliberate_repeat)
+        if answer is not ActivationEffectClaim.CLAIMED:
+            return book, TicketClaim.ALREADY_DONE
+        return book, None
+
     def _step[T](self, decide: Callable[[Book], T]) -> T:
         """Run one decision over a copy of the book, and keep what it wrote."""
         book = self._book()
@@ -1073,17 +1106,9 @@ class FakePlanStore:
         record = checked_ticket_effect(_claimable_effect(effect))
         named = _named_activations(match)
         async with self._resource.held():
-            self._decided_claim(record, None, deliberate_repeat=deliberate_repeat)
-            book = self._book()
-            carried = any(
-                held.ticket == record.ticket for held in self._activation_effects.values()
-            )
-            refused = decide_ticket(book, record, carried=carried)
+            book, refused = self._ticket_refusal(record, named, deliberate_repeat)
             if refused is not None:
                 return refused
-            answer = self._decided_claim(record, named, deliberate_repeat=deliberate_repeat)
-            if answer is not ActivationEffectClaim.CLAIMED:
-                return TicketClaim.ALREADY_DONE
             spend_ticket(book, record)
             self._requests = book.requests
             self._activation_effects[record.id] = record

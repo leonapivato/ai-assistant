@@ -3356,7 +3356,8 @@ class PlanStore(Protocol):
     and nothing refuses a push below a stopped activation (ADR-0352 §2:2-§2:3); a
     stopped activation's spawns are refused on its stop record (ADR-0350 §3:3).
     :meth:`write_scheduled_task` writes a task with its spawn's effect claim and
-    the limits' checks in one step, cancelling a task it replaces in that step;
+    the limits' checks in one step, cancelling a task it replaces in that step and
+    spending a ticket the spawn runs under in it (ADR-0362 §3:1);
     :meth:`cancel_scheduled_task` cancels one; :meth:`scheduled_tasks`,
     :meth:`person_scheduled_tasks`, :meth:`spawned_tasks` and :meth:`scheduled_lineage`
     read them by id, by person and state, by parent and by lineage; :meth:`live_below`
@@ -3384,7 +3385,9 @@ class PlanStore(Protocol):
     :meth:`due_approval_outcomes` and :meth:`pushed_approval_outcomes` read the outcomes
     due to be pushed and those marked pushed, and :meth:`mark_approval_outcome_pushed`
     marks one pushed, naming its activation (§3:4, §3:7); and :meth:`claim_ticket_call`
-    claims a call under a ticket, keyed by its request, spending it (§5:5). **The store
+    claims a call under a ticket, keyed by its request, spending it (§5:5), except a
+    spawn's, which :meth:`write_scheduled_task` claims and spends in its own step
+    (ADR-0362 §3:1, §3:3). **The store
     computes no instant**: a request's expiry, a tap's instant and an expiry's are the
     caller's, and a claim is decided at the instant its record was claimed at. The
     Approvals channel is a medium the hub hosts, and none of it is the assistant's memory
@@ -3674,7 +3677,16 @@ class PlanStore(Protocol):
            the store holds a stop record for ``effect.activation_id``, the spawning
            activation, it raises ``ClaimStopped``; a held effect id raises
            ``PlanningError``; a spent part answers ``ALREADY_USED`` and the backstop
-           ``ALREADY_DONE``. Each writes nothing.
+           ``ALREADY_DONE``. Each writes nothing. **Where ``effect.ticket`` names a
+           request**, the spawn runs under its ticket, and the claim is decided exactly
+           as :meth:`claim_ticket_call` decides it (ADR-0362 §3:1, ADR-0361
+           §5:3-§5:5): the stop and the id as above; then the ticket, a request not
+           held or never approved, a ticket used or whose key a record already
+           carries, one void, and a claim whose ``claimed_at`` is at or after the
+           request's expiry each answering ``TICKET_REFUSED`` with the
+           ``TicketClaim`` that names it; then the backstop, the spawn counting as a
+           call under an approval, ``ALREADY_DONE``. Each writes nothing, and leaves
+           the ticket as it was.
         2. **The task id.** Where the store already holds a task under ``spawn.id``, it
            raises ``PlanningError`` and writes nothing.
         3. **The rule's author** (ADR-0340 §4:1, §9:2): a spawn whose when is a rule and
@@ -3696,7 +3708,16 @@ class PlanStore(Protocol):
            the replace's cancel, with the new task's, may not exceed ``pending_limit``.
         8. Otherwise it cancels the replaced task's pending occurrences as
            :meth:`cancel_scheduled_task` does, writes the task, and writes ``effect`` as
-           a claim, with no outcome, which acting then finishes (ADR-0306 §5:5).
+           a claim, with no outcome, which acting then finishes (ADR-0306 §5:5); and
+           where the spawn runs under a ticket, it marks the ticket used by ``effect``,
+           as :meth:`claim_ticket_call` does. Steps 2-7 hold unchanged for a spawn
+           under a ticket, decided at the instant it runs, and a refusal of any of
+           them writes nothing, so the ticket stays held (ADR-0362 §3:2).
+
+        Whether the request was approved by the spawn's person, whether the spawning
+        activation holds the approval's input, and whether ``replace_any`` is read as
+        carried for a call under a ticket (ADR-0362 §3:5) are the caller's, as for
+        :meth:`claim_ticket_call`: the store holds no activation.
 
         **The store authors what the spawn does not state.** The task's parent is the
         spawning activation, or the replaced task's parent on a replace, which also
@@ -3712,7 +3733,8 @@ class PlanStore(Protocol):
         Args:
             spawn: What the spawn states.
             effect: The spawn's effect record, a call claimed with no outcome, made by
-                the spawning activation.
+                the spawning activation; carrying the spending key ``ticket`` where the
+                spawn runs under a ticket (ADR-0362 §3:1), and never ``request``.
             match: The activations the claim is matched against, or ``None``, as for
                 :meth:`claim_activation_effect`.
             deliberate_repeat: Whether planning marked the spawn a deliberate repeat.
@@ -3724,12 +3746,14 @@ class PlanStore(Protocol):
 
         Returns:
             ``WRITTEN`` with the task as written; ``ALREADY_USED`` or ``ALREADY_DONE``
-            from the claim; or ``REFUSED`` with its reason. Only ``WRITTEN`` wrote.
+            from the claim; ``TICKET_REFUSED`` with the ticket's refusal; or
+            ``REFUSED`` with its reason. Only ``WRITTEN`` wrote.
 
         Raises:
             ClaimStopped: If the store holds a stop record for the spawning activation.
             PlanningError: If the spawn or the effect is not valid, the effect is not a
-                call or carries an outcome, a limit is not a positive integer, the store
+                call, carries an outcome or a request, or runs under a ticket whose call
+                is another capability's, a limit is not a positive integer, the store
                 already holds the effect's id or the task's, or the backend fails.
                 Nothing is written. A spawn of a rule carrying no first instant, and a
                 spawn of any other when carrying one, is not valid: each is the
@@ -14188,7 +14212,8 @@ class PersonModelStore(Protocol):
             field: Which field.
             value: Its new value, or ``None`` to clear it.
             act: Who made the change, and how; never a suggestion's, which only
-                :meth:`accept_suggestion` writes.
+                :meth:`accept_suggestion` writes. A yes's act names the question part
+                it spent or the request whose ticket ran the call (ADR-0362 §2:1).
 
         Returns:
             ``written``; ``unchanged``; or ``refused`` with ``unknown_person``,
@@ -14212,7 +14237,8 @@ class PersonModelStore(Protocol):
         Args:
             person_id: Whose pin.
             memory_id: The memory, by id.
-            act: Who pinned it, and how: on the panel, or by a yes.
+            act: Who pinned it, and how: on the panel, or by a yes, naming the question
+                part it spent or the request whose ticket ran the call (ADR-0362 §2:1).
 
         Returns:
             ``written`` with the new pin's id; ``unchanged`` with the standing pin's;

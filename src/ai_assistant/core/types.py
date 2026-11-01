@@ -11780,22 +11780,39 @@ class TaskWriteAnswer(StrEnum):
     """The question part the spawn would spend is spent, so nothing was written."""
     REFUSED = "refused"
     """The spawn was refused as not done, with its reason, and nothing was written."""
+    TICKET_REFUSED = "ticket_refused"
+    """The ticket the spawn ran under was refused, as its ``TicketClaim`` names, and
+    nothing was written, so the ticket is as it was (ADR-0362 §3:1)."""
 
 
 class ScheduledTaskWrite(BaseModel):
-    """What a spawn's write came to (ADR-0350 §3:3, §9:4, §9:9).
+    """What a spawn's write came to (ADR-0350 §3:3, §9:4, §9:9; ADR-0362 §3:1).
 
-    The task as written, where it was; the refusal's reason, where it was refused; and
-    neither on an answer of the backstop or the spend.
+    The task as written, where it was; the refusal's reason, where it was refused; the
+    ticket's refusal, where the ticket the spawn ran under was refused; and none of them
+    on an answer of the backstop or the spend. A spawn written under a ticket spent it
+    in the step that wrote the task.
+
+    Attributes:
+        answer: What the write came to.
+        task: The task as written, exactly where ``answer`` is ``written``.
+        reason: Why the spawn was refused as not done, exactly where ``answer`` is
+            ``refused``.
+        ticket: Why the ticket was refused, exactly where ``answer`` is
+            ``ticket_refused``: ``not_granted``, ``used``, ``void`` or ``expired``, as
+            ``claim_ticket_call`` names them. The backstop's refusal is
+            ``already_done``, as on any spawn.
 
     Raises:
-        ValueError: If the task or the reason does not match the answer.
+        ValueError: If the task, the reason or the ticket's refusal does not match the
+            answer, or the ticket's refusal is not one.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     answer: TaskWriteAnswer
     task: ScheduledTask | None = None
     reason: TaskRefusal | None = None
+    ticket: TicketClaim | None = None
 
     @model_validator(mode="after")
     def _matches(self) -> Self:
@@ -11804,6 +11821,15 @@ class ScheduledTaskWrite(BaseModel):
             raise ValueError(msg)
         if (self.reason is not None) != (self.answer is TaskWriteAnswer.REFUSED):
             msg = "a spawn's write carries a reason exactly where it was refused"
+            raise ValueError(msg)
+        if (self.ticket is not None) != (self.answer is TaskWriteAnswer.TICKET_REFUSED):
+            msg = "a spawn's write carries a ticket's refusal exactly where it was refused one"
+            raise ValueError(msg)
+        if self.ticket in {TicketClaim.CLAIMED, TicketClaim.ALREADY_DONE}:
+            msg = (
+                "a ticket's refusal is not_granted, used, void or expired; the backstop's "
+                "is the spawn's already_done"
+            )
             raise ValueError(msg)
         return self
 
@@ -24348,7 +24374,9 @@ class PersonActHow(StrEnum):
     PANEL = "panel"
     """By the person, or the owner, on a panel (§8:2)."""
     APPROVAL = "approval"
-    """By a call run under the person's yes, naming the approval and its episode (§8:5)."""
+    """By a call run under the person's yes, naming the approval and its episode (§8:5):
+    the question part a yes spent, or the approval request whose ticket ran the call
+    (ADR-0362 §2:1)."""
     SUGGESTION = "suggestion"
     """By an accepted suggestion, naming the episode it rests on (§3:5). A field's
     change alone: a pin made by accepting a pin suggestion is the panel's."""
@@ -24359,17 +24387,30 @@ class PersonActHow(StrEnum):
 class PersonModelAct(BaseModel):
     """Who made a change, and how (ADR-0338 §3:5, §4:1).
 
+    **A change made by a yes has two forms, exactly one set** (ADR-0362 §2:1). The
+    question form's ``approval`` is the question part the yes spent. The request form
+    names ``request``, the approval request whose ticket ran the call, which is the
+    ticket's spending key (ADR-0361 §5:5), with ``episode_id`` the approval's own
+    episode, where the yes was given, whichever work ran the ticket. The work that ran it
+    is not on the act: the request's ``spent_by`` names the effect record, which names
+    that work.
+
     Attributes:
         how: How it was made.
         by: The person who made it, by id; ``None`` exactly for the hub's seed.
         approval: The approval a yes gave, by the question part it spent (ADR-0321
-            §2:6); set exactly where ``how`` is ``approval``.
+            §2:6); set only where ``how`` is ``approval``, and then exactly where
+            ``request`` is not.
         episode_id: The episode the yes was given in, or the accepted suggestion rests
             on; set exactly where ``how`` is ``approval`` or ``suggestion``.
+        request: The approval request whose ticket ran the call, by id (ADR-0362
+            §2:1); set only where ``how`` is ``approval``, and then exactly where
+            ``approval`` is not.
 
     Raises:
         ValueError: If a field is set that ``how`` does not name, or one it names is
-            missing.
+            missing, or a yes's act names both its question part and a request, or
+            neither.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -24377,6 +24418,9 @@ class PersonModelAct(BaseModel):
     by: NonBlankEncodableText | None = None
     approval: QuestionPart | None = None
     episode_id: NonBlankEncodableText | None = None
+    # Left out of a dump where it is unset, so an act of every earlier form is stored and
+    # sent exactly as it was before ADR-0362 §2:2 added it.
+    request: Identifier | None = Field(default=None, exclude_if=_is_none)
 
     @model_validator(mode="after")
     def _names_what_its_how_needs(self) -> Self:
@@ -24384,8 +24428,12 @@ class PersonModelAct(BaseModel):
         if (how is PersonActHow.SEED) != (self.by is None):
             msg = "a change names the person who made it, except the hub's seed"
             raise ValueError(msg)
-        if (how is PersonActHow.APPROVAL) != (self.approval is not None):
-            msg = "a change names an approval exactly when it was made by a yes"
+        named = (self.approval is not None) + (self.request is not None)
+        if named != (how is PersonActHow.APPROVAL):
+            msg = (
+                "a change names one approval, its question part or its request, exactly "
+                "when it was made by a yes"
+            )
             raise ValueError(msg)
         named = how in {PersonActHow.APPROVAL, PersonActHow.SUGGESTION}
         if named != (self.episode_id is not None):

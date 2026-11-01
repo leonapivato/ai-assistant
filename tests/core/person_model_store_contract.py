@@ -70,6 +70,16 @@ BY_A_YES: Final = PersonModelAct(
     episode_id=EPISODE,
 )
 
+#: A yes on a card, run by its ticket: the act names the request, and the episode is the
+#: approval's own, where the yes was given (ADR-0362 §2:1).
+APPROVAL_EPISODE: Final = "activation:act-approval"
+BY_A_TICKET: Final = PersonModelAct(
+    how=PersonActHow.APPROVAL,
+    by=OWNER_PERSON_ID,
+    request="q-1",
+    episode_id=APPROVAL_EPISODE,
+)
+
 WRITTEN: Final = PersonModelWriteKind.WRITTEN
 UNCHANGED: Final = PersonModelWriteKind.UNCHANGED
 REFUSED: Final = PersonModelWriteKind.REFUSED
@@ -254,6 +264,23 @@ class PersonModelStoreContract:
         ]
         assert [one.at for one in model.changes] == sorted(one.at for one in model.changes)
 
+    async def test_a_change_made_under_a_ticket_logs_its_request_and_the_approvals_episode(
+        self, store: PersonModelStore
+    ) -> None:
+        """ADR-0362 §2:1, §2:4: the request form's act, held as it was handed."""
+        written = await store.set_field(
+            OWNER_PERSON_ID, ProfileField.ADDRESS, "Robin", act=BY_A_TICKET
+        )
+
+        assert written == PersonModelWrite(kind=WRITTEN)
+        [change] = (await owner(store)).changes
+        assert change.act == BY_A_TICKET
+        assert (change.act.request, change.act.episode_id, change.act.approval) == (
+            "q-1",
+            APPROVAL_EPISODE,
+            None,
+        )
+
     async def test_a_write_of_the_value_held_changes_and_logs_nothing(
         self, store: PersonModelStore
     ) -> None:
@@ -388,6 +415,29 @@ class PersonModelStoreContract:
             BY_A_YES,
             None,
         )
+
+    async def test_a_pin_made_under_a_ticket_records_its_request(
+        self, store: PersonModelStore
+    ) -> None:
+        """ADR-0362 §2:4: a pin by a yes on a card names the request whose ticket ran it."""
+        written = await store.add_pin(OWNER_PERSON_ID, MEMORY, act=BY_A_TICKET)
+
+        assert written.kind is WRITTEN
+        [pin] = (await owner(store)).pins
+        assert pin.act == BY_A_TICKET
+
+    async def test_unpinning_leaves_the_act_that_made_the_pin(
+        self, store: PersonModelStore
+    ) -> None:
+        """ADR-0362 §2:5, ADR-0338 §4:7: a removed pin gains only when it was removed."""
+        for act, memory in ((BY_A_TICKET, MEMORY), (BY_A_YES, OTHER_MEMORY)):
+            pinned = await store.add_pin(OWNER_PERSON_ID, memory, act=act)
+            assert pinned.record_id is not None
+            await store.remove_pin(OWNER_PERSON_ID, pinned.record_id)
+
+        pins = (await owner(store)).pins
+        assert [pin.act for pin in pins] == [BY_A_TICKET, BY_A_YES]
+        assert all(pin.removed_at is not None for pin in pins)
 
     async def test_pinning_a_memory_already_pinned_changes_nothing(
         self, store: PersonModelStore
@@ -720,6 +770,8 @@ class PersonModelStoreContract:
 
     async def test_the_export_carries_every_record(self, store: PersonModelStore) -> None:
         await store.set_field(OWNER_PERSON_ID, ProfileField.NAME, "Robin Vale", act=PANEL)
+        await store.set_field(OWNER_PERSON_ID, ProfileField.LANGUAGE, "Portuguese", act=BY_A_TICKET)
+        await store.add_pin(OWNER_PERSON_ID, "memory:tea", act=BY_A_TICKET)
         pinned = await store.add_pin(OWNER_PERSON_ID, MEMORY, act=PANEL)
         assert pinned.record_id is not None
         await store.remove_pin(OWNER_PERSON_ID, pinned.record_id)
@@ -738,6 +790,8 @@ class PersonModelStoreContract:
         assert exported.profiles == ((OWNER_PERSON_ID, model.profile),)
         assert exported.changes == model.changes
         assert exported.pins == model.pins
+        assert [one.act for one in exported.changes][-1] == BY_A_TICKET
+        assert exported.pins[0].act == BY_A_TICKET
         assert exported.style_marks == model.style_marks
         assert [one.state for one in exported.suggestions] == [
             SuggestionState.DISMISSED,

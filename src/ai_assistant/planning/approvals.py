@@ -40,6 +40,8 @@ from ai_assistant.core.types import (
     ApprovalWriteAnswer,
     Identifier,
     NonBlankEncodableText,
+    ScheduledTaskWrite,
+    TaskWriteAnswer,
     TicketClaim,
     TicketState,
     UtcInstant,
@@ -281,6 +283,26 @@ def checked_plain_effect(effect: ActivationEffect) -> ActivationEffect:
     return effect
 
 
+def checked_spawn_key(effect: ActivationEffect) -> ActivationEffect:
+    """Refuse a spawn's record carrying a request; one carrying a ticket passes (§5:5).
+
+    A spawn is the one call whose runner claims its own record that a ticket can hold,
+    so its write takes a record carrying a ticket and decides and spends the ticket in
+    its own step, as ``claim_ticket_call`` does (ADR-0362 §3:1, §3:3).
+    ``request_approval``'s record is written with its request (§2:9), never with a task.
+
+    Raises:
+        PlanningError: If it carries a request.
+    """
+    if effect.request is not None:
+        msg = (
+            f"activation effect {effect.id} carries a request, and is written with its "
+            f"request, not with a task (ADR-0361 §2:9)"
+        )
+        raise PlanningError(msg)
+    return effect
+
+
 def checked_card(card: object) -> ApprovalCard:
     """Return the store's own copy of a card, or refuse it (§4:3).
 
@@ -496,6 +518,17 @@ def spend_ticket(book: Book, effect: ActivationEffect) -> None:
     """Mark a ticket used by the effect record its claim writes, in the claim's step."""
     held = book.held(str(effect.ticket))
     book.put(_replaced(held, ticket=TicketState.USED, spent_by=effect.id))
+
+
+def ticket_refused_write(refused: TicketClaim) -> ScheduledTaskWrite:
+    """What a spawn's write answers where the ticket it ran under refused it (ADR-0362 §3:1).
+
+    The backstop's ``already_done`` is the spawn's own answer, as on any spawn; every
+    other refusal is ``ticket_refused``, naming it. Each wrote nothing.
+    """
+    if refused is TicketClaim.ALREADY_DONE:
+        return ScheduledTaskWrite(answer=TaskWriteAnswer.ALREADY_DONE)
+    return ScheduledTaskWrite(answer=TaskWriteAnswer.TICKET_REFUSED, ticket=refused)
 
 
 # --- the reads -------------------------------------------------------------------------

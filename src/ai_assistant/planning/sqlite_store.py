@@ -65,6 +65,7 @@ from ai_assistant.planning.approvals import (
     checked_plain_effect,
     checked_request_effect,
     checked_request_id,
+    checked_spawn_key,
     checked_tap,
     checked_ticket_effect,
     checked_token,
@@ -78,6 +79,7 @@ from ai_assistant.planning.approvals import (
     requested_request_ids,
     requested_request_states,
     spend_ticket,
+    ticket_refused_write,
     write_request,
 )
 from ai_assistant.planning.approvals import by_person as requests_by_person
@@ -1535,17 +1537,20 @@ class SqlitePlanStore:
     ) -> ScheduledTaskWrite:
         """Write a scheduled task with its spawn's effect claim, in one step (§3:3).
 
-        The claim, the replace, the wait, the limits and both writes are read and
-        decided inside one ``BEGIN IMMEDIATE`` transaction, so two spawns of one round
-        cannot pass the limits together (§9:9). A refusal writes neither row.
+        The claim, a ticket the spawn runs under, the replace, the wait, the limits, both
+        writes and the ticket's spend are read and decided inside one ``BEGIN IMMEDIATE``
+        transaction, so two spawns of one round cannot pass the limits together (§9:9),
+        and two runs of one ticket cannot both write (ADR-0362 §3:1). A refusal writes
+        neither row and leaves the ticket held (§3:2).
 
         Raises:
             ClaimStopped: If the store holds a stop record for the spawning activation.
             PlanningError: If the spawn, the effect or a limit is not valid, an id is
-                already held, or the backend fails.
+                already held, the effect's capability is not its ticket's call's, or the
+                backend fails.
         """
         asked = checked_spawn(spawn)
-        record = checked_spawn_effect(checked_plain_effect(revalidated_claim(effect)))
+        record = checked_spawn_effect(checked_spawn_key(revalidated_claim(effect)))
         named = matched_activations(match)
         limits = (
             checked_limit(chain_limit, "chain limit"),
@@ -1575,9 +1580,15 @@ class SqlitePlanStore:
         deliberate_repeat, replace_any = flags
         chain_limit, pending_limit = limits
         with self._transaction(f"write scheduled task {spawn.id!r}") as conn:
-            answer = self._decided_claim(conn, record, named, deliberate_repeat)
-            if answer is not ActivationEffectClaim.CLAIMED:
-                return ScheduledTaskWrite(answer=TaskWriteAnswer(answer.value))
+            book: Book | None = None
+            if record.ticket is None:
+                answer = self._decided_claim(conn, record, named, deliberate_repeat)
+                if answer is not ActivationEffectClaim.CLAIMED:
+                    return ScheduledTaskWrite(answer=TaskWriteAnswer(answer.value))
+            else:
+                book, refused = self._ticket_refusal(conn, record, named, deliberate_repeat)
+                if refused is not None:
+                    return ticket_refused_write(refused)
             schedule = self._schedule(conn, now)
             written = decide_task_write(
                 schedule,
@@ -1590,6 +1601,9 @@ class SqlitePlanStore:
             if written.answer is TaskWriteAnswer.WRITTEN:
                 self._persist(conn, schedule)
                 _insert_effect(conn, record)
+                if book is not None:
+                    spend_ticket(book, record)
+                    self._persist_book(conn, book)
         return written
 
     async def cancel_scheduled_task(
@@ -2160,31 +2174,51 @@ class SqlitePlanStore:
         self, record: ActivationEffect, named: tuple[str, ...] | None, deliberate_repeat: bool
     ) -> TicketClaim:
         with self._transaction(f"claim activation effect {record.id!r} under a ticket") as conn:
-            self._decided_claim(conn, record, None, deliberate_repeat)
-            book = self._book(conn)
-            # Every record carrying the key, read from the record itself and reconciled,
-            # so a second claim of one ticket is refused whatever the request says (§5:5).
-            carried = bool(
-                [
-                    _checked_activation_effect(str(self._path), row)
-                    for row in conn.execute(
-                        "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only a constant is interpolated
-                        "WHERE json_extract(data, '$.ticket') = ?",
-                        (record.ticket,),
-                    ).fetchall()
-                ]
-            )
-            refused = decide_ticket(book, record, carried=carried)
+            book, refused = self._ticket_refusal(conn, record, named, deliberate_repeat)
             if refused is not None:
                 return refused
-            if self._decided_claim(conn, record, named, deliberate_repeat) is not (
-                ActivationEffectClaim.CLAIMED
-            ):
-                return TicketClaim.ALREADY_DONE
             spend_ticket(book, record)
             self._persist_book(conn, book)
             _insert_effect(conn, record)
         return TicketClaim.CLAIMED
+
+    def _ticket_refusal(
+        self,
+        conn: sqlite3.Connection,
+        record: ActivationEffect,
+        named: tuple[str, ...] | None,
+        deliberate_repeat: bool,
+    ) -> tuple[Book, TicketClaim | None]:
+        """Decide a call under a ticket up to its write, inside the caller's transaction.
+
+        In order, as ``claim_ticket_call`` decides it (ADR-0361 §5:3-§5:5): the stop and
+        the held id, the ticket and its key, and the backstop, a call under a ticket
+        counting as one under an approval. It answers the book the step decides over, and
+        the refusal, or ``None`` where the caller writes the record and spends the ticket
+        in the same transaction.
+        """
+        self._decided_claim(conn, record, None, deliberate_repeat)
+        book = self._book(conn)
+        # Every record carrying the key, read from the record itself and reconciled, so a
+        # second claim of one ticket is refused whatever the request says (§5:5).
+        carried = bool(
+            [
+                _checked_activation_effect(str(self._path), row)
+                for row in conn.execute(
+                    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only a constant is interpolated
+                    "WHERE json_extract(data, '$.ticket') = ?",
+                    (record.ticket,),
+                ).fetchall()
+            ]
+        )
+        refused = decide_ticket(book, record, carried=carried)
+        if refused is not None:
+            return book, refused
+        if self._decided_claim(conn, record, named, deliberate_repeat) is not (
+            ActivationEffectClaim.CLAIMED
+        ):
+            return book, TicketClaim.ALREADY_DONE
+        return book, None
 
     # --- data rights (ADR-0004) -------------------------------------------
 

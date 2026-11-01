@@ -103,8 +103,11 @@ _OWNER_ONLY: Final = 0o600
 #: the database does, so ADR-0004 §4 reaches them too (#490).
 _SIDECARS: Final = ("-journal", "-wal", "-shm")
 
-#: The schema this code writes and the only one it opens (ADR-0326 §5:3). A new store:
-#: no release wrote an earlier version, so there is none to upgrade from yet.
+#: The schema this code writes and the only one it opens (ADR-0326 §5:3). No release wrote
+#: an earlier version, so there is none to upgrade from yet. ``PersonModelAct``'s request
+#: form (ADR-0362 §2:1-§2:2) is left out of a stored act where unset, so a file of this
+#: version reads unchanged: its upgrade is the empty one ADR-0326 §4's note names, the label
+#: stays, and ``tests/memory/test_person_model_store_upgrade_request_form.py`` is its test.
 PERSON_MODEL_SCHEMA_VERSION: Final = 1
 
 #: How many times a write re-mints an id that a held record already carries before it
