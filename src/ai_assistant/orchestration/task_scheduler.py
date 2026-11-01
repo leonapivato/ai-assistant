@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final, cast
 
-from ai_assistant.core.channel_validation import TASK_SCHEDULER
+from ai_assistant.core.channel_validation import APPROVALS, TASK_SCHEDULER
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
     CapabilityEffect,
@@ -991,20 +991,23 @@ def read_back(task: ScheduledTask, zone: ZoneInfo, *, now: datetime, line: bool)
     return f"{said}. It suggests no place."
 
 
+#: Each place's kind, described for reading (§5:12).
+_PLACE_DESCRIPTIONS: Final = {
+    "conversation": "a conversation in the hub's chat",
+    "telegram": "the person's Telegram chat with their assistant",
+    TASK_SCHEDULER: "a scheduled step, started by the Task Scheduler",
+    # ADR-0362 §3:4: a ticket's spawn runs in the approval's own activation too.
+    APPROVALS: "the approvals, where the person answered a request for their yes",
+    "informational_event": "an event a source reported",
+}
+
+
 def place_description(channel: ChannelIdentity | None) -> str:
     """A place, described for reading: what it is, never what it can do (§5:12)."""
     if channel is None:
         return "no place"
     kind = channel.channel_type
-    if kind == "conversation":
-        return "a conversation in the hub's chat"
-    if kind == "telegram":
-        return "the person's Telegram chat with their assistant"
-    if kind == TASK_SCHEDULER:
-        return "a scheduled step, started by the Task Scheduler"
-    if kind == "informational_event":
-        return "an event a source reported"
-    return f"a place of the {kind} channel"
+    return _PLACE_DESCRIPTIONS.get(kind, f"a place of the {kind} channel")
 
 
 #: How an occurrence's state reads to planning.
