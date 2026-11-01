@@ -83,6 +83,7 @@ from ai_assistant.orchestration.support_parts import (
     episodes_to_read,
     part_content,
     remember_activations,
+    requests_to_read,
 )
 
 if TYPE_CHECKING:
@@ -389,6 +390,13 @@ async def compacted(
     effects: dict[str, ActivationEffect] = {}
     if activations:
         effects = {one.id: one for one in await plans.activation_effects(list(activations))}
+    # ADR-0361 §5:10: a confirmation of the request form reads its request.
+    approving = requests_to_read(shown)
+    requests = (
+        {str(one.id): one for one in await plans.approval_requests(list(approving))}
+        if approving
+        else {}
+    )
     compact: list[Retrieved] = []
     asked = 0
     for index, one in enumerate(memories, start=1):
@@ -414,6 +422,7 @@ async def compacted(
                             episodes=episodes,
                             effects=effects,
                             carried=support.carries,
+                            requests=requests,
                         ),
                     )
                     for support in newest[one.id]

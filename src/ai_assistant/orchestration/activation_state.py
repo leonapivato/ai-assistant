@@ -233,6 +233,11 @@ class ActivationState:
     #: §3, ADR-0349 §7:21), as the absorption step's own instant stamps an absorption's.
     #: ``None`` for a state built without one, whose takes keep the offer's instant.
     clock: Clock | None = field(default=None, repr=False, compare=False)
+    #: ADR-0361 §6:3: for an approval's activation, the asking activation its input is
+    #: meant for by code's link, which its understanding's ``continues`` names and the
+    #: takeover step offers the input to without reading §7:5's third condition (§6:4).
+    #: ``None`` for every other activation.
+    meant_for: str | None = None
     #: ADR-0349 §7:7: the activation that absorbed this one, where one did.
     absorbed_by: str | None = field(default=None, init=False)
     #: §7:21: the older activation that took this one's offered input, where one did.

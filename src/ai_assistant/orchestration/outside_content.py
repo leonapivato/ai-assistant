@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.channel_validation import APPROVALS
 from ai_assistant.core.types import (
     DigestOutcome,
     EpisodicMemory,
@@ -94,7 +95,12 @@ def joined_parties(joined: JoinedInput) -> tuple[SupportHolder, ...] | None:
 
     Returns:
         Its parties, or ``None`` where they are unknown.
+    An approval's, on the Approvals channel, carries no one's words: its kind declares its
+    parties empty (ADR-0351 §2:4, ADR-0361 §3:6, §6:1), so its messages carry no party.
+
     """
+    if joined.channel.channel_type == APPROVALS:
+        return ()
     if any(message.party is None for message in joined.messages):
         return None
     return canonical_parties(
@@ -121,7 +127,9 @@ def holds_outside(
         Whether any input it holds is outside.
     """
     return parties_are_outside(trigger.parties, relayed=relayed_by(understanding)) or any(
-        parties_are_outside(joined_parties(one), relayed=one.relayed) for one in joined
+        parties_are_outside(parties, relayed=one.relayed)
+        for one in joined
+        if (parties := joined_parties(one)) != ()
     )
 
 

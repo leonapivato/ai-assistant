@@ -187,7 +187,7 @@ def done_candidates(
     done = {
         (effect.activation_id, effect.round, effect.values_digest): effect.id
         for effect in effects
-        if _done_remember(effect) and effect.part is None
+        if _done_remember(effect) and not effect.under_approval
     }
     labels = {one.label: one for one in processing.labels}
     joined: list[DoneCandidate] = []

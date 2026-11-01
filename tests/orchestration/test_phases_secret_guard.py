@@ -492,7 +492,15 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``ActionRequest``: the ``ToolDefinition`` and ``EgressBinding`` judged here and the
     values as frozen JSON, exactly what the ``AskedCall`` made from it holds.
     ``QuestionPart`` is a round's id and a part number, and ``ApprovedAction`` pairs one
-    with the ``AskedCall`` it names. ``AskedIn`` (ADR-0322 §4:2), on the chat's window,
+    with the ``AskedCall`` it names.
+
+    **A ticket** (ADR-0361 §5:1). ``Ticket`` holds the ``ApprovalRequest`` a tap approved:
+    the request's ids, its person, planning's ``why`` in its own words, instants, its
+    states, the ``ApprovalTap`` that answered it (a closed giver and an instant), the
+    ``ApprovalCard``s it was posted as (a place, a position and an opaque token minted
+    for the card, naming no record, ADR-0323 §12:4), and its ``RequestedCall``: the same
+    ``ToolDefinition``, frozen values and ``EgressBinding`` an ``AskedCall`` holds, judged
+    above. Nothing of a credential. ``AskedIn`` (ADR-0322 §4:2), on the chat's window,
     is the question a message is: a round's id and part numbers.
 
     **The person block** (ADR-0338 §7). ``PersonBlock``, on understanding's ``person``
@@ -516,6 +524,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ActivationLabels",
         "ActivationRecall",
         "ActivationUnderstanding",
+        "ApprovalCard",
+        "ApprovalRequest",
+        "ApprovalTap",
         "ApprovedAction",
         "AskedCall",
         "Attestation",
@@ -653,6 +664,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PeerView",
         "ProjectedEvidence",
         "ProjectedText",
+        "RequestedCall",
         "RunningShown",
         "ShortView",
         "ShownSuggestion",
@@ -669,6 +681,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "StorySummaryLine",
         "StreamingTextReply",
         "SuppliedWindow",
+        "Ticket",
         "ToolCost",
         "ToolDefinition",
         "TrackRecordEntry",

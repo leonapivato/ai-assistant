@@ -158,7 +158,12 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from ai_assistant.core.channel_validation import TASK_SCHEDULER, OriginKind, origin_kind
+from ai_assistant.core.channel_validation import (
+    APPROVALS,
+    TASK_SCHEDULER,
+    OriginKind,
+    origin_kind,
+)
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.diagnostics import returned_written, write_diagnostic, write_failure
 from ai_assistant.core.episode_encoding import project_episode
@@ -212,10 +217,24 @@ from ai_assistant.core.types import (
     SupportHolder,
     ToolOutcome,
     label_prefix,
+    parameter_violations,
     parties_are_outside,
     parties_are_persons_own,
     relay_mark_counts,
     statement_citations,
+)
+from ai_assistant.orchestration.approvals import (
+    ARGUMENTS_KEY,
+    CALL_ARGUMENT,
+    CAPABILITY_KEY,
+    NESTED_REPEAT_KEY,
+    REQUEST_APPROVAL_CAPABILITY,
+    RUN_APPROVED_DESCRIPTION,
+    RUN_APPROVED_LABEL,
+    RUN_APPROVED_SCHEMA,
+    RUN_APPROVED_TOOL,
+    Ticket,
+    nested_call,
 )
 from ai_assistant.orchestration.channel_kinds import place_channel, place_of
 from ai_assistant.orchestration.matters import (
@@ -431,6 +450,10 @@ class PlaceAuthor(StrEnum):
     TASK_SCHEDULER = "task_scheduler"
     """The Task Scheduler, whose place window is a task's lineage, each step stated by the
     hub from the tasks it keeps (ADR-0350 §6:5)."""
+
+    APPROVALS = "approvals"
+    """The Approvals channel, whose context is the request an approval's input answers,
+    as its card shows it, stated by the hub from the record (ADR-0361 §6:2)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1397,6 +1420,12 @@ class PlanningInputs:
         ended: For each activation the exchange showed as running that has ended since,
             its frozen episode as the pass's audience admits it, which the news shows as
             short-term memory would, or ``None`` where it is not yet frozen (ADR-0360).
+        tickets: The tickets this activation holds and may run once (ADR-0361 §5:1,
+            §5:6): the approval's own input's, or one a take brought it, each approved
+            and still held as the plan store held it when the round was assembled.
+        approvals: Whether the Approvals channel is wired, so ``request_approval`` and
+            ``run_approved`` are offered (ADR-0361 §2, §5:2), and a call needing the
+            person's yes is asked about by ``request_approval`` alone (§2:4).
         person_now: The person's profile and pins as the person-model store holds them
             now, re-read before a report, whose changes the news names (ADR-0360 §4);
             ``None`` on a first round, for no person, or where the store was not read.
@@ -1443,6 +1472,8 @@ class PlanningInputs:
     matter_members: Mapping[str, int] = field(default_factory=dict)
     ended: Mapping[str, EpisodicMemory | None] = field(default_factory=dict)
     person_now: PersonNow | None = None
+    tickets: tuple[Ticket, ...] = ()
+    approvals: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1596,12 +1627,17 @@ class PlannedCall:
             (ADR-0321 §4:2), the part of the question its yes approved; its call then
             carries the values recorded with the question, those the hub fills apart.
             ``None`` for every other call.
+        ticket: For a ticket planning ran by its ``A`` label through ``run_approved``
+            (ADR-0361 §5:2), the approval request whose ticket it is; its call then
+            carries the values recorded with the request, those the hub fills apart.
+            ``None`` for every other call.
     """
 
     call: ProposedCall
     looking_for: str | None = None
     deliberate_repeat: bool = False
     approved_part: QuestionPart | None = None
+    ticket: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2243,7 +2279,9 @@ def _looks(item: PlaceItem) -> tuple[PlaceAuthor, datetime | None, str | None]:
 #: The authors whose items show nothing of an episode's own exchange (ADR-0276 §3): one
 #: someone else wrote is never shown, and a lineage step is the hub's statement of a
 #: step, never its messages (ADR-0350 §6:5).
-_NOT_AN_EXCHANGE: Final = frozenset({PlaceAuthor.OTHER, PlaceAuthor.TASK_SCHEDULER})
+_NOT_AN_EXCHANGE: Final = frozenset(
+    {PlaceAuthor.OTHER, PlaceAuthor.TASK_SCHEDULER, PlaceAuthor.APPROVALS}
+)
 
 _OUTCOME_TEXT: Final = {
     CallOutcomeKind.DONE: "done",
@@ -2284,6 +2322,24 @@ _ALREADY_ASKED: Final = (
     "answer, so it is not asked about again. It is not approved: never say it is going "
     "through or being done"
 )
+#: ADR-0361 §2:4: a direct call ruled to need the person ran nothing, and is asked about
+#: through request_approval, with the same arguments.
+_ASK_BY_REQUEST: Final = (
+    "needs the person's yes, so nothing ran: to ask, call request_approval with this "
+    "call's capability and the same arguments, and say in why what it does"
+)
+#: ADR-0361 §2:5: in an activation that is no person's, nothing can be asked.
+_NO_ONE_TO_APPROVE: Final = (
+    "needs the person's yes, and this activation is no person's, so it will not run and "
+    "is not asked about"
+)
+#: ADR-0361 §5:1-§5:2: what a work is told of the tickets it holds.
+_TICKETS_HELD: Final = (
+    "- Tickets you hold, each the person's yes on a card to one call, which run_approved "
+    "runs once by its label:"
+)
+#: ADR-0361 §5:1: how a ticket came to be granted.
+_TICKET_BY: Final = "by the person's tap on its card"
 #: A call that needs a yes but whose request was not handed on cannot be shown exactly,
 #: so it is never asked about (§2:5).
 _UNSHOWABLE: Final = "needs a yes, and it cannot be asked about, so it will not run"
@@ -2586,7 +2642,11 @@ class _Request:
         if withheld or (by_message and any(one.tag == "received" for one in words)):
             self.shown.marked = True
         for one in inputs.joined:
-            joined_parties = _known_parties(one.messages)
+            # ADR-0361 §6:1: an approval's input carries no one's words; its kind declares
+            # its parties empty, so it is shown as the system states it.
+            joined_parties = (
+                () if one.channel.channel_type == APPROVALS else _known_parties(one.messages)
+            )
             joined_words = [self._recorded_message(message) for message in one.messages]
             hidden = parties_are_outside(joined_parties) or relay_mark_counts(
                 joined_parties, relayed=one.relayed
@@ -2742,7 +2802,44 @@ class _Request:
             # ADR-0321 §4:2: what this stimulus's yes approved, each under its A label.
             lines.append("- Approved by a yes in this stimulus:")
             lines.extend(f"  {self._approved(one)}" for one in self._inputs.approved)
+        if self._inputs.tickets:
+            # ADR-0361 §5:1, ADR-0356 §15: a ticket renders in the input that holds it.
+            lines.append(_TICKETS_HELD)
+            lines.extend(f"  {self.ticket(one)}" for one in self._inputs.tickets)
         return lines
+
+    def ticket(self, one: Ticket) -> str:
+        """A ticket under its A label, with its call's exact line (ADR-0361 §5:1-§5:2)."""
+        request = one.request
+        call = AskedCall(
+            part=1,
+            tool=request.call.tool,
+            values=request.call.values,
+            binding=request.call.binding,
+            deliberate_repeat=request.call.deliberate_repeat,
+        )
+        attributes = [
+            ("label", self._book.label(LabelKind.APPROVED_ACTION, one.request_id)),
+            ("from", _SYSTEM),
+            ("approved", _TICKET_BY),
+            ("expires", self._at(request.expires_at)),
+        ]
+        if request.call.tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
+            attributes.append(("result", "may carry text someone else wrote: give looking_for"))
+        return _tag(
+            "ticket", attributes, exact_line(call, filled=_filled(self._inputs.capabilities, call))
+        )
+
+    def tickets_news(self) -> list[str]:
+        """The tickets this work holds that the exchange has not shown, each labelled now."""
+        fresh = [
+            one
+            for one in self._inputs.tickets
+            if self._book.held(LabelKind.APPROVED_ACTION, one.request_id) is None
+        ]
+        if not fresh:
+            return []
+        return [_TICKETS_HELD, *(f"  {self.ticket(one)}" for one in fresh)]
 
     def _understood_lines(self, understanding: ActivationUnderstanding) -> list[str]:
         """One understanding's ``understanding`` tag, ``unclear`` containers and belonging line."""
@@ -3971,6 +4068,7 @@ class _Request:
                 news.extend(self._item(replace(item, is_input=False)))
         for digest in evidence:
             news.extend(self._evidence_lines(digest))
+        news.extend(self.tickets_news())
         news.extend(self._matters_changed())
         news.extend(self._forgotten(shown))
         news.extend(self._works_changed(shown))
@@ -4143,6 +4241,23 @@ class _Request:
 
     def _as_run(self, call: ProposedCall) -> ProposedCall:
         """A call as it ran: an approved action as the call its yes approved (§4:2)."""
+        if call.name == RUN_APPROVED_TOOL:
+            named = self._book.resolve(str(call.arguments.get(RUN_APPROVED_LABEL, "")))
+            ticket = next(
+                (
+                    one
+                    for one in self._inputs.tickets
+                    if named is not None and one.request_id == named.id
+                ),
+                None,
+            )
+            if ticket is None:
+                return call
+            return ProposedCall(
+                call_id=call.call_id,
+                name=str(ticket.request.call.tool.capability),
+                arguments=dict(ticket.request.call.values),
+            )
         if call.name != APPROVED_ACTION_TOOL:
             return call
         named = self._book.resolve(str(call.arguments.get(APPROVED_ACTION_ARGUMENT, "")))
@@ -4795,6 +4910,13 @@ class _Request:
         question still waiting (§4:11) or by an earlier round of this activation.
         """
         shown: dict[str, object] = {}
+        if self._inputs.approvals:
+            # ADR-0361 §2:4-§2:5: a yes is asked for by request_approval alone, in any
+            # activation that is a person's, never by a question in words.
+            shown["outcome"] = _ASK_BY_REQUEST if self._inputs.person_id else _NO_ONE_TO_APPROVE
+            if outcome.reason is not None:
+                shown["because"] = outcome.reason
+            return shown
         request = outcome.request
         earlier = None if request is None else self._asked_earlier(request)
         if not self._can_ask():
@@ -5688,6 +5810,16 @@ def _approved_tool(
     )
 
 
+#: ADR-0361 §5:2: the tool a ticket is run by, by its ``A`` label alone. Offered on every
+#: round where the Approvals channel is wired (ADR-0356 §4:3), never a capability: the judge
+#: turns a call to it into the call its ticket holds.
+RUN_APPROVED_OFFERED: Final = OfferedTool(
+    name=RUN_APPROVED_TOOL,
+    description=RUN_APPROVED_DESCRIPTION,
+    parameters=RUN_APPROVED_SCHEMA,
+)
+
+
 # --- judging the round's calls -------------------------------------------------------------
 
 
@@ -5709,10 +5841,21 @@ class _Judge:
     asking: str | None = None
     """The round's asking message, by its call id: its first ``text`` call carrying
     ``asks`` (ADR-0357 §8:3); ``None`` where no call carries it."""
+    schemas: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    """Each offered tool's parameters, by name, which a nested call is checked against
+    (ADR-0361 §2:2)."""
+    tickets: Mapping[str, Ticket] = field(default_factory=dict)
+    """The tickets this activation holds that a round has shown under an ``A`` label, by
+    the request they name (ADR-0361 §5:3)."""
 
-    def __call__(self, call: ProposedCall) -> PlannedCall | RefusedCall:
+    def __call__(self, call: ProposedCall) -> PlannedCall | RefusedCall:  # noqa: PLR0911 — each kind of call the judge reads is a return of its own
         if call.name == APPROVED_ACTION_TOOL and self.approved:
             return self._approved(call)
+        if call.name == RUN_APPROVED_TOOL and RUN_APPROVED_TOOL in self.schemas:
+            return self._ticket(call)
+        if call.name == REQUEST_APPROVAL_CAPABILITY and call.name in self.offered:
+            why = self.not_here.get(call.name)
+            return RefusedCall(call, why) if why is not None else self._request_approval(call)
         if carries_asks(call.name, call.arguments) and call.call_id != self.asking:
             # ADR-0357 §8:3: a round has at most one asking message.
             return RefusedCall(call, ALREADY_ASKING)
@@ -5810,6 +5953,100 @@ class _Judge:
             approved_part=action.part,
         )
 
+    def _ticket(self, call: ProposedCall) -> PlannedCall | RefusedCall:
+        """A ticket, run by its ``A`` label, as the call its request holds (ADR-0361 §5:2).
+
+        Code fills in the values recorded with the request, those the hub fills apart, and
+        names the request, so nothing planning sends beside the label changes them; its
+        deliberate-repeat mark is the request's. The label must name a ticket this round
+        was shown that the activation holds now (§5:3): the rest of §5:3's checks are
+        authorizing's, against the request as the store holds it then.
+        """
+        arguments: dict[str, Any] = dict(call.model_dump()["arguments"])
+        label = arguments.pop(RUN_APPROVED_LABEL, None)
+        if not isinstance(label, str):
+            return RefusedCall(call, _TICKET_BY_LABEL)
+        resolved = self._id(label, LabelKind.APPROVED_ACTION)
+        if isinstance(resolved, _Refusal):
+            return RefusedCall(call, resolved.reason)
+        ticket = self.tickets.get(resolved)
+        if ticket is None:
+            return RefusedCall(call, _NO_TICKET.format(label=label[:_QUOTED_LABEL_CHARS]))
+        looking_for = arguments.pop(LOOKING_FOR, None)
+        if arguments:
+            return RefusedCall(call, _TICKET_LABEL_ALONE)
+        requested = ticket.request.call
+        if requested.tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
+            if not isinstance(looking_for, str) or not looking_for.strip():
+                return RefusedCall(call, f"{LOOKING_FOR!r} must say what you are looking for")
+        else:
+            looking_for = None
+        filled = _filled(
+            self.capabilities,
+            AskedCall(
+                part=1,
+                tool=requested.tool,
+                values=requested.values,
+                binding=requested.binding,
+                deliberate_repeat=requested.deliberate_repeat,
+            ),
+        )
+        values = {name: value for name, value in requested.values.items() if name not in filled}
+        planned = ProposedCall(
+            call_id=call.call_id, name=str(requested.tool.capability), arguments=values
+        )
+        return PlannedCall(
+            planned,
+            looking_for=looking_for,
+            deliberate_repeat=requested.deliberate_repeat,
+            ticket=ticket.request_id,
+        )
+
+    def _request_approval(self, call: ProposedCall) -> PlannedCall | RefusedCall:  # noqa: PLR0911 — each check §2:2 names is a return of its own
+        """A request for the person's yes, its nested call checked first (ADR-0361 §2:2).
+
+        The nested call names a capability planning is offered, other than asking and
+        messaging, and its arguments validate against that capability's offered schema;
+        then its labels are replaced by ids and its *looking for* and *deliberate repeat*
+        taken out, as any call's are (ADR-0306 §2:10), the mark kept beside it. A call
+        that fails comes back saying why, and writes nothing (ADR-0357 §6:1).
+        """
+        judged = self._capability(call)
+        if isinstance(judged, RefusedCall):
+            return judged
+        arguments = dict(judged.call.arguments)
+        nested = nested_call(arguments)
+        if nested is None:
+            return RefusedCall(call, _NESTED_MALFORMED)
+        capability, nested_arguments = nested
+        quoted = repr(capability[:_QUOTED_LABEL_CHARS])
+        schema = self.schemas.get(capability)
+        if capability in _NEVER_ASKED or capability not in self.offered or schema is None:
+            return RefusedCall(call, f"{quoted} {_NOT_ASKABLE}")
+        violations = parameter_violations(schema, nested_arguments)
+        if violations:
+            return RefusedCall(
+                call, f"the call's arguments do not fit {quoted} ({violations[0].keyword})"
+            )
+        why = self.not_here.get(capability)
+        if why is not None:
+            return RefusedCall(call, f"the call to approve cannot run here: {why}")
+        inner = self._capability(
+            ProposedCall(call_id=call.call_id, name=capability, arguments=nested_arguments)
+        )
+        if isinstance(inner, RefusedCall):
+            return RefusedCall(call, f"the call to approve: {inner.reason}")
+        held = arguments.get(CALL_ARGUMENT)
+        stated = held.get(NESTED_REPEAT_KEY) if isinstance(held, Mapping) else None
+        shaped: dict[str, Any] = {CAPABILITY_KEY: capability, ARGUMENTS_KEY: inner.call.arguments}
+        if inner.deliberate_repeat or stated is True:
+            shaped[NESTED_REPEAT_KEY] = True
+        arguments[CALL_ARGUMENT] = shaped
+        return PlannedCall(
+            ProposedCall(call_id=call.call_id, name=call.name, arguments=arguments),
+            deliberate_repeat=judged.deliberate_repeat,
+        )
+
     def _mapped(self, value: object, kind: LabelKind) -> tuple[object] | str:
         """A label argument with its labels replaced by ids, or why it is refused."""
         if isinstance(value, str):
@@ -5861,6 +6098,25 @@ WAITING_ROUND: Final = (
     "waits on, runs now; anything else waits for the next round"
 )
 
+
+#: ADR-0361 §5:2-§5:3: why a ``run_approved`` call runs nothing before authorizing.
+_TICKET_BY_LABEL: Final = f"{RUN_APPROVED_LABEL!r} names the ticket by its A label"
+_NO_TICKET: Final = (
+    "{label!r} names no ticket you hold now: a ticket is usable once, only in the work "
+    "holding its approval, and only until it expires; to run the call, ask again with "
+    "request_approval"
+)
+_TICKET_LABEL_ALONE: Final = (
+    "a ticket is run by its label alone: its values are the ones the person approved"
+)
+
+#: ADR-0361 §2:2: why a ``request_approval`` call writes nothing before authorizing.
+_NESTED_MALFORMED: Final = (
+    "call names the call to approve as its capability and its arguments, an object"
+)
+_NOT_ASKABLE: Final = "is not a call you are offered that a yes can approve"
+#: The calls no request asks about: asking itself, and a message, which needs no yes.
+_NEVER_ASKED: Final = frozenset({REQUEST_APPROVAL_CAPABILITY, RUN_APPROVED_TOOL, "text"})
 
 #: ADR-0321 §4:2: an approved action is proposed by its label, and its values are the
 #: recorded ones.
@@ -5983,6 +6239,10 @@ class PlanningStage:
             }
             approved_tool = _approved_tool(approved, offered)
             offered_here = offered if approved_tool is None else (*offered, approved_tool)
+            if inputs.approvals and all(one.name != RUN_APPROVED_TOOL for one in offered_here):
+                # ADR-0361 §5:2, ADR-0356 §4:3: offered on every round of every work, and
+                # refused, saying why, where its label names no ticket this round was shown.
+                offered_here = (*offered_here, RUN_APPROVED_OFFERED)
         else:
             # ADR-0356 §4:3, §5:2: every round of a work is offered what its first round
             # was, and an approved action is one its briefing showed under an A label.
@@ -6081,6 +6341,12 @@ class PlanningStage:
             ),
             capabilities=inputs.capabilities,
             not_here=inputs.not_here,
+            schemas={one.name: one.parameters for one in offered_here},
+            tickets={
+                one.request_id: one
+                for one in inputs.tickets
+                if book.held(LabelKind.APPROVED_ACTION, one.request_id) is not None
+            },
             waited=(
                 frozenset(episode_address(one.activation_id) for one in inputs.waiting)
                 if inputs.waiting

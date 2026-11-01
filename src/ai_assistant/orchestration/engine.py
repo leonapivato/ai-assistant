@@ -60,7 +60,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from ai_assistant.core.channel_validation import message_party, snapshot
+from ai_assistant.core.channel_validation import message_party, origin_kind, snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.device_context import (
     current_requesting_device,
@@ -88,6 +88,8 @@ from ai_assistant.core.types import (
     ActivationEnding,
     ActivationRecall,
     ActivationStop,
+    ApprovalOutcomePush,
+    AskedCall,
     Belief,
     BeliefSummary,
     ChannelContext,
@@ -168,6 +170,14 @@ from ai_assistant.orchestration.activation_state import (
     terminal_status,
 )
 from ai_assistant.orchestration.activation_writer import capture_loss
+from ai_assistant.orchestration.approval_calls import ApprovalCalls, ApprovalsSeams
+from ai_assistant.orchestration.approval_sensor import ApprovalsSensor
+from ai_assistant.orchestration.approvals import (
+    THE_APPROVALS,
+    Ticket,
+    approval_input,
+    ticket_of,
+)
 from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.channel_kinds import place_of
@@ -235,7 +245,7 @@ from ai_assistant.orchestration.payloads import (
 )
 from ai_assistant.orchestration.person_block import activation_person, person_zone, still_held
 from ai_assistant.orchestration.phase_path import PlaceTarget, Scheduling, failing_stage
-from ai_assistant.orchestration.planning import PlaceAuthor, PlaceItem
+from ai_assistant.orchestration.planning import PlaceAuthor, PlaceItem, exact_line
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.speech import (
     DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
@@ -255,6 +265,7 @@ from ai_assistant.orchestration.support_parts import (
     episodes_to_read,
     part_content,
     remember_activations,
+    requests_to_read,
 )
 from ai_assistant.orchestration.task_manager import (
     PlaceLists,
@@ -311,6 +322,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.core.types import (
         ActivationUnderstanding,
+        ApprovalRequest,
         BeliefBand,
         ChatChanges,
         ChatDevice,
@@ -1169,6 +1181,12 @@ class _TaskPass(_EventPass):
         return False
 
 
+def _taken_channels(state: ActivationState) -> tuple[ChannelIdentity, ...]:
+    """The places inputs ``state`` took by a take came from, in the order taken (§7:3)."""
+    took = {one.activation_id for one in state.took}
+    return tuple(dict.fromkeys(one.channel for one in state.joined if one.taken_over_from in took))
+
+
 def _resolved_turn(working: _TurnPass) -> ResolvedChannelInput:
     """The turn's resolved input, which every stage after the first reads.
 
@@ -1614,6 +1632,7 @@ class Engine:
         observer: Observer | None = None,
         person_blocks: PersonBlocks | None = None,
         task_scheduler: TaskSchedulerSeams | None = None,
+        approvals: ApprovalsSeams | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -2000,6 +2019,13 @@ class Engine:
                 (§7:1); and planning is offered spawn, cancel and the list pull (§4:1). A
                 stop still stops only the activation it names (ADR-0352 §2:1). It is
                 refused without the phases.
+            approvals: The Approvals channel's seams (ADR-0361 §3), or ``None``, the
+                default, for an engine with no Approvals channel. Wired, its sensor is the
+                engine's long-running task, started with the hub and stopped with it
+                (§3:4); planning is offered ``request_approval`` and ``run_approved``
+                (§2, §5:2); and each request answered or expired starts an activation of
+                its own, offered to the work that asked where it still runs (§6). It is
+                refused without the phases.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2300,6 +2326,16 @@ class Engine:
         self._unwritten: dict[str, OccurrenceState] = {}
         if task_scheduler is not None:
             self._wire_task_scheduler(task_scheduler, plans=plans, memory=memory)
+        # ADR-0361 §3:4, §6: the Approvals channel's sensor, wired only beside the phases.
+        self._approvals_sensor: ApprovalsSensor | None = None
+        self._approvals_started = False
+        #: ADR-0361 §5:6-§5:7: each approval's activation, by its id, with the request
+        #: whose outcome it was pushed, until the work holding its input has ended.
+        self._approval_inputs: dict[str, ApprovalRequest] = {}
+        #: Each id an outcome is being pushed to and not yet admitted.
+        self._approval_pushing: set[str] = set()
+        if approvals is not None:
+            self._wire_approvals(approvals, plans=plans, memory=memory)
         # ADR-0298 §7: the engine's half of the change stream, over the same chat
         # space and the same account of what runs as ``conversation`` reads.
         self._change_stream = ChangeStream(
@@ -2412,6 +2448,11 @@ class Engine:
         if self._task_sensor is not None and not self._task_started:
             self._task_started = True
             self._spawn_read(self._task_sensor.run())
+        # ADR-0361 §3:4, §3:7: the Approvals channel's sensor, after the same close, so an
+        # approval's activation a restart cut off reads as admitted.
+        if self._approvals_sensor is not None and not self._approvals_started:
+            self._approvals_started = True
+            self._spawn_read(self._approvals_sensor.run())
         if self._notification_outbox is not None:
             await self._recover_leases_once()
             await self._notification_outbox.reconcile()
@@ -6166,6 +6207,9 @@ class Engine:
         if self._task_sensor is not None:
             # ADR-0350 §7:1: the sensor stops with the hub; what it admitted is drained.
             self._task_sensor.close()
+        if self._approvals_sensor is not None:
+            # ADR-0361 §3:4: the Approvals channel's sensor stops with the hub too.
+            self._approvals_sensor.close()
         if self._shutdown is None:
             self._shutdown = asyncio.ensure_future(self._drain_and_close())
         await asyncio.shield(self._shutdown)
@@ -6790,6 +6834,358 @@ class Engine:
         self._checked(projection.terminal(result), projection.method)
         return result
 
+    # --- the Approvals channel (ADR-0361) ---
+
+    def _wire_approvals(
+        self, seams: ApprovalsSeams, *, plans: PlanStore, memory: MemoryStore
+    ) -> None:
+        """Build the sensor and ``request_approval``'s runner, and offer the two calls.
+
+        Raises:
+            ConfigurationError: If the phases are not wired, which plan every activation
+                an outcome starts.
+        """
+        phases = self._phases
+        if phases is None:
+            msg = (
+                "an approval's activation runs through the phases, so the Approvals channel "
+                "is wired only beside them (ADR-0361 §6, ADR-0309 §2:6)"
+            )
+            raise ConfigurationError(msg)
+        calls = ApprovalCalls(
+            plans=plans,
+            expiry=seams.expiry,
+            now=self._clock,
+            wake=self.approvals_changed,
+            cards=seams.cards,
+        )
+        self._approvals_sensor = ApprovalsSensor(
+            plans=plans,
+            memory=memory,
+            push=self._push_outcome,
+            is_running=self._approval_live,
+            closing=lambda: self._closing,
+            recheck=seams.recheck,
+            now=self._clock,
+        )
+        if self._place_lists is None:
+            line = self._telegram_seams
+            self._place_lists = PlaceLists(
+                conversations=self._conversations.chat_space,
+                line=None if line is None else line.channel,
+                line_connected=None if line is None else self._line_connected,
+            )
+        phases.attach_approvals(calls, self._tickets_held)
+
+    def approvals_changed(self) -> None:
+        """Wake the Approvals channel's sensor: a request was written, tapped or voided.
+
+        ADR-0361 §3:4: the sensor wakes on every write to a request. A surface's tap
+        (AP3's card, AP4's panel) calls this once its store step has landed.
+        """
+        if self._approvals_sensor is not None:
+            self._approvals_sensor.wake()
+
+    def _approval_live(self, activation_id: str) -> bool:
+        """Whether an approval's activation is being pushed, or runs here."""
+        return activation_id in self._approval_pushing or (
+            self._running_state(activation_id) is not None
+        )
+
+    def _held_requests(self, state: ActivationState) -> tuple[str, ...]:
+        """The requests whose approval input ``state`` holds now (ADR-0361 §5:6).
+
+        The approval's own activation's, where no take moved it on, and each one a take
+        brought it, followed through what it absorbed. An activation absorbed, or whose
+        input was taken, holds none: what it held moved with its input.
+        """
+        if not self._approval_inputs:
+            return ()
+        if state.absorbed_by is not None or state.handed_to is not None:
+            return ()
+        own = (state.activation_id,) if state.activation_id is not None else ()
+        held = [one for one in (*own, *state.merged) if one in self._approval_inputs]
+        return tuple(dict.fromkeys(str(self._approval_inputs[one].id) for one in held))
+
+    async def _tickets_held(self, state: ActivationState) -> tuple[Ticket, ...]:
+        """The tickets ``state`` holds, approved and still held, read now (§5:1, §5:6).
+
+        Only the request's person's: a ticket is for that person alone (§5:1). A store
+        that cannot be read shows none, and runs none.
+        """
+        held = self._held_requests(state)
+        if not held:
+            return ()
+        try:
+            found = await self._plans.approval_requests(list(held))
+        except PlanningError:
+            _log.warning("approval_tickets_unread", stage="planning", reason="store_failed")
+            return ()
+        person = activation_person(state.trigger)
+        now = self._now()
+        return tuple(
+            ticket
+            for one in found
+            if one.person == person and (ticket := ticket_of(one, at=now)) is not None
+        )
+
+    async def _void_tickets(self, state: ActivationState, held: Sequence[str]) -> None:
+        """ADR-0361 §5:7: the work holding these tickets' inputs ended without running them.
+
+        A ticket used or already void answers that it holds none, which changes nothing.
+        """
+        for request_id in held:
+            try:
+                await self._plans.void_approval_ticket(request_id)
+            except PlanningError:
+                _log.warning("approval_ticket_unvoided", stage="approvals", reason="store_failed")
+        for one in (state.activation_id, *state.merged):
+            self._approval_inputs.pop(str(one), None)
+        self.approvals_changed()
+
+    async def _push_outcome(self, request: ApprovalRequest, activation_id: str | None) -> None:
+        """Push one request's outcome, and admit its activation (ADR-0361 §3:4, §3:7).
+
+        The id the activation will be admitted under is minted here and named by the
+        pushed mark, written in one store step that refuses where the outcome is already
+        marked; a push again after a restart names the id the mark already holds, and
+        marks nothing.
+        """
+        if self._closing:
+            return
+        fresh = activation_id is None
+        pushed_to = self._chat_activation_id() if activation_id is None else activation_id
+        self._approval_pushing.add(pushed_to)
+        try:
+            if fresh:
+                answer = await self._plans.mark_approval_outcome_pushed(str(request.id), pushed_to)
+                if answer is not ApprovalOutcomePush.PUSHED:
+                    return
+            context, linked, suggests = await self._approval_context(request)
+            self._admit_approval(request, pushed_to, context, linked, suggests)
+        except RuntimeError:
+            # The engine began closing: left pushed, the next start pushes it again.
+            if not self._closing:
+                raise
+        finally:
+            self._approval_pushing.discard(pushed_to)
+
+    async def _approval_context(
+        self, request: ApprovalRequest
+    ) -> tuple[PlaceItem, tuple[str, ...], tuple[str, ...]]:
+        """What an approval's input brings with it, and where its asking work spoke (§6:2, §6:7).
+
+        The request as its card shows it, linked to the asking activation's episode; that
+        episode's address where it has frozen, which the episode window shows by its short
+        view (ADR-0356 §9); and the places the asking work's place list suggests: the place
+        its input came from where it takes a message, or, for an activation the Task
+        Scheduler started, its task's suggested places.
+        """
+        asking = str(request.activation_id)
+        address = f"activation:{asking}"
+        running = self._running_state(asking)
+        place = None if running is None else running.place
+        linked: tuple[str, ...] = ()
+        try:
+            record = await self._memory.get(address)
+        except MemoryStoreError:
+            record = None
+        if isinstance(record, EpisodicMemory) and record.processing_record is not None:
+            trigger = record.processing_record.trigger
+            if place is None:
+                target = trigger.channel or trigger.target
+                place = target if isinstance(target, ChannelIdentity) else None
+            if not record.processing_record.is_open:
+                linked = (address,)
+        suggests: tuple[str, ...] = ()
+        if place is not None and place.channel_type in {"conversation", TELEGRAM.channel_type}:
+            suggests = (place_of(place),)
+        elif place == SCHEDULE:
+            suggests = await self._task_places(asking)
+        kind = None if place is None else origin_kind(place.channel_type)
+        call = request.call
+        line = exact_line(
+            AskedCall(
+                part=1,
+                tool=call.tool,
+                values=call.values,
+                binding=call.binding,
+                deliberate_repeat=call.deliberate_repeat,
+            ),
+            filled=call.tool.system_supplied,
+        )
+        where = "where nothing is recorded" if kind is None else kind.where
+        text = (
+            f"A request for the person's yes, as its card shows it: {line}. Why, as the "
+            f"system said when it asked: {request.why} It was asked {where}, and is now "
+            f"{request.state.value}."
+        )
+        return (
+            PlaceItem(
+                author=PlaceAuthor.APPROVALS,
+                text=text,
+                at=request.written_at,
+                episode_id=address,
+            ),
+            linked,
+            suggests,
+        )
+
+    async def _task_places(self, activation_id: str) -> tuple[str, ...]:
+        """The places the task an activation the Task Scheduler started suggests."""
+        try:
+            lineage = await self._plans.scheduled_lineage(activation_id)
+        except PlanningError:
+            return ()
+        for task in reversed(lineage):
+            if any(activation_id in one.activations for one in task.occurrences):
+                return tuple(place_of(one) for one in task.places)
+        return ()
+
+    def _admit_approval(
+        self,
+        request: ApprovalRequest,
+        activation_id: str,
+        context: PlaceItem,
+        linked: tuple[str, ...],
+        suggests: tuple[str, ...],
+    ) -> None:
+        """Admit the activation an outcome starts, in one synchronous step (ADR-0361 §6).
+
+        Its input is the outcome, stated by the hub, on the approvals, carrying no one's
+        words and no authority (§6:1); it is meant for the asking activation by code's
+        link (§6:3), and runs side by side with every other activation.
+        """
+        text = approval_input(request)
+        state = admit_channel(
+            ChannelInput(target=THE_APPROVALS, payload=TextChannelPayload(text=text)),
+            None,
+            clock=self._now,
+            id_factory=lambda: activation_id,
+            stage_limit=self._stage_record_limit,
+        )
+        state.meant_for = str(request.activation_id)
+        # ADR-0349 §7:21: what a take of its offer brings, the input as the hub stated it.
+        state.input_messages = (RecordedInputMessage(text=text, sent_at=self._now()),)
+        self._approval_inputs[activation_id] = request
+        deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
+        self._activation_task(
+            ActivationScope(state),
+            lambda: self._approval_turn(
+                activation_id, deadline, context=context, linked=linked, suggests=suggests
+            ),
+            seam="approvals",
+            check_output=_unchecked,
+            deadline=deadline,
+        )
+
+    async def _approval_turn(
+        self,
+        activation_id: str,
+        deadline: float,
+        *,
+        context: PlaceItem,
+        linked: tuple[str, ...],
+        suggests: tuple[str, ...],
+    ) -> None:
+        """An activation an approval's outcome started, planned by the phases (ADR-0361 §6).
+
+        Its place window is the request as its card shows it, and its episode window the
+        asking episode where it has frozen (§6:2). Understanding still reads its input;
+        code sets what it continues and the matter it belongs to (§6:3), so the takeover
+        stage offers it to the asking work where that work still runs (§6:4); otherwise
+        it plans with its input, after any wait the offer leaves (§6:5). Its messages go
+        only into places on its place list (§6:7).
+        """
+        phases = self._phases
+        assert phases is not None  # noqa: S101 — the Approvals channel is wired only beside them
+        state = active_state()
+        trigger = None if state is None else state.trigger
+        payload = None if trigger is None else trigger.payload
+        text = payload.text if isinstance(payload, RecordedTextInput) else context.text
+        resolved = ResolvedChannelInput(
+            channel=THE_APPROVALS,
+            text=text,
+            modality=Modality.TEXT,
+            context=ChannelContext(
+                history=(
+                    ChannelContextItem(
+                        text=context.text, item_id=context.episode_id, source="Approvals"
+                    ),
+                )
+            ),
+        )
+        working_phases = phases.begin_approval(
+            activation_id=activation_id, trigger=trigger, context=(context,)
+        )
+        scheduling = self._approval_scheduling(state, suggests)
+        if scheduling is not None:
+            scheduling.places, scheduling.targets = await scheduling.build()
+            working_phases.place = replace(
+                working_phases.place, takes_message=bool(scheduling.targets)
+            )
+        working_phases.scheduling = scheduling
+        event = _TaskPass(
+            input=resolved,
+            deadline=deadline,
+            # The approvals are private (§3:2), so a record placed for the owner alone may
+            # be shown (ADR-0307 §6:4).
+            supply=BoundedAudienceSupply(
+                speakable_attested_sources=self._speakable_attested_sources
+            ),
+            understanding_wired=self._understanding is not None,
+            recall_wired=self._recall is not None,
+            story_links_wired=self._story_links is not None,
+            phases=working_phases,
+            activation=state,
+            linked=linked,
+        )
+        stages: list[ControllerStageRun[_EventPass]] = [
+            Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
+            phases.recall_stage(
+                TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
+                self._recall,
+            ),
+            Stage(
+                ControllerStage.UNDERSTANDING,
+                self._phases_event_understanding_stage,
+                expired=_turn_expired,
+            ),
+            TolerantStage(
+                ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
+            ),
+            Stage(ControllerStage.TAKEOVER, self._takeover_stage, expired=_takeover_expired),
+            *phases.stages(),
+        ]
+        await phases.run(event, lambda: self._controlled(event, stages), state=state)
+
+    def _approval_scheduling(
+        self, state: ActivationState | None, suggests: tuple[str, ...]
+    ) -> Scheduling | None:
+        """An approval's activation's place list (ADR-0361 §6:7), and no spawn.
+
+        The line's chat, where the line is connected, and the asking work's places,
+        marked suggested; it writes messages into places on that list alone, as a task's
+        activation does (ADR-0350 §6:7).
+        """
+        lists = self._place_lists
+        person = None if state is None else activation_person(state.trigger)
+        if lists is None or person is None:
+            return None
+
+        async def build() -> tuple[tuple[ListedPlace, ...], dict[str, PlaceTarget]]:
+            places = await lists.shown(input_place=None, suggested=suggests)
+            targets = {
+                one.place: target
+                for one in places
+                if (target := self._place_target(one.channel)) is not None
+            }
+            return places, targets
+
+        return Scheduling(
+            person=person, set_in=THE_APPROVALS, build=build, by_label=True, spawns=False
+        )
+
     # --- the Task Scheduler (ADR-0350) ---
 
     def _wire_task_scheduler(
@@ -6925,7 +7321,9 @@ class Engine:
         input_place = None if task is not None else set_in
 
         async def build() -> tuple[tuple[ListedPlace, ...], dict[str, PlaceTarget]]:
-            places = await lists.shown(input_place=input_place, suggested=suggested)
+            # ADR-0361 §7:3: a place an input taken by a take came from is on the list.
+            taken = () if state is None or task is not None else _taken_channels(state)
+            places = await lists.shown(input_place=input_place, suggested=suggested, taken=taken)
             targets = {
                 one.place: target
                 for one in places
@@ -7418,9 +7816,16 @@ class Engine:
             scope.state.order = self._admissions
 
     def _no_longer_running(self, scope: ActivationScope) -> None:
-        """ADR-0349 §7:24: an offer still open to it is declined, and every wait reads its end."""
+        """ADR-0349 §7:24: an offer still open to it is declined, and every wait reads its end.
+
+        ADR-0361 §5:7: a ticket whose input the ending work holds is void once it ends
+        without running it, however it ends.
+        """
         if scope.state is not None:
             self._matters.ended(scope.state)
+            held = self._held_requests(scope.state)
+            if held and not self._closing:
+                self._spawn_read(self._void_tickets(scope.state, held))
 
     async def _tracked(  # noqa: PLR0913 — the work, its seam, and one knob per policy a caller sets
         self,
@@ -7913,6 +8318,18 @@ class Engine:
         planning starts over for it (§3:12). The story-links rule reads it off the
         working set (ADR-0300 §6:11).
         """
+        if state is not None and state.meant_for is not None:
+            # ADR-0361 §6:3: an approval's input is meant for the asking activation, and
+            # belongs to each matter it belongs to, by code's link; what understanding
+            # named for it is not read.
+            understood = understood.model_copy(
+                update={
+                    "continues": (state.meant_for,),
+                    "story_links": (
+                        StoryMember(kind=StoryMemberKind.ACTIVATION, id=state.meant_for),
+                    ),
+                }
+            )
         if state is not None:
             state.understood(understood, limit=self._understanding_version_limit, inputs=covers)
             working.understanding = understood
@@ -8226,6 +8643,12 @@ class Engine:
             if activations
             else {}
         )
+        asked = requests_to_read(memories)
+        requests = (
+            {str(one.id): one for one in await self._plans.approval_requests(list(asked))}
+            if asked
+            else {}
+        )
         contents: dict[SupportPart, str | None] = {}
         for memory in memories:
             for support in memory.supports:
@@ -8234,6 +8657,7 @@ class Engine:
                     episodes=episodes,
                     effects=effects,
                     carried=support.carries,
+                    requests=requests,
                 )
         return _SupportReading(contents=contents, held=frozenset(episodes))
 

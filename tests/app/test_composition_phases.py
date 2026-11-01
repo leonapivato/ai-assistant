@@ -34,6 +34,10 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.orchestration.acting import _Beside
+from ai_assistant.orchestration.approvals import (
+    APPROVAL_CAPABILITIES,
+    REQUEST_APPROVAL_CAPABILITY,
+)
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
@@ -87,7 +91,7 @@ def test_the_opt_in_is_gone() -> None:
     assert "phases_thin_path" not in Settings.model_fields
 
 
-async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
+async def test_every_deployment_wires_the_path_over_the_roots_own_stores(  # noqa: PLR0915 — one assertion per seam the root wires
     tmp_path: Path,
 ) -> None:
     """One plan store, one trail, one memory store and one story store (§2:6)."""
@@ -122,6 +126,8 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
             NOTE_RELIANCE_CAPABILITY,
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
+            # ADR-0361 §2:1: the Approvals channel's actuator, on every deployment.
+            REQUEST_APPROVAL_CAPABILITY,
         }
         # ADR-0048 §1: the clock stays registered, and selection still finds it.
         clock = await phases._tools.find("report_current_time")
@@ -154,8 +160,12 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
         # Each story call runs through acting's own-records seam, over the root's own
         # stores and the one tidy-up, so at most one run is on a story at a time
         # (ADR-0300 §5:10).
+        # ADR-0361 §3:3: request_approval's runner sits outermost, attached last.
+        approvals = phases._acting._own_records
+        assert isinstance(approvals, _Beside)
+        assert set(approvals._runners) == APPROVAL_CAPABILITIES
         # The Task Scheduler's runners sit beside the root's seam (ADR-0350 §4:3).
-        seam = phases._acting._own_records
+        seam = approvals._beside
         assert isinstance(seam, _Beside)
         assert set(seam._runners) == TASK_SCHEDULER_CAPABILITIES
         # ADR-0349 §4:7, §6:4, §7:20: and the calls on running work beside those.
@@ -201,6 +211,8 @@ async def test_a_connected_search_is_offered_without_the_origin_the_hub_fills(
             NOTE_RELIANCE_CAPABILITY,
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
+            # ADR-0361 §2:1: the Approvals channel's actuator, on every deployment.
+            REQUEST_APPROVAL_CAPABILITY,
         }
         assert "origin" in offered["web_search"].system_supplied
         # Authorizing selects the search's own declaration, which the searcher compares
@@ -246,6 +258,8 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
             NOTE_RELIANCE_CAPABILITY,
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
+            # ADR-0361 §2:1: the Approvals channel's actuator, on every deployment.
+            REQUEST_APPROVAL_CAPABILITY,
         }
         # Both of the provider's capabilities name the configured endpoint, which the hub
         # fills and planning is never offered (ADR-0306 §2:10).

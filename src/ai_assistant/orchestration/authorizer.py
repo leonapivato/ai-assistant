@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -102,6 +103,7 @@ from ai_assistant.core.types import (
     ApprovalEnd,
     ApprovalGiven,
     ApprovalGiver,
+    ApprovalRequestState,
     AskedCall,
     CapabilityEffect,
     CarriedProvenance,
@@ -113,19 +115,29 @@ from ai_assistant.core.types import (
     LabelKind,
     PermissionDecision,
     PermissionOutcome,
+    PermissionRuling,
     PlanningLabel,
     PlanningRound,
     ProposedCall,
     QuestionPart,
+    RequestedCall,
     SpanCoverage,
     StoryMember,
     StoryMemberKind,
     StoryNote,
+    TapOnCard,
+    TicketState,
     ToolCall,
     ToolOutcome,
     YesToQuestion,
     canonical_json_bytes,
     rests_on_recorded_external_content,
+)
+from ai_assistant.orchestration.approvals import (
+    CALL_ARGUMENT,
+    NESTED_REPEAT_KEY,
+    REQUEST_APPROVAL_CAPABILITY,
+    nested_call,
 )
 from ai_assistant.orchestration.channel_kinds import users_place
 from ai_assistant.orchestration.message_tools import (
@@ -156,7 +168,7 @@ from ai_assistant.orchestration.selection import (
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import (
         ActionPolicy,
@@ -172,7 +184,6 @@ if TYPE_CHECKING:
         ActivationEffect,
         FrozenJson,
         FrozenJsonMapping,
-        PermissionRuling,
         ToolDefinition,
     )
 
@@ -253,6 +264,30 @@ _UNKNOWN_REPEAT: Final = (
 )
 _ALREADY_ASKED: Final = "the user was already asked about this exact call, and it waits on them"
 
+#: ADR-0361 §2:3: why ``request_approval``'s own decision allows it.
+_RULED_BY_ITS_CALL: Final = (
+    "request_approval is ruled by the call it asks about, whose own decision ruled it"
+)
+#: ADR-0361 §5:3: why a ticket's call runs nothing, in words planning reads.
+_TICKET_NOT_HELD: Final = (
+    "the ticket is not this work's: only the work holding the approval's input can use it"
+)
+_TICKET_UNREAD: Final = "the ticket could not be read from the hub's records, so nothing ran"
+_TICKET_NOT_GRANTED: Final = "no ticket was granted: the person did not approve that request"
+_TICKET_USED: Final = "the ticket is used: it runs its call once"
+_TICKET_VOID: Final = "the ticket is void: the work that held it ended without running it"
+_TICKET_EXPIRED: Final = "the ticket has expired: running the call takes a new request"
+_TICKET_NOT_THE_CALL: Final = (
+    "the call the ticket holds can no longer run as the person approved it"
+)
+
+
+def _not_asked(reason: str | None) -> str:
+    """ADR-0361 §2:3: a nested call refused by the ruling is not to be asked about."""
+    why = "" if reason is None else f" ({reason})"
+    return f"not allowed{why}, so no request was written: do not ask the person about it"
+
+
 # The facts an approval rests on (ADR-0321 §3:3, §4:4 to §4:5), each a code-owned word
 # for the diagnostic record and the log when it fails.
 _NO_POINTER: Final = "no_pointer"
@@ -300,11 +335,16 @@ class CallToAuthorize:
             It is a claim to check, never a grant: the call runs under an approval only
             where the records bear it out (§4:4 to §4:5), and is then rebuilt from the
             call the question showed, whatever else the proposal carries.
+        ticket: Where planning ran a ticket by its ``A`` label (ADR-0361 §5:2), the
+            approval request it names; ``None`` otherwise. It is a claim to check: the
+            call runs under the ticket only where §5:3's checks hold against the request
+            as the plan store holds it, and is rebuilt from the call the request holds.
     """
 
     call: ProposedCall
     deliberate_repeat: bool = False
     approved_part: QuestionPart | None = None
+    ticket: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +494,13 @@ class RoundToAuthorize:
             place its input came from (ADR-0350 §6:7); ``None`` for every other.
         gone: Those of ``places`` that are gone as the list stands when authorizing
             checks the message, a place gone since the list was built (§5:8-§5:9).
+        person: The person the activation is for, whose tickets alone it may run
+            (ADR-0361 §5:3); ``None`` where it is no person's.
+        tickets: The approval requests whose tickets the activation holds the input of
+            (ADR-0361 §5:6): the approval's own, or one a take brought it.
+        taken_places: For an activation that is not the Task Scheduler's, the places an
+            input it took by a take came from that take a message, which its messages
+            may go into beside its input's (ADR-0361 §7:3, ADR-0306 §4:7).
 
     Raises:
         ValueError: If two calls or message calls share a call id, a message call names
@@ -473,6 +520,9 @@ class RoundToAuthorize:
     yes: YesContext | None = None
     places: tuple[str, ...] | None = None
     gone: tuple[str, ...] = ()
+    person: str | None = None
+    tickets: frozenset[str] = frozenset()
+    taken_places: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Each call is one the round proposed, once."""
@@ -487,7 +537,8 @@ class RoundToAuthorize:
             raise ValueError(msg)
         for one in self.calls:
             named = proposed.get(one.call.call_id)
-            if named is None or (one.approved_part is None and named != one.call.name):
+            approved = one.approved_part is not None or one.ticket is not None
+            if named is None or (not approved and named != one.call.name):
                 msg = "authorizing checks only the calls the round proposed"
                 raise ValueError(msg)
 
@@ -540,11 +591,15 @@ class AllowedCall:
         asked: Where the call runs under an approval, the asked call it was rebuilt
             from (ADR-0321 §4:2), whose ``replaces`` a remember retires on the yes
             (§5:5); ``None`` on every other call.
+        requested: For a ``request_approval`` call, the call it asks about as ruled
+            here, with the values the hub filled in and its binding (ADR-0361 §2:3,
+            §2:6), which its request records; ``None`` on every other call.
     """
 
     call: ToolCall
     deliberate_repeat: bool = False
     asked: AskedCall | None = None
+    requested: RequestedCall | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -931,6 +986,7 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
                     if one.approved_part is None
                     else QuestionPart.model_validate(one.approved_part.model_dump())
                 ),
+                ticket=None if one.ticket is None else str(one.ticket),
             )
             for one in given.calls
         ),
@@ -940,6 +996,9 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
         yes=_detached_yes(given.yes),
         places=None if given.places is None else tuple(str(one) for one in given.places),
         gone=tuple(str(one) for one in given.gone),
+        person=None if given.person is None else str(given.person),
+        tickets=frozenset(str(one) for one in given.tickets),
+        taken_places=tuple(str(one) for one in given.taken_places),
     )
 
 
@@ -980,13 +1039,16 @@ class _Shown:
 
     ``request`` is the call rebuilt from ``asked``, its binding through
     ``EgressBinder.rebind`` (§4:2), and ``approval`` the approval assembled from the
-    records, of which ``part`` is this call's.
+    records, of which ``part`` is this call's. A ticket's (ADR-0361 §5:4) has no asked
+    call and no part: its approval's form names its request. ``repeat`` is the
+    deliberate-repeat mark the question or the request recorded.
     """
 
-    asked: AskedCall
-    part: QuestionPart
+    asked: AskedCall | None
+    part: QuestionPart | None
     approval: Approval
     request: ActionRequest
+    repeat: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1017,6 +1079,8 @@ class _Round:
     checks: dict[str, list[dict[str, object]]] | None = None
     stories: tuple[str, ...] | None = None
     asked_here: tuple[_AskedHere, ...] | None = None
+    person: str | None = None
+    tickets: frozenset[str] = frozenset()
 
     def note(self, call: ProposedCall, check: str, verdict: str, reason: str | None) -> None:
         """Note one check ``call`` reached, its verdict and its reason."""
@@ -1248,6 +1312,8 @@ class AuthorizingStage:
             yes=snapshot.yes,
             rounds=(*held.rounds, snapshot.round),
             checks={} if noting else None,
+            person=snapshot.person,
+            tickets=snapshot.tickets,
         )
         progress.append(state)
         for one in snapshot.calls:
@@ -1324,7 +1390,7 @@ class AuthorizingStage:
             self._diagnostics, DiagnosticSource.AUTHORIZING, DiagnosticKind.RETURNED, body
         )
 
-    async def _check(self, one: CallToAuthorize, state: _Round) -> None:
+    async def _check(self, one: CallToAuthorize, state: _Round) -> None:  # noqa: C901 — a ticket, a request and an approved action each take their own path first
         """Select, rule, record, and apply the checks after the policy, for one call.
 
         A call proposed as an approved action (ADR-0321 §4:2) has §4:4's facts checked
@@ -1333,6 +1399,12 @@ class AuthorizingStage:
         the approval, checked fresh (§4:3); where any fails, it is an ordinary call,
         checked as every call is, and runs under no approval (§4:5).
         """
+        if one.ticket is not None:
+            await self._check_ticket(one, state)
+            return
+        if one.call.name == REQUEST_APPROVAL_CAPABILITY:
+            await self._check_request(one, state)
+            return
         if one.approved_part is not None:
             shown = await self._shown(one, state)
             if isinstance(shown, _Shown):
@@ -1619,6 +1691,169 @@ class AuthorizingStage:
             return Verdict.NEEDS_YOU, _CONFIRM_WORDING
         return None
 
+    # --- asking, and running a ticket (ADR-0361 §2, §5) ---------------------------------
+
+    async def _check_request(self, one: CallToAuthorize, state: _Round) -> None:  # noqa: PLR0911 — each way the nested call is refused is a return of its own
+        """Rule a ``request_approval`` call by the call it asks about (ADR-0361 §2:3, §2:9).
+
+        The nested call is selected and ruled as every call is (ADR-0306 §4:1). Where the
+        policy denies it, or no tool takes it, the request is not written, and the call
+        comes back not allowed and not to be asked about (ADR-0321 §2:10's second case).
+        Otherwise the request is written, whether or not the ruling needs the person:
+        planning may narrow what runs freely, never widen it. ``request_approval`` itself
+        never needs the person and the stand-in never applies to it, so its own decision
+        is an allow resting on that ruling, naming the effect record its write claims.
+        """
+        call = one.call
+        nested = nested_call(call.arguments)
+        if nested is None:
+            state.note(call, "request", Verdict.NOT_DONE.value, _MALFORMED)
+            state.verdicts.append(_not_done(call, _MALFORMED))
+            return
+        capability, arguments = nested
+        held = call.arguments.get(CALL_ARGUMENT)
+        marked = isinstance(held, Mapping) and held.get(NESTED_REPEAT_KEY) is True
+        inner = ProposedCall(call_id=call.call_id, name=capability, arguments=arguments)
+        if capability == EMAIL_CAPABILITY:
+            back = _email_comes_back(inner.arguments)
+            if back is not None:
+                state.note(call, "email", Verdict.NOT_DONE.value, back)
+                state.verdicts.append(_not_done(call, back))
+                return
+        selected = await self._selected(inner, state)
+        if isinstance(selected, CallVerdict):
+            state.note(call, "selection", selected.verdict.value, selected.reason)
+            state.verdicts.append(_not_done(call, _not_asked(selected.reason)))
+            return
+        ruled = await self._ruled(inner, selected, state)
+        if isinstance(ruled, CallVerdict):
+            state.note(call, "request", ruled.verdict.value, ruled.reason)
+            state.verdicts.append(_not_done(call, _not_asked(ruled.reason)))
+            return
+        verdict = await self._after_the_policy(inner, ruled, state)
+        if verdict.verdict is Verdict.NOT_DONE:
+            state.verdicts.append(
+                CallVerdict(
+                    call.call_id,
+                    Verdict.NOT_DONE,
+                    reason=_not_asked(verdict.reason),
+                    decision_id=verdict.decision_id,
+                )
+            )
+            return
+        own = await self._selected(call, state)
+        if isinstance(own, CallVerdict):
+            state.verdicts.append(own)
+            return
+        try:
+            request = ActionRequest(tool=own.tool, parameters=own.parameters)
+            requested = RequestedCall(
+                tool=ruled.request.tool,
+                values=ruled.request.parameters,
+                binding=ruled.request.egress_binding,
+                deliberate_repeat=marked and not ruled.request.tool.safe_to_repeat,
+            )
+        except ValidationError, ValueError:
+            state.verdicts.append(_not_done(call, _MALFORMED))
+            return
+        effect_id = self._new_effect_id()
+        ruling = PermissionRuling(outcome=PermissionOutcome.ALLOW, reason=_RULED_BY_ITS_CALL)
+        state.note(call, "request", Verdict.ALLOWED.value, None)
+        decision = await self._recorded(request, ruling, effect_id)
+        state.verdicts.append(_ruled_verdict(call, Verdict.ALLOWED, None, decision))
+        state.allowed.append(
+            AllowedCall(
+                ToolCall(request=request, decision=decision),
+                deliberate_repeat=one.deliberate_repeat,
+                requested=requested,
+            )
+        )
+
+    async def _check_ticket(self, one: CallToAuthorize, state: _Round) -> None:
+        """Run a ticket's call under its approval, or refuse it saying why (ADR-0361 §5:3).
+
+        Refused, not done, unless every check holds; it is never run as an ordinary call.
+        """
+        ticketed = await self._ticket_shown(one, state)
+        if isinstance(ticketed, str):
+            state.note(one.call, "ticket", "failed", ticketed)
+            state.verdicts.append(_not_done(one.call, ticketed))
+            return
+        state.note(one.call, "ticket", "held", None)
+        await self._check_approved(one, ticketed, state)
+
+    async def _ticket_shown(self, one: CallToAuthorize, state: _Round) -> _Shown | str:  # noqa: PLR0911 — each of §5:3's checks is a return of its own
+        """Check §5:3's facts against the records, and rebuild the ticket's call (§5:2).
+
+        The label named a ticket this round was shown (planning's check); here, read
+        afresh from the plan store, the request was approved by its person, the activation
+        calling holds the approval's input (§5:6), the ticket is unused and not void, and
+        it has not expired. The call is rebuilt from the request's: its declaration still
+        offered, its values its own, its binding through ``EgressBinder.rebind`` (§5:2,
+        ADR-0321 §4:2, §4:16). Each failing check is said in words planning reads.
+
+        Returns:
+            The rebuilt call and the tap's approval where every check holds; otherwise
+            why not.
+        """
+        request_id = one.ticket
+        if request_id is None or request_id not in state.tickets:
+            return _TICKET_NOT_HELD
+        if self._plans is None:
+            return _TICKET_UNREAD
+        try:
+            found = await self._plans.approval_requests([request_id])
+        except PlanningError:
+            _log.warning("authorizing_ticket_unread", stage="authorizing")
+            return _TICKET_UNREAD
+        request = found[0] if found else None
+        answer = None if request is None else request.answer
+        if (
+            request is None
+            or answer is None
+            or request.state is not ApprovalRequestState.APPROVED
+            or state.person is None
+            or request.person != state.person
+        ):
+            return _TICKET_NOT_GRANTED
+        if request.ticket is TicketState.USED:
+            return _TICKET_USED
+        if request.ticket is not TicketState.HELD:
+            return _TICKET_VOID
+        if self._now() >= request.expires_at:
+            return _TICKET_EXPIRED
+        held = request.call
+        asked = AskedCall(
+            part=1,
+            tool=held.tool,
+            values=held.values,
+            binding=held.binding,
+            deliberate_repeat=held.deliberate_repeat,
+        )
+        if one.call.name != held.tool.capability:
+            return _TICKET_NOT_THE_CALL
+        rebuilt = await self._rebuilt(asked)
+        if rebuilt is None:
+            return _TICKET_NOT_THE_CALL
+        approval = Approval(
+            who=answer.who,
+            how=TapOnCard(
+                request=request.id,
+                activation_id=request.activation_id,
+                round=request.round,
+                expires_at=request.expires_at,
+            ),
+            given=ApprovalGiven(activation_id=state.activation_id, at=answer.at),
+            ends=ApprovalEnd.WHEN_USED_OR_EXPIRED,
+        )
+        return _Shown(
+            asked=None,
+            part=None,
+            approval=approval,
+            request=rebuilt,
+            repeat=held.deliberate_repeat,
+        )
+
     # --- the yes path (ADR-0321 §4) ------------------------------------------------------
 
     async def _shown(self, one: CallToAuthorize, state: _Round) -> _Shown | str:
@@ -1710,7 +1945,13 @@ class AuthorizingStage:
             given=ApprovalGiven(activation_id=state.activation_id, at=yes.given_at),
             ends=ApprovalEnd.WHEN_USED,
         )
-        return _Shown(asked=asked, part=part, approval=approval, request=request)
+        return _Shown(
+            asked=asked,
+            part=part,
+            approval=approval,
+            request=request,
+            repeat=asked.deliberate_repeat,
+        )
 
     async def _pointer_for(
         self,
@@ -1890,7 +2131,7 @@ class AuthorizingStage:
         state.allowed.append(
             AllowedCall(
                 ToolCall(request=request, decision=decision),
-                deliberate_repeat=shown.asked.deliberate_repeat and not tool.safe_to_repeat,
+                deliberate_repeat=shown.repeat and not tool.safe_to_repeat,
                 asked=shown.asked,
             )
         )
@@ -2042,10 +2283,10 @@ class AuthorizingStage:
                 effect_id=self._new_effect_id(),
                 call_id=message.call_id,
             )
-        if (
-            snapshot.input_place is None
-            or message.place is None
-            or message.place != snapshot.input_place
+        if message.place is None or (
+            message.place != snapshot.input_place
+            # ADR-0361 §7:3: or a place an input taken by a take came from.
+            and message.place not in snapshot.taken_places
         ):
             _log.info("authorizing_message_not_allowed", stage="authorizing")
             return MessageVerdict(
