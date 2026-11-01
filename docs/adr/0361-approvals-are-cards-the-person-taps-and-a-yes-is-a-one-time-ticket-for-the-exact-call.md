@@ -5,8 +5,8 @@
 - Scope: how the assistant asks for a yes and how a yes becomes permission, replacing the conversational yes ADR-0353 §11 stopped. Planning asks by `request_approval` (§2) into a built-in **Approvals** channel (§3); the person answers by tapping a card in the line's chat or on the hub page (§4); a yes gives a one-time ticket that planning runs by `run_approved` (§5); the approval arrives as an ordinary activation tied to the work that asked, and joins it where it still runs (§6), from any place (§7). The code it binds (§8), the lanes (§9), what it leaves open (§10) and what it retires (§11). Milestone 19, "Approvals by card", which the coordinator opens once this merges.
 - Dependency: [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md), [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md), [ADR-0349](0349-a-place-is-only-what-caused-an-activation-a-stop-is-reached-three-ways-running-work-is-shared-by-reading-it-and-the-newest-absorbs-what-it-continues.md), [ADR-0350](0350-every-spawn-is-a-scheduled-task-written-into-the-task-scheduler-whose-sensor-starts-it-when-it-comes-due-and-the-task-manager-is-the-one-way-in-from-outside.md), whose Task Scheduler is this channel's precedent, [ADR-0351](0351-an-input-carries-the-parties-whose-words-it-is-and-outside-content-authority-and-a-supports-holder-follow-from-them.md), [ADR-0353](0353-understanding-reads-its-stimulus-as-tagged-knowledge-then-memory-and-replies-with-what-it-understood-what-it-cites-what-is-unclear-and-where-it-belongs.md), [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md) and [ADR-0357](0357-messages-are-tools-by-modality-planning-chooses-and-tools-carry-out-and-a-rule-about-one-tool-sits-in-its-description.md), all Accepted, as their status lines leave them.
 - Authorization: the owner ruled the design point by point in chat with the coordinator on 2026-10-31. Their words, verbatim: on asking, "what if instead of holding and labelling anything, it has to call ask(email(same args...) ...)"; on the surface, "some other interface surface only for approvals? Similar to a 2FA push notification", then "yes go with that"; on the Telegram surface, "I dont like have 2 bots"; on joining, "do the wide stance now, let it join from wherever, and when the audience walk happens, it can narrow later"; and on the milestone, "the rest is good". The owner also chose the names `request_approval` and `run_approved`, that a yes runs nothing by itself but grants a ticket, who may use it and when it is void, and the 24 hours (§3:5). The coordinator assigned 0361, and ratifies it under the owner's delegation once its reviews are green (§1:1). What the rulings leave open and this decision settles is named where it is settled.
-- **Contract-surface decision, and a breaking change under golden rule 5.** It changes `core/types.py`: an approval request and its enumerations are added, `ApprovalGiver`, `Approval` and `ApprovalEnd` gain a member or a form each, `ActivationEffect`'s spending key names a request, `UserConfirmation` names the request it answers, and the question path's types leave (§8:1, §8:5). It changes `core/protocols.py`: `PlanStore` gains the requests (§8:2), `TelegramBotClient` the card and the tap (§8:3), and `AssistantEngine` the panel's query and command (§8:4). `core`'s register of channel types gains Approvals (§3:6). `PROTOCOL_VERSION` advances in each lane that changes a type the wire carries (§8:6).
-- **Partially supersedes**, in the clauses §11's first table names: ADR-0177, ADR-0292, ADR-0306, ADR-0321, ADR-0322, ADR-0323, ADR-0349, ADR-0350, ADR-0351, ADR-0353, ADR-0356 and ADR-0357.
+- **Contract-surface decision, and a breaking change under golden rule 5.** It changes `core/types.py`: an approval request and its enumerations are added, `ApprovalGiver`, `Approval` and `ApprovalEnd` gain a member or a form each, `ActivationEffect`'s spending key names a request, `UserConfirmation` and `ConfirmationPart` name a request, and the question path stops being produced (§8:1, §8:5–§8:6). It changes `core/protocols.py`: `PlanStore` gains the requests (§8:2), `TelegramBotClient` the card and the tap (§8:3), and `AssistantEngine` the panel's query and command (§8:4). `core`'s register of channel types gains Approvals (§3:6). `PROTOCOL_VERSION` advances in each lane that changes a type the wire carries (§8:7).
+- **Partially supersedes**, in the clauses §11's first table names: ADR-0177, ADR-0292, ADR-0306, ADR-0321, ADR-0322, ADR-0323, ADR-0328, ADR-0329, ADR-0349, ADR-0350, ADR-0351, ADR-0353, ADR-0356 and ADR-0357.
 
 ## Context
 
@@ -84,9 +84,11 @@ place; and have a yes grant a ticket for the exact call, which planning runs onc
 > the binding computed for it and its deliberate-repeat mark, as ADR-0321 §2:8 recorded a
 > question's call; `why`; when it was written; and when it expires (§3:5).
 
-> **Normative.** `request_approval` is done once the request is written. Its result says that
-> the card was sent, each surface it went to and how it went there, and that it waits on the
-> person. It holds up no round and waits for no answer.
+> **Normative.** `request_approval` is done once the request is written. It holds up no round
+> and waits for no answer. Its result says that the request was written and waits on the
+> person, that the panel shows it, and how its card went on the line: *sent*, *not done* or
+> *unknown*, as ADR-0323 §6:2–§6:5 record a message, or not posted where the line is not
+> connected. A card that failed or was not posted leaves the request on the panel alone.
 
 > **Normative.** A `request_approval` whose call has the same capability, values and binding as
 > a pending request for the same person writes nothing and comes back saying that it is already
@@ -230,6 +232,11 @@ place; and have a yes grant a ticket for the exact call, which planning runs onc
 > **Normative.** A deny grants no ticket, and its input says that the request was denied. An
 > expiry grants none, and its input says that the request expired.
 
+> **Normative.** A `remember` run under a ticket is ADR-0329 §5:3's call under a yes: it
+> records its candidate in the work that ran the ticket, and the observer's confirmation
+> support (ADR-0329 §5:5) points at that work's episode and at the request, whose recorded
+> call holds the statement ADR-0328 §4:6 compares. A deny or an expiry records nothing.
+
 ### 6. The approval's activation, and its link
 
 > **Normative.** The approval's input's author is the request's person, stated by the hub from
@@ -237,10 +244,13 @@ place; and have a yes grant a ticket for the exact call, which planning runs onc
 > (ADR-0292 §5:5, ADR-0351 §6:1). Its parties are empty: it carries no one's words (ADR-0351
 > §2:4). Its activation is for the request's person.
 
-> **Normative.** The input holds the outcome, the request as its card shows it, and the
-> ticket's label where there is a ticket. It brings with it, as context that is not the input
-> (ADR-0351 §2:10), the asking activation: by its episode label and its short view (ADR-0356
-> §9) where its episode has frozen, and as running work (ADR-0349 §5:6) where it has not.
+> **Normative.** The input holds the outcome, a reference to its request, and the ticket's
+> label where there is a ticket, structured and carrying no one's words. It brings with it, as
+> context that is not the input and keeps the author it is brought in with (ADR-0351 §2:10):
+> the request as its card shows it, its `why` as the assistant's words and its exact line as
+> the call's values; and the asking activation, by its episode label and its short view
+> (ADR-0356 §9) where its episode has frozen, and as running work (ADR-0349 §5:6) where it has
+> not.
 
 > **Normative.** Code records the approval's input as meant for the asking activation, in
 > `continues`, and links it to each matter the asking activation is linked to. Understanding
@@ -298,7 +308,8 @@ walk. Absorbing (ADR-0349 §7:5) already reaches any place and needs no widening
 > renamed, for its state (pending, approved, denied, expired) and its ticket's (held, used,
 > void). `ApprovalGiver` gains a member for each surface's tap; `Approval` gains a form for a
 > tap on a card, covering one request; `ApprovalEnd` gains expiry; `ActivationEffect`'s spending
-> key names a request; and `UserConfirmation` names the request it answers. Exact names and
+> key names a request; `UserConfirmation` names the request it answers; and `ConfirmationPart`
+> gains a form naming a request beside its question form (§5:10). Exact names and
 > shapes are the triad's (§9), extending ADR-0321 §4:6's shape rather than replacing it.
 
 > **Normative.** `PlanStore` gains members to: write a request with `request_approval`'s effect
@@ -315,10 +326,15 @@ walk. Absorbing (ADR-0349 §7:5) already reaches any place and needs no widening
 > **Normative.** `AssistantEngine` gains the panel's query and its tap command, and ADR-0177
 > §1:1's enumeration gains both.
 
-> **Normative.** What only the conversational question used leaves: `text`'s `asks` and the
-> exact lines a message carries (ADR-0357 §8); a round's asked calls and the types only they
-> use, `YesToQuestion`, `QuestionPart` and `AnsweredQuestion` among them, with any upgrade
-> ADR-0326 requires; and the question marks the windows still carry (#3495, #3547).
+> **Normative.** What only the conversational question used stops being produced: `text`'s
+> `asks` and the exact lines a message carries (ADR-0357 §8), a round's asked calls, and the
+> question marks the windows still carry (#3495, #3547).
+
+> **Normative.** A type only that path used, `YesToQuestion`, `QuestionPart` and
+> `AnsweredQuestion` among them, leaves `core` only where no stored record holds it. One a
+> stored record holds, a confirmation support's question form or a round's asked calls
+> included, stays and is read as it was, until an upgrade the lane ships under ADR-0326
+> rewrites those records.
 
 > **Normative.** Each lane whose change alters a type the wire carries advances
 > `PROTOCOL_VERSION` in that change (ADR-0124 §9).
@@ -334,7 +350,8 @@ after milestone 18's deploy:
 2. **AP2, the tools and the sensor, with the join,** in `orchestration/` and `app/`: the kind
    (§3:6), `request_approval` and `run_approved` (§2, §5), the outcome that sends a direct call
    to `request_approval` (§2:4), the sensor (§3:4–§3:7), the approval's activation and its link
-   (§6), the join and the place lists (§7), and the expiry constant and the wiring in `app/`.
+   (§6), the join and the place lists (§7), the confirmation support's request form in
+   `orchestration/` (§5:10), and the expiry constant and the wiring in `app/`.
 3. **AP3, the card and the tap on the line:** §8:3's members as a triad with their
    implementation in `tools/egress.py`, and in `orchestration/telegram.py` the card's post, its
    edits (§4:2–§4:5) and the callback as a command (§4:7–§4:10).
@@ -357,7 +374,10 @@ after milestone 18's deploy:
 > taken across places, whose ticket then runs once; a yes after the work ended, whose activation
 > names the asking episode; a second `run_approved` of one ticket refused; a ticket refused after
 > expiry, from other work and after its holder ended; a deny and an expiry, each granting no
-> ticket; a restart between the pushed mark and admission; and a card too long for one message.
+> ticket; a restart between the pushed mark and admission; a card too long for one message; a
+> card whose post fails, leaving the request on the panel; and a card-approved `remember`, run
+> in the approval's own activation and after a take, whose confirmation support names the
+> request.
 
 > **Normative.** AP2 adds synthetic prompt cases (ADR-0337 §3) for at least: an email that needs
 > a yes, asked by `request_approval` and never by a question in words; "yes" typed after a card,
@@ -389,10 +409,12 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0321 | §2:2's *in a message you could see*: on a card; §2:3, §2:6, §2:8 and §2:12, whole; §2:4's and §2:9's instruction lines: `request_approval`'s description; §2:5's *appends to the message*: the card shows it; §2:10's first case, and its third whole; §3, whole; §4:1: the work holding the input; §4:4–§4:5: §5:3's checks; §4:6, in the addition alone: a tap's form; §4:9's key: the request; §4:12: a pending request; §4:14's pointer and delivery; §5:1's *asks about it*: by `request_approval`; §5:4's *stays answerable*: until it expires; §7:3 and §7:4, whole; §9:1's rows for the question path | §2, §4, §5, §8 |
 | ADR-0322 | §3 and §4:3, whole: no question is marked or approved | §4:11, §8:5 |
 | ADR-0323 | §4:7 and §4:8, whole; §4:9, in the addition alone: each surface's tap; §6:1's *the chat is the input's place*, for a card: any activation's card goes to the chat; §7:1 and §7:2, whole; §12:2, in the addition alone: the card, its edits and a callback's answer | §4 |
+| ADR-0328 | §4:5 and §4:6, each in the addition alone: a confirmation support may name a request, approved and run under its ticket in that episode, and the statement its recorded call holds | §5:10 |
+| ADR-0329 | §5:2's *planning asks as ADR-0321 §2 decides*: by `request_approval`; §5:3's *in the yes's activation*: in the work that ran the ticket; §5:4's *a no, a change or an unanswered question*: a deny or an expiry; §5:5's *the yes's episode and the approved question part*: that work's episode and the request | §5:10 |
 | ADR-0349 | §6:12's *an approval is used only by its yes's activation*: by the work holding its input; §7:12's *After it has committed*, in its own place alone: every place; §7:17's *where both were caused by the same place*, and its third condition for an approval's input; §7:18, whole | §5:6, §6:4, §7:1–§7:2 |
 | ADR-0350 | §5:11, in the addition alone: an approval's activation's list, and a taken input's place on any list; §6:7, in the addition alone: an approval's activation speaks as a task's does; §6:8's *planning in every other activation still chooses no place*, in the addition alone: a taken input's place | §6:7, §7:3 |
 | ADR-0351 | §3:1's table, in the addition alone: Approvals' row, empty parties; §8:5's reading over all inputs, in the addition alone: an input with empty parties is left out | §3:6, §6:1, §6:6 |
-| ADR-0353 | §9:4 and §10:4, each in the addition alone: an approval's input's `continues` and matters are code's; §9:9's *`AnsweredQuestion` stays*; §11:3, whole; §11:4's second sentence | §6:3, §5, §8:5 |
+| ADR-0353 | §9:4 and §10:4, each in the addition alone: an approval's input's `continues` and matters are code's; §9:9's *`AnsweredQuestion` stays*: only while a stored record holds it; §11:3, whole; §11:4's second sentence | §6:3, §5, §8:5–§8:6 |
 | ADR-0356 | §7:7, in the addition alone: a taken input's place, and an approval's activation's list; §7:10, in the addition alone: §7:3 widens where a message may go | §6:7, §7:3 |
 | ADR-0357 | §2:2's `asks`; §2:11's *the person's yes to that exact call*: a ticket for it; §3:1's *with the exact lines (§8:2)*; §4:4, whole; §7:2's last row: `request_approval`'s description; §8, whole | §2:10, §5, §8:5 |
 
@@ -410,7 +432,8 @@ Read through and not superseded:
 | ADR-0356 §15 | Nothing: its approvals row is this decision; approved actions render in the input that holds the ticket |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a dated
-> header note of ADR-0177, ADR-0292, ADR-0306, ADR-0321, ADR-0322, ADR-0323, ADR-0349, ADR-0350,
+> header note of ADR-0177, ADR-0292, ADR-0306, ADR-0321, ADR-0322, ADR-0323, ADR-0328, ADR-0329,
+> ADR-0349, ADR-0350,
 > ADR-0351, ADR-0353, ADR-0356 and ADR-0357, atomically with this ADR under ADR-0070 and
 > ADR-0082, preserving their ratified bodies. The replacements take effect on this ADR's
 > ratification.
