@@ -1202,6 +1202,10 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "remove_style_mark",
         "accept_person_suggestion",
         "dismiss_person_suggestion",
+        # ADR-0361 §11: "ADR-0177 §1:1's enumeration, in the addition alone: the panel's
+        # query and its tap command" (§8:4), served by the approvals panel.
+        "approvals",
+        "tap_approval",
         "delivery-stream",
     }
 

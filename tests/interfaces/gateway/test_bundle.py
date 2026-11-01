@@ -2495,6 +2495,8 @@ _FAULT_PANELS: Final = frozenset(
         "acts",
         # ADR-0338 §8:2's About you panel.
         "about",
+        # ADR-0361 §4:6's approvals panel.
+        "approvals",
         "sources",
         "standing",
         "history",
@@ -3819,6 +3821,8 @@ def test_the_page_offers_none_of_the_panels_adr_0309_retires() -> None:
     console = console[: console.index("</section>")]
     assert re.findall(r'<button type="button" id="([a-z-]+)"', console) == [
         "chat-button",
+        # ADR-0361 §4:6's approvals panel, first in the menu: what waits on the owner.
+        "approvals-button",
         "conversations-button",
         "about-button",
         "beliefs-button",

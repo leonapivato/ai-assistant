@@ -1326,7 +1326,8 @@ code {
 .belief-row,
 .notification-row,
 .connection-row,
-.about-row {
+.about-row,
+.approval-row {
   border-top: 1px solid var(--line);
   padding: 0.7rem 0;
 }
