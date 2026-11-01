@@ -315,4 +315,11 @@ async def test_a_request_no_answer_can_carry_is_shown_cut_with_deny_alone(
         await expect(rows).to_have_count(1)
         (held,) = await plans.approval_requests(["approval:huge"])
         assert held.state is ApprovalRequestState.DENIED
+        # Read again, it is a recent one: still cut, its state said, and nothing to tap.
+        recent = drive.page.locator("#approvals-recent .approval-row")
+        await expect(recent).to_have_count(1)
+        await expect(recent.first).to_contain_text("Denied.")
+        await expect(recent.first).to_contain_text("This request is too long to show here whole")
+        await expect(recent.first).not_to_contain_text("Deny it if you do not want it done.")
+        await expect(recent.first.locator("button")).to_have_count(0)
         assert heard == []
