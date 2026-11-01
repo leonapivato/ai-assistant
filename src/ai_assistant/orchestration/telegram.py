@@ -269,8 +269,8 @@ _DENY_VERB: Final = "n"
 _VERB_SEPARATOR: Final = ":"
 
 #: How many card edits one read makes at most (ADR-0361 §4:5), retries and a start's
-#: checks included: the rest wait for the next read, oldest first, so the reader's
-#: loop is never held on a long run of edits.
+#: checks included: the rest wait for a later read, in turn, so the reader's loop is
+#: never held on a long run of edits.
 _EDITS_PER_READ: Final = 8
 
 #: The fixed message sent after a restart cut the chat's last activation off (§6:10).
@@ -932,8 +932,6 @@ class TelegramCards:
         self._watched: dict[str, None] = {}
         #: Whether the first read after a start is still owed.
         self._settled = False
-        #: The settled requests whose cards a start owes one more edit, newest first.
-        self._owed: list[str] = []
         #: The words each card was posted with, by its request, as this process sent it.
         self._posted: dict[str, str] = {}
 
@@ -1037,10 +1035,6 @@ class TelegramCards:
             if not self._settled:
                 await self._settle()
                 self._settled = True
-            # A start's owed checks join the watch as room is made for them.
-            room = max(0, _EDITS_PER_READ - len(self._watched))
-            self._watched.update(dict.fromkeys(self._owed[:room]))
-            del self._owed[:room]
             if not self._watched:
                 return
             asked = list(self._watched)
@@ -1060,21 +1054,23 @@ class TelegramCards:
                 break
             done, tried = await self._edited(request, budget)
             budget -= tried
-            self._watched.pop(request_id, None)
-            if not (done and _settled_state(request)):
-                self._watched[request_id] = None  # to the end: looked at again later
+            if tried:
+                # Looked at with an edit: to the end, so every watched card has its turn.
+                self._watched.pop(request_id, None)
+                self._watched[request_id] = None
+            if done and _settled_state(request):
+                self._watched.pop(request_id, None)
 
     async def _settle(self) -> None:
         """Read the person's requests once after a start, to check every card on the line.
 
         Which edits landed is held in memory alone, so after a start any card may show a
         state its request has left: one whose edit a stop cut off, whatever its age, or
-        one whose request the sensor ended before this first read. So every card is
-        checked once. A request that can still change, pending or holding its ticket, is
-        watched at once; a settled one is owed one more edit, newest first, which joins
-        the watch as there is room within a read's edits (:data:`_EDITS_PER_READ`).
-        Telegram refuses an edit that would change nothing, which costs a call and
-        changes nothing.
+        one whose request the sensor ended before this first read. So every request with
+        a card on the line is watched, newest first, and each read edits as many as its
+        bound allows (:data:`_EDITS_PER_READ`), each card in turn; one that can still
+        change stays watched, and a settled one leaves once its card shows it. Telegram
+        refuses an edit that would change nothing, which costs a call and changes nothing.
 
         Raises:
             PlanningError: If the store cannot be read.
@@ -1083,10 +1079,7 @@ class TelegramCards:
             self._person, tuple(ApprovalRequestState)
         )
         carded = [one for one in requests if any(self._on_line(card) for card in one.cards)]
-        self._watched.update(
-            dict.fromkeys(str(one.id) for one in carded if not _settled_state(one))
-        )
-        self._owed = [str(one.id) for one in reversed(carded) if _settled_state(one)]
+        self._watched.update(dict.fromkeys(str(one.id) for one in reversed(carded)))
 
     async def on_line(self) -> dict[int, tuple[LineMessage, str]]:
         """The cards the line's chat holds, each its asking activation's message (§4:3).
