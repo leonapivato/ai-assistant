@@ -1414,3 +1414,47 @@ async def test_the_lines_window_shows_a_card_as_its_asking_activations_message()
         (card.position, MessageAuthor.ASSISTANT, card_words),
     )
     assert line.inputs[0].window.links[card.position or 0] == "act-ask"
+
+
+async def test_the_lines_window_shows_a_card_the_hub_chat_asked_for_and_nothing_else_of_it() -> (
+    None
+):
+    """ADR-0361 §4:2-§4:3: a card goes to the line whatever place asked, so the window
+    shows a card a hub-chat activation posted, linked to it, and none of its input, which
+    was never the line's (review round 1)."""
+    memory = FakeMemoryStore(now=lambda: AT)
+    plans = FakePlanStore(now=lambda: AT)
+    line = _Line(memory=memory, plans=plans)
+    request = await _card_on_the_line(line, plans)
+    (card,) = request.cards
+    card_words = dict(line.fake.messages)[card.position or 0]
+    asking = _calling_episode(
+        "act-ask",
+        (RecordedInputMessage(text="Book the table", sent_at=AT, position=3),),
+        channel=_CONVERSATION,
+        rounds=(("round:1", ("call-1",)),),
+        entries=(
+            RecordedCall(
+                round="round:1",
+                call_id="call-1",
+                capability="request_approval",
+                effect=True,
+                outcome=CallOutcomeKind.DONE,
+                delivered=RecordedDelivery(
+                    words=card_words, went=line.seams.channel, status=DeliveryStatus.SENT
+                ),
+                recorded_at=AT,
+            ),
+        ),
+    )
+    await memory.add(asking)
+    line.fake.hold(text(40, "and then?", message_id=990))
+    line.start()
+    await line.until(lambda: bool(line.inputs), what="the input was taken in")
+    await line.stop()
+
+    window = line.inputs[0].window
+    assert tuple((one.position, one.author, one.text) for one in window.messages) == (
+        (card.position, MessageAuthor.ASSISTANT, card_words),
+    )
+    assert window.links[card.position or 0] == "act-ask"
