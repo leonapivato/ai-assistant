@@ -17,13 +17,22 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from plan_store_contract import PlanStoreContract
+from plan_store_contract import (
+    PlanStoreContract,
+    _approved,
+    _asked,
+    _asking,
+    _request,
+    _request_held,
+    _spending_ticket,
+)
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    ApprovalWriteAnswer,
     ChannelIdentity,
     DueNow,
     InputPart,
@@ -40,6 +49,8 @@ from ai_assistant.core.types import (
     ScheduledTaskAuthor,
     TaskSpawn,
     TaskWriteAnswer,
+    TicketClaim,
+    TicketState,
     ToolOutcome,
 )
 from ai_assistant.planning import SqlitePlanStore, sqlite_store
@@ -1934,3 +1945,103 @@ async def test_a_scheduled_task_table_of_another_shape_is_refused_at_open(
 
     with pytest.raises(PlanningError, match="written_seq"):
         SqlitePlanStore(path=path, now=_fixed_now)
+
+
+# --- the approval requests (ADR-0361 §8:2) ------------------------------------------
+
+
+@pytest.mark.parametrize("step", ["write_approval_request", "claim_ticket_call"])
+async def test_a_failed_effect_write_takes_the_requests_step_back_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """§2:9, §5:5: the request and its effect, or the spend and its effect, land together.
+
+    The effect record's insert fails after the request's write in the same step, and
+    the transaction takes both back: no request is left without its effect record, and
+    no ticket used without the call that spent it. The store then serves the step again.
+    """
+    store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
+    try:
+        await _approved(store, "q-held")
+        request = _request("q1", hotel="the Savoy")
+        insert = sqlite_store._insert_effect
+
+        def failing(conn: sqlite3.Connection, record: ActivationEffect) -> None:
+            msg = "disk I/O error"
+            raise sqlite3.OperationalError(msg)
+
+        attempt = (
+            store.write_approval_request(request, _asking(request), match=None)
+            if step == "write_approval_request"
+            else store.claim_ticket_call(_spending_ticket("e1", "q-held"), match=None)
+        )
+        monkeypatch.setattr(sqlite_store, "_insert_effect", failing)
+        with pytest.raises(PlanningError):
+            await attempt
+
+        assert await store.approval_requests(["q1"]) == ()
+        assert (await _request_held(store, "q-held")).ticket is TicketState.HELD
+        # Only the held request's own effect: neither failed step left one.
+        assert [one.id for one in await store.activation_effects(["act-ask"])] == ["ask-q-held"]
+        assert await store.activation_effects(["act-approval"]) == ()
+
+        monkeypatch.setattr(sqlite_store, "_insert_effect", insert)
+        if step == "write_approval_request":
+            written = await store.write_approval_request(request, _asking(request), match=None)
+            assert written.answer is ApprovalWriteAnswer.WRITTEN
+        else:
+            claimed = await store.claim_ticket_call(_spending_ticket("e1", "q-held"), match=None)
+            assert claimed is TicketClaim.CLAIMED
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "UPDATE approval_requests SET person = 'person:other'",
+        "UPDATE approval_requests SET id = 'q-other'",
+        "UPDATE approval_requests SET data = '{}'",
+    ],
+    ids=["another-person", "another-id", "no-record"],
+)
+async def test_an_approval_request_whose_columns_disagree_with_its_record_is_refused(
+    tmp_path: Path, tamper: str
+) -> None:
+    """A promoted column an outside writer changed is corruption, refused at every read."""
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await _asked(store, _request("q1"))
+        with sqlite3.connect(path) as conn:
+            conn.execute(tamper)
+        with pytest.raises(PlanningError):
+            await store.approval_requests(["q1"])
+        with pytest.raises(PlanningError):
+            await store.export()
+    finally:
+        store.close()
+
+
+async def test_a_stored_request_that_no_longer_validates_names_none_of_its_arguments(
+    tmp_path: Path,
+) -> None:
+    """ADR-0145 §8: decoding a tampered record renders no argument key or value."""
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await _asked(store, _request("q1"))
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE approval_requests SET data = json_set(data, '$.call.values', "
+                'json(\'{"PRIVATE_KEY": "PRIVATE_VALUE", "hotel": 7}\'))'
+            )
+        with pytest.raises(PlanningError) as refused:
+            await store.approval_requests(["q1"])
+    finally:
+        store.close()
+
+    chain: BaseException | None = refused.value
+    while chain is not None:
+        assert "PRIVATE" not in str(chain)
+        chain = chain.__cause__ or chain.__context__

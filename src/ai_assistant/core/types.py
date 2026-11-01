@@ -43,6 +43,7 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     TypeAdapter,
     ValidationInfo,
+    ValidatorFunctionWrapHandler,
     field_validator,
     model_serializer,
     model_validator,
@@ -12009,7 +12010,8 @@ class PlanExport(BaseModel):
     is not settled here.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # Its approval requests hold the person's call arguments (ADR-0145 §8).
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     schema_version: Literal[27] = Field(
         default=27,
@@ -16723,12 +16725,38 @@ class RequestedCall(BaseModel):
         return ActionRequest(tool=self.tool, parameters=self.values, egress_binding=self.binding)
 
     def same_call(self, other: RequestedCall) -> bool:
-        """Whether ``other`` has this call's capability, values and binding (§2:8)."""
-        return (self.tool.capability, self.values, self.binding) == (
-            other.tool.capability,
-            other.values,
-            other.binding,
+        """Whether ``other`` has this call's capability, values and binding (§2:8).
+
+        Compared by their canonical JSON (ADR-0021 §1), never by Python equality, which
+        reads ``true`` and ``1`` as one value: two calls the digest tells apart are two
+        calls here too.
+        """
+        return self._compared() == other._compared()
+
+    def _compared(self) -> tuple[str, bytes, bytes]:
+        binding = None if self.binding is None else self.binding.model_dump(mode="json")
+        return (
+            self.tool.capability,
+            _canonical_json(self.values),
+            _canonical_bytes(binding),
         )
+
+    @field_validator("values", mode="wrap")
+    @classmethod
+    def _values_said_by_shape(cls, value: object, handler: ValidatorFunctionWrapHandler) -> object:
+        """Refuse values that are not JSON without naming a key or a value (ADR-0145 §8).
+
+        The field's own error locates the fault by the argument's key, which is the
+        person's; it is replaced by one that names neither.
+
+        Raises:
+            ValueError: If the values are not a JSON object of JSON values.
+        """
+        try:
+            return handler(value)
+        except ValueError:  # pydantic's ValidationError is one
+            msg = "a requested call's values are a JSON object of JSON values"
+            raise ValueError(msg) from None
 
     @model_validator(mode="after")
     def _a_call_that_could_be_ruled_on(self) -> Self:
@@ -16785,6 +16813,9 @@ class ApprovalCard(BaseModel):
 class ApprovalRequest(BaseModel):
     """One approval request, as the Approvals channel holds it (ADR-0361 §2:6, §8:1).
 
+    Its call holds the person's Tier 1 arguments, so no validation error of it, or of
+    any model holding it, renders its input (ADR-0145 §8).
+
     §2:6's parts: ``id``; ``person``, whom it is for, who is the person the asking
     activation is for; ``activation_id``, the asking activation, and ``round``, the round
     whose ``request_approval`` call wrote it; ``call``, the call to approve; ``why``,
@@ -16806,7 +16837,7 @@ class ApprovalRequest(BaseModel):
             cards carry one token.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     id: Identifier
     person: NonBlankEncodableText
     activation_id: Identifier
@@ -16905,7 +16936,7 @@ class ApprovalRequestWrite(BaseModel):
         ValueError: If the request does not match the answer.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     answer: ApprovalWriteAnswer
     request: ApprovalRequest | None = None
 
@@ -16937,7 +16968,7 @@ class ApprovalStepAnswer(StrEnum):
 class ApprovalRequestStep(BaseModel):
     """What a step on a request came to, and the request as the store then holds it."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     answer: ApprovalStepAnswer
     request: ApprovalRequest
 
@@ -16965,7 +16996,7 @@ class ApprovalDue(BaseModel):
     expiry after the instant among such requests, which the sensor sleeps until.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     outcomes: tuple[ApprovalRequest, ...] = ()
     expiring: tuple[ApprovalRequest, ...] = ()
     next_expiry_at: UtcInstant | None = None
