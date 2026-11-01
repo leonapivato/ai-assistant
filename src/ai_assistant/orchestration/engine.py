@@ -7069,7 +7069,7 @@ class Engine:
         state.input_messages = (RecordedInputMessage(text=text, sent_at=self._now()),)
         self._approval_inputs[activation_id] = request
         deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
-        self._activation_task(
+        work = self._activation_task(
             ActivationScope(state),
             lambda: self._approval_turn(
                 activation_id, deadline, context=context, linked=linked, suggests=suggests
@@ -7078,6 +7078,25 @@ class Engine:
             check_output=_unchecked,
             deadline=deadline,
         )
+        self._spawn_read(self._approval_ended(work, state))
+
+    async def _approval_ended(
+        self,
+        work: asyncio.Task[tuple[None, EpisodeCaptureReport | None]],
+        state: ActivationState,
+    ) -> None:
+        """Read how an approval's activation ended: a stop by a take is how it hands over.
+
+        Its outcome is already the request's (§3:4); what it held is voided as it ends
+        (§5:7). A failure is logged as a channel activation's is.
+        """
+        try:
+            await work
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # every ending is the activation's own
+            if not isinstance(exc, ActivationStoppedError):
+                _log_chat_failure(exc, state=state, marked=True, reader="approvals")
 
     async def _approval_turn(
         self,

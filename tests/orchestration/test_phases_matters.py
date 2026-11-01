@@ -768,10 +768,14 @@ async def test_input_continuing_work_that_acted_elsewhere_is_offered_and_taken(
             calls=(_call("c2", "answer_offer", offer=_label_of(request, older_text), take=True),)
         ),
         says("Two-bedroom flats: three found.", call_id="m12"),
-        RoundResponse(),
+        # ADR-0361 §7:3: the taken input's place is on its list, and a message may go there.
+        lambda request: RoundResponse(
+            calls=(text_call("Filtered for you here.", call_id="m13", via=_taken_place(request)),)
+        ),
     )
     planner.hold(older_text, from_round=2)
-    harness = _harness(understanding, planner)
+    # The place lists are the Task Scheduler's, which every deployment wires (ADR-0350 §5:11).
+    harness = _harness(understanding, planner, task_scheduler=seams())
     first, older = await _acted_on_one_place(harness, planner, monkeypatch, older_text)
     second, newer = await _start(harness, newer_text, message_id="b-1")
 
@@ -795,11 +799,23 @@ async def test_input_continuing_work_that_acted_elsewhere_is_offered_and_taken(
     record = _of(found, older)
     assert [one.taken_over_from for one in record.joined] == [newer]
     assert record.joined[0].channel.instance_id == second
-    assert await _assistant(harness, first) == [
+    assert (await _assistant(harness, first))[:2] == [
         "Searching.",
         "Two-bedroom flats: three found.",
     ]
-    assert await _assistant(harness, second) == [], "the offering one wrote nothing"
+    assert await _assistant(harness, second) == ["Filtered for you here."], (
+        "the offering one wrote nothing; the taker wrote into the taken input's place"
+    )
+
+
+def _taken_place(request: _Request) -> str:
+    """The ``L`` label of a place newly on the list, an input's taken by a take (§7:3)."""
+    (place,) = [
+        one
+        for one in tags(request.text, "place")
+        if one.text == "a conversation an input this activation took came from"
+    ]
+    return str(place.get("label"))
 
 
 async def test_input_continuing_work_it_cannot_be_offered_to_waits_on_it(
