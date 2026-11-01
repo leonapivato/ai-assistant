@@ -2,6 +2,8 @@
 # needing his yes and saying to ask through request_approval with the same arguments
 # (ADR-0361 §2:4). Now that a ticket runs the person model's calls, this round asks on a
 # card, for the same call.
+# A code check of the arguments' text passes a request for another field whose why names
+# this one, so this property is read.
 prompt = "planning"
 guards = "yes_without_question"
 came_from = "2026-11-01"
@@ -9,9 +11,8 @@ set = "development"
 samples = 3
 
 [property]
-check = "includes_with"
-capabilities = ["request_approval"]
-phrases = ["set_profile", "address", "Leonardo"]
+check = "read"
+read = "Calls request_approval for a set_profile call whose field is address and whose value is Leonardo, and asks Leo no question in words about it."
 
 [input]
 file = "a-profile-change-needing-a-yes-is-asked-on-a-card.json"
