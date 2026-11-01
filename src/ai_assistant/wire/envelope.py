@@ -2781,7 +2781,17 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``ApprovalCardState``, ``ApprovalChoice`` and ``ApprovalPanelTapAnswer``. A hub at
 #:     125 answers either method as unknown (ADR-0124 §9:2's method-set limb). No type a
 #:     frame already carried changes.
-PROTOCOL_VERSION: Final[int] = 126
+#: 127: ADR-0362 §2:3 advances the version once for its lane AP6 (§6:1), on these
+#:     grounds: ``PersonModelAct`` gains its request form, ``request``, the approval
+#:     request whose ticket ran the call (§2:1), carried on every ``ProfileChange`` and
+#:     ``Pin`` of the person model the panels read. It is left out of a dump where it is
+#:     unset, so an act of every earlier form is sent as it was (§2:2). A peer at 126
+#:     refuses the new field as extra, and an act of the request form, naming no
+#:     question part, as invalid (ADR-0124 §9:2). The method set does not move:
+#:     ``PlanStore.write_scheduled_task`` takes a spawn under a ticket and answers
+#:     ``TaskWriteAnswer.ticket_refused`` with the ticket's ``TicketClaim``, but no engine
+#:     method changes, and the spawn's write crosses no frame.
+PROTOCOL_VERSION: Final[int] = 127
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

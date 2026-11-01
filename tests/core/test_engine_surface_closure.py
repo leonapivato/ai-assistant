@@ -1926,6 +1926,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     method set moves to 71**; the types they carry are new, and no type a frame already
     carried changes.
 
+    **127 is ADR-0362 §2:3, on a wire-carried core type alone.** ``PersonModelAct``,
+    carried on the person model's change log and pins, gains its request form,
+    ``request``, left out of a dump where unset. A peer at 126 refuses it as extra
+    (ADR-0124 §9:2). **The method set does not move and stays at 71**: no engine method
+    changes, and the spawn's write under a ticket crosses no frame.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1934,7 +1940,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (71, 126), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (71, 127), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
