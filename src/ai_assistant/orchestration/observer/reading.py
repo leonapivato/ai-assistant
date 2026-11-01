@@ -1024,8 +1024,11 @@ class EpisodeReader:
         Its confirmation points at the approval's own episode, where the yes was given,
         whichever work ran the ticket, so its place among the person's statements is when
         they approved; it names the request, whose recorded call holds the statement, and
-        the work that ran the ticket beside. A request whose approval's episode is not
-        held frozen confirms nothing.
+        the work that ran the ticket beside. The approval's episode is read open or
+        frozen: the part names it and is placed by when it began, and its text is the
+        request's recorded statement, never the episode's, so an approval still freezing
+        after its taker confirms all the same. A request whose approval's episode is not
+        held at all confirms nothing.
         """
         ticketed = [
             one
@@ -1048,7 +1051,7 @@ class EpisodeReader:
             for one in requests.values()
             if one.pushed_to is not None
         ]
-        held = without_open_episodes(await self._memory.get_many(addresses))
+        held = await self._memory.get_many(addresses)
         hints: list[Hint] = []
         for effect in ticketed:
             request = requests.get(str(effect.ticket))

@@ -224,6 +224,7 @@ from ai_assistant.core.types import (
     statement_citations,
 )
 from ai_assistant.orchestration.approvals import (
+    ALREADY_ON_A_CARD,
     ARGUMENTS_KEY,
     CALL_ARGUMENT,
     CAPABILITY_KEY,
@@ -248,12 +249,14 @@ from ai_assistant.orchestration.message_tools import (
     platform_name,
 )
 from ai_assistant.orchestration.person_block import activation_person, person_zone
+from ai_assistant.orchestration.person_calls import PERSON_MODEL_CAPABILITIES
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
     TIDY_STORY_CAPABILITY,
 )
 from ai_assistant.orchestration.task_scheduler import (
+    TASK_SCHEDULER_CAPABILITIES,
     StartingEntry,
     place_description,
 )
@@ -2327,6 +2330,11 @@ _ALREADY_ASKED: Final = (
 _ASK_BY_REQUEST: Final = (
     "needs the person's yes, so nothing ran: to ask, call request_approval with this "
     "call's capability and the same arguments, and say in why what it does"
+)
+#: #3568: a call no ticket can run yet is not asked about on a card.
+_NOT_ON_A_CARD_YET: Final = (
+    "needs the person's yes, and cannot be approved on a card yet, so it will not run and "
+    "is not asked about"
 )
 #: ADR-0361 §2:5: in an activation that is no person's, nothing can be asked.
 _NO_ONE_TO_APPROVE: Final = (
@@ -4557,7 +4565,7 @@ class _Request:
             )
             return shown
         if outcome.kind is CallOutcomeKind.NEEDS_YOU:
-            return shown | self._needs_you(outcome, reference)
+            return shown | self._needs_you(outcome, reference, capability=call.name)
         text = _OUTCOME_TEXT[outcome.kind]
         if outcome.reason is not None:
             text = f"{text}: {outcome.reason}"
@@ -4927,7 +4935,9 @@ class _Request:
             "absorbed_by": self._book.label(LabelKind.EPISODE, episode_address(peer.absorbed_by))
         }
 
-    def _needs_you(self, outcome: CallOutcome, reference: str) -> dict[str, object]:
+    def _needs_you(
+        self, outcome: CallOutcome, reference: str, *, capability: str | None = None
+    ) -> dict[str, object]:
         """Which case of needing a yes applies to a call (ADR-0321 §2:10).
 
         A call is offered for asking, under ``reference``, only where the activation can
@@ -4938,7 +4948,13 @@ class _Request:
         if self._inputs.approvals:
             # ADR-0361 §2:4-§2:5: a yes is asked for by request_approval alone, in any
             # activation that is a person's, never by a question in words.
-            shown["outcome"] = _ASK_BY_REQUEST if self._inputs.person_id else _NO_ONE_TO_APPROVE
+            if outcome.reason == ALREADY_ON_A_CARD:
+                shown["outcome"] = ALREADY_ON_A_CARD
+                return shown
+            if capability in _NO_TICKET_RUNS:
+                shown["outcome"] = _NOT_ON_A_CARD_YET
+            else:
+                shown["outcome"] = _ASK_BY_REQUEST if self._inputs.person_id else _NO_ONE_TO_APPROVE
             if outcome.reason is not None:
                 shown["because"] = outcome.reason
             return shown
@@ -6048,6 +6064,8 @@ class _Judge:
         schema = self.schemas.get(capability)
         if capability in _NEVER_ASKED or capability not in self.offered or schema is None:
             return RefusedCall(call, f"{quoted} {_NOT_ASKABLE}")
+        if capability in _NO_TICKET_RUNS:
+            return RefusedCall(call, f"{quoted} {_NOT_ON_A_CARD}")
         violations = parameter_violations(schema, nested_arguments)
         if violations:
             return RefusedCall(
@@ -6142,6 +6160,12 @@ _NESTED_MALFORMED: Final = (
 _NOT_ASKABLE: Final = "is not a call you are offered that a yes can approve"
 #: The calls no request asks about: asking itself, and a message, which needs no yes.
 _NEVER_ASKED: Final = frozenset({REQUEST_APPROVAL_CAPABILITY, RUN_APPROVED_TOOL, "text"})
+#: The calls a ticket cannot yet run, so no request asks about them, rather than grant a
+#: ticket that would be spent and run nothing (#3568): the person model's, whose record
+#: of an act names a question part (ADR-0338 §8:5), and the Task Scheduler's, whose write
+#: claims its own effect record in one store step (ADR-0350 §3:3).
+_NO_TICKET_RUNS: Final = PERSON_MODEL_CAPABILITIES | TASK_SCHEDULER_CAPABILITIES
+_NOT_ON_A_CARD: Final = "cannot be approved on a card yet, so it is not asked about"
 
 #: ADR-0321 §4:2: an approved action is proposed by its label, and its values are the
 #: recorded ones.

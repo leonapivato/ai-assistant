@@ -134,6 +134,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.approvals import (
+    ALREADY_ON_A_CARD,
     CALL_ARGUMENT,
     NESTED_REPEAT_KEY,
     REQUEST_APPROVAL_CAPABILITY,
@@ -1474,6 +1475,15 @@ class AuthorizingStage:
         here. A needs-you verdict carries the request as ruled on and the repeat mark,
         which the round that asks records; an allowed one is returned as it was.
         """
+        if await self._waiting_on_a_card(request, state):
+            # ADR-0361 §2:2, ADR-0321 §4:11 as §11 amends it: a call identical to one a
+            # pending request holds waits on the person, whatever the fresh checks rule,
+            # so a direct call cannot run it before the person answers the card.
+            _log.info("authorizing_call_already_requested", stage="authorizing")
+            state.note(call, "requested", "waiting", ALREADY_ON_A_CARD)
+            return replace(
+                verdict, verdict=Verdict.NEEDS_YOU, reason=ALREADY_ON_A_CARD, request=request
+            )
         waiting = await self._waiting(request, state)
         if waiting is not None:
             _log.info("authorizing_call_already_asked", stage="authorizing")
@@ -1489,6 +1499,29 @@ class AuthorizingStage:
         if verdict.verdict is not Verdict.NEEDS_YOU:
             return verdict
         return replace(verdict, request=request, deliberate_repeat=repeat)
+
+    async def _waiting_on_a_card(self, request: ActionRequest, state: _Round) -> bool:
+        """Whether a pending request for the person holds this very call (ADR-0361 §2:8).
+
+        The same capability, values and binding, not yet expired. A store that cannot
+        be read is no answer that none waits, so the call goes back needing the person.
+        """
+        if self._plans is None or state.person is None:
+            return False
+        try:
+            asked = RequestedCall(
+                tool=request.tool, values=request.parameters, binding=request.egress_binding
+            )
+            pending = await self._plans.person_approval_requests(
+                state.person, [ApprovalRequestState.PENDING]
+            )
+        except ValidationError, ValueError:
+            return False
+        except PlanningError:
+            _log.warning("authorizing_requests_unread", stage="authorizing")
+            return True
+        now = self._now()
+        return any(one.expires_at > now and one.call.same_call(asked) for one in pending)
 
     async def _selected(self, call: ProposedCall, state: _Round) -> _Selected | CallVerdict:
         """Bind ``call`` to one tool, its hub-filled arguments added (ADR-0144, ADR-0254 §3)."""
