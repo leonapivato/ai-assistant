@@ -134,6 +134,18 @@ step after it that needs a yes takes another tap. AP2 already reads §2:2 as §3
 > record, written with the request before the post (ADR-0361 §2:9), and a crash before its
 > outcome leaves that record with none, never resolved by guessing (ADR-0306 §5:6).
 
+> **Normative.** In place of the claimed record ADR-0323 §11:3 and §11:4 require before the
+> call and before the token is read, each of the two is gated by a plan-store check made before
+> the token is read. An edit goes ahead only where the request holds that card at that chat and
+> position, as `record_approval_card` recorded it. An answer goes ahead only where the update
+> comes from the request's person and its token resolves to a request. The connection record is
+> read before the check and again before any byte is sent, and the chat check is unchanged.
+
+> **Normative.** ADR-0017 §3's path for an attempt a crash leaves pending is the request record:
+> after a start, the hub re-edits each card on the line to its request's state. A lost answer
+> needs none: it is fixed text, and the tap it answers is decided in the plan store (ADR-0361
+> §4:9).
+
 ADR-0017 §3's attempt-and-outcome condition exists because, without it, a timeout cannot be told
 from a disclosure. An edit or an answer discloses nothing the claimed post did not already send
 to the same chat. So a lost outcome costs only the card's display, and a repeat is harmless: an
@@ -195,7 +207,7 @@ Superseded in part. Every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0323 | §13:2, in the addition alone: a card's edit and a callback's answer are exempt; §13's table, rows 6 and 12, in the addition alone: an edit is bound to the request and logged by its attempt identifier | §4 |
+| ADR-0323 | §11:3 and §11:4, each in the addition alone: a card's edit and a callback's answer are gated by a plan-store check in place of a claimed record; §13:2, in the addition alone: a card's edit and a callback's answer are exempt; §13's table, rows 6 and 12, in the addition alone: an edit is bound to the request and logged by its attempt identifier | §4 |
 | ADR-0338 | §3:5's and §4:1's *by a yes, naming the approval and its episode*, in the addition alone: a yes on a card names its request, and the episode is the approval's own; §8:5's *Under a yes the call runs as ADR-0321 §4 decides*, in the addition alone: or under a ticket, as ADR-0361 §5:4 decides | §2 |
 | ADR-0350 | §3:3, in the addition alone: the write may spend a ticket; §3:4, in the addition alone: a ticket's call runs in the work holding its input; §3:7 and §4:4, in the addition alone: under a ticket, the input's authority is read as carried | §3 |
 | ADR-0361 | §2:2's *one planning is offered*: one the asking activation could run; §6:2's *structured*, until a later decision: the hub's text; §8:1 and §8:2, in the addition alone: `PersonModelAct`'s request form and the spawn's write under a ticket; §9, in the addition alone: AP6 and AP7 | §2, §3, §5, §6 |
