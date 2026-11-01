@@ -233,9 +233,11 @@ place; and have a yes grant a ticket for the exact call, which planning runs onc
 > expiry grants none, and its input says that the request expired.
 
 > **Normative.** A `remember` run under a ticket is ADR-0329 §5:3's call under a yes: it
-> records its candidate in the work that ran the ticket, and the observer's confirmation
-> support (ADR-0329 §5:5) points at that work's episode and at the request, whose recorded
-> call holds the statement ADR-0328 §4:6 compares. A deny or an expiry records nothing.
+> records its candidate in the work that ran the ticket. The observer's confirmation support
+> (ADR-0329 §5:5) points at the approval's own episode, where the yes was given, whichever
+> work ran the ticket, so its place among the person's statements is when they approved; it
+> names the request, whose recorded call holds the statement ADR-0328 §4:6 compares, and the
+> work that ran the ticket beside. A deny or an expiry records nothing.
 
 ### 6. The approval's activation, and its link
 
@@ -376,8 +378,9 @@ after milestone 18's deploy:
 > expiry, from other work and after its holder ended; a deny and an expiry, each granting no
 > ticket; a restart between the pushed mark and admission; a card too long for one message; a
 > card whose post fails, leaving the request on the panel; and a card-approved `remember`, run
-> in the approval's own activation and after a take, whose confirmation support names the
-> request.
+> in the approval's own activation and after a take, whose confirmation support points at the
+> approval's episode and names the request, and which, with a contrary statement made between
+> the request and the tap, ranks the confirmation as the newer.
 
 > **Normative.** AP2 adds synthetic prompt cases (ADR-0337 §3) for at least: an email that needs
 > a yes, asked by `request_approval` and never by a question in words; "yes" typed after a card,
@@ -409,8 +412,8 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0321 | §2:2's *in a message you could see*: on a card; §2:3, §2:6, §2:8 and §2:12, whole; §2:4's and §2:9's instruction lines: `request_approval`'s description; §2:5's *appends to the message*: the card shows it; §2:10's first case, and its third whole; §3, whole; §4:1: the work holding the input; §4:4–§4:5: §5:3's checks; §4:6, in the addition alone: a tap's form; §4:9's key: the request; §4:12: a pending request; §4:14's pointer and delivery; §5:1's *asks about it*: by `request_approval`; §5:4's *stays answerable*: until it expires; §7:3 and §7:4, whole; §9:1's rows for the question path | §2, §4, §5, §8 |
 | ADR-0322 | §3 and §4:3, whole: no question is marked or approved | §4:11, §8:5 |
 | ADR-0323 | §4:7 and §4:8, whole; §4:9, in the addition alone: each surface's tap; §6:1's *the chat is the input's place*, for a card: any activation's card goes to the chat; §7:1 and §7:2, whole; §12:2, in the addition alone: the card, its edits and a callback's answer | §4 |
-| ADR-0328 | §4:5 and §4:6, each in the addition alone: a confirmation support may name a request, approved and run under its ticket in that episode, and the statement its recorded call holds | §5:10 |
-| ADR-0329 | §5:2's *planning asks as ADR-0321 §2 decides*: by `request_approval`; §5:3's *in the yes's activation*: in the work that ran the ticket; §5:4's *a no, a change or an unanswered question*: a deny or an expiry; §5:5's *the yes's episode and the approved question part*: that work's episode and the request | §5:10 |
+| ADR-0328 | §4:5 and §4:6, each in the addition alone: a confirmation support may name a request, approved in that episode, the approval's own, and the statement its recorded call holds | §5:10 |
+| ADR-0329 | §5:2's *planning asks as ADR-0321 §2 decides*: by `request_approval`; §5:3's *in the yes's activation*: in the work that ran the ticket; §5:4's *a no, a change or an unanswered question*: a deny or an expiry; §5:5's *the approved question part*: the request, the yes's episode being the approval's own | §5:10 |
 | ADR-0349 | §6:12's *an approval is used only by its yes's activation*: by the work holding its input; §7:12's *After it has committed*, in its own place alone: every place; §7:17's *where both were caused by the same place*, and its third condition for an approval's input; §7:18, whole | §5:6, §6:4, §7:1–§7:2 |
 | ADR-0350 | §5:11, in the addition alone: an approval's activation's list, and a taken input's place on any list; §6:7, in the addition alone: an approval's activation speaks as a task's does; §6:8's *planning in every other activation still chooses no place*, in the addition alone: a taken input's place | §6:7, §7:3 |
 | ADR-0351 | §3:1's table, in the addition alone: Approvals' row, empty parties; §8:5's reading over all inputs, in the addition alone: an input with empty parties is left out | §3:6, §6:1, §6:6 |
