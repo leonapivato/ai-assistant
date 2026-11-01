@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-11-01
 - Scope: the relay's contract with a hub (ADR-0330 §4), widened by the calls an approval card makes on the line (ADR-0361 §4): a post with buttons, its edits, a tap handed to the hub and the tap's answer. Milestone 19, "Approvals by card". The relay is the private repository's, and §6 is its lane.
-- Dependency: [ADR-0330](0330-a-hubs-telegram-line-may-run-through-a-relay-on-the-box-which-serves-it-the-bot-api-for-one-linked-account-and-the-hub-trusts-it-by-a-certificate-configured-at-setup.md), whose §4 this amends; [ADR-0361](0361-approvals-are-cards-the-person-taps-and-a-yes-is-a-one-time-ticket-for-the-exact-call.md), whose §4:12 has the relay serve the card's calls; [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md); and ADR-0362, whose §4 rules how the hub claims a card's edit and a callback's answer; all as their status lines leave them.
+- Dependency: [ADR-0330](0330-a-hubs-telegram-line-may-run-through-a-relay-on-the-box-which-serves-it-the-bot-api-for-one-linked-account-and-the-hub-trusts-it-by-a-certificate-configured-at-setup.md), whose §4 this amends; [ADR-0361](0361-approvals-are-cards-the-person-taps-and-a-yes-is-a-one-time-ticket-for-the-exact-call.md), whose §4:12 has the relay serve the card's calls; [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md); and ADR-0362, whose §4 rules how the hub gates and claims a card's edit and a callback's answer, and which merges before this one (§6:4); all as their status lines leave them.
 - Authorization: the coordinator agreed this direction on 2026-11-01, as the brief for this lane records, and assigned 0363. The coordinator ratifies it under the owner's delegation once its reviews are green (§1:1).
 - **Changes no `core` contract.** The hub's side is built on `main` at `bf66b683d` by AP3 (#3573): `TelegramBotClient` has `send_with_buttons`, `edit_message` and `answer_callback`, and `HttpsTelegramBotClient` sends them to the relay's origin as to Telegram's. No member, argument, result, `Settings` field or `core/types.py` shape changes, and `PROTOCOL_VERSION` does not advance. It does change a trust boundary, the relay's contract, so both review lenses run.
 - **Partially supersedes** [ADR-0330](0330-a-hubs-telegram-line-may-run-through-a-relay-on-the-box-which-serves-it-the-bot-api-for-one-linked-account-and-the-hub-trusts-it-by-a-certificate-configured-at-setup.md), in the clauses §7 names, and no clause of any other ADR.
@@ -171,8 +171,9 @@ Every other row of ADR-0330 §4's table holds for the two methods as it does for
 ### 6. The lane
 
 > **Normative.** One lane in the private repository builds this decision: the relay's code,
-> its tests, and `docs/design/telegram-relay.md`. No lane in this repository is owed: the hub's
-> side is on `main`.
+> its tests, and `docs/design/telegram-relay.md`. It owes no lane in this repository: what
+> the hub owes for a card's edit and a callback's answer is ADR-0362 §4's, in direct and
+> relayed mode alike.
 
 > **Normative.** That lane's tests cover, against a fake Telegram: each refusal of §2:5, §3:2
 > and §5:1 made before anything reaches Telegram; an answer refused once its update is
@@ -181,6 +182,10 @@ Every other row of ADR-0330 §4's table holds for the two methods as it does for
 
 > **Normative.** This decision decides nothing of the relay's internals beyond what §2–§5
 > require of it, as ADR-0330 §13:1 decides nothing of them beyond its own list.
+
+> **Normative.** The relay is redeployed serving `editMessageText` and `answerCallbackQuery`
+> only once ADR-0362 has merged `Accepted` and every hub lane its §4 owes has merged, so that a
+> relayed card's edit and answer are gated and claimed as a direct line's are.
 
 The relay's redeploy on the box is the coordinator's, held by milestone 19.
 
@@ -208,7 +213,7 @@ Read through and not superseded:
 ## Consequences
 
 - A relayed line's card works as a direct one's, once §6's lane lands and the relay is
-  redeployed. Until then a relayed card is *not done*, and the request waits on the panel.
+  redeployed after ADR-0362 (§6:4). Until then a relayed card is *not done*, and the request waits on the panel.
 - The relay serves two more methods and one more kind of update, each held to the one shape
   the hub sends.
 - A hub can answer only its own person's taps, and only while it holds them unconfirmed.
