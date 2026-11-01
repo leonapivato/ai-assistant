@@ -86,6 +86,9 @@ def _value(name: str, schema: dict[str, Any]) -> object:
     if "enum" in schema:
         return schema["enum"][0]
     kind = schema.get("type")
+    if kind == "object" and "properties" in schema:
+        # A nested object, as request_approval's call (ADR-0361 §2:1), holds its own.
+        return {key: _value(key, one) for key, one in schema["properties"].items()}
     if kind == "array":
         item = _value(f"{name} item", schema.get("items", {"type": "string"}))
         return [item] * max(schema.get("minItems", 1), 1)

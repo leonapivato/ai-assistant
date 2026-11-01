@@ -330,6 +330,14 @@ from ai_assistant.orchestration.acting import (
     ResultRoute,
 )
 from ai_assistant.orchestration.activation_state import CaptureFacts, Commitment, active_state
+from ai_assistant.orchestration.approval_calls import ApprovalAsker, ApprovalCalls, asking
+from ai_assistant.orchestration.approvals import (
+    APPROVAL_CAPABILITIES,
+    APPROVALS_DESCRIPTION,
+    REQUEST_APPROVAL,
+    REQUEST_APPROVAL_CAPABILITY,
+    Ticket,
+)
 from ai_assistant.orchestration.authorizer import (
     AllowedCall,
     AuthorizingStage,
@@ -397,7 +405,7 @@ from ai_assistant.orchestration.message_tools import (
     who_it_is_for,
     with_question,
 )
-from ai_assistant.orchestration.outside_content import rests_on_outside_content
+from ai_assistant.orchestration.outside_content import joined_parties, rests_on_outside_content
 from ai_assistant.orchestration.person_block import activation_person, still_held
 from ai_assistant.orchestration.person_calls import (
     PERSON_MODEL_CALLS,
@@ -629,6 +637,8 @@ class _Nowhere:
 #: (ADR-0356 §4:4-§4:6), each the condition that decided whether it was offered before.
 _NO_PERSON: Final = "this activation is no person's, so it has no profile or pins to change"
 _NO_SPAWN: Final = "only an activation that may set a task runs the Task Scheduler's calls"
+#: ADR-0361 §2:5: request_approval is refused in an activation that is no person's.
+_NO_ONE_TO_ASK: Final = "this activation is no person's, so there is no one to ask for a yes"
 _NO_RUNNING_VIEW: Final = (
     "running work is shown only to an activation whose author its place establishes, "
     "and this one's it does not"
@@ -1893,6 +1903,35 @@ class _SendRaisedError(Exception):
         self.sent = sent
 
 
+#: ADR-0361 §5:6: the engine's read of the tickets an activation holds now, each approved
+#: and still held, as the plan store holds it.
+type TicketsHeld = Callable[[ActivationState], Awaitable[tuple[Ticket, ...]]]
+
+#: The channel types whose places take a message from the assistant: the hub chat's
+#: conversations and the line's chat (ADR-0350 §5:11).
+_TAKES_A_MESSAGE: Final = frozenset({"conversation", "telegram"})
+
+
+def _taken_places(state: ActivationState | None, own: str | None) -> tuple[str, ...]:
+    """The places inputs this activation took by a take came from (ADR-0361 §7:3).
+
+    Each where its kind takes a message, other than ``own``, the place its input came
+    from, each once in the order taken.
+    """
+    if state is None:
+        return ()
+    took = {one.activation_id for one in state.took}
+    return tuple(
+        dict.fromkeys(
+            place
+            for one in state.joined
+            if one.taken_over_from in took
+            and one.channel.channel_type in _TAKES_A_MESSAGE
+            and (place := place_of(one.channel)) != own
+        )
+    )
+
+
 @dataclass
 class Scheduling:
     """What the phases hold of an activation offered spawn (ADR-0350 §3:4, §5:10-§5:11).
@@ -1908,6 +1947,10 @@ class Scheduling:
             from (§6:8).
         places: The place list as last built.
         targets: Each place on that list, by place, with its writer.
+        by_label: Whether its messages name their place by label though it is no task's:
+            an approval's activation's (ADR-0361 §6:7).
+        spawns: Whether it is offered spawn (§3:4): an approval's activation is shown its
+            place list, and is not.
     """
 
     person: str
@@ -1916,11 +1959,17 @@ class Scheduling:
     task: ScheduledTask | None = None
     places: tuple[ListedPlace, ...] = ()
     targets: Mapping[str, PlaceTarget] = field(default_factory=dict)
+    by_label: bool = False
+    spawns: bool = True
 
     @property
     def speaks_by_label(self) -> bool:
-        """Whether its messages name their place by label: a task's activation's (§6:7)."""
-        return self.task is not None
+        """Whether its messages name their place by label (§6:7, ADR-0361 §6:7).
+
+        A task's activation's, and an approval's, which writes messages into places on
+        its list alone, as a task's activation does.
+        """
+        return self.task is not None or self.by_label
 
 
 class PhaseWorking:
@@ -2309,7 +2358,10 @@ class PhaseWorking:
         fresh = list(joined[self._joined_taken :])
         self._joined_taken = len(joined)
         # ADR-0351 §5:13-§5:14: an input appended relayed brings its relay mark here.
-        self.joined_relayed = self.joined_relayed or any(one.relayed for one in fresh)
+        # ADR-0361 §6:6: an input whose parties are empty, an approval's, is left out.
+        self.joined_relayed = self.joined_relayed or any(
+            one.relayed and joined_parties(one) != () for one in fresh
+        )
         sent: list[tuple[datetime, PlaceItem]] = []
         for one in fresh:
             if one.taken_over_from not in taken or one.channel != place:
@@ -3772,6 +3824,10 @@ class PhasePath:
         self._person_blocks: PersonBlocks | None = None
         # ADR-0350 §4: the Task Scheduler's calls, attached only where it is wired.
         self._task_calls: ScheduledTaskCalls | None = None
+        # ADR-0361 §2, §5: the Approvals channel's calls, and the tickets an activation
+        # holds, attached only where it is wired.
+        self._approval_calls: ApprovalCalls | None = None
+        self._tickets: TicketsHeld | None = None
         # ADR-0349 §4-§7: what crosses the engine's activations, attached by the engine.
         self._matters: Matters | None = None
         self._append: Callable[[], Awaitable[None]] | None = None
@@ -3855,6 +3911,34 @@ class PhasePath:
         self._acting.add_own_records(dict.fromkeys(TASK_SCHEDULER_CAPABILITIES, calls))
         self._label_arguments.update(TASK_SCHEDULER_LABEL_ARGUMENTS)
         self._task_calls = calls
+
+    def attach_approvals(self, calls: ApprovalCalls, tickets: TicketsHeld) -> None:
+        """Offer planning ``request_approval`` and ``run_approved`` (ADR-0361 §2, §5:2).
+
+        ``request_approval`` is advertised among the own records' declarations and run
+        by ``calls``, directly against the plan store (§3:3); ``run_approved`` is offered
+        on every round, and the tickets each round is shown are read through
+        ``tickets``, the engine's account of which approvals' inputs the activation holds
+        (§5:6). Both are offered on every round, and refused, saying why, where their
+        condition does not hold (ADR-0356 §4:4).
+
+        Raises:
+            ValueError: If it is attached already, or its capability is advertised
+                already.
+        """
+        if self._approval_calls is not None:
+            msg = "the Approvals channel's calls are attached once"
+            raise ValueError(msg)
+        self._tools.add_own_records((REQUEST_APPROVAL,))
+        self._acting.add_own_records(dict.fromkeys(APPROVAL_CAPABILITIES, calls))
+        self._approval_calls = calls
+        self._tickets = tickets
+
+    async def _held_tickets(self, state: ActivationState | None) -> tuple[Ticket, ...]:
+        """The tickets the activation holds, as the plan store holds them now (§5:6)."""
+        if self._tickets is None or state is None:
+            return ()
+        return await self._tickets(state)
 
     def attach_matters(self, matters: Matters) -> None:
         """Offer planning its calls on running work, and hold the waits (ADR-0349 §4-§7).
@@ -4103,6 +4187,46 @@ class PhasePath:
             activation_id=activation_id,
             place=PlaceWindow(
                 takes_message=False, description=TASK_SCHEDULER_DESCRIPTION, items=tuple(lineage)
+            ),
+            conversation_id=None,
+            trigger=trigger,
+            owner_records=True,
+            round_limit=self._round_limit,
+            labels=labels,
+            users_authority=False,
+            given_at=self._now(),
+        )
+
+    def begin_approval(
+        self,
+        *,
+        activation_id: str,
+        trigger: RecordedChannelTrigger | None,
+        context: Sequence[PlaceItem],
+        labels: Sequence[PlanningLabel] = (),
+    ) -> PhaseWorking:
+        """Start the working set of an activation an approval's outcome started (ADR-0361 §6).
+
+        Its place is the approvals, which take no message; the context its input brings,
+        the request as its card shows it, is its place window (§6:2); and its messages go
+        into the places on its place list it names, each by its label (§6:7): the engine
+        attaches :class:`Scheduling` before the first round. Its input carries no
+        authority (§6:1), so no yes is read from it and no call needing the person runs
+        but under its ticket.
+
+        Args:
+            activation_id: The activation.
+            trigger: The activation's recorded trigger, whose parties are empty.
+            context: The context its input brings, as place items.
+            labels: The labels the episode already records.
+
+        Returns:
+            The working set, which the engine holds on the pass.
+        """
+        return PhaseWorking(
+            activation_id=activation_id,
+            place=PlaceWindow(
+                takes_message=False, description=APPROVALS_DESCRIPTION, items=tuple(context)
             ),
             conversation_id=None,
             trigger=trigger,
@@ -4392,7 +4516,7 @@ class PhasePath:
         left = max(given.deadline - asyncio.get_running_loop().time(), 0.0)
         return min(bound, timedelta(seconds=left))
 
-    async def _plan(self, given: PhasePass) -> None:
+    async def _plan(self, given: PhasePass) -> None:  # noqa: PLR0915 — every input the round is given, gathered in one place
         """One planning round, over everything the thin path gives it (ADR-0307 §6).
 
         **The waits on an older activation come first** (ADR-0349 §7:25-§7:28): while
@@ -4460,10 +4584,12 @@ class PhasePath:
         # ADR-0356 §4:3: every capability on every round, in one fixed order; §4:4-§4:6:
         # each whose condition does not hold here comes back refused, saying why.
         offered = await self._offered()
+        tickets = await self._held_tickets(state)
         not_here = self._not_here(
             offered,
             person=person is not None,
-            scheduling=working.scheduling is not None,
+            scheduling=working.scheduling is not None and working.scheduling.spawns,
+            persons=state is not None and activation_person(state.trigger) is not None,
             running=self._running_calls(state, working, offers=bool(offers)),
             standing=state is not None
             and state.standing is not None
@@ -4517,6 +4643,10 @@ class PhasePath:
             meanings=reread.meanings,
             ended=reread.ended,
             person_now=reread.person,
+            # ADR-0349 §7:26: a waiting round runs nothing but a message and the stop, so
+            # a ticket waits, with the rest of its work, for the rounds after the wait.
+            tickets=() if waiting else tickets,
+            approvals=self._approval_calls is not None,
         )
         # The round is recorded inside planning's call, so the recorder reads what it
         # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
@@ -4954,6 +5084,8 @@ class PhasePath:
             names = (*names, *sorted(TASK_SCHEDULER_CAPABILITIES - set(names)))
         if self._matters is not None:
             names = (*names, *sorted(MATTER_CAPABILITIES - set(names)))
+        if self._approval_calls is not None:
+            names = (*names, *sorted(APPROVAL_CAPABILITIES - set(names)))
         declared = await self._tools.offered(
             [name for name in names if name not in _NOT_OFFERED and name != TEXT_CAPABILITY]
         )
@@ -4968,6 +5100,7 @@ class PhasePath:
         running: frozenset[str],
         standing: bool,
         waiting: bool,
+        persons: bool = True,
     ) -> dict[str, str]:
         """Why each capability offered cannot run in this activation, on this round.
 
@@ -4985,6 +5118,9 @@ class PhasePath:
             why |= dict.fromkeys(sorted(PERSON_MODEL_CAPABILITIES & names), _NO_PERSON)
         if not scheduling:
             why |= dict.fromkeys(sorted(TASK_SCHEDULER_CAPABILITIES & names), _NO_SPAWN)
+        if not persons:
+            # ADR-0361 §2:5: any activation that is a person's may ask, whatever caused it.
+            why |= dict.fromkeys(sorted(APPROVAL_CAPABILITIES & names), _NO_ONE_TO_ASK)
         for name in sorted((MATTER_CAPABILITIES & names) - running):
             if not standing:
                 why[name] = _NO_RUNNING_VIEW
@@ -5299,6 +5435,7 @@ class PhasePath:
     async def _authorize(self, given: PhasePass) -> None:
         """Check the latest round's calls by rule, and its message by its place."""
         working = _working(given)
+        state = active_state()
         latest = working.latest
         planned = latest.planned
         calls = [
@@ -5306,6 +5443,7 @@ class PhasePath:
                 call=await self._tools.filled(one.call),
                 deliberate_repeat=one.deliberate_repeat,
                 approved_part=one.approved_part,
+                ticket=one.ticket,
             )
             for one in planned.calls
             if one.call.name != TEXT_CAPABILITY
@@ -5364,6 +5502,9 @@ class PhasePath:
             yes=working.yes(given.understanding),
             places=places,
             gone=gone,
+            person=None if state is None else activation_person(state.trigger),
+            tickets=frozenset(one.request_id for one in await self._held_tickets(state)),
+            taken_places=() if places is not None else _taken_places(state, place),
         )
         try:
             async with asyncio.timeout_at(given.deadline):
@@ -5782,6 +5923,7 @@ class PhasePath:
             caller = self._caller(given, working)
         with (
             spawning(self._spawner(given, working)),
+            asking(self._asker(working, decided)),
             calling(caller),
             self._tools.holding(working.supplied, working.attributions),
         ):
@@ -5845,6 +5987,30 @@ class PhasePath:
                 continue
             key = one.result_id if one.result_id is not None else one.call.call.decision.id
             working.peers[key] = shown
+
+    def _asker(self, working: PhaseWorking, decided: RoundAuthorization) -> ApprovalAsker | None:
+        """Who calls ``request_approval`` in this round, and what each asks (ADR-0361 §2).
+
+        ``None`` where the Approvals channel is not wired or the activation is no
+        person's (§2:5).
+        """
+        if self._approval_calls is None:
+            return None
+        state = active_state()
+        person = None if state is None else activation_person(state.trigger)
+        if person is None:
+            return None
+        return ApprovalAsker(
+            person=person,
+            activation_id=working.activation_id,
+            round_id=decided.round_id,
+            requested={
+                str(one.call.decision.id): one.requested
+                for one in decided.allowed
+                if one.requested is not None
+                and str(one.call.request.tool.capability) == REQUEST_APPROVAL_CAPABILITY
+            },
+        )
 
     @staticmethod
     def _spawner(given: PhasePass, working: PhaseWorking) -> Spawner | None:
@@ -6145,14 +6311,23 @@ class PhasePath:
         """The place the activation's messages go into, and its writer, or ``None``.
 
         For an activation the Task Scheduler started, the place on its list ``place``
-        names, or ``None`` where it names none on the list (ADR-0350 §6:7). Otherwise the
-        working set's own target, as the Telegram line's chat; its conversation, through
-        this path's chat writer; and ``None`` where the place takes no message, an
-        event's (ADR-0307 §3:8).
+        names, or ``None`` where it names none on the list (ADR-0350 §6:7). For any other,
+        a place an input it took by a take came from, where ``place`` names one on its
+        list (ADR-0361 §7:3). Otherwise the working set's own target, as the Telegram
+        line's chat; its conversation, through this path's chat writer; and ``None``
+        where the place takes no message, an event's (ADR-0307 §3:8).
         """
         scheduling = working.scheduling
         if scheduling is not None and scheduling.speaks_by_label:
             return None if place is None else scheduling.targets.get(place)
+        if (
+            place is not None
+            and scheduling is not None
+            and place in _taken_places(active_state(), None)
+            and (taken := scheduling.targets.get(place)) is not None
+        ):
+            # ADR-0361 §7:3: a place an input taken by a take came from, on its list.
+            return taken
         if working.target is not None:
             return working.target
         if working.conversation_id is None:

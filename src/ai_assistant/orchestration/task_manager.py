@@ -238,6 +238,10 @@ class TaskManagerLimits:
     listing_bound: int
 
 
+#: ADR-0361 §7:3: what a place an input taken by a take came from is said to be.
+_TAKEN_FROM: Final = "a conversation an input this activation took came from"
+
+
 class PlaceLists:
     """Build an activation's place list when it is shown (ADR-0350 §5:8, §5:11).
 
@@ -266,14 +270,21 @@ class PlaceLists:
         self._line_connected = line_connected
 
     async def shown(
-        self, *, input_place: ChannelIdentity | None, suggested: Sequence[str] | None
+        self,
+        *,
+        input_place: ChannelIdentity | None,
+        suggested: Sequence[str] | None,
+        taken: Sequence[ChannelIdentity] = (),
     ) -> tuple[ListedPlace, ...]:
         """The place list, as it stands now.
 
         Args:
             input_place: The place the activation's input came from.
             suggested: For an activation the Task Scheduler started, its task's suggested
-                places; ``None`` for every other activation.
+                places, or an approval's, its asking work's (ADR-0361 §6:7); ``None`` for
+                every other activation.
+            taken: The places inputs the activation took by a take came from, each of
+                which is on its list where it is not gone (ADR-0361 §7:3).
 
         Returns:
             The places, the hub chat's before the line's, each once.
@@ -299,6 +310,14 @@ class PlaceLists:
                     places.append(
                         ListedPlace(channel, _HUB_CHAT, place_description(channel), suggested=True)
                     )
+        listed = {one.channel for one in places}
+        for channel in dict.fromkeys(taken):
+            if (
+                channel.channel_type == "conversation"
+                and channel not in listed
+                and await self._held(channel)
+            ):
+                places.append(ListedPlace(channel, _HUB_CHAT, _TAKEN_FROM))
         line = await self._connected_line()
         if line is not None:
             mark = suggested is not None and place_of(line) in suggested

@@ -669,8 +669,8 @@ async def test_an_older_one_reaching_its_first_act_waits_and_the_newer_absorbs_i
     assert await _assistant(harness, second) == [f"done: {newer_text}"]
 
 
-async def test_an_activation_that_has_acted_waits_for_nothing_on_another_place() -> None:
-    """§7:12, §1:5's case: after it commits, only its own place's newer input is waited for."""
+async def test_an_activation_that_has_acted_waits_for_newer_input_on_another_place() -> None:
+    """§7:12, ADR-0361 §7:2: after it commits, newer input on any place is waited for."""
     understanding, planner = _Understanding(), _Planner()
     planner.script(
         "book Riverside",
@@ -694,20 +694,20 @@ async def test_an_activation_that_has_acted_waits_for_nothing_on_another_place()
     await asyncio.wait_for(understanding.hold(weather)[0].wait(), SETTLE)
 
     # The older has acted, and its second round's act comes while the newer input
-    # elsewhere is running and has not been understood.
+    # elsewhere is running and has not been understood: an offer could now come from it.
     planner.hold("book Riverside")[1].set()
-    found = await _frozen(harness, 1)
-
-    assert [processing(one).activation_id for one in found] == [older], (
-        "its second act did not wait on the newer input elsewhere"
+    await asyncio.sleep(0.3)
+    assert await _assistant(harness, first) == ["Looking."], (
+        "its second act waits on the newer input elsewhere"
     )
-    assert await _assistant(harness, first) == ["Looking.", "done: book Riverside"]
     assert any(
         one.state is not None and one.state.activation_id == newer
         for one in harness.engine._running
     ), "the newer one was running, unsettled, the whole time"
     understanding.hold(weather)[1].set()
-    await _frozen(harness, 2)
+    found = await _frozen(harness, 2)
+    assert {processing(one).activation_id for one in found} == {older, newer}
+    assert await _assistant(harness, first) == ["Looking.", "done: book Riverside"]
 
 
 async def test_the_absorbers_planning_is_shown_what_it_took_over_read_from_the_source() -> None:
@@ -748,10 +748,68 @@ async def test_the_absorbers_planning_is_shown_what_it_took_over_read_from_the_s
 # --- §7:17, §7:25-§7:28: work that has acted elsewhere is waited on ---------------------
 
 
-async def test_input_continuing_work_that_acted_elsewhere_waits_on_it_with_no_offer(
+async def test_input_continuing_work_that_acted_elsewhere_is_offered_and_taken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§7:17, §7:25-§7:28, §1:5's case: a waiting round, the moved deadline, the work."""
+    """ADR-0361 §7:1, ADR-0349 §7:17-§7:21: an offer is made from any place, and taken."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "search apartments", "only two bedrooms, continues: apartments"
+    planner.script(
+        older_text,
+        RoundResponse(
+            calls=(
+                text_call("Searching.", call_id="m2"),
+                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+            ),
+        ),
+        # Planned before the offer, so held back (§7:14) and never written.
+        says("Still searching.", call_id="m10"),
+        lambda request: RoundResponse(
+            calls=(_call("c2", "answer_offer", offer=_label_of(request, older_text), take=True),)
+        ),
+        says("Two-bedroom flats: three found.", call_id="m12"),
+        RoundResponse(),
+    )
+    planner.hold(older_text, from_round=2)
+    harness = _harness(understanding, planner)
+    first, older = await _acted_on_one_place(harness, planner, monkeypatch, older_text)
+    second, newer = await _start(harness, newer_text, message_id="b-1")
+
+    async def offered() -> bool:
+        state = next(
+            (
+                one.state
+                for one in harness.engine._running
+                if one.state is not None and one.state.activation_id == older
+            ),
+            None,
+        )
+        return state is not None and bool(state.offers)
+
+    await until(offered, what="the offer from another place")
+    planner.hold(older_text)[1].set()
+    found = await _frozen(harness, 2)
+
+    stopped(_episode(found, newer))
+    assert newer_text not in planner.requests, "while its offer was open it planned no round"
+    record = _of(found, older)
+    assert [one.taken_over_from for one in record.joined] == [newer]
+    assert record.joined[0].channel.instance_id == second
+    assert await _assistant(harness, first) == [
+        "Searching.",
+        "Two-bedroom flats: three found.",
+    ]
+    assert await _assistant(harness, second) == [], "the offering one wrote nothing"
+
+
+async def test_input_continuing_work_it_cannot_be_offered_to_waits_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7:22, §7:25-§7:28, §1:5's case: a waiting round, the moved deadline, the work.
+
+    No offer is made to an older holding as much input as it may (§7:22), so the newer
+    one, on another place, waits on it (ADR-0361 §7:1 lets an offer come from any place).
+    """
     understanding, planner = _Understanding(), _Planner()
     planner.script(
         "search apartments",
@@ -766,6 +824,7 @@ async def test_input_continuing_work_that_acted_elsewhere_waits_on_it_with_no_of
     newer_text = "only two bedrooms, continues: apartments"
     planner.script(newer_text, says("I'll filter to two bedrooms once it ends.", call_id="m10"))
     harness = _harness(understanding, planner)
+    monkeypatch.setattr(harness.engine._matters, "held_input_limit", 1)
     await open_conversation(harness)
     first, _ = await _start(harness, "search apartments", message_id="a-1")
     await until(_has(planner, "search apartments", 2), what="the older to act and plan again")
@@ -1431,6 +1490,9 @@ async def test_a_waiting_round_is_shown_no_approved_action_and_the_round_after_i
         return found
 
     monkeypatch.setattr(phases, "_approved", approved)
+    # ADR-0349 §7:22: no offer is made to an older holding as much input as it may, so
+    # the newer one waits on it, wherever it runs (ADR-0361 §7:1).
+    monkeypatch.setattr(harness.engine._matters, "held_input_limit", 1)
     await open_conversation(harness)
     await _start(harness, "search apartments", message_id="a-1")
     await until(_has(planner, "search apartments", 2), what="the older to act and plan again")

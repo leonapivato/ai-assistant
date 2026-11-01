@@ -54,7 +54,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 
-from ai_assistant.core.channel_validation import TASK_SCHEDULER, establishes_the_user
+from ai_assistant.core.channel_validation import APPROVALS, TASK_SCHEDULER, establishes_the_user
 from ai_assistant.core.errors import MemoryStoreError, PersonModelStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -120,8 +120,9 @@ _PUSHED_BY_A_CONNECTED_SOURCE: Final = frozenset({"informational_event"})
 #: for the person its task is for, and a task is for the person its spawner was (§3:5).
 #: Every activation that is a person's is the owner's (the hub serves one person), so a
 #: task's activation is the owner's; a household's people would need the trigger to name
-#: its task's person (ADR-0350 §14, #691).
-_FOR_ITS_TASKS_PERSON: Final = frozenset({TASK_SCHEDULER})
+#: its task's person (ADR-0350 §14, #691). An approval's activation is for its request's
+#: person (ADR-0361 §6:1), today the owner, by the same reading.
+_FOR_ITS_TASKS_PERSON: Final = frozenset({TASK_SCHEDULER, APPROVALS})
 
 
 def activation_person(trigger: RecordedChannelTrigger | None) -> str | None:

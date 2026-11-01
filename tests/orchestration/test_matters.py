@@ -401,7 +401,7 @@ def test_an_activation_is_settled_once_its_first_version_and_its_decision_are_re
 
 
 async def test_an_act_waits_for_each_newer_one_of_its_standing_and_no_other() -> None:
-    """§7:12-§7:13: before it commits on any place, after only on its own; to the deadline."""
+    """§7:12-§7:13, ADR-0361 §7:2: on any place, before it commits and after; to the deadline."""
     older = _running("a", _IDS[0], order=1)
     elsewhere = _running("b", _IDS[1], order=2)
     matters = _matters([older, elsewhere])
@@ -409,7 +409,7 @@ async def test_an_act_waits_for_each_newer_one_of_its_standing_and_no_other() ->
     assert not await matters.before_act(older, loop.time() + 0.05), "it waited to the deadline"
 
     older.committed = True
-    assert await matters.before_act(older, loop.time() + 0.05), "elsewhere, after it acted"
+    assert not await matters.before_act(older, loop.time() + 0.05), "elsewhere, after it acted"
 
     older.committed = False
     _understood(elsewhere)
@@ -547,16 +547,16 @@ def test_one_that_has_acted_on_this_place_is_offered_this_input() -> None:
     assert newer.waits_on == (_IDS[0],)
 
 
-def test_one_that_has_acted_elsewhere_or_two_that_have_are_waited_on_with_no_offer() -> None:
-    """§7:17-§7:18: across places no offer; and an input continuing two waits on both."""
+def test_one_that_has_acted_elsewhere_is_offered_and_two_that_have_are_waited_on() -> None:
+    """ADR-0361 §7:1: an offer from any place; §7:17: an input continuing two waits on both."""
     there = _running("a", _IDS[0], order=1)
     there.committed = True
     newer = _running("b", _IDS[1], order=2)
     matters = _matters([there, newer])
     decided, _ = matters.merge(newer, _understood(newer, _IDS[0]), at=_AT)
-    assert [one.became for one in decided] == [Became.WAITED_ON]
-    assert there.offers == {}
-    assert newer.waits_on == (_IDS[0],)
+    assert [one.became for one in decided] == [Became.OFFERED]
+    assert list(there.offers) == [_IDS[1]]
+    assert newer.offered_to == _IDS[0]
 
     one = _running("c", _IDS[0], order=1)
     two = _running("c", _IDS[1], order=2)
@@ -965,8 +965,8 @@ async def test_an_act_waits_for_a_newer_one_whose_pass_has_not_set_its_standing(
 
 
 async def test_an_act_waits_for_an_input_a_reader_holds_in_its_start_wait() -> None:
-    """§7:12, §1:5's case: before it commits, one held on any of its person's places;
-    after, only one held on its own place; each until it is let go."""
+    """§7:12, §1:5's case, ADR-0361 §7:2: one held on any of its person's places, before
+    it commits and after; each until it is let go."""
     older = _running("a", _IDS[0], order=1)
     matters = _matters([older])
     loop = asyncio.get_running_loop()
@@ -974,7 +974,9 @@ async def test_an_act_waits_for_an_input_a_reader_holds_in_its_start_wait() -> N
     assert not await matters.before_act(older, loop.time() + 0.05), "it waited to the deadline"
 
     older.committed = True
-    assert await matters.before_act(older, loop.time() + 0.05), "elsewhere, after it acted"
+    assert not await matters.before_act(older, loop.time() + 0.05), "elsewhere, after it acted"
+    elsewhere.release()
+    assert await matters.before_act(older, loop.time() + 0.05), "let go"
     here = matters.hold(_place("a"))
     assert not await matters.before_act(older, loop.time() + 0.05), "its own place, after"
 
@@ -983,7 +985,6 @@ async def test_an_act_waits_for_an_input_a_reader_holds_in_its_start_wait() -> N
     assert not waiting.done()
     here.release()
     assert await asyncio.wait_for(waiting, 1), "let go: nothing was taken in"
-    elsewhere.release()
 
 
 async def test_a_held_input_once_admitted_is_waited_for_until_its_activation_settles() -> None:

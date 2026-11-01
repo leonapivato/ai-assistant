@@ -120,6 +120,8 @@ from ai_assistant.core.types import (
     CapabilityResult,
     EgressBinding,
     Memory,
+    TapOnCard,
+    TicketClaim,
     ToolCall,
     ToolFailure,
     ToolFailureKind,
@@ -202,6 +204,17 @@ _ALREADY_USED: Final = "already used: the yes that approved this call has let it
 _ANOTHER_ACTIVATIONS: Final = (
     "not run: the yes that approved this call was given to another activation"
 )
+#: ADR-0361 §5:3-§5:5: what the claim under a ticket answered, where it wrote nothing.
+_TICKET_CLAIMS: Final = {
+    TicketClaim.NOT_GRANTED: "not run: no ticket was granted for this call",
+    TicketClaim.USED: "not run: the ticket is used, and it runs its call once",
+    TicketClaim.VOID: "not run: the ticket is void",
+    TicketClaim.EXPIRED: "not run: the ticket has expired; running the call takes a new request",
+    TicketClaim.ALREADY_DONE: _ALREADY_DONE,
+}
+#: A ticket's call whose runner claims its own record: the two claims cannot be one step.
+_TICKET_UNCLAIMABLE: Final = "not run: a ticket cannot run this call, whose write claims itself"
+
 _REFUSED: Final = "refused before the call was made"
 _NEEDS_YOU: Final = "needs you: nothing was written, and this needs your yes first"
 
@@ -792,7 +805,7 @@ class ActingStage:
             raise ExceptionGroup(msg, errors)
         return ActedRound(round_id=round_id, calls=tuple(acted))
 
-    async def _act(  # noqa: PLR0911, PLR0913 — each way a call ends before it runs, the two routes it runs by, and the round's facts it runs under
+    async def _act(  # noqa: C901, PLR0911, PLR0913 — each way a call ends before it runs, the two routes it runs by and a ticket's, and the round's facts it runs under
         self,
         activation_id: str,
         round_id: str,
@@ -817,6 +830,11 @@ class ActingStage:
             _log.info("acting_call_not_done", stage="acting", reason="another_activations_yes")
             return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ANOTHER_ACTIVATIONS)
         if effect_id is not None:
+            ticket = (
+                approval.how.request
+                if approval is not None and isinstance(approval.how, TapOnCard)
+                else None
+            )
             record = ActivationEffect(
                 id=effect_id,
                 activation_id=activation_id,
@@ -826,7 +844,21 @@ class ActingStage:
                 decision_id=call.decision.id,
                 claimed_at=self._now(),
                 part=call.decision.approved_part,
+                ticket=ticket,
             )
+            if ticket is not None:
+                # ADR-0361 §5:5: the ticket is spent in the step that claims its call.
+                claimed = await self._ticket_claimed(one, record, match)
+                if claimed is not None:
+                    return claimed
+                if tool.effect is CapabilityEffect.OWN_RECORDS:
+                    work = asyncio.ensure_future(
+                        _handed_back(
+                            self._on_own_records(one, effect_id, round_id, held), hand_back
+                        )
+                    )
+                    return await drain_registered(work, cancel_on_interrupt=False)
+                return await self._through_invoker(one, effect_id, round_id, held)
             claiming = (
                 _claiming(self._own_records, str(tool.capability))
                 if tool.effect is CapabilityEffect.OWN_RECORDS
@@ -866,6 +898,34 @@ class ActingStage:
             )
             return await drain_registered(work, cancel_on_interrupt=False)
         return await self._through_invoker(one, effect_id, round_id, held)
+
+    async def _ticket_claimed(
+        self, one: AuthorizedCall, record: ActivationEffect, match: tuple[str, ...]
+    ) -> ActedCall | None:
+        """Claim a ticket's call, spending the ticket, or say why it is not run (§5:5).
+
+        ``None`` where the claim was written and the call runs.
+        """
+        tool = one.call.request.tool
+        if (
+            tool.effect is CapabilityEffect.OWN_RECORDS
+            and _claiming(self._own_records, str(tool.capability)) is not None
+        ):
+            _log.info("acting_call_not_done", stage="acting", reason="ticket_unclaimable")
+            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_TICKET_UNCLAIMABLE)
+        try:
+            answer = await self._plans.claim_ticket_call(
+                record,
+                match=None if tool.safe_to_repeat else match,
+                deliberate_repeat=one.deliberate_repeat,
+            )
+        except ClaimStopped:
+            _log.info("acting_call_not_done", stage="acting", reason="stopped")
+            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_STOPPED)
+        if answer is TicketClaim.CLAIMED:
+            return None
+        _log.info("acting_call_not_done", stage="acting", reason=f"ticket_{answer.value}")
+        return ActedCall(one, ActedOutcome.NOT_DONE, reason=_TICKET_CLAIMS[answer])
 
     async def _claimed_by_runner(  # noqa: PLR0911 — each answer a claiming runner gives
         self,

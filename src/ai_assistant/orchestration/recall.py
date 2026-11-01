@@ -628,13 +628,15 @@ def _users_own(processing: EpisodeProcessingRecord) -> bool:
     """Whether every input an episode holds is the user's own (ADR-0351 §5:2, §5:7, §8:5).
 
     Its trigger's, by its parties and its latest understanding version's relay mark,
-    and each joined input's, by its parties and its own.
+    and each joined input's, by its parties and its own. A joined input whose parties are
+    empty, an approval's, is left out (ADR-0361 §6:6).
     """
     return parties_are_persons_own(
         processing.trigger.parties, relayed=relayed_by(processing.understanding)
     ) and all(
-        parties_are_persons_own(joined_parties(one), relayed=one.relayed)
+        parties_are_persons_own(parties, relayed=one.relayed)
         for one in processing.joined
+        if (parties := joined_parties(one)) != ()
     )
 
 

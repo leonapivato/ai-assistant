@@ -101,6 +101,7 @@ from ai_assistant.orchestration.episode_reads import is_open_episode, without_op
 from ai_assistant.orchestration.remembering import (
     FACT_ARGUMENT,
     REMEMBER_CAPABILITY,
+    STATEMENT_ARGUMENT,
     Candidate,
     candidate_of,
 )
@@ -114,6 +115,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActivationEffect,
         ActivationUnderstanding,
+        ApprovalRequest,
         EpisodeProcessingRecord,
         FrozenJson,
         OpenQuestion,
@@ -968,6 +970,7 @@ class EpisodeReader:
         answer pointers name whose round is that part's round: the question the input
         answers, which ADR-0346 §2:1 names among what the record points at.
         """
+        hints = await self._ticketed(processing, effects, shown, labels)
         approved = [
             one
             for one in effects
@@ -977,13 +980,12 @@ class EpisodeReader:
             and one.activation_id == processing.activation_id
         ]
         if not approved:
-            return []
+            return hints
         # ADR-0353 §11:2: no version records an answer pointer, so no asker is named.
         askers: list[str] = []
         found = without_open_episodes(
             await self._memory.get_many([episode_address(one) for one in askers])
         )
-        hints: list[Hint] = []
         for effect in approved:
             part = effect.part
             if part is None:  # pragma: no cover - filtered above
@@ -1008,6 +1010,86 @@ class EpisodeReader:
                 )
             )
         return hints
+
+    async def _ticketed(
+        self,
+        processing: EpisodeProcessingRecord,
+        effects: Sequence[ActivationEffect],
+        shown: _Shown,
+        labels: _Labels,
+    ) -> list[Hint]:
+        """The candidates recorded under a ticket in the leaving episode (ADR-0361 §5:10).
+
+        A ``remember`` run under a ticket records its candidate in the work that ran it.
+        Its confirmation points at the approval's own episode, where the yes was given,
+        whichever work ran the ticket, so its place among the person's statements is when
+        they approved; it names the request, whose recorded call holds the statement, and
+        the work that ran the ticket beside. A request whose approval's episode is not
+        held frozen confirms nothing.
+        """
+        ticketed = [
+            one
+            for one in effects
+            if one.capability == REMEMBER_CAPABILITY
+            and one.outcome is ToolOutcome.SUCCEEDED
+            and one.ticket is not None
+            and one.activation_id == processing.activation_id
+        ]
+        if not ticketed:
+            return []
+        requests = {
+            str(one.id): one
+            for one in await self._plans.approval_requests(
+                list(dict.fromkeys(str(one.ticket) for one in ticketed))
+            )
+        }
+        addresses = [
+            episode_address(str(one.pushed_to))
+            for one in requests.values()
+            if one.pushed_to is not None
+        ]
+        held = without_open_episodes(await self._memory.get_many(addresses))
+        hints: list[Hint] = []
+        for effect in ticketed:
+            request = requests.get(str(effect.ticket))
+            answer = None if request is None else request.answer
+            if request is None or answer is None or request.pushed_to is None:
+                continue
+            address = episode_address(str(request.pushed_to))
+            own = held.get(address)
+            fact = _requested_fact(request)
+            if not isinstance(own, EpisodicMemory) or fact is None:
+                continue
+            confirmation = shown.confirmation(
+                ConfirmationPart(
+                    episode=own.id,
+                    asking_activation=request.activation_id,
+                    request=request.id,
+                    ran_in=processing.activation_id,
+                ),
+                episode=own,
+                text=fact,
+                when=answer.at,
+            )
+            hints.append(
+                Hint(
+                    handle=labels("C"),
+                    effect=effect.id,
+                    fact=fact,
+                    rests_on=(confirmation.handle,),
+                    confirmation=confirmation,
+                )
+            )
+        return hints
+
+
+def _requested_fact(request: ApprovalRequest) -> str | None:
+    """The statement a request's recorded call holds (ADR-0361 §5:10, ADR-0328 §4:6)."""
+    for argument in (FACT_ARGUMENT, STATEMENT_ARGUMENT):
+        value = request.call.values.get(argument)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _answers(records: Sequence[EpisodicMemory]) -> dict[str, str]:

@@ -70,7 +70,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
-from ai_assistant.core.channel_validation import TASK_SCHEDULER, establishes_the_user
+from ai_assistant.core.channel_validation import APPROVALS, TASK_SCHEDULER, establishes_the_user
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -264,9 +264,12 @@ def holds_relayed(state: ActivationState) -> bool:
     """Whether any input ``state`` holds is relayed (ADR-0351 §5:11, §5:14, §8:5).
 
     Its trigger's, by its latest understanding version, or a joined input's, by its own
-    record.
+    record. A joined input whose parties are empty, an approval's, is left out (ADR-0361
+    §6:6): it carries no one's words, so no relay mark on it lowers anything.
     """
-    return relayed_by(state.understanding) or any(one.relayed for one in state.joined)
+    return relayed_by(state.understanding) or any(
+        one.relayed and joined_parties(one) != () for one in state.joined
+    )
 
 
 def _covered(state: ActivationState) -> bool:
@@ -282,6 +285,10 @@ def _readings(state: ActivationState) -> tuple[bool, ...]:
     relayed = holds_relayed(state)
     return (relayed,) if relayed or _covered(state) else (False, True)
 
+
+#: The kinds whose activation is for the person its record names, though no author is
+#: established: a scheduled task's (ADR-0350 §6:4) and an approval's (ADR-0361 §6:1).
+_FOR_A_RECORDS_PERSON: Final = frozenset({TASK_SCHEDULER, APPROVALS})
 
 #: The effects a pure read may declare (ADR-0341 §2:1): none, or the assistant's own
 #: records, which a look-up in memory or of a story declares (ADR-0306 §3:1).
@@ -307,13 +314,13 @@ def person_of(state: ActivationState) -> str | None:
     """The person ``state``'s activation is for, where it is one's to share (§5:3).
 
     One whose input's author its place establishes is that person's; one the Task
-    Scheduler started is the person's its task is for, as ADR-0350 records it. Any other
-    is no person's.
+    Scheduler started is the person's its task is for, as ADR-0350 records it; and an
+    approval's is its request's person's (ADR-0361 §6:1). Any other is no person's.
     """
     standing = state.standing
     established = standing is not None and standing.author is not None
     kind = None if state.place is None else state.place.channel_type
-    if not established and kind != TASK_SCHEDULER:
+    if not established and kind not in _FOR_A_RECORDS_PERSON:
         return None
     return activation_person(state.trigger)
 
@@ -934,11 +941,11 @@ class Matters:
     def _newer(self, state: ActivationState) -> list[ActivationState]:
         """What an act of ``state``'s waits for, as it runs now (§7:12).
 
-        Before it has committed, each activation started after it, running for the same
-        person with its standing, on any place; after, each such activation caused by its
-        own place. One admitted on a place whose kind establishes its author, whose pass
-        has not yet set its standing, may be such an activation, so it is waited for until
-        its standing shows it is not (:func:`_waited_out`).
+        Each activation started after it, running for the same person with its standing,
+        on any place, before it has committed and after (ADR-0361 §7:2: an offer can now
+        come from any place). One admitted on a place whose kind establishes its author,
+        whose pass has not yet set its standing, may be such an activation, so it is
+        waited for until its standing shows it is not (:func:`_waited_out`).
         """
         return [
             one
@@ -947,7 +954,6 @@ class Matters:
             and one.order > state.order
             and _running(one)
             and _may_share(one, state)
-            and (not state.committed or one.place == state.place)
         ]
 
     def _older(self, state: ActivationState) -> list[ActivationState]:
@@ -964,8 +970,8 @@ class Matters:
     def _held_newer(self, state: ActivationState) -> list[HeldInput]:
         """What an act of ``state``'s waits for of what the readers hold (§7:12).
 
-        Before it has committed, each input a reader of one of its person's places holds
-        in its start wait; after, each its own place's reader holds. One already admitted
+        Each input a reader of one of its person's places holds in its start wait, before
+        it has committed and after (ADR-0361 §7:2). One already admitted
         as a running activation is that activation's, which :meth:`_newer` reads, and
         ``state``'s own input is never among them.
         """
@@ -984,7 +990,6 @@ class Matters:
             and one.activation_id != state.activation_id
             and one.activation_id not in running
             and _held_person(one.place) == person
-            and (not state.committed or one.place == state.place)
         ]
 
     def _held_out(self, held: HeldInput, seen: int, state: ActivationState) -> bool:
@@ -1071,7 +1076,8 @@ class Matters:
         followed forward; those reached that started before this one, run with their
         stop mark unset, are the same person's of this standing and have not committed
         are absorbed, all or none under ``held_input_limit``; one reached that has acted,
-        on this place, is offered this activation's input, and any other is waited on.
+        on any place (ADR-0361 §7:1), is offered this activation's input, and any other is
+        waited on.
 
         Returns:
             The decision for the version, each activation named with what became of it,
@@ -1097,17 +1103,22 @@ class Matters:
             )
             decisions.append(decision)
             other = self.state_of(reached)
+            # ADR-0361 §6:3-§6:4: an approval's input is meant for its asking work by
+            # code's link, and carries no words and no authority, so §7:5's third
+            # condition is not read for it; the asking work has acted, since its request
+            # was a write, so it is offered the input and never absorbed.
+            linked = state.meant_for is not None and str(named) == state.meant_for
             if (
                 other is None
                 or other is state
                 or reached in seen
                 or other.order >= state.order
                 or not _running(other)
-                or not _same_matter(other, state)
+                or not (linked or _same_matter(other, state))
             ):
                 continue
             seen.add(reached)
-            (acted if other.committed else absorb).append((decision, other))
+            (acted if other.committed or linked else absorb).append((decision, other))
         absorbed = self._absorbing(state, absorb, at=at)
         if not absorbed:
             for decision, _ in absorb:
@@ -1210,8 +1221,7 @@ class Matters:
             older_id = str(older.activation_id)
             if (
                 offering
-                and older.place is not None
-                and older.place == state.place
+                # ADR-0361 §7:1: from any place, within one person.
                 and older.inputs_held + older.offers_untaken < self.held_input_limit
             ):
                 inputs = held_inputs(state, at=at)

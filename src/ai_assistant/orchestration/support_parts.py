@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         ActivationEffect,
+        ApprovalRequest,
         EpisodeProcessingRecord,
         FrozenJson,
         ProposedCall,
@@ -66,6 +67,7 @@ __all__ = [
     "episodes_to_read",
     "part_content",
     "remember_activations",
+    "requests_to_read",
 ]
 
 
@@ -103,6 +105,27 @@ def episodes_to_read(memories: Iterable[Memory]) -> tuple[str, ...]:
     return tuple(wanted)
 
 
+def requests_to_read(memories: Iterable[Memory]) -> tuple[str, ...]:
+    """The approval requests resolving ``memories``' confirmations needs, once each.
+
+    A confirmation of the request form names the request a tap approved, whose recorded
+    call holds its statement (ADR-0361 §5:10): it is read from the plan store.
+
+    Args:
+        memories: The memories whose supports are being resolved.
+
+    Returns:
+        The request ids to read in one batch.
+    """
+    wanted: dict[str, None] = {}
+    for memory in memories:
+        for support in memory.supports:
+            part = support.points_at
+            if isinstance(part, ConfirmationPart) and part.request is not None:
+                wanted[str(part.request)] = None
+    return tuple(wanted)
+
+
 def remember_activations(
     memories: Iterable[Memory], episodes: Mapping[str, EpisodicMemory]
 ) -> tuple[str, ...]:
@@ -137,6 +160,7 @@ def part_content(  # noqa: C901, PLR0911, PLR0912 — one arm per part the part 
     episodes: Mapping[str, EpisodicMemory],
     effects: Mapping[str, ActivationEffect],
     carried: Mapping[str, object] | None,
+    requests: Mapping[str, ApprovalRequest] | None = None,
 ) -> str | None:
     """The readable content ``part`` points at, or ``None`` where it does not resolve.
 
@@ -145,6 +169,8 @@ def part_content(  # noqa: C901, PLR0911, PLR0912 — one arm per part the part 
         episodes: The episodes read for the page, by id.
         effects: The effect records read for the page's remember calls, by id.
         carried: A legacy support's carried record, as stored (§16:4).
+        requests: The approval requests read for the page's confirmations of the request
+            form, by id (:func:`requests_to_read`); one not given is gone.
 
     Returns:
         The part's content, or ``None`` for gone.
@@ -163,8 +189,14 @@ def part_content(  # noqa: C901, PLR0911, PLR0912 — one arm per part the part 
         case EvidenceItemPart():
             return _evidence(_processing(episodes.get(part.episode)), part.digest, part.item)
         case ConfirmationPart():
-            if episodes.get(part.episode) is None or part.question is None:
-                # ADR-0361 §5:10: a request's form resolves to gone until AP2's read.
+            if episodes.get(part.episode) is None:
+                return None
+            if part.request is not None:
+                # ADR-0361 §5:10: the approval's own episode, and the statement the
+                # request's recorded call holds.
+                held = None if requests is None else requests.get(str(part.request))
+                return None if held is None else _requested(held)
+            if part.question is None:  # pragma: no cover - one form is always set
                 return None
             asking = episodes.get(episode_address(part.asking_activation))
             return _approved(_processing(asking), part.question.round, part.question.part)
@@ -256,6 +288,20 @@ def _approved(processing: EpisodeProcessingRecord | None, round_id: str, part: i
         if isinstance(statement, str) and statement:
             return statement
     return round_.text or None
+
+
+def _requested(request: ApprovalRequest) -> str | None:
+    """The statement an approved request's recorded call holds (ADR-0361 §5:10).
+
+    The wording the person approved on the card, as ADR-0328 §4:6 compares it: a
+    remember's statement, or a candidate's fact.
+    """
+    values = request.call.values
+    for argument in (STATEMENT_ARGUMENT, FACT_ARGUMENT):
+        statement = values.get(argument)
+        if isinstance(statement, str) and statement:
+            return statement
+    return None
 
 
 #: The arguments a proposed remember call carries that never reach acting's digest: the

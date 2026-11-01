@@ -85,6 +85,7 @@ from ai_assistant.orchestration import (
     UpcomingEventStage,
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
+from ai_assistant.orchestration.approval_calls import ApprovalsSeams
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
@@ -338,6 +339,11 @@ STORY_TIDY_UP_DECISIONS: Final = STORY_TIDY_UP_OTHER_STORIES
 #: completion on consolidation's route; a run's time is bounded by
 #: ``scheduler_run_budget``, and it runs at ``consolidation_interval``.
 SCHEDULED_TIDY_UP_THRESHOLD: Final = 5
+
+#: ADR-0361 §3:5: how long an approval request waits on its person before it ends
+#: expired, its ticket expiring with it: **24 hours**, a constant of the composition
+#: root and not a setting, handed to the engine's Approvals channel.
+APPROVAL_EXPIRY: Final = timedelta(hours=24)
 SCHEDULED_TIDY_UP_QUIET: Final = timedelta(hours=24)
 SCHEDULED_TIDY_UP_PER_RUN: Final = 10
 
@@ -2121,6 +2127,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 push_limit=settings.task_scheduler_push_limit,
                 zone=settings.timezone,
                 persons=(OWNER_PERSON_ID,),
+            ),
+            # ADR-0361 §3:4-§3:5: the Approvals channel, on every deployment: its sensor
+            # starts with the hub and stops with it, rechecking as the Task Scheduler's
+            # does, and a request expires 24 hours after it is written. The line's card
+            # is AP3's (§9:3): until its poster is wired, no card is posted and a request
+            # waits on the hub page's panel alone.
+            approvals=ApprovalsSeams(
+                expiry=APPROVAL_EXPIRY,
+                recheck=settings.task_scheduler_recheck_interval,
             ),
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
