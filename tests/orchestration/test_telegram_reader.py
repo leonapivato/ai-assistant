@@ -1353,6 +1353,28 @@ async def test_a_tap_from_anyone_else_changes_nothing(
     assert (await line.intake.recorded([10])) == {}
 
 
+async def test_a_tap_from_the_owner_on_no_known_card_is_confirmed_and_not_answered() -> None:
+    """ADR-0362 §4:4: an answer goes ahead only where the token resolves to a request, so
+    the owner's tap on a token no card carries changes nothing, is answered nothing and
+    recorded nowhere, and is confirmed as an update that is no input (ADR-0323 §5:6)."""
+    plans = FakePlanStore(now=lambda: AT)
+    line = _Line(plans=plans)
+    request = await _card_on_the_line(line, plans)
+    (card,) = request.cards
+    line.fake.tap(10, message_id=card.position or 0, data="no-such-token:y")
+    line.start()
+
+    await line.until(
+        lambda: any(one.get("offset") == 11 for one in line.polls()), what="it was confirmed"
+    )
+    await line.stop()
+
+    (held,) = await plans.approval_requests(["approval:1"])
+    assert held.state is ApprovalRequestState.PENDING
+    assert line.fake.answered == ()
+    assert (await line.intake.recorded([10])) == {}
+
+
 async def test_the_lines_window_shows_a_card_as_its_asking_activations_message() -> None:
     """ADR-0361 §4:3, ADR-0323 §10: a card posted, then the next activation's window.
 
