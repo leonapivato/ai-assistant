@@ -8994,7 +8994,10 @@ async def approval_panel(
         PlanningError: If the plan store cannot be read.
     """
     held = await plans.person_approval_requests(person, tuple(ApprovalRequestState))
-    waiting = [one for one in held if card_state(one, now=now) == "pending"][:limit]
+    waiting = sorted(
+        (one for one in held if card_state(one, now=now) == "pending"),
+        key=lambda one: one.written_at,
+    )[:limit]
     ended = sorted(
         (one for one in held if card_state(one, now=now) != "pending"),
         key=_ended_at,

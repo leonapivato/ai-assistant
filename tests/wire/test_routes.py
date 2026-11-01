@@ -119,6 +119,19 @@ def test_the_person_model_members_are_the_surfaces_own() -> None:
     assert _PERSON_MODEL_MEMBERS <= METHODS
 
 
+@pytest.mark.parametrize("method", ["approvals", "tap_approval"])
+def test_the_approvals_panels_members_are_commands_for_an_admitted_device(method: str) -> None:
+    """ADR-0361 §4:8: a tap from the hub page is carried out only from a device admitted
+    under ADR-0124, whose command role is the owner's; one without it is refused before
+    dispatch, and the panel's read with it."""
+    assert method in METHODS
+    assert route_of(method) is Route.COMMAND
+    with pytest.raises(DeviceRefusedError) as refused:
+        check_request(method, {}, device=_NOBODY, acting_for=None, knows=_everything_known)
+    assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
+    check_request(method, {}, device=_COMMANDER, acting_for=None, knows=_everything_known)
+
+
 @pytest.mark.parametrize(
     "arguments", [_CONVERSATION_INPUT, _NEW_CONVERSATION_INPUT], ids=["channel", "new"]
 )
