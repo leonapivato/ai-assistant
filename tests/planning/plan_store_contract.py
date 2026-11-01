@@ -3443,6 +3443,48 @@ class PlanStoreContract:
             "ask-q1"
         ]
 
+    async def test_the_duplicate_check_tells_apart_what_the_digest_tells_apart(
+        self, store: PlanStore
+    ) -> None:
+        """§2:8: same values means the same canonical JSON, so ``true`` is not ``1``.
+
+        Nested too: two calls whose values a parameters digest separates are two calls,
+        each written.
+        """
+        tool = _stay_tool().model_copy(update={"parameters_schema": {"type": "object"}})
+        for request_id, values in (
+            ("q-true", {"hotel": True}),
+            ("q-one", {"hotel": 1}),
+            ("q-nested-true", {"hotel": {"late": True}}),
+            ("q-nested-one", {"hotel": {"late": 1}}),
+        ):
+            request = _request(request_id).model_copy(
+                update={"call": RequestedCall(tool=tool, values=values)}
+            )
+            await _asked(store, request)
+
+        assert len((await store.export()).approval_requests) == 4
+
+    async def test_a_rejected_request_says_nothing_of_its_call_arguments(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0145 §8: the store's refusal renders no argument key or value.
+
+        A request whose call was changed past its frozen guard is revalidated and
+        refused, and nothing of what it carried reaches the message or its chain.
+        """
+        request = _request("q1")
+        object.__setattr__(request.call, "values", {"PRIVATE_KEY": float("nan")})
+
+        with pytest.raises(PlanningError) as refused:
+            await store.write_approval_request(request, _asking(request), match=None)
+
+        chain: BaseException | None = refused.value
+        while chain is not None:
+            assert "PRIVATE_KEY" not in str(chain)
+            chain = chain.__cause__ or chain.__context__
+        assert (await store.export()).approval_requests == ()
+
     async def test_the_duplicate_check_reads_only_a_waiting_request_for_the_same_person(
         self, store: PlanStore
     ) -> None:
@@ -3723,6 +3765,27 @@ class PlanStoreContract:
         assert (await store.due_approval_outcomes(_TAP_AT)).outcomes == ()
         (pushed,) = await store.pushed_approval_outcomes()
         assert (pushed.id, pushed.pushed_to) == ("q1", "act-approval")
+
+    async def test_an_expiry_is_an_outcome_pushed_as_a_yes_or_a_deny_is(
+        self, store: PlanStore
+    ) -> None:
+        """§3:7: a request that ended expired starts its activation too.
+
+        It is due once expired, leaves the due outcomes once marked pushed, and is then
+        found among the outcomes pushed.
+        """
+        await _asked(store, _request("q1"))
+        await store.expire_approval_request("q1", _EXPIRY)
+
+        due = await store.due_approval_outcomes(_EXPIRY)
+        pushed = await store.mark_approval_outcome_pushed("q1", "act-expiry")
+
+        assert [one.id for one in due.outcomes] == ["q1"]
+        assert due.expiring == ()
+        assert pushed is ApprovalOutcomePush.PUSHED
+        assert (await store.due_approval_outcomes(_EXPIRY)).outcomes == ()
+        (found,) = await store.pushed_approval_outcomes()
+        assert (found.state, found.pushed_to) == (ApprovalRequestState.EXPIRED, "act-expiry")
 
     async def test_one_activation_is_pushed_one_outcome(self, store: PlanStore) -> None:
         """§3:4, §3:7: an activation id names one approval's input."""

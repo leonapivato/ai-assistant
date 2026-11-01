@@ -424,3 +424,27 @@ def test_the_approvals_input_carries_no_ones_words_and_establishes_no_one() -> N
     assert not establishes_the_user(APPROVALS)
     with pytest.raises(ValueError, match="mark"):
         declared_input(_APPROVALS, carries_outside_mark=True)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param({"PRIVATE_KEY": float("nan")}, id="a-value-no-json-holds"),
+        pytest.param({"hotel": "PRIVATE_VALUE\ud800"}, id="text-with-no-encoding"),
+        pytest.param({"PRIVATE_KEY": "PRIVATE_VALUE"}, id="values-the-schema-refuses"),
+    ],
+)
+def test_a_refused_request_renders_none_of_its_arguments(values: dict[str, object]) -> None:
+    """ADR-0145 §8: no error of the request, or of what holds it, names a key or a value."""
+    for build in (
+        lambda: _request(call={"tool": _tool(), "values": values}),
+        lambda: PlanExport(
+            exported_at=_AT,
+            approval_requests=(
+                {**_request().model_dump(), "call": {"tool": _tool(), "values": values}},
+            ),  # type: ignore[arg-type]  # a document as a reader hands it in
+        ),
+    ):
+        with pytest.raises(ValidationError) as refused:
+            build()
+        assert "PRIVATE" not in str(refused.value)
