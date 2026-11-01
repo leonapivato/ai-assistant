@@ -438,6 +438,16 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "PersonModelWrite",
         "PersonModelWriteKind",
         "PersonModelRefusal",
+        # ADR-0361 §8:4's two approvals-panel members, and the types they carry: the
+        # panel's read, each request as its card shows it with its state, and what the
+        # panel's tap did, with the choice it makes. The request itself crosses no frame:
+        # the entry carries its card's text, so the walk reaches none of the store's types.
+        "ApprovalPanel",
+        "ApprovalPanelEntry",
+        "ApprovalCardState",
+        "ApprovalChoice",
+        "ApprovalPanelTap",
+        "ApprovalPanelTapAnswer",
     }
 )
 
@@ -899,8 +909,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     ``profile_changes``, ``set_profile_field``, ``pin_memory``, ``unpin_memory``,
     ``remove_style_mark``, ``accept_person_suggestion`` and
     ``dismiss_person_suggestion`` — so the count rises to sixty-nine.
+
+    **ADR-0361 §8:4 adds two**, the hub page's approvals panel's query, ``approvals``,
+    and its tap command, ``tap_approval`` — so the count rises to seventy-one. ADR-0177
+    §1:1's enumeration gains both by ADR-0361 §11's record.
     """
-    assert len(_method_names()) == 69
+    assert len(_method_names()) == 71
     assert "converse_spoken" not in _method_names()
     for retired in (
         "converse",
@@ -1907,6 +1921,11 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     fields as extra (ADR-0124 §9:2). **The method set does not move and stays at 69**:
     ``PlanStore`` gains members, and no engine method.
 
+    **126 is ADR-0361 §8:7, on the method set.** ``AssistantEngine`` gains ``approvals``
+    and ``tap_approval``, the hub page's approvals panel's query and tap (§8:4), so **the
+    method set moves to 71**; the types they carry are new, and no type a frame already
+    carried changes.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1915,7 +1934,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (69, 125), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (71, 126), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

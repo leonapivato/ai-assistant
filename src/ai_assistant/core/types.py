@@ -25063,3 +25063,211 @@ def profile_value(value: object) -> str | None:
             pass
     msg = "value must be text with a UTF-8 encoding, or None to clear the field"
     raise ValueError(msg)
+
+
+# --- the hub page's approvals panel (ADR-0361 §4:6-§4:9, §8:4) ---------------------
+#
+# ``AssistantEngine.approvals`` reads the person's requests as the panel shows them, and
+# ``AssistantEngine.tap_approval`` is the panel's tap. Declared here, after the person
+# model's views, because they are views of the same kind: what a page shows and what its
+# control did, built by the engine from the store's records. The request itself never
+# crosses: the panel shows each one as its card shows it (§4:6), by the one renderer
+# every surface shows a request by (§2:11), so the view carries that text, where the
+# request stands, and when it was written, expires and was answered.
+
+
+class ApprovalCardState(StrEnum):
+    """Where a request stands, as its card and the panel show it (ADR-0361 §2:11, §4:5).
+
+    Closed, **added to and never renamed**. ``pending`` while a tap can still answer it;
+    ``approved`` once a yes granted its ticket and it is still held, ``used`` once the
+    ticket ran and ``not_used`` once it went void (§5:7); ``denied``; and ``expired``,
+    which a request still pending at or after its expiry already shows, since no tap
+    can approve it now (§3:5), whether or not the sensor has ended it.
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    USED = "used"
+    NOT_USED = "not_used"
+    DENIED = "denied"
+    EXPIRED = "expired"
+
+
+#: The card states a tap answered: a yes, in each of the ticket's three states, or a no.
+_TAPPED_CARD_STATES: Final[frozenset[ApprovalCardState]] = frozenset(
+    {
+        ApprovalCardState.APPROVED,
+        ApprovalCardState.USED,
+        ApprovalCardState.NOT_USED,
+        ApprovalCardState.DENIED,
+    }
+)
+
+
+class ApprovalPanelEntry(BaseModel):
+    """One request, as the hub page's approvals panel shows it (ADR-0361 §4:6).
+
+    ``text`` is the request as its card shows it, by the one renderer (§2:11): the exact
+    line for the call, ``why``, where the asking work came from, the outside-content
+    line where it applies, when it expires and its state. It is the whole card however
+    long, so a request too long for one Telegram message is read and answered here
+    (§4:4). ``state`` is where it stands, ``request_id`` the id the panel's tap names,
+    and ``answered_by`` and ``answered_at`` the tap that answered it, where one did
+    (§4:9).
+
+    Its call holds the person's Tier 1 arguments, which the text shows, so no
+    validation error of it renders its input (ADR-0145 §8).
+
+    Raises:
+        ValueError: If it expires no later than it was written, or a tap's answer is
+            given exactly where its state is not a tap's, or by a giver that is no
+            tap's.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    request_id: Identifier
+    text: NonBlankEncodableText
+    state: ApprovalCardState
+    written_at: UtcInstant
+    expires_at: UtcInstant
+    answered_by: ApprovalGiver | None = None
+    answered_at: UtcInstant | None = None
+
+    @model_validator(mode="after")
+    def _answered_where_tapped(self) -> Self:
+        if self.expires_at <= self.written_at:
+            msg = "a request expires after it was written (ADR-0361 §3:5)"
+            raise ValueError(msg)
+        if (self.answered_by is None) != (self.answered_at is None):
+            msg = "a panel entry names who answered it and when together"
+            raise ValueError(msg)
+        if (self.answered_by is not None) != (self.state in _TAPPED_CARD_STATES):
+            msg = "a panel entry carries its tap exactly where a tap answered it (§4:9)"
+            raise ValueError(msg)
+        if self.answered_by is not None and self.answered_by not in TAP_GIVERS:
+            msg = "a request is answered by a tap on one of its surfaces (ADR-0361 §4:9)"
+            raise ValueError(msg)
+        return self
+
+
+class ApprovalPanel(BaseModel):
+    """The person's requests, as ``AssistantEngine.approvals`` reads them (ADR-0361 §4:6).
+
+    ``pending`` are the requests a tap can still answer, the oldest first, since it
+    expires first; ``recent`` the ones answered or expired most recently, the most
+    recent first, each with its state. Each list holds at most the read's ``limit``.
+
+    Raises:
+        ValueError: If a pending entry is not pending, a recent one is, or a request is
+            shown twice.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    pending: tuple[ApprovalPanelEntry, ...] = ()
+    recent: tuple[ApprovalPanelEntry, ...] = ()
+
+    @model_validator(mode="after")
+    def _each_in_its_list(self) -> Self:
+        if any(one.state is not ApprovalCardState.PENDING for one in self.pending):
+            msg = "the panel's pending requests are each still pending"
+            raise ValueError(msg)
+        if any(one.state is ApprovalCardState.PENDING for one in self.recent):
+            msg = "the panel's recent requests are each answered or expired"
+            raise ValueError(msg)
+        shown = [one.request_id for one in (*self.pending, *self.recent)]
+        if len(shown) != len(set(shown)):
+            msg = "the panel shows each request once"
+            raise ValueError(msg)
+        return self
+
+
+class ApprovalChoice(StrEnum):
+    """What a tap on the panel says: Approve or Deny (ADR-0361 §4:6, §4:9).
+
+    Closed, **added to and never renamed**.
+    """
+
+    APPROVE = "approve"
+    DENY = "deny"
+
+
+def approval_choice(value: object) -> ApprovalChoice:
+    """A panel tap's ``choice`` argument, refused locally before any I/O (ADR-0085 §9).
+
+    Refused by every implementation of ``AssistantEngine.tap_approval``, the wire
+    client included.
+
+    Args:
+        value: The argument as the caller passed it: an :class:`ApprovalChoice`, or
+            its value.
+
+    Returns:
+        The choice.
+
+    Raises:
+        ValueError: If it is neither Approve nor Deny.
+    """
+    if isinstance(value, ApprovalChoice):
+        return value
+    if isinstance(value, str):
+        try:
+            return ApprovalChoice(value)
+        except ValueError:
+            pass
+    msg = "choice must be approve or deny (ADR-0361 §4:6)"
+    raise ValueError(msg)
+
+
+class ApprovalPanelTapAnswer(StrEnum):
+    """What a tap on the panel came to (ADR-0361 §4:8-§4:9).
+
+    Closed, **added to and never renamed**. Only ``answered`` changed anything.
+    """
+
+    ANSWERED = "answered"
+    """This tap landed first: the request is approved or denied by it."""
+    ALREADY_ANSWERED = "already_answered"
+    """Another tap landed first, on the panel or the card, so this one changed nothing,
+    and is answered with the request's state (§4:9)."""
+    EXPIRED = "expired"
+    """The request expired before the tap landed, so it changed nothing (§3:5)."""
+    UNKNOWN = "unknown"
+    """No request of the person's is held by that id, so the tap changed nothing: one
+    from anyone but the request's person changes nothing (§4:8)."""
+
+
+class ApprovalPanelTap(BaseModel):
+    """What a tap on the panel did, and the request as it now stands (ADR-0361 §4:9).
+
+    ``entry`` is the request as the panel now shows it, its state the one the first tap
+    to land gave it; ``None`` exactly where the answer is ``unknown``, which shows
+    nothing of a request that is not the person's.
+
+    Raises:
+        ValueError: If the entry is missing on a known request, given on an unknown
+            one, or disagrees with the answer.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    answer: ApprovalPanelTapAnswer
+    entry: ApprovalPanelEntry | None = None
+
+    @model_validator(mode="after")
+    def _shows_the_request(self) -> Self:
+        if (self.entry is None) != (self.answer is ApprovalPanelTapAnswer.UNKNOWN):
+            msg = "a tap's answer shows its request exactly where the request is known"
+            raise ValueError(msg)
+        if self.entry is None:
+            return self
+        if self.answer is ApprovalPanelTapAnswer.EXPIRED and (
+            self.entry.state is not ApprovalCardState.EXPIRED
+        ):
+            msg = "a tap answered as expired shows its request expired"
+            raise ValueError(msg)
+        if self.answer is not ApprovalPanelTapAnswer.EXPIRED and (
+            self.entry.state not in _TAPPED_CARD_STATES
+        ):
+            msg = "a tap answered as landed or already answered shows its request answered"
+            raise ValueError(msg)
+        return self

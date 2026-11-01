@@ -85,10 +85,21 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    OWNER_PERSON_ID,
     ActivationEnding,
     ActivationRecall,
     ActivationStop,
+    ApprovalCardState,
+    ApprovalChoice,
+    ApprovalGiver,
     ApprovalOutcomePush,
+    ApprovalPanel,
+    ApprovalPanelEntry,
+    ApprovalPanelTap,
+    ApprovalPanelTapAnswer,
+    ApprovalRequestState,
+    ApprovalStepAnswer,
+    ApprovalTap,
     AskedCall,
     Belief,
     BeliefSummary,
@@ -138,6 +149,7 @@ from ai_assistant.core.types import (
     SupportPart,
     TextChannelPayload,
     WholeTextReply,
+    approval_choice,
     belief_summary,
     belief_view,
     chat_conversation_ids,
@@ -170,9 +182,16 @@ from ai_assistant.orchestration.activation_state import (
     terminal_status,
 )
 from ai_assistant.orchestration.activation_writer import capture_loss
-from ai_assistant.orchestration.approval_calls import ApprovalCalls, ApprovalsSeams
+from ai_assistant.orchestration.approval_calls import (
+    ApprovalCalls,
+    ApprovalsSeams,
+    CardFacts,
+    card_state,
+    card_text,
+)
 from ai_assistant.orchestration.approval_sensor import ApprovalsSensor
 from ai_assistant.orchestration.approvals import (
+    REQUEST_APPROVAL_CAPABILITY,
     THE_APPROVALS,
     Ticket,
     approval_input,
@@ -349,6 +368,8 @@ if TYPE_CHECKING:
         PersonModelView,
         ProfileChange,
         ProfileField,
+        RecordedCall,
+        RecordedChannelTrigger,
         RecordedInvocation,
         RequestingDevice,
         RulePush,
@@ -6886,6 +6907,90 @@ class Engine:
         if self._approvals_sensor is not None:
             self._approvals_sensor.wake()
 
+    # --- the hub page's approvals panel (ADR-0361 §4:6-§4:9, §8:4) ---
+
+    async def approvals(self, *, limit: int = DEFAULT_PAGE_SIZE) -> ApprovalPanel:
+        """The person's requests, as the hub page's approvals panel shows them (§4:6).
+
+        Read from the plan store whether or not the Approvals channel is wired: a hub
+        with none wired holds no request, and shows none. The person is the owner, whom
+        every device admitted under ADR-0124 carries (§4:8, ADR-0124 §5).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``limit`` is out of range.
+            TypeError: If ``limit`` is not an integer.
+            PlanningError: If the plan store cannot be read.
+        """
+        self._reject_if_closing()
+        page_argument(limit, name="limit")
+        check_arguments("approvals", max_bytes=self._max_payload_bytes, limit=limit)
+        return await self._tracked(
+            approval_panel(
+                self._plans,
+                self._approval_facts,
+                person=OWNER_PERSON_ID,
+                now=self._now(),
+                limit=limit,
+            ),
+            "approvals",
+            checked=True,
+        )
+
+    async def tap_approval(
+        self, request_id: Identifier, /, *, choice: ApprovalChoice
+    ) -> ApprovalPanelTap:
+        """The panel's tap: mark the request, then wake the sensor (ADR-0361 §4:7-§4:9).
+
+        A command, never perceived: nothing here admits an activation. The sensor, woken
+        once the store step has landed, pushes the outcome (§3:4), and the line's reader
+        edits the card (§4:5).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``request_id`` is not an identifier, or ``choice`` is neither
+                Approve nor Deny.
+            PlanningError: If the plan store cannot be read or written.
+        """
+        self._reject_if_closing()
+        named = identifier(request_id, name="request_id")
+        chosen = approval_choice(choice)
+        check_arguments(
+            "tap_approval", max_bytes=self._max_payload_bytes, request_id=named, choice=chosen
+        )
+        return await self._tracked(self._tap_approval(named, chosen), "tap_approval", checked=True)
+
+    async def _tap_approval(self, request_id: str, choice: ApprovalChoice) -> ApprovalPanelTap:
+        tapped, landed = await tap_on_approval_panel(
+            self._plans,
+            self._approval_facts,
+            request_id,
+            choice,
+            person=OWNER_PERSON_ID,
+            now=self._now(),
+        )
+        if landed:
+            self.approvals_changed()
+        return tapped
+
+    async def _approval_facts(self, requests: Sequence[ApprovalRequest]) -> dict[str, CardFacts]:
+        """What each request's card shows beside it, read from the activation that asked.
+
+        From the running activation where this engine still runs it, and otherwise from
+        its frozen episode (:func:`episode_card_facts`).
+        """
+        facts: dict[str, CardFacts] = {}
+        unread: list[ApprovalRequest] = []
+        for one in requests:
+            state = self._running_state(str(one.activation_id))
+            if state is None:
+                unread.append(one)
+            else:
+                facts[str(one.id)] = approval_card_facts(one, state.trigger, state.call_records)
+        if unread:
+            facts.update(await episode_card_facts(self._memory, unread))
+        return facts
+
     def _approval_live(self, activation_id: str) -> bool:
         """Whether an approval's activation is being pushed, or runs here."""
         return activation_id in self._approval_pushing or (
@@ -8744,7 +8849,227 @@ class Engine:
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
 
 
+# --- the hub page's approvals panel, read once for the engine and the fake ------------
+#
+# ADR-0361 §4:6: the panel shows each request as its card shows it, by the one renderer
+# every surface shows a request by (§2:11, ``approval_calls.card_text``), handed what the
+# request does not record: where the asking work came from, and whether it had read
+# outside content. The engine and the canonical fake both answer through these, so the
+# suite compares two implementations of the surface rather than two readings of a card.
+
+#: Reads what each request's card shows beside it, by the request's id.
+type CardFactsReader = Callable[[Sequence[ApprovalRequest]], Awaitable[Mapping[str, CardFacts]]]
+
+#: What a card shows where the asking activation cannot be read: where it was asked is
+#: not recorded, and the outside-content line is shown, the cautious reading.
+_UNREAD_FACTS: Final = CardFacts(origin=None, read_outside=True)
+
+
+def approval_card_facts(
+    request: ApprovalRequest,
+    trigger: RecordedChannelTrigger | None,
+    calls: Sequence[RecordedCall],
+) -> CardFacts:
+    """What a request's card shows beside it, from the activation that asked (§2:11).
+
+    Where its input came from, by its trigger's channel; and whether it had read outside
+    content, by whether its ``request_approval`` entries in the request's round rest on
+    outside content (ADR-0356 §8:7). A round holding no such entry, as one not yet
+    recorded, shows the outside line: the cautious reading, as the line's card reads an
+    episode after a start.
+
+    Args:
+        request: The request.
+        trigger: The asking activation's recorded trigger, or ``None`` where it cannot
+            be read.
+        calls: The calls its rounds recorded.
+
+    Returns:
+        The facts.
+    """
+    if trigger is None:
+        return _UNREAD_FACTS
+    target = trigger.channel or trigger.target
+    entries = [
+        one
+        for one in calls
+        if one.round == request.round and one.capability == REQUEST_APPROVAL_CAPABILITY
+    ]
+    return CardFacts(
+        origin=target if isinstance(target, ChannelIdentity) else None,
+        read_outside=not entries or any(one.marked for one in entries),
+    )
+
+
+async def episode_card_facts(
+    memory: MemoryStore, requests: Sequence[ApprovalRequest]
+) -> dict[str, CardFacts]:
+    """What each request's card shows beside it, from the asking activation's episode.
+
+    One batch read. An episode that cannot be read, is not held, or holds no processing
+    record shows :data:`_UNREAD_FACTS`, so a store that fails still lets the panel show
+    and answer the request, whose call and ``why`` are the request's own.
+
+    Args:
+        memory: The memory store the episodes are held in.
+        requests: The requests.
+
+    Returns:
+        The facts, by request id.
+    """
+    addresses = {str(one.id): f"activation:{one.activation_id}" for one in requests}
+    try:
+        records = await memory.get_many(list(dict.fromkeys(addresses.values())))
+    except MemoryStoreError:
+        _log.warning("approval_facts_unread", stage="approvals", reason="store_failed")
+        records = {}
+    facts: dict[str, CardFacts] = {}
+    for one in requests:
+        record = records.get(addresses[str(one.id)])
+        processing = record.processing_record if isinstance(record, EpisodicMemory) else None
+        facts[str(one.id)] = (
+            _UNREAD_FACTS
+            if processing is None
+            else approval_card_facts(one, processing.trigger, processing.call_records)
+        )
+    return facts
+
+
+def approval_panel_entry(
+    request: ApprovalRequest, facts: CardFacts, *, now: datetime
+) -> ApprovalPanelEntry:
+    """One request as the panel shows it: as its card shows it, at ``now`` (§4:6).
+
+    Args:
+        request: The request, as the store holds it.
+        facts: What its card shows beside it.
+        now: The instant it is shown at, which its state is read at.
+
+    Returns:
+        The entry.
+    """
+    answer = request.answer
+    return ApprovalPanelEntry(
+        request_id=request.id,
+        text=card_text(request, facts, now=now),
+        state=ApprovalCardState(card_state(request, now=now)),
+        written_at=request.written_at,
+        expires_at=request.expires_at,
+        answered_by=None if answer is None else answer.who,
+        answered_at=None if answer is None else answer.at,
+    )
+
+
+def _ended_at(request: ApprovalRequest) -> datetime:
+    """When a request stopped waiting: its tap, or its expiry."""
+    return request.expires_at if request.answer is None else request.answer.at
+
+
+async def approval_panel(
+    plans: PlanStore,
+    facts_of: CardFactsReader,
+    *,
+    person: str,
+    now: datetime,
+    limit: int,
+) -> ApprovalPanel:
+    """The person's requests, as the hub page's approvals panel shows them (§4:6).
+
+    The pending ones, the oldest first, and the ones answered or expired most recently,
+    the most recent first, at most ``limit`` of each. A request still pending at or
+    after its expiry is shown expired among the recent ones: no tap can approve it now
+    (§3:5), whether or not the sensor has ended it.
+
+    Args:
+        plans: The plan store, which holds the Approvals channel's content.
+        facts_of: Reads what each request's card shows beside it.
+        person: The person whose requests are shown.
+        now: The instant the panel is read at.
+        limit: The most entries each list holds.
+
+    Returns:
+        The panel.
+
+    Raises:
+        PlanningError: If the plan store cannot be read.
+    """
+    held = await plans.person_approval_requests(person, tuple(ApprovalRequestState))
+    waiting = [one for one in held if card_state(one, now=now) == "pending"][:limit]
+    ended = sorted(
+        (one for one in held if card_state(one, now=now) != "pending"),
+        key=_ended_at,
+        reverse=True,
+    )[:limit]
+    facts = await facts_of((*waiting, *ended))
+    return ApprovalPanel(
+        pending=tuple(approval_panel_entry(one, facts[str(one.id)], now=now) for one in waiting),
+        recent=tuple(approval_panel_entry(one, facts[str(one.id)], now=now) for one in ended),
+    )
+
+
+async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, and its person and instant
+    plans: PlanStore,
+    facts_of: CardFactsReader,
+    request_id: str,
+    choice: ApprovalChoice,
+    *,
+    person: str,
+    now: datetime,
+) -> tuple[ApprovalPanelTap, bool]:
+    """Carry out a tap on the panel, as the hub page's ``ApprovalGiver`` (§4:8-§4:9).
+
+    The request is read first, and a tap on one that is not ``person``'s changes
+    nothing and shows nothing of it (§4:8). Otherwise it is marked approved or denied,
+    with the tap's instant, in the store's one step that refuses where the request is no
+    longer pending, so the first tap to land wins and a later one is answered with the
+    request's state.
+
+    Args:
+        plans: The plan store.
+        facts_of: Reads what the request's card shows beside it.
+        request_id: The request tapped.
+        choice: Approve or Deny.
+        person: The person tapping, whom the request must be for.
+        now: The tap's instant.
+
+    Returns:
+        What the tap came to, and whether a store step landed that the sensor is woken
+        for: this tap's mark, or a tap past the request's expiry, which the sensor ends
+        expired at its next look (§3:5).
+
+    Raises:
+        PlanningError: If the plan store cannot be read or written.
+    """
+    found = await plans.approval_requests([request_id])
+    if not found or found[0].person != person:
+        return ApprovalPanelTap(answer=ApprovalPanelTapAnswer.UNKNOWN), False
+    state = (
+        ApprovalRequestState.APPROVED
+        if choice is ApprovalChoice.APPROVE
+        else ApprovalRequestState.DENIED
+    )
+    step = await plans.answer_approval_request(
+        request_id, state, ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=now)
+    )
+    facts = await facts_of((step.request,))
+    entry = approval_panel_entry(step.request, facts[str(step.request.id)], now=now)
+    if step.answer is ApprovalStepAnswer.CHANGED:
+        answer = ApprovalPanelTapAnswer.ANSWERED
+    elif entry.state is ApprovalCardState.EXPIRED:
+        answer = ApprovalPanelTapAnswer.EXPIRED
+    else:
+        answer = ApprovalPanelTapAnswer.ALREADY_ANSWERED
+    landed = step.answer in {ApprovalStepAnswer.CHANGED, ApprovalStepAnswer.PAST_EXPIRY}
+    return ApprovalPanelTap(answer=answer, entry=entry), landed
+
+
 __all__ = [
+    "CardFactsReader",
     "Engine",
+    "approval_card_facts",
+    "approval_panel",
+    "approval_panel_entry",
     "conversation_summary",
+    "episode_card_facts",
+    "tap_on_approval_panel",
 ]
