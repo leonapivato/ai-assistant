@@ -642,3 +642,42 @@ async def test_a_card_at_the_limit_whose_state_outgrows_it_shows_the_short_card(
     assert CARD_TOO_LONG_LINE in text
     assert text.endswith("Expired: it was not answered in time.")
     assert rig.fake.buttons == {}
+
+
+async def test_after_days_down_a_card_the_sensor_ended_first_is_still_put_right() -> None:
+    """After a start every card is checked, whatever its age: one whose request the sensor
+    expired before the line's first read is edited too (review round 2)."""
+    rig = _Rig()
+    _, request = await rig.ask()
+    rig.clock.at = AT + timedelta(days=10)
+    await rig.plans.expire_approval_request(str(request.id), rig.clock.at)
+    restarted = rig.over(rig.fake)
+
+    await restarted.refresh()
+
+    assert rig.shown(await rig.request(str(request.id))).endswith(
+        "Expired: it was not answered in time."
+    )
+    assert rig.fake.buttons == {}
+
+
+async def test_a_starts_checks_of_settled_cards_are_made_a_few_at_each_read() -> None:
+    """A start never holds the loop on a long run of edits: newest first, a few a read."""
+    rig = _Rig()
+    asked = [(await rig.ask(date=f"2026-11-{day:02d}"))[1] for day in range(1, 13)]
+    for one in asked:
+        await rig.plans.answer_approval_request(
+            str(one.id),
+            ApprovalRequestState.DENIED,
+            ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT),
+        )
+    restarted = rig.over(rig.fake)
+
+    await restarted.refresh()
+    first = rig.edits()
+    await restarted.refresh()
+
+    assert first == 8
+    assert rig.edits() == 12
+    assert rig.shown(await rig.request(str(asked[-1].id))).endswith("Denied.")
+    assert rig.shown(await rig.request(str(asked[0].id))).endswith("Denied.")
