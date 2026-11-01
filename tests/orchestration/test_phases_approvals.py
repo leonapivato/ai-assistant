@@ -49,7 +49,7 @@ from ai_assistant.core.types import (
     TicketState,
     ToolOutcome,
 )
-from ai_assistant.orchestration.approval_calls import ApprovalsSeams
+from ai_assistant.orchestration.approval_calls import ApprovalsSeams, CardFacts, card_text
 from ai_assistant.orchestration.approvals import THE_APPROVALS
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.person_block import PersonBlocks
@@ -799,6 +799,22 @@ async def test_a_set_profile_and_a_pin_each_run_under_a_ticket_naming_the_reques
     finally:
         await harness.engine.aclose()
 
+    # ADR-0338 §8:6, ADR-0361 §2:11: the pin's card and its ticket show the memory's
+    # wording as the asking round read it, never its id.
+    pinning = held["pin"]
+    assert pinning.call.wording == _DIET.content
+    card = card_text(pinning, CardFacts(origin=None, read_outside=False), now=AT)
+    assert f'pin — memory: "{_DIET.content}"' in card
+    assert _DIET.id not in card
+    tickets = [
+        one.text or ""
+        for exchange in planner.approval
+        for one in tags(_text(exchange), "ticket")
+        if "pin" in (one.text or "")
+    ]
+    assert tickets
+    assert all(_DIET.content in one and _DIET.id not in one for one in tickets)
+    assert held["set_profile"].call.wording is None
     assert model.profile.address == "Leo"
     (change,) = [one for one in model.changes if one.field is ProfileField.ADDRESS]
     (pin,) = model.standing_pins
@@ -838,6 +854,7 @@ async def test_an_unpin_under_a_ticket_removes_the_pin_and_leaves_the_act_that_m
     finally:
         await harness.engine.aclose()
 
+    assert request.call.wording == _DIET.content, "its card showed the memory's wording"
     (pin,) = model.pins
     assert pin.removed_at is not None
     assert pin.act == made, "the act that made the pin is left as it was"
@@ -993,3 +1010,37 @@ async def test_a_request_for_a_call_the_asking_activation_cannot_run_writes_noth
     assert "cannot run here" in refused["outcome"]
     assert len(requests) == 1, "only the person's work's request"
     assert tasks == ()
+
+
+async def test_a_pin_request_whose_memory_is_not_current_is_not_written() -> None:
+    """ADR-0338 §8:6, ADR-0361 §2:11: the card could not show its wording, so no request."""
+    people = _People()
+    await people.memory.add(_DIET)
+    await people.store.record_suggestion(
+        OWNER_PERSON_ID,
+        ProposedSuggestion(kind=SuggestionKind.PIN, memory_id=_DIET.id, episode_id="activation:a0"),
+    )
+    told: list[dict[str, Any]] = []
+
+    async def person(exchange: PlanningExchange) -> RoundResponse:
+        if not exchange.steps:
+            label = _memory_label(exchange)
+            # Gone between the round that saw it and that round's acting.
+            await people.memory.delete(_DIET.id)
+            return RoundResponse(calls=(_asking("pin", "ask-1", memory=label),))
+        told.extend(_results(exchange))
+        return RoundResponse()
+
+    planner = _Planner(person)
+    harness = _harness(planner, **people.stores)
+    await harness.engine.start()
+    try:
+        await _start(harness, "keep in mind that I eat no meat")
+        await until(lambda: _settled(told), what="the second round")
+        requests = await _requests(harness)
+    finally:
+        await harness.engine.aclose()
+
+    (refused,) = told
+    assert "could not show its wording" in str(refused)
+    assert requests == ()

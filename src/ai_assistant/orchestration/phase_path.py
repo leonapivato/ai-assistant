@@ -508,6 +508,7 @@ if TYPE_CHECKING:
         MessageReceipt,
         PlanningRound,
         RecordedChannelTrigger,
+        RequestedCall,
         ScheduledTask,
         SearchOutcome,
         StoryNote,
@@ -5953,9 +5954,10 @@ class PhasePath:
         acted_one = latest.acted_one
         if caller is None:
             caller = self._caller(given, working)
+        asker = await self._asker(working, decided)
         with (
             spawning(self._spawner(given, working)),
-            asking(self._asker(working, decided)),
+            asking(asker),
             calling(caller),
             self._tools.holding(working.supplied, working.attributions),
         ):
@@ -6047,11 +6049,14 @@ class PhasePath:
         calls = self._approval_calls
         return None if calls is None else calls.card_delivery(decision_id)
 
-    def _asker(self, working: PhaseWorking, decided: RoundAuthorization) -> ApprovalAsker | None:
+    async def _asker(
+        self, working: PhaseWorking, decided: RoundAuthorization
+    ) -> ApprovalAsker | None:
         """Who calls ``request_approval`` in this round, and what each asks (ADR-0361 §2).
 
         ``None`` where the Approvals channel is not wired or the activation is no
-        person's (§2:5).
+        person's (§2:5). A pin's or an unpin's call carries its memory's wording, read
+        live here for the round that asks (:meth:`_requests_worded`).
         """
         if self._approval_calls is None:
             return None
@@ -6059,18 +6064,56 @@ class PhasePath:
         person = None if state is None else activation_person(state.trigger)
         if person is None:
             return None
+        requested = {
+            str(one.call.decision.id): one.requested
+            for one in decided.allowed
+            if one.requested is not None
+            and str(one.call.request.tool.capability) == REQUEST_APPROVAL_CAPABILITY
+        }
         return ApprovalAsker(
             person=person,
             activation_id=working.activation_id,
             round_id=decided.round_id,
-            requested={
-                str(one.call.decision.id): one.requested
-                for one in decided.allowed
-                if one.requested is not None
-                and str(one.call.request.tool.capability) == REQUEST_APPROVAL_CAPABILITY
-            },
+            requested=await self._requests_worded(working, requested),
             read_outside=decided.read_outside_content,
         )
+
+    async def _requests_worded(
+        self, working: PhaseWorking, requested: Mapping[str, RequestedCall]
+    ) -> dict[str, RequestedCall]:
+        """Each requested call, a pin's or an unpin's with its memory's wording recorded.
+
+        ADR-0338 §8:6, ADR-0361 §2:11: the card's exact line shows, in place of the
+        memory's label, its wording as the store holds it when the asking round is
+        recorded, read live here as a question's is (:meth:`_worded`). Only a memory the
+        live read returns current is worded so (ADR-0342 §5:1); one that is not, or
+        cannot be read, leaves the call with no wording, and its request is not written.
+        A wording read is among what the activation obtained (ADR-0309 §5:10).
+        """
+        named: dict[str, str] = {}
+        for decision_id, call in requested.items():
+            argument = worded_argument(str(call.tool.capability))
+            memory_id = None if argument is None else call.values.get(argument)
+            if isinstance(memory_id, str):
+                named[decision_id] = memory_id
+        if not named:
+            return dict(requested)
+        held: Mapping[str, MemoryRecord]
+        try:
+            held = await self._memory.get_many(sorted(set(named.values())))
+        except MemoryStoreError:
+            _log.warning("approval_wording_unread", stage="acting", reason="memory_fault")
+            held = {}
+        worded = dict(requested)
+        for decision_id, memory_id in named.items():
+            record = held.get(memory_id)
+            if not isinstance(record, Memory) or record.status is not MemoryStatus.CURRENT:
+                continue
+            working.supplied.obtained((record,))
+            worded[decision_id] = requested[decision_id].model_copy(
+                update={"wording": record.content}
+            )
+        return worded
 
     @staticmethod
     def _spawner(given: PhasePass, working: PhaseWorking) -> Spawner | None:

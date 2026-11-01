@@ -63,6 +63,7 @@ import structlog
 
 from ai_assistant.core.errors import MemoryStoreError, PersonModelStoreError, PlanningError
 from ai_assistant.core.types import (
+    WORDED_CAPABILITIES,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
@@ -94,6 +95,7 @@ if TYPE_CHECKING:
         AskedCall,
         FrozenJson,
         PersonModelWrite,
+        RequestedCall,
         ToolCall,
     )
     from ai_assistant.orchestration.person_block import PersonBlocks
@@ -113,6 +115,7 @@ __all__ = [
     "VALUE_ARGUMENT",
     "NotDone",
     "PersonModelCalls",
+    "recorded_wording",
     "worded_argument",
 ]
 
@@ -257,9 +260,28 @@ def worded_argument(capability: str, /) -> str | None:
         ``memory`` for a ``pin`` or an ``unpin``; ``None`` for any other capability,
         whose exact line shows every value as it is sent.
     """
-    if capability in {PIN_CAPABILITY, UNPIN_CAPABILITY}:
+    if capability in WORDED_CAPABILITIES:
         return MEMORY_ARGUMENT
     return None
+
+
+def recorded_wording(call: RequestedCall) -> dict[str, str] | None:
+    """What a request's exact line shows in place of its memory (ADR-0338 §8:6).
+
+    The memory's wording as the asking round read it, recorded with the request, so the
+    card, the panel and the ticket line show the call as it was asked (ADR-0361 §2:11).
+
+    Args:
+        call: The call a request holds.
+
+    Returns:
+        The worded argument and its wording, for :func:`exact_line`'s ``worded``; ``None``
+        for a call that shows no memory by its wording, or records none.
+    """
+    argument = worded_argument(str(call.tool.capability))
+    if argument is None or call.wording is None:
+        return None
+    return {argument: call.wording}
 
 
 #: Reads the approval requests named, from the plan store, as

@@ -264,6 +264,7 @@ from ai_assistant.orchestration.payloads import (
     positive_page_argument,
 )
 from ai_assistant.orchestration.person_block import activation_person, person_zone, still_held
+from ai_assistant.orchestration.person_calls import recorded_wording
 from ai_assistant.orchestration.phase_path import PlaceTarget, Scheduling, failing_stage
 from ai_assistant.orchestration.planning import PlaceAuthor, PlaceItem, exact_line
 from ai_assistant.orchestration.recall import Recalled
@@ -7121,6 +7122,7 @@ class Engine:
                 deliberate_repeat=call.deliberate_repeat,
             ),
             filled=call.tool.system_supplied,
+            worded=recorded_wording(call),
         )
         where = "where nothing is recorded" if kind is None else kind.where
         text = (
