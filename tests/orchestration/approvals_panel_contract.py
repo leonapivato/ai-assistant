@@ -463,7 +463,8 @@ class ApprovalsPanelContract:
         panel = await subject.engine.approvals()
 
         assert panel.pending_total == 20
-        assert panel.recent == ()
+        # The recent one is placed only in whatever room the pending ones left.
+        assert [one.request_id for one in panel.recent] in ([], ["approval:old-no"])
         shown = [one.request_id for one in panel.pending]
         assert 1 <= len(shown) < 20
         assert shown == [f"approval:{index:02d}" for index in range(len(shown))]
@@ -472,6 +473,57 @@ class ApprovalsPanelContract:
         after = await subject.engine.approvals()
         assert after.pending_total == 19
         assert after.pending[0].request_id == "approval:01"
+
+    async def test_a_request_too_long_for_any_read_is_shown_cut_and_hides_none_after_it(
+        self, approvals_subject: ApprovalsPanelSubject
+    ) -> None:
+        """ADR-0085 §8, §4:4: a request whose card no answer can carry is shown by the
+        start of its card, marked not whole, and can still be denied; the newer request
+        that fits is shown whole beside it, and a recent one in the room left."""
+        subject = approvals_subject
+        await hold_request(subject.plans, "approval:done", ago=timedelta(hours=9), date="x")
+        await card_tap(
+            subject.plans, "approval:done", ApprovalRequestState.DENIED, ago=timedelta(hours=8)
+        )
+        await hold_request(
+            subject.plans, "approval:huge", ago=timedelta(hours=3), date="d" * (APPROVALS_LIMIT + 1)
+        )
+        await hold_request(
+            subject.plans, "approval:long", ago=timedelta(hours=2), why="w" * APPROVAL_WHY_MAX_CHARS
+        )
+
+        panel = await subject.engine.approvals()
+
+        assert panel.pending_total == 2
+        huge, long = panel.pending
+        assert (huge.request_id, huge.whole) == ("approval:huge", False)
+        assert huge.text.startswith("Approval needed:")
+        assert huge.state is ApprovalCardState.PENDING
+        assert (long.request_id, long.whole) == ("approval:long", True)
+        assert f"Why: {'w' * APPROVAL_WHY_MAX_CHARS}" in long.text
+        assert [one.request_id for one in panel.recent] == ["approval:done"]
+        assert panel.recent[0].whole
+        tapped = await subject.engine.tap_approval("approval:huge", choice=ApprovalChoice.DENY)
+        assert tapped.answer is ApprovalPanelTapAnswer.ANSWERED
+
+    async def test_a_request_that_fits_alone_waits_for_a_read_of_its_own(
+        self, approvals_subject: ApprovalsPanelSubject
+    ) -> None:
+        """One that fits by itself but not beside those placed is left for a later read,
+        whole, rather than shown cut; the ones after it that fit are still placed."""
+        subject = approvals_subject
+        half = "d" * (APPROVALS_LIMIT // 2)
+        await hold_request(subject.plans, "approval:a", ago=timedelta(hours=4), date="a" + half)
+        await hold_request(subject.plans, "approval:b", ago=timedelta(hours=3), date="b" + half)
+        await hold_request(subject.plans, "approval:c", ago=timedelta(hours=2), date="c")
+
+        panel = await subject.engine.approvals()
+
+        assert [(one.request_id, one.whole) for one in panel.pending] == [
+            ("approval:a", True),
+            ("approval:c", True),
+        ]
+        assert panel.pending_total == 3
 
     async def test_the_total_counts_what_the_limit_left_out(
         self, approvals_subject: ApprovalsPanelSubject

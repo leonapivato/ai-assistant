@@ -110,6 +110,7 @@ async def test_the_read_carries_each_request_as_its_card_shows_it() -> None:
         "expires_at",
         "answered_by",
         "answered_at",
+        "whole",
     }
 
 

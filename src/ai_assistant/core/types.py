@@ -25116,6 +25116,11 @@ class ApprovalPanelEntry(BaseModel):
     and ``answered_by`` and ``answered_at`` the tap that answered it, where one did
     (§4:9).
 
+    ``whole`` is ``False`` only for a request whose card is too long for any one answer
+    of this surface to carry (ADR-0085 §8): ``text`` is then the start of its card, cut,
+    and a page offers no Approve on it, since a yes is to the exact call shown
+    (ADR-0321 §2:7) and this one cannot be shown.
+
     Its call holds the person's Tier 1 arguments, which the text shows, so no
     validation error of it renders its input (ADR-0145 §8).
 
@@ -25133,6 +25138,7 @@ class ApprovalPanelEntry(BaseModel):
     expires_at: UtcInstant
     answered_by: ApprovalGiver | None = None
     answered_at: UtcInstant | None = None
+    whole: bool = True
 
     @model_validator(mode="after")
     def _answered_where_tapped(self) -> Self:
@@ -25157,11 +25163,12 @@ class ApprovalPanel(BaseModel):
     ``pending`` are the requests a tap can still answer, the oldest first, since it
     expires first; ``recent`` the ones answered or expired most recently, the most
     recent first, each with its state. Each list holds at most the read's ``limit``, and
-    **only as many as fit the contract's size limit** (ADR-0085 §8): a panel that would
-    not fit leaves out the oldest recent ones first, then the newest pending ones, so a
-    read always answers and the oldest waiting request is always the first shown, whole.
-    ``pending_total`` says how many requests wait in all, so a page holding fewer says
-    that more wait.
+    **only as many as fit the contract's size limit** (ADR-0085 §8): pending ones are
+    placed first, the oldest first, then recent ones in the room left; one that does not
+    fit beside those placed waits for a later read, and one too long for any read is
+    shown by the start of its card, not whole. So a read always answers, and no request
+    is kept from the panel by another. ``pending_total`` says how many requests wait in
+    all, so a page holding fewer says that more wait.
 
     Raises:
         ValueError: If a pending entry is not pending, a recent one is, a request is

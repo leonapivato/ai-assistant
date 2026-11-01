@@ -5103,15 +5103,27 @@ function renderApprovals(panel) {
   panel.recent.forEach((one) => renderApproval(recent, one, false));
 }
 
-// One request: its card's text, when, and on a pending one its two buttons.
+// What a request too long for any one answer of the hub's to carry says: its card is
+// shown by its start, and a yes is to the exact call shown, so it is not offered.
+const APPROVAL_CUT =
+  "This request is too long to show here whole, so only its start is shown, and it " +
+  "cannot be approved here. Deny it if you do not want it done.";
+
+// One request: its card's text, when, and on a pending one its buttons — Deny alone on
+// one that could not be shown whole.
 function renderApproval(list, entry, open) {
   const item = document.createElement("div");
   item.className = "approval-row";
   line(item, entry.text, "reply");
+  if (entry.whole === false) {
+    line(item, APPROVAL_CUT, "hint");
+  }
   line(item, approvalWhen(entry), "hint");
   if (open) {
     const made = [];
-    made.push(control("Approve", () => tapApproval(entry.request_id, "approve", made)));
+    if (entry.whole !== false) {
+      made.push(control("Approve", () => tapApproval(entry.request_id, "approve", made)));
+    }
     made.push(control("Deny", () => tapApproval(entry.request_id, "deny", made)));
     controls(item, made);
   }

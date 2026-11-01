@@ -6970,6 +6970,7 @@ class Engine:
             choice,
             person=OWNER_PERSON_ID,
             now=self._now(),
+            max_bytes=self._max_payload_bytes,
         )
         if landed:
             self.approvals_changed()
@@ -9018,33 +9019,87 @@ async def approval_panel(  # noqa: PLR0913 — the store, the reader, and one kn
 
 
 def fit_approval_panel(panel: ApprovalPanel, *, max_bytes: int) -> ApprovalPanel:
-    """The panel, leaving out what does not fit the contract's size limit (ADR-0085 §8).
+    """The panel, holding only what fits the contract's size limit (ADR-0085 §8).
 
-    The oldest recent entries go first, then the newest pending ones, so the read always
-    answers, and the request that expires first is the last to go: a panel too large to
-    send would leave every request it holds unanswerable here, where a request too long
-    for a Telegram card is answered (§4:4). ``pending_total`` still counts every waiting
-    request, so the page says that more wait than it shows.
+    A panel that fits is returned as it is. Otherwise the pending entries are placed
+    first, the oldest first, then the recent ones in the room left, each placed whole
+    where it fits beside those already placed. One that would fit alone but not beside
+    them waits for a later read, once those are answered; and one too long for any read
+    to carry is placed by the start of its card (:func:`_cut_entry`), so it is never
+    hidden by its size and can still be denied here (§4:4). ``pending_total`` still
+    counts every waiting request, so the page says that more wait than it shows.
 
     Args:
         panel: The panel as read.
         max_bytes: The contract's size limit.
 
     Returns:
-        The largest panel of that shape that fits.
+        The panel as placed.
     """
-    pending, recent = list(panel.pending), list(panel.recent)
-    fitted = panel
-    while len(canonical_payload(fitted)) > max_bytes and (pending or recent):
-        if recent:
-            recent.pop()
+
+    def fits(pending: Sequence[ApprovalPanelEntry], recent: Sequence[ApprovalPanelEntry]) -> bool:
+        placed = panel.model_copy(update={"pending": tuple(pending), "recent": tuple(recent)})
+        return len(canonical_payload(placed)) <= max_bytes
+
+    if fits(panel.pending, panel.recent):
+        return panel
+    pending: list[ApprovalPanelEntry] = []
+    for one in panel.pending:
+        placed = _placed(one, lambda e: fits([*pending, e], ()), lambda e: fits([e], ()))
+        if placed is not None:
+            pending.append(placed)
+    recent: list[ApprovalPanelEntry] = []
+    for one in panel.recent:
+        placed = _placed(one, lambda e: fits(pending, [*recent, e]), lambda e: fits((), [e]))
+        if placed is not None:
+            recent.append(placed)
+    return panel.model_copy(update={"pending": tuple(pending), "recent": tuple(recent)})
+
+
+#: The most of a card's text an entry too long for any read shows: its start, enough to
+#: see what was asked, and short enough to leave room for the requests after it.
+_CUT_CHARS: Final = 2_000
+
+
+def _placed(
+    entry: ApprovalPanelEntry,
+    fits: Callable[[ApprovalPanelEntry], bool],
+    fits_alone: Callable[[ApprovalPanelEntry], bool],
+) -> ApprovalPanelEntry | None:
+    """The entry as it can be placed now: whole, cut, or not on this read."""
+    if fits(entry):
+        return entry
+    if fits_alone(entry):
+        return None  # it fits a read of its own: it waits until those before it are answered
+    return _cut_entry(entry, fits)
+
+
+def _cut_entry(
+    entry: ApprovalPanelEntry, fits: Callable[[ApprovalPanelEntry], bool]
+) -> ApprovalPanelEntry | None:
+    """The longest start of the entry's text, at most :data:`_CUT_CHARS`, that fits.
+
+    ``None`` where not even its first character fits beside what is placed.
+    """
+
+    def cut(count: int) -> ApprovalPanelEntry:
+        return entry.model_copy(update={"text": entry.text[:count], "whole": False})
+
+    best: ApprovalPanelEntry | None = None
+    low, high = 1, min(len(entry.text), _CUT_CHARS)
+    while low <= high:
+        count = (low + high) // 2
+        candidate = cut(count)
+        if fits(candidate):
+            best, low = candidate, count + 1
         else:
-            pending.pop()
-        fitted = panel.model_copy(update={"pending": tuple(pending), "recent": tuple(recent)})
-    return fitted
+            high = count - 1
+    if best is None or not best.text.strip():
+        return None
+    return best
 
 
-async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, and its person and instant
+async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, its person, instant and bound
     plans: PlanStore,
     facts_of: CardFactsReader,
     request_id: str,
@@ -9052,6 +9107,7 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
     *,
     person: str,
     now: datetime,
+    max_bytes: int,
 ) -> tuple[ApprovalPanelTap, bool]:
     """Carry out a tap on the panel, as the hub page's ``ApprovalGiver`` (§4:8-§4:9).
 
@@ -9068,6 +9124,8 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
         choice: Approve or Deny.
         person: The person tapping, whom the request must be for.
         now: The tap's instant.
+        max_bytes: The contract's size limit: a request whose card no answer can carry
+            is shown by its start, as the panel shows it (:func:`fit_approval_panel`).
 
     Returns:
         What the tap came to, and whether a store step landed that the sensor is woken
@@ -9097,7 +9155,16 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
     else:
         answer = ApprovalPanelTapAnswer.ALREADY_ANSWERED
     landed = step.answer in {ApprovalStepAnswer.CHANGED, ApprovalStepAnswer.PAST_EXPIRY}
-    return ApprovalPanelTap(answer=answer, entry=entry), landed
+    tapped = ApprovalPanelTap(answer=answer, entry=entry)
+
+    def fits(shown: ApprovalPanelEntry) -> bool:
+        return len(canonical_payload(tapped.model_copy(update={"entry": shown}))) <= max_bytes
+
+    if not fits(entry):
+        # The step has landed whatever is shown; a cut that fits nothing is measured and
+        # refused by the result's own check, as any oversized answer is.
+        tapped = tapped.model_copy(update={"entry": _cut_entry(entry, fits) or entry})
+    return tapped, landed
 
 
 __all__ = [
