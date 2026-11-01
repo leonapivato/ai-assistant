@@ -1,14 +1,15 @@
-"""ADR-0357 §§2-4 and §8 through the phases: ``text``'s arguments, where it goes, its result.
+"""ADR-0357 §§2-4 through the phases: ``text``'s arguments, where it goes, its result.
 
 End to end over the engine and the phases, a scripted planner and the canonical fakes:
 who a ``text`` call is for and where it goes, what comes back sending nothing, the words
-as the wording step renders them, an asking call's exact lines after them, and what the
-next round is shown of every message call (§3:1).
+as the wording step renders them, and what the next round is shown of every message call
+(§3:1). No message asks: ``text`` takes no ``asks``, no exact lines follow its words,
+and no round records an asked call (ADR-0361 §8:5).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from exchange_support import reported
@@ -22,14 +23,11 @@ from ai_assistant.core.types import (
     RecordedCall,
     RoundResponse,
 )
-from ai_assistant.orchestration import phase_path
-from ai_assistant.orchestration.message_tools import NEEDS_YOUR_YES, TEXT_CAPABILITY
+from ai_assistant.orchestration.message_tools import TEXT_CAPABILITY
 from ai_assistant.testing import FakeToolCallingCompleter
 
 if TYPE_CHECKING:
     from test_engine import Harness
-
-_BOOKING: Final = 'book — date: "2026-10-12"'
 
 
 def _call(call_id: str, name: str, **arguments: object) -> ProposedCall:
@@ -135,75 +133,41 @@ async def test_a_text_naming_the_input_by_its_platform_goes_there() -> None:
     await harness.engine.aclose()
 
 
-async def _asked_round(
-    monkeypatch: pytest.MonkeyPatch | None = None, *, words: str = "Shall I book it for the 12th?"
-) -> tuple[Harness, FakeToolCallingCompleter, str, Any]:
-    """A booking that needs the user, then a round whose ``text`` asks about it."""
-    if monkeypatch is not None:
-        # A wording step that rewords everything it is handed: what it never touches
-        # are the exact lines code appends after it (§4:4, §8:2).
-        monkeypatch.setattr(phase_path, "reworded", lambda words, *, exact: words.upper())
+async def _after_a_call_needing_a_yes(**text: object) -> tuple[Harness, str, Any]:
+    """A booking that needs the user, then a round whose ``text`` speaks of it."""
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(calls=(_call("c1", "book", date="2026-10-12"),)),
-        RoundResponse(calls=(_text("t1", words=words, asks=["1.1"]),)),
+        RoundResponse(calls=(_text("t1", **text),)),
         RoundResponse(),
     )
     harness = phases_harness(completer)
     conversation, episode = await chat_turn(harness, "book a table for the 12th")
-    return harness, completer, conversation, episode
+    return harness, conversation, episode
 
 
-async def test_an_asking_texts_exact_lines_follow_its_words_and_it_is_recorded_asked() -> None:
-    """§8:1-§8:4: the lines after the words, the delivered text carrying them, and the
-    round recording the call it asks about."""
-    harness, completer, conversation, episode = await _asked_round()
+async def test_a_text_about_a_call_needing_a_yes_is_its_words_alone() -> None:
+    """ADR-0361 §8:5: no exact line follows the words, and no round records an asked call."""
+    words = "Shall I book it for the 12th?"
+    harness, conversation, episode = await _after_a_call_needing_a_yes(words=words)
 
-    question = f"Shall I book it for the 12th?\n\n{NEEDS_YOUR_YES}\n{_BOOKING}"
-    assert await _said(harness, conversation) == [question]
-    record = processing(episode)
-    (asked,) = record.rounds[1].asked
-    assert (asked.part, str(asked.tool.capability)) == (1, "book")
+    assert await _said(harness, conversation) == [words]
     entry = _entries(episode)["t1"]
     assert entry.delivered is not None
-    assert entry.delivered.words == question
-    (shown,) = reported(completer.calls[2], -1)
-    assert shown["delivered"]["words"] == question
+    assert entry.delivered.words == words
+    assert all(one.asked == () for one in processing(episode).rounds)
     await harness.engine.aclose()
 
 
-async def test_the_exact_lines_follow_any_rewording_and_are_never_reworded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """§4:4, §8:2, §10's test: code appends them after the wording step has run."""
-    harness, _, conversation, _ = await _asked_round(monkeypatch, words="Shall I book it?")
-
-    assert await _said(harness, conversation) == [
-        f"SHALL I BOOK IT?\n\n{NEEDS_YOUR_YES}\n{_BOOKING}"
-    ]
-    await harness.engine.aclose()
-
-
-async def test_a_second_asking_text_in_a_round_runs_nothing() -> None:
-    """§8:3, §10's test: the first in the model's order asks; the second comes back."""
-    completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "book", date="2026-10-12"),)),
-        RoundResponse(
-            calls=(
-                _text("t1", words="Shall I book it?", asks=["1.1"]),
-                _text("t2", words="Really book it?", asks=["1.1"]),
-            )
-        ),
-        RoundResponse(),
+async def test_a_text_naming_calls_in_asks_runs_nothing() -> None:
+    """ADR-0361 §8:5: ``asks`` is no argument of ``text``, so the call comes back."""
+    harness, conversation, episode = await _after_a_call_needing_a_yes(
+        words="Shall I book it?", asks=["1.1"]
     )
-    harness = phases_harness(completer)
 
-    conversation, episode = await chat_turn(harness, "book a table for the 12th")
-
-    assert await _said(harness, conversation) == [
-        f"Shall I book it?\n\n{NEEDS_YOUR_YES}\n{_BOOKING}"
-    ]
-    second = _entries(episode)["t2"]
-    assert (second.outcome, second.delivered) == (CallOutcomeKind.REFUSED, None)
-    assert second.reason is not None
-    assert "already asked" in second.reason
+    assert "Shall I book it?" not in await _said(harness, conversation)
+    entry = _entries(episode)["t1"]
+    assert (entry.outcome, entry.delivered) == (CallOutcomeKind.REFUSED, None)
+    assert entry.reason is not None
+    assert "nothing else" in entry.reason
+    assert all(one.asked == () for one in processing(episode).rounds)
     await harness.engine.aclose()

@@ -811,15 +811,6 @@
           "exact": {
             "type": "boolean",
             "description": "Send the words exactly as written."
-          },
-          "asks": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "minItems": 1,
-            "description": "The calls this message asks about, each by the ask_as reference its result showed: an action that needs a yes before it runs. Explain each in the message's own words, with the details that matter to the person; the system adds its exact details after your words, so never write them yourself, and never send them alone. One message a round asks. Never approve anything on anyone's behalf: there is no other route, no confirmation email, no link or code, and no step on the person's end."
           }
         },
         "required": [

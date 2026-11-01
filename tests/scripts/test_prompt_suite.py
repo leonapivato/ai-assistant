@@ -97,7 +97,7 @@ def _planning(**changes: Any) -> dict[str, Any]:
         "came_from": "#3104",
         "set": "held_out",
         "samples": 3,
-        "property": {"check": "asks_about", "calls": ["1.1"]},
+        "property": {"check": "none_of", "capabilities": ["web_search"]},
         "input": {
             # ADR-0356 §11:4: a planning case's input is its exchange after its instruction.
             "exchange": {"briefing": f'# The stimulus\n<said from="Leo">{PRIVATE}</said>'},
@@ -242,7 +242,10 @@ def test_an_input_may_be_a_json_file_beside_the_case(tmp_path: Path) -> None:
         (_understanding(flags={"x": True}), "['x']"),
         (_understanding(flags={"x": "no"}), "true and false"),
         (_understanding(property={"check": "guess"}), "no code check"),
-        (_understanding(property={"check": "asks_about", "calls": ["1.1"]}), "reads no reply"),
+        (
+            _understanding(property={"check": "none_of", "capabilities": ["web_search"]}),
+            "reads no reply",
+        ),
         (
             _understanding(property={"check": "no_label", "fields": ["understanding"]}),
             "takes exactly",
@@ -576,42 +579,6 @@ def test_no_label_reads_a_rounds_notes_and_its_messages_apart() -> None:
     assert _round("no_label", params_message, None) == "the reply is not one its stage reads"
 
 
-def test_asks_about_reads_the_asking_text_calls_asks() -> None:
-    """ADR-0357 §8:1: the calls a question asks about are named in its ``text`` call's ``asks``."""
-    params: dict[str, object] = {"calls": ["1.1"]}
-
-    asking = RoundResponse(calls=(_text("Shall I book it?", asks=["1.1"]),))
-    assert _round("asks_about", params, asking) is None
-    unnamed = RoundResponse(text="asks 1.1", calls=(_text("Shall I?"),))
-    assert _round("asks_about", params, unnamed) == (
-        "the round's question leaves out 1 of the named calls"
-    )
-    assert _round("asks_about", params, None) == "the response reads as no round"
-
-
-def test_asks_about_refuses_a_question_the_runtime_would_not_send() -> None:
-    """ADR-0357 §6:1, review round 3: blank words are refused, so nothing is asked."""
-    blank = RoundResponse(calls=(_text(" ", asks=["1.1"]),))
-
-    assert _round("asks_about", {"calls": ["1.1"]}, blank) == (
-        "the round's question is a text call the runtime refuses"
-    )
-
-
-def test_asks_about_reads_a_malformed_first_asking_call_as_the_question() -> None:
-    """ADR-0357 §8:3, review round 6: it takes the slot, so the well-formed one asks nothing."""
-    malformed = RoundResponse(
-        calls=(
-            _text("Shall I?", asks="1.1"),
-            _text("Shall I book it?", call_id="c2", asks=["1.1"]),
-        )
-    )
-
-    assert _round("asks_about", {"calls": ["1.1"]}, malformed) == (
-        "the round's question is a text call the runtime refuses"
-    )
-
-
 def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
     """ADR-0356 §11:2: a plain question comes back as a message call, not as text."""
     params: dict[str, object] = {"phrases": ["10:30"]}
@@ -626,17 +593,6 @@ def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
     )
     assert _round("only_says", params, RoundResponse(calls=(_text("At 10:30."), search))) == (
         "the round makes a call other than a text call"
-    )
-
-
-def test_asks_about_reads_the_first_asking_message_alone() -> None:
-    """ADR-0357 §8:3: a second asking text call is refused, so what it names is asked of none."""
-    second = RoundResponse(
-        calls=(_text("Shall I?", asks=["9.9"]), _text("Or this?", call_id="c2", asks=["1.1"]))
-    )
-
-    assert _round("asks_about", {"calls": ["1.1"]}, second) == (
-        "the round's question leaves out 1 of the named calls"
     )
 
 
@@ -893,7 +849,7 @@ def test_a_planning_case_is_sent_as_a_round_with_its_tools_and_its_message_read(
         [
             [
                 TextPart(PRIVATE),
-                ToolCallPart("text", {"to": "Leo", "words": "Shall I?", "asks": ["1.1"]}),
+                ToolCallPart("text", {"to": "Leo", "words": "Shall I?"}),
             ],
             [ToolCallPart("web_search", {"query": PRIVATE})],
             [TextPart("Shall I book it?"), ToolCallPart("web_search", "not json")],
@@ -907,13 +863,13 @@ def test_a_planning_case_is_sent_as_a_round_with_its_tools_and_its_message_read(
     assert model.tools == [["text", "web_search"]] * 3
     lines = _lines(tmp_path / "results")
     assert [one["passed"] for one in lines] == [True, False, False]
-    assert lines[1]["reason"] == "the round's question leaves out 1 of the named calls"
+    assert lines[1]["reason"] == "the round calls a named capability"
     assert lines[2]["read_as_round"] is False
     assert lines[2]["reason"] == "the response reads as no round"
     assert lines[0]["response"]["parts"][0]["content"].endswith(PRIVATE)
     assert any(
         one.startswith(
-            "planning/one [held_out, yes_without_question]: asks_about passed: default 1 of 3"
+            "planning/one [held_out, yes_without_question]: none_of passed: default 1 of 3"
         )
         for one in reports
     )

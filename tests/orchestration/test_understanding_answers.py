@@ -1,8 +1,9 @@
-"""ADR-0353 §11: approvals stop until the authority run, so understanding sees no question.
+"""ADR-0353 §11, ADR-0361 §8:5: understanding sees no question, whatever a stored round holds.
 
 The stage alone, over a scripted model and hand-built windows. Understanding is shown no
-question mark and no ``Q`` label wherever it is shown a message that asked, though the
-windows still bring the question each assistant message is (§11:1); the reply carries no
+question mark and no ``Q`` label wherever it is shown a message that asked, its stored
+round holding the asked calls a round recorded before the question path retired, read as
+it was (ADR-0361 §8:6); no window brings a question with a message (§8:5); the reply carries no
 answer pointer, and whatever the reply holds no version records one (§11:2, §16:4). A
 reply that still holds ``answers`` names a key its shape does not, so it does not parse
 and costs the one repair (ADR-0354 §8:3, §10:1); and a ``Q`` label cited in ``cites``
@@ -46,7 +47,6 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.story_links import Candidates, ShortView
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
-    AskedIn,
     SuppliedWindow,
     TranscriptWindow,
     UnderstandingStage,
@@ -159,7 +159,6 @@ _CHAT: Final = TranscriptWindow(
     ),
     input_messages=(),
     links={1: "a-1", 2: "a-1", 3: "a-1"},
-    asked={2: AskedIn(round="r-1", parts=(1, 2))},
 )
 
 
@@ -263,7 +262,6 @@ async def test_an_exchange_shown_in_the_place_window_carries_no_question_of_its_
             _message(2, "Shall I book r-1?", author=MessageAuthor.ASSISTANT),
         ),
         links={1: "a-1", 2: "a-1"},
-        asked={2: AskedIn(round="r-1", parts=(1,))},
     )
     model = FakeModelProvider(_proposal())
 

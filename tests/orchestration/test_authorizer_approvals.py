@@ -55,6 +55,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from ai_assistant.core.protocols import ActionPolicy
     from ai_assistant.orchestration.authorizer import RoundAuthorization
 
 _AT: Final = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
@@ -123,15 +124,21 @@ class _Ids:
 
 
 class _Hub:
-    """The stage over fakes, its clock ``at``."""
+    """The stage over fakes, its clock ``at``, offering ``tools`` beside the book and the note."""
 
-    def __init__(self, *, at: datetime = _AT) -> None:
+    def __init__(
+        self,
+        *,
+        at: datetime = _AT,
+        tools: tuple[ToolDefinition, ...] = (),
+        policy: ActionPolicy | None = None,
+    ) -> None:
         self.at = at
         self.plans = FakePlanStore()
         self.trail = FakeAuditTrail(now=lambda: self.at)
         self.stage = AuthorizingStage(
-            registry=FakeToolRegistry((_BOOK, _ALLOWED, REQUEST_APPROVAL)),
-            policy=_Policy(),
+            registry=FakeToolRegistry((_BOOK, _ALLOWED, REQUEST_APPROVAL, *tools)),
+            policy=_Policy() if policy is None else policy,
             trail=self.trail,
             stories=FakeStoryStore(now=lambda: self.at),
             memory=FakeMemoryStore(now=lambda: self.at),
@@ -220,6 +227,7 @@ async def _approved(
     *,
     person: str = OWNER_PERSON_ID,
     state: ApprovalRequestState = ApprovalRequestState.APPROVED,
+    call: RequestedCall | None = None,
 ) -> ApprovalRequest:
     """A request written and answered by a tap, as ``request_approval`` and a tap leave it."""
     request = ApprovalRequest(
@@ -227,7 +235,7 @@ async def _approved(
         person=person,
         activation_id=_ASKER,
         round="round:ask",
-        call=RequestedCall(tool=_BOOK, values={"date": "2026-11-02"}),
+        call=RequestedCall(tool=_BOOK, values={"date": "2026-11-02"}) if call is None else call,
         why="You asked me to book the table.",
         written_at=_AT,
         expires_at=_AT + _DAY,
@@ -252,7 +260,11 @@ async def _approved(
 def _running(request: ApprovalRequest) -> CallToAuthorize:
     """The ticket's call, as planning's check hands it on (§5:2)."""
     return CallToAuthorize(
-        ProposedCall(call_id="run-1", name="book", arguments={"date": "2026-11-02"}),
+        ProposedCall(
+            call_id="run-1",
+            name=str(request.call.tool.capability),
+            arguments=dict(request.call.values),
+        ),
         ticket=str(request.id),
     )
 

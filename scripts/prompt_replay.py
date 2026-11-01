@@ -148,7 +148,6 @@ from ai_assistant.models import (
 from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT, follow_up_round
 from ai_assistant.orchestration.digesting import DigestReply
 from ai_assistant.orchestration.matters_pass import MattersPassReply
-from ai_assistant.orchestration.message_tools import carries_asks, text_arguments
 from ai_assistant.orchestration.observer.prompts import PERSON_FLAG
 from ai_assistant.orchestration.observer.replies import (
     FramingReplyShape,
@@ -2496,31 +2495,6 @@ def _said(planning_round: RoundResponse) -> list[str]:
     ]
 
 
-def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:
-    """The round asks with a ``text`` call naming each of the named calls in ``asks``.
-
-    ADR-0357 §8:1: a question names the calls it asks about in the ``asks`` argument of
-    the ``text`` call that asks it, each by the reference its result showed. A call the
-    runtime would refuse, its words blank, say, sends no question (§6:1, §6:3), so its
-    ``asks`` count for nothing.
-    """
-    if reply.round is None:
-        return "the response reads as no round"
-    asked: set[str] = set()
-    # ADR-0357 §8:3: the first call the runtime takes as asking is the round's asking
-    # message, malformed or not; a second is refused, and asks nothing.
-    asking = next((one for one in reply.round.calls if carries_asks(one.name, one.arguments)), None)
-    if asking is not None:
-        checked = text_arguments(asking.arguments)
-        if isinstance(checked, str):
-            return "the round's question is a text call the runtime refuses"
-        asked.update(checked.asks)
-    missing = [one for one in cast("list[str]", params["calls"]) if one not in asked]
-    if missing:
-        return f"the round's question leaves out {len(missing)} of the named calls"
-    return None
-
-
 def _only_says(reply: Reply, params: Mapping[str, object]) -> Judgement:
     """Every call is a ``text`` call, and one's words hold each named phrase, in any case.
 
@@ -2890,13 +2864,6 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
             frozenset({PLANNING, *REPLY_READERS}),
             {"fields": "strings", "labels": "strings"},
             _no_label,
-        ),
-        CodeCheck(
-            "asks_about",
-            "the round asks with a text call naming each of the named calls in asks",
-            frozenset({PLANNING}),
-            {"calls": "strings"},
-            _asks_about,
         ),
         CodeCheck(
             "only_says",

@@ -1,10 +1,12 @@
-"""The yes path's `core` shapes (ADR-0321 §2, §3, §4, §9).
+"""The yes path's `core` shapes (ADR-0321 §2, §3, §4, §9), as stored records hold them.
 
-A round's asked calls and its naming of them, the answer pointer in both of
-understanding's forms, the approved-action label, the approval with its five slots, the
+A round's asked calls, the approved-action label, the approval with its five slots, the
 decision that names it, the effect record's part key, and the confirmation that names
-the question it answers. Each test pins a shape a consumer lane builds against, or a
-refusal that keeps a record from saying something the yes path could not have meant.
+the question it answers. Nothing produces a question's shape since ADR-0361 §8:5; each
+stays because a stored record holds it, and is read as it was (§8:6). Each test pins a
+shape a stored record is read back in, or a refusal that keeps a record from saying
+something the yes path could not have meant. The answer pointer, which no stored record
+holds, has left `core` (§8:6).
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ from ai_assistant.core.types import (
     ActionRequest,
     ActivationEffect,
     ActivationEffectClaim,
-    AnsweredQuestion,
     Approval,
     ApprovalEnd,
     ApprovalGiven,
@@ -287,39 +288,6 @@ def test_a_response_no_longer_names_the_calls_its_message_asks_about() -> None:
 
 
 # --- the answer pointer (§3:1) ----------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "named",
-    [
-        pytest.param({"round": "q-round"}, id="by-round"),
-        pytest.param({"place": "conv-1", "position": 7}, id="by-place-and-position"),
-        pytest.param({"round": "q-round", "place": "conv-1", "position": 7}, id="by-both"),
-    ],
-)
-def test_a_recorded_answer_names_its_message_by_ids(named: dict[str, Any]) -> None:
-    """§3:1, ADR-0276 §2:4: the question's message by the records that keep it, no label."""
-    pointer = AnsweredQuestion(activation_id="act-asked", parts=(1, 2), **named)
-
-    assert AnsweredQuestion.model_validate_json(pointer.model_dump_json()) == pointer
-
-
-@pytest.mark.parametrize(
-    ("named", "match"),
-    [
-        pytest.param({}, "round, its place and position", id="names-no-message"),
-        pytest.param({"place": "conv-1"}, "together", id="a-place-without-a-position"),
-        pytest.param({"round": "r", "position": 7}, "together", id="a-position-without-a-place"),
-        pytest.param({"round": "r", "parts": (2, 1)}, "ascending", id="parts-out-of-order"),
-        pytest.param({"round": "r", "parts": (1, 1)}, "once", id="a-part-twice"),
-    ],
-)
-def test_a_recorded_answer_that_names_no_one_message_is_refused(
-    named: dict[str, Any], match: str
-) -> None:
-    """§3:1: the pointer names exactly one message and each part once."""
-    with pytest.raises(ValidationError, match=match):
-        AnsweredQuestion(activation_id="act-asked", **named)
 
 
 # --- the approved-action label (§4:2) ---------------------------------------------------

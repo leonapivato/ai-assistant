@@ -20,12 +20,12 @@ from test_planning_person import _stage as _person_stage
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
-    AskedCall,
     Profile,
+    RequestedCall,
 )
 from ai_assistant.orchestration.person_block import PersonBlock
 from ai_assistant.orchestration.person_calls import PIN, SET_PROFILE, UNPIN
-from ai_assistant.orchestration.planning import CallOutcome, CallOutcomeKind, exact_line
+from ai_assistant.orchestration.planning import exact_line
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import FrozenJson, ToolDefinition
@@ -97,7 +97,7 @@ def test_the_exact_line_shows_every_argument_a_person_model_call_sends() -> None
         (UNPIN, {"memory": "m:diet"}),
     ]
     for tool, values in sent:
-        call = AskedCall(part=1, tool=tool, values=values)
+        call = RequestedCall(tool=tool, values=values)
         worded = {"memory": "Eats no meat."} if "memory" in values else None
         line = exact_line(call, worded=worded)
         shown = {**values, **(worded or {})}
@@ -105,10 +105,3 @@ def test_the_exact_line_shows_every_argument_a_person_model_call_sends() -> None
             assert f"{argument}: {json.dumps(value, ensure_ascii=False)}" in line, (tool.id, line)
         if worded is not None:
             assert "m:diet" not in line
-
-
-def test_only_a_call_that_needs_you_carries_a_wording_and_only_with_its_request() -> None:
-    with pytest.raises(ValueError, match="only a call that needs the user"):
-        CallOutcome("r", "c", CallOutcomeKind.DONE, worded=(("memory", "Eats no meat."),))
-    with pytest.raises(ValueError, match="rides the request"):
-        CallOutcome("r", "c", CallOutcomeKind.NEEDS_YOU, worded=(("memory", "Eats no meat."),))

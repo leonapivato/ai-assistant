@@ -89,7 +89,7 @@ from ai_assistant.orchestration.telegram import (
     is_stop_command,
     line_channel,
 )
-from ai_assistant.orchestration.understanding import AskedIn, LineMessage, WrittenBy
+from ai_assistant.orchestration.understanding import LineMessage, WrittenBy
 from ai_assistant.testing import (
     FakeMemoryStore,
     FakePlanStore,
@@ -605,11 +605,7 @@ async def test_the_window_is_the_lines_recent_episodes_and_a_reply_brings_its_qu
         assert place == f"telegram:{channel.instance_id}"
         assert positions is None
         assert list(activations) == ["act-a"]
-        return {
-            21: WrittenBy(
-                activation_id="act-a", asked=AskedIn(round="round:1", parts=(1,)), round="round:1"
-            )
-        }
+        return {21: WrittenBy(activation_id="act-a", round="round:1")}
 
     line = _Line(memory=memory, written=written)
     quoted = TelegramQuotedMessage(
@@ -627,7 +623,8 @@ async def test_the_window_is_the_lines_recent_episodes_and_a_reply_brings_its_qu
         (21, MessageAuthor.ASSISTANT, "Shall I book Friday?"),
     ]
     assert window.links == {20: "act-a", 21: "act-a"}
-    assert window.asked == {21: AskedIn(round="round:1", parts=(1,))}
+    # ADR-0361 §8:5: the window carries no question mark.
+    assert not hasattr(window, "asked")
     (input_message,) = window.input_messages
     assert (input_message.position, input_message.replies_to) == (30, 21)
 
@@ -729,13 +726,7 @@ async def test_a_reply_to_the_last_part_of_a_long_message_finds_its_question_who
     async def written(
         place: str, activations: Sequence[str], positions: Sequence[int] | None
     ) -> Mapping[int, WrittenBy]:
-        return {
-            26: WrittenBy(
-                activation_id="act-long",
-                asked=AskedIn(round="round:1", parts=(1,)),
-                round="round:1",
-            )
-        }
+        return {26: WrittenBy(activation_id="act-long", round="round:1")}
 
     line = _Line(memory=memory, written=written)
     quoted = TelegramQuotedMessage(
@@ -750,7 +741,6 @@ async def test_a_reply_to_the_last_part_of_a_long_message_finds_its_question_who
     (said,) = [one for one in window.messages if one.position == 26]
     assert said.text == long_text, "the whole message, its question at its end"
     assert said.text.endswith("Would you prefer Tuesday?")
-    assert window.asked == {26: AskedIn(round="round:1", parts=(1,))}
     assert window.input_messages[0].replies_to == 26
 
 

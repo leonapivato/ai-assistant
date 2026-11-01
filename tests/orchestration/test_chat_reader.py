@@ -46,7 +46,7 @@ from ai_assistant.orchestration.chat import (
     couldnt_finish,
 )
 from ai_assistant.orchestration.conversations import fitted_message
-from ai_assistant.orchestration.understanding import AskedIn, WrittenBy
+from ai_assistant.orchestration.understanding import WrittenBy
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
@@ -677,15 +677,10 @@ _WRITER_B: Final = "00000000-0000-4000-8000-00000000000b"
 
 
 class _Writers:
-    """A ``written`` reader over a fixed table of which activation wrote each position.
+    """A ``written`` reader over a fixed table of which activation wrote each position."""
 
-    A position ``questions`` names is a question: its round ``round:<position>`` asked
-    about one part.
-    """
-
-    def __init__(self, table: dict[int, str], *, questions: frozenset[int] = frozenset()) -> None:
+    def __init__(self, table: dict[int, str]) -> None:
         self._table = table
-        self._questions = questions
         self.asked: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
 
     async def __call__(
@@ -694,12 +689,7 @@ class _Writers:
         del conversation_id
         self.asked.append((tuple(activation_ids), tuple(positions)))
         return {
-            position: WrittenBy(
-                activation_id=writer,
-                asked=AskedIn(round=f"round:{position}", parts=(1,))
-                if position in self._questions
-                else None,
-            )
+            position: WrittenBy(activation_id=writer, round=f"round:{position}")
             for position, writer in self._table.items()
             if position in positions and writer in activation_ids
         }
@@ -795,16 +785,16 @@ async def test_an_assistant_message_links_to_the_activation_that_wrote_it() -> N
     assert writers.asked == [((_WRITER_B, _WRITER_A), (3, 5))]
 
 
-async def test_an_assistant_message_carries_the_question_it_is() -> None:
-    """ADR-0322 §4:2: the reader brings the question beside the link, where it is one."""
+async def test_an_assistant_message_carries_its_link_and_no_question_mark() -> None:
+    """ADR-0361 §8:5: the reader brings the link alone; no window carries a question."""
     store = FakeConversationStore(now=lambda: AT)
     conversation = await _seeded(store)
-    writers = _Writers({2: _WRITER_A, 3: _WRITER_A, 5: _WRITER_B}, questions=frozenset({3}))
+    writers = _Writers({2: _WRITER_A, 3: _WRITER_A, 5: _WRITER_B})
 
     window = await _window(store, conversation, writers)
 
     assert dict(window.links) == {3: _WRITER_A, 4: _WRITER_B, 5: _WRITER_B}
-    assert dict(window.asked) == {3: AskedIn(round="round:3", parts=(1,))}
+    assert not hasattr(window, "asked")
 
 
 async def test_without_a_writers_reader_no_assistant_message_links() -> None:

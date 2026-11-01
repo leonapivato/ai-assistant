@@ -2,10 +2,10 @@
 
 For every capability the composition root registers and planning is offered, a call
 sending a value for every argument its selected declaration takes has its exact line
-rendered, as an approved action's details are, and the line must show every one of them
-but those §2:5 leaves out: the arguments the offered declaration names in
-``system_supplied``, the *looking for* and the *deliberate repeat* mark. No message asks
-about a call by name any more (ADR-0356 §7:5), so the line is rendered directly. The
+rendered, as a card and a ticket show it (ADR-0361 §2:11, §5:1), and the line must show
+every one of them but those §2:5 leaves out: the arguments the offered declaration names
+in ``system_supplied``, the *looking for* and the *deliberate repeat* mark. No message
+asks about a call any more (ADR-0361 §8:5), so the line is rendered directly. The
 capabilities are read from a deployment that configures every provider and keeps the
 person model, so a capability added later is covered without a change here. An argument
 naming a memory by its id, as a ``pin``'s does, is read as the memory's wording, which
@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.types import AskedCall
+from ai_assistant.core.types import RequestedCall
 from ai_assistant.orchestration.matter_calls import MATTER_CAPABILITIES
 from ai_assistant.orchestration.person_calls import worded_argument
 from ai_assistant.orchestration.phase_path import PhasePath
@@ -144,21 +144,16 @@ async def test_every_capabilitys_exact_line_shows_every_argument_it_sends(
     worded = [worded_argument(str(offered.capability)) for offered, _ in pairs]
     lines = [
         exact_line(
-            AskedCall(part=number, tool=selected, values=values),
+            RequestedCall(tool=selected, values=values),
             filled={*offered.system_supplied, *selected.system_supplied},
-            numbered=True,
             worded={} if argument is None else {argument: _WORDING},
         )
-        for number, ((offered, selected), values, argument) in enumerate(
-            zip(pairs, sent, worded, strict=True), 1
-        )
+        for (offered, selected), values, argument in zip(pairs, sent, worded, strict=True)
     ]
     missing: dict[str, list[str]] = {}
-    for number, ((offered, _), values, line, by_wording) in enumerate(
-        zip(pairs, sent, lines, worded, strict=True), 1
-    ):
+    for (offered, _), values, line, by_wording in zip(pairs, sent, lines, worded, strict=True):
         name = str(offered.capability)
-        assert line.startswith(f"{number}. {name}"), line
+        assert line.startswith(name), line
         left_out = {*offered.system_supplied, LOOKING_FOR, DELIBERATE_REPEAT}
         for argument, value in values.items():
             # §8:6: the memory an argument names is read as its wording, the argument sent.

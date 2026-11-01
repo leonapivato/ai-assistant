@@ -162,7 +162,6 @@ from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksSt
 from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
-    AskedIn,
     Fetched,
     TranscriptWindow,
     UnderstandingStage,
@@ -991,10 +990,10 @@ async def test_a_booking_that_needs_you_is_answered_cannot_be_done_yet() -> None
             "I can't book that yet: it needs you, and that isn't possible yet.",
         ),
     ]
-    # The second round was shown the call as needing a yes, not yet asked (ADR-0357
-    # §8:1); this case's round answers rather than asks.
+    # The second round was shown the call as needing a yes it cannot ask for here, no
+    # Approvals channel being wired (ADR-0361 §2:4, §8:5); this case's round answers.
     (call,) = reported(completer.calls[1], 0)
-    assert call["outcome"].startswith("needs a yes, and is not yet asked")
+    assert call["outcome"].startswith("needs a yes, and it cannot be asked about")
 
     # Nothing ran: no effect record for the booking, and the invoker was not reached.
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
@@ -2295,11 +2294,12 @@ async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() 
     assert await path.written("c1", ["activation-unknown"], [2]) == {}
 
 
-async def test_the_writers_read_marks_a_question_by_its_own_activations_round() -> None:
-    """ADR-0322 §4:1-§4:3: a round's id names it only within its activation.
+async def test_the_writers_read_marks_no_message_a_question_even_from_a_round_that_asked() -> None:
+    """ADR-0361 §8:5-§8:6: no window carries a question mark, whatever a stored round holds.
 
-    Two activations each wrote a message from a round of one id. Only B's round asked,
-    so only B's message is a question, with the parts B's episode's projection marks.
+    Two activations each wrote a message from a round of one id, and B's stored round
+    holds the asked calls a round recorded before the question path retired. It is read
+    as it was, and neither message is marked a question: each is linked to its writer.
     """
     completer = FakeToolCallingCompleter.scripted()
     harness = _harness(completer)
@@ -2332,12 +2332,12 @@ async def test_the_writers_read_marks_a_question_by_its_own_activations_round() 
 
     assert await path.written("c1", ["act-a", "act-b"], [2, 3]) == {
         2: WrittenBy(activation_id="act-a", round="round:1"),
-        3: WrittenBy(
-            activation_id="act-b",
-            asked=AskedIn(round="round:1", parts=(1, 2)),
-            round="round:1",
-        ),
+        3: WrittenBy(activation_id="act-b", round="round:1"),
     }
+    held = await harness.memory.get(episode("act-b").id)
+    assert isinstance(held, EpisodicMemory)
+    assert held.processing_record is not None
+    assert held.processing_record.rounds[0].asked == asked
 
 
 async def test_the_writers_read_links_nothing_where_the_records_cannot_be_read(

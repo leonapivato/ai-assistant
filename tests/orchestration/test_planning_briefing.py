@@ -24,7 +24,10 @@ from exchange_support import section, tag, tags
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActivationUnderstanding,
-    AskedCall,
+    ApprovalGiver,
+    ApprovalRequest,
+    ApprovalRequestState,
+    ApprovalTap,
     CallOutcomeKind,
     ChannelContext,
     ChannelIdentity,
@@ -43,12 +46,12 @@ from ai_assistant.core.types import (
     Profile,
     ProposedCall,
     Provenance,
-    QuestionPart,
     RecordedCall,
     RecordedChannelTrigger,
     RecordedDelivery,
     RecordedInputMessage,
     RecordedTextInput,
+    RequestedCall,
     RoundResponse,
     StageEntry,
     StageOutcome,
@@ -59,20 +62,20 @@ from ai_assistant.core.types import (
     StorySummaryLine,
     StorySummaryState,
     SupportHolder,
+    TicketState,
     UnderstandingProducer,
     WholeTextReply,
 )
+from ai_assistant.orchestration.approvals import RUN_APPROVED_TOOL, Ticket
 from ai_assistant.orchestration.matters import EntryInput, InProgressEntry
 from ai_assistant.orchestration.person_block import KeptInMind, PersonBlock
 from ai_assistant.orchestration.person_calls import SET_PROFILE
 from ai_assistant.orchestration.planning import (
-    APPROVED_ACTION_TOOL,
     BRIEFING_HEADINGS,
     NEWS_OPENING,
     NOTE_REASONS,
     NOTHING_NEW,
     PLANNING_PROMPT,
-    ApprovedAction,
     CallOutcome,
     DigestedEvidence,
     DigestItem,
@@ -100,8 +103,8 @@ MAREN: Final = memory("m:maren", "Maren is Leo's partner.", said_support(when=NO
 
 
 class _Recorder:
-    async def record(self, planning_round: Any, labels: Any, *, questions: Any = None) -> None:
-        del planning_round, labels, questions
+    async def record(self, planning_round: Any, labels: Any) -> None:
+        del planning_round, labels
 
 
 def _stage(
@@ -872,16 +875,25 @@ async def test_an_own_change_undone_before_its_report_is_news() -> None:
 
 
 async def test_an_approved_profile_change_is_not_named_again() -> None:
-    """ADR-0360 §4:5, ADR-0321 §4:2, review round 5: an approved call is the call it ran."""
-    approved = ApprovedAction(
-        part=QuestionPart(round="round:asking", part=1),
-        call=AskedCall(part=1, tool=SET_PROFILE, values={"field": "address", "value": "Lee"}),
+    """ADR-0360 §4:5, ADR-0361 §5:2, review round 5: a ticket's call is the call it ran."""
+    request = ApprovalRequest(
+        id="approval:1",
+        person=OWNER_PERSON_ID,
+        activation_id="act-asking",
+        round="round:asking",
+        call=RequestedCall(tool=SET_PROFILE, values={"field": "address", "value": "Lee"}),
+        why="Leo asked to be called Lee.",
+        written_at=NOW,
+        expires_at=NOW + timedelta(days=1),
+        state=ApprovalRequestState.APPROVED,
+        answer=ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=NOW),
+        ticket=TicketState.HELD,
     )
-    given = _inputs(approved=(approved,))
+    given = _inputs(tickets=(Ticket(request=request),), approvals=True)
 
     news = await _next_round(
         given,
-        RoundResponse(calls=(_call("c1", APPROVED_ACTION_TOOL, action="A1"),)),
+        RoundResponse(calls=(_call("c1", RUN_APPROVED_TOOL, label="A1"),)),
         person_now=_now(address="Lee"),
     )
 

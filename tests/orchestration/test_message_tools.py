@@ -1,18 +1,18 @@
-"""ADR-0357 §2, §4 and §8:2: what every message call shares, read without the phases.
+"""ADR-0357 §2 and §4: what every message call shares, read without the phases.
 
 ``text``'s declaration and the check of its arguments, who a message is for, the
-platforms ``via`` names, the pass-through wording step, the asking message's lines, and
-``email``'s names, pinned to the declaration ``tools`` spells.
+platforms ``via`` names, the pass-through wording step, and ``email``'s names, pinned to
+the declaration ``tools`` spells. ``text`` takes no ``asks`` and no message carries exact
+lines (ADR-0361 §8:5): a yes is asked for by ``request_approval`` alone.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from ai_assistant.orchestration.message_tools import (
-    ASKS_ARGUMENT,
     ATTACHMENTS_ARGUMENT,
     BCC_ARGUMENT,
     CC_ARGUMENT,
@@ -21,7 +21,6 @@ from ai_assistant.orchestration.message_tools import (
     FROM_ARGUMENT,
     FROM_ASSISTANT,
     FROM_USER,
-    NEEDS_YOUR_YES,
     SUBJECT_ARGUMENT,
     TEXT_CALL,
     TEXT_CAPABILITY,
@@ -29,22 +28,17 @@ from ai_assistant.orchestration.message_tools import (
     VIA_ARGUMENT,
     WORDS_ARGUMENT,
     TextArguments,
-    asks_named,
-    carries_asks,
     platform_name,
     platform_type,
     reworded,
     text_arguments,
     who_it_is_for,
-    with_question,
 )
 from ai_assistant.tools import send_email
 from ai_assistant.tools.send_email import EMAIL
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ToolDefinition
-
-_LINE: Final = 'book — slot: "19:00"'
 
 
 def _schema(tool: ToolDefinition) -> dict[str, Any]:
@@ -56,18 +50,15 @@ def _schema(tool: ToolDefinition) -> dict[str, Any]:
 # --- text's declaration (§2:2) ----------------------------------------------------------
 
 
-def test_text_takes_to_and_words_required_and_via_exact_and_asks_optional() -> None:
-    """§2:2: who and what are the choices that cannot be left to the tool (§5:3)."""
+def test_text_takes_to_and_words_required_and_via_and_exact_optional() -> None:
+    """§2:2: who and what are the choices that cannot be left to the tool (§5:3).
+
+    ADR-0361 §8:5: ``asks`` is no longer among them.
+    """
     schema = _schema(TEXT_CALL)
     assert TEXT_CALL.capability == TEXT_CAPABILITY
     assert list(schema["required"]) == [TO_ARGUMENT, WORDS_ARGUMENT]
-    assert set(schema["properties"]) == {
-        TO_ARGUMENT,
-        WORDS_ARGUMENT,
-        VIA_ARGUMENT,
-        EXACT_ARGUMENT,
-        ASKS_ARGUMENT,
-    }
+    assert set(schema["properties"]) == {TO_ARGUMENT, WORDS_ARGUMENT, VIA_ARGUMENT, EXACT_ARGUMENT}
     assert schema["additionalProperties"] is False
 
 
@@ -92,12 +83,8 @@ def test_texts_description_says_it_is_sent_as_the_assistant() -> None:
 
 
 def test_well_formed_arguments_are_read_whole() -> None:
-    checked = text_arguments(
-        {"to": "the user", "words": "On it.", "via": " L2 ", "exact": True, "asks": ["1.1"]}
-    )
-    assert checked == TextArguments(
-        to="the user", words="On it.", via="L2", exact=True, asks=("1.1",)
-    )
+    checked = text_arguments({"to": "the user", "words": "On it.", "via": " L2 ", "exact": True})
+    assert checked == TextArguments(to="the user", words="On it.", via="L2", exact=True)
 
 
 def test_left_out_optional_arguments_are_the_tools_to_decide() -> None:
@@ -116,8 +103,9 @@ def test_left_out_optional_arguments_are_the_tools_to_decide() -> None:
         pytest.param({"to": "the user", "words": "Hi.", "via": []}, "'via'", id="via-list"),
         pytest.param({"to": "the user", "words": "Hi.", "via": " "}, "'via'", id="via-blank"),
         pytest.param({"to": "the user", "words": "Hi.", "exact": "yes"}, "'exact'", id="exact"),
-        pytest.param({"to": "the user", "words": "Hi.", "asks": "1.1"}, "'asks'", id="asks"),
-        pytest.param({"to": "the user", "words": "Hi.", "asks": [""]}, "'asks'", id="asks-blank"),
+        pytest.param(
+            {"to": "the user", "words": "Hi.", "asks": ["1.1"]}, "nothing else", id="asks"
+        ),
         pytest.param({"to": "the user", "words": "Hi.", "from": "user"}, "nothing else", id="from"),
     ],
 )
@@ -128,17 +116,6 @@ def test_an_argument_missing_or_wrong_comes_back_saying_which(
     checked = text_arguments(arguments)
     assert isinstance(checked, str)
     assert says in checked
-
-
-def test_only_a_text_call_with_asks_not_empty_carries_it() -> None:
-    """§8:1, §8:3: a malformed ``asks`` still makes its call the asking message."""
-    assert carries_asks(TEXT_CAPABILITY, {"asks": ["1.1"]})
-    assert carries_asks(TEXT_CAPABILITY, {"asks": "1.1"})
-    assert not carries_asks(TEXT_CAPABILITY, {"asks": []})
-    assert not carries_asks(TEXT_CAPABILITY, {"words": "Hi."})
-    assert not carries_asks(EMAIL_CAPABILITY, {"asks": ["1.1"]})
-    assert asks_named({"asks": ["1.1", " 1.2 "]}) == ("1.1", " 1.2 ")
-    assert asks_named({"asks": "1.1"}) == ()
 
 
 # --- who it is for (§2:3) ---------------------------------------------------------------
@@ -185,7 +162,7 @@ def test_a_result_names_each_platform() -> None:
     assert platform_name("imessage") == "imessage"
 
 
-# --- the wording step (§4) and the asking message (§8:2) ---------------------------------
+# --- the wording step (§4) ----------------------------------------------------------------
 
 
 @pytest.mark.parametrize("exact", [True, False])
@@ -193,31 +170,6 @@ def test_until_the_wording_step_is_built_every_messages_words_go_unchanged(exact
     """§4:3: ``exact`` is accepted and changes nothing."""
     words = "  Tell her: 'I'll be late'  \n"
     assert reworded(words, exact=exact) == words
-
-
-def test_the_exact_lines_follow_the_words_under_the_fixed_line() -> None:
-    """§8:2, ADR-0321 §2:5: after the words, after a blank line, under one fixed line."""
-    assert with_question("Shall I book it?", _LINE) == (
-        f"Shall I book it?\n\n{NEEDS_YOUR_YES}\n{_LINE}"
-    )
-
-
-def test_a_message_asking_nothing_is_its_words_as_they_are() -> None:
-    words = f"Shall I?\n\n{NEEDS_YOUR_YES}"
-    assert with_question(words, None) == words
-    assert with_question(words, "") == words
-
-
-@pytest.mark.parametrize("own", [NEEDS_YOUR_YES, "needs your yes", "  NEEDS YOUR YES :  \n"])
-def test_a_fixed_line_the_words_end_with_is_dropped_so_it_appears_once(own: str) -> None:
-    """#3103: the backstop, on the asking message's words."""
-    asked = with_question(f"I'll book it if you say yes.\n\n{own}", _LINE)
-    assert asked == f"I'll book it if you say yes.\n\n{NEEDS_YOUR_YES}\n{_LINE}"
-
-
-def test_a_fixed_line_mid_words_is_left_as_written() -> None:
-    words = f"Look under {NEEDS_YOUR_YES} below.\nShall I?"
-    assert with_question(words, _LINE) == f"{words}\n\n{NEEDS_YOUR_YES}\n{_LINE}"
 
 
 # --- email's names (§2:5) ---------------------------------------------------------------
@@ -244,5 +196,5 @@ def test_emails_names_are_the_ones_its_declaration_spells() -> None:
     ]
     assert list(properties[FROM_ARGUMENT]["enum"]) == [FROM_ASSISTANT, FROM_USER]
     assert (send_email.FROM_ASSISTANT, send_email.FROM_USER) == (FROM_ASSISTANT, FROM_USER)
-    assert ASKS_ARGUMENT not in properties  # §8:1: an email's yes approves nothing
+    assert "asks" not in properties  # ADR-0361 §8:5: no message asks
     assert EMAIL.safe_to_repeat is False

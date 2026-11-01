@@ -79,7 +79,7 @@ from ai_assistant.core.types import (
     TranscriptMessage,
 )
 from ai_assistant.orchestration.conversations import conversation_channel, fitted_message
-from ai_assistant.orchestration.understanding import AskedIn, TranscriptWindow, WrittenBy
+from ai_assistant.orchestration.understanding import TranscriptWindow, WrittenBy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -700,14 +700,13 @@ class ChatReader:
             )
             if earlier is not None and earlier.entries and earlier.entries[-1].position == wanted:
                 replied.append(earlier.entries[-1])
-        links, asked = await self._links(conversation_id, recent, replied)
+        links = await self._links(conversation_id, recent, replied)
         return TranscriptWindow(
             conversation=conversation_channel(conversation_id),
             messages=recent,
             input_messages=tuple(waiting),
             replied_to=tuple(replied),
             links=links,
-            asked=asked,
         )
 
     async def _links(
@@ -715,11 +714,8 @@ class ChatReader:
         conversation_id: str,
         recent: Sequence[TranscriptMessage],
         replied: Sequence[TranscriptMessage | DeletedMessage],
-    ) -> tuple[dict[int, str], dict[int, AskedIn]]:
-        """The activation each window message links to, and the question each one is.
-
-        ADR-0303 §7:1-§7:3, with ADR-0322 §4:2's question: for an assistant message
-        linked by its effect record, the question it is, where ``written`` found one.
+    ) -> dict[int, str]:
+        """The activation each window message links to (ADR-0303 §7:1-§7:3).
 
         Brought with the window, so the understanding phase reads no further store to
         link a message. A user's message links to the activation that took it in, by
@@ -740,9 +736,8 @@ class ChatReader:
             for one in (*recent, *replied)
             if isinstance(one, TranscriptMessage) and one.author is MessageAuthor.ASSISTANT
         ]
-        asked: dict[int, AskedIn] = {}
         if self._written is None or not writes:
-            return links, asked
+            return links
         recent_positions = {one.position for one in recent}
         heads = {min(recent_positions)} if recent_positions else set()
         heads.update(position for position in writes if position not in recent_positions)
@@ -759,15 +754,13 @@ class ChatReader:
         elsewhere = () if self._writers is None else await self._writers()
         candidates = list(dict.fromkeys((*links.values(), *before.values(), *elsewhere)))
         if not candidates:
-            return links, asked
+            return links
         written = await self._written(conversation_id, candidates, writes)
         for position in writes:
             writer = written.get(position)
             if writer is not None and position not in links:
                 links[position] = writer.activation_id
-                if writer.asked is not None:
-                    asked[position] = writer.asked
-        return links, asked
+        return links
 
     async def _taken_in(self, conversation_id: str, positions: Sequence[int]) -> dict[int, str]:
         """The bookkeeping for ``positions``, in as many calls as the store's bound needs."""

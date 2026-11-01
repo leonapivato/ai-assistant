@@ -53,7 +53,6 @@ from ai_assistant.core.types import (
     ApprovalRequest,
     ApprovalRequestState,
     ApprovalWriteAnswer,
-    AskedCall,
     ChannelIdentity,
     RecordedDelivery,
     TicketState,
@@ -455,14 +454,7 @@ def card_text(request: ApprovalRequest, facts: CardFacts, *, now: datetime) -> s
     """
     call = request.call
     line = exact_line(
-        AskedCall(
-            part=1,
-            tool=call.tool,
-            values=call.values,
-            binding=call.binding,
-            deliberate_repeat=call.deliberate_repeat,
-            replaces=call.replaces,
-        ),
+        call,
         filled=call.tool.system_supplied,
         replacing=call.replaces,
         worded=recorded_wording(call),

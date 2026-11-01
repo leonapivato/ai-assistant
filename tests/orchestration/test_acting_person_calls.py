@@ -8,14 +8,11 @@ every other call still reaches the seam the stage was built with.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
-from test_acting import _approved, _Approving, _asked, _authorized, _now, _over, _round
+from test_acting import _approved, _Approving, _authorized, _now, _over, _round
 
 from ai_assistant.core.types import (
     ActionRequest,
-    AskedCall,
     PermissionDecision,
     ToolCall,
     ToolOutcome,
@@ -48,7 +45,7 @@ async def test_a_call_its_runner_refuses_is_not_done_with_the_runners_reason() -
 
 
 def _pin() -> AuthorizedCall:
-    """A ``pin`` allowed under the yes ``_approved`` names, with the asked call it rides."""
+    """A ``pin`` allowed under the approval ``_approved`` names."""
     request = ActionRequest(tool=PIN, parameters={"memory": "m:diet"})
     template = _approved("remember").call.decision
     decision = PermissionDecision.from_request(
@@ -60,10 +57,7 @@ def _pin() -> AuthorizedCall:
         approval=template.approval,
         approved_part=template.approved_part,
     )
-    return AuthorizedCall(
-        ToolCall(request=request, decision=decision),
-        asked=AskedCall(part=1, tool=PIN, values={"memory": "m:diet"}),
-    )
+    return AuthorizedCall(ToolCall(request=request, decision=decision))
 
 
 async def test_runners_added_beside_the_seam_reach_their_capabilities_alone() -> None:
@@ -71,15 +65,15 @@ async def test_runners_added_beside_the_seam_reach_their_capabilities_alone() ->
     added = _Approving(NotDone(reason=_REASON))
     stage = _over(FakePlanStore(now=_now), base)
     stage.add_own_records({"pin": added})
-    remember = replace(_approved("remember", decision="d2", effect="e2", part=2), asked=_asked(2))
+    remember = _approved("remember", decision="d2", effect="e2", part=2)
 
     acted = await stage.act(held=HeldResults(), authorized=_round(_pin(), remember))
 
     pinned, remembered = acted.calls
     assert (pinned.outcome, pinned.reason) == (ActedOutcome.NOT_DONE, _REASON)
     assert remembered.outcome is ActedOutcome.DONE
-    assert [str(call.request.tool.capability) for call, _ in added.approved] == ["pin"]
-    assert [str(call.request.tool.capability) for call, _ in base.approved] == ["remember"]
+    assert [str(call.request.tool.capability) for call in added.run_calls] == ["pin"]
+    assert [str(call.request.tool.capability) for call in base.run_calls] == ["remember"]
 
 
 def test_attaching_no_runner_is_refused() -> None:

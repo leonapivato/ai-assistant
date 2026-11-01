@@ -15,8 +15,6 @@ phases, planning and authorizing read alike, and imports nothing of theirs:
   name, and the platforms are named here, with how a result names them (§3:1).
 - **The wording step** (§4): it passes the words through unchanged, ``exact`` or not,
   until the decision §4:5 names builds it.
-- **The asking message** (§8): the round's one ``text`` call carrying ``asks``, and the
-  fixed line and exact lines code appends after any rewording (§8:2, ADR-0321 §2:5).
 - **``email``'s names** (§2:5-§2:10): the capability and its arguments, which the
   declaration in ``tools`` spells and authorizing's gate reads, pinned equal by test.
 """
@@ -42,7 +40,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 __all__ = [
-    "ASKS_ARGUMENT",
     "ATTACHMENTS_ARGUMENT",
     "BCC_ARGUMENT",
     "CC_ARGUMENT",
@@ -52,7 +49,6 @@ __all__ = [
     "FROM_ARGUMENT",
     "FROM_ASSISTANT",
     "FROM_USER",
-    "NEEDS_YOUR_YES",
     "PLACE_LABEL",
     "PLATFORMS",
     "SUBJECT_ARGUMENT",
@@ -63,15 +59,12 @@ __all__ = [
     "VIA_ARGUMENT",
     "WORDS_ARGUMENT",
     "TextArguments",
-    "asks_named",
-    "carries_asks",
     "emailed_to",
     "platform_name",
     "platform_type",
     "reworded",
     "text_arguments",
     "who_it_is_for",
-    "with_question",
 ]
 
 # --- the names ------------------------------------------------------------------------
@@ -81,7 +74,6 @@ TO_ARGUMENT: Final = "to"
 WORDS_ARGUMENT: Final = "words"
 VIA_ARGUMENT: Final = "via"
 EXACT_ARGUMENT: Final = "exact"
-ASKS_ARGUMENT: Final = "asks"
 
 #: ``email`` (ADR-0357 §2:5), as ``tools``' declaration names it and its arguments.
 EMAIL_CAPABILITY: Final = "email"
@@ -111,10 +103,6 @@ _PLATFORM_NAMES: Final[Mapping[str, str]] = {
 #: The channel type an email's delivery names where it went (ADR-0357 §3:1): its
 #: platform, with its recipients as the place.
 EMAIL_CHANNEL_TYPE: Final = "email"
-
-#: The owner's ruling on #3094 (2026-10-16): the one fixed line code puts above the exact
-#: lines it appends to an asking message, so a question never goes out as a bare line.
-NEEDS_YOUR_YES: Final = "Needs your yes:"
 
 # --- text's declaration (§2:2) ---------------------------------------------------------
 
@@ -165,21 +153,6 @@ TEXT_CALL: Final = ToolDefinition(
                 "type": "boolean",
                 "description": "Send the words exactly as written.",
             },
-            ASKS_ARGUMENT: {
-                "type": "array",
-                "items": {"type": "string", "minLength": 1},
-                "minItems": 1,
-                "description": (
-                    "The calls this message asks about, each by the ask_as reference its "
-                    "result showed: an action that needs a yes before it runs. Explain "
-                    "each in the message's own words, with the details that matter to "
-                    "the person; the system adds its exact details after your words, so "
-                    "never write them yourself, and never send them alone. One message a "
-                    "round asks. Never approve anything on anyone's behalf: there is no "
-                    "other route, no confirmation email, no link or code, and no step on "
-                    "the person's end."
-                ),
-            },
         },
         "required": [TO_ARGUMENT, WORDS_ARGUMENT],
         "additionalProperties": False,
@@ -210,16 +183,11 @@ _NOT_ONE_PLACE: Final = (
     f"{VIA_ARGUMENT!r} names one place, by its L label, or one platform, by its name"
 )
 _NOT_EXACT: Final = f"{EXACT_ARGUMENT!r} is true or false"
-_NOT_ASKS: Final = (
-    f"{ASKS_ARGUMENT!r} names the calls the message asks about, each by its ask_as reference"
-)
 _UNDECLARED: Final = (
-    f"{TEXT_CAPABILITY} takes {TO_ARGUMENT}, {WORDS_ARGUMENT}, {VIA_ARGUMENT}, "
-    f"{EXACT_ARGUMENT} and {ASKS_ARGUMENT}, and nothing else"
+    f"{TEXT_CAPABILITY} takes {TO_ARGUMENT}, {WORDS_ARGUMENT}, {VIA_ARGUMENT} and "
+    f"{EXACT_ARGUMENT}, and nothing else"
 )
-_DECLARED: Final = frozenset(
-    {TO_ARGUMENT, WORDS_ARGUMENT, VIA_ARGUMENT, EXACT_ARGUMENT, ASKS_ARGUMENT}
-)
+_DECLARED: Final = frozenset({TO_ARGUMENT, WORDS_ARGUMENT, VIA_ARGUMENT, EXACT_ARGUMENT})
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,17 +200,15 @@ class TextArguments:
         via: Where it goes, as planning named it; ``None`` where it named nowhere, and
             the tool chooses (§2:4).
         exact: Whether the words go exactly as written (§4:2).
-        asks: The references of the calls it asks about, as named (§8:1).
     """
 
     to: str
     words: str
     via: str | None = None
     exact: bool = False
-    asks: tuple[str, ...] = ()
 
 
-def text_arguments(arguments: Mapping[str, object]) -> TextArguments | str:  # noqa: PLR0911 — one refusal for each argument it checks
+def text_arguments(arguments: Mapping[str, object]) -> TextArguments | str:
     """A ``text`` call's arguments, or why the call runs nothing (ADR-0357 §6:1, §6:3).
 
     ``text`` is never ruled on as a call, so its schema is checked here: a missing or
@@ -265,38 +231,9 @@ def text_arguments(arguments: Mapping[str, object]) -> TextArguments | str:  # n
     exact = arguments.get(EXACT_ARGUMENT, False)
     if not isinstance(exact, bool):
         return _NOT_EXACT
-    asks = arguments.get(ASKS_ARGUMENT, ())
-    if not isinstance(asks, list | tuple) or not all(
-        isinstance(one, str) and one.strip() for one in asks
-    ):
-        return _NOT_ASKS
     return TextArguments(
-        to=to,
-        words=words,
-        via=via.strip() if isinstance(via, str) else None,
-        exact=exact,
-        asks=tuple(str(one) for one in asks),
+        to=to, words=words, via=via.strip() if isinstance(via, str) else None, exact=exact
     )
-
-
-def carries_asks(name: str, arguments: Mapping[str, object]) -> bool:
-    """Whether a call is a ``text`` call carrying ``asks`` (ADR-0357 §8:1, §8:3).
-
-    One whose ``asks`` is present and not empty, whatever it holds: a malformed one still
-    makes the call the round's asking message, which then comes back for it.
-    """
-    if name != TEXT_CAPABILITY:
-        return False
-    asks = arguments.get(ASKS_ARGUMENT)
-    return asks is not None and asks not in ([], ())
-
-
-def asks_named(arguments: Mapping[str, object]) -> tuple[str, ...]:
-    """The references a ``text`` call's ``asks`` names, or none where it is malformed."""
-    asks = arguments.get(ASKS_ARGUMENT, ())
-    if not isinstance(asks, list | tuple) or not all(isinstance(one, str) for one in asks):
-        return ()
-    return tuple(str(one) for one in asks)
 
 
 # --- who it is for (§2:3) ---------------------------------------------------------------
@@ -370,7 +307,7 @@ def emailed_to(arguments: Mapping[str, object]) -> str | None:
     return ", ".join(dict.fromkeys(named)) or None
 
 
-# --- the wording step (§4) and the asking message (§8:2) ---------------------------------
+# --- the wording step (§4) ----------------------------------------------------------------
 
 
 def reworded(words: str, *, exact: bool) -> str:
@@ -381,37 +318,3 @@ def reworded(words: str, *, exact: bool) -> str:
     """
     del exact
     return words
-
-
-def _bare_line(line: str) -> str:
-    """A line as :func:`_without_fixed_line` compares it: no whitespace, colon or case."""
-    return line.strip().removesuffix(":").rstrip().casefold()
-
-
-def _without_fixed_line(text: str) -> str:
-    """The words without a :data:`NEEDS_YOUR_YES` line of their own at their end (#3103).
-
-    Planning is told it never writes the fixed line, and code is the backstop: a last
-    line that is the fixed line, whatever its case, surrounding whitespace or missing
-    colon, is dropped. Only the last line: a mention anywhere else is left as written.
-    """
-    lines = text.rstrip().splitlines(keepends=True)
-    if lines and _bare_line(lines[-1]) == _bare_line(NEEDS_YOUR_YES):
-        return "".join(lines[:-1])
-    return text
-
-
-def with_question(words: str, lines: str | None) -> str:
-    """The asking message: its words, then the exact lines under the fixed line (§8:2).
-
-    ``words`` are the words after any rewording, and the lines come after them, so the
-    wording step never changes them (§4:4) and a message cut to fit loses them first. The
-    fixed line comes after a blank line, whether or not there are words (#3094), and a
-    copy of it ending the words is dropped, so it appears once (#3103). A message asking
-    about nothing, ``lines`` ``None`` or empty, is its words as they are.
-    """
-    if not lines:
-        return words
-    text = _without_fixed_line(words)
-    question = f"{NEEDS_YOUR_YES}\n{lines}"
-    return f"{text.rstrip()}\n\n{question}" if text.strip() else question

@@ -176,7 +176,7 @@ async def test_a_candidate_with_confirm_set_needs_you_and_records_nothing() -> N
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
     assert [one for one in effects if one.capability == "remember"] == []
     (call,) = reported(completer.calls[1], 0)
-    assert call["outcome"].startswith("needs a yes, and is not yet asked")
+    assert call["outcome"].startswith("needs a yes, and it cannot be asked about")
     assert call["because"] == "the user is asked to confirm this wording before it is kept"
 
 

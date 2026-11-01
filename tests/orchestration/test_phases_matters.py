@@ -1475,11 +1475,25 @@ async def test_a_stop_call_waits_and_a_newer_input_absorbs_the_stopping_one() ->
     await harness.engine.aclose()
 
 
-async def test_a_waiting_round_is_shown_no_approved_action_and_the_round_after_it_is(
+async def test_a_waiting_round_is_shown_no_ticket_and_the_round_after_it_is(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§7:25-§7:26: the waiting round is offered the stop call alone, its yes withheld."""
-    from test_planning_asks import _approved as approved_action  # noqa: PLC0415 — one case's
+    """§7:25-§7:26: the waiting round is offered the stop call alone, its ticket withheld.
+
+    ADR-0361 §5:1, ADR-0356 §15: a ticket renders in the input that holds it, so the
+    round after the wait is shown it as news, the briefing being rendered once.
+    """
+    from ai_assistant.core.types import (  # noqa: PLC0415 — one case's
+        OWNER_PERSON_ID,
+        ApprovalGiver,
+        ApprovalRequest,
+        ApprovalRequestState,
+        ApprovalTap,
+        RequestedCall,
+        TicketState,
+    )
+    from ai_assistant.orchestration.approvals import Ticket  # noqa: PLC0415 — one case's
+    from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE  # noqa: PLC0415
 
     understanding, planner = _Understanding(), _Planner()
     planner.script(
@@ -1496,16 +1510,34 @@ async def test_a_waiting_round_is_shown_no_approved_action_and_the_round_after_i
     harness = _harness(understanding, planner)
     phases = harness.engine._phases
     assert phases is not None
-    approving = phases._approved
+    request = ApprovalRequest(
+        id="approval:1",
+        person=OWNER_PERSON_ID,
+        activation_id="act-asking",
+        round="round:asking",
+        call=RequestedCall(
+            tool=REMEMBER_CANDIDATE,
+            values={
+                "fact": "Wants two bedrooms.",
+                "why": "a plan",
+                "rests_on_input": True,
+                "episode": "activation:act-asking",
+                "rests_on_outside_content": False,
+            },
+        ),
+        why="Leo said so.",
+        written_at=AT,
+        expires_at=AT + timedelta(days=1),
+        state=ApprovalRequestState.APPROVED,
+        answer=ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT),
+        ticket=TicketState.HELD,
+    )
 
-    async def approved(given: Any, working: Any) -> Any:
-        found = await approving(given, working)
-        understood = given.understanding
-        if understood is not None and understood.meaning == newer_text:
-            return (approved_action(),)
-        return found
+    async def held(state: Any) -> tuple[Ticket, ...]:
+        said = getattr(state.trigger.payload, "text", "")
+        return (Ticket(request=request),) if said == newer_text else ()
 
-    monkeypatch.setattr(phases, "_approved", approved)
+    monkeypatch.setattr(phases, "_tickets", held)
     # ADR-0349 §7:22: no offer is made to an older holding as much input as it may, so
     # the newer one waits on it, wherever it runs (ADR-0361 §7:1).
     monkeypatch.setattr(harness.engine._matters, "held_input_limit", 1)
@@ -1519,13 +1551,11 @@ async def test_a_waiting_round_is_shown_no_approved_action_and_the_round_after_i
 
     waiting_round, after = planner.requests[newer_text][:2]
     assert tags(waiting_round.section("## Concurrent stimuli"), "stimulus", waited_on="yes")
-    assert tags(waiting_round.text, "approved") == []
-    # ADR-0356 §4:3, §5:2: every round of a work is offered what its first was, and its
-    # briefing is rendered once, so an approval the waiting round was not shown is not
-    # shown after it either; where approved actions render is still undecided, and
-    # approvals stay stopped (§15, ADR-0353 §11).
+    assert tags(waiting_round.text, "ticket") == []
+    # ADR-0356 §4:3, §5:2: every round of a work is offered what its first was.
     assert planner.offered[newer_text][0] == planner.offered[newer_text][1]
-    assert tags(after.text, "approved") == []
+    assert tags(after.text, "ticket") != []
+    await harness.engine.aclose()
 
 
 # --- ADR-0352 §5: what a conversation shows after a hand-over ---------------------------
