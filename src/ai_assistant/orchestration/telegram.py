@@ -76,6 +76,19 @@ it was not sent and a retry can succeed (§6:3), never one whose outcome is unkn
 (§6:4), and records every other refusal *not done* (§6:5). While an activation runs it
 renews the typing indicator, each renewal claimed on the intake record (§6:7, §13:2).
 
+**An approval request's card** (ADR-0361 §4, :class:`TelegramCards`). Where the line is
+connected, ``request_approval`` has the line post its request's card into the line's chat
+as the assistant's own message, with Approve and Deny buttons, whatever place asked
+(§4:2), and records it with its opaque token (§4:10); a card too long for one message is
+posted with no buttons, saying it is answered on the hub page (§4:4). The hub edits each
+card in place as its request's state changes (§4:5), from the reader's own loop, which
+reads the requests its cards are on after every poll. **A tap is a command** (§4:7): a
+button's callback, told apart by its structure, never perceived, carried out only from
+the configured account in its chat (ADR-0323 §4:1, as ADR-0332 §8:1 applies it to
+``/stop``), and dealt with as any other account's update otherwise (§5:2). It is recorded
+answered on the intake record as ``/stop`` is, which claims its answer's call (§13:2), so a
+repeated fetch carries it out once.
+
 **It logs code-owned reasons only.** No line, record or error here carries a message's
 text, and the bot's token never reaches this module: the client binds it (§11:8-§11:9).
 
@@ -87,6 +100,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import secrets
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import partial
@@ -97,11 +111,16 @@ import structlog
 from ai_assistant.core.channel_validation import message_party
 from ai_assistant.core.errors import (
     MemoryStoreError,
+    PlanningError,
     TelegramIntakeRecordError,
 )
 from ai_assistant.core.types import (
     TELEGRAM_MESSAGE_LIMIT,
+    ApprovalCard,
     ApprovalGiver,
+    ApprovalRequestState,
+    ApprovalStepAnswer,
+    ApprovalTap,
     ChannelIdentity,
     ClaimedAuthor,
     DeliveryStatus,
@@ -110,13 +129,24 @@ from ai_assistant.core.types import (
     MessageAuthor,
     ProcessingReason,
     ProcessingStatus,
+    RecordedDelivery,
     RecordedInputMessage,
+    TelegramButton,
     TelegramFailure,
     TelegramOutcome,
     TelegramPollOutcome,
+    TicketState,
     ToolOutcome,
     telegram_length,
 )
+from ai_assistant.orchestration.approval_calls import (
+    CardFacts,
+    CardOutcome,
+    CardPosted,
+    card_state,
+    card_text,
+)
+from ai_assistant.orchestration.approvals import REQUEST_APPROVAL_CAPABILITY
 from ai_assistant.orchestration.channel_kinds import (
     Audience,
     ChannelKind,
@@ -137,10 +167,20 @@ from ai_assistant.orchestration.understanding import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from datetime import datetime
 
-    from ai_assistant.core.protocols import MemoryStore, TelegramBotClient, TelegramIntakeRecord
+    from ai_assistant.core.clock import Clock
+    from ai_assistant.core.protocols import (
+        MemoryStore,
+        PlanStore,
+        TelegramBotClient,
+        TelegramIntakeRecord,
+    )
     from ai_assistant.core.types import (
+        ApprovalRequest,
         ChannelEpisodePage,
+        PlanningRound,
+        TelegramCallback,
         TelegramMessage,
         TelegramSendOutcome,
         TelegramUpdate,
@@ -149,7 +189,10 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.phase_path import PlaceWriter
 
 __all__ = [
+    "APPROVE_LABEL",
+    "CARD_TOO_LONG_LINE",
     "DEFAULT_TELEGRAM_START_WAIT",
+    "DENY_LABEL",
     "INTERRUPTED_LINE",
     "LINE_GIVER",
     "NON_TEXT_LINE",
@@ -160,10 +203,12 @@ __all__ = [
     "TELEGRAM",
     "TELEGRAM_CHANNEL_TYPE",
     "TELEGRAM_DESCRIPTION",
+    "TelegramCards",
     "TelegramInput",
     "TelegramLineSeams",
     "TelegramReader",
     "TelegramWriter",
+    "card_notice",
     "is_stop_command",
     "line_channel",
     "split_message",
@@ -195,6 +240,39 @@ DEFAULT_TELEGRAM_START_WAIT: Final = timedelta(seconds=2)
 #: so the rest is what keeps the reader from polling in a loop (ADR-0332 §8:8). It ends
 #: early when an activation does.
 RUNNING_POLL_PACE: Final = timedelta(seconds=1)
+
+#: The words on a card's two buttons (ADR-0361 §4:2).
+APPROVE_LABEL: Final = "Approve"
+DENY_LABEL: Final = "Deny"
+
+#: What a card too long for one Telegram message says in its place (ADR-0361 §4:4).
+CARD_TOO_LONG_LINE: Final = (
+    "This request is too long to show here. Answer it on the hub page, where the "
+    "approvals panel shows it whole."
+)
+
+#: What a tap is answered with, by what came of it (ADR-0361 §4:9).
+_TAP_APPROVED: Final = "Approved."
+_TAP_DENIED: Final = "Denied."
+_TAP_ALREADY: Final = {
+    ApprovalRequestState.APPROVED: "This request was already approved.",
+    ApprovalRequestState.DENIED: "This request was already denied.",
+    ApprovalRequestState.EXPIRED: "This request has expired.",
+}
+_TAP_EXPIRED: Final = "This request has expired."
+_TAP_UNKNOWN: Final = "This card is no longer known here. See the hub page's approvals panel."
+_TAP_NOT_YOURS: Final = "This request is not yours to answer."
+_TAP_UNRECORDED: Final = "Your answer could not be recorded. Try again, or answer on the hub page."
+
+#: A card's callback data: its token, then the button's verb (ADR-0361 §4:10).
+_APPROVE_VERB: Final = "y"
+_DENY_VERB: Final = "n"
+_VERB_SEPARATOR: Final = ":"
+
+#: How far back the line looks, at its first read after a start, for cards whose
+#: request may have changed while the hub was down: a request changes no later than
+#: just after its expiry (ADR-0361 §3:5, §5:7), so a day past it holds every change.
+_SETTLE_WINDOW: Final = timedelta(days=1)
 
 #: The fixed message sent after a restart cut the chat's last activation off (§6:10).
 INTERRUPTED_LINE: Final = (
@@ -383,6 +461,8 @@ class TelegramLineSeams:
         start_wait: ``Settings.telegram_start_wait`` (ADR-0332 §5:3), strictly
             positive: how long after the first message not yet taken in, whatever runs
             (ADR-0349 §8:2), the reader waits before it takes in what has arrived.
+        cards: The line's approval cards (ADR-0361 §4), or ``None``, and then a tap is
+            dealt with as an update that is not input, and no card is edited.
 
     Raises:
         ValueError: If ``start_wait`` is not strictly positive.
@@ -395,6 +475,7 @@ class TelegramLineSeams:
     poll_bound: timedelta
     send_bound: timedelta
     start_wait: timedelta = DEFAULT_TELEGRAM_START_WAIT
+    cards: TelegramCards | None = None
 
     def __post_init__(self) -> None:
         """The start wait is strictly positive (ADR-0332 §6:4)."""
@@ -733,6 +814,505 @@ def _cut_short(outcome: TelegramSendOutcome | None, sent: Sequence[str], parts: 
     return Delivery(ToolOutcome.FAILED, reason=reason, written=written)
 
 
+def card_notice(request: ApprovalRequest, *, now: datetime) -> str:
+    """What a card too long for one Telegram message shows instead (ADR-0361 §4:4).
+
+    Plain text, well within one message: that the request is answered on the hub page,
+    the capability it asks about, when it expires, and its state.
+
+    Args:
+        request: The request.
+        now: The instant it is rendered at.
+
+    Returns:
+        The text.
+    """
+    whole = card_text(request, CardFacts(origin=None, read_outside=False), now=now)
+    state = whole.rsplit("\n", 1)[-1]
+    return "\n".join(
+        (
+            f"Approval needed: {request.call.tool.capability}",
+            CARD_TOO_LONG_LINE,
+            "",
+            state,
+        )
+    )
+
+
+def _buttons(token: str) -> tuple[TelegramButton, ...]:
+    """A card's Approve and Deny buttons, each carrying the card's token (§4:2, §4:10)."""
+    return (
+        TelegramButton(label=APPROVE_LABEL, data=f"{token}{_VERB_SEPARATOR}{_APPROVE_VERB}"),
+        TelegramButton(label=DENY_LABEL, data=f"{token}{_VERB_SEPARATOR}{_DENY_VERB}"),
+    )
+
+
+def _mint_token() -> str:
+    """An opaque token for one card's buttons, naming no record (ADR-0361 §4:10)."""
+    return secrets.token_urlsafe(16)
+
+
+#: How a card's post went, by the failure it came back with (ADR-0361 §2:7).
+_POST_FAILED: Final = {
+    TelegramFailure.UNAVAILABLE: CardOutcome.NOT_POSTED,
+    TelegramFailure.UNKNOWN: CardOutcome.UNKNOWN,
+}
+
+
+class TelegramCards:
+    """The line's approval cards: the post, the edits and the tap (ADR-0361 §4).
+
+    **The post** (:meth:`post`, §4:2-§4:4) is ``request_approval``'s
+    :class:`~ai_assistant.orchestration.approval_calls.CardPoster`: one card, sent into
+    the line's one chat whatever place asked, as the assistant's own message, under the
+    request's id, the durable record written before it; the card and its token are then
+    recorded on the request, which completes it (``PlanStore.record_approval_card``). A
+    send is retried only as ADR-0323 §6:3 allows, never one whose outcome is unknown.
+
+    **The edits** (:meth:`refresh`, §4:5) are the hub's own, no message and no act of any
+    activation: after every poll the reader has it read the requests its cards are on,
+    and each card whose rendering changed is edited in place to show the request's
+    state, its buttons taken away once it is no longer pending. An edit that fails
+    changes nothing in the store, and one Telegram may retry is tried again at the next
+    read. After a start it reads the person's requests once, so a card whose request
+    changed while the hub was down is edited too.
+
+    **The tap** (:meth:`tap`, §4:7-§4:10) is a command: its token is resolved by the
+    store's read by card token, the request marked approved or denied with the tap's
+    instant as the line's ``ApprovalGiver``, in one step where the first tap wins, the
+    callback answered, the card edited and the Approvals sensor woken.
+    """
+
+    def __init__(  # noqa: PLR0913 — the bot and its records, the stores, the person, the clock and the two seams a test varies
+        self,
+        *,
+        client: TelegramBotClient,
+        intake: TelegramIntakeRecord,
+        channel: ChannelIdentity,
+        send_bound: timedelta,
+        plans: PlanStore,
+        memory: MemoryStore,
+        person: str,
+        now: Clock,
+        mint: Callable[[], str] = _mint_token,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        """Wire the cards to the bot, the line's records, its one place and the stores.
+
+        Args:
+            client: The bot.
+            intake: Where a tap's answer is claimed, as ``/stop``'s is (§13:2).
+            channel: The line's channel, whose place is the one chat (§2:3).
+            send_bound: The bound on one call (§11:12).
+            plans: The plan store, which holds the Approvals channel's requests.
+            memory: The memory store, where a card's facts are read again after a start
+                from the asking activation's episode.
+            person: The line's person, the configured account's: a tap answers only
+                their requests (§4:8).
+            now: The wall clock, in UTC.
+            mint: Mints a card's token.
+            sleep: How a retry waits.
+        """
+        self._client = client
+        self._intake = intake
+        self._channel = channel
+        self._send_bound = send_bound
+        self._plans = plans
+        self._memory = memory
+        self._person = person
+        self._now = now
+        self._mint = mint
+        self._sleep = sleep
+        self._wake: Callable[[], None] | None = None
+        #: The facts each card this process posted shows, by its request.
+        self._facts: dict[str, CardFacts] = {}
+        #: What each card shows now, as last sent or edited, by request and position.
+        self._shown: dict[tuple[str, int], tuple[str, bool]] = {}
+        #: The requests whose cards on the line may still change.
+        self._watched: set[str] = set()
+        #: Whether the first read after a start is still owed.
+        self._settled = False
+
+    def wake_with(self, wake: Callable[[], None]) -> None:
+        """Have a tap that changed a request wake the Approvals sensor (§3:4).
+
+        The composition root hands it the engine's ``approvals_changed`` once the engine
+        is built, which is after the line's seams.
+        """
+        self._wake = wake
+
+    # --- the post (§4:2-§4:4) ---
+
+    async def post(self, request: ApprovalRequest, facts: CardFacts) -> CardPosted:
+        """Post ``request``'s card into the line's chat, and say how it went (§2:7, §4:2).
+
+        Returns:
+            Sent, with what it sent; *not done* or *unknown*, as ADR-0323 §6:2-§6:5
+            record a message; or *not posted* where the line is not connected.
+        """
+        request_id = str(request.id)
+        self._facts[request_id] = facts
+        now = self._now()
+        text = card_text(request, facts, now=now)
+        token = self._mint()
+        buttons = _buttons(token)
+        if telegram_length(text) > TELEGRAM_MESSAGE_LIMIT:
+            # §4:4: no buttons, and the panel shows it whole.
+            text, buttons = card_notice(request, now=now), ()
+        outcome = await self._retried(
+            partial(
+                self._client.send_with_buttons,
+                attempt=request_id,
+                chat_id=self._client.chat_id,
+                text=text,
+                buttons=buttons,
+                timeout=self._send_bound,
+            )
+            if buttons
+            else partial(
+                self._client.send,
+                attempt=request_id,
+                chat_id=self._client.chat_id,
+                text=text,
+                timeout=self._send_bound,
+            )
+        )
+        if outcome is None:
+            _log.warning("approval_card_unsent", stage="writer", reason="unsendable")
+            return CardPosted(CardOutcome.NOT_DONE)
+        failure = outcome.failure
+        if failure is TelegramFailure.UNAVAILABLE:
+            _log.info("approval_card_unsent", stage="writer", reason="unavailable")
+            return CardPosted(CardOutcome.NOT_POSTED)
+        if failure is None or failure is TelegramFailure.UNKNOWN:
+            await self._recorded(request_id, outcome.message_id, token if buttons else None)
+            if outcome.message_id is not None:
+                self._shown[request_id, outcome.message_id] = (text, bool(buttons))
+            self._watched.add(request_id)
+        card = (
+            CardOutcome.SENT if failure is None else _POST_FAILED.get(failure, CardOutcome.NOT_DONE)
+        )
+        _log.info("approval_card_posted", stage="writer", card=card.value)
+        return CardPosted(card, _delivery(text, self._channel, failure))
+
+    async def _recorded(self, request_id: str, position: int | None, token: str | None) -> None:
+        """Record the card on its request, with its token (§4:10); a fault is logged."""
+        try:
+            await self._plans.record_approval_card(
+                request_id, ApprovalCard(place=self._channel, position=position, token=token)
+            )
+        except PlanningError:
+            _log.warning("approval_card_unrecorded", stage="writer", reason="store_failed")
+
+    async def _retried(
+        self, call: Callable[[], Awaitable[TelegramSendOutcome]]
+    ) -> TelegramSendOutcome | None:
+        """One send, retried only as ADR-0323 §6:3 allows; ``None`` where it cannot be sent."""
+        outcome: TelegramSendOutcome | None = None
+        for tried in range(1, SEND_ATTEMPTS + 1):
+            try:
+                outcome = await call()
+            except ValueError:
+                return None  # refused before anything was read: nothing reached Telegram
+            wait = _wait_before_retry(outcome)
+            if wait is None or tried == SEND_ATTEMPTS:
+                return outcome
+            await self._sleep(wait)
+        return outcome
+
+    # --- the edits (§4:5) ---
+
+    async def refresh(self) -> None:
+        """Edit each card whose request's state changed since it was last shown (§4:5).
+
+        Never raises but for a cancellation or a defect: a store that cannot be read
+        edits nothing now, and the next read tries again.
+        """
+        try:
+            if not self._settled:
+                await self._settle()
+                self._settled = True
+            if not self._watched:
+                return
+            found = await self._plans.approval_requests(sorted(self._watched))
+        except PlanningError:
+            _log.warning("approval_cards_unread", stage="reader", reason="store_failed")
+            return
+        held = {str(one.id) for one in found}
+        self._watched &= held
+        for request in found:
+            if await self._edited(request) and _settled_state(request):
+                self._watched.discard(str(request.id))
+
+    async def _settle(self) -> None:
+        """Read the person's recent requests once after a start, to watch their cards.
+
+        Raises:
+            PlanningError: If the store cannot be read.
+        """
+        since = self._now() - _SETTLE_WINDOW
+        requests = await self._plans.person_approval_requests(
+            self._person, tuple(ApprovalRequestState)
+        )
+        self._watched.update(
+            str(one.id)
+            for one in requests
+            if one.expires_at > since and any(self._on_line(card) for card in one.cards)
+        )
+
+    async def written(self, activation_ids: Sequence[str]) -> dict[int, WrittenBy]:
+        """Which activation posted each card on the line, by its position (ADR-0361 §4:3).
+
+        Read from the activations' ``request_approval`` effect records, each naming its
+        request, and the requests' cards: a card at a position the line's chat holds is
+        its asking activation's message, posted by the round that wrote its request. A
+        store that cannot be read links none, the conservative direction, and the window
+        is still brought in.
+        """
+        try:
+            effects = await self._plans.activation_effects(list(activation_ids))
+            named = list(dict.fromkeys(str(one.request) for one in effects if one.request))
+            requests = await self._plans.approval_requests(named) if named else ()
+        except PlanningError:
+            _log.warning("approval_cards_unread", stage="reader", reason="store_failed")
+            return {}
+        return {
+            card.position: WrittenBy(activation_id=str(one.activation_id), round=str(one.round))
+            for one in requests
+            for card in one.cards
+            if self._on_line(card) and card.position is not None
+        }
+
+    def _on_line(self, card: ApprovalCard) -> bool:
+        """Whether ``card`` is in the line's chat, at a position the hub can edit it by."""
+        return card.place == self._channel and card.position is not None
+
+    async def _edited(self, request: ApprovalRequest) -> bool:
+        """Edit the request's cards on the line to show it as it stands; whether all show it.
+
+        A card whose rendering has not changed is not edited. An edit Telegram may retry
+        leaves the card owed, and any other outcome settles it, so the same rendering is
+        never sent twice: an edit Telegram refused or never answered is not tried again
+        until the request changes.
+        """
+        now = self._now()
+        facts = await self._facts_of(request)
+        if facts is None:
+            return False
+        pending = card_state(request, now=now) == "pending"
+        settled = True
+        for card in request.cards:
+            if not self._on_line(card):
+                continue
+            assert card.position is not None  # noqa: S101 — _on_line read it
+            long = card.token is None
+            text = card_notice(request, now=now) if long else card_text(request, facts, now=now)
+            buttons = _buttons(card.token) if pending and card.token is not None else ()
+            key = (str(request.id), card.position)
+            if self._shown.get(key) == (text, bool(buttons)):
+                continue
+            outcome = await self._edit(str(request.id), card.position, text, buttons)
+            if outcome.failure is not None and outcome.failure.retryable:
+                settled = False
+                continue
+            self._shown[key] = (text, bool(buttons))
+        return settled
+
+    async def _edit(
+        self, request_id: str, position: int, text: str, buttons: tuple[TelegramButton, ...]
+    ) -> TelegramOutcome:
+        """One edit, under an attempt naming the request and the step (§4:5).
+
+        ADR-0323 §13:2 for a card's edit is interim here: ADR-0362 settles whether it is
+        claimed on a record of the line's own.
+        """
+        try:
+            outcome = await self._client.edit_message(
+                attempt=f"{request_id}/edit/{position}",
+                chat_id=self._client.chat_id,
+                message_id=position,
+                text=text,
+                buttons=buttons,
+                timeout=self._send_bound,
+            )
+        except ValueError:
+            _log.warning("approval_card_unedited", stage="reader", reason="unsendable")
+            return TelegramOutcome(failure=TelegramFailure.REFUSED)
+        if not outcome.done:
+            _log.info("approval_card_unedited", stage="reader", reason=_failure(outcome))
+        return outcome
+
+    async def _facts_of(self, request: ApprovalRequest) -> CardFacts | None:
+        """What the request's card shows beside it: posted here, or read from its episode.
+
+        After a start, from the asking activation's episode: its trigger's channel, and
+        whether its ``request_approval`` entries in the request's round rest on outside
+        content (ADR-0356 §8:7). An episode holding no such entry shows the outside
+        line, the cautious reading. ``None`` where the episode cannot be read now.
+        """
+        held = self._facts.get(str(request.id))
+        if held is not None:
+            return held
+        try:
+            record = await self._memory.get(f"activation:{request.activation_id}")
+        except MemoryStoreError:
+            _log.warning("approval_card_facts_unread", stage="reader", reason="store_failed")
+            return None
+        processing = record.processing_record if isinstance(record, EpisodicMemory) else None
+        if processing is None:
+            facts = CardFacts(origin=None, read_outside=True)
+        else:
+            target = processing.trigger.channel or processing.trigger.target
+            entries = [
+                one
+                for one in processing.call_records
+                if one.round == request.round and one.capability == REQUEST_APPROVAL_CAPABILITY
+            ]
+            facts = CardFacts(
+                origin=target if isinstance(target, ChannelIdentity) else None,
+                read_outside=not entries or any(one.marked for one in entries),
+            )
+        self._facts[str(request.id)] = facts
+        return facts
+
+    # --- the tap (§4:7-§4:10) ---
+
+    async def tap(
+        self, callback: TelegramCallback, claim: Callable[[], Awaitable[str | None]]
+    ) -> None:
+        """Carry out a tap from the request's person: mark, answer, edit and wake (§4:9).
+
+        ``claim`` is the intake record's claim of the tap's answer, which records the
+        update answered, as ``/stop``'s does: a tap the record already holds was carried
+        out, and a repeated fetch changes nothing and answers nothing.
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be written for the claim;
+                nothing is then changed.
+        """
+        first = await claim()
+        if first is None:
+            return  # held already: a repeat carries nothing out (§5:9)
+        words, request = await self._decided(callback)
+        await self._answered(callback, words, first, claim)
+        if request is not None:
+            self._watched.add(str(request.id))
+            await self._edited(request)
+
+    async def _decided(  # noqa: PLR0911 — each way a tap ends is an answer of its own
+        self, callback: TelegramCallback
+    ) -> tuple[str, ApprovalRequest | None]:
+        """Resolve the tap's token and mark its request; what to answer, and the request.
+
+        The first tap to land wins, and a later one is answered with the request's state
+        (§4:9). Never raises but for a cancellation: a store that fails is answered so.
+        """
+        data = callback.data or ""
+        token, _, verb = data.rpartition(_VERB_SEPARATOR)
+        if not token or verb not in {_APPROVE_VERB, _DENY_VERB}:
+            return _TAP_UNKNOWN, None
+        try:
+            request = await self._plans.approval_request_by_token(token)
+        except PlanningError:
+            _log.warning("approval_tap_unread", stage="reader", reason="store_failed")
+            return _TAP_UNRECORDED, None
+        if request is None or not any(
+            one.token == token and one.place == self._channel for one in request.cards
+        ):
+            return _TAP_UNKNOWN, None
+        if request.person != self._person:
+            _log.info("approval_tap_refused", stage="reader", reason="not_the_persons")
+            return _TAP_NOT_YOURS, None
+        state = (
+            ApprovalRequestState.APPROVED if verb == _APPROVE_VERB else ApprovalRequestState.DENIED
+        )
+        try:
+            step = await self._plans.answer_approval_request(
+                str(request.id),
+                state,
+                ApprovalTap(who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, at=self._now()),
+            )
+        except PlanningError:
+            _log.warning("approval_tap_unrecorded", stage="reader", reason="store_failed")
+            return _TAP_UNRECORDED, request
+        _log.info("approval_tap", stage="reader", step=step.answer.value)
+        if step.answer is ApprovalStepAnswer.CHANGED:
+            self._woken()
+            return (_TAP_APPROVED if state is ApprovalRequestState.APPROVED else _TAP_DENIED), (
+                step.request
+            )
+        if step.answer is ApprovalStepAnswer.PAST_EXPIRY:
+            self._woken()  # the sensor ends it expired at its next look (§3:5)
+            return _TAP_EXPIRED, step.request
+        return _TAP_ALREADY.get(step.request.state, _TAP_EXPIRED), step.request
+
+    def _woken(self) -> None:
+        """Wake the Approvals sensor: a tap's store step landed (§3:4)."""
+        if self._wake is not None:
+            self._wake()
+
+    async def _answered(
+        self,
+        callback: TelegramCallback,
+        words: str,
+        first: str,
+        claim: Callable[[], Awaitable[str | None]],
+    ) -> None:
+        """Answer the callback, each try claimed through ``claim`` (§4:9, ADR-0323 §13:2).
+
+        A try that came back with a failure §6:3 lets the line retry is claimed again,
+        which is the retry, as a fixed reply's is.
+        """
+        attempt: str | None = first
+        for tried in range(1, SEND_ATTEMPTS + 1):
+            if attempt is None:
+                return
+            outcome = await _finished(
+                self._intake,
+                attempt,
+                partial(
+                    self._client.answer_callback,
+                    attempt=attempt,
+                    chat_id=self._client.chat_id,
+                    callback_id=callback.callback_id,
+                    text=words,
+                    timeout=self._send_bound,
+                ),
+            )
+            wait = _wait_before_retry(outcome)
+            if wait is None or tried == SEND_ATTEMPTS:
+                if not outcome.done:
+                    _log.info("approval_tap_unanswered", stage="reader", reason=_failure(outcome))
+                return
+            await self._sleep(wait)
+            attempt = await claim()
+
+
+def _settled_state(request: ApprovalRequest) -> bool:
+    """Whether a request can change no more: denied, expired, or its ticket spent or void."""
+    if request.state is ApprovalRequestState.APPROVED:
+        return request.ticket is not None and request.ticket is not TicketState.HELD
+    return request.state is not ApprovalRequestState.PENDING
+
+
+def _delivery(
+    text: str, channel: ChannelIdentity, failure: TelegramFailure | None
+) -> RecordedDelivery:
+    """What a card sent, where and how, as its call's entry holds it (ADR-0356 §8:4)."""
+    if failure is None:
+        return RecordedDelivery(words=text, went=channel, status=DeliveryStatus.SENT)
+    if failure is TelegramFailure.UNKNOWN:
+        return RecordedDelivery(
+            words=text, went=channel, status=DeliveryStatus.UNKNOWN, reason=f"{_NOT_SENT}:unknown"
+        )
+    return RecordedDelivery(
+        words=text,
+        went=channel,
+        status=DeliveryStatus.FAILED,
+        reason=f"{_NOT_SENT}:{failure.value}",
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _PlaceWriter:
     """The writer of one place's activation messages, as the phases are handed it."""
@@ -839,6 +1419,7 @@ class TelegramReader:
             sleep: How the reader rests between polls.
         """
         self._client = seams.client
+        self._cards = seams.cards
         self._elsewhere = elsewhere
         self._intake = seams.intake
         self._channel = seams.channel
@@ -925,6 +1506,9 @@ class TelegramReader:
                 wait = await self._deal_with(outcome.updates)
             else:
                 wait = _poll_backoff(outcome)
+            if self._cards is not None and not self._done():
+                # ADR-0361 §4:5: each card shows its request's state, after every poll.
+                await self._cards.refresh()
         except asyncio.CancelledError:
             raise
         except TelegramIntakeRecordError, MemoryStoreError:
@@ -1057,6 +1641,11 @@ class TelegramReader:
                 continue
             if update.update_id in handed:
                 continue  # a running activation's, its marking not yet landed
+            if update.callback is not None:
+                # ADR-0361 §4:7: a tap is a command, never input, whoever sent it.
+                await self._tapped(update.update_id, update.callback)
+                batch.dealt.add(update.update_id)
+                continue
             message = self._own(update)
             if message is None:
                 batch.dealt.add(update.update_id)  # §5:2: not input, recorded nowhere
@@ -1073,6 +1662,28 @@ class TelegramReader:
             else:
                 pending.append(update)
         return pending
+
+    async def _tapped(self, update_id: int, callback: TelegramCallback) -> None:
+        """Carry a tap out where it is the configured account's, in its chat (§4:8).
+
+        ADR-0323 §4:1's test, as ADR-0332 §8:1 applies it to ``/stop``: the tapper is the
+        configured account, no bot, in its private chat with the bot. A tap from anyone
+        else, or anywhere else, changes nothing and is dealt with as §5:2 deals with
+        another account's update: not input, recorded nowhere and not answered.
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be written for the claim; the
+                tap is then not dealt with, and nothing is changed.
+        """
+        if (
+            self._cards is None
+            or callback.sender_is_bot
+            or callback.sender_id != self._client.chat_id
+            or callback.chat_id != self._client.chat_id
+            or not callback.private_chat
+        ):
+            return
+        await self._cards.tap(callback, partial(self._intake.claim_reply, update_id))
 
     def _own(self, update: TelegramUpdate) -> TelegramMessage | None:
         """The update's message, where it is the configured account's in its chat (§5:1)."""
@@ -1299,6 +1910,10 @@ class TelegramReader:
             if self._written is None or not activations
             else await self._written(self._place, activations, None)
         )
+        # ADR-0361 §4:3: an approval request's card is its asking activation's message.
+        carded: Mapping[int, WrittenBy] = (
+            {} if self._cards is None or not activations else await self._cards.written(activations)
+        )
         inputs = tuple(self._input_message(one) for one in messages)
         taken = {one.position for one in inputs}
         shown: dict[int, LineMessage] = {}
@@ -1306,7 +1921,7 @@ class TelegramReader:
         asked: dict[int, AskedIn] = {}
         forwarded: dict[int, ClaimedAuthor] = {}
         for episode in episodes:
-            self._episode_items(episode, writes, shown, links, forwarded)
+            self._episode_items(episode, writes, shown, links, forwarded, carded)
         for position, writer in writes.items():
             if position in shown and writer.asked is not None:
                 asked[position] = writer.asked
@@ -1331,13 +1946,14 @@ class TelegramReader:
             claimed=frozenset(claimed),
         )
 
-    def _episode_items(
+    def _episode_items(  # noqa: PLR0913 — the episode, the two writers' maps and the three it fills
         self,
         episode: EpisodicMemory,
         writes: Mapping[int, WrittenBy],
         shown: dict[int, LineMessage],
         links: dict[int, str],
         forwarded: dict[int, ClaimedAuthor],
+        carded: Mapping[int, WrittenBy],
     ) -> None:
         """One episode's messages: the user's from its input, the assistant's by record.
 
@@ -1369,7 +1985,7 @@ class TelegramReader:
             if one.forwarded_from is not None:
                 forwarded[one.position] = one.forwarded_from
         at = processing.ended_at or episode.occurred_at
-        for position, text in _assistant_words(processing, writes, self._place).items():
+        for position, text in _assistant_words(processing, writes, self._place, carded).items():
             shown[position] = LineMessage(
                 position=position,
                 written_at=at,
@@ -1454,7 +2070,10 @@ _TAKEN: Final = frozenset({DeliveryStatus.SENT, DeliveryStatus.DELIVERED, Delive
 
 
 def _assistant_words(
-    processing: EpisodeProcessingRecord, writes: Mapping[int, WrittenBy], place: str
+    processing: EpisodeProcessingRecord,
+    writes: Mapping[int, WrittenBy],
+    place: str,
+    carded: Mapping[int, WrittenBy] | None = None,
 ) -> dict[int, str]:
     """The words of each message the activation wrote into ``place``, by its position.
 
@@ -1473,34 +2092,66 @@ def _assistant_words(
     record's finish did not hold. So they are paired only where their counts match, and
     where they do not, nothing of the round is shown, since which entry has no message is
     not known: the window never shows a message's position with another message's words.
+
+    **An approval request's card is the asking activation's message too** (ADR-0361
+    §4:3): ``carded`` holds each card's position, from its request, by the round whose
+    ``request_approval`` call posted it, and its words are that call's entry's delivery.
+    Cards and ``text`` calls are paired apart, each by the same rule, so a card never
+    takes a text call's place in the count, nor a text call a card's.
     """
-    activation_id = processing.activation_id
+    by_round = _by_round(writes, processing.activation_id)
+    words = dict.fromkeys(by_round.pop(None, ()), COULDNT_FINISH)
+    for one in processing.rounds:
+        positions = by_round.get(one.id, [])
+        if positions and one.text.strip():
+            words.update(dict.fromkeys(positions, one.text))
+        elif positions:
+            words.update(_paired(positions, _delivered_into(processing, one, place, card=False)))
+    cards = _by_round(
+        {at: writer for at, writer in (carded or {}).items() if at not in words},
+        processing.activation_id,
+    )
+    for one in processing.rounds:
+        sent = _delivered_into(processing, one, place, card=True)
+        words.update(_paired(cards.get(one.id, []), sent))
+    return words
+
+
+def _by_round(writes: Mapping[int, WrittenBy], activation_id: str) -> dict[str | None, list[int]]:
+    """The positions ``activation_id`` wrote at, ascending, by the round that wrote each."""
     by_round: dict[str | None, list[int]] = {}
     for position, writer in sorted(writes.items()):
         if writer.activation_id == activation_id and position >= 1:
             by_round.setdefault(writer.round, []).append(position)
-    words = dict.fromkeys(by_round.pop(None, ()), COULDNT_FINISH)
-    for one in processing.rounds:
-        positions = by_round.get(one.id)
-        if not positions:
-            continue
-        if one.text.strip():
-            words.update(dict.fromkeys(positions, one.text))
-            continue
-        order = {call.call_id: at for at, call in enumerate(one.calls)}
-        sent = sorted(
-            (
-                (order[entry.call_id], entry.delivered.words)
-                for entry in processing.call_records
-                if entry.round == one.id
-                and entry.delivered is not None
-                and entry.delivered.status in _TAKEN
-                and place_of(entry.delivered.went) == place
-            ),
-        )
-        if len(sent) == len(positions):
-            words.update(zip(positions, (said for _, said in sent), strict=True))
-    return words
+    return by_round
+
+
+def _paired(positions: Sequence[int], sent: Sequence[str]) -> dict[int, str]:
+    """Each position with its words, where their counts match; none where they do not."""
+    if not positions or len(positions) != len(sent):
+        return {}
+    return dict(zip(positions, sent, strict=True))
+
+
+def _delivered_into(
+    processing: EpisodeProcessingRecord, round_: PlanningRound, place: str, *, card: bool
+) -> list[str]:
+    """What the round's message calls, or its cards, delivered into ``place``, in call order.
+
+    ``card`` reads the ``request_approval`` calls' entries, whose delivery is their card
+    (ADR-0361 §4:3), and otherwise every other call's.
+    """
+    order = {call.call_id: at for at, call in enumerate(round_.calls)}
+    sent = sorted(
+        (order[entry.call_id], entry.delivered.words)
+        for entry in processing.call_records
+        if entry.round == round_.id
+        and entry.delivered is not None
+        and entry.delivered.status in _TAKEN
+        and place_of(entry.delivered.went) == place
+        and (entry.capability == REQUEST_APPROVAL_CAPABILITY) is card
+    )
+    return [said for _, said in sent]
 
 
 def _cut_off(record: EpisodicMemory) -> bool:

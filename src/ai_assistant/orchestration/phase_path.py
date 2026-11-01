@@ -2601,6 +2601,7 @@ class PhaseWorking:
         freezing: bool = False,
         showed: int = SHOWED_CHARS,
         reported: Sequence[PlanningStory] | None = None,
+        cards: Callable[[str], RecordedDelivery | None] | None = None,
     ) -> tuple[RecordedCall, ...]:
         """Each call's entry the episode does not yet record, as of now (ADR-0356 §8).
 
@@ -2631,6 +2632,9 @@ class PhaseWorking:
             reported: The stories the next round's report shows beside the last round's
                 first story call done, read before that round; ``None`` where they are
                 not read yet.
+            cards: What a ``request_approval`` call's card sent, by the call's decision
+                id, which its entry holds as a message call's (ADR-0361 §4:3); ``None``
+                reads none.
 
         Returns:
             The new entries, in the order the rounds proposed their calls.
@@ -2684,6 +2688,7 @@ class PhaseWorking:
                     beside_given = True
                     beside = reported or ()
                 sent = one.sent.get(call.call_id)
+                carded = _carded(one.authorization, call.call_id, cards)
                 shown = (
                     None
                     if outcome is None
@@ -2702,7 +2707,7 @@ class PhaseWorking:
                             if sent is not None
                             else None
                             if outcome is None
-                            else outcome.delivered
+                            else outcome.delivered or carded
                         ),
                         recorded_at=at,
                         marked=one.planned.read_outside
@@ -2979,6 +2984,18 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
             )
         )
     return tuple(outcomes)
+
+
+def _carded(
+    authorization: RoundAuthorization | None,
+    call_id: str,
+    cards: Callable[[str], RecordedDelivery | None] | None,
+) -> RecordedDelivery | None:
+    """What a ``request_approval`` call's card sent, by its decision (ADR-0361 §4:3)."""
+    if cards is None or authorization is None:
+        return None
+    decided = next((one for one in authorization.verdicts if one.call_id == call_id), None)
+    return None if decided is None or decided.decision_id is None else cards(decided.decision_id)
 
 
 #: How an email that acting ran went, by what acting made of it (ADR-0357 §3:1-§3:3).
@@ -4451,7 +4468,9 @@ class PhasePath:
                 # ADR-0356 §8:6: every call's entry not yet appended, its outcome where it
                 # is now known and none where it is not, carried by the freezing revision.
                 state.recorded_calls(
-                    working.call_entries(self._now(), freezing=True, showed=self._showed_chars)
+                    working.call_entries(
+                        self._now(), freezing=True, showed=self._showed_chars, cards=self._cards
+                    )
                 )
                 # ADR-0309 §5:10: taken once, here, over every round. The windows are
                 # held again in case no round was planned to hold them.
@@ -5156,7 +5175,9 @@ class PhasePath:
         state = active_state()
         if state is None:
             return
-        entries = working.call_entries(self._now(), showed=self._showed_chars, reported=started)
+        entries = working.call_entries(
+            self._now(), showed=self._showed_chars, reported=started, cards=self._cards
+        )
         if entries:
             state.recorded_calls(entries)
             await _extended(state, self.append)
@@ -6019,6 +6040,11 @@ class PhasePath:
             arguments={**call.arguments, CALL_ARGUMENT: shaped},
         )
 
+    def _cards(self, decision_id: str) -> RecordedDelivery | None:
+        """What a ``request_approval`` call's card sent, where and how (ADR-0361 §4:3)."""
+        calls = self._approval_calls
+        return None if calls is None else calls.card_delivery(decision_id)
+
     def _asker(self, working: PhaseWorking, decided: RoundAuthorization) -> ApprovalAsker | None:
         """Who calls ``request_approval`` in this round, and what each asks (ADR-0361 §2).
 
@@ -6041,6 +6067,7 @@ class PhasePath:
                 if one.requested is not None
                 and str(one.call.request.tool.capability) == REQUEST_APPROVAL_CAPABILITY
             },
+            read_outside=decided.read_outside_content,
         )
 
     @staticmethod

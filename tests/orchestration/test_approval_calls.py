@@ -9,6 +9,7 @@ and the approval's input (§3:6, §5:2, §6:1).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -25,12 +26,15 @@ from ai_assistant.core.types import (
     ApprovalTap,
     CapabilityEffect,
     CapabilityResult,
+    ChannelIdentity,
     CostBasis,
     DataTier,
+    DeliveryStatus,
     Idempotency,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    RecordedDelivery,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -43,10 +47,15 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.acting import Unwritten
 from ai_assistant.orchestration.approval_calls import (
+    OUTSIDE_LINE,
     ApprovalAsker,
     ApprovalCalls,
+    CardFacts,
     CardOutcome,
+    CardPosted,
     asking,
+    card_state,
+    card_text,
 )
 from ai_assistant.orchestration.approvals import (
     APPROVALS_KIND,
@@ -63,6 +72,9 @@ if TYPE_CHECKING:
 
 _AT: Final = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
 _DAY: Final = timedelta(hours=24)
+_TAP: Final = ApprovalTap(
+    who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, at=_AT + timedelta(minutes=1)
+)
 
 _BOOK: Final = ToolDefinition(
     id="book",
@@ -130,14 +142,25 @@ def _asker() -> ApprovalAsker:
 class _Cards:
     def __init__(self, outcome: CardOutcome | None) -> None:
         self.posted: list[ApprovalRequest] = []
+        self.facts: list[CardFacts] = []
         self._outcome = outcome
 
-    async def post(self, request: ApprovalRequest) -> CardOutcome:
+    async def post(self, request: ApprovalRequest, facts: CardFacts) -> CardPosted:
         self.posted.append(request)
+        self.facts.append(facts)
         if self._outcome is None:
             msg = "the line is down"
             raise RuntimeError(msg)
-        return self._outcome
+        delivered = (
+            RecordedDelivery(
+                words="Approval needed: book",
+                went=ChannelIdentity(channel_type="telegram", instance_id="bot/1"),
+                status=DeliveryStatus.SENT,
+            )
+            if self._outcome is CardOutcome.SENT
+            else None
+        )
+        return CardPosted(self._outcome, delivered)
 
 
 async def test_a_request_is_written_with_every_part_code_fills_in() -> None:
@@ -279,3 +302,97 @@ def test_the_input_states_the_outcome_and_a_ticket_is_held_only_while_usable() -
     denied = request.model_copy(update={"state": ApprovalRequestState.DENIED, "answer": tap})
     assert ticket_of(denied, at=_AT) is None
     assert "denied" in approval_input(denied)
+
+
+async def test_the_card_is_handed_what_its_request_does_not_record_and_its_delivery_kept() -> None:
+    """ADR-0361 §2:11, §4:3: the outside-content fact from the round's ruling, and what
+    the card sent kept by the call's decision until the phases record its entry, once."""
+    cards = _Cards(CardOutcome.SENT)
+    runner = ApprovalCalls(plans=FakePlanStore(), expiry=_DAY, now=lambda: _AT, cards=cards)
+    asker = replace(_asker(), read_outside=True)
+    with asking(asker):
+        await runner.run_claiming(_call(), _effect(), match=None, deliberate_repeat=False)
+
+    (facts,) = cards.facts
+    assert facts.read_outside
+    delivered = runner.card_delivery(str(_call().decision.id))
+    assert delivered is not None
+    assert delivered.status is DeliveryStatus.SENT
+    assert runner.card_delivery(str(_call().decision.id)) is None, "taken once"
+
+
+def _request(**fields: object) -> ApprovalRequest:
+    base = ApprovalRequest(
+        id="approval:1",
+        person=OWNER_PERSON_ID,
+        activation_id="act-ask",
+        round="round:ask",
+        call=RequestedCall(tool=_BOOK, values={"date": "2026-11-02"}),
+        why="You asked me to book the table.",
+        written_at=_AT,
+        expires_at=_AT + _DAY,
+    )
+    return base.model_copy(update=fields)
+
+
+def test_a_card_shows_the_line_why_where_outside_content_expiry_and_state() -> None:
+    """§2:11: the one renderer, in its order; a record's identifier is never shown."""
+    origin = ChannelIdentity(channel_type="conversation", instance_id="conversation:secret")
+    text = card_text(_request(), CardFacts(origin=origin, read_outside=True), now=_AT)
+
+    lines = text.split("\n")
+    assert lines[0] == "Approval needed:"
+    assert lines[1].startswith("book")
+    assert '"2026-11-02"' in lines[1]
+    assert "Why: You asked me to book the table." in lines
+    assert "Asked in the hub chat." in lines
+    assert OUTSIDE_LINE in lines
+    assert any(line.startswith("Expires ") for line in lines)
+    assert lines[-1] == "Waiting for your answer."
+    assert "conversation:secret" not in text
+
+
+@pytest.mark.parametrize(
+    ("fields", "state"),
+    [
+        ({}, "pending"),
+        ({"state": ApprovalRequestState.EXPIRED}, "expired"),
+        ({"state": ApprovalRequestState.DENIED, "answer": _TAP}, "denied"),
+        (
+            {"state": ApprovalRequestState.APPROVED, "answer": _TAP, "ticket": TicketState.HELD},
+            "approved",
+        ),
+        (
+            {
+                "state": ApprovalRequestState.APPROVED,
+                "answer": _TAP,
+                "ticket": TicketState.USED,
+                "spent_by": "effect:used",
+            },
+            "used",
+        ),
+        (
+            {"state": ApprovalRequestState.APPROVED, "answer": _TAP, "ticket": TicketState.VOID},
+            "not_used",
+        ),
+    ],
+    ids=["pending", "expired", "denied", "approved", "used", "not-used"],
+)
+def test_a_cards_state_is_where_its_request_stands(fields: dict[str, object], state: str) -> None:
+    """§4:5: approved, denied, expired, and after a yes, used or not used."""
+    request = ApprovalRequest.model_validate({**_request().model_dump(), **fields})
+
+    assert card_state(request, now=_AT) == state
+
+
+def test_a_pending_request_past_its_expiry_shows_expired() -> None:
+    """§3:5: no tap can approve it now, whether or not the sensor has ended it."""
+    assert card_state(_request(), now=_AT + _DAY) == "expired"
+
+
+def test_a_card_whose_origin_is_not_recorded_says_so() -> None:
+    """Where the asking work came from is not known: the card says so, and no outside line."""
+    text = card_text(_request(), CardFacts(origin=None, read_outside=False), now=_AT)
+
+    assert "Where it was asked is not recorded." in text
+    assert OUTSIDE_LINE not in text

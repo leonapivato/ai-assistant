@@ -23,6 +23,7 @@ from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING
 
+import pytest
 from story_support import episode
 from telegram_support import (
     AT,
@@ -36,6 +37,10 @@ from telegram_support import (
 )
 
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    ActivationEffect,
+    ApprovalRequest,
+    ApprovalRequestState,
     CallOutcomeKind,
     ChannelIdentity,
     DeliveryStatus,
@@ -49,6 +54,7 @@ from ai_assistant.core.types import (
     RecordedCall,
     RecordedDelivery,
     RecordedInputMessage,
+    RequestedCall,
     TelegramCallKind,
     TelegramCallOutcome,
     TelegramFailure,
@@ -60,6 +66,8 @@ from ai_assistant.core.types import (
     TelegramQuotedMessage,
     TelegramUpdate,
 )
+from ai_assistant.orchestration.approval_calls import CardFacts
+from ai_assistant.orchestration.approvals import REQUEST_APPROVAL
 from ai_assistant.orchestration.matters import HeldInput
 from ai_assistant.orchestration.telegram import (
     DEFAULT_TELEGRAM_START_WAIT,
@@ -71,6 +79,7 @@ from ai_assistant.orchestration.telegram import (
     STOPPED_LINE,
     TYPING_RENEWAL,
     UNAVAILABLE_BACKOFF,
+    TelegramCards,
     TelegramInput,
     TelegramLineSeams,
     TelegramReader,
@@ -81,6 +90,7 @@ from ai_assistant.orchestration.telegram import (
 from ai_assistant.orchestration.understanding import AskedIn, LineMessage, WrittenBy
 from ai_assistant.testing import (
     FakeMemoryStore,
+    FakePlanStore,
     FakeTelegramBotClient,
     FakeTelegramIntakeRecord,
 )
@@ -123,11 +133,27 @@ class _Line:
         | None = None,
         poll_bound: timedelta = timedelta(seconds=2),
         start_wait: timedelta = DEFAULT_TELEGRAM_START_WAIT,
+        plans: FakePlanStore | None = None,
     ) -> None:
         self.fake = client or FakeTelegramBotClient(chat_id=CHAT, first_message_id=900)
         self.intake = intake or FakeTelegramIntakeRecord()
         self.memory = memory or FakeMemoryStore(now=lambda: AT)
         self.telegram = YieldingTelegram(self.fake)
+        # ADR-0361 §4: the line's approval cards, where a case hands it a plan store.
+        self.cards = (
+            None
+            if plans is None
+            else TelegramCards(
+                client=self.telegram,
+                intake=self.intake,
+                channel=line_channel(REFERENCE, CHAT),
+                send_bound=timedelta(seconds=1),
+                plans=plans,
+                memory=self.memory,
+                person=OWNER_PERSON_ID,
+                now=lambda: AT,
+            )
+        )
         self.seams = TelegramLineSeams(
             client=self.telegram,
             intake=self.intake,
@@ -136,6 +162,7 @@ class _Line:
             poll_bound=poll_bound,
             send_bound=timedelta(seconds=1),
             start_wait=start_wait,
+            cards=self.cards,
         )
         self.rests: list[float] = []
         self.inputs: list[TelegramInput] = []
@@ -1219,3 +1246,171 @@ async def test_a_stop_behind_a_full_page_waits_and_is_acted_on_when_a_poll_retur
     assert line.gate is not None
     line.gate.set()
     await line.stop()
+
+
+# --- ADR-0361 §4: an approval request's card, and the tap on it ----------------------------
+
+
+async def _card_on_the_line(line: _Line, plans: FakePlanStore) -> ApprovalRequest:
+    """A request written by ``act-ask``'s round ``round:1``, its card posted on the line."""
+    request = ApprovalRequest(
+        id="approval:1",
+        person=OWNER_PERSON_ID,
+        activation_id="act-ask",
+        round="round:1",
+        call=RequestedCall(
+            tool=REQUEST_APPROVAL,
+            values={"call": {"capability": "book", "arguments": {"date": "x"}}, "why": "w"},
+        ),
+        why="You asked me to book the table.",
+        written_at=AT,
+        expires_at=AT + timedelta(hours=24),
+    )
+    effect = ActivationEffect(
+        id="effect:ask",
+        activation_id="act-ask",
+        round="round:1",
+        capability="request_approval",
+        values_digest="0" * 64,
+        decision_id="decision:ask",
+        claimed_at=AT,
+        request="approval:1",
+    )
+    await plans.write_approval_request(request, effect, match=None)
+    assert line.cards is not None
+    await line.cards.post(request, CardFacts(origin=line.seams.channel, read_outside=False))
+    (posted,) = await plans.approval_requests(["approval:1"])
+    return posted
+
+
+async def test_a_tap_from_the_owner_is_a_command_that_answers_the_request() -> None:
+    """ADR-0361 §4:7-§4:9: a callback is no input; carried out, answered, and confirmed."""
+    plans = FakePlanStore(now=lambda: AT)
+    line = _Line(plans=plans)
+    request = await _card_on_the_line(line, plans)
+    (card,) = request.cards
+    line.fake.tap(10, message_id=card.position or 0, data=f"{card.token}:y")
+    line.start()
+
+    await line.until(lambda: bool(line.fake.answered), what="the tap was answered")
+    await line.until(
+        lambda: any(one.get("offset") == 11 for one in line.polls()), what="it was confirmed"
+    )
+    await line.stop()
+
+    assert line.inputs == [], "a tap starts and joins nothing (§4:7)"
+    (held,) = await plans.approval_requests(["approval:1"])
+    assert held.state is ApprovalRequestState.APPROVED
+    assert line.fake.answered == (("callback-1", "Approved."),)
+
+
+async def test_two_taps_in_one_poll_the_first_wins() -> None:
+    """§4:9, §9:4: Approve, then Deny, handed back together; the second changes nothing."""
+    plans = FakePlanStore(now=lambda: AT)
+    line = _Line(plans=plans)
+    request = await _card_on_the_line(line, plans)
+    (card,) = request.cards
+    line.fake.tap(10, message_id=card.position or 0, data=f"{card.token}:y")
+    line.fake.tap(11, message_id=card.position or 0, data=f"{card.token}:n")
+    line.start()
+
+    await line.until(lambda: len(line.fake.answered) == 2, what="both taps were answered")
+    await line.stop()
+
+    (held,) = await plans.approval_requests(["approval:1"])
+    assert held.state is ApprovalRequestState.APPROVED
+    assert line.fake.answered == (
+        ("callback-1", "Approved."),
+        ("callback-2", "This request was already approved."),
+    )
+
+
+@pytest.mark.parametrize(
+    ("sender", "chat", "private"),
+    [(CHAT + 1, CHAT, True), (CHAT, CHAT + 1, True), (CHAT, CHAT, False)],
+    ids=["another-account", "another-chat", "a-group"],
+)
+async def test_a_tap_from_anyone_else_changes_nothing(
+    sender: int, chat: int, private: bool
+) -> None:
+    """§4:8, §9:4: dealt with as ADR-0323 §5:2 deals with another account's update: it
+    changes nothing, is answered nothing and recorded nowhere, and is confirmed."""
+    plans = FakePlanStore(now=lambda: AT)
+    line = _Line(plans=plans)
+    request = await _card_on_the_line(line, plans)
+    (card,) = request.cards
+    line.fake.tap(
+        10,
+        message_id=card.position or 0,
+        data=f"{card.token}:y",
+        sender=sender,
+        chat=chat,
+        private=private,
+    )
+    line.start()
+
+    await line.until(
+        lambda: any(one.get("offset") == 11 for one in line.polls()), what="it was confirmed"
+    )
+    await line.stop()
+
+    (held,) = await plans.approval_requests(["approval:1"])
+    assert held.state is ApprovalRequestState.PENDING
+    assert held.answer is None
+    assert line.fake.answered == ()
+    assert (await line.intake.recorded([10])) == {}
+
+
+async def test_the_lines_window_shows_a_card_as_its_asking_activations_message() -> None:
+    """ADR-0361 §4:3, ADR-0323 §10: a card posted, then the next activation's window.
+
+    The card is at its Telegram position, in the words its call's entry holds, linked to
+    the activation that asked; a ``text`` call in the same round still pairs with its own
+    message, so the card never takes its place in the count.
+    """
+    memory = FakeMemoryStore(now=lambda: AT)
+    plans = FakePlanStore(now=lambda: AT)
+
+    async def written(
+        place: str, activations: Sequence[str], positions: Sequence[int] | None
+    ) -> Mapping[int, WrittenBy]:
+        return {21: WrittenBy(activation_id="act-ask", round="round:1")}
+
+    line = _Line(memory=memory, plans=plans, written=written)
+    request = await _card_on_the_line(line, plans)
+    (card,) = request.cards
+    card_words = dict(line.fake.messages)[card.position or 0]
+    channel = line.seams.channel
+    asking = _calling_episode(
+        "act-ask",
+        (RecordedInputMessage(text="Book the table", sent_at=AT, position=20),),
+        channel=channel,
+        rounds=(("round:1", ("call-1", "call-2")),),
+        entries=(
+            _sent("round:1", "call-1", "I'll ask you first.", went=channel),
+            RecordedCall(
+                round="round:1",
+                call_id="call-2",
+                capability="request_approval",
+                effect=True,
+                outcome=CallOutcomeKind.DONE,
+                delivered=RecordedDelivery(
+                    words=card_words, went=channel, status=DeliveryStatus.SENT
+                ),
+                recorded_at=AT,
+            ),
+        ),
+    )
+    await memory.add(asking)
+    line.fake.hold(text(40, "and then?", message_id=990))
+    line.start()
+    await line.until(lambda: bool(line.inputs), what="the input was taken in")
+    await line.stop()
+
+    window = tuple((one.position, one.author, one.text) for one in line.inputs[0].window.messages)
+    assert window == (
+        (20, MessageAuthor.USER, "Book the table"),
+        (21, MessageAuthor.ASSISTANT, "I'll ask you first."),
+        (card.position, MessageAuthor.ASSISTANT, card_words),
+    )
+    assert line.inputs[0].window.links[card.position or 0] == "act-ask"
