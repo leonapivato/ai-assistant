@@ -2763,7 +2763,18 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     validates unchanged (§11:6). A peer at 123 refuses the new field as extra, and a
 #:     hub at 124 reads an entry without it as keeping nothing (ADR-0124 §9:2). The method
 #:     set does not move: no ``Protocol`` gains a member.
-PROTOCOL_VERSION: Final[int] = 124
+#: 125: ADR-0361 §8:7 advances the version once for its lane AP1 (§9:1), on these
+#:     grounds: ``ApprovalGiver`` gains ``user_tap_on_telegram_card`` and
+#:     ``user_tap_on_hub_panel``, ``ApprovalEnd`` gains ``when_used_or_expired``, and
+#:     ``Approval.how`` gains the ``TapOnCard`` form, all carried on
+#:     ``PermissionDecision.approval`` by ``recent_decisions`` and ``export_decisions``;
+#:     and ``ConfirmationPart``, inside ``SupportPart`` on every memory, gains its request
+#:     form (``request``, ``ran_in``), its ``question`` becoming optional. A peer at 124
+#:     refuses the new members as unknown, the new form's kind and the new fields as
+#:     extra, and a confirmation with no question (ADR-0124 §9:2). The method set does not
+#:     move: ``PlanStore`` gains members, but no engine method, and the approval request
+#:     and ``PlanExport`` cross no frame.
+PROTOCOL_VERSION: Final[int] = 125
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

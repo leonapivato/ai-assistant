@@ -72,6 +72,7 @@ _RECORD_TABLES: Final = frozenset(
         "activation_effects",
         "observations",
         "scheduled_tasks",
+        "approval_requests",
     }
 )
 
@@ -116,6 +117,21 @@ _SYNC_METHODS = {
     "live_below": "_live_below_sync",
     "due_occurrences": "_due_occurrences_sync",
     "stopped_activations": "_stopped_activations_sync",
+    # ADR-0361 §8:2's twelve members: the write and the claim each have their own step,
+    # every other write runs one decision through the shared step, and every read the
+    # shared read, each under the connection lock like every other.
+    "write_approval_request": "_write_approval_request_sync",
+    "claim_ticket_call": "_claim_ticket_call_sync",
+    "record_approval_card": "_approvals_step",
+    "answer_approval_request": "_approvals_step",
+    "expire_approval_request": "_approvals_step",
+    "void_approval_ticket": "_approvals_step",
+    "mark_approval_outcome_pushed": "_approvals_step",
+    "approval_requests": "_read_book",
+    "person_approval_requests": "_read_book",
+    "approval_request_by_token": "_read_book",
+    "due_approval_outcomes": "_read_book",
+    "pushed_approval_outcomes": "_read_book",
 }
 
 
@@ -659,22 +675,22 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-async def test_a_fresh_file_is_labelled_version_18_and_holds_only_its_four_tables(
+async def test_a_fresh_file_is_labelled_version_19_and_holds_only_its_five_tables(
     tmp_path: Path,
 ) -> None:
-    """The absolute figure's home, and the shape it labels (ADR-0352 §6:4).
+    """The absolute figure's home, and the shape it labels (ADR-0361 §8:2).
 
-    Version 18 is the store ADR-0309 §5 leaves, its effect records carrying the question
+    Version 19 is the store ADR-0309 §5 leaves, its effect records carrying the question
     part ADR-0321 §4:9 promotes, with the observation records ADR-0329 §16 and ADR-0346
-    add, and the Task Scheduler's scheduled tasks ADR-0350 adds, less the cascade
-    records ADR-0352 retires: four record tables beside ``meta``, and no table of the
-    old path.
+    add, the Task Scheduler's scheduled tasks ADR-0350 adds, less the cascade records
+    ADR-0352 retires, and the approval requests ADR-0361 adds: five record tables beside
+    ``meta``, and no table of the old path.
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
 
-    assert sqlite_store._SCHEMA_VERSION == 18
-    assert _meta(path, "schema_version") == "18"
+    assert sqlite_store._SCHEMA_VERSION == 19
+    assert _meta(path, "schema_version") == "19"
     assert _tables(path) == {"meta", *_RECORD_TABLES}
 
 

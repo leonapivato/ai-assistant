@@ -117,6 +117,14 @@ if TYPE_CHECKING:
         ActivationEffect,
         ActivationEffectClaim,
         ActivationStop,
+        ApprovalCard,
+        ApprovalDue,
+        ApprovalOutcomePush,
+        ApprovalRequest,
+        ApprovalRequestState,
+        ApprovalRequestStep,
+        ApprovalRequestWrite,
+        ApprovalTap,
         BatchHandle,
         BatchItemOutcome,
         BatchRequest,
@@ -252,6 +260,7 @@ if TYPE_CHECKING:
         TelegramPollClaim,
         TelegramPollOutcome,
         TelegramSendOutcome,
+        TicketClaim,
         ToolCall,
         ToolCost,
         ToolDefinition,
@@ -3358,6 +3367,25 @@ class PlanStore(Protocol):
     round, are totally ordered (§7:5, §9:9). The Task Scheduler is a medium the hub
     hosts, and none of it is the assistant's memory (§2:3, §4:2).
 
+    **Twelve more hold the Approvals channel's content** (ADR-0361 §8:2): the approval
+    requests ``request_approval`` writes, each with its ticket (§3:2, §5).
+    :meth:`write_approval_request` writes a request with ``request_approval``'s effect
+    claim and §2:8's duplicate check in one step; :meth:`approval_requests`,
+    :meth:`person_approval_requests` and :meth:`approval_request_by_token` read requests
+    by id, by person and state, and by a card's token (§4:10);
+    :meth:`record_approval_card` records a card and its token; :meth:`answer_approval_request`
+    marks a pending request answered by a tap, the first to land winning (§4:9), and
+    :meth:`expire_approval_request` ends one expired or voids its held ticket at its expiry
+    (§3:5); :meth:`void_approval_ticket` makes a held ticket void (§5:7);
+    :meth:`due_approval_outcomes` and :meth:`pushed_approval_outcomes` read the outcomes
+    due to be pushed and those marked pushed, and :meth:`mark_approval_outcome_pushed`
+    marks one pushed, naming its activation (§3:4, §3:7); and :meth:`claim_ticket_call`
+    claims a call under a ticket, keyed by its request, spending it (§5:5). **The store
+    computes no instant**: a request's expiry, a tap's instant and an expiry's are the
+    caller's, and a claim is decided at the instant its record was claimed at. The
+    Approvals channel is a medium the hub hosts, and none of it is the assistant's memory
+    (§3:1).
+
     **A task the person set may hold a rule** (ADR-0340 §4, §9:3), and then holds more
     than one occurrence over its life. :meth:`write_scheduled_task` writes its first
     occurrence at the instant its spawn carries; :meth:`mark_occurrence_pushed`, at an
@@ -3463,8 +3491,10 @@ class PlanStore(Protocol):
         Raises:
             ClaimStopped: If the store holds a stop record for the activation.
             PlanningError: If the store already holds a record under the id, the
-                record carries an outcome, a reason or a position, ``match`` names an
-                id with no UTF-8 encoding, or the backend fails. Nothing is written.
+                record carries an outcome, a reason or a position, or a ticket or a
+                request (ADR-0361: :meth:`claim_ticket_call` and
+                :meth:`write_approval_request` claim those), ``match`` names an id with
+                no UTF-8 encoding, or the backend fails. Nothing is written.
         """
         ...
 
@@ -3966,6 +3996,250 @@ class PlanStore(Protocol):
         """
         ...
 
+    # --- the Approvals channel's requests (ADR-0361 §8:2) ---------------------
+
+    async def write_approval_request(
+        self,
+        request: ApprovalRequest,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+    ) -> ApprovalRequestWrite:
+        """Write a request with ``request_approval``'s effect claim, in one step (§2:8-§2:9).
+
+        **One indivisible step**, which decides the claim and the duplicate check and
+        writes the request and the effect record together, or writes nothing. In this
+        order:
+
+        1. **The stop and the id**, as :meth:`claim_activation_effect` decides them:
+           where the store holds a stop record for ``effect.activation_id``, the asking
+           activation, it raises ``ClaimStopped``; a held effect id raises
+           ``PlanningError``.
+        2. **The request id.** Where the store already holds a request under
+           ``request.id``, it raises ``PlanningError``.
+        3. **The duplicate** (§2:8). Where a pending request for ``request.person``, not
+           expired by ``request.written_at``, holds a call with the same capability,
+           values and binding, it answers ``already_waiting`` with that request, which
+           says since when.
+        4. **The backstop**, as :meth:`claim_activation_effect` decides it over
+           ``match``: ``already_done``.
+        5. Otherwise it writes the request and ``effect`` as a claim, with no outcome,
+           which acting then finishes (ADR-0306 §5:5), and answers ``written``.
+
+        Args:
+            request: The request to write: pending, with no answer, ticket, card or
+                pushed mark. Its ``expires_at`` is the caller's, 24 hours on (§3:5).
+            effect: ``request_approval``'s effect record, a call claimed with no outcome,
+                made by the asking activation in the request's round and naming the
+                request (:attr:`~ai_assistant.core.types.ActivationEffect.request`).
+            match: The activations the claim is matched against, or ``None``, as for
+                :meth:`claim_activation_effect`.
+            deliberate_repeat: Whether planning marked the call a deliberate repeat.
+
+        Returns:
+            ``written`` with the request; ``already_waiting`` with the pending request it
+            duplicates; or ``already_done``. Only ``written`` wrote.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the asking activation.
+            PlanningError: If the request is not valid or not fresh, the effect is not a
+                call naming the request from its activation and round or carries an
+                outcome, an id is already held, or the backend fails. Nothing is written.
+        """
+        ...
+
+    async def approval_requests(self, request_ids: Sequence[str], /) -> tuple[ApprovalRequest, ...]:
+        """Return the named requests the store holds, in the order named, each once (§8:2).
+
+        A request the store does not hold contributes nothing.
+
+        Raises:
+            PlanningError: If ``request_ids`` is a bare string or not a sequence of
+                strings, names an id with no UTF-8 encoding, or the backend fails.
+        """
+        ...
+
+    async def person_approval_requests(
+        self, person: str, states: Sequence[ApprovalRequestState], /
+    ) -> tuple[ApprovalRequest, ...]:
+        """Return a person's requests in any of ``states``, in the order written (§4:6).
+
+        The panel reads the pending ones and those answered most recently, and the reader
+        bounds what it shows.
+
+        Raises:
+            PlanningError: If ``person`` is blank or has no UTF-8 encoding, ``states``
+                holds anything but an ``ApprovalRequestState``, or the backend fails.
+        """
+        ...
+
+    async def approval_request_by_token(self, token: str, /) -> ApprovalRequest | None:
+        """Return the request one of whose cards carries ``token``, or ``None`` (§4:10).
+
+        A button's callback data is an opaque token minted for its card, naming no
+        record, so this read is how a tap on the line finds its request. Its state is the
+        request's, whatever it is, so a later tap is answered with it (§4:9).
+
+        Raises:
+            PlanningError: If ``token`` is blank or has no UTF-8 encoding, or the backend
+                fails.
+        """
+        ...
+
+    async def record_approval_card(self, request_id: str, card: ApprovalCard, /) -> ApprovalRequest:
+        """Record one of a request's cards, with its token, in one step (§4:2-§4:4, §4:10).
+
+        A card is recorded whatever state the request stands in, since a tap on the panel
+        may answer it before its post returns. A card that failed or was not posted is
+        not recorded (§2:7).
+
+        Returns:
+            The request as written.
+
+        Raises:
+            PlanningError: If an id is not an identifier, the card is not valid, the store
+                holds no such request, a card of any request already carries the token, or
+                the backend fails. Nothing is written.
+        """
+        ...
+
+    async def answer_approval_request(
+        self, request_id: str, state: ApprovalRequestState, tap: ApprovalTap, /
+    ) -> ApprovalRequestStep:
+        """Mark a pending request approved or denied by a tap, in one step (§4:9).
+
+        **One indivisible step**, which refuses where the request is no longer pending,
+        so the first tap to land wins: a later one answers ``not_pending`` with the
+        request's state. A tap at or after the request's expiry answers ``past_expiry``.
+        Each writes nothing. Otherwise the request takes ``state``, with ``tap`` as its
+        answer, and an approval its ticket, held (§5:1); a deny grants none (§5:9).
+
+        Args:
+            request_id: The request tapped.
+            state: ``approved`` or ``denied``.
+            tap: Who tapped, as their surface's giver, and when.
+
+        Returns:
+            ``changed``, ``not_pending`` or ``past_expiry``, with the request as held.
+
+        Raises:
+            PlanningError: If an argument is not valid, ``state`` is neither approved
+                nor denied, the store holds no such request, the tap is earlier than its
+                write, or the backend fails.
+        """
+        ...
+
+    async def expire_approval_request(
+        self, request_id: str, at: datetime, /
+    ) -> ApprovalRequestStep:
+        """End a request expired at its expiry, in one step (§3:5).
+
+        A pending request ends ``expired``. A ticket expires with its request, so an
+        approved request whose ticket is still held has it made void (§5:7). Either
+        answers ``changed``; any other request answers ``not_pending`` and writes nothing.
+
+        Args:
+            request_id: The request.
+            at: The instant the caller read, at or after the request's expiry.
+
+        Raises:
+            PlanningError: If an argument is not valid, the store holds no such request,
+                ``at`` is before its expiry, or the backend fails.
+        """
+        ...
+
+    async def void_approval_ticket(self, request_id: str, /) -> ApprovalRequestStep:
+        """Make a request's held ticket void, in one step (§5:7).
+
+        The work holding the approval's input ended without running it. A request
+        holding no ticket still held answers ``no_held_ticket`` and writes nothing.
+
+        Raises:
+            PlanningError: If ``request_id`` is not an identifier, the store holds no
+                such request, or the backend fails.
+        """
+        ...
+
+    async def due_approval_outcomes(self, at: datetime, /) -> ApprovalDue:
+        """Return what the Approvals sensor reads at ``at`` (§3:4-§3:5).
+
+        The requests answered or expired whose outcome no push has marked, in the order
+        written; the requests whose expiry is at or before ``at`` that are still pending
+        or hold a ticket still held; and the earliest expiry after ``at`` among such
+        requests, which the sensor sleeps until. Instants are compared in UTC.
+
+        Raises:
+            PlanningError: If ``at`` is not a timezone-aware instant, or the backend
+                fails.
+        """
+        ...
+
+    async def pushed_approval_outcomes(self) -> tuple[ApprovalRequest, ...]:
+        """Return every request whose outcome is marked pushed, in the order written (§3:7).
+
+        The read a restart makes: an outcome marked pushed whose activation was never
+        admitted is pushed again, under the activation its mark names. Whether that
+        activation was admitted is the engine's to read, never the store's.
+
+        Raises:
+            PlanningError: If the backend fails.
+        """
+        ...
+
+    async def mark_approval_outcome_pushed(
+        self, request_id: str, activation_id: str, /
+    ) -> ApprovalOutcomePush:
+        """Mark a request's outcome pushed, naming its activation, before it is admitted.
+
+        **One indivisible step** (§3:4), which refuses where the outcome is already
+        marked, or the request is still pending: it answers ``not_due`` and writes
+        nothing. Otherwise it records ``activation_id`` and answers ``pushed``.
+
+        Raises:
+            PlanningError: If an id is not an identifier, the store holds no such
+                request, another request's outcome was already pushed to
+                ``activation_id``, or the backend fails. Nothing is written.
+        """
+        ...
+
+    async def claim_ticket_call(
+        self,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+    ) -> TicketClaim:
+        """Claim a call under a ticket, keyed by its request, spending it (§5:3-§5:5).
+
+        **One indivisible step**, which decides the claim and the ticket and writes the
+        effect record and the spend together, or writes nothing. In this order:
+
+        1. **The stop and the id**, as :meth:`claim_activation_effect` decides them.
+        2. **The ticket**, named by ``effect.ticket``: a request not held, or never
+           approved, answers ``not_granted``; a ticket used, or one whose key a record
+           already carries, ``used``; one void, ``void``; and a claim whose
+           ``claimed_at`` is at or after the request's expiry, ``expired``.
+        3. **The backstop**, as :meth:`claim_activation_effect` decides it over
+           ``match``, a call under a ticket counting as a call under an approval:
+           ``already_done``.
+        4. Otherwise it writes ``effect`` as a claim, marks the ticket used by it, and
+           answers ``claimed``.
+
+        Whether the request was approved by the person the calling activation is for,
+        and whether that activation holds the approval's input (§5:3, §5:6), are the
+        caller's: the store holds no activation.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the activation.
+            PlanningError: If the effect is not a valid call naming a ticket, carries an
+                outcome, its id is held, its capability is not the one the ticket's call
+                holds, or the backend fails. Nothing is written.
+        """
+        ...
+
     async def export(self) -> PlanExport:
         """Return a portable snapshot of all planning state (ADR-0004 §6).
 
@@ -3980,6 +4254,9 @@ class PlanStore(Protocol):
 
         **And the Task Scheduler's content** (ADR-0350 §12:3): every scheduled task it
         holds, with its occurrences, in the order written.
+
+        **And the Approvals channel's content** (ADR-0361 §8:2): every approval request it
+        holds, with its answer, ticket, cards and pushed mark, in the order written.
         """
         ...
 
@@ -3990,7 +4267,8 @@ class PlanStore(Protocol):
         the records removed. **So does every observation record** (ADR-0329 §16:9),
         each counted once; the revision issuer is kept, so no revision is issued
         twice. **So does every scheduled task** (ADR-0350 §12:3), each counted once;
-        no cascade record is held to count (ADR-0352 §6:3).
+        no cascade record is held to count (ADR-0352 §6:3). **So does every approval
+        request** (ADR-0361 §8:2, ADR-0292 §3:11), each counted once.
 
         Raises:
             PlanningError: If the backend fails.

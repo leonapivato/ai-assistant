@@ -35,11 +35,15 @@ from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    ApprovalRequest,
+    ApprovalRequestWrite,
+    ApprovalWriteAnswer,
     ObservationRecord,
     PlanExport,
     ScheduledTask,
     ScheduledTaskWrite,
     TaskWriteAnswer,
+    TicketClaim,
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.activation_effects import (
@@ -52,6 +56,34 @@ from ai_assistant.planning.activation_effects import (
     requested_parts,
     revalidated_claim,
 )
+from ai_assistant.planning.approvals import (
+    Book,
+    by_token,
+    checked_at,
+    checked_card,
+    checked_new_request,
+    checked_plain_effect,
+    checked_request_effect,
+    checked_request_id,
+    checked_tap,
+    checked_ticket_effect,
+    checked_token,
+    decide_answer,
+    decide_card,
+    decide_expiry,
+    decide_outcome_push,
+    decide_request_write,
+    decide_ticket,
+    decide_void,
+    requested_request_ids,
+    requested_request_states,
+    spend_ticket,
+    write_request,
+)
+from ai_assistant.planning.approvals import by_person as requests_by_person
+from ai_assistant.planning.approvals import checked_person as checked_request_person
+from ai_assistant.planning.approvals import due as approvals_due
+from ai_assistant.planning.approvals import pushed as pushed_outcomes
 from ai_assistant.planning.observations import (
     checked_expected_revision,
     checked_observation,
@@ -95,6 +127,12 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
+        ApprovalCard,
+        ApprovalDue,
+        ApprovalOutcomePush,
+        ApprovalRequestState,
+        ApprovalRequestStep,
+        ApprovalTap,
         OccurrencePush,
         OccurrenceState,
         QuestionPart,
@@ -214,13 +252,22 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: at start; and then the table is dropped (:meth:`SqlitePlanStore._retire_cascades`).
 #: A build reading 17 would recreate the table and find it empty, so it must refuse a
 #: file at 18 (ADR-0326 §5:3).
-_SCHEMA_VERSION = 18
+#:
+#: **Version 19 is ADR-0361 §8:2's**: the store gains ``approval_requests``, the Approvals
+#: channel's requests, each its record as a blob with its person and write order
+#: promoted. **A version 18 file is upgraded in place** (ADR-0326 §4:1): the open's
+#: ``CREATE TABLE IF NOT EXISTS`` adds the table, empty, in its one transaction, every
+#: other record is carried as it stands (§4:4), and the step is the label alone. An effect
+#: record's ``ticket`` and ``request`` (§5:5, §2:9) ride in its blob, empty on every record
+#: written before them. A build reading 18 refuses a file at 19, whose table it would
+#: leave outside export and clear (ADR-0326 §5:3).
+_SCHEMA_VERSION = 19
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
 #: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
 #: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
 #: ruling (§4:6).
-_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16, 17)
+_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16, 17, 18)
 
 #: The table ADR-0350 §12:3 gave the store for a stop command's cascade records, and the
 #: last label that holds it. A file at that label or below may hold it, and the open
@@ -278,6 +325,13 @@ _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS scheduled_tasks("
     "id TEXT PRIMARY KEY, person TEXT NOT NULL, parent TEXT NOT NULL, "
     "written_seq INTEGER NOT NULL, data TEXT NOT NULL)",
+    # ADR-0361 §8:2's approval requests. The record is the blob; `person` is promoted
+    # because it names whom the request is for, and `written_seq` because every read
+    # answers in the order the requests were written. Both are reconciled with the blob on
+    # every read. No foreign key: a request names activations and an effect record.
+    "CREATE TABLE IF NOT EXISTS approval_requests("
+    "id TEXT PRIMARY KEY, person TEXT NOT NULL, written_seq INTEGER NOT NULL, "
+    "data TEXT NOT NULL)",
 )
 
 #: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
@@ -335,11 +389,21 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "written_seq": ("INTEGER", True),
         "data": ("TEXT", True),
     },
+    "approval_requests": {
+        "id": ("TEXT", False),
+        "person": ("TEXT", True),
+        "written_seq": ("INTEGER", True),
+        "data": ("TEXT", True),
+    },
 }
 
 #: The columns every read of a scheduled task selects, in the order
 #: :func:`_checked_task` reconciles them with the record.
 _TASK_COLUMNS = "id, person, parent, data"
+
+#: The columns every read of an approval request selects, in the order
+#: :func:`_checked_request` reconciles them with the record.
+_REQUEST_COLUMNS = "id, person, data"
 
 #: The columns every read of an observation record selects, in the order
 #: :func:`_checked_observation` reconciles them with the record.
@@ -368,6 +432,7 @@ _RECORD_PRIMARY_KEY: dict[str, tuple[str, ...]] = {
     "activation_effects": ("id",),
     "observations": ("episode_id",),
     "scheduled_tasks": ("id",),
+    "approval_requests": ("id",),
 }
 
 
@@ -704,6 +769,11 @@ class SqlitePlanStore:
         **17 → 18** (ADR-0352 §2:6, §6:4): the store loses ``cascade_records``. The step
         moves the label here, and :meth:`_retire_cascades` applies the records' reach and
         drops the table once the record tables are verified, in this same transaction.
+
+        **18 → 19** (ADR-0361 §8:2): the store gains ``approval_requests``, which the
+        open's ``CREATE TABLE IF NOT EXISTS`` creates, empty, in this same transaction. An
+        effect record's ``ticket`` and ``request`` default to empty, so every record reads
+        back as it was, no row is rewritten, and the step is the label alone.
         """
         for step in range(held, _SCHEMA_VERSION):
             conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))
@@ -1114,7 +1184,7 @@ class SqlitePlanStore:
         """
         # Snapshotted before the first await, so a caller mutating its record while
         # this call is queued cannot change what is written (ADR-0018 §3).
-        record = revalidated_claim(effect)
+        record = checked_plain_effect(revalidated_claim(effect))
         named = matched_activations(match)
         async with self._lock:
             return await _run_to_completion(
@@ -1475,7 +1545,7 @@ class SqlitePlanStore:
                 already held, or the backend fails.
         """
         asked = checked_spawn(spawn)
-        record = checked_spawn_effect(revalidated_claim(effect))
+        record = checked_spawn_effect(checked_plain_effect(revalidated_claim(effect)))
         named = matched_activations(match)
         limits = (
             checked_limit(chain_limit, "chain limit"),
@@ -1815,6 +1885,307 @@ class SqlitePlanStore:
             self._persist(conn, schedule)
         return removed
 
+    # --- the Approvals channel's requests (ADR-0361 §8:2) ------------------
+    #
+    # As the Task Scheduler's members do, every member reads the whole book on its own
+    # transaction's connection, runs one decision of `planning.approvals` over it, and
+    # writes back what the decision changed, so each is one indivisible step (§3:4, §4:9,
+    # §5:5). The writes take `BEGIN IMMEDIATE`, and the reads a deferred transaction.
+
+    def _book(self, conn: sqlite3.Connection) -> Book:
+        """Read every approval request on ``conn``, inside the caller's transaction."""
+        return Book(
+            requests={
+                one.id: one
+                for one in (
+                    _checked_request(str(self._path), row)
+                    for row in conn.execute(
+                        "SELECT " + _REQUEST_COLUMNS + " FROM approval_requests "  # noqa: S608 — only a constant is interpolated
+                        "ORDER BY written_seq ASC"
+                    ).fetchall()
+                )
+            }
+        )
+
+    def _persist_book(self, conn: sqlite3.Connection, book: Book) -> None:
+        """Write back the requests a decision changed, new or rewritten."""
+        for request_id in book.changed:
+            request = book.requests[request_id]
+            updated = conn.execute(
+                "UPDATE approval_requests SET data = ? WHERE id = ?",
+                (request.model_dump_json(), request.id),
+            ).rowcount
+            if not updated:
+                conn.execute(
+                    "INSERT INTO approval_requests(id, person, written_seq, data) "
+                    "VALUES (?, ?, (SELECT COALESCE(MAX(written_seq), 0) + 1 "
+                    "FROM approval_requests), ?)",
+                    (request.id, request.person, request.model_dump_json()),
+                )
+
+    def _read_book(self, what: str) -> dict[str, ApprovalRequest]:
+        """Every approval request, read under one deferred transaction."""
+        with transaction(self._conn, what, error=PlanningError, immediate=False) as conn:
+            return self._book(conn).requests
+
+    def _approvals_step[T](self, what: str, decide: Callable[[Book], T]) -> T:
+        """Run one decision over the book in a write transaction, and persist it."""
+        with self._transaction(what) as conn:
+            book = self._book(conn)
+            answer = decide(book)
+            self._persist_book(conn, book)
+        return answer
+
+    async def write_approval_request(
+        self,
+        request: ApprovalRequest,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+    ) -> ApprovalRequestWrite:
+        """Write a request with ``request_approval``'s effect claim, in one step (§2:8-§2:9).
+
+        The claim, the duplicate check and both writes are read and decided inside one
+        ``BEGIN IMMEDIATE`` transaction, so two identical requests cannot both be written.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the asking activation.
+            PlanningError: If the request or the effect is not valid, an id is held, or
+                the backend fails.
+        """
+        asked = checked_new_request(request)
+        record = checked_request_effect(revalidated_claim(effect), asked)
+        named = matched_activations(match)
+        async with self._lock:
+            return await _run_to_completion(
+                self._write_approval_request_sync, asked, record, named, deliberate_repeat
+            )
+
+    def _write_approval_request_sync(
+        self,
+        request: ApprovalRequest,
+        record: ActivationEffect,
+        named: tuple[str, ...] | None,
+        deliberate_repeat: bool,
+    ) -> ApprovalRequestWrite:
+        with self._transaction(f"write approval request {request.id!r}") as conn:
+            self._decided_claim(conn, record, None, deliberate_repeat)
+            book = self._book(conn)
+            waiting = decide_request_write(book, request)
+            if waiting is not None:
+                return waiting
+            answer = self._decided_claim(conn, record, named, deliberate_repeat)
+            if answer is not ActivationEffectClaim.CLAIMED:
+                return ApprovalRequestWrite(answer=ApprovalWriteAnswer.ALREADY_DONE)
+            written = write_request(book, request)
+            self._persist_book(conn, book)
+            _insert_effect(conn, record)
+        return written
+
+    async def approval_requests(self, request_ids: Sequence[str], /) -> tuple[ApprovalRequest, ...]:
+        """Return the named requests the store holds, in the order named.
+
+        Raises:
+            PlanningError: If ``request_ids`` is not a sequence of encodable strings, or
+                the backend fails.
+        """
+        named = requested_request_ids(request_ids)
+        async with self._lock:
+            held = await _run_to_completion(self._read_book, "read approval requests")
+        return tuple(held[one] for one in named if one in held)
+
+    async def person_approval_requests(
+        self, person: str, states: Sequence[ApprovalRequestState], /
+    ) -> tuple[ApprovalRequest, ...]:
+        """Return a person's requests in any of ``states``, in the order written (§4:6).
+
+        Raises:
+            PlanningError: If ``person`` or ``states`` is not valid, or the backend
+                fails.
+        """
+        whose = checked_request_person(person)
+        wanted = requested_request_states(states)
+        async with self._lock:
+            held = await _run_to_completion(self._read_book, "read a person's approval requests")
+        return requests_by_person(held, whose, wanted)
+
+    async def approval_request_by_token(self, token: str, /) -> ApprovalRequest | None:
+        """Return the request one of whose cards carries ``token``, or ``None`` (§4:10).
+
+        Raises:
+            PlanningError: If ``token`` is blank or has no UTF-8 encoding, or the backend
+                fails.
+        """
+        named = checked_token(token)
+        async with self._lock:
+            held = await _run_to_completion(self._read_book, "read an approval request by token")
+        return by_token(held, named)
+
+    async def record_approval_card(self, request_id: str, card: ApprovalCard, /) -> ApprovalRequest:
+        """Record one of a request's cards and its token, in one step (§4:3, §4:10).
+
+        Raises:
+            PlanningError: If an argument is not valid, no such request is held, the
+                token is already carried, or the backend fails.
+        """
+        named = checked_request_id(request_id)
+        posted = checked_card(card)
+        async with self._lock:
+            return await _run_to_completion(
+                self._approvals_step,
+                f"record a card of approval request {named!r}",
+                lambda book: decide_card(book, named, posted),
+            )
+
+    async def answer_approval_request(
+        self, request_id: str, state: ApprovalRequestState, tap: ApprovalTap, /
+    ) -> ApprovalRequestStep:
+        """Answer a pending request by a tap, the first to land winning (§4:9).
+
+        Raises:
+            PlanningError: If an argument is not valid, no such request is held, or the
+                backend fails.
+        """
+        named = checked_request_id(request_id)
+        answer, tapped = checked_tap(state, tap)
+        async with self._lock:
+            return await _run_to_completion(
+                self._approvals_step,
+                f"answer approval request {named!r}",
+                lambda book: decide_answer(book, named, answer, tapped),
+            )
+
+    async def expire_approval_request(
+        self, request_id: str, at: datetime, /
+    ) -> ApprovalRequestStep:
+        """Expire a request, or void its held ticket, at its expiry (§3:5, §5:7).
+
+        Raises:
+            PlanningError: If an argument is not valid, no such request is held, ``at`` is
+                before its expiry, or the backend fails.
+        """
+        named = checked_request_id(request_id)
+        instant = checked_at(at)
+        async with self._lock:
+            return await _run_to_completion(
+                self._approvals_step,
+                f"expire approval request {named!r}",
+                lambda book: decide_expiry(book, named, instant),
+            )
+
+    async def void_approval_ticket(self, request_id: str, /) -> ApprovalRequestStep:
+        """Make a request's held ticket void, in one step (§5:7).
+
+        Raises:
+            PlanningError: If ``request_id`` is not valid, no such request is held, or the
+                backend fails.
+        """
+        named = checked_request_id(request_id)
+        async with self._lock:
+            return await _run_to_completion(
+                self._approvals_step,
+                f"void the ticket of approval request {named!r}",
+                lambda book: decide_void(book, named),
+            )
+
+    async def due_approval_outcomes(self, at: datetime, /) -> ApprovalDue:
+        """Return the outcomes to push, the requests expiring, and the next expiry (§3:4).
+
+        Raises:
+            PlanningError: If ``at`` is not a timezone-aware instant, or the backend
+                fails.
+        """
+        instant = checked_at(at)
+        async with self._lock:
+            held = await _run_to_completion(self._read_book, "read the approvals due")
+        return approvals_due(held, instant)
+
+    async def pushed_approval_outcomes(self) -> tuple[ApprovalRequest, ...]:
+        """Return every request whose outcome is marked pushed, in the order written (§3:7).
+
+        Raises:
+            PlanningError: If the backend fails.
+        """
+        async with self._lock:
+            held = await _run_to_completion(self._read_book, "read the approvals pushed")
+        return pushed_outcomes(held)
+
+    async def mark_approval_outcome_pushed(
+        self, request_id: str, activation_id: str, /
+    ) -> ApprovalOutcomePush:
+        """Mark a request's outcome pushed, naming its activation, in one step (§3:4).
+
+        Raises:
+            PlanningError: If an id is not valid, no such request is held, the activation
+                was already pushed to, or the backend fails.
+        """
+        named = checked_request_id(request_id)
+        pushed_to = checked_request_id(activation_id, "activation")
+        async with self._lock:
+            return await _run_to_completion(
+                self._approvals_step,
+                f"push the outcome of approval request {named!r}",
+                lambda book: decide_outcome_push(book, named, pushed_to),
+            )
+
+    async def claim_ticket_call(
+        self,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+    ) -> TicketClaim:
+        """Claim a call under a ticket, keyed by its request, spending it (§5:3-§5:5).
+
+        The stop, the ticket, the key, the backstop, the write and the spend are read and
+        decided inside one ``BEGIN IMMEDIATE`` transaction, so two claims of one ticket
+        cannot both run.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the activation.
+            PlanningError: If the effect is not valid, its id is held, its capability is
+                not the ticket's call's, or the backend fails.
+        """
+        record = checked_ticket_effect(revalidated_claim(effect))
+        named = matched_activations(match)
+        async with self._lock:
+            return await _run_to_completion(
+                self._claim_ticket_call_sync, record, named, deliberate_repeat
+            )
+
+    def _claim_ticket_call_sync(
+        self, record: ActivationEffect, named: tuple[str, ...] | None, deliberate_repeat: bool
+    ) -> TicketClaim:
+        with self._transaction(f"claim activation effect {record.id!r} under a ticket") as conn:
+            self._decided_claim(conn, record, None, deliberate_repeat)
+            book = self._book(conn)
+            # Every record carrying the key, read from the record itself and reconciled,
+            # so a second claim of one ticket is refused whatever the request says (§5:5).
+            carried = bool(
+                [
+                    _checked_activation_effect(str(self._path), row)
+                    for row in conn.execute(
+                        "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only a constant is interpolated
+                        "WHERE json_extract(data, '$.ticket') = ?",
+                        (record.ticket,),
+                    ).fetchall()
+                ]
+            )
+            refused = decide_ticket(book, record, carried=carried)
+            if refused is not None:
+                return refused
+            if self._decided_claim(conn, record, named, deliberate_repeat) is not (
+                ActivationEffectClaim.CLAIMED
+            ):
+                return TicketClaim.ALREADY_DONE
+            spend_ticket(book, record)
+            self._persist_book(conn, book)
+            _insert_effect(conn, record)
+        return TicketClaim.CLAIMED
+
     # --- data rights (ADR-0004) -------------------------------------------
 
     async def export(self) -> PlanExport:
@@ -1828,7 +2199,7 @@ class SqlitePlanStore:
         """
         exported_at = self._now()
         async with self._lock:
-            stopped, acted, observed, schedule = await _run_to_completion(self._export_sync)
+            stopped, acted, observed, schedule, book = await _run_to_completion(self._export_sync)
         return PlanExport(
             exported_at=exported_at,
             # ADR-0297 §1: every stop record, in a deterministic order.
@@ -1839,11 +2210,13 @@ class SqlitePlanStore:
             observations=tuple(observed),
             # ADR-0350 §12:3: every scheduled task, in the order written.
             scheduled_tasks=tuple(schedule.tasks.values()),
+            # ADR-0361 §8:2: every approval request, in the order written.
+            approval_requests=tuple(book.requests.values()),
         )
 
     def _export_sync(
         self,
-    ) -> tuple[list[str], list[ActivationEffect], list[ObservationRecord], Schedule]:
+    ) -> tuple[list[str], list[ActivationEffect], list[ObservationRecord], Schedule, Book]:
         # Both reads inside one transaction, so the export is a single database
         # snapshot. The write form, not the deferred one a read would otherwise take:
         # the write lock excludes a writer outright rather than leaving the reads to a
@@ -1873,7 +2246,8 @@ class SqlitePlanStore:
                 ).fetchall()
             ]
             schedule = self._schedule(conn, _EPOCH)
-        return stopped, acted, observed, schedule
+            book = self._book(conn)
+        return stopped, acted, observed, schedule, book
 
     async def clear(self) -> int:
         """Delete every record, the Task Scheduler's included, returning the count.
@@ -1896,6 +2270,8 @@ class SqlitePlanStore:
             removed += conn.execute("DELETE FROM observations").rowcount
             # ADR-0350 §12:3: and every scheduled task.
             removed += conn.execute("DELETE FROM scheduled_tasks").rowcount
+            # ADR-0361 §8:2: and every approval request.
+            removed += conn.execute("DELETE FROM approval_requests").rowcount
         return removed
 
     def close(self) -> None:
@@ -1963,6 +2339,38 @@ def _checked_task(path: str, row: Sequence[Any]) -> ScheduledTask:
         )
         raise PlanningError(msg)
     return task
+
+
+def _checked_request(path: str, row: Sequence[Any]) -> ApprovalRequest:
+    """Decode one approval request and refuse a blob that disagrees with its columns.
+
+    The id and the person are promoted, so each is reconciled with the record a tampered
+    file could answer with (ADR-0361 §8:2).
+
+    Args:
+        path: The store's path, for the message.
+        row: ``(id, person, data)``.
+
+    Returns:
+        The reconciled request.
+
+    Raises:
+        PlanningError: If the blob does not validate, or disagrees with its columns.
+    """
+    try:
+        request = ApprovalRequest.model_validate_json(str(row[2]))
+    except ValidationError as exc:
+        msg = f"the plan store holds an approval request that no longer validates: {exc}"
+        raise PlanningError(msg) from exc
+    promoted = (row[0], row[1])
+    held = (request.id, request.person)
+    if promoted != held:
+        msg = (
+            f"the plan store at {path!r} holds an approval request indexed at {promoted} "
+            f"whose record names {held}; the store is corrupt"
+        )
+        raise PlanningError(msg)
+    return request
 
 
 def _micros(instant: datetime) -> int:

@@ -59,6 +59,14 @@ from ai_assistant.core.types import (
     ActionRequest,
     ActivationEffect,
     ActivationUnderstanding,
+    ApprovalCard,
+    ApprovalGiver,
+    ApprovalOutcomePush,
+    ApprovalRequest,
+    ApprovalRequestState,
+    ApprovalStepAnswer,
+    ApprovalTap,
+    ApprovalWriteAnswer,
     Attestation,
     CandidateDecline,
     ChannelContext,
@@ -125,6 +133,7 @@ from ai_assistant.core.types import (
     RecordedInputMessage,
     RecordedTextInput,
     RememberCallPart,
+    RequestedCall,
     Reversibility,
     RiskLevel,
     RuleDay,
@@ -151,6 +160,7 @@ from ai_assistant.core.types import (
     TaskSpawn,
     TaskWriteAnswer,
     TelegramOutcome,
+    TicketClaim,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -1294,6 +1304,7 @@ async def _write_plans(directory: Path, moment: Moment) -> None:
             expected_revision=0,
         )
         await _write_scheduled_tasks(store, moment)
+        await _write_approval_requests(store, moment)
     finally:
         store.close()
 
@@ -1419,6 +1430,80 @@ async def _write_scheduled_tasks(store: SqlitePlanStore, moment: Moment) -> None
         raise RuntimeError(msg)
 
 
+async def _write_approval_requests(store: SqlitePlanStore, moment: Moment) -> None:
+    """ADR-0361 §8:2: a request waiting, and one approved by a tap on its card.
+
+    The approved one carries its card and token, its ticket spent by the call it holds,
+    and its outcome marked pushed, so a later head reads back each part a request holds.
+
+    Raises:
+        RuntimeError: If the store does not write a request or take a step on it.
+    """
+    for request_id, hotel in (("q-upgrade-waiting", "the Savoy"), ("q-upgrade-approved", "Ritz")):
+        request = ApprovalRequest(
+            id=request_id,
+            person=OWNER_PERSON_ID,
+            activation_id="act-upgrade-asking",
+            round="r1",
+            call=RequestedCall(tool=_tool(), values={"hotel": hotel}),
+            why=f"You asked me to book {hotel}.",
+            written_at=moment.ago(minutes=12),
+            expires_at=moment.ago(minutes=12) + timedelta(hours=24),
+        )
+        written = await store.write_approval_request(
+            request,
+            ActivationEffect(
+                id=f"effect-{request_id}",
+                activation_id="act-upgrade-asking",
+                round="r1",
+                capability="request_approval",
+                values_digest=("f" if hotel == "Ritz" else "e") * 64,
+                decision_id=f"d-{request_id}",
+                claimed_at=moment.ago(minutes=12),
+                request=request_id,
+            ),
+            match=None,
+        )
+        if written.answer is not ApprovalWriteAnswer.WRITTEN:
+            msg = f"the plan store did not write {request_id}: {written!r}"
+            raise RuntimeError(msg)
+    await store.record_approval_card(
+        "q-upgrade-approved", ApprovalCard(place=_LINE, position=7, token=_UPGRADE_CARD)
+    )
+    tap = ApprovalTap(who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, at=moment.ago(minutes=11))
+    steps = [
+        (
+            await store.answer_approval_request(
+                "q-upgrade-approved", ApprovalRequestState.APPROVED, tap
+            )
+        ).answer
+        is ApprovalStepAnswer.CHANGED,
+        await store.mark_approval_outcome_pushed("q-upgrade-approved", "act-upgrade-approval")
+        is ApprovalOutcomePush.PUSHED,
+        await store.claim_ticket_call(
+            ActivationEffect(
+                id="effect-upgrade-ticket",
+                activation_id="act-upgrade-approval",
+                round="r1",
+                capability="send_email",
+                values_digest="d" * 64,
+                decision_id="d-upgrade-ticket",
+                claimed_at=moment.ago(minutes=10),
+                ticket="q-upgrade-approved",
+            ),
+            match=None,
+        )
+        is TicketClaim.CLAIMED,
+    ]
+    if not all(steps):
+        msg = f"the plan store did not take every step on the approved request: {steps!r}"
+        raise RuntimeError(msg)
+
+
+#: The opaque token minted for the approved request's card (ADR-0361 §4:10).
+_UPGRADE_CARD: Final = "upgrade-card-1"
+
+
 async def _read_plans(directory: Path) -> Records:
     store = _plans(directory)
     try:
@@ -1430,6 +1515,8 @@ async def _read_plans(directory: Path) -> Records:
             # ADR-0350 §12:3: keyed, so a base that predates them reads back no key and
             # the head reads back none either; the shape does not move.
             **_keyed("task", exported.scheduled_tasks, _field("id")),
+            # ADR-0361 §8:2: keyed, as the tasks are, so the shape does not move.
+            **_keyed("approval", exported.approval_requests, _field("id")),
         }
     finally:
         store.close()

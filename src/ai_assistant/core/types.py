@@ -3902,6 +3902,21 @@ class ApprovalGiver(StrEnum):
     """The user, by a message sent through their Telegram line (ADR-0323 §4:9): their
     own account, not forwarding, in its private chat with the bot (§4:1)."""
 
+    USER_TAP_ON_TELEGRAM_CARD = "user_tap_on_telegram_card"
+    """The request's person, by a tap on a button of its card in the line's chat
+    (ADR-0361 §4:2, §4:8-§4:9), established by ADR-0323 §4:1's test."""
+
+    USER_TAP_ON_HUB_PANEL = "user_tap_on_hub_panel"
+    """The request's person, by a tap on the hub page's approvals panel (ADR-0361 §4:6,
+    §4:8-§4:9), from a device admitted under ADR-0124."""
+
+
+#: ADR-0361 §4:9: the givers a tap on an approval request's surface answers as, one per
+#: surface (§4:1). A request's answer names one of these and no other.
+TAP_GIVERS: Final[frozenset[ApprovalGiver]] = frozenset(
+    {ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, ApprovalGiver.USER_TAP_ON_HUB_PANEL}
+)
+
 
 class ApprovalEnd(StrEnum):
     """When an approval stops covering anything: §4:6's *ends* (ADR-0321 §4:6).
@@ -3911,6 +3926,11 @@ class ApprovalEnd(StrEnum):
 
     WHEN_USED = "when_used"
     """Each part covers its call once: the claim that runs it spends it (§4:9)."""
+
+    WHEN_USED_OR_EXPIRED = "when_used_or_expired"
+    """A ticket covers its request's call once, and only until the request expires
+    (ADR-0361 §3:5, §5:1, §5:7): the claim that runs it spends it (§5:5), and at its
+    expiry it is void."""
 
 
 class YesToQuestion(BaseModel):
@@ -3925,6 +3945,25 @@ class YesToQuestion(BaseModel):
     kind: Literal["yes_to_a_question"] = "yes_to_a_question"
     activation_id: Identifier
     round: Identifier
+
+
+class TapOnCard(BaseModel):
+    """How an approval was given, as a tap on a request's card: §4:6's *how* (ADR-0361 §8:1).
+
+    The form ADR-0361 adds beside :class:`YesToQuestion`, extending ADR-0321 §4:6's shape
+    rather than replacing it. ``request`` is the approval request the tap answered, which
+    is the one request the approval covers; ``activation_id`` the activation that asked,
+    and ``round`` the round whose ``request_approval`` call wrote the request; and
+    ``expires_at`` when the request, and so its ticket, expires (§3:5). ``kind`` tells
+    this form from the question's.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["tap_on_a_card"] = "tap_on_a_card"
+    request: Identifier
+    activation_id: Identifier
+    round: Identifier
+    expires_at: UtcInstant
 
 
 class ApprovalGiven(BaseModel):
@@ -3952,20 +3991,45 @@ class Approval(BaseModel):
     A later kind of approval extends this shape, by a member or a form, rather than
     replacing it.
 
+    **A tap on a card is the second form** (ADR-0361 §5, §8:1): **who**, the request's
+    person through the surface tapped (:data:`TAP_GIVERS`); **how**, a
+    :class:`TapOnCard`; **covers** nothing beside it, since the form names the one
+    request it covers, whose ticket is its spending key (§5:5); **given**, in the
+    activation holding the approval's input (§5:6); and **ends** when used or expired.
+
     Raises:
         ValueError: If it covers a part twice, covers a part of another question than
-            the one its yes answered, or was given in the activation that asked.
+            the one its yes answered, or was given in the activation that asked; or, as
+            a tap, covers a part, is given by anyone but a tap's giver, or ends otherwise
+            than when used or expired.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     who: ApprovalGiver
-    how: YesToQuestion
-    covers: tuple[QuestionPart, ...] = Field(min_length=1)
+    how: Annotated[YesToQuestion | TapOnCard, Field(discriminator="kind")]
+    covers: tuple[QuestionPart, ...] = ()
     given: ApprovalGiven
     ends: ApprovalEnd
 
     @model_validator(mode="after")
     def _one_question(self) -> Self:
+        if isinstance(self.how, TapOnCard):
+            if self.covers:
+                msg = "a tap's approval covers its one request, and no question part"
+                raise ValueError(msg)
+            if self.who not in TAP_GIVERS:
+                msg = "a tap's approval is given by the person tapping a surface (ADR-0361 §4:9)"
+                raise ValueError(msg)
+            if self.ends is not ApprovalEnd.WHEN_USED_OR_EXPIRED:
+                msg = "a ticket ends when used or when its request expires (ADR-0361 §5:7)"
+                raise ValueError(msg)
+            return self
+        if not self.covers:
+            msg = "a yes's approval covers at least one part of its question"
+            raise ValueError(msg)
+        if self.who in TAP_GIVERS or self.ends is ApprovalEnd.WHEN_USED_OR_EXPIRED:
+            msg = "a yes to a question is given in a message and ends when used"
+            raise ValueError(msg)
         if len(set(self.covers)) != len(self.covers):
             msg = "an approval covers each part once"
             raise ValueError(msg)
@@ -6140,18 +6204,47 @@ class EvidenceItemPart(BaseModel):
     item: int = Field(strict=True, ge=0, lt=_PART_POSITION_BOUND)
 
 
-class ConfirmationPart(BaseModel):
-    """A yes, and the question part it approved (ADR-0328 §4, §4:5).
+def _is_none(value: object) -> bool:
+    """Whether a field's value is unset, so a dump leaves it out (``exclude_if``)."""
+    return value is None
 
-    ``episode`` is the yes's episode; ``asking_activation`` the activation that asked;
-    ``question`` the round whose message asked and the part approved.
+
+class ConfirmationPart(BaseModel):
+    """A yes, and the question part or the approval request it approved (ADR-0328 §4, §4:5).
+
+    ``episode`` is the yes's episode; ``asking_activation`` the activation that asked.
+    **Two forms, exactly one set.** The question form's ``question`` is the round whose
+    message asked and the part approved. The request form (ADR-0361 §5:10, §8:1) names
+    ``request``, the approval request a tap approved, whose recorded call holds the
+    statement ADR-0328 §4:6 compares, with ``episode`` the approval's own episode, where
+    the yes was given, and ``ran_in`` the activation of the work that ran the ticket,
+    beside it.
+
+    Raises:
+        ValueError: If it names both a question and a request, or neither, or names the
+            work that ran a ticket on the question form.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     part: Literal["confirmation"] = "confirmation"
     episode: EncodableText
     asking_activation: Identifier
-    question: QuestionPart
+    # Each is left out of a dump where it is unset, so a support of the question form
+    # serialises exactly as it did before the request form, and every digest taken over a
+    # memory's supports (``MemoryUpdateProposal.proposal_fingerprint``) is unchanged.
+    question: QuestionPart | None = Field(default=None, exclude_if=_is_none)
+    request: Identifier | None = Field(default=None, exclude_if=_is_none)
+    ran_in: Identifier | None = Field(default=None, exclude_if=_is_none)
+
+    @model_validator(mode="after")
+    def _one_form(self) -> Self:
+        if (self.question is None) == (self.request is None):
+            msg = "a confirmation names the question part or the request it approved, one"
+            raise ValueError(msg)
+        if (self.ran_in is None) != (self.request is None):
+            msg = "a request's confirmation names the work that ran its ticket, and only it"
+            raise ValueError(msg)
+        return self
 
 
 class RememberCallPart(BaseModel):
@@ -7872,18 +7965,29 @@ class UserConfirmation(BaseModel):
 
     **The yes path is its only legitimate producer** (ADR-0321 §5:2): code builds it
     from the approval a yes to the remember's question made, and ``question`` names that
-    question's message and part (§9). No type expresses that; it is a composition-root
-    obligation with a structural test behind it, and it is the obligation this value's
-    whole bound rests on.
+    question's message and part (§9); or, since ADR-0361 §5:10, from the ticket a tap on
+    a request's card granted, and ``request`` names that request. No type expresses
+    that; it is a composition-root obligation with a structural test behind it, and it
+    is the obligation this value's whole bound rests on.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    question: QuestionPart = Field(
+    question: QuestionPart | None = Field(
+        default=None,
         description=(
             "The question this answer is for: the round whose message asked it, and the "
-            "part that showed the remember (ADR-0321 §2:6, §9)."
-        )
+            "part that showed the remember (ADR-0321 §2:6, §9). ``None`` where it answers "
+            "an approval request instead."
+        ),
+    )
+    request: Identifier | None = Field(
+        default=None,
+        description=(
+            "The approval request this answer is for, where a tap on its card approved the "
+            "remember (ADR-0361 §5:10, §8:1). Exactly one of ``question`` and ``request`` "
+            "is set."
+        ),
     )
     question_key: Sha256Hex = Field(
         description=(
@@ -7899,6 +8003,18 @@ class UserConfirmation(BaseModel):
             "question froze and the surface showed (ADR-0078 §5). Nothing else."
         ),
     )
+
+    @model_validator(mode="after")
+    def _answers_one_thing(self) -> Self:
+        """Refuse a confirmation naming both a question and a request, or neither.
+
+        Raises:
+            ValueError: If it does.
+        """
+        if (self.question is None) == (self.request is None):
+            msg = "a confirmation answers one question part or one approval request"
+            raise ValueError(msg)
+        return self
 
 
 class MemoryRetirement(BaseModel):
@@ -11798,7 +11914,17 @@ class ScheduledDue(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 26 because the document lost ``cascades``** (ADR-0352 §6:3):
+    **``schema_version`` is 27 because the document gained ``approval_requests``**
+    (ADR-0361 §8:2): the Approvals channel's content, each request with its call, its
+    answer, its ticket, its cards and its pushed mark, in the order written. A request
+    names activations, an effect record and places, none of which is checked against the
+    document, so ADR-0014 §5's closure rule is **extended by nothing**; the only
+    constraints stated over the member are that no request id appears twice and no card
+    token is carried by two requests. A reader of 26 refuses the member as extra; and
+    an effect record's ``ticket`` and ``request``, which ADR-0361 §5:5 and §2:9 add, are
+    refused by it as extra too.
+
+    **It was 26 because the document lost ``cascades``** (ADR-0352 §6:3):
     no stop writes a cascade record any more, and the plan store's upgrade retires every
     one a stop wrote before (§2:6), so the store holds none to carry. A reader of 25
     expects a member this document no longer has. The closure rule is extended by
@@ -11885,12 +12011,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[26] = Field(
-        default=26,
+    schema_version: Literal[27] = Field(
+        default=27,
         description=(
-            "Shape of this export, pinned to exactly 26 (ADR-0039 §10, ADR-0352 §6:3): an "
+            "Shape of this export, pinned to exactly 27 (ADR-0039 §10, ADR-0361 §8:2): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[26]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[27]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -11926,6 +12052,38 @@ class PlanExport(BaseModel):
             "the order they were written (ADR-0350 §12:3)."
         ),
     )
+    approval_requests: tuple[ApprovalRequest, ...] = Field(
+        default=(),
+        description=(
+            "The approval requests the Approvals channel holds, each with its answer, "
+            "ticket, cards and pushed mark, in the order they were written (ADR-0361 §8:2)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_approval_request_appears_once(self) -> PlanExport:
+        """Refuse a document carrying one request id, or one card token, twice (§4:10).
+
+        A store holds one request per id and mints each token once, so a duplicate
+        states a record the store cannot hold.
+
+        Raises:
+            ValueError: If a request id or a card token appears more than once.
+        """
+        ids = [one.id for one in self.approval_requests]
+        if len(set(ids)) != len(ids):
+            msg = "export contains duplicate approval request ids"
+            raise ValueError(msg)
+        tokens = [
+            card.token
+            for one in self.approval_requests
+            for card in one.cards
+            if card.token is not None
+        ]
+        if len(set(tokens)) != len(tokens):
+            msg = "export contains one card token on two approval requests"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _a_scheduled_task_appears_once(self) -> PlanExport:
@@ -16474,6 +16632,366 @@ class AskedCall(BaseModel):
         return self
 
 
+# --- an approval request, its card and its ticket (ADR-0361 §2:6, §3, §4, §5, §8:1) -------
+#
+# Planning asks for a yes with ``request_approval``, which writes an approval request into
+# the plan store, the Approvals channel's one place (§3:1-§3:3). The person answers by a
+# tap on one of its surfaces (§4:9); a yes grants a ticket, the request's exact call, used
+# once and only until the request expires (§5). Declared here, beside :class:`AskedCall`,
+# because the request's call carries the declaration and the binding by value as an asked
+# call does, and :class:`PlanExport`, far above, names the request forward.
+
+#: The bound, in characters, on a request's ``why``: planning's own explanation (§2:1),
+#: short, and the ceiling a runaway one meets, as a scheduled task's instruction has.
+APPROVAL_WHY_MAX_CHARS: Final = 4_000
+
+#: The bound, in characters, on a card's callback token (ADR-0361 §4:10): Telegram carries
+#: a button's callback data in at most 64 bytes, and a token is minted within it.
+APPROVAL_TOKEN_MAX_CHARS: Final = 64
+
+
+class ApprovalRequestState(StrEnum):
+    """Where an approval request stands (ADR-0361 §3:5, §4:9, §8:1).
+
+    Closed, **added to and never renamed**. ``pending`` from its write until the first tap
+    lands or it expires; then ``approved`` or ``denied``, by the tap, or ``expired``, 24
+    hours after it was written (§3:5). Every state but ``pending`` is an ending, and its
+    outcome is pushed once as an input of its own (§3:4, §3:7).
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+
+
+#: The states an approval request ends in, each of which starts one activation (§3:7).
+ENDED_REQUEST_STATES: Final[frozenset[ApprovalRequestState]] = frozenset(
+    {ApprovalRequestState.APPROVED, ApprovalRequestState.DENIED, ApprovalRequestState.EXPIRED}
+)
+
+
+class TicketState(StrEnum):
+    """Where an approved request's ticket stands (ADR-0361 §5:1, §5:5, §5:7, §8:1).
+
+    Closed, **added to and never renamed**. ``held`` from the yes; ``used`` once the call it
+    holds is claimed under it (§5:5); ``void`` once the work holding its input ended without
+    running it, or the request expired (§5:7). Only a deny's and an expiry's requests hold
+    none (§5:9).
+    """
+
+    HELD = "held"
+    USED = "used"
+    VOID = "void"
+
+
+class RequestedCall(BaseModel):
+    """The call an approval request holds, as ADR-0321 §2:8 recorded a question's (§2:6).
+
+    ``tool`` is the declaration of the capability called, by value; ``values`` every
+    argument the call sends, those the hub fills in included, after the *looking for*
+    argument and the *deliberate repeat* mark were removed (ADR-0306 §2:10); ``binding``
+    the egress binding computed for it, or ``None`` for a call that does not leave the
+    hub; and ``deliberate_repeat`` planning's mark. ``replaces`` are the assertions a
+    remember's card shows the new statement replacing (ADR-0321 §5:5). They are the call
+    the card shows (§2:11) and the call a ticket runs (§5:2): code fills in these values
+    and rebinds this binding, and nothing planning sends changes them.
+
+    The record **is** a request's content, checked as :class:`AskedCall` checks its own:
+    :attr:`request` is the request it makes, so a call that could not be ruled on cannot
+    be asked about.
+
+    Raises:
+        ValueError: If the values or the binding would not make an
+            :class:`ActionRequest`, a call to a capability safe to repeat is marked a
+            deliberate repeat, or an assertion is named twice in ``replaces``.
+    """
+
+    # The values are the person's Tier 1 arguments, kept out of validation errors as
+    # :class:`AskedCall` keeps them (ADR-0145 §8).
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    tool: Annotated[ToolDefinition, AfterValidator(_detached_tool)]
+    values: FrozenJsonMapping
+    binding: Annotated[EgressBinding | None, AfterValidator(_detached_binding)] = None
+    deliberate_repeat: bool = False
+    replaces: tuple[NonBlankEncodableText, ...] = ()
+
+    @property
+    def request(self) -> ActionRequest:
+        """The call as a request: its declaration, values and binding (ADR-0021 §3)."""
+        return ActionRequest(tool=self.tool, parameters=self.values, egress_binding=self.binding)
+
+    def same_call(self, other: RequestedCall) -> bool:
+        """Whether ``other`` has this call's capability, values and binding (§2:8)."""
+        return (self.tool.capability, self.values, self.binding) == (
+            other.tool.capability,
+            other.values,
+            other.binding,
+        )
+
+    @model_validator(mode="after")
+    def _a_call_that_could_be_ruled_on(self) -> Self:
+        try:
+            self.request  # noqa: B018 — constructed for ActionRequest's own checks
+        except ValueError:
+            # Pydantic's validation error renders the values, so it is dropped (ADR-0145 §7).
+            msg = "a requested call's values and binding make a request its declaration admits"
+            raise ValueError(msg) from None
+        if self.deliberate_repeat and self.tool.safe_to_repeat:
+            msg = "only a call to a capability not safe to repeat is a deliberate repeat"
+            raise ValueError(msg)
+        if len(set(self.replaces)) != len(self.replaces):
+            msg = "a requested call names each assertion it replaces once"
+            raise ValueError(msg)
+        return self
+
+
+class ApprovalTap(BaseModel):
+    """A request's answer: who tapped, as their surface's giver, and when (ADR-0361 §4:9).
+
+    Raises:
+        ValueError: If ``who`` is no tap's giver (:data:`TAP_GIVERS`).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    who: ApprovalGiver
+    at: UtcInstant
+
+    @model_validator(mode="after")
+    def _a_surfaces_tap(self) -> Self:
+        if self.who not in TAP_GIVERS:
+            msg = "a request is answered by a tap on one of its surfaces (ADR-0361 §4:9)"
+            raise ValueError(msg)
+        return self
+
+
+class ApprovalCard(BaseModel):
+    """Where one of a request's cards went (ADR-0361 §4:2-§4:4, §4:10, §8:1).
+
+    ``place`` is the chat it was posted into, and ``position`` the position the medium
+    recorded it at, which the hub edits it by (§4:5), or ``None`` where the post's outcome
+    is unknown. ``token`` is the opaque callback token minted for its buttons, naming no
+    record (§4:10), or ``None`` for a card posted with no buttons, too long for one message
+    (§4:4). A card that failed or was not posted is not recorded (§2:7).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    place: ChannelIdentity
+    position: int | None = Field(default=None, strict=True, ge=0, lt=2**63)
+    token: NonBlankEncodableText | None = Field(default=None, max_length=APPROVAL_TOKEN_MAX_CHARS)
+
+
+class ApprovalRequest(BaseModel):
+    """One approval request, as the Approvals channel holds it (ADR-0361 §2:6, §8:1).
+
+    §2:6's parts: ``id``; ``person``, whom it is for, who is the person the asking
+    activation is for; ``activation_id``, the asking activation, and ``round``, the round
+    whose ``request_approval`` call wrote it; ``call``, the call to approve; ``why``,
+    planning's explanation in its own words; ``written_at``; and ``expires_at``, 24 hours
+    on (§3:5), the composition root's constant, which the store is handed and never
+    computes.
+
+    Its answer: ``state`` (:class:`ApprovalRequestState`); ``answer``, the tap that
+    approved or denied it (§4:9); ``ticket``, an approved request's
+    (:class:`TicketState`), with ``spent_by``, the effect record of the call that used
+    it (§5:5). Where its cards went: ``cards`` (§4:2-§4:4). And ``pushed_to``, the
+    activation its outcome was pushed to, marked before that activation is admitted
+    (§3:4). **It carries no authority**: a yes grants only the ticket (§5:1).
+
+    Raises:
+        ValueError: If it expires no later than it was written; its answer and its state
+            disagree, or the answer falls outside its life; its ticket and its state, or
+            its spend and its ticket, disagree; a pending request is marked pushed; or two
+            cards carry one token.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    person: NonBlankEncodableText
+    activation_id: Identifier
+    round: Identifier
+    call: RequestedCall
+    why: NonBlankEncodableText = Field(max_length=APPROVAL_WHY_MAX_CHARS)
+    written_at: UtcInstant
+    expires_at: UtcInstant
+    state: ApprovalRequestState = ApprovalRequestState.PENDING
+    answer: ApprovalTap | None = None
+    ticket: TicketState | None = None
+    spent_by: Identifier | None = None
+    cards: tuple[ApprovalCard, ...] = ()
+    pushed_to: Identifier | None = None
+
+    @property
+    def ended(self) -> bool:
+        """Whether it has been answered or has expired (§3:7)."""
+        return self.state in ENDED_REQUEST_STATES
+
+    @property
+    def outcome_due(self) -> bool:
+        """Whether its outcome is due to be pushed: it has ended, and no push is marked."""
+        return self.ended and self.pushed_to is None
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        fault = _approval_request_fault(self)
+        if fault is not None:
+            raise ValueError(fault)
+        return self
+
+
+def _approval_request_fault(request: ApprovalRequest) -> str | None:
+    """Which of :class:`ApprovalRequest`'s rules ``request`` breaks, if any."""
+    answered = request.state in {ApprovalRequestState.APPROVED, ApprovalRequestState.DENIED}
+    answer = request.answer
+    tokens = [card.token for card in request.cards if card.token is not None]
+    clauses = (
+        (
+            request.expires_at <= request.written_at,
+            "a request expires after it was written (ADR-0361 §3:5)",
+        ),
+        (
+            answered != (answer is not None),
+            "a request carries its tap exactly where a tap approved or denied it (§4:9)",
+        ),
+        (
+            answer is not None and not (request.written_at <= answer.at < request.expires_at),
+            "a request is answered after it was written and before it expires (§3:5)",
+        ),
+        (
+            (request.ticket is not None) != (request.state is ApprovalRequestState.APPROVED),
+            "a request holds a ticket exactly where it was approved (ADR-0361 §5:1, §5:9)",
+        ),
+        (
+            (request.spent_by is not None) != (request.ticket is TicketState.USED),
+            "a ticket names the effect that spent it exactly where it was used (§5:5)",
+        ),
+        (
+            request.pushed_to is not None and not request.ended,
+            "only a request answered or expired has its outcome pushed (§3:4)",
+        ),
+        (
+            len(set(tokens)) != len(tokens),
+            "a request's cards carry distinct tokens (ADR-0361 §4:10)",
+        ),
+    )
+    return next((fault for broken, fault in clauses if broken), None)
+
+
+class ApprovalWriteAnswer(StrEnum):
+    """What the plan store answered a request's write (ADR-0361 §2:8-§2:9, ADR-0306 §6:2).
+
+    Closed, **added to and never renamed**. A stopped asking activation is not an answer:
+    the write raises ``ClaimStopped``, as a claim does.
+    """
+
+    WRITTEN = "written"
+    """The request and ``request_approval``'s effect record were written together."""
+    ALREADY_WAITING = "already_waiting"
+    """A pending request for the same person holds the same call (§2:8): nothing was
+    written, and the answer carries that request, which says since when."""
+    ALREADY_DONE = "already_done"
+    """The duplicate backstop refused ``request_approval``'s effect (ADR-0306 §5:9), so
+    nothing was written."""
+
+
+class ApprovalRequestWrite(BaseModel):
+    """What a request's write came to (ADR-0361 §2:7-§2:9).
+
+    ``request`` is the request written, on ``written``; the pending request it duplicates,
+    on ``already_waiting``; and ``None`` on the backstop's answer.
+
+    Raises:
+        ValueError: If the request does not match the answer.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    answer: ApprovalWriteAnswer
+    request: ApprovalRequest | None = None
+
+    @model_validator(mode="after")
+    def _matches(self) -> Self:
+        if (self.request is None) != (self.answer is ApprovalWriteAnswer.ALREADY_DONE):
+            msg = "a request's write carries a request except where the backstop refused it"
+            raise ValueError(msg)
+        return self
+
+
+class ApprovalStepAnswer(StrEnum):
+    """What the plan store answered one step on a request (ADR-0361 §3:5, §4:9, §5:7).
+
+    Closed, **added to and never renamed**. Only ``changed`` wrote anything.
+    """
+
+    CHANGED = "changed"
+    """The step was taken: the request was answered, expired, or its ticket made void."""
+    NOT_PENDING = "not_pending"
+    """The request is no longer pending, so a tap or an expiry changes nothing: the first
+    to land won (§4:9), and the caller answers with the request's state."""
+    PAST_EXPIRY = "past_expiry"
+    """The tap came at or after the request's expiry, so it changes nothing (§3:5)."""
+    NO_HELD_TICKET = "no_held_ticket"
+    """The request holds no ticket that is still held, so there is nothing to make void."""
+
+
+class ApprovalRequestStep(BaseModel):
+    """What a step on a request came to, and the request as the store then holds it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    answer: ApprovalStepAnswer
+    request: ApprovalRequest
+
+
+class ApprovalOutcomePush(StrEnum):
+    """What the plan store answered the sensor marking a request's outcome pushed (§3:4).
+
+    Closed, **added to and never renamed**. Only ``pushed`` lets the activation be
+    admitted.
+    """
+
+    PUSHED = "pushed"
+    """The outcome is marked pushed, naming the activation it will be admitted under."""
+    NOT_DUE = "not_due"
+    """The request is still pending, or its outcome is already marked pushed."""
+
+
+class ApprovalDue(BaseModel):
+    """What the Approvals sensor reads at an instant (ADR-0361 §3:4-§3:5).
+
+    ``outcomes`` are the requests answered or expired whose outcome no push has marked,
+    in the order they were written; ``expiring`` the requests whose expiry is at or
+    before the instant and that are still pending, or approved with their ticket still
+    held, which the sensor expires or makes void; and ``next_expiry_at`` the earliest
+    expiry after the instant among such requests, which the sensor sleeps until.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outcomes: tuple[ApprovalRequest, ...] = ()
+    expiring: tuple[ApprovalRequest, ...] = ()
+    next_expiry_at: UtcInstant | None = None
+
+
+class TicketClaim(StrEnum):
+    """What the plan store answered a claim of a call under a ticket (ADR-0361 §5:3-§5:5).
+
+    Closed, **added to and never renamed**. Only ``claimed`` wrote anything; a stopped
+    activation is not an answer, and raises ``ClaimStopped``, as a claim does.
+    """
+
+    CLAIMED = "claimed"
+    """The effect record was written, carrying the ticket's key, and the ticket is used."""
+    ALREADY_DONE = "already_done"
+    """The duplicate backstop refused the call (ADR-0306 §5:9)."""
+    NOT_GRANTED = "not_granted"
+    """The store holds no such request, or it was not approved: no ticket was granted."""
+    USED = "used"
+    """The ticket is used, or a record already carries its key (§5:5)."""
+    VOID = "void"
+    """The ticket is void (§5:7)."""
+    EXPIRED = "expired"
+    """The claim is at or after the request's expiry (§3:5, §5:3)."""
+
+
 # The round names `AskedCall` forward (see the section comment above). Every model
 # declared so far that is not yet whole is rebuilt here, the round and every model that
 # holds one among them, so that each is whole when this module finishes importing
@@ -16947,13 +17465,22 @@ class PermissionDecision(BaseModel):
         an approval gets one, whatever its capability (§4:10). A ``CONFIRM`` may name
         one: route (a) records the confirm ruled fresh in the yes's activation, and it is
         a decision about the call that runs (§4:7, §4:8).
+
+        A tap's approval (ADR-0361 §5:4) names no part: its spending key is the request its
+        form names, so ``approved_part`` is ``None`` beside it.
         """
-        if (self.approval is None) != (self.approved_part is None):
+        # ADR-0361 §5:4-§5:5: a call run under a ticket names the tap's approval, whose
+        # spending key is its request, and no question part.
+        tapped = self.approval is not None and isinstance(self.approval.how, TapOnCard)
+        if tapped and self.approved_part is not None:
+            msg = "a decision under a ticket names its request, and no question part"
+            raise ValueError(msg)
+        if not tapped and (self.approval is None) != (self.approved_part is None):
             msg = "a decision names an approval and the part it runs under together"
             raise ValueError(msg)
-        if self.approval is None or self.approved_part is None:
+        if self.approval is None:
             return self
-        if self.approved_part not in self.approval.covers:
+        if self.approved_part is not None and self.approved_part not in self.approval.covers:
             msg = "a decision's approved part is one its approval covers (ADR-0321 §4:6)"
             raise ValueError(msg)
         if self.ruling.outcome is PermissionOutcome.DENY:
@@ -17564,6 +18091,13 @@ class ActivationEffect(BaseModel):
         part: For a call that runs under an approval, the question part it spends:
             the asking round's id and the part number (ADR-0321 §4:9). ``None`` on
             every other record, and always on a message.
+        ticket: For a call run under a ticket, the spending key: the approval request
+            whose ticket it spends (ADR-0361 §5:5). ``None`` on every other record.
+        request: For ``request_approval``'s call, the approval request it wrote
+            (ADR-0361 §2:9). ``None`` on every other record.
+
+    **One key at most**: a record carries at most one of ``part``, ``ticket`` and
+    ``request``, and a message none of them.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -17580,11 +18114,20 @@ class ActivationEffect(BaseModel):
     reason: NonBlankEncodableText | None = None
     claimed_at: UtcInstant
     part: QuestionPart | None = None
+    # Left out of a dump where unset, so a record of every other kind is stored exactly
+    # as it was before ADR-0361 added them.
+    ticket: DurableIdentifier | None = Field(default=None, exclude_if=_is_none)
+    request: DurableIdentifier | None = Field(default=None, exclude_if=_is_none)
 
     @property
     def is_call(self) -> bool:
         """Whether this records a call, rather than a message."""
         return self.capability is not None
+
+    @property
+    def under_approval(self) -> bool:
+        """Whether the call runs under an approval: a question part's, or a ticket's."""
+        return self.part is not None or self.ticket is not None
 
     @model_validator(mode="after")
     def _a_call_or_a_message(self) -> ActivationEffect:
@@ -17596,8 +18139,12 @@ class ActivationEffect(BaseModel):
                 carries a call's fields, its question part included (ADR-0321 §4:9).
         """
         call_fields = (self.capability, self.values_digest, self.decision_id)
-        if self.capability is None and self.part is not None:
-            msg = "a message's effect spends no question part (ADR-0321 §4:9)"
+        keys = (self.part, self.ticket, self.request)
+        if self.capability is None and any(key is not None for key in keys):
+            msg = "a message's effect spends no question part or ticket and writes no request"
+            raise ValueError(msg)
+        if sum(key is not None for key in keys) > 1:
+            msg = "an effect carries one key at most: a question part, a ticket or a request"
             raise ValueError(msg)
         if self.capability is not None:
             if None in call_fields:

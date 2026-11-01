@@ -204,6 +204,20 @@ def test_a_part_the_episode_does_not_hold_is_gone() -> None:
     assert _content(InputPart(episode="activation:absent"), episodes) is None
 
 
+def test_a_confirmation_of_an_approval_request_is_gone_until_its_read_is_built() -> None:
+    """ADR-0361 §5:10, §9:2: the request form resolves to nothing, never to a question's.
+
+    AP1 lands the form in ``core``; reading the request's recorded call is AP2's, so until
+    then a support of that form reads as gone, even where its episodes are held.
+    """
+    yes = _held(episode("a", text="approved"))
+    asking = _held(episode("b", text="book the stay"), rounds=(_round("r-1", "asked"),))
+    episodes = {yes.id: yes, asking.id: asking}
+    part = ConfirmationPart(episode=yes.id, asking_activation="b", request="q1", ran_in="b")
+
+    assert _content(part, episodes) is None
+
+
 def _evidence(*texts: str) -> ActivationDigest:
     return ActivationDigest(
         question="where is the office?",

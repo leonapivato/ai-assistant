@@ -163,7 +163,8 @@ def part_content(  # noqa: C901, PLR0911, PLR0912 — one arm per part the part 
         case EvidenceItemPart():
             return _evidence(_processing(episodes.get(part.episode)), part.digest, part.item)
         case ConfirmationPart():
-            if episodes.get(part.episode) is None:
+            if episodes.get(part.episode) is None or part.question is None:
+                # ADR-0361 §5:10: a request's form resolves to gone until AP2's read.
                 return None
             asking = episodes.get(episode_address(part.asking_activation))
             return _approved(_processing(asking), part.question.round, part.question.part)

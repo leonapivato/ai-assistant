@@ -206,6 +206,38 @@ def test_the_plan_writer_writes_scheduled_tasks_and_a_rule(
     assert all(f"effect/effect-{key.removeprefix('task/')}" in plans for key in tasks)
 
 
+def test_the_plan_writer_writes_approval_requests(written: tuple[Path, Path]) -> None:
+    """ADR-0361 §8:2: so a later base writes them, and its head reads them back.
+
+    One request waits; the other carries its card and token, the tap that approved it,
+    its ticket spent by the call it held, and its outcome marked pushed.
+    """
+    plans = _records(_snapshot(written[1]), "plans")
+    requests = {key: value for key, value in plans.items() if key.startswith("approval/")}
+    assert sorted(requests) == ["approval/q-upgrade-approved", "approval/q-upgrade-waiting"]
+    waiting = requests["approval/q-upgrade-waiting"]
+    approved = requests["approval/q-upgrade-approved"]
+    assert isinstance(waiting, dict)
+    assert isinstance(approved, dict)
+    assert (waiting["state"], waiting["ticket"], waiting["cards"]) == ("pending", None, [])
+    assert {
+        "state": "approved",
+        "ticket": "used",
+        "spent_by": "effect-upgrade-ticket",
+        "pushed_to": "act-upgrade-approval",
+    }.items() <= approved.items()
+    assert approved["cards"] == [
+        {
+            "place": {"channel_type": "telegram", "instance_id": "upgrade-line", "kind": "channel"},
+            "position": 7,
+            "token": "upgrade-card-1",
+        }
+    ]
+    ticketed = plans["effect/effect-upgrade-ticket"]
+    assert isinstance(ticketed, dict)
+    assert ticketed["ticket"] == "q-upgrade-approved"
+
+
 def test_the_plan_stores_cascade_carry_is_what_its_upgrade_does(
     written: tuple[Path, Path],
 ) -> None:

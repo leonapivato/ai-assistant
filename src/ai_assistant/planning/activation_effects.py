@@ -224,7 +224,7 @@ def _counts_against(held: ActivationEffect, effect: ActivationEffect, *, deliber
         return False
     if held.outcome is ToolOutcome.SUCCEEDED:
         return not deliberate
-    return not (deliberate and effect.part is not None)
+    return not (deliberate and effect.under_approval)
 
 
 def decide_activation_claim(  # noqa: PLR0913 — the claim's three inputs and the four facts the store reads inside its step

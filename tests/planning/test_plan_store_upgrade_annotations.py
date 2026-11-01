@@ -142,8 +142,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "18"
-    assert export.schema_version == 26
+    assert _label(legacy) == "19"
+    assert export.schema_version == 27
     assert export.stopped_activations == ("act-before-stopped",)
     assert [one.id for one in export.activation_effects] == ["effect-before-remember"]
     assert export.observations == read
@@ -193,7 +193,7 @@ async def test_the_upgraded_file_takes_annotations_and_declines_and_keeps_them(
         assert stored.declines[0].reason == "Trivia."
     finally:
         reopened.close()
-    assert _label(legacy) == "18"
+    assert _label(legacy) == "19"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

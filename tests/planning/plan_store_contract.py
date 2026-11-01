@@ -31,7 +31,16 @@ from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    ApprovalCard,
+    ApprovalGiver,
+    ApprovalOutcomePush,
+    ApprovalRequest,
+    ApprovalRequestState,
+    ApprovalStepAnswer,
+    ApprovalTap,
+    ApprovalWriteAnswer,
     ChannelIdentity,
+    CostBasis,
     DueAfterTasks,
     DueAt,
     DueNow,
@@ -39,6 +48,7 @@ from ai_assistant.core.types import (
     EvidenceItemPart,
     FindingOutcome,
     FindingUnwritten,
+    Idempotency,
     InputPart,
     MemoryDecisionKind,
     MemoryOperationKind,
@@ -56,6 +66,9 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     QuestionPart,
+    RequestedCall,
+    Reversibility,
+    RiskLevel,
     RuleDay,
     RulePush,
     ScheduledTask,
@@ -65,8 +78,13 @@ from ai_assistant.core.types import (
     TaskRuleKind,
     TaskSpawn,
     TaskWriteAnswer,
+    TicketClaim,
+    TicketState,
+    ToolCost,
+    ToolDefinition,
     ToolOutcome,
 )
+from ai_assistant.testing import with_phase_declaration
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
@@ -882,6 +900,347 @@ class _StoppedActivationsOp(_ScheduleReadOp):
         return store.stopped_activations(["act-A", "act-B"])
 
 
+# --- the Approvals channel's requests (ADR-0361 §8:2) ------------------------------------
+
+#: The 24 hours a request waits on its person (ADR-0361 §3:5), the composition root's
+#: constant, which the suite hands in as a caller does.
+_DAY_LONG = timedelta(hours=24)
+_EXPIRY = _WHEN + _DAY_LONG
+_TAP_AT = _WHEN + timedelta(hours=1)
+
+
+def _stay_tool() -> ToolDefinition:
+    """A booking, not safe to repeat, that leaves no binding to compute."""
+    return ToolDefinition(
+        **with_phase_declaration(  # type: ignore[arg-type]  # heterogeneous test kwargs
+            {
+                "id": "stays",
+                "capability": "book_stay",
+                "description": "Book a stay.",
+                "risk_level": RiskLevel.HIGH,
+                "reversibility": Reversibility.IRREVERSIBLE,
+                "side_effecting": True,
+                "reads": (),
+                "writes": (),
+                "discloses": (),
+                "cost": ToolCost(basis=CostBasis.FREE),
+                "idempotency": Idempotency.NONE,
+                "parameters_schema": {
+                    "type": "object",
+                    "properties": {"hotel": {"type": "string"}},
+                    "required": ["hotel"],
+                },
+            }
+        )
+    )
+
+
+def _request(
+    request_id: str,
+    *,
+    person: str = _PERSON,
+    activation: str = "act-ask",
+    hotel: str = "the Ritz",
+    written_at: datetime = _WHEN,
+) -> ApprovalRequest:
+    """A request as ``request_approval`` writes it: pending, its expiry 24 hours on."""
+    return ApprovalRequest(
+        id=request_id,
+        person=person,
+        activation_id=activation,
+        round="r1",
+        call=RequestedCall(tool=_stay_tool(), values={"hotel": hotel}),
+        why="You asked me to book the stay for the trip.",
+        written_at=written_at,
+        expires_at=written_at + _DAY_LONG,
+    )
+
+
+def _asking(request: ApprovalRequest, *, effect_id: str | None = None) -> ActivationEffect:
+    """``request_approval``'s effect record, naming the request it writes (§2:9)."""
+    return _effect(
+        effect_id or f"ask-{request.id}",
+        activation=request.activation_id,
+        capability="request_approval",
+        values=hashlib.sha256(request.id.encode()).hexdigest(),
+    ).model_copy(update={"request": request.id})
+
+
+async def _asked(store: PlanStore, request: ApprovalRequest) -> ApprovalRequest:
+    """Write ``request`` with its effect record, failing on any answer but written."""
+    written = await store.write_approval_request(request, _asking(request), match=None)
+    assert written.answer is ApprovalWriteAnswer.WRITTEN, written
+    assert written.request is not None
+    return written.request
+
+
+def _card(minted: str | None = None, position: int | None = None) -> ApprovalCard:
+    """A card posted into the line's chat, with the token minted for it, or none (§4:4)."""
+    return ApprovalCard(place=_LINE, position=position, token=minted)
+
+
+def _tap(at: datetime = _TAP_AT) -> ApprovalTap:
+    return ApprovalTap(who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, at=at)
+
+
+async def _approved(store: PlanStore, request_id: str) -> ApprovalRequest:
+    """Write a request of its own call and approve it by a tap, so it holds a ticket."""
+    await _asked(store, _request(request_id, hotel=f"the hotel of {request_id}"))
+    step = await store.answer_approval_request(request_id, ApprovalRequestState.APPROVED, _tap())
+    assert step.answer is ApprovalStepAnswer.CHANGED, step
+    return step.request
+
+
+def _spending_ticket(
+    effect_id: str,
+    request_id: str,
+    *,
+    activation: str = "act-approval",
+    at: datetime = _TAP_AT,
+) -> ActivationEffect:
+    """The ticket's call, claimed under it in the approval's activation (§5:4-§5:5)."""
+    return _effect(effect_id, activation=activation).model_copy(
+        update={"ticket": request_id, "claimed_at": at}
+    )
+
+
+async def _request_held(store: PlanStore, request_id: str) -> ApprovalRequest:
+    (held,) = await store.approval_requests([request_id])
+    return held
+
+
+class _ApprovalsOp:
+    """A locked Approvals operation (ADR-0361 §8:2), driven as every other is.
+
+    Seeded with two pending requests, ``qA`` and ``qB``, and two approved, ``qC`` and
+    ``qD``, each holding its ticket, so the cancelled call and the concurrent one act on
+    independent subjects whatever the first's effect.
+    """
+
+    name = ""
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Two pending requests and two approved ones."""
+        await _asked(store, _request("qA", hotel="A"))
+        await _asked(store, _request("qB", hotel="B"))
+        await _approved(store, "qC")
+        await store.record_approval_card("qC", _card("tok-C", 1))
+        await _approved(store, "qD")
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The call the case suspends inside the resource and then cancels."""
+        raise NotImplementedError
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The concurrent call barred from the resource until the first is done."""
+        raise NotImplementedError
+
+    async def verify(self, store: PlanStore) -> None:
+        """All four requests are still held whole, and the store still serves reads."""
+        held = await store.approval_requests(["qA", "qB", "qC", "qD"])
+        assert [one.id for one in held] == ["qA", "qB", "qC", "qD"]
+
+
+class _ApprovalsReadOp(_ApprovalsOp):
+    """A read of the requests: the same read against the seeded store, twice."""
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The read."""
+        raise NotImplementedError
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The read — the call that is cancelled."""
+        return self.read(store)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The read again, concurrently."""
+        return self.read(store)
+
+
+class _WriteApprovalRequestOp(_ApprovalsOp):
+    """``write_approval_request``: the request's one step (§2:8-§2:9)."""
+
+    name = "write_approval_request"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Write request E — the call that is cancelled."""
+        return _asked(store, _request("qE", hotel="E"))
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Write request F concurrently."""
+        return _asked(store, _request("qF", hotel="F"))
+
+    async def verify(self, store: PlanStore) -> None:
+        """Request F landed whole with its effect record."""
+        await super().verify(store)
+        assert [one.id for one in await store.approval_requests(["qF"])] == ["qF"]
+
+
+class _RecordApprovalCardOp(_ApprovalsOp):
+    """``record_approval_card`` (§4:3)."""
+
+    name = "record_approval_card"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Record A's card — the call that is cancelled."""
+        return store.record_approval_card("qA", _card("tok-A"))
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Record B's card concurrently."""
+        return store.record_approval_card("qB", _card("tok-B"))
+
+    async def verify(self, store: PlanStore) -> None:
+        """B's card is recorded."""
+        await super().verify(store)
+        assert (await _request_held(store, "qB")).cards == (_card("tok-B"),)
+
+
+class _AnswerApprovalRequestOp(_ApprovalsOp):
+    """``answer_approval_request`` (§4:9)."""
+
+    name = "answer_approval_request"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Approve A — the call that is cancelled."""
+        return store.answer_approval_request("qA", ApprovalRequestState.APPROVED, _tap())
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Deny B concurrently."""
+        return store.answer_approval_request("qB", ApprovalRequestState.DENIED, _tap())
+
+    async def verify(self, store: PlanStore) -> None:
+        """B is denied."""
+        await super().verify(store)
+        assert (await _request_held(store, "qB")).state is ApprovalRequestState.DENIED
+
+
+class _ExpireApprovalRequestOp(_ApprovalsOp):
+    """``expire_approval_request`` (§3:5)."""
+
+    name = "expire_approval_request"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Expire A — the call that is cancelled."""
+        return store.expire_approval_request("qA", _EXPIRY)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Expire B concurrently."""
+        return store.expire_approval_request("qB", _EXPIRY)
+
+    async def verify(self, store: PlanStore) -> None:
+        """B has expired."""
+        await super().verify(store)
+        assert (await _request_held(store, "qB")).state is ApprovalRequestState.EXPIRED
+
+
+class _VoidApprovalTicketOp(_ApprovalsOp):
+    """``void_approval_ticket`` (§5:7)."""
+
+    name = "void_approval_ticket"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Void C's ticket — the call that is cancelled."""
+        return store.void_approval_ticket("qC")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Void D's ticket concurrently."""
+        return store.void_approval_ticket("qD")
+
+    async def verify(self, store: PlanStore) -> None:
+        """D's ticket is void."""
+        await super().verify(store)
+        assert (await _request_held(store, "qD")).ticket is TicketState.VOID
+
+
+class _MarkApprovalOutcomePushedOp(_ApprovalsOp):
+    """``mark_approval_outcome_pushed`` (§3:4)."""
+
+    name = "mark_approval_outcome_pushed"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Push C's outcome — the call that is cancelled."""
+        return store.mark_approval_outcome_pushed("qC", "act-push-C")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Push D's outcome concurrently."""
+        return store.mark_approval_outcome_pushed("qD", "act-push-D")
+
+    async def verify(self, store: PlanStore) -> None:
+        """D's outcome is marked pushed."""
+        await super().verify(store)
+        assert (await _request_held(store, "qD")).pushed_to == "act-push-D"
+
+
+class _ClaimTicketCallOp(_ApprovalsOp):
+    """``claim_ticket_call``: the spend's one step (§5:5)."""
+
+    name = "claim_ticket_call"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Claim under C's ticket — the call that is cancelled."""
+        return store.claim_ticket_call(_spending_ticket("e-C", "qC"), match=None)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Claim under D's ticket concurrently."""
+        return store.claim_ticket_call(_spending_ticket("e-D", "qD"), match=None)
+
+    async def verify(self, store: PlanStore) -> None:
+        """D's ticket is used by its call."""
+        await super().verify(store)
+        held = await _request_held(store, "qD")
+        assert (held.ticket, held.spent_by) == (TicketState.USED, "e-D")
+
+
+class _ApprovalRequestsOp(_ApprovalsReadOp):
+    """``approval_requests``."""
+
+    name = "approval_requests"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read two by id."""
+        return store.approval_requests(["qA", "qB"])
+
+
+class _PersonApprovalRequestsOp(_ApprovalsReadOp):
+    """``person_approval_requests``."""
+
+    name = "person_approval_requests"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read the person's pending requests."""
+        return store.person_approval_requests(_PERSON, [ApprovalRequestState.PENDING])
+
+
+class _ApprovalRequestByTokenOp(_ApprovalsReadOp):
+    """``approval_request_by_token``."""
+
+    name = "approval_request_by_token"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read C by its card's token."""
+        return store.approval_request_by_token("tok-C")
+
+
+class _DueApprovalOutcomesOp(_ApprovalsReadOp):
+    """``due_approval_outcomes``."""
+
+    name = "due_approval_outcomes"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read what is due an hour on."""
+        return store.due_approval_outcomes(_TAP_AT)
+
+
+class _PushedApprovalOutcomesOp(_ApprovalsReadOp):
+    """``pushed_approval_outcomes``."""
+
+    name = "pushed_approval_outcomes"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read the outcomes marked pushed."""
+        return store.pushed_approval_outcomes()
+
+
 #: Every locked ``PlanStore`` operation ADR-0060's case is run against: each is a
 #: distinct lock site with its own ``_run_to_completion`` call. The writes came
 #: first (#370); the reads are the same invariant on the other half of the surface
@@ -919,6 +1278,19 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _LiveBelowOp,
     _DueOccurrencesOp,
     _StoppedActivationsOp,
+    # ADR-0361 §8:2's twelve members, each its own lock site: seven writes and five reads.
+    _WriteApprovalRequestOp,
+    _RecordApprovalCardOp,
+    _AnswerApprovalRequestOp,
+    _ExpireApprovalRequestOp,
+    _VoidApprovalTicketOp,
+    _MarkApprovalOutcomePushedOp,
+    _ClaimTicketCallOp,
+    _ApprovalRequestsOp,
+    _PersonApprovalRequestsOp,
+    _ApprovalRequestByTokenOp,
+    _DueApprovalOutcomesOp,
+    _PushedApprovalOutcomesOp,
 )
 
 
@@ -1004,7 +1376,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 26
+        assert export.schema_version == 27
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -1015,6 +1387,8 @@ class PlanStoreContract:
             # ADR-0350 §12:3: the Task Scheduler's tasks; ADR-0352 §6:3 removed
             # ``cascades``.
             "scheduled_tasks",
+            # ADR-0361 §8:2: the Approvals channel's requests.
+            "approval_requests",
         }
         assert sorted(export.stopped_activations) == ["act-1", "act-2"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
@@ -1631,7 +2005,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 26
+        assert export.schema_version == 27
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -1878,7 +2252,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 26
+        assert export.schema_version == 27
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -2620,7 +2994,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 26
+        assert exported.schema_version == 27
         assert [one.id for one in exported.scheduled_tasks] == ["t2", "t1"]
         assert removed == 4
         cleared = await store.export()
@@ -3010,7 +3384,7 @@ class PlanStoreContract:
     async def test_the_export_carries_a_rule_whole_and_clear_erases_it(
         self, store: PlanStore
     ) -> None:
-        """ADR-0340 §9:3: every occurrence, in order, at ``schema_version`` 26 (ADR-0352 §6:3)."""
+        """ADR-0340 §9:3: every occurrence, in order, at ``schema_version`` 27 (ADR-0361 §8:2)."""
         await _rule_written(store, "t1")
         await store.mark_occurrence_pushed(
             "t1", 1, "act-1", rule=RulePush(skipped=(_due(1),), latest=_due(2), successor=_due(3))
@@ -3020,10 +3394,470 @@ class PlanStoreContract:
         exported = await store.export()
         await store.clear()
 
-        assert exported.schema_version == 26
+        assert exported.schema_version == 27
         assert exported.scheduled_tasks == (held,)
         assert len(exported.scheduled_tasks[0].occurrences) == 4
         assert (await store.export()).scheduled_tasks == ()
+
+    # --- ADR-0361 §8:2: the Approvals channel's requests ----------------------
+
+    async def test_a_request_is_written_with_its_effect_record_in_one_step(
+        self, store: PlanStore
+    ) -> None:
+        """§2:6, §2:9: the request as written, pending, and its effect naming it."""
+        request = _request("q1")
+
+        written = await store.write_approval_request(request, _asking(request), match=None)
+
+        assert written.answer is ApprovalWriteAnswer.WRITTEN
+        assert written.request == request
+        assert await store.approval_requests(["q1", "q-unheld"]) == (request,)
+        (effect,) = await store.activation_effects(["act-ask"])
+        assert (effect.id, effect.request, effect.outcome) == ("ask-q1", "q1", None)
+
+    async def test_a_second_identical_pending_request_is_refused_and_writes_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """§2:8: the same capability, values and binding for the same person, still pending.
+
+        The answer carries the request already waiting, which says since when, and
+        neither the second request nor its effect record is written: in another
+        activation, and in the same one.
+        """
+        first = await _asked(store, _request("q1"))
+
+        for again, effect_id in (
+            (_request("q2", activation="act-other"), "e2"),
+            (
+                _request("q3"),
+                "e3",
+            ),
+        ):
+            answer = await store.write_approval_request(
+                again, _asking(again, effect_id=effect_id), match=("act-ask", "act-other")
+            )
+            assert answer.answer is ApprovalWriteAnswer.ALREADY_WAITING
+            assert answer.request == first
+        assert [one.id for one in (await store.export()).approval_requests] == ["q1"]
+        assert [one.id for one in await store.activation_effects(["act-ask", "act-other"])] == [
+            "ask-q1"
+        ]
+
+    async def test_the_duplicate_check_reads_only_a_waiting_request_for_the_same_person(
+        self, store: PlanStore
+    ) -> None:
+        """§2:8: another person's, another call's, an answered one, or an expired one waits not."""
+        await _asked(store, _request("q1"))
+        await _asked(store, _request("q2", person="person:other"))
+        await _asked(store, _request("q3", hotel="the Savoy"))
+        await store.answer_approval_request("q3", ApprovalRequestState.DENIED, _tap())
+        await _asked(store, _request("q4", hotel="the Savoy"))
+        # A request written once q1's expiry has come does not wait behind it.
+        await _asked(store, _request("q5", written_at=_EXPIRY))
+
+        assert len((await store.export()).approval_requests) == 5
+
+    async def test_a_request_of_a_stopped_activation_is_refused_with_its_claim(
+        self, store: PlanStore
+    ) -> None:
+        """§2:9, ADR-0297 §2: the claim's stop refuses the write, which writes nothing."""
+        await store.record_stop("act-ask")
+        request = _request("q1")
+
+        with pytest.raises(ClaimStopped):
+            await store.write_approval_request(request, _asking(request), match=None)
+        assert (await store.export()).approval_requests == ()
+
+    async def test_the_backstop_refuses_request_approval_called_again_where_it_was_done(
+        self, store: PlanStore
+    ) -> None:
+        """§2:9, ADR-0306 §5:9: not safe to repeat, so matched where nothing waits."""
+        first = _request("q1")
+        await store.write_approval_request(first, _asking(first), match=None)
+        await store.finish_activation_effect("ask-q1", ToolOutcome.SUCCEEDED)
+        await store.answer_approval_request("q1", ApprovalRequestState.DENIED, _tap())
+        again = _request("q2")
+        effect = _asking(again).model_copy(update={"values_digest": _asking(first).values_digest})
+
+        answer = await store.write_approval_request(again, effect, match=("act-ask",))
+
+        assert (answer.answer, answer.request) == (ApprovalWriteAnswer.ALREADY_DONE, None)
+        assert [one.id for one in (await store.export()).approval_requests] == ["q1"]
+
+    @pytest.mark.parametrize(
+        "case",
+        ["held-request-id", "held-effect-id", "names-another-request", "not-fresh"],
+    )
+    async def test_a_malformed_request_write_is_refused_and_writes_nothing(
+        self, store: PlanStore, case: str
+    ) -> None:
+        """§2:9: an id held, an effect not naming its request, or a request not pending."""
+        await _asked(store, _request("q1"))
+        request = _request("q2", hotel="the Savoy")
+        effect = _asking(request)
+        if case == "held-request-id":
+            request = _request("q1", hotel="the Savoy")
+            effect = _asking(request, effect_id="e-new")
+        elif case == "held-effect-id":
+            effect = effect.model_copy(update={"id": "ask-q1"})
+        elif case == "names-another-request":
+            effect = effect.model_copy(update={"request": "q1"})
+        else:
+            request = request.model_copy(update={"pushed_to": "act-x"})
+
+        with pytest.raises(PlanningError):
+            await store.write_approval_request(request, effect, match=None)
+        assert [one.id for one in (await store.export()).approval_requests] == ["q1"]
+
+    @pytest.mark.parametrize("key", ["ticket", "request"])
+    async def test_an_ordinary_claim_carrying_a_ticket_or_a_request_is_refused(
+        self, store: PlanStore, key: str
+    ) -> None:
+        """§2:9, §5:5: those keys are written only with the step they belong to."""
+        with pytest.raises(PlanningError):
+            await store.claim_activation_effect(
+                _effect("e1").model_copy(update={key: "q1"}), match=None
+            )
+        assert await store.activation_effects(["act-1"]) == ()
+
+    async def test_a_persons_requests_are_read_by_state_in_the_order_written(
+        self, store: PlanStore
+    ) -> None:
+        """§4:6: the panel reads the pending ones, and the answered ones with their state."""
+        await _asked(store, _request("q1"))
+        await _asked(store, _request("q2", hotel="the Savoy"))
+        await _asked(store, _request("q3", person="person:other"))
+        await store.answer_approval_request("q1", ApprovalRequestState.APPROVED, _tap())
+
+        pending = await store.person_approval_requests(_PERSON, [ApprovalRequestState.PENDING])
+        every = await store.person_approval_requests(_PERSON, list(ApprovalRequestState))
+
+        assert [one.id for one in pending] == ["q2"]
+        assert [(one.id, one.state) for one in every] == [
+            ("q1", ApprovalRequestState.APPROVED),
+            ("q2", ApprovalRequestState.PENDING),
+        ]
+
+    async def test_a_card_is_recorded_with_its_token_and_found_by_it(
+        self, store: PlanStore
+    ) -> None:
+        """§4:3, §4:10: where the card went, and the opaque token that finds its request."""
+        await _asked(store, _request("q1"))
+        card = _card("tok-1", 42)
+        bare = _card(None, 43)
+
+        await store.record_approval_card("q1", card)
+        written = await store.record_approval_card("q1", bare)
+
+        assert written.cards == (card, bare)
+        assert await store.approval_request_by_token("tok-1") == written
+        assert await store.approval_request_by_token("tok-unminted") is None
+
+    async def test_a_token_is_carried_by_one_card_alone(self, store: PlanStore) -> None:
+        """§4:10: a second card carrying a held token is refused, and nothing is written."""
+        await _asked(store, _request("q1"))
+        await _asked(store, _request("q2", hotel="the Savoy"))
+        await store.record_approval_card("q1", _card("tok-1"))
+
+        with pytest.raises(PlanningError):
+            await store.record_approval_card("q2", _card("tok-1"))
+        with pytest.raises(PlanningError):
+            await store.record_approval_card("q-unheld", _card())
+        assert (await _request_held(store, "q2")).cards == ()
+
+    async def test_a_card_is_recorded_on_a_request_already_answered(self, store: PlanStore) -> None:
+        """§4:3: a tap on the panel may land before the card's post returns."""
+        await _asked(store, _request("q1"))
+        await store.answer_approval_request("q1", ApprovalRequestState.DENIED, _tap())
+
+        written = await store.record_approval_card("q1", _card("t"))
+
+        assert written.state is ApprovalRequestState.DENIED
+        assert len(written.cards) == 1
+
+    async def test_a_yes_grants_a_held_ticket_and_a_deny_none(self, store: PlanStore) -> None:
+        """§4:9, §5:1, §5:9: the tap, who and when, and the ticket only on a yes."""
+        await _asked(store, _request("q1"))
+        await _asked(store, _request("q2", hotel="the Savoy"))
+        panel = ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=_TAP_AT)
+
+        yes = await store.answer_approval_request("q1", ApprovalRequestState.APPROVED, _tap())
+        no = await store.answer_approval_request("q2", ApprovalRequestState.DENIED, panel)
+
+        assert (yes.answer, no.answer) == (ApprovalStepAnswer.CHANGED, ApprovalStepAnswer.CHANGED)
+        assert (yes.request.ticket, yes.request.answer) == (TicketState.HELD, _tap())
+        assert (no.request.state, no.request.ticket) == (ApprovalRequestState.DENIED, None)
+        assert await store.approval_requests(["q1", "q2"]) == (yes.request, no.request)
+
+    async def test_two_taps_racing_the_first_wins(self, store: PlanStore) -> None:
+        """§4:9: the step refuses where the request is no longer pending.
+
+        Whichever lands first is the answer, and the other is told the request's state
+        and writes nothing.
+        """
+        await _asked(store, _request("q1"))
+
+        steps = await asyncio.gather(
+            store.answer_approval_request("q1", ApprovalRequestState.APPROVED, _tap()),
+            store.answer_approval_request(
+                "q1",
+                ApprovalRequestState.DENIED,
+                ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=_TAP_AT),
+            ),
+        )
+
+        answers = sorted(one.answer for one in steps)
+        assert answers == sorted([ApprovalStepAnswer.CHANGED, ApprovalStepAnswer.NOT_PENDING])
+        (won,) = [one for one in steps if one.answer is ApprovalStepAnswer.CHANGED]
+        (lost,) = [one for one in steps if one.answer is ApprovalStepAnswer.NOT_PENDING]
+        assert lost.request == won.request == await _request_held(store, "q1")
+
+    async def test_a_tap_at_or_after_the_expiry_changes_nothing(self, store: PlanStore) -> None:
+        """§3:5: a request not answered within 24 hours of its write ends expired."""
+        await _asked(store, _request("q1"))
+
+        step = await store.answer_approval_request(
+            "q1", ApprovalRequestState.APPROVED, _tap(_EXPIRY)
+        )
+
+        assert step.answer is ApprovalStepAnswer.PAST_EXPIRY
+        assert (await _request_held(store, "q1")).state is ApprovalRequestState.PENDING
+
+    async def test_a_tap_that_is_no_answer_is_refused(self, store: PlanStore) -> None:
+        """§4:9: a tap approves or denies, and only a request held is tapped."""
+        await _asked(store, _request("q1"))
+
+        with pytest.raises(PlanningError):
+            await store.answer_approval_request("q1", ApprovalRequestState.EXPIRED, _tap())
+        with pytest.raises(PlanningError):
+            await store.answer_approval_request("q-unheld", ApprovalRequestState.APPROVED, _tap())
+        assert (await _request_held(store, "q1")).state is ApprovalRequestState.PENDING
+
+    async def test_an_expiry_ends_a_pending_request_and_voids_a_held_ticket(
+        self, store: PlanStore
+    ) -> None:
+        """§3:5, §5:7: a request expires, and its ticket expires with it."""
+        await _asked(store, _request("q1"))
+        await _approved(store, "q2")
+        await _asked(store, _request("q3", hotel="the Savoy"))
+        await store.answer_approval_request("q3", ApprovalRequestState.DENIED, _tap())
+
+        expired = await store.expire_approval_request("q1", _EXPIRY)
+        lapsed = await store.expire_approval_request("q2", _EXPIRY)
+        denied = await store.expire_approval_request("q3", _EXPIRY)
+
+        assert (expired.answer, expired.request.state) == (
+            ApprovalStepAnswer.CHANGED,
+            ApprovalRequestState.EXPIRED,
+        )
+        assert (lapsed.answer, lapsed.request.ticket) == (
+            ApprovalStepAnswer.CHANGED,
+            TicketState.VOID,
+        )
+        assert denied.answer is ApprovalStepAnswer.NOT_PENDING
+
+    async def test_nothing_expires_before_its_expiry(self, store: PlanStore) -> None:
+        """§3:5: the caller's instant is at or after the expiry, or the call is wrong."""
+        await _asked(store, _request("q1"))
+
+        with pytest.raises(PlanningError):
+            await store.expire_approval_request("q1", _EXPIRY - timedelta(microseconds=1))
+        assert (await _request_held(store, "q1")).state is ApprovalRequestState.PENDING
+
+    async def test_a_held_ticket_is_made_void_once(self, store: PlanStore) -> None:
+        """§5:7: the work holding the input ended without running it."""
+        await _approved(store, "q1")
+        await _asked(store, _request("q2", hotel="the Savoy"))
+
+        voided = await store.void_approval_ticket("q1")
+        again = await store.void_approval_ticket("q1")
+        unapproved = await store.void_approval_ticket("q2")
+
+        assert (voided.answer, voided.request.ticket) == (
+            ApprovalStepAnswer.CHANGED,
+            TicketState.VOID,
+        )
+        assert again.answer is ApprovalStepAnswer.NO_HELD_TICKET
+        assert unapproved.answer is ApprovalStepAnswer.NO_HELD_TICKET
+
+    async def test_the_sensor_reads_the_outcomes_due_what_expires_and_the_next_expiry(
+        self, store: PlanStore
+    ) -> None:
+        """§3:4-§3:5: answered or expired and not pushed; pending or held past expiry."""
+        await _asked(store, _request("q-pending"))
+        await _approved(store, "q-held")
+        await _asked(store, _request("q-later", hotel="the Savoy", written_at=_TAP_AT))
+        await _asked(store, _request("q-denied", hotel="Claridge's"))
+        await store.answer_approval_request("q-denied", ApprovalRequestState.DENIED, _tap())
+
+        before = await store.due_approval_outcomes(_TAP_AT)
+        at_expiry = await store.due_approval_outcomes(_EXPIRY)
+
+        assert [one.id for one in before.outcomes] == ["q-held", "q-denied"]
+        assert before.expiring == ()
+        assert before.next_expiry_at == _EXPIRY
+        assert [one.id for one in at_expiry.expiring] == ["q-pending", "q-held"]
+        assert at_expiry.next_expiry_at == _TAP_AT + _DAY_LONG
+
+    async def test_an_outcome_is_marked_pushed_once_naming_its_activation(
+        self, store: PlanStore
+    ) -> None:
+        """§3:4: the step refuses where the outcome is already marked, or not yet one.
+
+        The outcome marked pushed leaves the due outcomes, and is found among those
+        pushed, naming its activation, so a restart can push it again where that
+        activation was never admitted (§3:7).
+        """
+        await _approved(store, "q1")
+        await _asked(store, _request("q2", hotel="the Savoy"))
+
+        first = await store.mark_approval_outcome_pushed("q1", "act-approval")
+        again = await store.mark_approval_outcome_pushed("q1", "act-approval-2")
+        pending = await store.mark_approval_outcome_pushed("q2", "act-approval-3")
+
+        assert (first, again, pending) == (
+            ApprovalOutcomePush.PUSHED,
+            ApprovalOutcomePush.NOT_DUE,
+            ApprovalOutcomePush.NOT_DUE,
+        )
+        assert (await store.due_approval_outcomes(_TAP_AT)).outcomes == ()
+        (pushed,) = await store.pushed_approval_outcomes()
+        assert (pushed.id, pushed.pushed_to) == ("q1", "act-approval")
+
+    async def test_one_activation_is_pushed_one_outcome(self, store: PlanStore) -> None:
+        """§3:4, §3:7: an activation id names one approval's input."""
+        await _approved(store, "q1")
+        await _asked(store, _request("q2", hotel="the Savoy"))
+        await store.answer_approval_request("q2", ApprovalRequestState.DENIED, _tap())
+        await store.mark_approval_outcome_pushed("q1", "act-approval")
+
+        with pytest.raises(PlanningError):
+            await store.mark_approval_outcome_pushed("q2", "act-approval")
+        assert (await _request_held(store, "q2")).pushed_to is None
+
+    async def test_a_call_under_a_ticket_is_claimed_once_and_spends_it(
+        self, store: PlanStore
+    ) -> None:
+        """§5:5: the claim writes the record carrying the key and marks the ticket used.
+
+        A second claim under the one ticket is refused and writes nothing, whatever
+        activation makes it.
+        """
+        await _approved(store, "q1")
+
+        claimed = await store.claim_ticket_call(_spending_ticket("e1", "q1"), match=None)
+        again = await store.claim_ticket_call(
+            _spending_ticket("e2", "q1", activation="act-ask"), match=None
+        )
+
+        assert (claimed, again) == (TicketClaim.CLAIMED, TicketClaim.USED)
+        held = await _request_held(store, "q1")
+        assert (held.ticket, held.spent_by) == (TicketState.USED, "e1")
+        (effect,) = await store.activation_effects(["act-approval"])
+        assert (effect.id, effect.ticket) == ("e1", "q1")
+        assert [one.id for one in await store.activation_effects(["act-ask"])] == ["ask-q1"]
+
+    async def test_two_claims_racing_under_one_ticket_land_once(self, store: PlanStore) -> None:
+        """§5:5: the spend and the claim are one step, so the second finds it spent."""
+        await _approved(store, "q1")
+
+        answers = await asyncio.gather(
+            store.claim_ticket_call(_spending_ticket("e1", "q1"), match=None),
+            store.claim_ticket_call(_spending_ticket("e2", "q1"), match=None),
+        )
+
+        assert sorted(answers) == sorted([TicketClaim.CLAIMED, TicketClaim.USED])
+        assert len(await store.activation_effects(["act-approval"])) == 1
+
+    async def test_a_ticket_is_refused_once_void_or_expired(self, store: PlanStore) -> None:
+        """§5:3, §5:7: void by the work ending, or past its request's expiry."""
+        await _approved(store, "q-void")
+        await store.void_approval_ticket("q-void")
+        await _approved(store, "q-late")
+        await _approved(store, "q-lapsed")
+        await store.expire_approval_request("q-lapsed", _EXPIRY)
+
+        void = await store.claim_ticket_call(_spending_ticket("e1", "q-void"), match=None)
+        late = await store.claim_ticket_call(
+            _spending_ticket("e2", "q-late", at=_EXPIRY), match=None
+        )
+        lapsed = await store.claim_ticket_call(_spending_ticket("e3", "q-lapsed"), match=None)
+
+        assert (void, late, lapsed) == (TicketClaim.VOID, TicketClaim.EXPIRED, TicketClaim.VOID)
+        assert await store.activation_effects(["act-approval"]) == ()
+        assert (await _request_held(store, "q-late")).ticket is TicketState.HELD
+
+    async def test_no_ticket_is_claimed_where_none_was_granted(self, store: PlanStore) -> None:
+        """§5:9: a deny, an expiry, a pending request and an unknown one grant none."""
+        await _asked(store, _request("q-denied"))
+        await store.answer_approval_request("q-denied", ApprovalRequestState.DENIED, _tap())
+        await _asked(store, _request("q-pending", hotel="the Savoy"))
+
+        answers = [
+            await store.claim_ticket_call(_spending_ticket(f"e-{one}", one), match=None)
+            for one in ("q-denied", "q-pending", "q-unheld")
+        ]
+
+        assert answers == [TicketClaim.NOT_GRANTED] * 3
+        assert await store.activation_effects(["act-approval"]) == ()
+
+    async def test_a_ticket_runs_the_call_it_holds_and_no_other(self, store: PlanStore) -> None:
+        """§5:2, §5:4: the record claimed under it is a call to the ticket's capability."""
+        await _approved(store, "q1")
+        other = _spending_ticket("e1", "q1").model_copy(update={"capability": "send_email"})
+
+        with pytest.raises(PlanningError):
+            await store.claim_ticket_call(other, match=None)
+        with pytest.raises(PlanningError):
+            await store.claim_ticket_call(_effect("e2", activation="act-approval"), match=None)
+        assert (await _request_held(store, "q1")).ticket is TicketState.HELD
+
+    async def test_a_stopped_activation_claims_nothing_under_a_ticket(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0297 §2: the stop refuses the claim, and the ticket stays held."""
+        await _approved(store, "q1")
+        await store.record_stop("act-approval")
+
+        with pytest.raises(ClaimStopped):
+            await store.claim_ticket_call(_spending_ticket("e1", "q1"), match=None)
+        assert (await _request_held(store, "q1")).ticket is TicketState.HELD
+
+    async def test_the_backstop_reads_a_call_under_a_ticket_as_under_an_approval(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0321 §6:2, §5:4: a deliberate repeat passes a matching unknown outcome."""
+        await store.claim_activation_effect(_effect("e0", activation="act-approval"), match=None)
+        await _approved(store, "q1")
+        await _approved(store, "q2")
+
+        repeated = await store.claim_ticket_call(
+            _spending_ticket("e1", "q1"), match=("act-approval",), deliberate_repeat=True
+        )
+        refused = await store.claim_ticket_call(
+            _spending_ticket("e2", "q2"), match=("act-approval",)
+        )
+
+        assert (repeated, refused) == (TicketClaim.CLAIMED, TicketClaim.ALREADY_DONE)
+        assert (await _request_held(store, "q2")).ticket is TicketState.HELD
+
+    async def test_the_export_carries_the_requests_and_clear_erases_them(
+        self, store: PlanStore
+    ) -> None:
+        """§8:2, ADR-0292 §3:11: in the order written, each counted once by clear."""
+        await _asked(store, _request("q1"))
+        await _approved(store, "q2")
+        held = await store.approval_requests(["q1", "q2"])
+
+        exported = await store.export()
+        removed = await store.clear()
+
+        assert exported.schema_version == 27
+        assert exported.approval_requests == held
+        # Two requests and their two effect records.
+        assert removed == 4
+        assert (await store.export()).approval_requests == ()
+        assert await store.approval_request_by_token("tok") is None
 
     # --- cancellation (ADR-0060) -------------------------------------------
 
