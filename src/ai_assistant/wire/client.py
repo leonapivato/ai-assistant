@@ -69,6 +69,7 @@ from ai_assistant.core.types import (
     EpisodeChunk,
     EpisodePage,
     ProcessingStatus,
+    approval_choice,
     chat_conversation_ids,
     check_chat_cursor,
     check_chat_position,
@@ -117,6 +118,9 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         ActivationStop,
+        ApprovalChoice,
+        ApprovalPanel,
+        ApprovalPanelTap,
         Belief,
         BeliefBand,
         BeliefSummary,
@@ -664,6 +668,51 @@ class HubClient:
             The pending candidates, the most recent episode's first.
         """
         return await self._call("pending_candidates")  # type: ignore[no-any-return]
+
+    # --- the hub page's approvals panel (ADR-0361 §4:6-§4:9, §8:4) ---------
+    #
+    # Both are the person's own, and neither names a person: on the hub page the person
+    # is established by the device being admitted under ADR-0124 (§4:8). Both sit in the
+    # route table's command row, so a device without the command role is refused by the
+    # hub before dispatch, and nothing is read or marked.
+
+    async def approvals(self, *, limit: int = DEFAULT_PAGE_SIZE) -> ApprovalPanel:
+        """The person's requests, as the hub page's approvals panel shows them (§4:6).
+
+        Args:
+            limit: The most entries each of the two lists holds, refused here when
+                malformed, as the engine refuses it (ADR-0085 §9).
+
+        Returns:
+            The panel: the pending requests and the most recently answered or expired.
+        """
+        page_argument(limit, name="limit")
+        return await self._call("approvals", limit=limit)  # type: ignore[no-any-return]
+
+    async def tap_approval(
+        self, request_id: Identifier, /, *, choice: ApprovalChoice
+    ) -> ApprovalPanelTap:
+        """Relay the panel's tap on one request (ADR-0361 §4:7-§4:9).
+
+        **The client relays and decides nothing**: which tap landed first, on the panel
+        or the card, is the hub's store's to say.
+
+        Args:
+            request_id: The request, by the id :meth:`approvals` read.
+            choice: Approve or Deny.
+
+        Returns:
+            What the tap came to, and the request as the panel now shows it.
+
+        Raises:
+            ValueError: If ``request_id`` is not an identifier, or ``choice`` is neither
+                Approve nor Deny, refused here before anything is sent (ADR-0085 §9).
+        """
+        named = identifier(request_id, name="request_id")
+        chosen = approval_choice(choice)
+        return await self._call(  # type: ignore[no-any-return]
+            "tap_approval", request_id=named, choice=chosen
+        )
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------
     #

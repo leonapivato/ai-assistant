@@ -106,11 +106,20 @@ class Route(StrEnum):
 #: §8:3's rule holds on the wire: a person's model is shown only to that person and to
 #: the owner, and on a hub whose one person is the owner (§2:1) a device without the
 #: command role is refused before dispatch.
+#:
+#: ADR-0361 §8:4's ``approvals`` and ``tap_approval``, the hub page's approvals panel's
+#: query and its tap command, are placed in the command-or-query row by the same class: a
+#: query and a command on the assistant's own records, beside ``stop_activation``, the
+#: other act a page makes that is never perceived. That is how §4:8 holds on the wire: a
+#: tap from the hub page is carried out only from a device admitted under ADR-0124,
+#: whose command role is the owner's, and a device without it is refused before
+#: dispatch, changing nothing.
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
             "activation_stories",
             "add_story_note",
+            "approvals",
             "belief",
             "beliefs",
             "connect_account",
@@ -160,6 +169,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "story_log",
             "story_summary",
             "story_standing",
+            "tap_approval",
             "unguard",
             "unlink_story",
             "unpin_memory",

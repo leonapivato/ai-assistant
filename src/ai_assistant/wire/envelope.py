@@ -2774,7 +2774,14 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     extra, and a confirmation with no question (ADR-0124 §9:2). The method set does not
 #:     move: ``PlanStore`` gains members, but no engine method, and the approval request
 #:     and ``PlanExport`` cross no frame.
-PROTOCOL_VERSION: Final[int] = 125
+#: 126: ADR-0361 §8:7 advances the version once for its lane AP4 (§9:4), on the method-set
+#:     limb: ``AssistantEngine`` gains ``approvals``, the hub page's approvals panel's
+#:     query, and ``tap_approval``, its tap command (§8:4), carrying the new
+#:     ``ApprovalPanel``, ``ApprovalPanelEntry``, ``ApprovalPanelTap`` and the closed
+#:     ``ApprovalCardState``, ``ApprovalChoice`` and ``ApprovalPanelTapAnswer``. A hub at
+#:     125 answers either method as unknown (ADR-0124 §9:2's method-set limb). No type a
+#:     frame already carried changes.
+PROTOCOL_VERSION: Final[int] = 126
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

@@ -57,6 +57,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    OWNER_PERSON_ID,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
     ActivationStop,
@@ -116,6 +117,7 @@ from ai_assistant.core.types import (
     SupportPart,
     TextChannelPayload,
     WholeTextReply,
+    approval_choice,
     belief_view,
     chat_conversation_ids,
     check_chat_cursor,
@@ -169,6 +171,11 @@ from ai_assistant.orchestration.conversations import (
 # an instance of it. `lint-imports` holds the boundary that rule is enforced by, and
 # `ai_assistant.testing` is test-only rather than a runtime subsystem.
 from ai_assistant.orchestration.disclosure import notification_is_speakable
+from ai_assistant.orchestration.engine import (
+    approval_panel,
+    episode_card_facts,
+    tap_on_approval_panel,
+)
 from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
@@ -209,6 +216,10 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import AuditTrail, SourceReadTrail, SpendLedger
     from ai_assistant.core.types import (
+        ApprovalChoice,
+        ApprovalPanel,
+        ApprovalPanelTap,
+        ApprovalRequest,
         ChatChanges,
         ChatDevice,
         ChatStreamChunk,
@@ -239,6 +250,7 @@ if TYPE_CHECKING:
         TranscriptPage,
         UserMessage,
     )
+    from ai_assistant.orchestration.approval_calls import CardFacts
     from ai_assistant.orchestration.person_block import PersonBlocks
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
@@ -358,6 +370,14 @@ class FakeAssistantEngine:
         #: effect records from, public so a consumer can seed or inspect it; the
         #: episodes it joins are :attr:`episode_memory`'s (ADR-0329 §3:3).
         self.plan_store = FakePlanStore(now=lambda: _AT)
+        #: The instant the approvals panel reads its requests at and a panel tap is
+        #: stamped with (ADR-0361 §4:6, §4:9), replaceable as :attr:`placement_clock` is.
+        #: The requests are :attr:`plan_store`'s, and the episodes that asked
+        #: :attr:`episode_memory`'s, where the card's facts are read.
+        self.approval_clock: Callable[[], datetime] = lambda: _AT
+        #: How many times a panel tap woke the Approvals channel's sensor: this fake has
+        #: no sensor, so a wake is counted where the engine's would run (ADR-0361 §3:4).
+        self.approvals_woken = 0
         #: The person-block assembly the eight person-model members answer from
         #: (ADR-0338 §8:1), as the engine's ``person_blocks`` is: ``None``, the default,
         #: is a hub with ``Settings.person_model`` off, where each member raises
@@ -1116,6 +1136,52 @@ class FakeAssistantEngine:
         self.calls.append(("pending_candidates", {}))
         held = await held_candidates(self.episode_memory, self.plan_store)
         return self._checked(held, "pending_candidates")
+
+    # --- the hub page's approvals panel (ADR-0361 §4:6-§4:9, §8:4) --------
+    #
+    # The engine's own reading and tap (``orchestration.engine``'s module-level panel
+    # functions), over :attr:`plan_store` and the episodes of :attr:`episode_memory`, so
+    # the suite compares two implementations of the surface rather than two of the card.
+    # The fake runs no activation, so every card's facts are read from an episode.
+
+    async def approvals(self, *, limit: int = DEFAULT_PAGE_SIZE) -> ApprovalPanel:
+        """The owner's requests, as the panel shows them (ADR-0361 §4:6)."""
+        page_argument(limit, name="limit")
+        check_arguments("approvals", max_bytes=self._max_payload_bytes, limit=limit)
+        self.calls.append(("approvals", {"limit": limit}))
+        panel = await approval_panel(
+            self.plan_store,
+            self._approval_facts,
+            person=OWNER_PERSON_ID,
+            now=self.approval_clock(),
+            limit=limit,
+        )
+        return self._checked(panel, "approvals")
+
+    async def tap_approval(
+        self, request_id: Identifier, /, *, choice: ApprovalChoice
+    ) -> ApprovalPanelTap:
+        """The panel's tap, as the hub page's giver (ADR-0361 §4:7-§4:9)."""
+        named = identifier(request_id, name="request_id")
+        chosen = approval_choice(choice)
+        check_arguments(
+            "tap_approval", max_bytes=self._max_payload_bytes, request_id=named, choice=chosen
+        )
+        self.calls.append(("tap_approval", {"request_id": named, "choice": chosen}))
+        tapped, landed = await tap_on_approval_panel(
+            self.plan_store,
+            self._approval_facts,
+            named,
+            chosen,
+            person=OWNER_PERSON_ID,
+            now=self.approval_clock(),
+        )
+        if landed:
+            self.approvals_woken += 1
+        return self._checked(tapped, "tap_approval")
+
+    async def _approval_facts(self, requests: Sequence[ApprovalRequest]) -> dict[str, CardFacts]:
+        return await episode_card_facts(self.episode_memory, requests)
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) ------------
     #

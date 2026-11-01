@@ -118,8 +118,11 @@ if TYPE_CHECKING:
         ActivationEffectClaim,
         ActivationStop,
         ApprovalCard,
+        ApprovalChoice,
         ApprovalDue,
         ApprovalOutcomePush,
+        ApprovalPanel,
+        ApprovalPanelTap,
         ApprovalRequest,
         ApprovalRequestState,
         ApprovalRequestStep,
@@ -10157,6 +10160,71 @@ class AssistantEngine(Protocol):
             ValueError: If an id is blank or unwritable. Refused locally.
             PersonModelOffError: If the hub keeps no person model.
             PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    # --- the hub page's approvals panel (ADR-0361 §4:6-§4:9, §8:4) ---------
+    #
+    # The panel is a surface of the one approvals store, beside the line's card (§4:1).
+    # Both members are the person's own: a request is shown to, and answered by, the
+    # person it is for, and on the hub page that person is established by the device
+    # being admitted under ADR-0124 (§4:8), whose every enrolled device carries the
+    # owner's single principal (ADR-0124 §5). So neither member names a person: the
+    # person is the owner's, ``OWNER_PERSON_ID``, and a request for anyone else is not
+    # shown and not answered. Both sit in the route table's command row, so a device
+    # without the command role is refused before dispatch (ADR-0298 §5:6).
+
+    async def approvals(self, *, limit: int = DEFAULT_PAGE_SIZE) -> ApprovalPanel:
+        """The person's requests, as the hub page's approvals panel shows them (§4:6).
+
+        The pending ones, the oldest first, and the ones answered or expired most
+        recently, the most recent first, each with its state; each as its card shows
+        it, by the one renderer every surface shows a request by (§2:11), and whole,
+        so a request too long for one Telegram message is answered here (§4:4). A
+        request still pending at or after its expiry is shown expired, since no tap
+        can approve it now (§3:5).
+
+        Args:
+            limit: The most entries each of the two lists holds.
+
+        Returns:
+            The panel.
+
+        Raises:
+            ValueError: If ``limit`` is out of range. Refused locally.
+            TypeError: If ``limit`` is not an integer. Refused locally.
+            PlanningError: If the plan store cannot be read.
+        """
+        ...
+
+    async def tap_approval(
+        self, request_id: Identifier, /, *, choice: ApprovalChoice
+    ) -> ApprovalPanelTap:
+        """The panel's tap: approve or deny one of the person's pending requests (§4:9).
+
+        **A command, never perceived** (§4:7): it starts no activation, joins none, and
+        no model reads it. It marks the request approved or denied as
+        ``ApprovalGiver.USER_TAP_ON_HUB_PANEL``, with the tap's instant, in the plan
+        store's one step that refuses where the request is no longer pending, so the
+        first tap to land, on the panel or on the card, wins, and a later one is
+        answered with the request's state. A tap that landed wakes the Approvals
+        channel's sensor, which pushes its outcome (§3:4); the line's reader edits the
+        card (§4:5). A request that is not the person's changes nothing and is answered
+        ``unknown``, showing nothing of it (§4:8).
+
+        Args:
+            request_id: The request, by the id :meth:`approvals` reads.
+            choice: Approve or Deny.
+
+        Returns:
+            ``answered``, ``already_answered``, ``expired`` or ``unknown``, with the
+            request as the panel now shows it on every answer but ``unknown``.
+
+        Raises:
+            ValueError: If ``request_id`` is not an identifier, or ``choice`` is
+                neither Approve nor Deny. Refused locally.
+            PlanningError: If the plan store cannot be read or written; nothing is
+                then answered.
         """
         ...
 
