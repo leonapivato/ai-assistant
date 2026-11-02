@@ -58,8 +58,6 @@ from ai_assistant.orchestration.supplied_records import SuppliedRecords
 from ai_assistant.orchestration.understanding import TranscriptWindow, _channel_items
 from ai_assistant.testing import FakeAuditTrail, FakeForecaster, FakeToolInvoker, FakeWebSearcher
 from ai_assistant.testing.forecasting import (
-    DEFAULT_FORECAST_LATITUDE,
-    DEFAULT_FORECAST_LONGITUDE,
     DEFAULT_FORECAST_ORIGIN,
     DEFAULT_FORECAST_REPORTED_AT,
 )
@@ -260,12 +258,10 @@ async def test_the_tools_offer_the_weather_pull_beside_the_registry_with_its_coo
     assert set(offered.system_supplied) == {"origin"}
     (registered,) = await tools.find("read_forecast")
     assert registered.system_supplied == ()
+    # ADR-0364 §12:2-§12:3: naming neither, the forecaster reads its configured place,
+    # whose coordinates are never written into the call.
     neither = await tools.filled(ProposedCall(call_id="c1", name="read_forecast", arguments={}))
-    assert neither.arguments == {
-        "origin": DEFAULT_FORECAST_ORIGIN,
-        "latitude": DEFAULT_FORECAST_LATITUDE,
-        "longitude": DEFAULT_FORECAST_LONGITUDE,
-    }
+    assert neither.arguments == {"origin": DEFAULT_FORECAST_ORIGIN}
     both = await tools.filled(
         ProposedCall(
             call_id="c2", name="read_forecast", arguments={"latitude": 42.36, "longitude": -71.06}

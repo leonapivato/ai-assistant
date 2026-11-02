@@ -7323,7 +7323,9 @@ class Engine:
             return None
 
         async def build() -> tuple[tuple[ListedPlace, ...], dict[str, PlaceTarget]]:
-            places = await lists.shown(input_place=None, suggested=suggests)
+            # ADR-0364 §9:4: and the origin of each input it took by a take.
+            taken = () if state is None else _taken_channels(state)
+            places = await lists.shown(input_place=None, suggested=suggests, taken=taken)
             targets = {
                 one.place: target
                 for one in places
@@ -7470,8 +7472,9 @@ class Engine:
         input_place = None if task is not None else set_in
 
         async def build() -> tuple[tuple[ListedPlace, ...], dict[str, PlaceTarget]]:
-            # ADR-0361 §7:3: a place an input taken by a take came from is on the list.
-            taken = () if state is None or task is not None else _taken_channels(state)
+            # ADR-0361 §7:3, ADR-0364 §9:4: a place an input taken by a take came from is
+            # on the list, a task's work's included.
+            taken = () if state is None else _taken_channels(state)
             places = await lists.shown(input_place=input_place, suggested=suggested, taken=taken)
             targets = {
                 one.place: target

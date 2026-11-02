@@ -987,11 +987,15 @@ class FakeForecaster:
                 f"that was authorised (ADR-0029 §2, ADR-0260 §6)"
             )
             raise ToolBindingError(msg)
+        parameters = checked.request.parameters
         named = (
-            checked.request.parameters.get("origin"),
-            _real(checked.request.parameters.get("latitude")),
-            _real(checked.request.parameters.get("longitude")),
+            parameters.get("origin"),
+            _real(parameters.get("latitude")),
+            _real(parameters.get("longitude")),
         )
+        if "latitude" not in parameters and "longitude" not in parameters:
+            # ADR-0364 §12:2: naming neither reads the configured place, as production's.
+            named = (named[0], self._latitude, self._longitude)
         if named[0] != self._origin or named[1] is None or named[2] is None:
             # **The origin is still the configured provider's** (ADR-0364 §12:3): the
             # coordinates are planning's, the configured place's where it named none, and

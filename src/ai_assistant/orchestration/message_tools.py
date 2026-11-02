@@ -232,6 +232,7 @@ _TAG: Final = re.compile(r"(\\*)(<exact>|</exact>)")
 _UNCLOSED: Final = f"an {EXACT_OPEN} tag is never closed"
 _NESTED: Final = f"an {EXACT_OPEN} tag is opened inside a part already marked exact"
 _STRAY_CLOSE: Final = f"a {EXACT_CLOSE} tag closes no {EXACT_OPEN} tag"
+_NOTHING_LEFT: Final = "the words hold nothing to send once their tags are read"
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,8 +254,8 @@ def exact_words(words: str) -> ExactWords | str:
     An ``<exact>`` tag opens a part and ``</exact>`` closes it. A run of backslashes before
     a tag sends half of them, rounded down, as backslashes; where the run is odd the tag is
     sent as literal text, and where it is even, two backslashes for one included, the tag
-    stays a tag. An unclosed tag, a tag opened inside a marked part, and a closing tag with
-    none open each come back not done.
+    stays a tag. An unclosed tag, a tag opened inside a marked part, a closing tag with
+    none open, and words left blank once their tags are read each come back not done.
 
     Returns:
         The words read out, or the reason they come back not done.
@@ -286,7 +287,11 @@ def exact_words(words: str) -> ExactWords | str:
     if part is not None:
         return _UNCLOSED
     text.append(words[at:])
-    return ExactWords(text="".join(text), parts=tuple(parts))
+    read = "".join(text)
+    if not read.strip():
+        # A message is never blank, and words that are only tags would send one.
+        return _NOTHING_LEFT
+    return ExactWords(text=read, parts=tuple(parts))
 
 
 def escaped_exact(words: str) -> str:

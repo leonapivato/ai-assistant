@@ -828,6 +828,17 @@ async def test_a_set_profile_and_a_pin_each_run_under_a_ticket_naming_the_reques
         model = await people.model()
     finally:
         await harness.engine.aclose()
+    # ADR-0364 §5:1: a ticket's result is the shape of the tool it ran, and a call on the
+    # person model writes its result under `result`, with no R label.
+    ran = [
+        one
+        for exchange in planner.approval
+        for step in exchange.steps
+        for one in (json.loads(result.text) for result in step.report.results)
+        if one.get("outcome") == "done"
+    ]
+    assert len(ran) == 2
+    assert all(not isinstance(one.get("result"), dict) for one in ran), ran
 
     # ADR-0338 §8:6, ADR-0361 §2:11: the pin's card and its ticket show the memory's
     # wording as the asking round read it, never its id.

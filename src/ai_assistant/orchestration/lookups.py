@@ -141,7 +141,7 @@ from ai_assistant.orchestration.planning import (
 from ai_assistant.orchestration.story_calls import STORY_ARGUMENT
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
 
     from ai_assistant.core.protocols import ConversationStore, MemoryStore
     from ai_assistant.core.types import FrozenJson, ToolCall
@@ -562,7 +562,8 @@ class ConnectionSearch:
 
         Args:
             conversations: The chat space, whose conversations are places.
-            scan: How many of the most recent conversations one search reads.
+            scan: How many conversations, or a transcript's entries, one read of the
+                store takes; a search reads them all, that many at a time.
             page_size: How many connections one page shows.
 
         Raises:
@@ -584,26 +585,49 @@ class ConnectionSearch:
         words = {one for one in re.findall(r"\w+", query.casefold()) if len(one) > 1}
         kind = CONNECTION_KINDS["conversation"]
         scored: list[tuple[int, int, ConnectionShown]] = []
-        for order, one in enumerate(await self._conversations.recent(limit=self._scan)):
-            transcript = await self._conversations.transcript(one.id)
-            texts = [kind.is_a, kind.group or ""]
-            if transcript is not None:
-                texts.extend(
-                    entry.text
-                    for entry in transcript.entries
-                    if isinstance(entry, TranscriptMessage)
-                )
+        order = 0
+        async for conversation in self._every_conversation():
+            texts = [kind.is_a, kind.group or "", *await self._texts(conversation)]
             held = " ".join(texts).casefold()
             score = sum(1 for word in words if word in held)
             if score:
-                place = place_of(conversation_channel(one.id))
+                place = place_of(conversation_channel(conversation))
                 scored.append((-score, order, ConnectionShown(place=place, kind=kind)))
+            order += 1
         scored.sort(key=lambda one: (one[0], one[1]))
         start = (page - 1) * self._page_size
         shown = tuple(one for _, _, one in scored[start : start + self._page_size])
         return ConnectionsFound(
             page=page, connections=shown, more=len(scored) > start + self._page_size
         )
+
+    async def _every_conversation(self) -> AsyncIterator[str]:
+        """Every conversation's id, most recent first, ``scan`` of them a read."""
+        offset = 0
+        while True:
+            batch = await self._conversations.recent(limit=self._scan, offset=offset)
+            for one in batch:
+                yield one.id
+            if len(batch) < self._scan:
+                return
+            offset += len(batch)
+
+    async def _texts(self, conversation_id: str) -> list[str]:
+        """Every message's text in one conversation's transcript, ``scan`` of them a read."""
+        texts: list[str] = []
+        before: int | None = None
+        while True:
+            page = await self._conversations.transcript(
+                conversation_id, before=before, limit=self._scan
+            )
+            if page is None or not page.entries:
+                return texts
+            texts.extend(
+                entry.text for entry in page.entries if isinstance(entry, TranscriptMessage)
+            )
+            if len(page.entries) < self._scan:
+                return texts
+            before = page.entries[0].position
 
 
 def searched_ids(output: object) -> tuple[str, ...]:

@@ -838,13 +838,14 @@ async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answe
     schema = offered.model_dump()["parameters"]
     assert set(schema["properties"]) == {"latitude", "longitude", "looking_for"}
     assert schema["required"] == ["looking_for"]
-    # Sent to `Forecaster.read` with exactly the arguments its proposal names.
+    # Sent to `Forecaster.read` with its proposal's origin and no coordinate: naming
+    # neither, it reads its configured place, which is never written into the call
+    # (ADR-0364 §12:2-§12:3).
     (read,) = forecaster.read_calls
     proposal = await forecaster.request()
     assert proposal is not None
-    assert read.request.parameters == proposal.parameters
-    assert read.request.parameters["origin"] == DEFAULT_FORECAST_ORIGIN
-    assert read.request.parameters["latitude"] == DEFAULT_FORECAST_LATITUDE
+    assert dict(read.request.parameters) == {"origin": DEFAULT_FORECAST_ORIGIN}
+    assert proposal.parameters["latitude"] == DEFAULT_FORECAST_LATITUDE
     # The digest read the forecast as quoted data under the hub's attribution.
     (digest_call,) = digests.calls
     document = json.loads(digest_call.messages[1].content)

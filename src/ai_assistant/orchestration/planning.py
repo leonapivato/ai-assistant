@@ -582,6 +582,9 @@ class CallOutcome:
             ``None`` for any other call.
         full: For the episode look-up, the full record it read (§10); ``None`` for any
             other call.
+        connections: For a connections search, the page it found (ADR-0364 §3:7).
+        ran: The capability the call ran, where acting ran it: a ticket's is its
+            request's tool, whose result shape the result takes (ADR-0364 §5:1).
 
     Raises:
         ValueError: If it carries a result, or says one was digested, without the
@@ -606,6 +609,7 @@ class CallOutcome:
     history: OlderHistory | None = None
     full: EpisodeRead | None = None
     connections: ConnectionsFound | None = None
+    ran: str | None = None
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
@@ -4217,11 +4221,16 @@ class _Request:
         for digest in evidence:
             news.extend(self._evidence_lines(digest))
         news.extend(self.tickets_news())
+        # ADR-0364 §3:5, §3:10: the connections joined are read after every other kind of
+        # news, since any of them may name one by ``where``, and shown before them.
+        rest = [
+            *self._matters_changed(),
+            *self._forgotten(shown),
+            *self._works_changed(shown),
+            *self._always_changed(shown, round_id),
+        ]
         news.extend(self._connections_joined(shown))
-        news.extend(self._matters_changed())
-        news.extend(self._forgotten(shown))
-        news.extend(self._works_changed(shown))
-        news.extend(self._always_changed(shown, round_id))
+        news.extend(rest)
         return news
 
     def _works_changed(self, shown: NewsShown) -> list[str]:
@@ -4695,7 +4704,9 @@ class _Request:
         shown |= self._absorbed_by(outcome.peer)
         if outcome.kind is not CallOutcomeKind.DONE or outcome.result_id is None:
             return shown, outcome.kind
-        shown |= self._result(call.name, outcome, outcome.result_id)
+        # ADR-0364 §5:1: a ticket's result is written as the tool it ran writes one.
+        ran = outcome.ran if outcome.ran is not None else self._as_run(call).name
+        shown |= self._result(ran, outcome, outcome.result_id)
         return shown, outcome.kind
 
     def _result(self, name: str, outcome: CallOutcome, result_id: str) -> dict[str, object]:
@@ -5688,7 +5699,9 @@ def exact_line(
     Returns:
         The line, with no line break in it.
     """
-    left_out = _NEVER_SHOWN | frozenset(filled)
+    # ADR-0364 §8:2: the member an add or a remove names is planning's, written into the
+    # argument its kind is read by, so it is shown, as `member`, though the hub fills it.
+    left_out = _NEVER_SHOWN | (frozenset(filled) - _MEMBER_WRITTEN)
     shown = {} if worded is None else worded
     capability = str(call.tool.capability)
     # ADR-0364 §8:4-§8:5: a call stored under an old name is shown under its name now.
@@ -5706,6 +5719,11 @@ def exact_line(
         line = f"{line} — " + "; ".join(arguments)
     return line
 
+
+#: The arguments planning's check writes a named member into (ADR-0364 §8:2).
+_MEMBER_WRITTEN: Final = frozenset(
+    target for split in MEMBER_SPLIT.values() for target in split.values()
+)
 
 #: A name an exact line shows bare: one that can carry no line break, quote or
 #: delimiter of the line's own.
@@ -5754,7 +5772,8 @@ def _filled(capabilities: Sequence[ToolDefinition], call: RequestedCall) -> froz
     to the model (ADR-0260 §3:2, ADR-0324 §3), and a search's no origin. Such a call
     runs nowhere either, since authorizing finds no tool for a capability not offered.
     """
-    capability = str(call.tool.capability)
+    # ADR-0364 §8:4: a call stored under an old name is the new tool's.
+    capability = current_name(str(call.tool.capability))
     offered = next(
         (
             tool

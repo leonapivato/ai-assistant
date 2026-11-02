@@ -1074,7 +1074,7 @@ class PhaseTools:
             and call.name == str(forecast.capability)
         ):
             proposal = await self._forecaster.request()
-            filled = None if proposal is None else _forecast_filled(call, proposal.parameters)
+            filled = None if proposal is None else _forecast_filled(proposal.parameters)
         if not filled:
             return call
         arguments: dict[str, FrozenJson] = {**call.arguments, **filled}
@@ -1177,19 +1177,17 @@ _LATITUDE_ARGUMENT: Final = "latitude"
 _LONGITUDE_ARGUMENT: Final = "longitude"
 
 
-def _forecast_filled(
-    call: ProposedCall, proposal: Mapping[str, FrozenJson]
-) -> dict[str, FrozenJson]:
+def _forecast_filled(proposal: Mapping[str, FrozenJson]) -> dict[str, FrozenJson]:
     """What the hub fills in a forecast read (ADR-0364 §12:1-§12:2).
 
-    Its origin, and the configured place's coordinates where planning gave neither.
-    Planning's own coordinates are what the call sends, so they are kept; one of them alone
-    is kept as it is, and the forecast read comes back saying both or neither.
+    Its origin alone. Planning's own coordinates are what the call sends, so they are
+    kept, one of them alone as it is, and the forecast read comes back saying both or
+    neither; where it gave neither, the forecaster reads its configured place, whose
+    coordinates are never written into the call, so no ticket or card shows them to
+    planning (§12:3).
     """
     coordinates = (_LATITUDE_ARGUMENT, _LONGITUDE_ARGUMENT)
-    if any(name in call.arguments for name in coordinates):
-        return {name: value for name, value in proposal.items() if name not in coordinates}
-    return dict(proposal)
+    return {name: value for name, value in proposal.items() if name not in coordinates}
 
 
 def _forecast_attribution(channel: str, reported_at: datetime | None) -> str:
@@ -2964,6 +2962,7 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
                 result=one.output if one.route is ResultRoute.PLANNING else None,
                 digested=digested,
                 delivered=_emailed(one),
+                ran=str(one.call.call.request.tool.capability),
             )
         )
     return tuple(outcomes)

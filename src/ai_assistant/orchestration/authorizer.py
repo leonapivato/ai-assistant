@@ -156,7 +156,7 @@ from ai_assistant.orchestration.remembering import (
     REMEMBER_CAPABILITY,
     candidate_of,
 )
-from ai_assistant.orchestration.renames import Void, translated
+from ai_assistant.orchestration.renames import Void, current_name, translated
 from ai_assistant.orchestration.selection import (
     Preference,
     eligible_candidates,
@@ -1880,7 +1880,9 @@ class AuthorizingStage:
         digest = values_digest(request)
         return any(
             effect.is_call
-            and effect.capability == request.tool.capability
+            and effect.capability is not None
+            # ADR-0364 §8:5: an effect recorded under an old name is the same tool's.
+            and current_name(effect.capability) == current_name(request.tool.capability)
             and effect.values_digest == digest
             and effect.outcome in {None, ToolOutcome.INDETERMINATE}
             for effect in await self._plans.activation_effects(match)

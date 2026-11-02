@@ -191,3 +191,9 @@ def test_an_email_takes_no_attachment_and_no_exact() -> None:
     properties = _schema(EMAIL)["properties"]
     assert "attachments" not in properties
     assert "exact" not in properties
+
+
+@pytest.mark.parametrize("words", ["<exact></exact>", "<exact> </exact>", " <exact>\n</exact> "])
+def test_words_blank_once_their_tags_are_read_come_back_not_done(words: str) -> None:
+    """§9:8: a message is never blank, so tags around nothing send nothing."""
+    assert exact_words(words) == "the words hold nothing to send once their tags are read"
