@@ -61,6 +61,7 @@ from ai_assistant.testing import (
     FakePersonModelStore,
     FakePlanStore,
     FakeToolCallingCompleter,
+    FakeWebSearcher,
 )
 from ai_assistant.testing.memories import memory, remembered_support, said_support
 
@@ -1093,3 +1094,88 @@ async def test_a_worded_request_whose_memory_cannot_be_shown_is_not_written(
     (refused,) = told
     assert "could not show its wording" in str(refused)
     assert requests == ()
+
+
+# --- ADR-0364 §10:2, §10:6: a request keeps its looking_for for the ticket --------------
+
+
+class _SearchNeedsAYes(_Policy):
+    """A search needs the person, so planning asks for it on a card."""
+
+    async def decide(self, request: ActionRequest) -> PermissionRuling:
+        if request.tool.capability == "search_web":
+            return PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="test: a yes")
+        return await super().decide(request)
+
+
+async def test_an_approved_search_runs_with_the_looking_for_its_request_kept() -> None:
+    """ADR-0364 §10:2, §10:6, §14:4: the request keeps the call's ``looking_for``, and the
+    ticket's run reads its result for it, in the approval's own work."""
+
+    async def person(exchange: PlanningExchange) -> RoundResponse:
+        if exchange.steps:
+            return RoundResponse()
+        ask = ProposedCall(
+            call_id="ask-1",
+            name="request_approval",
+            arguments={
+                "call": {
+                    "tool": "search_web",
+                    "arguments": {
+                        "query": "museum hours",
+                        "looking_for": "When does it open on Sunday?",
+                    },
+                },
+                "why": "You asked when the museum opens on Sunday.",
+            },
+        )
+        return RoundResponse(calls=(ask,))
+
+    ran: list[str] = []
+
+    async def approval(exchange: PlanningExchange) -> RoundResponse:
+        ticket = _ticket(exchange)
+        if ticket is not None and not ran:
+            ran.append(ticket)
+            return RoundResponse(calls=(_run(ticket),))
+        return RoundResponse()
+
+    planner = _Planner(person, approval)
+    plans = FakePlanStore(now=lambda: AT)
+    searcher = FakeWebSearcher(results=("Open on Sundays from 10:00.",))
+    harness = phases_harness(
+        planner,
+        approvals=_seams(),
+        plans=plans,
+        phases={
+            "policy": _SearchNeedsAYes(),
+            "round_limit": 8,
+            "authorizing": _authorizing(plans),
+            "searcher": searcher,
+        },
+    )
+    await harness.engine.start()
+    try:
+        await _start(harness, "when does the museum open on Sunday?")
+        (request,) = await _until_requests(harness, 1)
+        assert request.call.looking_for == "When does it open on Sunday?"
+        await _frozen(harness, str(request.activation_id))
+        await _tap(harness, request)
+
+        async def pushed() -> bool:
+            return (await _held(harness, str(request.id))).pushed_to is not None
+
+        await until(pushed, what="the outcome to be pushed")
+        approval_id = (await _held(harness, str(request.id))).pushed_to
+        assert approval_id is not None
+        own = await _frozen(harness, approval_id)
+
+        assert ran
+        (searched,) = searcher.searched
+        assert searched.request.parameters["query"] == "museum hours"
+        record = own.processing_record
+        assert record is not None
+        (digest,) = record.digests
+        assert digest.question == "When does it open on Sunday?"
+    finally:
+        await harness.engine.aclose()

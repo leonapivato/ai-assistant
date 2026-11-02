@@ -378,6 +378,13 @@ def _facts(episode: str, processing: EpisodeProcessingRecord, done: _Done) -> tu
     return tuple(facts)
 
 
+#: The candidate declaration with its arguments' names unchecked, to digest a call as it
+#: was recorded before the renames (ADR-0364 §8:5) once it fits under the names now.
+_AS_RECORDED: Final = REMEMBER_CANDIDATE.model_copy(
+    update={"parameters_schema": {"type": "object"}}
+)
+
+
 def _digest(episode: str, values: dict[str, FrozenJson]) -> str | None:
     """The digest of ``values`` authorizing's request carried, or ``None``.
 
@@ -394,7 +401,16 @@ def _digest(episode: str, values: dict[str, FrozenJson]) -> str | None:
     try:
         request = ActionRequest(tool=REMEMBER_CANDIDATE, parameters=filled)
     except ValidationError, ValueError:
-        return None
+        # ADR-0364 §8:2, §8:5: a call recorded before the renames fits the declaration
+        # under the names its arguments go by now, and was digested under its own.
+        try:
+            ActionRequest(
+                tool=REMEMBER_CANDIDATE,
+                parameters=current_arguments(REMEMBER_CAPABILITY, filled),
+            )
+        except ValidationError, ValueError:
+            return None
+        request = ActionRequest(tool=_AS_RECORDED, parameters=filled)
     return values_digest(request)
 
 

@@ -10,6 +10,8 @@ samples = 2
 [property]
 check = "calls_within"
 capabilities = ["stop_work", "read_episode"]
+# The argument both once took as `activation`: `work` for a stop, `episode` for a
+# look-up (ADR-0364 §8:2).
 argument = "activation"
 value = "E1"
 

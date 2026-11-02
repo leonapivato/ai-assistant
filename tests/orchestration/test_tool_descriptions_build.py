@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from exchange_support import reported, section, tags
@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.approval_rules import ALWAYS_NEEDS_APPROVAL, approval_rule
 from ai_assistant.orchestration.approvals import Ticket
+from ai_assistant.orchestration.candidates import _digest as _candidate_digest
 from ai_assistant.orchestration.channel_kinds import (
     ACCOUNT_KINDS,
     CONNECTION_KINDS,
@@ -68,10 +69,14 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.remembering import candidate_of, is_remember
 from ai_assistant.orchestration.renames import Void, translated
+from ai_assistant.orchestration.story_calls import LINK_STORY
 from ai_assistant.testing import FakeConversationStore, FakeToolCallingCompleter, default_prompt
 from ai_assistant.tools.forecast import FORECAST_READ
 from ai_assistant.tools.send_email import EMAIL
 from ai_assistant.tools.web_search import WEB_SEARCH
+
+if TYPE_CHECKING:
+    from ai_assistant.core.types import FrozenJson
 
 _AT: Final = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
 
@@ -517,3 +522,37 @@ def test_a_remember_recorded_before_the_renames_still_reads_as_a_candidate() -> 
     )
     assert old.rests_on_input
     assert old.user_messages == ("episode:one",)
+
+
+@pytest.mark.parametrize("member", ["member_story", "member_episode"])
+def test_a_waiting_link_from_before_the_build_keeps_its_members_kind(member: str) -> None:
+    """§8:6: a ticket runs without planning's check, so the member keeps the argument its
+    kind is read by, and only ``story`` becomes ``matter``."""
+    old = LINK_STORY.model_copy(
+        update={"capability": "link_story", "parameters_schema": {"type": "object"}}
+    )
+    named = "story:inner" if member == "member_story" else "activation:act-1"
+    read = translated(
+        RequestedCall(
+            tool=old, values={"story": "story:outer", member: named, "episode": "episode:act-1"}
+        ),
+        {"add_to_matter": LINK_STORY}.get,
+    )
+    assert isinstance(read, RequestedCall)
+    assert dict(read.values) == {"matter": "story:outer", member: named, "episode": "episode:act-1"}
+
+
+def test_a_remember_recorded_before_the_renames_is_digested_as_it_was_recorded() -> None:
+    """§8:5: an old ``remember``'s values fit under the names now, and its digest is the
+    one authorizing stated over the names it was recorded under, so its effect matches."""
+    old: dict[str, FrozenJson] = {
+        "fact": "The owner likes tea.",
+        "why": "A standing taste.",
+        "rests_on_input": True,
+    }
+    new: dict[str, FrozenJson] = {**old, "rests_on_this_stimulus": True}
+    del new["rests_on_input"]
+    assert _candidate_digest("episode:e1", old) is not None
+    assert _candidate_digest("episode:e1", new) is not None
+    assert _candidate_digest("episode:e1", old) != _candidate_digest("episode:e1", new)
+    assert _candidate_digest("episode:e1", {**old, "rests_on_nothing": True}) is None

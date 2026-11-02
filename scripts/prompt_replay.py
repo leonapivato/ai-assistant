@@ -155,6 +155,7 @@ from ai_assistant.orchestration.observer.replies import (
     PlacementReplyShape,
     ScoutReplyShape,
 )
+from ai_assistant.orchestration.renames import current_arguments
 from ai_assistant.orchestration.story_tidy_up import TidyUpReply
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
@@ -2689,7 +2690,10 @@ def _calls_within(reply: Reply, params: Mapping[str, object]) -> Judgement:
     for one in calls:
         if one.name not in named:
             return "the round makes a call to a capability not named"
-        if one.arguments.get(str(params["argument"])) != params["value"]:
+        # ADR-0364 §8:2: an argument the named tools once shared goes by each tool's own
+        # name now, as `stop_work`'s `work` and `read_episode`'s `episode`.
+        (argument,) = current_arguments(one.name, {str(params["argument"]): None})
+        if one.arguments.get(argument) != params["value"]:
             return "a call names another value, or none"
     return None
 

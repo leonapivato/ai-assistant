@@ -138,6 +138,7 @@ from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
     LOOK_UPS,
+    ConnectionSearch,
     LookUps,
     searched_ids,
 )
@@ -417,7 +418,15 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             else None
         )
         looking = (
-            LookUps(memory=harness.memory, views=reads, search_limit=5, episodes=episode_reads)
+            LookUps(
+                memory=harness.memory,
+                views=reads,
+                search_limit=5,
+                episodes=episode_reads,
+                connections=ConnectionSearch(
+                    conversations=harness.conversation_store, scan=50, page_size=5
+                ),
+            )
             if look_ups
             else None
         )
@@ -3820,10 +3829,13 @@ async def test_an_event_runs_the_phases_in_a_place_that_takes_no_message() -> No
     (asked,) = completer.calls
     withheld = tag(section(asked.exchange.briefing, "# The stimulus"), "received")
     assert (withheld.get("withheld"), withheld.text) == ("yes", None)
-    # No connection kind declares the event's origin, so it is no connection a message
-    # could name: its stimulus carries no where, and Connections shows nothing to send to.
-    assert withheld.get("where") is None
-    assert tags(section(asked.exchange.briefing, "## Connections"), "connection") == []
+    # Every origin is a connection (§3:2), the event's too, though no kind here declares
+    # it: the stimulus's where names its entry, which says it takes no message.
+    where = withheld.get("where")
+    assert where is not None
+    entry = tag(section(asked.exchange.briefing, "## Connections"), "connection", label=where)
+    assert "takes no message" in (entry.get("can") or "")
+    assert entry.get("reaches") is None
     # Its text is its notes, kept with the episode and written nowhere.
     record = episode.processing_record
     assert record is not None
@@ -4053,3 +4065,35 @@ async def test_an_events_result_past_the_output_bound_raises_as_every_result_doe
 
     with pytest.raises(OversizedValueError, match="the result of receive"):
         await harness.engine.receive(_LONG_EVENT, reply=None, timeout=budget)
+
+
+async def test_an_add_and_a_remove_name_one_member_or_this_work_end_to_end() -> None:
+    """ADR-0364 §8:2: ``member`` names a matter by its ``S`` label, and left out it is
+    this work; planning's check writes the one it names, and authorizing fills nothing
+    else, so both forms run."""
+    completer = FakeToolCallingCompleter.scripted(
+        _STARTED,
+        RoundResponse(calls=(_call("c2", "start_matter", notes="The gear for the trip."),)),
+        RoundResponse(
+            calls=(
+                _call("c3", "add_to_matter", matter="S1", member="S2"),
+                _call("c4", "remove_from_matter", matter="S2"),
+            )
+        ),
+        RoundResponse(),
+    )
+    stories = FakeStoryStore(now=lambda: AT)
+    harness = _harness(completer, stories=stories, story_calls=True)
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "help me plan a camping trip to Riverside")
+    episode = await _settled(harness, conversation)
+
+    record = episode.processing_record
+    assert record is not None
+    assert len(completer.calls) == 3
+    activation = StoryMember(kind=StoryMemberKind.ACTIVATION, id=record.activation_id)
+    (trip,) = [str(one.story_id) for one in await stories.stories_of(activation)]
+    gear = next(one.id for one in record.labels if one.kind is LabelKind.STORY and one.id != trip)
+    held_by = await stories.stories_of(StoryMember(kind=StoryMemberKind.STORY, id=gear))
+    assert [str(one.story_id) for one in held_by] == [trip]

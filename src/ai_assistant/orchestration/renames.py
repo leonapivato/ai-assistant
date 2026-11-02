@@ -32,7 +32,7 @@ from ai_assistant.orchestration.message_tools import FROM_THE_PERSONS_ACCOUNT
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from ai_assistant.core.types import FrozenJson, ToolDefinition
+    from ai_assistant.core.types import EgressBinding, FrozenJson, ToolDefinition
 
 __all__ = [
     "ARGUMENT_RENAMES",
@@ -78,6 +78,9 @@ _MEMBER: Final[Mapping[str, str]] = {
     "member_story": "member",
     "member_episode": "member",
 }
+
+#: The arguments a run reads a member's kind by: shown as ``member``, run as recorded.
+_RUN_AS_RECORDED: Final = frozenset({"member_story", "member_episode"})
 
 #: ADR-0364 §8:2: each renamed tool's old argument names, by its new name. The nested
 #: call of a ``request_approval`` names its tool ``tool``, once ``capability``.
@@ -173,7 +176,16 @@ def translated(
     current = declaration(new)
     if current is None:
         return Void(reason=f"{new} is not offered here, so the call cannot run")
-    values = current_arguments(old, dict(requested.values))
+    # A member's kind is read by the argument it is recorded under, which planning's own
+    # check writes from ``member`` and a run reads (§8:2), so those keep their names.
+    recorded = dict(requested.values)
+    kept = {name: value for name, value in recorded.items() if name in _RUN_AS_RECORDED}
+    values = {
+        **current_arguments(
+            old, {name: value for name, value in recorded.items() if name not in kept}
+        ),
+        **kept,
+    }
     if new == "send_email":
         carried = _email_values(values)
         if isinstance(carried, Void):
@@ -183,7 +195,7 @@ def translated(
         return RequestedCall(
             tool=current,
             values=values,
-            binding=requested.binding,
+            binding=_carried_binding(old, requested.binding, values),
             deliberate_repeat=requested.deliberate_repeat and not current.safe_to_repeat,
             replaces=requested.replaces,
             wording=requested.wording,
@@ -191,6 +203,33 @@ def translated(
         )
     except ValidationError, ValueError:
         return Void(reason=f"its call no longer fits {new}, so it cannot run as asked")
+
+
+def _carried_binding(
+    capability: str, binding: EgressBinding | None, values: Mapping[str, FrozenJson]
+) -> EgressBinding | None:
+    """A recorded call's binding with its spans under the names its arguments go by now.
+
+    Each argument's span is the one recorded, renamed as the table renames it, and an
+    argument the translation leaves out, such as an old ``email``'s ``exact``, takes its
+    span with it, so the binding still describes the call it covers. Authorizing then
+    rebinds it as ADR-0321 §4:2 rebinds, which refuses it where it differs.
+    """
+    if binding is None:
+        return None
+    renamed = ARGUMENT_RENAMES.get(current_name(capability), {})
+    spans = []
+    for span in binding.spans:
+        name = (
+            span.argument
+            if span.argument in _RUN_AS_RECORDED
+            else renamed.get(span.argument, span.argument)
+        )
+        if name in values:
+            spans.append(
+                span if name == span.argument else span.model_copy(update={"argument": name})
+            )
+    return binding.model_copy(update={"spans": tuple(spans)})
 
 
 def _email_values(values: Mapping[str, FrozenJson]) -> dict[str, FrozenJson] | Void:

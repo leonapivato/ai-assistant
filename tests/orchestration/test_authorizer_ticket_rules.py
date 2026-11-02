@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from test_tool_descriptions_build import _old_email
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -84,6 +85,7 @@ from ai_assistant.testing import (
     FakeToolRegistry,
 )
 from ai_assistant.testing.parties import OWNERS_WORDS
+from ai_assistant.tools.send_email import EMAIL
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import FrozenJson
@@ -597,3 +599,45 @@ def test_the_shown_values_leave_out_what_the_hub_fills() -> None:
     }
 
     assert shown_values(REMEMBER_CANDIDATE, values) == {"fact": "s"}
+
+
+# --- ADR-0364 §8:6, §14:4: a waiting `email` from before the build ------------------------
+
+
+async def test_a_waiting_email_from_before_the_build_runs_as_the_send_email_it_reads_as() -> None:
+    """§8:6: the request, held under the old declaration, runs under ``send_email``'s,
+    its binding rebound and its values the old call's as the new tool reads them, so
+    what is sent is what the card showed."""
+    old = _old_email()
+    # The build before wrote the request, binding it under its own declaration; this
+    # build holds send_email's under the same id and the same account.
+    before = FakeEgressBinder()
+    before.register_egress(old, reference="conn-1", identity="me@example.com")
+    binder = FakeEgressBinder()
+    binder.register_egress(EMAIL, reference="conn-1", identity="me@example.com")
+    hub = _Hub(EMAIL, binder=binder, policy=FakeActionPolicy(confirm_at=None))
+    values = {
+        "to": "maren@example.org",
+        "subject": "Dinner",
+        "words": "See you at 8.",
+        "from": "user",
+    }
+    bound = await before.bind(
+        old,
+        parameters={**values, "exact": False},
+        provenance=_carried(outside=False),
+    )
+    binding = None if bound is None else bound.binding
+    requested = RequestedCall(tool=old, values={**values, "exact": False}, binding=binding)
+    await hub.approved(requested)
+
+    decided = await hub.authorize(_round((_call("c1", "send_email", **values), _REQUEST)))
+
+    (verdict,) = decided.verdicts
+    assert verdict.verdict is Verdict.ALLOWED, verdict.reason
+    (allowed,) = decided.allowed
+    assert allowed.call.request.tool == EMAIL
+    assert {
+        name: value for name, value in allowed.call.request.parameters.items() if name in values
+    } == values
+    assert "exact" not in allowed.call.request.parameters

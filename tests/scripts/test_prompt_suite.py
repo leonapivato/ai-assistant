@@ -701,13 +701,14 @@ def test_the_capability_checks_read_the_rounds_calls() -> None:
     )
     twice = RoundResponse(calls=(_text("a"), _text("b", call_id="c2")))
     assert _round("none_of", pay, twice) == "the round sends more than one message"
+    # ADR-0364 §8:2: the argument both once took as `activation` is each tool's own now.
     within: dict[str, object] = {
-        "capabilities": ["stop_activation", "look_up_activation"],
+        "capabilities": ["stop_work", "read_episode"],
         "argument": "activation",
         "value": "E1",
     }
-    look = ProposedCall(call_id="c5", name="look_up_activation", arguments={"activation": "E1"})
-    elsewhere = ProposedCall(call_id="c6", name="stop_activation", arguments={"activation": "E2"})
+    look = ProposedCall(call_id="c5", name="read_episode", arguments={"episode": "E1"})
+    elsewhere = ProposedCall(call_id="c6", name="stop_work", arguments={"work": "E2"})
     assert _round("calls_within", within, RoundResponse(calls=(look,))) is None
     assert _round("calls_within", within, RoundResponse(calls=(look, elsewhere))) == (
         "a call names another value, or none"

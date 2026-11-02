@@ -1240,7 +1240,7 @@ async def test_an_episode_stored_at_any_address_takes_a_label(episode_id: str) -
     [
         (CallOutcomeKind.DONE, None, ("done", None)),
         (CallOutcomeKind.NOT_DONE, "the call failed (timeout)", ("not done", "the call failed")),
-        (CallOutcomeKind.UNKNOWN, None, ("unknown", None)),
+        (CallOutcomeKind.UNKNOWN, None, ("unknown", "whether it was done could not")),
         (CallOutcomeKind.NEEDS_YOU, None, ("refused", "it needs approval, and nothing here")),
         (CallOutcomeKind.REFUSED, "'S9' names nothing you were shown", ("refused", "'S9'")),
     ],

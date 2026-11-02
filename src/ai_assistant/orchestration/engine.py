@@ -7554,7 +7554,8 @@ class Engine:
             kind = account_kind(account.kind)
             if kind is None:
                 continue
-            state: str | None = None
+            # ADR-0364 §3:3: a state that could not be read is not shown as normal.
+            state: str | None = "its state could not be read" if live is None else None
             if live is not None:
                 held = live.get(account.reference)
                 if held is None:
