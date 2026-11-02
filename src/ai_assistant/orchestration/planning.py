@@ -5622,8 +5622,8 @@ def _place_text(channel: ChannelIdentity) -> str:
 _HISTORY_UNREADABLE: Final = "this place's older history cannot be read here"
 _NOTHING_OLDER: Final = "nothing older: the place window already showed all this place holds"
 _STILL_RUNNING: Final = (
-    "the work is still running, so its record is not frozen: look up the running "
-    "activation's findings instead"
+    "the work is still running, so its record is not frozen yet, and it was not shown to "
+    "you as running work"
 )
 _RECORD_GONE: Final = "its record is no longer kept"
 _NOT_KEPT: Final = "no longer kept"

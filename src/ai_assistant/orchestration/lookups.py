@@ -587,7 +587,7 @@ class ConnectionSearch:
         scored: list[tuple[int, int, ConnectionShown]] = []
         order = 0
         async for conversation in self._every_conversation():
-            texts = [kind.is_a, kind.group or "", *await self._texts(conversation)]
+            texts = [kind.is_a, kind.group or "", kind.can, *await self._texts(conversation)]
             held = " ".join(texts).casefold()
             score = sum(1 for word in words if word in held)
             if score:

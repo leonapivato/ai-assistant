@@ -274,6 +274,25 @@ async def test_a_look_up_shows_the_work_and_whether_it_has_ended() -> None:
     )
 
 
+async def test_an_episode_shown_among_the_concurrent_stimuli_is_read_as_running() -> None:
+    """ADR-0364 §8:3: ``read_episode`` reads running work under any label it was shown
+    under as running, the concurrent stimuli's included, though a stop may not name it."""
+    older, asker = _running("a", _A, order=1), _running("b", _B, order=2)
+    _, calls, _, _ = _wired([older, asker])
+    caller = MatterCaller(
+        state=asker,
+        users_authority=True,
+        owner_records=True,
+        running=frozenset(),
+        concurrent=frozenset({_A}),
+    )
+    with calling(caller):
+        read = await calls.read_running(_call(READ_EPISODE, episode=_episode(_A)))
+        stop = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
+    assert isinstance(read, ToolResult)
+    assert isinstance(stop, NotDone)
+
+
 # --- the answer call (§7:20-§7:21) -------------------------------------------------
 
 

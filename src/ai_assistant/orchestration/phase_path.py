@@ -5796,6 +5796,7 @@ class PhasePath:
             running=working.running_shown(),
             waiting=frozenset(state.waits_on) if latest.waiting else None,
             supply=given.supply,
+            concurrent=frozenset() if working.work is None else working.work.shown.running,
         )
 
     @staticmethod
