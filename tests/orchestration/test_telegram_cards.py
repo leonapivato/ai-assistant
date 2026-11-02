@@ -163,7 +163,7 @@ class _Rig:
         """One ``request_approval`` call, its card posted on the line."""
         n = next(self._asked)
         arguments: dict[str, FrozenJson] = {
-            "call": {"capability": "book", "arguments": {"date": date}},
+            "call": {"tool": "book", "arguments": {"date": date}},
             "why": "You asked me to book the table.",
         }
         request = ActionRequest(tool=REQUEST_APPROVAL, parameters=arguments)
@@ -287,14 +287,14 @@ async def test_a_card_too_long_for_one_message_has_no_buttons_and_points_at_the_
 
 
 async def test_a_card_whose_post_fails_leaves_the_request_on_the_panel() -> None:
-    """§2:7, §9:4: Telegram refused it, so the result says not done, no card is recorded,
+    """§2:7, §9:4: Telegram refused it, so the result says not sent, no card is recorded,
     and the request waits pending, as the panel reads it."""
     rig = _Rig()
     rig.fake.fail_next(TelegramFailure.REFUSED)
 
     answer, request = await rig.ask()
 
-    assert _card_words(answer).startswith("not done")
+    assert _card_words(answer) == "not sent, so only the approvals panel shows it"
     assert request.cards == ()
     assert request.state is ApprovalRequestState.PENDING
     (pending,) = await rig.plans.person_approval_requests(
@@ -313,7 +313,7 @@ async def test_a_card_on_a_line_not_connected_is_not_posted() -> None:
 
     answer, request = await rig.ask()
 
-    assert _card_words(answer).startswith("not posted")
+    assert _card_words(answer) == "not sent, so only the approvals panel shows it"
     assert request.cards == ()
     assert rig.runner.card_delivery("decision:1") is None
 

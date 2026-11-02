@@ -170,7 +170,7 @@ def _asking(date: str) -> CallToAuthorize:
             call_id="ask-1",
             name="request_approval",
             arguments={
-                "call": {"capability": "book", "arguments": {"date": date}},
+                "call": {"tool": "book", "arguments": {"date": date}},
                 "why": "You asked me to book the table.",
             },
         )
@@ -209,7 +209,7 @@ async def test_a_request_for_a_call_no_tool_takes_writes_nothing() -> None:
         ProposedCall(
             call_id="ask-1",
             name="request_approval",
-            arguments={"call": {"capability": "fly", "arguments": {}}, "why": "To fly."},
+            arguments={"call": {"tool": "fly", "arguments": {}}, "why": "To fly."},
         )
     )
     decided = await _Hub().authorize(call)
@@ -427,7 +427,7 @@ async def test_a_direct_call_this_rounds_request_asks_about_waits_on_its_card(
             call_id="ask-1",
             name="request_approval",
             arguments={
-                "call": {"capability": "note", "arguments": {"date": "2026-11-02"}},
+                "call": {"tool": "note", "arguments": {"date": "2026-11-02"}},
                 "why": "You asked me to note it.",
             },
         )

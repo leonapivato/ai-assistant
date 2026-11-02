@@ -171,8 +171,6 @@ FAKE_WEB_SEARCH: Final = ToolDefinition(
     result=CapabilityResult.MAY_CARRY_OUTSIDE_TEXT,
     outcome_can_be_unknown=True,
     safe_to_repeat=True,
-    # ADR-0364 §12:1: the origin is the hub's to fill, as production declares it.
-    system_supplied=("origin",),
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

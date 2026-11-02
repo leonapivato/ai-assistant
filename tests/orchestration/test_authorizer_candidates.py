@@ -31,7 +31,7 @@ from ai_assistant.testing import FakeActionPolicy
 
 
 def _candidate(**fields: Any) -> dict[str, Any]:
-    return {"fact": "likes window seats", "why": "travel", "rests_on_input": True, **fields}
+    return {"fact": "likes window seats", "why": "travel", "rests_on_this_stimulus": True, **fields}
 
 
 def _hub(**knobs: Any) -> plain._Hub:
@@ -42,7 +42,7 @@ async def test_a_candidate_is_filled_by_the_hub() -> None:
     """§3:4: the hub fills the episode and the mark; §5:6: no MemoryPolicy rules on it."""
     hub = _hub()
 
-    decided = await hub.authorize(plain._round(plain._call("c1", "remember", **_candidate())))
+    decided = await hub.authorize(plain._round(plain._call("c1", "remember_fact", **_candidate())))
 
     (verdict,) = decided.verdicts
     assert verdict.verdict is Verdict.ALLOWED
@@ -60,7 +60,7 @@ async def test_a_candidate_with_confirm_set_needs_you_by_rule() -> None:
     hub = _hub()
 
     decided = await hub.authorize(
-        plain._round(plain._call("c1", "remember", **_candidate(confirm=True)))
+        plain._round(plain._call("c1", "remember_fact", **_candidate(confirm=True)))
     )
 
     (verdict,) = decided.verdicts
@@ -73,7 +73,7 @@ async def test_a_candidate_with_confirm_unset_runs() -> None:
     hub = _hub()
 
     decided = await hub.authorize(
-        plain._round(plain._call("c1", "remember", **_candidate(confirm=False)))
+        plain._round(plain._call("c1", "remember_fact", **_candidate(confirm=False)))
     )
 
     assert decided.verdicts[0].verdict is Verdict.ALLOWED
@@ -84,7 +84,7 @@ async def test_a_deny_still_refuses_a_candidate() -> None:
     hub = _hub(policy=FakeActionPolicy(deny_at=RiskLevel.LOW))
 
     decided = await hub.authorize(
-        plain._round(plain._call("c1", "remember", **_candidate(confirm=True)))
+        plain._round(plain._call("c1", "remember_fact", **_candidate(confirm=True)))
     )
 
     assert decided.verdicts[0].verdict is Verdict.NOT_DONE
@@ -95,7 +95,7 @@ async def test_a_candidate_resting_on_nothing_is_not_done() -> None:
     hub = _hub()
 
     decided = await hub.authorize(
-        plain._round(plain._call("c1", "remember", fact="likes window seats", why="travel"))
+        plain._round(plain._call("c1", "remember_fact", fact="likes window seats", why="travel"))
     )
 
     assert decided.verdicts[0].verdict is Verdict.NOT_DONE
@@ -159,7 +159,7 @@ async def test_without_the_ticket_the_same_candidate_needs_you_again() -> None:
     await cards._approved(hub.plans, call=requested)
 
     decided = await hub.authorize(
-        CallToAuthorize(plain._call("c1", "remember", **_candidate(confirm=True))),
+        CallToAuthorize(plain._call("c1", "remember_fact", **_candidate(confirm=True))),
         person=OWNER_PERSON_ID,
     )
 

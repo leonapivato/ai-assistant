@@ -245,7 +245,7 @@ import asyncio
 import contextlib
 import contextvars
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Protocol
@@ -459,8 +459,6 @@ from ai_assistant.orchestration.understanding import WrittenBy, fetch_held
 
 if TYPE_CHECKING:
     from collections.abc import (
-        Awaitable,
-        Callable,
         Collection,
         Coroutine,
         Iterable,
@@ -1038,9 +1036,10 @@ class PhaseTools:
                 if search is not None and one == search:
                     hidden = _properties(one) - {self._search_query}
                 elif forecast is not None and one == forecast:
-                    # Every argument the forecast read takes is the hub's (ADR-0324
-                    # §3:1, §3:4): planning writes only the *looking for*.
-                    hidden = _properties(one)
+                    # ADR-0364 §12:1-§12:2: the origin is the hub's, a system-supplied
+                    # argument of the offer, filled by the hub before authorizing as the
+                    # search's is; the coordinates are planning's.
+                    hidden = _properties(one) - {_LATITUDE_ARGUMENT, _LONGITUDE_ARGUMENT}
                 else:
                     hidden = set(self._fills.get(name, {}))
                 offered.append(_without(one, hidden))
@@ -1075,7 +1074,7 @@ class PhaseTools:
             and call.name == str(forecast.capability)
         ):
             proposal = await self._forecaster.request()
-            filled = None if proposal is None else proposal.parameters
+            filled = None if proposal is None else _forecast_filled(call, proposal.parameters)
         if not filled:
             return call
         arguments: dict[str, FrozenJson] = {**call.arguments, **filled}
@@ -1148,6 +1147,20 @@ class PhaseTools:
         and its attribution is noted under the call's decision, where a
         :meth:`holding` scope is open.
         """
+        named = [
+            name
+            for name in (_LATITUDE_ARGUMENT, _LONGITUDE_ARGUMENT)
+            if name in call.request.parameters
+        ]
+        if len(named) == 1:
+            # ADR-0364 §12:2, ADR-0357 §5:6: both or neither is the tool's check when called.
+            return ToolResult(
+                outcome=ToolOutcome.FAILED,
+                failure=ToolFailure(
+                    kind=ToolFailureKind.INVALID_REQUEST,
+                    message="give both the latitude and the longitude of a place, or neither",
+                ),
+            )
         outcome = await forecaster.read(call, timeout=timeout)
         if (supplied := _HOLDING.get()) is not None:
             supplied.obtained(outcome.records)
@@ -1156,6 +1169,27 @@ class PhaseTools:
                 forecaster.name, outcome.reported_at
             )
         return _forecasted(outcome)
+
+
+#: A forecast read's coordinates, as ``tools``' declaration names them, which this package
+#: cannot import: planning's to give, both or neither (ADR-0364 §12:2).
+_LATITUDE_ARGUMENT: Final = "latitude"
+_LONGITUDE_ARGUMENT: Final = "longitude"
+
+
+def _forecast_filled(
+    call: ProposedCall, proposal: Mapping[str, FrozenJson]
+) -> dict[str, FrozenJson]:
+    """What the hub fills in a forecast read (ADR-0364 §12:1-§12:2).
+
+    Its origin, and the configured place's coordinates where planning gave neither.
+    Planning's own coordinates are what the call sends, so they are kept; one of them alone
+    is kept as it is, and the forecast read comes back saying both or neither.
+    """
+    coordinates = (_LATITUDE_ARGUMENT, _LONGITUDE_ARGUMENT)
+    if any(name in call.arguments for name in coordinates):
+        return {name: value for name, value in proposal.items() if name not in coordinates}
+    return dict(proposal)
 
 
 def _forecast_attribution(channel: str, reported_at: datetime | None) -> str:
@@ -4529,7 +4563,9 @@ class PhasePath:
             # ADR-0356 §3:2, ADR-0353 §4, §6, §7: whose stimulus it is, its inputs as
             # recorded, and the running work its concurrent stimuli show.
             person_id=None if state is None else activation_person(state.trigger),
-            trigger=working.trigger,
+            # ADR-0364 §3:9: the trigger as the lifecycle resolved it, so a hub chat's
+            # stimulus names the conversation it came from by its ``where``.
+            trigger=working.trigger if state is None else state.trigger,
             joined=() if state is None else tuple(state.joined),
             received_at=None if state is None else state.started_at,
             running=(concurrent := self._in_progress(state, given))[0],

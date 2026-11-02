@@ -499,6 +499,13 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     ``ToolDefinition``, frozen values and ``EgressBinding`` an ``AskedCall`` holds, judged
     above. Nothing of a credential. No window carries a question mark (ADR-0361 §8:5).
 
+    **Connections** (ADR-0364 §3). ``ConnectionShown``, an entry of the Connections
+    section, is a place's identifier or an account's connection reference, a closed
+    state, a flag and an account kind; its ``ConnectionKind`` is code-owned text, what a
+    kind is and can do, with flags. ``ConnectionsFound`` is a page of them, a number and
+    a flag. The reference names a connection and is not its credential, which stays in
+    the keyring, read by ``tools/`` alone.
+
     **The person block** (ADR-0338 §7). ``PersonBlock``, on understanding's ``person``
     and planning's, is a person's id, their ``Profile`` — five fields they typed, the
     person's own words, Tier 1 — the slot as ``KeptInMind``, each a ``Memory`` judged
@@ -533,6 +540,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ChannelIdentity",
         "ClaimedAuthor",
         "ConfirmationPart",
+        "ConnectionKind",
+        "ConnectionShown",
+        "ConnectionsFound",
         "DeletedMessage",
         "DigestItem",
         "DigestReply",

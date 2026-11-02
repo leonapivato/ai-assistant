@@ -171,7 +171,9 @@ RETENTION = timedelta(days=30)
 _GRANTABLE = _SOURCE
 
 
-CAPABILITY = "send_email"
+#: The confirmable egress tool's capability. Not ``send_email``: that name is the email
+#: tool's, which authorizing checks by its own rules before any ruling (ADR-0364 §9:7).
+CAPABILITY = "send_letter"
 PARAMETERS = {"to": "someone@example.com"}
 
 

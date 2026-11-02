@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
-from exchange_support import says, section, tags
+from exchange_support import says, section, tag, tags
 from phases_support import NeverFinishing, frozen, input_of, phases_harness, processing
 from telegram_support import (
     AT,
@@ -179,7 +179,9 @@ async def test_a_message_in_is_answered_in_the_chat_through_the_phases() -> None
     assert all(one.activation_id == record.activation_id for one in typing)
 
 
-async def test_planning_is_told_the_place_is_the_lines_private_plain_text_chat() -> None:
+async def test_planning_is_shown_the_lines_chat_as_a_connection_reaching_the_owner() -> None:
+    """ADR-0364 §3:3: the stimulus's ``where`` names the line's chat, whose entry says what
+    it is, who it reaches by ``P`` label, and that it takes text messages."""
     line = _Line()
     line.fake.hold(text(1, "Hi"))
     completer = FakeToolCallingCompleter()
@@ -189,8 +191,12 @@ async def test_planning_is_told_the_place_is_the_lines_private_plain_text_chat()
     await harness.engine.aclose()
 
     shown = completer.calls[0].exchange.briefing
-    assert "Telegram" in shown
-    assert "plain text" in shown
+    (said,) = tags(section(shown, "# The stimulus"), "said")
+    entry = tag(section(shown, "## Connections"), "connection", label=str(said.get("where")))
+    assert entry.text is not None
+    assert "Telegram" in entry.text
+    assert entry.get("reaches") == "P1"
+    assert "takes text messages" in (entry.get("can") or "")
 
 
 async def test_what_is_not_input_starts_nothing_and_a_non_text_message_is_answered() -> None:
@@ -307,7 +313,7 @@ async def test_the_window_carries_the_earlier_exchange_and_a_reply_links_to_it()
     remembered = section(briefing, "## Stimulus origin memory")
     (earlier,) = tags(remembered, "episode")
     assert [(one.get("from"), one.text) for one in earlier.held("said")] == [
-        ("the owner", "Remind me what I said.")
+        ("P1", "Remind me what I said.")
     ]
     (did,) = earlier.held("did")
     assert "You said hello." in str(did.text)

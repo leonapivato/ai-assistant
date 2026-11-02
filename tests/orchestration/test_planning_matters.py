@@ -141,10 +141,11 @@ async def test_the_list_pulls_running_part_is_the_in_progress_entries() -> None:
         (ProposedCall(call_id="c1", name="list_tasks", arguments={}),), outcome
     )
 
-    running = listed["result"]["value"]["running"]
+    # ADR-0364 §6:1: the list pull's fields as they are, its place now ``where``.
+    running = listed["running"]
     assert running[0] == {
         "episode": running[0]["episode"],
-        "place": "the person's Telegram chat",
+        "where": "the person's Telegram chat",
         "input": running[0]["input"],
         "has_acted": True,
     }
@@ -205,7 +206,8 @@ async def test_a_waiting_round_is_shown_what_it_waits_on_and_why_it_was_declined
     await stage.plan(_inputs(**_matters(waiting=(waited,), declined=((_A, "already booked"),))))
 
     shown = tag(section(_sent(completer), "## Concurrent stimuli"), "stimulus", waited_on="yes")
-    assert shown.get("origin") == "Telegram"
+    # ADR-0364 §3:9: where it is, by its connection's L label.
+    assert shown.get("where") == "L1"
     assert shown.held("said")[0].text == "book Saturday"
     assert shown.get("acted") == "yes"
     assert shown.get("declined") == "already booked"
@@ -236,7 +238,7 @@ async def test_earlier_work_is_the_peer_view_read_as_provisional_with_its_marks(
     assert (plain.text, plain.get("outside")) == ("Three in Leith.", None)
     assert (marked.text, marked.get("outside")) == ("x", "yes")
     assert [one.text for one in shown.held("did")] == [
-        "the tool remember ran",
+        "the tool remember_fact ran",
         "the tool book may have run; whether it did is not known",
         "sent the message: Searching.",
     ]
@@ -282,8 +284,8 @@ async def test_a_stop_calls_result_and_a_refusal_naming_its_absorber() -> None:
         peer=PeerShown(activation_id=_B, absorbed_by=_A),
     )
     calls = (
-        ProposedCall(call_id="c1", name="stop_activation", arguments={"activation": "E1"}),
-        ProposedCall(call_id="c2", name="stop_activation", arguments={"activation": "E2"}),
+        ProposedCall(call_id="c1", name="stop_work", arguments={"work": "E1"}),
+        ProposedCall(call_id="c2", name="stop_work", arguments={"work": "E2"}),
     )
 
     done, absorbed = await _results(calls, stopped, refused, **_matters())
@@ -291,10 +293,11 @@ async def test_a_stop_calls_result_and_a_refusal_naming_its_absorber() -> None:
     value = tag(done["result"]["value"], "episode")
     assert value.get("stopped_by_this_call") == "yes"
     assert value.get("status") == "ended"
-    assert [one.text for one in value.held("did")] == ["the tool remember ran"]
+    assert [one.text for one in value.held("did")] == ["the tool remember_fact ran"]
     assert absorbed["absorbed_by"] == value.get("label"), "the absorber, by its label"
-    assert absorbed["outcome"] == (
-        "not done: newer work absorbed it since it was shown, so nothing was stopped"
+    assert absorbed["outcome"] == "not done"
+    assert absorbed["because"] == (
+        "newer work absorbed it since it was shown, so nothing was stopped"
     )
 
 
@@ -438,7 +441,7 @@ def _stop_shown(set_up: StillLive) -> CallOutcome:
 
 async def _set_up_shown(set_up: StillLive) -> Any:
     """What a stop's result shows, beside the stopped work's view, of what it set up."""
-    calls = (ProposedCall(call_id="c1", name="stop_activation", arguments={"activation": "E1"}),)
+    calls = (ProposedCall(call_id="c1", name="stop_work", arguments={"work": "E1"}),)
     (call,) = await _results(calls, _stop_shown(set_up), **_matters())
     assert tag(call["result"]["value"], "episode").get("label") == "E1"
     return call["result"]["set_up_still_live"]
@@ -503,13 +506,14 @@ async def test_a_stop_calls_result_says_when_what_it_set_up_could_not_be_read() 
     assert "could not be read" in await _set_up_shown(StillLive(read=False))
 
 
-#: ADR-0352 §3:8's line, as it is said now: in the stop's own description, since a rule
-#: about one tool is said there (ADR-0357 §7:1).
-_WORDS_COVER: Final = "where it is unclear what the words cover, ask which."
+#: The stop's rule on what to stop, in its own description, since a rule about one tool
+#: is said there (ADR-0357 §7:1). ADR-0364's agreed words drop ADR-0352 §3:8's "ask which":
+#: the instruction says to find out what is unclear where getting it wrong would matter.
+_WORDS_COVER: Final = "Stop exactly what was asked, including what a stop's result lists"
 
 
 async def test_the_words_cover_line_goes_with_the_stop_and_never_in_the_instruction() -> None:
-    """ADR-0352 §3:8, ADR-0357 §7:1: offered with the stop, in a waiting round and in any
+    """ADR-0357 §7:1, ADR-0364 §5:1: offered with the stop, in a waiting round and in any
     other; never in the instruction, which takes no flag (ADR-0356 §4:2)."""
     waited = RunningShown(
         activation_id=_A, place=_LINE, input="book Saturday", acted=True, parties=OWNERS_WORDS
@@ -517,10 +521,10 @@ async def test_the_words_cover_line_goes_with_the_stop_and_never_in_the_instruct
     for fields in ({}, {"waiting": (waited,)}):
         stage, completer, _ = _stage(RoundResponse(text=""))
         await stage.plan(_inputs(**_matters(**fields)))
-        (stop,) = (one for one in completer.last_call.tools if one.name == "stop_activation")
+        (stop,) = (one for one in completer.last_call.tools if one.name == "stop_work")
         assert stop.description.count(_WORDS_COVER) == 1
         assert _WORDS_COVER not in completer.last_call.exchange.instruction
     stage, completer, _ = _stage(RoundResponse(text=""))
     await stage.plan(_inputs())
-    assert all(one.name != "stop_activation" for one in completer.last_call.tools)
+    assert all(one.name != "stop_work" for one in completer.last_call.tools)
     assert _WORDS_COVER not in completer.last_call.exchange.instruction

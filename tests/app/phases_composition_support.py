@@ -25,6 +25,8 @@ from datetime import timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final
 
+from exchange_support import section, tags
+
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.reply_shapes import read_reply, reply_shape_version
@@ -299,21 +301,39 @@ async def until(check: Callable[[], Awaitable[bool]], *, what: str) -> None:
         await asyncio.sleep(0.005)
 
 
+def reply_to(briefing: str) -> str | None:
+    """The ``L`` label of the stimulus's connection where it takes a text, else ``None``.
+
+    ADR-0364 §3:3, §3:9: the stimulus names its origin by ``where``, and the origin's
+    Connections entry says what can be done with it; an event's origin is no connection.
+    """
+    stimulus = tags(section(briefing, "# The stimulus"))
+    where = next((one.get("where") for one in stimulus if one.get("where")), None)
+    if where is None:
+        return None
+    entries = tags(section(briefing, "## Connections"), "connection", label=where)
+    return where if any("takes text messages" in str(one.get("can")) for one in entries) else None
+
+
 def answering(words: str = REPLY) -> FakeToolCallingCompleter:
     """Planning that answers ``words`` in a work's first round, and proposes nothing after.
 
-    A round's own text is its notes alone (ADR-0356 §7:3): where the origin takes a reply,
-    the first round sends ``words`` by a ``text`` call, whose round brings one more, which
-    ends the work; where it takes none, as an event's, the first keeps them as its notes.
+    A round's own text is its notes alone (ADR-0356 §7:3): where the origin takes a text,
+    the first round sends ``words`` by a ``send_text`` naming the origin's connection
+    (ADR-0364 §9:1), whose round brings one more, which ends the work; where it takes none,
+    as an event's, the first keeps them as its notes.
     """
 
     def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
         if exchange.steps:
             return RoundResponse()
-        if "A reply can be written there." not in exchange.briefing:
+        connection = reply_to(exchange.briefing)
+        if connection is None:
             return RoundResponse(text=words)
         call = ProposedCall(
-            call_id="reply", name="text", arguments={"to": "the user", "words": words}
+            call_id="reply",
+            name="send_text",
+            arguments={"connection": connection, "words": words},
         )
         return RoundResponse(calls=(call,))
 

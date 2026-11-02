@@ -560,12 +560,12 @@ async def test_a_replace_that_would_move_a_task_past_its_wait_is_refused() -> No
 
 
 async def test_a_spawn_into_the_past_or_off_the_list_writes_nothing() -> None:
-    """§4:5, §5:6: an instant earlier than now, and a place off the list."""
+    """§4:5, §5:6: an instant earlier than now, and a connection off the list (ADR-0364 §8:2)."""
     world = _World()
     parent = activation()
 
     past = await _spawn(world, _spawner(parent), at="2025-12-31T23:00:00+00:00")
-    off = await _spawn(world, _spawner(parent), places=["telegram:other/9"])
+    off = await _spawn(world, _spawner(parent), connections=["telegram:other/9"])
 
     assert isinstance(past, Unwritten)
     assert isinstance(off, Unwritten)

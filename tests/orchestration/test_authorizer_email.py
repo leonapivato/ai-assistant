@@ -1,8 +1,9 @@
-"""ADR-0357 §2:5-§2:10 in authorizing: ``email``'s own checks, and its yes.
+"""ADR-0364 §9:7-§9:14 in authorizing: ``send_email``'s own checks, and its approval.
 
-Over the stage and the canonical fakes, with ``tools``' own declaration of ``email``:
-what comes back before any ruling, and that an email from the user's address never
-runs without their yes, whatever the policy says.
+Over the stage and the canonical fakes, with ``tools``' own declaration of ``send_email``:
+what comes back before any ruling, and that every email needs approval by rule, from
+whichever account, whatever the policy says (§9:12). ``from`` reaches authorizing as the
+account planning's check mapped its ``L`` label to, the person's own (§9:11).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from test_authorizer import _call, _Hub, _round
 
 from ai_assistant.core.types import PermissionOutcome, PermissionRuling
 from ai_assistant.orchestration.authorizer import Verdict
-from ai_assistant.tools.send_email import EMAIL
+from ai_assistant.tools.send_email import EMAIL, FROM_THE_PERSONS_ACCOUNT
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActionRequest, PermissionDecision
@@ -23,7 +24,7 @@ _ADDRESS: Final = "anna@example.invalid"
 
 
 class _Allowing:
-    """A policy that allows every call: what an email from the user's address beats."""
+    """A policy that allows every call: what the rule that every email needs approval beats."""
 
     async def decide(self, request: ActionRequest) -> PermissionRuling:
         del request
@@ -35,41 +36,33 @@ class _Allowing:
 
 
 def _email(**arguments: Any) -> dict[str, Any]:
-    return {"to": [_ADDRESS], "subject": "Lunch", "words": "One o'clock?", **arguments}
+    return {
+        "from": FROM_THE_PERSONS_ACCOUNT,
+        "to": [_ADDRESS],
+        "subject": "Lunch",
+        "words": "One o'clock?",
+        **arguments,
+    }
 
 
 async def _decided(policy: object | None = None, **arguments: Any) -> Any:
     hub = _Hub(EMAIL, policy=policy)  # type: ignore[arg-type]  # a policy of the test's own
-    decided = await hub.authorize(_round(_call("c1", "email", **_email(**arguments))))
+    decided = await hub.authorize(_round(_call("c1", "send_email", **_email(**arguments))))
     (verdict,) = decided.verdicts
     return hub, decided, verdict
 
 
-async def test_an_email_from_the_users_address_never_runs_without_their_yes() -> None:
-    """§2:10, §10's test: whatever allows it, it needs the user, and nothing runs."""
-    hub, decided, verdict = await _decided(_Allowing(), **{"from": "user"})
+async def test_every_email_needs_approval_whatever_allows_it() -> None:
+    """§9:12, §14:4: whatever allows it, it needs approval by rule, and nothing runs."""
+    hub, decided, verdict = await _decided(_Allowing())
 
     assert verdict.verdict is Verdict.NEEDS_YOU
     assert verdict.reason is not None
-    assert "user's own address" in verdict.reason
+    assert "every email needs approval" in verdict.reason
     assert decided.allowed == ()
     # The policy's allow stays the deciding decision, recorded as ruled.
     assert verdict.decision_id is not None
     assert (await hub.trail.get(verdict.decision_id)) is not None
-
-
-@pytest.mark.parametrize("sender", [None, "assistant"])
-async def test_an_email_from_the_assistants_address_comes_back_unruled(sender: str | None) -> None:
-    """§2:9: left out, it is sent from the assistant's address where one is connected; none
-    is, so it comes back saying only the user's is available, and no ruling is sought."""
-    arguments = {} if sender is None else {"from": sender}
-    _, decided, verdict = await _decided(_Allowing(), **arguments)
-
-    assert verdict.verdict is Verdict.NOT_DONE
-    assert verdict.reason is not None
-    assert "only the user's address is available" in verdict.reason
-    assert verdict.decision_id is None
-    assert decided.allowed == ()
 
 
 @pytest.mark.parametrize(
@@ -81,12 +74,12 @@ async def test_an_email_from_the_assistants_address_comes_back_unruled(sender: s
         pytest.param({"bcc": "anna at home"}, "'bcc' recipient 1", id="bcc"),
     ],
 )
-async def test_a_recipient_with_no_known_address_comes_back_before_the_ruling(
+async def test_a_recipient_that_is_not_an_address_comes_back_before_the_ruling(
     recipients: dict[str, Any], where: str
 ) -> None:
-    """§2:7: resolved only from an ADR-0148 §5:2 source, before the ruling; none is
-    wired, so it comes back saying an address is needed, and nothing is guessed."""
-    _, decided, verdict = await _decided(_Allowing(), **{"from": "user", **recipients})
+    """§9:13: every recipient is an email address; one that is not comes back not done,
+    saying an address is needed, and nothing is guessed."""
+    _, decided, verdict = await _decided(_Allowing(), **recipients)
 
     assert verdict.verdict is Verdict.NOT_DONE
     assert verdict.reason is not None
@@ -96,32 +89,31 @@ async def test_a_recipient_with_no_known_address_comes_back_before_the_ruling(
     assert decided.allowed == ()
 
 
-async def test_an_attachment_comes_back_and_sends_nothing() -> None:
-    """§2:8: what can be attached is the email tool's, and nothing can be yet."""
-    _, decided, verdict = await _decided(
-        _Allowing(), **{"from": "user", "attachments": ["the menu"]}
-    )
-
-    assert verdict.verdict is Verdict.NOT_DONE
-    assert verdict.reason is not None
-    assert "attached" in verdict.reason
-    assert decided.allowed == ()
-
-
-async def test_a_sender_that_is_neither_address_comes_back() -> None:
+async def test_a_sender_that_is_no_email_account_comes_back() -> None:
+    """§9:11: ``from`` names an email account, which planning's check maps; any other is not."""
     _, _, verdict = await _decided(_Allowing(), **{"from": "Anna"})
     assert verdict.verdict is Verdict.NOT_DONE
     assert verdict.reason is not None
     assert "'from'" in verdict.reason
 
 
-async def test_a_deny_still_refuses_an_email_from_the_users_address() -> None:
-    """§2:10 adds a yes; it takes no refusal away (ADR-0321 §2:10)."""
+async def test_words_whose_exact_tag_never_closes_come_back_not_done() -> None:
+    """§9:8: an unclosed tag comes back not done, before the ruling."""
+    _, decided, verdict = await _decided(_Allowing(), words="Say <exact>this exactly")
+    assert verdict.verdict is Verdict.NOT_DONE
+    assert verdict.reason is not None
+    assert "never closed" in verdict.reason
+    assert verdict.decision_id is None
+    assert decided.allowed == ()
+
+
+async def test_a_deny_still_refuses_an_email() -> None:
+    """§9:12 adds approval; it takes no refusal away (ADR-0321 §2:10)."""
 
     class _Denying(_Allowing):
         async def decide(self, request: ActionRequest) -> PermissionRuling:
             del request
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason="no")
 
-    _, _, verdict = await _decided(_Denying(), **{"from": "user"})
+    _, _, verdict = await _decided(_Denying())
     assert verdict.verdict is Verdict.NOT_DONE

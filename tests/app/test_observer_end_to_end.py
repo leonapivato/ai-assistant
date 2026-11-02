@@ -81,15 +81,17 @@ class _Planning:
             self.recorded = True
             call = ProposedCall(
                 call_id="c1",
-                name="remember",
-                arguments={"fact": _FACT, "why": "health", "rests_on_input": True},
+                name="remember_fact",
+                arguments={"fact": _FACT, "why": "health", "rests_on_this_stimulus": True},
             )
             return RoundResponse(calls=(_text("Got it, I'll remember."), call))
         return RoundResponse(calls=(_text("Noted."),))
 
 
 def _text(words: str) -> ProposedCall:
-    return ProposedCall(call_id="say", name="text", arguments={"to": "the user", "words": words})
+    return ProposedCall(
+        call_id="say", name="send_text", arguments={"connection": "L1", "words": words}
+    )
 
 
 class _Models:

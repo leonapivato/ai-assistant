@@ -283,7 +283,7 @@ _BOOK: Final = ToolDefinition(
     },
 )
 
-_CAPABILITIES: Final = ("web_search", "remember", "book")
+_CAPABILITIES: Final = ("search_web", "remember_fact", "book")
 
 #: A digest answering from the one record it read, by the label local to the call.
 _DIGESTED: Final = json.dumps({"evidence": [{"text": "It opens at nine.", "source": "D1"}]})
@@ -467,7 +467,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 invoker=tools,
                 own_records=OwnRecordsByCapability(
                     {
-                        "remember": CandidateCalls(similar=similar, limit=5),
+                        "remember_fact": CandidateCalls(similar=similar, limit=5),
                         **(
                             dict.fromkeys(STORY_CALL_CAPABILITIES, calls)
                             if calls is not None
@@ -602,7 +602,9 @@ def _digests_read(result: dict[str, Any]) -> list[tuple[str, str]]:
 
 def _remember(call_id: str, fact: str) -> ProposedCall:
     """A ``remember`` recording a candidate resting on the input (ADR-0329 §3:1)."""
-    return _call(call_id, "remember", fact=fact, why="worth keeping", rests_on_input=True)
+    return _call(
+        call_id, "remember_fact", fact=fact, why="worth keeping", rests_on_this_stimulus=True
+    )
 
 
 # --- the five cases ---------------------------------------------------------------------
@@ -656,7 +658,7 @@ async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
         RoundResponse(
             calls=(
                 text_call("Let me look that up."),
-                _call("c1", "web_search", query="museum hours", looking_for="when it opens"),
+                _call("c1", "search_web", query="museum hours", looking_for="when it opens"),
             ),
         ),
         says("It opens at nine.", call_id="say-2"),
@@ -675,7 +677,7 @@ async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
     ]
     # Planning was offered the search without the origin the hub fills, and the
     # searcher's own proposal filled it.
-    (offered,) = [one for one in completer.calls[0].tools if one.name == "web_search"]
+    (offered,) = [one for one in completer.calls[0].tools if one.name == "search_web"]
     schema = offered.model_dump()["parameters"]
     assert "origin" not in schema["properties"]
     assert "looking_for" in schema["required"]
@@ -708,7 +710,9 @@ async def test_a_search_is_digested_then_answered_in_a_second_round() -> None:
     assert digest.outcome is DigestOutcome.ANSWERED
     assert digest.question == "when it opens"
     assert [(one.text, one.source) for one in digest.evidence] == [("It opens at nine.", "R1")]
-    assert [(one.label, one.kind) for one in record.labels] == [("R1", LabelKind.RESULT)]
+    assert [(one.label, one.kind) for one in record.labels if one.kind is LabelKind.RESULT] == [
+        ("R1", LabelKind.RESULT)
+    ]
     # The second round was shown the evidence under the result's label, never the
     # raw result: in the report on the first round's call (ADR-0356 §5:4).
     _, shown_search = reported(completer.calls[1], 0)
@@ -736,10 +740,10 @@ async def _configured_search_run(*, registered: bool) -> tuple[Harness, FakeWebS
     binder.register_egress(proposal.tool, reference=_ACCOUNT.reference, identity=_ACCOUNT.identity)
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
-            calls=(_call("c1", "web_search", query="museum hours", looking_for="opening"),)
+            calls=(_call("c1", "search_web", query="museum hours", looking_for="opening"),)
         ),
         RoundResponse(
-            calls=(_call("c2", "web_search", query="museum prices", looking_for="price"),)
+            calls=(_call("c2", "search_web", query="museum prices", looking_for="price"),)
         ),
         RoundResponse(text="It opens at nine."),
     )
@@ -798,7 +802,7 @@ async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answe
     author as the hub's attribution; and the activation has read outside content.
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "forecast_read", looking_for="rain tomorrow"),)),
+        RoundResponse(calls=(_call("c1", "read_forecast", looking_for="rain tomorrow"),)),
         says("No rain tomorrow."),
         RoundResponse(),
     )
@@ -808,7 +812,7 @@ async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answe
         completer,
         digests=digests,
         forecaster=forecaster,
-        capabilities=(*_CAPABILITIES, "forecast_read"),
+        capabilities=(*_CAPABILITIES, "read_forecast"),
     )
     conversation = await _conversation(harness)
 
@@ -819,10 +823,11 @@ async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answe
         MessageAuthor.ASSISTANT,
         "No rain tomorrow.",
     )
-    # Offered with none of its arguments: the place never crosses the planning seam.
-    (offered,) = [one for one in completer.calls[0].tools if one.name == "forecast_read"]
+    # ADR-0364 §12:1-§12:2: offered without the origin the hub fills, the coordinates
+    # planning's own and optional; the configured place never crosses the planning seam.
+    (offered,) = [one for one in completer.calls[0].tools if one.name == "read_forecast"]
     schema = offered.model_dump()["parameters"]
-    assert set(schema["properties"]) == {"looking_for"}
+    assert set(schema["properties"]) == {"latitude", "longitude", "looking_for"}
     assert schema["required"] == ["looking_for"]
     # Sent to `Forecaster.read` with exactly the arguments its proposal names.
     (read,) = forecaster.read_calls
@@ -862,13 +867,13 @@ async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answe
 async def test_without_a_forecaster_planning_is_not_offered_the_weather_pull() -> None:
     """ADR-0324 §5:4: offered only where a forecaster is configured."""
     completer = FakeToolCallingCompleter.scripted(RoundResponse(text="I can't check that."))
-    harness = _harness(completer, capabilities=(*_CAPABILITIES, "forecast_read"))
+    harness = _harness(completer, capabilities=(*_CAPABILITIES, "read_forecast"))
     conversation = await _conversation(harness)
 
     await _say(harness, conversation, "will it rain tomorrow?")
     await _settled(harness, conversation)
 
-    assert all(one.name != "forecast_read" for one in completer.calls[0].tools)
+    assert all(one.name != "read_forecast" for one in completer.calls[0].tools)
 
 
 async def _configured_forecast_run(*, registered: bool) -> tuple[Harness, FakeForecaster, str]:
@@ -890,7 +895,7 @@ async def _configured_forecast_run(*, registered: bool) -> tuple[Harness, FakeFo
         identity=_FORECAST_ACCOUNT.identity,
     )
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "forecast_read", looking_for="rain"),)),
+        RoundResponse(calls=(_call("c1", "read_forecast", looking_for="rain"),)),
         RoundResponse(text="No rain."),
     )
     harness = _harness(
@@ -899,7 +904,7 @@ async def _configured_forecast_run(*, registered: bool) -> tuple[Harness, FakeFo
         policy=ThresholdActionPolicy(configured_forecast=_CONFIGURED_FORECAST),
         binder=binder,
         registered_forecast=frozenset({str(proposal.tool.id)}) if registered else frozenset(),
-        capabilities=(*_CAPABILITIES, "forecast_read"),
+        capabilities=(*_CAPABILITIES, "read_forecast"),
     )
     conversation = await _conversation(harness)
     await _say(harness, conversation, "will it rain?")
@@ -956,7 +961,7 @@ async def test_a_remember_records_a_candidate_through_the_assistants_own_records
         (MessageAuthor.ASSISTANT, "I'll remember that."),
     ]
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
-    (remembered,) = [one for one in effects if one.capability == "remember"]
+    (remembered,) = [one for one in effects if one.capability == "remember_fact"]
     assert remembered.outcome is ToolOutcome.SUCCEEDED
     # A candidate is the call joined to its effect record; it writes no memory (§3:3).
     assert [one for one in await harness.memory.export() if isinstance(one, Memory)] == []
@@ -990,10 +995,11 @@ async def test_a_booking_that_needs_you_is_answered_cannot_be_done_yet() -> None
             "I can't book that yet: it needs you, and that isn't possible yet.",
         ),
     ]
-    # The second round was shown the call as needing a yes it cannot ask for here, no
-    # Approvals channel being wired (ADR-0361 §2:4, §8:5); this case's round answers.
+    # The second round was shown the call refused, as needing approval it cannot ask for
+    # here, no Approvals channel being wired (ADR-0361 §2:4, ADR-0364 §6:3).
     (call,) = reported(completer.calls[1], 0)
-    assert call["outcome"].startswith("needs a yes, and it cannot be asked about")
+    assert call["outcome"] == "refused"
+    assert call["because"].startswith("it needs approval, and nothing here can ask for it")
 
     # Nothing ran: no effect record for the booking, and the invoker was not reached.
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
@@ -1010,7 +1016,7 @@ async def test_a_stop_mid_task_ends_after_the_current_round_and_writes_nothing_m
         RoundResponse(
             calls=(
                 text_call("Let me look that up."),
-                _call("c1", "web_search", query="museum hours", looking_for="when it opens"),
+                _call("c1", "search_web", query="museum hours", looking_for="when it opens"),
             ),
         ),
         says("It opens at nine.", call_id="say-2"),
@@ -1137,7 +1143,7 @@ async def test_a_message_that_fails_beside_a_remember_still_lists_what_was_remem
         await _say(harness, conversation, "remember I like green tea")
         episode = await _settled(harness, conversation)
 
-    expected = couldnt_finish(("the tool remember ran",)).text
+    expected = couldnt_finish(("the tool remember_fact ran",)).text
     assert _said(await _messages(harness, conversation))[1:] == [
         (MessageAuthor.ASSISTANT, expected)
     ]
@@ -1180,8 +1186,8 @@ async def test_two_results_digested_side_by_side_are_both_kept() -> None:
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _call("c1", "web_search", query="museum hours", looking_for="when it opens"),
-                _call("c2", "web_search", query="museum prices", looking_for="what it costs"),
+                _call("c1", "search_web", query="museum hours", looking_for="when it opens"),
+                _call("c2", "search_web", query="museum prices", looking_for="what it costs"),
             )
         ),
         says("It opens at nine."),
@@ -2135,13 +2141,13 @@ async def test_couldnt_finish_lists_an_unknown_outcome_as_unknown() -> None:
     """
     completer = FakeToolCallingCompleter.scripted()
     harness = _harness(completer)
-    await _claimed(harness, "e1", "remember", ToolOutcome.SUCCEEDED)
+    await _claimed(harness, "e1", "remember_fact", ToolOutcome.SUCCEEDED)
     await _claimed(harness, "e2", "book", ToolOutcome.INDETERMINATE)
     await _claimed(harness, "e3", "book", ToolOutcome.FAILED)
 
     written = await _ended_failing(harness, completer)
 
-    assert written == couldnt_finish(("the tool remember ran", _UNKNOWN_BOOKING)).text
+    assert written == couldnt_finish(("the tool remember_fact ran", _UNKNOWN_BOOKING)).text
 
 
 async def test_couldnt_finish_is_written_where_the_effect_records_cannot_be_read(
@@ -2285,7 +2291,7 @@ async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() 
     await claimed(message("e2", place="conversation:c2"), ToolOutcome.SUCCEEDED, position=3)
     await claimed(message("e3"), ToolOutcome.FAILED, reason="the place took no message")
     await claimed(message("e4"), ToolOutcome.SUCCEEDED, position=9)
-    await _claimed(harness, "e5", "remember", ToolOutcome.SUCCEEDED)
+    await _claimed(harness, "e5", "remember_fact", ToolOutcome.SUCCEEDED)
 
     assert await path.written("c1", [_ACTIVATION], [2, 3, 5]) == {
         2: WrittenBy(activation_id=_ACTIVATION, round="round:1")
@@ -2555,7 +2561,7 @@ async def test_a_later_round_is_handed_the_story_views_its_work_was_first_shown(
     else is not in the second round's request.
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(text="one", calls=(_call("c1", "remember", fact="likes lakes"),)),
+        RoundResponse(text="one", calls=(_call("c1", "remember_fact", fact="likes lakes"),)),
         RoundResponse(text="two"),
     )
     harness = _harness(completer)
@@ -2811,7 +2817,7 @@ async def _the_story(stories: FakeStoryStore, activation_id: str) -> str:
 _STARTED: Final = RoundResponse(
     calls=(
         text_call("I'll keep track of the trip."),
-        _call("c1", "start_story", notes=["A camping trip to Riverside."]),
+        _call("c1", "start_matter", notes="A camping trip to Riverside."),
     ),
 )
 
@@ -2832,7 +2838,7 @@ async def test_a_story_is_started_and_then_noted_end_to_end() -> None:
         _STARTED,
         RoundResponse(
             calls=(
-                _call("c2", "note_story", story="S1", note="Waiting on the campground's reply."),
+                _call("c2", "note_matter", matter="S1", note="Waiting on the campground's reply."),
             )
         ),
         RoundResponse(),
@@ -2857,7 +2863,7 @@ async def test_a_story_is_started_and_then_noted_end_to_end() -> None:
     # The second round was shown the new story under the label it then named, in the
     # start's result (ADR-0356 §5:4).
     _, started = reported(completer.calls[1], 0)
-    (shown,) = started["stories"]
+    (shown,) = started["matters"]
     matter = tag(shown, "matter")
     assert matter.get("label") == "S1"
     assert [one.text for one in matter.held("note")] == ["A camping trip to Riverside."]
@@ -2866,7 +2872,7 @@ async def test_a_story_is_started_and_then_noted_end_to_end() -> None:
     # The start is claimed under an effect record; the note, safe to repeat, is not.
     effects = await harness.plans.activation_effects([activation])
     assert [(one.capability, one.outcome) for one in effects if one.capability] == [
-        ("start_story", ToolOutcome.SUCCEEDED)
+        ("start_matter", ToolOutcome.SUCCEEDED)
     ]
     assert _stages(episode)[-5:] == [
         (ControllerStage.PLANNING, ControllerRule.ROUND_DUE),
@@ -2892,7 +2898,7 @@ async def test_a_tidy_up_brings_no_round_and_nothing_waits_for_it() -> None:
     """
     provider = _GatedTidyUp()
     completer = FakeToolCallingCompleter.scripted(
-        _STARTED, RoundResponse(calls=(_call("c2", "tidy_story", story="S1"),))
+        _STARTED, RoundResponse(calls=(_call("c2", "tidy_matter", matter="S1"),))
     )
     stories = FakeStoryStore(now=lambda: AT)
     harness = _harness(
@@ -2926,14 +2932,14 @@ async def test_a_tidy_up_brings_no_round_and_nothing_waits_for_it() -> None:
     assert len(versions.versions) == 1
     # Its outcome is the story's, not the episode's: no acting record of it, no effect.
     effects = await harness.plans.activation_effects([record.activation_id])
-    assert {one.capability for one in effects if one.capability} == {"start_story"}
+    assert {one.capability for one in effects if one.capability} == {"start_matter"}
 
 
 @pytest.mark.parametrize(
     ("name", "brings"),
     [
-        pytest.param("tidy_story", False, id="a-tidy-up-brings-none"),
-        pytest.param("note_story", True, id="any-other-refused-call-brings-one"),
+        pytest.param("tidy_matter", False, id="a-tidy-up-brings-none"),
+        pytest.param("note_matter", True, id="any-other-refused-call-brings-one"),
     ],
 )
 async def test_a_refused_tidy_up_still_brings_no_round(name: str, *, brings: bool) -> None:
@@ -2942,8 +2948,8 @@ async def test_a_refused_tidy_up_still_brings_no_round(name: str, *, brings: boo
     A label planning was never shown refuses the call whole, before authorizing; a
     refused note brings a round to say so, and a refused tidy-up does not.
     """
-    arguments: dict[str, Any] = {"story": "S9"}
-    if name == "note_story":
+    arguments: dict[str, Any] = {"matter": "S9"}
+    if name == "note_matter":
         arguments["note"] = "noted"
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(calls=(_call("c1", name, **arguments),))
@@ -2978,7 +2984,9 @@ async def test_a_note_is_marked_where_the_activation_read_outside_content(
     so authorizing fills the note's mark from it; the note's own words decide nothing.
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "note_story", story="S1", note="The reply said Sunday."),))
+        RoundResponse(
+            calls=(_call("c1", "note_matter", matter="S1", note="The reply said Sunday."),)
+        )
     )
     harness = _harness(completer)
     await harness.memory.add(_episode(parties=parties))
@@ -3041,31 +3049,24 @@ async def test_on_a_pass_that_may_not_show_the_owners_records_planning_still_wri
 async def test_a_note_is_moved_between_stories_by_its_label_end_to_end() -> None:
     """ADR-0303 §9:1, §9:4, ADR-0307 §5:5: a move carries the note named by its N label.
 
-    The first round starts a story with two first notes, the second starts another, and
-    the third moves the second note of the first story onto the other, naming the stories
-    by ``S`` label and the note by the ``N`` label it was shown under.
+    The first round starts a matter with its first note, the second starts another, and
+    the third moves the first matter's note onto the other, naming the matters by ``S``
+    label and the note by the ``N`` label it was shown under. A start's first notes are
+    one text since ADR-0364 §8:2, so the note moved is the first matter's only one.
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
-            text="I'll keep track of the trip.",
-            calls=(
-                _call(
-                    "c1",
-                    "start_story",
-                    notes=["A camping trip to Riverside.", "The dog's paperwork is open."],
-                ),
-            ),
+            text="I'll keep track of the dog.",
+            calls=(_call("c1", "start_matter", notes="The dog's paperwork is open."),),
         ),
-        RoundResponse(
-            calls=(_call("c2", "start_story", notes=["The dog's vet visit."]),),
-        ),
-        RoundResponse(calls=(_call("c3", "move_story", story="S1", to="S2", notes=["N2"]),)),
+        RoundResponse(calls=(_call("c2", "start_matter", notes="The dog's vet visit."),)),
+        RoundResponse(calls=(_call("c3", "move_to_matter", matter="S1", to="S2", notes=["N1"]),)),
     )
     stories = FakeStoryStore(now=lambda: AT)
     harness = _harness(completer, stories=stories, story_calls=True)
     conversation = await _conversation(harness)
 
-    await _say(harness, conversation, "help me plan a camping trip to Riverside")
+    await _say(harness, conversation, "help me sort the dog's vet visit")
     episode = await _settled(harness, conversation)
 
     record = episode.processing_record
@@ -3077,15 +3078,15 @@ async def test_a_note_is_moved_between_stories_by_its_label_end_to_end() -> None
         assert page is not None
         texts[str(header.story_id)] = [one.text for one in page.notes]
     assert sorted(texts.values()) == [
-        ["A camping trip to Riverside."],
+        [],
         ["The dog's paperwork is open.", "The dog's vet visit."],
     ]
-    (trip,) = [story for story, notes in texts.items() if "A camping trip" in notes[0]]
-    log = await stories.log(trip)
+    (left,) = [story for story, notes in texts.items() if not notes]
+    log = await stories.log(left)
     assert log is not None
     (moved_out,) = [line for line in log.lines if line.change is StoryChange.NOTE_MOVED_OUT]
     assert (moved_out.actor, moved_out.trigger) == (StoryActor.PLANNING, record.activation_id)
-    (labelled,) = [one for one in record.labels if one.label == "N2"]
+    (labelled,) = [one for one in record.labels if one.label == "N1"]
     assert labelled.kind is LabelKind.NOTE
 
 
@@ -3136,8 +3137,8 @@ async def test_the_hub_refuses_a_move_naming_a_note_not_held_before_authorizing(
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _call("c1", "move_story", story="S1", to="S2", notes=["N1", "N2"]),
-                _call("c2", "move_story", story="S1", to="S2", episodes=["E1"]),
+                _call("c1", "move_to_matter", matter="S1", to="S2", notes=["N1", "N2"]),
+                _call("c2", "move_to_matter", matter="S1", to="S2", episodes=["E1"]),
             )
         )
     )
@@ -3173,8 +3174,8 @@ async def test_on_an_owner_only_pass_a_move_naming_notes_is_refused_and_members_
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _call("c1", "move_story", story="S1", to="S2", notes=["N1"]),
-                _call("c2", "split_story", story="S1", episodes=["E1"]),
+                _call("c1", "move_to_matter", matter="S1", to="S2", notes=["N1"]),
+                _call("c2", "split_matter", matter="S1", episodes=["E1"]),
             )
         )
     )
@@ -3283,10 +3284,10 @@ async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_diges
         RoundResponse(
             calls=(
                 text_call("Let me check."),
-                _call("c1", "search_memory", query="dentist", looking_for="when it is"),
+                _call("c1", "search_memories", query="dentist", looking_for="when it is"),
             ),
         ),
-        RoundResponse(calls=(_call("c2", "follow_up", result="R1", looking_for="what moved"),)),
+        RoundResponse(calls=(_call("c2", "reread_result", result="R1", looking_for="what moved"),)),
         says("It is at three, with Dr Rao.", call_id="say-2"),
         RoundResponse(),
     )
@@ -3346,8 +3347,9 @@ async def test_a_memory_search_and_a_follow_up_reach_planning_by_label_and_diges
     # evidence, never its text (ADR-0307 §9:2).
     second = shown_text(completer.calls[1])
     _, search = reported(completer.calls[1], 0)
+    # ADR-0364 §6:1: the result's fields under its R label, as its description writes it.
     assert search["result"]["label"] == "R1"
-    value = search["result"]["value"]
+    value = search["result"]
     remembered = [tag(one, "memory") for one in value["remembered"]]
     assert [(one.get("label"), one.text) for one in remembered] == [
         ("M2", f"{_DENTIST} with Dr Rao")
@@ -3377,9 +3379,9 @@ async def test_a_follow_up_naming_a_result_with_nothing_held_comes_back_not_done
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             text="Let me check.",
-            calls=(_call("c1", "search_memory", query="dentist", looking_for="when it is"),),
+            calls=(_call("c1", "search_memories", query="dentist", looking_for="when it is"),),
         ),
-        RoundResponse(calls=(_call("c2", "follow_up", result="R1", looking_for="what moved"),)),
+        RoundResponse(calls=(_call("c2", "reread_result", result="R1", looking_for="what moved"),)),
         RoundResponse(text="It is with Dr Rao."),
     )
     digests = FakeModelProvider(reply=_SEARCH_DIGESTED)
@@ -3390,8 +3392,8 @@ async def test_a_follow_up_naming_a_result_with_nothing_held_comes_back_not_done
     episode = await _settled(harness, conversation, seeded=frozenset({"said"}))
 
     (follow_up,) = reported(completer.calls[2], 1)
-    assert follow_up["outcome"].startswith("not done")
-    assert "nothing is held" in follow_up["outcome"]
+    assert follow_up["outcome"] == "not done"
+    assert "nothing is held" in follow_up["because"]
     assert "result" not in follow_up
     assert digests.calls == []
     record = episode.processing_record
@@ -3408,7 +3410,7 @@ async def test_a_search_applies_the_audience_predicate_at_the_search_and_at_the_
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
-            calls=(_call("c1", "search_memory", query="dentist", looking_for="when it is"),)
+            calls=(_call("c1", "search_memories", query="dentist", looking_for="when it is"),)
         ),
         RoundResponse(text="ok"),
     )
@@ -3464,7 +3466,7 @@ async def _page_read(
     """
     stories = FakeStoryStore(now=lambda: AT)
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "read_story", story="S1"),)),
+        RoundResponse(calls=(_call("c1", "read_matter", matter="S1"),)),
         RoundResponse(text="Saturday."),
     )
     harness = _harness(completer)
@@ -3551,7 +3553,7 @@ async def test_a_storys_full_view_follows_the_owner_only_placement() -> None:
 async def test_a_story_read_naming_a_story_never_shown_is_refused_whole() -> None:
     """ADR-0307 §5:3: a label planning was never shown runs nothing."""
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "read_story", story="S9"),)),
+        RoundResponse(calls=(_call("c1", "read_matter", matter="S9"),)),
         RoundResponse(text="ok"),
     )
     harness = _harness(completer, stories=FakeStoryStore(now=lambda: AT), look_ups=True)
@@ -3561,8 +3563,8 @@ async def test_a_story_read_naming_a_story_never_shown_is_refused_whole() -> Non
     await _settled(harness, conversation)
 
     (read,) = reported(completer.calls[1], 0)
-    assert read["outcome"].startswith("refused")
-    assert "S9" in read["outcome"]
+    assert read["outcome"] == "refused"
+    assert "S9" in read["because"]
 
 
 async def test_a_tidy_up_naming_a_story_never_shown_beside_a_look_up_is_refused_and_recorded() -> (
@@ -3573,8 +3575,8 @@ async def test_a_tidy_up_naming_a_story_never_shown_beside_a_look_up_is_refused_
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _call("c1", "tidy_story", story="S9"),
-                _call("c2", "read_story", story="S9"),
+                _call("c1", "tidy_matter", matter="S9"),
+                _call("c2", "read_matter", matter="S9"),
             )
         ),
         RoundResponse(text="ok"),
@@ -3589,8 +3591,8 @@ async def test_a_tidy_up_naming_a_story_never_shown_beside_a_look_up_is_refused_
 
     tidied, read = reported(completer.calls[1], 0)
     for one in (tidied, read):
-        assert one["outcome"].startswith("refused")
-        assert "S9" in one["outcome"]
+        assert one["outcome"] == "refused"
+        assert "S9" in one["because"]
     record = episode.processing_record
     assert record is not None
     entries = {one.call_id: one for one in record.call_records}
@@ -3599,7 +3601,7 @@ async def test_a_tidy_up_naming_a_story_never_shown_beside_a_look_up_is_refused_
         assert entry.outcome is CallOutcomeKind.REFUSED
         assert entry.reason is not None
         assert "S9" in entry.reason
-    assert entries["c1"].capability == "tidy_story"
+    assert entries["c1"].capability == "tidy_matter"
 
 
 class _GatedWrites(FakeConversationStore):
@@ -3625,8 +3627,8 @@ async def test_a_tidy_ups_entry_is_stored_as_it_starts_while_its_sibling_is_pend
         _STARTED,
         RoundResponse(
             calls=(
-                _call("c2", "tidy_story", story="S1"),
-                _call("c3", "text", to="the user", words="Tidying."),
+                _call("c2", "tidy_matter", matter="S1"),
+                _call("c3", "send_text", connection="L1", words="Tidying."),
             )
         ),
         RoundResponse(),
@@ -3737,7 +3739,7 @@ async def test_with_the_record_on_each_source_writes_for_the_one_activation() ->
         DiagnosticKind.GIVEN,
     ]
     (authorized,) = sink.of(DiagnosticSource.AUTHORIZING)
-    assert authorized.model_dump(mode="json")["body"]["calls"][0]["name"] == "remember"
+    assert authorized.model_dump(mode="json")["body"]["calls"][0]["name"] == "remember_fact"
 
 
 async def test_with_the_record_off_an_activation_writes_nothing() -> None:
@@ -3812,14 +3814,16 @@ async def test_an_event_runs_the_phases_in_a_place_that_takes_no_message() -> No
         (ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE),
         (ControllerStage.END, ControllerRule.NOTHING_DUE),
     ]
-    # Planning is shown that the origin takes no reply (ADR-0307 §3:8), and the
+    # Planning is shown that the origin takes no reply (ADR-0307 §3:8): since ADR-0364
+    # §3:3 its Connections entry says so, the stimulus's where naming it; and the
     # stimulus withheld as an outside report.
     (asked,) = completer.calls
-    situation = section(asked.exchange.briefing, "## The situation")
-    assert "- The origin: a connected source" in situation
-    assert "No reply can be written there." in situation
     withheld = tag(section(asked.exchange.briefing, "# The stimulus"), "received")
     assert (withheld.get("withheld"), withheld.text) == ("yes", None)
+    # No connection kind declares the event's origin, so it is no connection a message
+    # could name: its stimulus carries no where, and Connections shows nothing to send to.
+    assert withheld.get("where") is None
+    assert tags(section(asked.exchange.briefing, "## Connections"), "connection") == []
     # Its text is its notes, kept with the episode and written nowhere.
     record = episode.processing_record
     assert record is not None
@@ -3842,11 +3846,11 @@ async def test_an_event_remembers_starts_a_story_and_notes_it() -> None:
         RoundResponse(
             calls=(
                 _remember("c1", "The thermostat goes to eco mode at 18:00."),
-                _call("c2", "start_story", notes=["The thermostat's schedule."]),
+                _call("c2", "start_matter", notes="The thermostat's schedule."),
             ),
         ),
         RoundResponse(
-            calls=(_call("c3", "note_story", story="S1", note="Eco mode at 18:00 again."),)
+            calls=(_call("c3", "note_matter", matter="S1", note="Eco mode at 18:00 again."),)
         ),
         # The note brings a third round (ADR-0315 §2:1), which has nothing to do.
         RoundResponse(),
@@ -3863,13 +3867,13 @@ async def test_an_event_remembers_starts_a_story_and_notes_it() -> None:
     shown = reported(completer.calls[1], 0)
     assert [one["outcome"].split(":")[0] for one in shown] == ["done", "done"]
     assert [call.name for call in completer.calls[1].exchange.steps[0].response.calls] == [
-        "remember",
-        "start_story",
+        "remember_fact",
+        "start_matter",
     ]
     effects = await harness.plans.activation_effects([activation])
     assert [(one.capability, one.outcome) for one in effects] == [
-        ("remember", ToolOutcome.SUCCEEDED),
-        ("start_story", ToolOutcome.SUCCEEDED),
+        ("remember_fact", ToolOutcome.SUCCEEDED),
+        ("start_matter", ToolOutcome.SUCCEEDED),
     ]
     # The candidate is the call as its round recorded it (ADR-0329 §3:3).
     assert record.rounds[0].calls[0].arguments["fact"] == (

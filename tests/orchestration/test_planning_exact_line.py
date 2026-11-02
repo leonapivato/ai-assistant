@@ -19,6 +19,7 @@ driven.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
@@ -41,14 +42,14 @@ if TYPE_CHECKING:
 #: cannot pass over a configuration that registered none of them.
 _FLOOR: Final = frozenset(
     {
-        "email",
+        "send_email",
         "book_stay",
         "booking_availability",
-        "web_search",
-        "remember",
-        "set_profile",
-        "pin",
-        "unpin",
+        "search_web",
+        "remember_fact",
+        "set_profile_field",
+        "pin_memory",
+        "unpin_memory",
     }
 )
 
@@ -78,7 +79,7 @@ def _everything() -> Settings:
     )
 
 
-def _value(name: str, schema: dict[str, Any]) -> object:
+def _value(name: str, schema: dict[str, Any]) -> object:  # noqa: PLR0911 — one per kind
     """A value the schema admits, distinct per argument so its line can be checked."""
     for combinator in ("anyOf", "oneOf"):
         if combinator in schema:
@@ -92,6 +93,10 @@ def _value(name: str, schema: dict[str, Any]) -> object:
     if kind == "array":
         item = _value(f"{name} item", schema.get("items", {"type": "string"}))
         return [item] * max(schema.get("minItems", 1), 1)
+    label = re.fullmatch(r"\^([A-Z])\[1-9\]\[0-9\]\*\$", str(schema.get("pattern", "")))
+    if kind == "string" and label is not None:
+        # ADR-0364 §9:2: an argument checked by its label's pattern, as send_text's is.
+        return f"{label.group(1)}1"
     if kind == "string" and (schema.get("format") == "date" or "pattern" in schema):
         return "2026-10-02"
     text = f"the {name} value"

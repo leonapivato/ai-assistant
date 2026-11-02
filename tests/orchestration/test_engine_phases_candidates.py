@@ -88,7 +88,7 @@ def _phases(
                 plans=harness.plans,
                 invoker=tools,
                 own_records=OwnRecordsByCapability(
-                    {"remember": CandidateCalls(similar=looking, limit=3)}
+                    {"remember_fact": CandidateCalls(similar=looking, limit=3)}
                 ),
                 timeout=timedelta(seconds=5),
                 now=lambda: AT,
@@ -99,7 +99,7 @@ def _phases(
                 conversations=harness.conversation_store,
                 max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
             ),
-            capabilities=("remember", "note_reliance"),
+            capabilities=("remember_fact", "note_reliance"),
             label_arguments={**CANDIDATE_LABEL_ARGUMENTS, **RELIANCE_LABEL_ARGUMENTS},
             look_ups=looking,
             round_limit=4,
@@ -132,7 +132,9 @@ async def _say(harness: Harness, conversation: str, text: str, message_id: str) 
 
 
 def _candidate(call_id: str = "c1", **fields: Any) -> Any:
-    return _call(call_id, "remember", fact=_FACT, why="travel", rests_on_input=True, **fields)
+    return _call(
+        call_id, "remember_fact", fact=_FACT, why="travel", rests_on_this_stimulus=True, **fields
+    )
 
 
 async def test_a_candidate_is_recorded_writes_no_memory_and_shows_its_lookup_next_round() -> None:
@@ -149,13 +151,13 @@ async def test_a_candidate_is_recorded_writes_no_memory_and_shows_its_lookup_nex
     episode = await _settled(harness, conversation)
 
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
-    (recorded,) = [one for one in effects if one.capability == "remember"]
+    (recorded,) = [one for one in effects if one.capability == "remember_fact"]
     assert recorded.outcome is ToolOutcome.SUCCEEDED
     held = [one for one in await harness.memory.export() if isinstance(one, Memory)]
     assert [one.id for one in held] == ["aisle"]
     (call,) = reported(completer.calls[1], 0)
     assert call["outcome"] == "done"
-    value = call["result"]["value"]
+    value = call["result"]  # ADR-0364 §5:1: a candidate's fields, under no label
     assert value["candidate"].startswith("recorded as a candidate for long-term memory")
     similar = [tag(one, "memory") for one in value["similar_memories"]]
     assert [(one.get("label"), one.text) for one in similar] == [("M1", "prefers aisle seats")]
@@ -174,10 +176,13 @@ async def test_a_candidate_with_confirm_set_needs_you_and_records_nothing() -> N
     episode = await _settled(harness, conversation)
 
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
-    assert [one for one in effects if one.capability == "remember"] == []
+    assert [one for one in effects if one.capability == "remember_fact"] == []
     (call,) = reported(completer.calls[1], 0)
-    assert call["outcome"].startswith("needs a yes, and it cannot be asked about")
-    assert call["because"] == "the user is asked to confirm this wording before it is kept"
+    # ADR-0364 §6:3: refused, and with no approvals wired nothing here can ask for it.
+    assert call == {
+        "outcome": "refused",
+        "because": "it needs approval, and nothing here can ask for it, so it will not run",
+    }
 
 
 async def test_reliance_is_noted_in_the_round_and_nowhere_else() -> None:
@@ -198,7 +203,7 @@ async def test_reliance_is_noted_in_the_round_and_nowhere_else() -> None:
     episode = await _settled(harness, conversation)
 
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
-    assert [one.capability for one in effects if one.capability is not None] == ["remember"]
+    assert [one.capability for one in effects if one.capability is not None] == ["remember_fact"]
     assert episode.processing_record is not None
     noted = episode.processing_record.rounds[1].calls[0]
     assert (noted.name, dict(noted.arguments)["memories"]) == ("note_reliance", ("M1",))
@@ -237,10 +242,10 @@ async def test_an_unprocessed_episodes_candidates_reach_the_next_activations_win
             calls=(
                 _call(
                     "c2",
-                    "remember",
+                    "remember_fact",
                     fact="The user prefers window seats over aisle seats.",
                     why="a correction of a held memory",
-                    rests_on_input=True,
+                    rests_on_this_stimulus=True,
                     memory="M1",
                     note="it replaces the aisle preference",
                 ),

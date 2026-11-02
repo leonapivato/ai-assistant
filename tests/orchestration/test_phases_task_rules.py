@@ -16,7 +16,6 @@ import structlog
 from exchange_support import section, tags
 from phases_support import phases_harness, until
 from task_support import AT, CHAT, LINE, activation, message, pushed, seams, spawn_effect
-from test_phases_task_scheduler import _THE_SCHEDULE
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -49,6 +48,8 @@ if TYPE_CHECKING:
 #: The person's profile zone: AT, midnight UTC on 1 January 2026, is 19:00 on Wednesday
 #: 31 December 2025 there. The hub's ``Settings.timezone`` is UTC.
 NEW_YORK: Final = "America/New_York"
+#: How the stimulus's framing says a task's step came due (ADR-0353 §7:1).
+_SCHEDULED_STEP: Final = "a step of scheduled work came due"
 
 
 def _day(day: int) -> datetime:
@@ -66,9 +67,10 @@ class _Inputs:
     def completer(self) -> FakeToolCallingCompleter:
         def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
             briefing = exchange.briefing
-            # Started by the Task Scheduler: its origin is the schedule (ADR-0353 §4:4).
-            if f"- The origin: {_THE_SCHEDULE}," in section(briefing, "## The situation"):
-                stimulus = section(briefing, "# The stimulus")
+            # Started by the Task Scheduler: since ADR-0364 §2:2 the situation names no
+            # origin, and the stimulus's framing says a step of scheduled work came due.
+            stimulus = section(briefing, "# The stimulus")
+            if _SCHEDULED_STEP in stimulus.split("\n", 1)[0]:
                 self.inputs.extend(str(one.text) for one in tags(stimulus))
                 window = section(briefing, "## Stimulus origin knowledge")
                 self.windows.append([one.text or "" for one in tags(window, "message")])

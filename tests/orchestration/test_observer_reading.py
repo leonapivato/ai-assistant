@@ -706,18 +706,22 @@ async def test_linked_work_that_ended_before_the_leaving_episode_is_read_as_it_s
 
 
 async def test_a_candidate_is_a_hint_naming_its_parts_and_memory() -> None:
-    """ADR-0329 §3:3, §9:1: a done ``remember`` call is a hint, its labels mapped."""
+    """ADR-0329 §3:3, §9:1: a done ``remember_fact`` call is a hint, its labels mapped."""
     harness = Harness()
     held = memory("m-seat", "The user likes aisle seats.", said_support(address("past")))
     values = {
         "fact": "The user prefers window seats.",
         "why": "travel",
-        "rests_on_input": True,
+        "rests_on_this_stimulus": True,
         "memory": "m-seat",
         "note": "it changes the earlier preference",
     }
     call = remember_call(
-        fact=values["fact"], why="travel", rests_on_input=True, memory="M1", note=values["note"]
+        fact=values["fact"],
+        why="travel",
+        rests_on_this_stimulus=True,
+        memory="M1",
+        note=values["note"],
     )
     await harness.hold(
         episode("past", at=AT - timedelta(days=3), text="I like aisle seats."),

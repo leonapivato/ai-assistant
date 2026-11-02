@@ -1,8 +1,9 @@
-"""ADR-0357 §2:4 for an activation the Task Scheduler started: where a ``text`` call goes.
+"""ADR-0364 §9:1-§9:4 for an activation the Task Scheduler started: where a text goes.
 
 End to end over the engine, the phases and the Task Scheduler's fakes: a person's
 activation spawns a task suggesting their conversation, and the task's activation sends
-a ``text`` call naming its place by label, by platform or not at all.
+a ``send_text`` call naming a connection by its ``L`` label. A task's work keeps its
+list: it speaks only in the connections its task suggests and the line (§9:4).
 """
 
 from __future__ import annotations
@@ -26,23 +27,31 @@ from ai_assistant.orchestration.chat import COULDNT_FINISH
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+#: Which connection a case's text names: the first its task suggests, the stimulus's own
+#: origin, the schedule, or a label it was never shown.
+_FIRST, _ORIGIN = "first place", "origin"
 
-def _texting(**via: str) -> Callable[[_Request], RoundResponse]:
-    """The task's activation: one ``text`` call in its first round, then nothing."""
+
+def _texting(connection: str) -> Callable[[_Request], RoundResponse]:
+    """The task's activation: one ``send_text`` call in its first round, then nothing."""
 
     def task(request: _Request) -> RoundResponse:
         if request.rounds:
             return RoundResponse()
-        named = {
-            key: _first_place(request) if value == "first place" else value
-            for key, value in via.items()
-        }
+        if connection == _FIRST:
+            named = _first_place(request)
+        elif connection == _ORIGIN:
+            origin = request.origin
+            assert origin is not None
+            named = str(origin.get("label"))
+        else:
+            named = connection
         return RoundResponse(
             calls=(
                 ProposedCall(
                     call_id="t1",
-                    name="text",
-                    arguments={"to": "the user", "words": "hello from the schedule", **named},
+                    name="send_text",
+                    arguments={"connection": named, "words": "hello from the schedule"},
                 ),
             )
         )
@@ -50,19 +59,9 @@ def _texting(**via: str) -> Callable[[_Request], RoundResponse]:
     return task
 
 
-@pytest.mark.parametrize(
-    "via",
-    [
-        pytest.param({}, id="naming-none-goes-to-the-one-place-its-task-suggests"),
-        pytest.param({"via": "first place"}, id="by-its-label"),
-        pytest.param({"via": "hub_chat"}, id="by-its-platform"),
-    ],
-)
-async def test_a_tasks_text_goes_into_the_place_it_names_or_its_task_suggests(
-    via: dict[str, str],
-) -> None:
-    """§2:4: left out, the one place its task suggests; named, by label or platform."""
-    completer = _responder(_spawning(places="first place"), _texting(**via))
+async def test_a_tasks_text_goes_into_the_connection_its_task_suggests_by_its_label() -> None:
+    """§9:1, §9:4: by label, into a connection its task suggests."""
+    completer = _responder(_spawning(connections=_FIRST), _texting(_FIRST))
     harness = phases_harness(completer, task_scheduler=seams())
     await harness.engine.start()
     try:
@@ -87,17 +86,17 @@ async def test_a_tasks_text_goes_into_the_place_it_names_or_its_task_suggests(
 
 
 @pytest.mark.parametrize(
-    ("via", "says"),
+    ("connection", "says"),
     [
-        pytest.param({"via": "L9"}, "'L9' names no place you were shown", id="a-label-off-it"),
-        pytest.param({"via": "telegram"}, "no place on your list is on Telegram", id="a-platform"),
+        pytest.param("L9", "'L9' names no connection you were shown", id="a-label-never-shown"),
+        pytest.param(_ORIGIN, "takes no text message", id="the-schedule"),
     ],
 )
-async def test_a_tasks_text_naming_nowhere_on_its_list_comes_back_with_its_places(
-    via: dict[str, str], says: str
+async def test_a_tasks_text_naming_no_connection_it_may_speak_in_comes_back_refused(
+    connection: str, says: str
 ) -> None:
-    """§2:4, §6:2: it runs nothing, and comes back with the places it may name."""
-    completer = _responder(_spawning(places="first place"), _texting(**via))
+    """§9:2: it runs nothing, and comes back refused with the connections it may name."""
+    completer = _responder(_spawning(connections=_FIRST), _texting(connection))
     harness = phases_harness(completer, task_scheduler=seams())
     await harness.engine.start()
     try:
@@ -116,6 +115,6 @@ async def test_a_tasks_text_naming_nowhere_on_its_list_comes_back_with_its_place
         assert (entry.outcome, entry.delivered) == (CallOutcomeKind.REFUSED, None)
         assert entry.reason is not None
         assert says in entry.reason
-        assert "the places it may name: L1 (the hub chat)" in entry.reason
+        assert "the connections it may name: L" in entry.reason
     finally:
         await harness.engine.aclose()

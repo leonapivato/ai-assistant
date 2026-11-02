@@ -388,7 +388,7 @@ async def test_the_full_view_reads_each_record_it_names_again_as_held_now() -> N
     """§10:6, §6:3: a memory forgotten since is left out, as is one the store lost."""
     searched = _earlier(
         "round:one",
-        calls=(ProposedCall(call_id="c1", name="search_memory", arguments={"query": "x"}),),
+        calls=(ProposedCall(call_id="c1", name="search_memories", arguments={"query": "x"}),),
     )
     showed = CallShowed(
         parts=(
@@ -402,7 +402,7 @@ async def test_the_full_view_reads_each_record_it_names_again_as_held_now() -> N
         RecordedCall(
             round="round:one",
             call_id="c1",
-            capability="search_memory",
+            capability="search_memories",
             effect=False,
             outcome=CallOutcomeKind.DONE,
             recorded_at=_AT,
@@ -476,7 +476,7 @@ def test_the_episode_look_ups_read_own_records_and_return_no_outside_text() -> N
     assert {one.name for one in offered} == {
         "search_episodes",
         "read_episode",
-        "read_older_history",
+        "read_origin_history",
     }
 
 

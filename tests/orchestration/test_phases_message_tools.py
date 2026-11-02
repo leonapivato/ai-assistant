@@ -1,10 +1,10 @@
-"""ADR-0357 §§2-4 through the phases: ``text``'s arguments, where it goes, its result.
+"""ADR-0364 §9 through the phases: ``send_text``'s arguments, where it goes, its result.
 
 End to end over the engine and the phases, a scripted planner and the canonical fakes:
-who a ``text`` call is for and where it goes, what comes back sending nothing, the words
-as the wording step renders them, and what the next round is shown of every message call
-(§3:1). No message asks: ``text`` takes no ``asks``, no exact lines follow its words,
-and no round records an asked call (ADR-0361 §8:5).
+the connection a ``send_text`` call names by its ``L`` label, what comes back sending
+nothing, the words with their exact parts as the wording step renders them, and what the
+next round is shown of a message call, its outcome alone (§9:5). No message asks: no
+exact lines follow its words, and no round records an asked call (ADR-0361 §8:5).
 """
 
 from __future__ import annotations
@@ -35,7 +35,8 @@ def _call(call_id: str, name: str, **arguments: object) -> ProposedCall:
 
 
 def _text(call_id: str, **arguments: object) -> ProposedCall:
-    return _call(call_id, TEXT_CAPABILITY, **{"to": "the user", **arguments})
+    """A ``send_text`` call, into ``L1``, the stimulus's origin, unless it names another."""
+    return _call(call_id, TEXT_CAPABILITY, **{"connection": "L1", **arguments})
 
 
 def _entries(episode: object) -> dict[str, RecordedCall]:
@@ -50,53 +51,85 @@ async def _said(harness: Harness, conversation: str) -> list[str]:
     ]
 
 
-async def test_a_text_with_exact_delivers_its_words_unchanged_and_says_where_and_how() -> None:
-    """§3:1, §4:2, §10's tests: the words as written, the place by the platform, and how."""
-    words = "  Tell her: “I'll be late,” word for word.  "
+async def test_an_exact_part_is_sent_as_written_its_tags_removed_its_result_its_outcome() -> None:
+    """§9:5-§9:9, §14:4: the words as written, the tags removed; the entry holds where and
+    how, and the next round is shown the outcome alone."""
+    words = "Tell her: <exact>“I'll be late,”</exact> word for word."
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_text("t1", words=words, exact=True, via="hub_chat"),)),
+        RoundResponse(calls=(_text("t1", words=words),)),
         RoundResponse(),
     )
     harness = phases_harness(completer)
 
     conversation, episode = await chat_turn(harness, "tell her I'll be late")
 
-    assert await _said(harness, conversation) == [words]
+    sent = "Tell her: “I'll be late,” word for word."
+    assert await _said(harness, conversation) == [sent]
     entry = _entries(episode)["t1"]
     assert entry.outcome is CallOutcomeKind.DONE
     assert entry.delivered is not None
-    assert entry.delivered.words == words
+    assert entry.delivered.words == sent
     assert entry.delivered.went.instance_id == conversation
     assert entry.delivered.status is DeliveryStatus.SENT
     (shown,) = reported(completer.calls[1], 0)
-    assert shown["delivered"] == {
-        "words": words,
-        "went": f"conversation:{conversation}",
-        "by": "the hub chat",
-        "how": "sent",
-    }
+    assert shown == {"outcome": "done"}
+    await harness.engine.aclose()
+
+
+async def test_a_literal_tag_sent_escaped_arrives_as_written() -> None:
+    """§9:8, §14:4: a backslash before a tag sends the tag as literal text."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_text("t1", words=r"Type \<exact> to mark a part."),)),
+        RoundResponse(),
+    )
+    harness = phases_harness(completer)
+
+    conversation, _ = await chat_turn(harness, "how do I mark a part?")
+
+    assert await _said(harness, conversation) == ["Type <exact> to mark a part."]
+    await harness.engine.aclose()
+
+
+async def test_an_unclosed_tag_comes_back_not_done_and_sends_nothing() -> None:
+    """§9:8, §14:4: the tool's own check, so not done rather than refused."""
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_text("t1", words="Say <exact>this"),)),
+        RoundResponse(),
+    )
+    harness = phases_harness(completer)
+
+    conversation, episode = await chat_turn(harness, "say it")
+
+    assert "Say this" not in await _said(harness, conversation)
+    entry = _entries(episode)["t1"]
+    assert (entry.outcome, entry.delivered) == (CallOutcomeKind.NOT_DONE, None)
+    assert entry.reason is not None
+    assert "never closed" in entry.reason
+    (shown,) = reported(completer.calls[1], 0)
+    assert shown["outcome"] == "not done"
+    assert "never closed" in shown["because"]
     await harness.engine.aclose()
 
 
 @pytest.mark.parametrize(
     ("arguments", "says"),
     [
-        pytest.param({"to": "Anna"}, "it could be the user", id="for-no-one-it-reaches"),
         pytest.param(
-            {"via": "telegram"},
-            "only into the place your input came from",
-            id="a-platform-off-the-input",
+            {"connection": "L4"},
+            "'L4' names no connection you were shown",
+            id="a-label-never-shown",
         ),
-        pytest.param({"via": "L4"}, "'L4' names no place you were shown", id="a-label-never-shown"),
-        pytest.param({"via": "whatsapp"}, "no platform", id="a-platform-not-built"),
-        pytest.param({"exact": "yes"}, "'exact'", id="a-wrong-argument"),
+        pytest.param(
+            {"connection": "the hub chat"}, "names one connection, by its L label", id="a-name"
+        ),
+        pytest.param({"to": "the owner"}, "nothing else", id="an-argument-it-takes-no-more"),
     ],
 )
 async def test_a_text_that_cannot_be_carried_out_comes_back_and_sends_nothing(
     arguments: dict[str, Any], says: str
 ) -> None:
-    """§2:3-§2:5, §6:1, §10's test: nothing is written and nothing is claimed, and the
-    result says why and what it may use instead."""
+    """§9:1-§9:2, §14:4: refused, nothing is written and nothing is claimed, and the
+    result says why and what it may name instead."""
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(calls=(_text("t1", words="Running late.", **arguments),)),
         RoundResponse(),
@@ -115,21 +148,8 @@ async def test_a_text_that_cannot_be_carried_out_comes_back_and_sends_nothing(
     effects = await harness.plans.activation_effects([record.activation_id])
     assert [one for one in effects if one.round == record.rounds[0].id] == []
     (shown,) = reported(completer.calls[1], 0)
-    assert shown["outcome"].startswith("refused")
-    await harness.engine.aclose()
-
-
-async def test_a_text_naming_the_input_by_its_platform_goes_there() -> None:
-    """§2:4: a platform names the place the input came from, where it is on it."""
-    completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_text("t1", words="On it.", via="the hub chat"),)),
-        RoundResponse(),
-    )
-    harness = phases_harness(completer)
-
-    conversation, _ = await chat_turn(harness, "do it")
-
-    assert await _said(harness, conversation) == ["On it."]
+    assert shown["outcome"] == "refused"
+    assert says in shown["because"]
     await harness.engine.aclose()
 
 

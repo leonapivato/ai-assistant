@@ -91,7 +91,7 @@ async def _ran(harness: Harness, request: ApprovalRequest, ran_in: str) -> None:
         id="effect-run",
         activation_id=ran_in,
         round="r-run",
-        capability="remember",
+        capability="remember_fact",
         values_digest=values_digest(ActionRequest(tool=REMEMBER_CANDIDATE, parameters=_values())),
         decision_id="decision-run",
         claimed_at=_TAPPED,
@@ -116,7 +116,7 @@ async def test_a_card_approved_remember_is_confirmed_at_the_approvals_episode(
     run = PlanningRound(
         id="r-run",
         recorded_at=_TAPPED,
-        calls=(ProposedCall(call_id="c1", name="run_approved", arguments={"label": "A1"}),),
+        calls=(ProposedCall(call_id="c1", name="run_approved", arguments={"ticket": "A1"}),),
     )
     held = [
         episode("ask", at=_WRITTEN),

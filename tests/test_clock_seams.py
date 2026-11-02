@@ -402,8 +402,8 @@ async def _authorizing_stage(now: Clock) -> None:
     """
     planned = ProposedCall(
         call_id="c-1",
-        name="remember",
-        arguments={"fact": "The user likes tea.", "why": "a taste", "rests_on_input": True},
+        name="remember_fact",
+        arguments={"fact": "The user likes tea.", "why": "a taste", "rests_on_this_stimulus": True},
     )
     await AuthorizingStage(
         registry=FakeToolRegistry([REMEMBER_CANDIDATE]),

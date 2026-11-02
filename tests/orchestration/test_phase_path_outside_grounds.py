@@ -304,7 +304,7 @@ async def test_a_story_read_names_the_marked_note_its_view_shows_once() -> None:
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
-            calls=(ProposedCall(call_id="c1", name="read_story", arguments={"story": "S1"}),)
+            calls=(ProposedCall(call_id="c1", name="read_matter", arguments={"matter": "S1"}),)
         ),
         RoundResponse(calls=(_book(),), text="the venue answered"),
     )
@@ -370,7 +370,7 @@ async def test_a_digest_the_episode_and_the_working_set_both_hold_is_one_ground(
             calls=(
                 ProposedCall(
                     call_id="c1",
-                    name="web_search",
+                    name="search_web",
                     arguments={"query": "museum hours", "looking_for": "when it opens"},
                 ),
             ),

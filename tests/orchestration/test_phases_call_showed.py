@@ -190,7 +190,7 @@ def test_what_an_entry_keeps_is_cut_to_the_bound_and_the_cut_carried() -> None:
 def test_a_call_not_done_keeps_nothing_of_what_it_showed() -> None:
     """§11:2: only a done call's entry keeps what it showed."""
     working = _working()
-    working.planned(_planned(_call("c1", "search_memory", query="x"), refused=("c1",)))
+    working.planned(_planned(_call("c1", "search_memories", query="x"), refused=("c1",)))
 
     (entry,) = working.call_entries(_AT)
 
@@ -376,7 +376,7 @@ async def test_a_story_started_keeps_the_story_its_report_showed() -> None:
     from ai_assistant.testing import FakeStoryStore  # noqa: PLC0415
 
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "start_story", notes=["A camping trip to Riverside."]),)),
+        RoundResponse(calls=(_call("c1", "start_matter", notes="A camping trip to Riverside."),)),
         RoundResponse(text="Noted."),
     )
     stories = FakeStoryStore(now=lambda: _AT)

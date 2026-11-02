@@ -125,7 +125,7 @@ def test_a_denial_performs_no_credential_read_and_no_network_io() -> None:
     """
     request = ActionRequest(
         tool=EMAIL,
-        parameters={"to": ["a@example.invalid"], "subject": "s", "words": "b"},
+        parameters={"from": "user", "to": ["a@example.invalid"], "subject": "s", "words": "b"},
     )
     denied = PermissionDecision.from_request(
         request,

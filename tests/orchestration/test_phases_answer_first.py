@@ -120,7 +120,9 @@ def _answer_and_spawn(
             )
             for index, (words, take) in enumerate(answers, 1)
         ]
-        calls.append(_call("s1", "spawn", instruction="Remind them at 9 PM.", delay_minutes=60))
+        calls.append(
+            _call("s1", "spawn_task", instruction="Remind them at 9 PM.", delay_minutes=60)
+        )
         calls.append(text_call(text, call_id="t1"))
         return RoundResponse(calls=tuple(calls))
 
@@ -172,12 +174,14 @@ def _answers(shown: list[dict[str, Any]]) -> list[str]:
 
 
 def _outcome_of(shown: list[dict[str, Any]], capability: str) -> str:
+    """A call's outcome, with its why where it has one (ADR-0364 §6:1)."""
     (call,) = [one for one in shown if one["capability"] == capability]
-    return str(call.get("outcome"))
+    because = call.get("because")
+    return str(call.get("outcome")) + ("" if because is None else f": {because}")
 
 
 def _spawn_outcome(shown: list[dict[str, Any]]) -> str:
-    return _outcome_of(shown, "spawn")
+    return _outcome_of(shown, "spawn_task")
 
 
 def _declined(request: _Request) -> str | None:
@@ -230,7 +234,7 @@ async def test_a_take_refused_at_the_limit_dispatches_no_spawn_and_no_message(
     assert str(value.get("label")) in because, "naming the offering work by its label"
     assert _NOT_TAKEN in _spawn_outcome(shown)
     assert _AT_LIMIT in _spawn_outcome(shown), "the held-back call says what it came to"
-    assert _NOT_TAKEN in _outcome_of(shown, "text"), "and so does the held-back message"
+    assert _NOT_TAKEN in _outcome_of(shown, "send_text"), "and so does the held-back message"
     assert len(planner.requests[older_text]) == 5, "planning ran a round again"
     assert _declined(planner.requests[newer_text][0]) == _LIMIT_REACHED
     await harness.engine.aclose()
@@ -329,7 +333,7 @@ async def test_an_answer_naming_no_open_offer_dispatches_no_spawn(
         return RoundResponse(
             calls=(
                 _call("a1", "answer_offer", offer=str(earlier.get("label")), take=True),
-                _call("s1", "spawn", instruction="Remind them at 9 PM.", delay_minutes=60),
+                _call("s1", "spawn_task", instruction="Remind them at 9 PM.", delay_minutes=60),
                 text_call("Changed it to 9 PM.", call_id="t1"),
             ),
         )
@@ -378,7 +382,7 @@ async def test_an_answer_planning_refused_before_acting_dispatches_no_spawn(
         RoundResponse(
             calls=(
                 _call("a1", "answer_offer", offer="E99", take=True),
-                _call("s1", "spawn", instruction="Remind them at 9 PM.", delay_minutes=60),
+                _call("s1", "spawn_task", instruction="Remind them at 9 PM.", delay_minutes=60),
                 text_call("Changed it to 9 PM.", call_id="t1"),
             ),
         ),
@@ -398,7 +402,7 @@ async def test_an_answer_planning_refused_before_acting_dispatches_no_spawn(
     assert "result" not in answer, "it never ran"
     assert _NOT_TAKEN in _spawn_outcome(shown)
     assert "it was not allowed, so it settled nothing" in _spawn_outcome(shown)
-    assert _NOT_TAKEN in _outcome_of(shown, "text"), "the held-back message says so too"
+    assert _NOT_TAKEN in _outcome_of(shown, "send_text"), "the held-back message says so too"
     await harness.engine.aclose()
 
 
@@ -425,7 +429,7 @@ async def test_a_stop_landing_while_the_answer_runs_dispatches_nothing_more(
     write, record_stop = harness.plans.write_scheduled_task, harness.plans.record_stop
 
     async def spawn_probe(*args: Any, **kwargs: Any) -> Any:
-        attempted.append("spawn")
+        attempted.append("spawn_task")
         return await write(*args, **kwargs)
 
     async def stop_probe(activation_id: str, /) -> None:

@@ -408,8 +408,8 @@ def _label_of(request: _Request, key: str) -> str:
             return str(one.get("label"))
     for number in range(1, len(request.rounds) + 1):
         for call in request.results(number):
-            value = call.get("result", {}).get("value", {})
-            for running in (value.get("running") if isinstance(value, dict) else None) or ():
+            # ADR-0364 §6:1: a list pull's running part is among the result's own fields.
+            for running in call.get("running") or ():
                 if isinstance(running, dict):
                     return str(running["episode"])
     msg = f"no running work shown for {key}: {request.text[:200]}"
@@ -678,7 +678,11 @@ async def test_an_activation_that_has_acted_waits_for_newer_input_on_another_pla
             calls=(
                 text_call("Looking.", call_id="m1"),
                 _call(
-                    "c1", "remember", fact="Likes Riverside.", why="a taste", rests_on_input=True
+                    "c1",
+                    "remember_fact",
+                    fact="Likes Riverside.",
+                    why="a taste",
+                    rests_on_this_stimulus=True,
                 ),
             ),
         ),
@@ -759,7 +763,13 @@ async def test_input_continuing_work_that_acted_elsewhere_is_offered_and_taken(
         RoundResponse(
             calls=(
                 text_call("Searching.", call_id="m2"),
-                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+                _call(
+                    "c1",
+                    "remember_fact",
+                    fact="Wants a flat.",
+                    why="a plan",
+                    rests_on_this_stimulus=True,
+                ),
             ),
         ),
         # Planned before the offer, so held back (§7:14) and never written.
@@ -770,7 +780,11 @@ async def test_input_continuing_work_that_acted_elsewhere_is_offered_and_taken(
         says("Two-bedroom flats: three found.", call_id="m12"),
         # ADR-0361 §7:3: the taken input's place is on its list, and a message may go there.
         lambda request: RoundResponse(
-            calls=(text_call("Filtered for you here.", call_id="m13", via=_taken_place(request)),)
+            calls=(
+                text_call(
+                    "Filtered for you here.", call_id="m13", connection=_taken_place(request)
+                ),
+            )
         ),
     )
     planner.hold(older_text, from_round=2)
@@ -809,11 +823,14 @@ async def test_input_continuing_work_that_acted_elsewhere_is_offered_and_taken(
 
 
 def _taken_place(request: _Request) -> str:
-    """The ``L`` label of a place newly on the list, an input's taken by a take (§7:3)."""
+    """The ``L`` label of the connection an input taken by a take came from (§7:3).
+
+    ADR-0364 §3:10: a connection that joins mid-work is shown in the news under its label.
+    """
     (place,) = [
         one
-        for one in tags(request.text, "place")
-        if one.text == "a conversation an input this activation took came from"
+        for one in tags(request.news(), "connection")
+        if one.text == "a conversation in the hub chat"
     ]
     return str(place.get("label"))
 
@@ -832,7 +849,13 @@ async def test_input_continuing_work_it_cannot_be_offered_to_waits_on_it(
         RoundResponse(
             calls=(
                 text_call("Searching.", call_id="m2"),
-                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+                _call(
+                    "c1",
+                    "remember_fact",
+                    fact="Wants a flat.",
+                    why="a plan",
+                    rests_on_this_stimulus=True,
+                ),
             ),
         ),
     )
@@ -872,7 +895,7 @@ async def test_input_continuing_work_it_cannot_be_offered_to_waits_on_it(
     assert [one.text for one in work.held("said")] == ["search apartments"]
     assert [one.text for one in work.held("did")] == [
         "sent the message: Searching.",
-        "the tool remember ran",
+        "the tool remember_fact ran",
         "sent the message: done: search apartments",
     ], "its finished work, the message it wrote during the wait included"
     assert await _assistant(harness, first) == ["Searching.", "done: search apartments"]
@@ -925,7 +948,13 @@ async def test_an_offer_taken_ends_the_offering_one_silent_and_the_reply_covers_
         RoundResponse(
             calls=(
                 text_call("Searching.", call_id="m3"),
-                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+                _call(
+                    "c1",
+                    "remember_fact",
+                    fact="Wants a flat.",
+                    why="a plan",
+                    rests_on_this_stimulus=True,
+                ),
             ),
         ),
         # Planned before the offer, so held back (§7:14) and never written.
@@ -995,7 +1024,11 @@ async def test_an_offer_declined_sends_the_newer_one_to_wait_with_the_reason(
             calls=(
                 text_call("Booking.", call_id="m4"),
                 _call(
-                    "c1", "remember", fact="Books Saturdays.", why="a habit", rests_on_input=True
+                    "c1",
+                    "remember_fact",
+                    fact="Books Saturdays.",
+                    why="a habit",
+                    rests_on_this_stimulus=True,
                 ),
             ),
         ),
@@ -1039,7 +1072,7 @@ async def test_an_offer_declined_sends_the_newer_one_to_wait_with_the_reason(
     work = tag(rounds[-1].news(), "episode")
     assert [one.text for one in work.held("said")] == [older_text]
     did = [one.text for one in work.held("did")]
-    assert "the tool remember ran" in did, "it plans from the older's finished work"
+    assert "the tool remember_fact ran" in did, "it plans from the older's finished work"
     assert "sent the message: done: book Saturday" in did
     assert _of(found, newer).joined == ()
     assert _of(found, older).joined == ()
@@ -1057,7 +1090,11 @@ async def test_an_older_one_ending_without_answering_has_declined(
             calls=(
                 text_call("Booking.", call_id="m5"),
                 _call(
-                    "c1", "remember", fact="Books Saturdays.", why="a habit", rests_on_input=True
+                    "c1",
+                    "remember_fact",
+                    fact="Books Saturdays.",
+                    why="a habit",
+                    rests_on_this_stimulus=True,
                 ),
             ),
         ),
@@ -1107,7 +1144,11 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
             calls=(
                 text_call("Booking.", call_id="m6"),
                 _call(
-                    "c1", "remember", fact="Books Saturdays.", why="a habit", rests_on_input=True
+                    "c1",
+                    "remember_fact",
+                    fact="Books Saturdays.",
+                    why="a habit",
+                    rests_on_this_stimulus=True,
                 ),
             ),
         ),
@@ -1117,10 +1158,10 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
                 text_call("Booked for Saturday.", call_id="m7"),
                 _call(
                     "c2",
-                    "remember",
+                    "remember_fact",
                     fact="Booked Saturday.",
                     why="the booking",
-                    rests_on_input=True,
+                    rests_on_this_stimulus=True,
                 ),
             ),
         ),
@@ -1162,14 +1203,14 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
     assert _offers(replanned)
     # The held-back round's message and write each come back not run (ADR-0349 §7:14).
     held_back = replanned.results(2)
-    assert [one["capability"] for one in held_back] == ["text", "remember"]
+    assert [one["capability"] for one in held_back] == ["send_text", "remember_fact"]
     assert all(
-        "offered to this work before this round acted" in one["outcome"] for one in held_back
+        "offered to this work before this round acted" in one["because"] for one in held_back
     )
     remembered = [
         one
         for one in await harness.plans.activation_effects([older])
-        if one.capability == "remember"
+        if one.capability == "remember_fact"
     ]
     assert len(remembered) == 1, "the held-back write was never claimed, by any path"
 
@@ -1179,9 +1220,7 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
 
 def _stop_result(request: _Request, round_number: int) -> dict[str, Any]:
     """What a stop call a round made came back with, as a later round is shown it."""
-    (call,) = [
-        one for one in request.results(round_number) if one["capability"] == "stop_activation"
-    ]
+    (call,) = [one for one in request.results(round_number) if one["capability"] == "stop_work"]
     result: dict[str, Any] = call["result"]
     return result
 
@@ -1200,7 +1239,7 @@ async def test_the_stop_call_stops_committed_work_and_its_task_stays_and_is_list
         RoundResponse(
             calls=(
                 text_call("I'll remind you.", call_id="remind"),
-                _call("c1", "spawn", instruction="Remind them to stretch.", delay_minutes=60),
+                _call("c1", "spawn_task", instruction="Remind them to stretch.", delay_minutes=60),
             ),
         ),
     )
@@ -1209,7 +1248,7 @@ async def test_the_stop_call_stops_committed_work_and_its_task_stays_and_is_list
         newer_text,
         RoundResponse(calls=(_call("c1", "list_tasks"),)),
         lambda request: RoundResponse(
-            calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
+            calls=(_call("c2", "stop_work", work=_label_of(request, newer_text)),)
         ),
         says("Stopped; the reminder is still set.", call_id="m17"),
         RoundResponse(),
@@ -1265,7 +1304,7 @@ async def test_a_stop_call_naming_work_that_set_up_nothing_says_nothing_is_still
         newer_text,
         RoundResponse(calls=(_call("c1", "list_tasks"),)),
         lambda request: RoundResponse(
-            calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
+            calls=(_call("c2", "stop_work", work=_label_of(request, newer_text)),)
         ),
         says("Stopped.", call_id="m18"),
         RoundResponse(),
@@ -1303,7 +1342,7 @@ async def test_a_stop_calls_result_lists_running_work_below_which_the_next_round
         RoundResponse(
             calls=(
                 text_call("Researching.", call_id="research"),
-                _call("c1", "spawn", instruction=step, delay_minutes=5),
+                _call("c1", "spawn_task", instruction=step, delay_minutes=5),
             ),
         ),
     )
@@ -1312,15 +1351,13 @@ async def test_a_stop_calls_result_lists_running_work_below_which_the_next_round
 
     def stop_below(request: _Request) -> RoundResponse:
         listed = _stop_result(request, 2)["set_up_still_live"]["running"]
-        return RoundResponse(
-            calls=(_call("c3", "stop_activation", activation=listed[0]["episode"]),)
-        )
+        return RoundResponse(calls=(_call("c3", "stop_work", work=listed[0]["episode"]),))
 
     planner.script(
         newer_text,
         RoundResponse(calls=(_call("c1", "list_tasks"),)),
         lambda request: RoundResponse(
-            calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
+            calls=(_call("c2", "stop_work", work=_label_of(request, newer_text)),)
         ),
         stop_below,
         says("Stopped the research and its reading.", call_id="m19"),
@@ -1397,7 +1434,7 @@ async def test_a_look_up_shows_what_running_work_has_found_so_far() -> None:
         newer_text,
         RoundResponse(calls=(_call("c1", "list_tasks"),)),
         lambda request: RoundResponse(
-            calls=(_call("c2", "look_up_activation", activation=_label_of(request, newer_text)),)
+            calls=(_call("c2", "read_episode", episode=_label_of(request, newer_text)),)
         ),
         says("The Grand, at 180.", call_id="m20"),
         RoundResponse(),
@@ -1434,7 +1471,7 @@ async def test_a_stop_call_waits_and_a_newer_input_absorbs_the_stopping_one() ->
         RoundResponse(
             calls=(
                 text_call("I'll remind you.", call_id="remind"),
-                _call("c1", "spawn", instruction="Remind them to stretch.", delay_minutes=60),
+                _call("c1", "spawn_task", instruction="Remind them to stretch.", delay_minutes=60),
             ),
         ),
     )
@@ -1443,7 +1480,7 @@ async def test_a_stop_call_waits_and_a_newer_input_absorbs_the_stopping_one() ->
         stopper,
         RoundResponse(calls=(_call("c1", "list_tasks"),)),
         lambda request: RoundResponse(
-            calls=(_call("c2", "stop_activation", activation=_label_of(request, stopper)),)
+            calls=(_call("c2", "stop_work", work=_label_of(request, stopper)),)
         ),
     )
     planner.hold(stopper, from_round=2)
@@ -1501,7 +1538,13 @@ async def test_a_waiting_round_is_shown_no_ticket_and_the_round_after_it_is(
         RoundResponse(
             calls=(
                 text_call("Searching.", call_id="m8"),
-                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+                _call(
+                    "c1",
+                    "remember_fact",
+                    fact="Wants a flat.",
+                    why="a plan",
+                    rests_on_this_stimulus=True,
+                ),
             ),
         ),
     )
@@ -1520,7 +1563,7 @@ async def test_a_waiting_round_is_shown_no_ticket_and_the_round_after_it_is(
             values={
                 "fact": "Wants two bedrooms.",
                 "why": "a plan",
-                "rests_on_input": True,
+                "rests_on_this_stimulus": True,
                 "episode": "activation:act-asking",
                 "rests_on_outside_content": False,
             },
@@ -1602,7 +1645,13 @@ async def test_a_take_within_one_conversation_never_reads_stopped_then_reads_the
         RoundResponse(
             calls=(
                 text_call("Searching.", call_id="m9"),
-                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+                _call(
+                    "c1",
+                    "remember_fact",
+                    fact="Wants a flat.",
+                    why="a plan",
+                    rests_on_this_stimulus=True,
+                ),
             ),
         ),
         says("Still searching.", call_id="m21"),

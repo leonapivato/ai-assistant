@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from datetime import timedelta
 from itertools import count
@@ -74,12 +75,14 @@ from ai_assistant.memory import InMemoryMemoryStore
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage
+from ai_assistant.orchestration.channel_kinds import EMAIL_ACCOUNT_KIND, AccountConnection
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.grants import GrantOperations
 from ai_assistant.orchestration.lookups import LookUps
+from ai_assistant.orchestration.message_tools import EMAIL_LABEL_ARGUMENTS
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
 from ai_assistant.orchestration.planning import PLANNING_PROMPT
@@ -129,7 +132,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import OfferedTool, PlanningExchange
 
 #: The capability the obeying planner proposes, offered as this module's doc says.
-SEND: Final = "email"
+SEND: Final = "send_email"
 
 #: The device the user writes from, their own.
 PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
@@ -168,10 +171,14 @@ class ObeyingPlanner(FakeToolCallingCompleter):
         self.to = to
         proposed = [False]
 
-        def respond(_exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
+        def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
             if proposed[0]:
                 return RoundResponse(text=AFTER)
             proposed[0] = True
+            # ADR-0364 §9:11: from the connected email account, by its Connections label.
+            account = re.search(
+                r'<connection label="(L\d+)"[^>]*can="[^"]*sends email', exchange.briefing
+            )
             return RoundResponse(
                 calls=(
                     ProposedCall(
@@ -181,9 +188,7 @@ class ObeyingPlanner(FakeToolCallingCompleter):
                             "to": to,
                             "subject": "your dentist",
                             "words": "The dentist appointment and the home address, as asked.",
-                            # ADR-0357 §2:9-§2:10: from the user's own connected account,
-                            # the one this build registers, so it is ruled on.
-                            "from": "user",
+                            "from": "L0" if account is None else account.group(1),
                         },
                     ),
                 )
@@ -370,6 +375,7 @@ def build_phases_world(
         tools=tools,
         plans=plans,
         writer=ChatWriter(conversations=chat, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES),
+        label_arguments=EMAIL_LABEL_ARGUMENTS,
         capabilities=(SEND,) if remembers is None else (SEND, REMEMBER_CAPABILITY),
         round_limit=3,
         round_wait=timedelta(seconds=5),
@@ -401,6 +407,8 @@ def build_phases_world(
             clock=lambda: NOW,
         ),
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),
+        # ADR-0364 §3:6: the send's account, shown in Connections for its ``from``.
+        account_connections=(AccountConnection(reference=REFERENCE, kind=EMAIL_ACCOUNT_KIND),),
         understanding=UnderstandingStage(
             model=TextAsStructured(FakeModelProvider(reply=_STATED)),
             excerpt_chars=2000,

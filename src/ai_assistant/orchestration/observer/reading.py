@@ -100,10 +100,10 @@ from ai_assistant.orchestration.candidates import done_candidates
 from ai_assistant.orchestration.episode_reads import is_open_episode, without_open_episodes
 from ai_assistant.orchestration.remembering import (
     FACT_ARGUMENT,
-    REMEMBER_CAPABILITY,
     STATEMENT_ARGUMENT,
     Candidate,
     candidate_of,
+    is_remember,
 )
 from ai_assistant.orchestration.stories import episode_address
 
@@ -974,7 +974,7 @@ class EpisodeReader:
         approved = [
             one
             for one in effects
-            if one.capability == REMEMBER_CAPABILITY
+            if is_remember(one.capability)
             and one.outcome is ToolOutcome.SUCCEEDED
             and one.part is not None
             and one.activation_id == processing.activation_id
@@ -1033,7 +1033,7 @@ class EpisodeReader:
         ticketed = [
             one
             for one in effects
-            if one.capability == REMEMBER_CAPABILITY
+            if is_remember(one.capability)
             and one.outcome is ToolOutcome.SUCCEEDED
             and one.ticket is not None
             and one.activation_id == processing.activation_id
@@ -1165,7 +1165,7 @@ def _asked(
             continue
         asked = round_.asked[part.part - 1]
         fact = asked.values.get(FACT_ARGUMENT)
-        if asked.tool.capability != REMEMBER_CAPABILITY or not isinstance(fact, str) or not fact:
+        if not is_remember(asked.tool.capability) or not isinstance(fact, str) or not fact:
             continue
         try:
             digest = values_digest(asked.request)

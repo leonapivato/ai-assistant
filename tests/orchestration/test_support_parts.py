@@ -424,7 +424,7 @@ def test_a_confirmed_candidate_reads_as_the_fact_its_approved_part_showed() -> N
                         values={
                             "fact": "The user likes tea.",
                             "why": "drinks",
-                            "rests_on_input": True,
+                            "rests_on_this_stimulus": True,
                             "confirm": True,
                             EPISODE_ARGUMENT: "activation:ask",
                             OUTSIDE_CONTENT_ARGUMENT: False,

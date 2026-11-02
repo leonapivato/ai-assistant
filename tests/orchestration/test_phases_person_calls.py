@@ -1,12 +1,13 @@
 """The person model's calls end to end, through the engine and the phases (ADR-0338 §8:4-§8:8).
 
 The yes-path hub of :mod:`test_phases_yes_path`, with a person-model store wired: a
-``pin`` planning proposes needs the person's yes, and so does a ``set_profile``. No part
+``pin_memory`` planning proposes needs the person's yes, and so does a
+``set_profile_field``. No part
 of a response names the calls a message asks about (ADR-0356 §7:5), so a question is the
 round's prose alone and records no asked call. Until the authority run a yes approves
 nothing (ADR-0353 §11:3), so neither runs on one: each goes back to planning as needing
 the person. With no store wired, none of the three is offered, and nothing changes
-(§11:2). A ``pin`` or ``unpin`` whose memory the asking
+(§11:2). A ``pin_memory`` or ``unpin_memory`` whose memory the asking
 round's live read does not return current, finds resting on outside content, or cannot
 read is not asked about (§8:6).
 """
@@ -151,12 +152,15 @@ async def test_a_pin_needing_a_yes_is_asked_and_a_yes_pins_nothing() -> None:
     approves nothing, so nothing is pinned."""
     hub, people = await _hub()
     hub.reader.nothing()
-    hub.planner.then(RoundResponse(calls=(_call("c1", "pin", memory="M1"),)), _ask(_ASKING_PIN))
+    hub.planner.then(
+        RoundResponse(calls=(_call("c1", "pin_memory", memory="M1"),)), _ask(_ASKING_PIN)
+    )
     conversation, _ = await hub.turn("I don't eat meat, keep that in mind.")
 
     (question,) = await hub.said(conversation)
     assert question.text == _ASKING_PIN
-    assert "needs a yes, and it cannot be asked about" in hub.planner.shown(1)
+    # ADR-0364 §6:3: refused, its why saying it needs approval, which nothing here asks.
+    assert "it needs approval, and nothing here can ask for it" in hub.planner.shown(1)
     model = await people.store.read(OWNER_PERSON_ID)
     assert model is not None
     assert model.pins == ()
@@ -177,14 +181,17 @@ async def test_a_set_profile_is_asked_and_a_yes_sets_nothing() -> None:
     hub, people = await _hub()
     hub.reader.nothing()
     hub.planner.then(
-        RoundResponse(calls=(_call("c1", "set_profile", field="time_zone", value="Asia/Kolkata"),)),
+        RoundResponse(
+            calls=(_call("c1", "set_profile_field", field="time_zone", value="Asia/Kolkata"),)
+        ),
         _ask(_ASKING_ZONE),
     )
     conversation, _ = await hub.turn("I've moved to Bangalore.")
 
     (question,) = await hub.said(conversation)
     assert question.text == _ASKING_ZONE
-    assert "needs a yes, and it cannot be asked about" in hub.planner.shown(1)
+    # ADR-0364 §6:3: refused, its why saying it needs approval, which nothing here asks.
+    assert "it needs approval, and nothing here can ask for it" in hub.planner.shown(1)
     # The situation's clock line names the zone it tells time in (ADR-0356 §3:1).
     assert "in the hub's time zone (UTC)" in hub.planner.shown(0)
 

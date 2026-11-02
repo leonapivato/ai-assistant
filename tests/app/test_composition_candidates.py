@@ -65,8 +65,8 @@ async def test_remember_records_candidates_and_reliance_is_offered(tmp_path: Pat
         assert runner._similar is phases._look_ups
         assert runner._limit == composition.CANDIDATE_LOOKUP_LIMIT
         assert set(phases._label_arguments[REMEMBER_CAPABILITY]) == {
-            "rests_on_user_messages",
-            "rests_on_assistant_messages",
+            "rests_on_stimuli",
+            "rests_on_responses",
             "rests_on_results",
             "memory",
         }

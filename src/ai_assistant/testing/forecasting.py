@@ -368,9 +368,6 @@ FAKE_FORECAST_READ: Final = ToolDefinition(
     result=CapabilityResult.MAY_CARRY_OUTSIDE_TEXT,
     outcome_can_be_unknown=True,
     safe_to_repeat=True,
-    # ADR-0364 §12:1-§12:2: the origin is the hub's to fill, and the coordinates are
-    # planning's, optional, as production declares them.
-    system_supplied=("origin",),
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -995,21 +992,16 @@ class FakeForecaster:
             _real(checked.request.parameters.get("latitude")),
             _real(checked.request.parameters.get("longitude")),
         )
-        if named != (self._origin, self._latitude, self._longitude):
-            # **§3's place clause, which is every forecaster's and not the production
-            # one's alone.** "The place is the deployment's own configured place, and the
-            # configuration is the naming act … held by the forecaster as its own
-            # configuration", and no caller widens, narrows or offsets the read
-            # (ADR-0093 §10). A call carrying this fake's declaration with another
-            # coordinate is *validly authorised* — its own decision was recorded over its
-            # own request — so the three checks above pass it, and only this comparison
-            # stands between it and a scripted answer about somewhere the deployment did
-            # not choose. A fake that answered it would let a consumer's test pass over an
-            # exchange no deployment can have.
+        if named[0] != self._origin or named[1] is None or named[2] is None:
+            # **The origin is still the configured provider's** (ADR-0364 §12:3): the
+            # coordinates are planning's, the configured place's where it named none, and
+            # what the call sends, never where it goes. A call carrying this fake's
+            # declaration to another origin, or without both coordinates, is no call a
+            # deployment makes, so a fake that answered it would let a consumer's test
+            # pass over an exchange no deployment can have.
             msg = (
-                f"{self._declaration.id}: this call names a place this forecaster is not "
-                f"configured for, so the request would ask about somewhere the "
-                f"deployment did not choose (ADR-0260 §3, §6)"
+                f"{self._declaration.id}: this call is not bound to the configured provider "
+                f"or does not carry both coordinates (ADR-0260 §6, ADR-0364 §12:2)"
             )
             raise ToolBindingError(msg)
 

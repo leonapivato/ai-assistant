@@ -211,18 +211,18 @@ async def test_the_tools_add_remembering_and_the_search_and_fill_the_searchs_ori
     tools = PhaseTools(
         registry=registry, invoker=registry, own_records=(REMEMBER_CANDIDATE,), searcher=searcher
     )
-    assert await tools.capabilities() == ("remember", "web_search")
+    assert await tools.capabilities() == ("remember_fact", "search_web")
     (offered_search,) = [
-        one for one in await tools.offered(("web_search",)) if one.capability == "web_search"
+        one for one in await tools.offered(("search_web",)) if one.capability == "search_web"
     ]
     assert "origin" in offered_search.system_supplied
-    (registered,) = await tools.find("web_search")
+    (registered,) = await tools.find("search_web")
     assert registered.system_supplied == ()
     filled = await tools.filled(
-        ProposedCall(call_id="c1", name="web_search", arguments={"query": "hours"})
+        ProposedCall(call_id="c1", name="search_web", arguments={"query": "hours"})
     )
     assert filled.arguments == {"origin": "https://search.example.com", "query": "hours"}
-    untouched = ProposedCall(call_id="c2", name="web_search", arguments={})
+    untouched = ProposedCall(call_id="c2", name="search_web", arguments={})
     assert await tools.filled(untouched) == untouched
 
 
@@ -240,32 +240,46 @@ async def test_a_search_call_goes_to_its_searcher_and_comes_back_as_its_records(
     assert searcher.searched == [call]
 
 
-async def test_the_tools_offer_the_weather_pull_beside_the_registry_with_no_argument() -> None:
-    """ADR-0324 §5:4-§5:5, §3:1, §3:4: the forecast read is offered as the search is.
+async def test_the_tools_offer_the_weather_pull_beside_the_registry_with_its_coordinates() -> None:
+    """ADR-0324 §5:4-§5:5, ADR-0364 §12:1-§12:2: the forecast read is offered as the search is.
 
     The deployment's registry never holds it, the tools list it beside the registry's
-    capabilities, planning is offered it with every argument the hub's, and the hub fills
-    them all from the forecaster's own proposal, whatever planning wrote for them.
+    capabilities, and planning is offered it with the origin the hub's alone: the
+    coordinates are planning's. The hub fills the origin, and the configured place's
+    coordinates only where planning named neither; one named alone is left as it is, for
+    the tool's both-or-neither check.
     """
     trail = FakeAuditTrail()
     registry = FakeToolInvoker([], ledger=trail, gate=trail)
     tools = PhaseTools(registry=registry, invoker=registry, forecaster=FakeForecaster())
 
-    assert "forecast_read" not in await registry.capabilities()
+    assert "read_forecast" not in await registry.capabilities()
     assert [str(one.id) for one in await registry.all_tools()] == []
-    assert await tools.capabilities() == ("forecast_read",)
-    (offered,) = await tools.offered(("forecast_read",))
-    assert set(offered.system_supplied) >= {"origin", "latitude", "longitude"}
-    (registered,) = await tools.find("forecast_read")
+    assert await tools.capabilities() == ("read_forecast",)
+    (offered,) = await tools.offered(("read_forecast",))
+    assert set(offered.system_supplied) == {"origin"}
+    (registered,) = await tools.find("read_forecast")
     assert registered.system_supplied == ()
-    filled = await tools.filled(
-        ProposedCall(call_id="c1", name="forecast_read", arguments={"latitude": 0.0})
-    )
-    assert filled.arguments == {
+    neither = await tools.filled(ProposedCall(call_id="c1", name="read_forecast", arguments={}))
+    assert neither.arguments == {
         "origin": DEFAULT_FORECAST_ORIGIN,
         "latitude": DEFAULT_FORECAST_LATITUDE,
         "longitude": DEFAULT_FORECAST_LONGITUDE,
     }
+    both = await tools.filled(
+        ProposedCall(
+            call_id="c2", name="read_forecast", arguments={"latitude": 42.36, "longitude": -71.06}
+        )
+    )
+    assert both.arguments == {
+        "origin": DEFAULT_FORECAST_ORIGIN,
+        "latitude": 42.36,
+        "longitude": -71.06,
+    }
+    one = await tools.filled(
+        ProposedCall(call_id="c3", name="read_forecast", arguments={"latitude": 0.0})
+    )
+    assert one.arguments == {"origin": DEFAULT_FORECAST_ORIGIN, "latitude": 0.0}
 
 
 async def test_no_forecaster_or_none_configured_offers_no_weather_pull() -> None:

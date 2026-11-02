@@ -339,7 +339,7 @@ async def _candidate(harness: Harness) -> None:
     values: dict[str, Any] = {
         "fact": "The user prefers window seats",
         "why": "travel",
-        "rests_on_input": True,
+        "rests_on_this_stimulus": True,
     }
     await harness.hold(
         episode(

@@ -143,8 +143,8 @@ async def test_a_note_a_tidy_up_took_in_is_read_then_moved_by_its_label() -> Non
 
     working, _ = await _run(
         stories,
-        _call("c1", "read_story", story="S1"),
-        _call("c2", "move_story", story="S1", to="S2", notes=["N2"]),
+        _call("c1", "read_matter", matter="S1"),
+        _call("c2", "move_to_matter", matter="S1", to="S2", notes=["N2"]),
         labels=_shown(("S1", LabelKind.STORY, trip), ("S2", LabelKind.STORY, car)),
     )
 
@@ -179,8 +179,8 @@ async def test_a_note_on_a_later_page_is_read_then_split_off_by_its_label() -> N
 
     working, completer = await _run(
         stories,
-        _call("c1", "read_story", story="S1", older_notes_page=2),
-        _call("c2", "split_story", story="S1", episodes=["E1"], notes=["N1"]),
+        _call("c1", "read_matter", matter="S1", older_notes_page=2),
+        _call("c2", "split_matter", matter="S1", episodes=["E1"], notes=["N1"]),
         labels=_shown(("S1", LabelKind.STORY, trip), ("E1", LabelKind.EPISODE, "activation:other")),
     )
 
@@ -206,7 +206,7 @@ async def test_on_a_pass_that_may_not_show_owner_records_a_read_shows_no_older_n
 
     working, completer = await _run(
         stories,
-        _call("c1", "read_story", story="S1"),
+        _call("c1", "read_matter", matter="S1"),
         labels=_shown(("S1", LabelKind.STORY, trip)),
         owner_records=False,
         read_back=True,
@@ -230,7 +230,7 @@ async def test_a_marked_older_note_a_read_shows_is_named_once_in_authorizings_gr
     entry names it once, by its id, and the round that read it is marked.
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "read_story", story="S1"),)),
+        RoundResponse(calls=(_call("c1", "read_matter", matter="S1"),)),
         RoundResponse(calls=(_book(),), text="the venue answered"),
     )
     harness = _harness(completer)

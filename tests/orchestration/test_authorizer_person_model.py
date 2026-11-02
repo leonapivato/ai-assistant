@@ -27,9 +27,9 @@ from ai_assistant.testing import FakeActionPolicy
 
 #: Each call, with arguments it is proposed with.
 _CALLS: list[tuple[str, dict[str, Any]]] = [
-    ("set_profile", {"field": "address", "value": "Robin"}),
-    ("pin", {"memory": "m:diet"}),
-    ("unpin", {"memory": "m:diet"}),
+    ("set_profile_field", {"field": "address", "value": "Robin"}),
+    ("pin_memory", {"memory": "m:diet"}),
+    ("unpin_memory", {"memory": "m:diet"}),
 ]
 
 
@@ -44,7 +44,9 @@ async def test_each_call_needs_the_persons_yes_by_rule(
 
     (verdict,) = decided.verdicts
     assert verdict.verdict is Verdict.NEEDS_YOU
-    assert verdict.reason == "a change to the person's profile or pins runs only on their yes"
+    assert verdict.reason == (
+        "a change to the profile or the pins of the person this work is for needs approval first"
+    )
     assert decided.allowed == ()
     # ADR-0321 §4:17: the policy's recorded allow is the deciding decision.
     deciding = await plain._recorded(hub.trail, verdict.decision_id)
@@ -55,7 +57,7 @@ async def test_a_deny_still_refuses_one() -> None:
     """ADR-0306 §4:1: the policy is asked first, as for every call."""
     hub = plain._Hub(SET_PROFILE, PIN, UNPIN, policy=FakeActionPolicy(deny_at=RiskLevel.LOW))
 
-    decided = await hub.authorize(plain._round(plain._call("c1", "pin", memory="m:diet")))
+    decided = await hub.authorize(plain._round(plain._call("c1", "pin_memory", memory="m:diet")))
 
     assert decided.verdicts[0].verdict is Verdict.NOT_DONE
 
@@ -64,7 +66,7 @@ async def test_where_none_is_offered_a_call_names_no_tool_and_is_not_done() -> N
     """§11:2: with no store wired no declaration is advertised, so selection finds none."""
     hub = plain._Hub()
 
-    decided = await hub.authorize(plain._round(plain._call("c1", "pin", memory="m:diet")))
+    decided = await hub.authorize(plain._round(plain._call("c1", "pin_memory", memory="m:diet")))
 
     (verdict,) = decided.verdicts
     assert verdict.verdict is Verdict.NOT_DONE
@@ -102,7 +104,7 @@ async def test_without_the_ticket_the_same_pin_needs_you_again() -> None:
     await cards._approved(hub.plans, call=RequestedCall(tool=PIN, values={"memory": "m:diet"}))
 
     decided = await hub.authorize(
-        CallToAuthorize(plain._call("c1", "pin", memory="m:diet")), person=OWNER_PERSON_ID
+        CallToAuthorize(plain._call("c1", "pin_memory", memory="m:diet")), person=OWNER_PERSON_ID
     )
 
     assert decided.verdicts[0].verdict is Verdict.NEEDS_YOU

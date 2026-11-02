@@ -41,10 +41,11 @@ from ai_assistant.orchestration.approvals import (
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
+    READ_EPISODE_CAPABILITY,
     LookUps,
 )
 from ai_assistant.orchestration.matter_calls import MATTER_CAPABILITIES, MATTER_LABEL_ARGUMENTS
-from ai_assistant.orchestration.message_tools import TEXT_CAPABILITY
+from ai_assistant.orchestration.message_tools import EMAIL_LABEL_ARGUMENTS, TEXT_CAPABILITY
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY, RELIANCE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.remembering import CANDIDATE_LABEL_ARGUMENTS
@@ -122,7 +123,7 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(  # noq
         # (ADR-0307 §6:6), with theirs.
         offered = await _offered(phases)
         assert {str(one.capability) for one in offered} == {
-            "remember",
+            "remember_fact",
             NOTE_RELIANCE_CAPABILITY,
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
@@ -144,9 +145,11 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(  # noq
             **RELIANCE_LABEL_ARGUMENTS,
             **TASK_SCHEDULER_LABEL_ARGUMENTS,
             **MATTER_LABEL_ARGUMENTS,
+            # ADR-0364 §9:7: ``send_email``'s ``from`` names an account's connection by label.
+            **EMAIL_LABEL_ARGUMENTS,
         }
-        # ADR-0357 §2:4: a ``text`` call's ``via`` names a place or a platform, so the
-        # phases resolve it, and the judge's label check never reads it.
+        # ADR-0364 §9:1: a ``send_text`` call's ``connection`` carries its own label
+        # pattern, so the phases resolve it, and the judge's label check never reads it.
         assert TEXT_CAPABILITY not in phases._label_arguments
         assert phases._task_calls is not None
         assert phases._matters is engine._matters
@@ -168,8 +171,12 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(  # noq
         seam = approvals._beside
         assert isinstance(seam, _Beside)
         assert set(seam._runners) == TASK_SCHEDULER_CAPABILITIES
-        # ADR-0349 §4:7, §6:4, §7:20: and the calls on running work beside those.
-        matters = seam._beside
+        # ADR-0364 §8:3: ``read_episode``, reading running work too, beside those.
+        reading = seam._beside
+        assert isinstance(reading, _Beside)
+        assert set(reading._runners) == {READ_EPISODE_CAPABILITY}
+        # ADR-0349 §4:7, §6:4, §7:20: and the calls on running work beside that.
+        matters = reading._beside
         assert isinstance(matters, _Beside)
         assert set(matters._runners) == MATTER_CAPABILITIES
         runners = matters._beside._runners  # type: ignore[attr-defined]
@@ -206,18 +213,18 @@ async def test_a_connected_search_is_offered_without_the_origin_the_hub_fills(
         assert phases is not None
         offered = {str(one.capability): one for one in await _offered(phases)}
         assert set(offered) == {
-            "web_search",
-            "remember",
+            "search_web",
+            "remember_fact",
             NOTE_RELIANCE_CAPABILITY,
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
             # ADR-0361 §2:1: the Approvals channel's actuator, on every deployment.
             REQUEST_APPROVAL_CAPABILITY,
         }
-        assert "origin" in offered["web_search"].system_supplied
+        assert "origin" in offered["search_web"].system_supplied
         # Authorizing selects the search's own declaration, which the searcher compares
         # every call against (ADR-0029 §2).
-        (selected,) = await phases._tools.find("web_search")
+        (selected,) = await phases._tools.find("search_web")
         assert "origin" not in selected.system_supplied
         # ADR-0247 §4: authorizing is told the search is this deployment's registered
         # one, so its calls carry `closed_loop` and reach the configured route.
@@ -254,7 +261,7 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
         assert set(offered) == {
             "booking_availability",
             "book_stay",
-            "remember",
+            "remember_fact",
             NOTE_RELIANCE_CAPABILITY,
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
@@ -301,7 +308,7 @@ async def test_a_connected_account_s_send_is_offered(tmp_path: Path) -> None:
         phases = engine._phases
         assert phases is not None
         offered = {str(one.capability) for one in await _offered(phases)}
-        assert "email" in offered
+        assert "send_email" in offered
     finally:
         await engine.aclose()
 

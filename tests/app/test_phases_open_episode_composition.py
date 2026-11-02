@@ -18,6 +18,7 @@ import pytest
 from phases_composition_support import (
     SETTLE,
     Phased,
+    answering,
     build_phased,
     hold,
     phased,
@@ -57,7 +58,7 @@ _FROZEN_COPIES: Final = 3
 @pytest.fixture
 async def composed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Phased]:
     """The production root with the phases, over a fresh data directory, started."""
-    built = build_phased(tmp_path, monkeypatch)
+    built = build_phased(tmp_path, monkeypatch, completer=answering())
     await built.engine.start()
     try:
         yield built

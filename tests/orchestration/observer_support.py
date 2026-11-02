@@ -199,7 +199,7 @@ async def remembered(  # noqa: PLR0913 — the call, where it was recorded, and 
         id=effect_id,
         activation_id=activation_id,
         round=round_id,
-        capability="remember",
+        capability="remember_fact",
         values_digest=values_digest(ActionRequest(tool=REMEMBER_CANDIDATE, parameters=filled)),
         decision_id=f"decision-{effect_id}",
         claimed_at=AT,
@@ -212,7 +212,7 @@ async def remembered(  # noqa: PLR0913 — the call, where it was recorded, and 
 
 def remember_call(call_id: str = "c1", **values: Any) -> ProposedCall:
     """A ``remember`` call as a round records it, recording a candidate."""
-    return ProposedCall(call_id=call_id, name="remember", arguments=values)
+    return ProposedCall(call_id=call_id, name="remember_fact", arguments=values)
 
 
 def said(

@@ -100,12 +100,10 @@ async def _reported(
 async def test_a_call_needing_a_yes_is_asked_for_by_request_approval() -> None:
     """§2:4: it ran nothing, and is asked about through request_approval alone."""
     planned, shown = await _reported(_needs_you("r", "c1"), approvals=True, person_id="owner")
+    # ADR-0364 §6:3: shown refused, its why saying to ask with request_approval.
     assert shown == {
-        "outcome": (
-            "needs the person's yes, so nothing ran: to ask, call request_approval with this "
-            "call's capability and the same arguments, and say in why what it does"
-        ),
-        "because": "the permission policy asks the user about this call",
+        "outcome": "refused",
+        "because": "it needs approval: ask for it with request_approval",
     }
     assert planned.round.asked == ()
 
@@ -113,16 +111,19 @@ async def test_a_call_needing_a_yes_is_asked_for_by_request_approval() -> None:
 async def test_in_an_activation_that_is_no_persons_nothing_is_asked() -> None:
     """§2:5: no request can be written for no one."""
     _, shown = await _reported(_needs_you("r", "c1"), approvals=True)
-    assert shown["outcome"] == (
-        "needs the person's yes, and this activation is no person's, so it will not run and "
-        "is not asked about"
-    )
+    assert shown == {
+        "outcome": "refused",
+        "because": "it needs approval, and this work is no person's, so no one can be asked for it",
+    }
 
 
 async def test_where_the_approvals_channel_is_not_wired_nothing_can_ask() -> None:
     """§2:4, §4:10: no input approves anything, so with no card nothing can ask."""
     planned, shown = await _reported(_needs_you("r", "c1"), person_id="owner")
-    assert shown["outcome"] == "needs a yes, and it cannot be asked about, so it will not run"
+    assert shown == {
+        "outcome": "refused",
+        "because": "it needs approval, and nothing here can ask for it, so it will not run",
+    }
     assert "ask_as" not in shown
     assert planned.round.asked == ()
 
@@ -132,16 +133,15 @@ async def test_a_call_a_pending_request_holds_says_it_waits_on_its_card() -> Non
     _, shown = await _reported(
         _needs_you("r", "c1", ALREADY_ON_A_CARD), approvals=True, person_id="owner"
     )
-    assert shown == {"outcome": ALREADY_ON_A_CARD}
+    assert shown == {"outcome": "refused", "because": ALREADY_ON_A_CARD}
 
 
 async def test_a_deny_is_never_asked_about_and_is_said_plainly() -> None:
     """ADR-0321 §2:10's second case, as ADR-0361 §2:3 keeps it: the refused outcome says so."""
     refused = CallOutcome("r", "c1", CallOutcomeKind.REFUSED, reason="the policy denies it")
     planned, shown = await _reported(refused, approvals=True, person_id="owner")
-    assert shown["outcome"].startswith(
-        "refused before it ran, so nothing in it ran, and no yes lets it run: never ask about it"
-    )
+    # ADR-0364 §6:1: refused, with the policy's own why.
+    assert shown == {"outcome": "refused", "because": "the policy denies it"}
     assert planned.round.asked == ()
 
 

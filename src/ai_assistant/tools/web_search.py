@@ -205,10 +205,6 @@ WEB_SEARCH: Final = ToolDefinition(
     result=CapabilityResult.MAY_CARRY_OUTSIDE_TEXT,
     outcome_can_be_unknown=True,
     safe_to_repeat=True,
-    # ADR-0364 §12:1: the origin is the hub's to fill, absent from the schema planning is
-    # offered, and keeps its destination keyword, so the binding and every ruling still
-    # range over it.
-    system_supplied=(ORIGIN_ARGUMENT,),
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

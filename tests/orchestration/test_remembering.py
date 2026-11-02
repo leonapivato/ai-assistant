@@ -64,7 +64,7 @@ class _Runner:
 
 async def test_each_call_reaches_its_capabilitys_runner_and_no_other() -> None:
     runner = _Runner()
-    runners = {"remember": runner}
+    runners = {"remember_fact": runner}
     seam = OwnRecordsByCapability(runners)
     runners.clear()
 

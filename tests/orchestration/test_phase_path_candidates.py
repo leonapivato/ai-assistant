@@ -46,7 +46,7 @@ _AT: Final = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 _VALUES: Final[dict[str, FrozenJson]] = {
     "fact": "prefers window seats",
     "why": "travel",
-    "rests_on_input": True,
+    "rests_on_this_stimulus": True,
     "confirm": True,
     "episode": "activation:asking",
     "rests_on_outside_content": False,
@@ -69,7 +69,9 @@ def _working(output: FrozenJsonValue, *, proposed_as: str) -> PhaseWorking:
             round=PlanningRound(id="round:1", recorded_at=_AT, calls=(proposed,)),
             labels=(),
             recorded=True,
-            calls=(PlannedCall(ProposedCall(call_id="c1", name="remember", arguments=_VALUES)),),
+            calls=(
+                PlannedCall(ProposedCall(call_id="c1", name="remember_fact", arguments=_VALUES)),
+            ),
         )
     )
     request = ActionRequest(tool=REMEMBER_CANDIDATE, parameters=_VALUES)
@@ -129,7 +131,7 @@ def test_an_approved_candidate_whose_lookup_failed_says_so() -> None:
 
 
 def test_a_candidate_proposed_directly_is_shown_the_same_way() -> None:
-    working = _working({SIMILAR_KEY: []}, proposed_as="remember")
+    working = _working({SIMILAR_KEY: []}, proposed_as="remember_fact")
     working.searched["result:1"] = ()
 
     (outcome,) = working.outcomes()

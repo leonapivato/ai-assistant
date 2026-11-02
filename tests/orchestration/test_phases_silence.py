@@ -89,14 +89,20 @@ _FILLER = "Let me check."
 #: A later round's message.
 _ANSWER = "It's done."
 #: *Couldn't finish*, listing the remember an earlier round made (ADR-0317 §3:1).
-_LISTED = couldnt_finish(("the tool remember ran",)).text
+_LISTED = couldnt_finish(("the tool remember_fact ran",)).text
 
 
 def _remember() -> RoundResponse:
     """A call that brings a round (ADR-0315 §2:1), its text set by the case."""
     return RoundResponse(
         calls=(
-            _call("c1", "remember", fact="The user likes tea.", why="a taste", rests_on_input=True),
+            _call(
+                "c1",
+                "remember_fact",
+                fact="The user likes tea.",
+                why="a taste",
+                rests_on_this_stimulus=True,
+            ),
         )
     )
 
@@ -162,7 +168,7 @@ async def test_silence_after_calls_in_earlier_rounds_ends_the_same_way() -> None
     assert _stages(episode)[-1] == (ControllerStage.END, ControllerRule.NOTHING_DUE)
     assert await _ended(harness, conversation, episode) == (_RETURNED, ActivationEnding.DONE)
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
-    assert [one.capability for one in effects] == ["remember"]
+    assert [one.capability for one in effects] == ["remember_fact"]
 
 
 async def test_a_tolerated_failure_then_a_silent_end_writes_nothing() -> None:
