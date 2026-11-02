@@ -197,3 +197,26 @@ def test_an_email_takes_no_attachment_and_no_exact() -> None:
 def test_words_blank_once_their_tags_are_read_come_back_not_done(words: str) -> None:
     """§9:8: a message is never blank, so tags around nothing send nothing."""
     assert exact_words(words) == "the words hold nothing to send once their tags are read"
+
+
+def test_reading_words_takes_time_in_their_length_however_many_backslashes() -> None:
+    """A long run of backslashes with no tag after it is read in one pass, not in time
+    growing with its square, so one message never holds up the loop the hub runs on."""
+    import time  # noqa: PLC0415
+
+    words = "x" + "\\" * 200_000 + "y"
+    started = time.perf_counter()
+    read = exact_words(words)
+    assert time.perf_counter() - started < 1.0
+    assert isinstance(read, ExactWords)
+    assert read.text == words
+
+
+@pytest.mark.parametrize("trailing", [1, 2, 3])
+def test_words_ending_in_backslashes_wrapped_whole_read_back_as_written(trailing: int) -> None:
+    """§8:6: a run of backslashes the words end in is no escape of the closing tag."""
+    words = "C:" + "\\" * trailing
+    read = exact_words(escaped_exact(words))
+    assert isinstance(read, ExactWords)
+    assert read.text == words
+    assert read.parts == (words,)

@@ -40,7 +40,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
 __all__ = [
     "BCC_ARGUMENT",
@@ -225,8 +225,9 @@ def text_arguments(arguments: Mapping[str, object]) -> TextArguments | str:
 EXACT_OPEN: Final = "<exact>"
 EXACT_CLOSE: Final = "</exact>"
 
-#: A tag with the run of backslashes before it.
-_TAG: Final = re.compile(r"(\\*)(<exact>|</exact>)")
+#: A tag alone; the run of backslashes before it is counted back from it, so reading
+#: words takes time in their length, however many backslashes they hold.
+_TAG: Final = re.compile(r"</?exact>")
 
 #: Why words with exact parts come back not done (§9:8).
 _UNCLOSED: Final = f"an {EXACT_OPEN} tag is never closed"
@@ -264,11 +265,11 @@ def exact_words(words: str) -> ExactWords | str:
     parts: list[str] = []
     part: list[str] | None = None
     at = 0
-    for found in _TAG.finditer(words):
-        slashes, tag = found.group(1), found.group(2)
-        before = words[at : found.start()] + "\\" * (len(slashes) // 2)
-        at = found.end()
-        literal = len(slashes) % 2 == 1
+    for run, start, end, tag in _tags(words):
+        slashes = start - run
+        before = words[at:run] + "\\" * (slashes // 2)
+        at = end
+        literal = slashes % 2 == 1
         piece = before + (tag if literal else "")
         text.append(piece)
         if part is not None:
@@ -301,8 +302,33 @@ def escaped_exact(words: str) -> str:
     :func:`exact_words` reads it back as the same literal text: the run doubled and one
     backslash more. So the wrapped words read back as ``words`` exactly, one part whole.
     """
-    escaped = _TAG.sub(lambda found: "\\" * (2 * len(found.group(1)) + 1) + found.group(2), words)
-    return f"{EXACT_OPEN}{escaped}{EXACT_CLOSE}"
+    pieces: list[str] = []
+    at = 0
+    for run, start, end, tag in _tags(words):
+        pieces.append(words[at:run] + "\\" * (2 * (start - run) + 1) + tag)
+        at = end
+    rest = words[at:]
+    # A run of backslashes the words end in stands before the closing tag appended, so it
+    # is doubled, and the tag stays a tag.
+    trailing = len(rest) - len(rest.rstrip("\\"))
+    pieces.append(rest + "\\" * trailing)
+    return f"{EXACT_OPEN}{''.join(pieces)}{EXACT_CLOSE}"
+
+
+def _tags(words: str) -> Iterator[tuple[int, int, int, str]]:
+    """Each tag in ``words``, with where the run of backslashes before it starts.
+
+    Where the run starts, where the tag starts and ends, and the tag; the run is counted
+    back no further than the tag before it.
+    """
+    at = 0
+    for found in _TAG.finditer(words):
+        start = found.start()
+        run = start
+        while run > at and words[run - 1] == "\\":
+            run -= 1
+        yield run, start, found.end(), found.group(0)
+        at = found.end()
 
 
 # --- the wording step (ADR-0357 §4, ADR-0364 §9:7, §9:9) -----------------------------------
