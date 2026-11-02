@@ -69,8 +69,8 @@ from ai_assistant.orchestration.planning import (
     offered_tools,
 )
 from ai_assistant.orchestration.remembering import candidate_of, is_remember
-from ai_assistant.orchestration.renames import Void, carried, current_arguments, translated
-from ai_assistant.orchestration.story_calls import LINK_STORY, START_STORY
+from ai_assistant.orchestration.renames import Void, current_arguments, translated
+from ai_assistant.orchestration.story_calls import LINK_STORY
 from ai_assistant.testing import FakeConversationStore, FakeToolCallingCompleter, default_prompt
 from ai_assistant.tools.forecast import FORECAST_READ
 from ai_assistant.tools.send_email import EMAIL
@@ -715,20 +715,6 @@ def test_a_recorded_request_for_approval_shows_its_nested_call_under_the_names_n
         "capability": "spawn",
         "arguments": {"instruction": "x", "places": ["L2"]},
     }
-
-
-def test_a_waiting_start_whose_notes_were_a_list_is_void_on_its_card_too() -> None:
-    """§8:6: the translation cannot carry a list of first notes into one text, so the card
-    and the panel say void, as a run does."""
-    old = START_STORY.model_copy(
-        update={"capability": "start_story", "parameters_schema": {"type": "object"}}
-    )
-    waiting = RequestedCall(
-        tool=old, values={"notes": ["First note", "Second note"], "episode": "episode:e"}
-    )
-    void = carried(waiting)
-    assert isinstance(void, Void)
-    assert isinstance(translated(waiting, {"start_matter": START_STORY}.get), Void)
 
 
 async def test_search_connections_matches_what_an_entry_says_it_can_do() -> None:

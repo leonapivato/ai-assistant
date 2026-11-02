@@ -465,6 +465,10 @@ class AuthorizedCall:
             one: where its capability's calls get one, and wherever the decision names
             an approval (ADR-0321 §4:10).
         deliberate_repeat: Whether planning marked the call a deliberate repeat.
+        recorded: For a call under a ticket, its capability as the request records it,
+            which its effect record is claimed under, so the store's check that the
+            claim is the ticket's call holds for a request written under an old name
+            (ADR-0364 §8:5-§8:6); every reader reads the name through the renames.
 
     Raises:
         ValueError: If the decision's ``effect`` is set on a call that gets no record
@@ -474,6 +478,7 @@ class AuthorizedCall:
 
     call: ToolCall
     deliberate_repeat: bool = False
+    recorded: str | None = None
 
     def __post_init__(self) -> None:
         """Check the call against its declaration and its approval."""
@@ -778,7 +783,7 @@ class ActingStage:
                 id=effect_id,
                 activation_id=activation_id,
                 round=round_id,
-                capability=tool.capability,
+                capability=one.recorded if one.recorded is not None else tool.capability,
                 values_digest=values_digest(call),
                 decision_id=call.decision.id,
                 claimed_at=self._now(),
@@ -1153,7 +1158,11 @@ def _snapshot(one: AuthorizedCall) -> AuthorizedCall:
     """
     try:
         call = ToolCall.model_validate(one.call.model_dump())
-        return AuthorizedCall(call, deliberate_repeat=bool(one.deliberate_repeat))
+        return AuthorizedCall(
+            call,
+            deliberate_repeat=bool(one.deliberate_repeat),
+            recorded=None if one.recorded is None else str(one.recorded),
+        )
     except (ValidationError, ValueError) as exc:
         msg = "the call did not survive revalidation, so it is not the call that was authorised"
         raise ToolBindingError(msg) from exc

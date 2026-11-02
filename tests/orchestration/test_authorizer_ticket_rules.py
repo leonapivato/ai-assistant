@@ -57,6 +57,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
     ToolOutcome,
+    ToolResult,
     WholeTextReply,
 )
 from ai_assistant.orchestration import acting
@@ -671,3 +672,47 @@ async def test_an_unknown_effect_recorded_under_an_old_name_still_needs_you() ->
     (ruled,) = decided.verdicts
     assert ruled.verdict is Verdict.NEEDS_YOU
     assert decided.allowed == ()
+
+
+class _Ran:
+    """A ``ToolInvoker`` that records each call and does it."""
+
+    def __init__(self) -> None:
+        self.calls: list[ToolCall] = []
+
+    async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam's own signature
+        self.calls.append(call)
+        return ToolResult(outcome=ToolOutcome.SUCCEEDED)
+
+
+async def test_a_ticket_from_before_the_renames_is_claimed_and_runs() -> None:
+    """ADR-0364 §8:5-§8:6, the coordinator's ruling on #3602: a ticket whose request names
+    the tool's old name runs as the new tool, its effect claimed under the name the
+    request records, so the store's check that the claim is the ticket's call holds."""
+    from ai_assistant.orchestration.acting import ActingStage  # noqa: PLC0415
+    from ai_assistant.orchestration.held_results import HeldResults  # noqa: PLC0415
+    from ai_assistant.orchestration.phase_path import authorized_round  # noqa: PLC0415
+
+    current = _tool("book", id="spawn", capability="spawn_task")
+    hub = _Hub(current, policy=FakeActionPolicy(confirm_at=None))
+    before = current.model_copy(update={"capability": "spawn"})
+    await hub.approved(RequestedCall(tool=before, values={"q": "remind me at 9"}))
+
+    decided = await hub.authorize(_round((_call("c1", "spawn_task", q="remind me at 9"), _REQUEST)))
+    (allowed,) = decided.allowed
+    assert allowed.recorded == "spawn"
+    ran = _Ran()
+    acting_stage = ActingStage(
+        plans=hub.plans,
+        invoker=ran,
+        own_records=acting.OwnRecordsByCapability({}),
+        timeout=timedelta(seconds=5),
+        now=_now,
+    )
+    acted = await acting_stage.act(authorized_round(decided), held=HeldResults())
+
+    (one,) = acted.calls
+    assert one.outcome is acting.ActedOutcome.DONE, one.reason
+    assert [str(call.request.tool.capability) for call in ran.calls] == ["spawn_task"]
+    (effect,) = [one for one in await hub.plans.activation_effects([_HOLDER]) if one.ticket]
+    assert effect.capability == "spawn"
