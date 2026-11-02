@@ -205,10 +205,7 @@ SET_PROFILE: Final = _declared(
         "\n"
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
-        "result: with done, set, cleared, or already so\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat. Always needs approval first: "
-        "ask for it with request_approval."
+        "result: with done, set, cleared, or already so"
     ),
     {
         "type": "object",
@@ -244,10 +241,7 @@ PIN: Final = _declared(
         "\n"
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
-        "result: with done, pinned, or already pinned\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat. Always needs approval first: "
-        "ask for it with request_approval."
+        "result: with done, pinned, or already pinned"
     ),
     _memory_schema("The memory to pin, by its M label."),
 )
@@ -261,10 +255,7 @@ UNPIN: Final = _declared(
         "\n"
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
-        "result: with done, unpinned, or not pinned\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat. Always needs approval first: "
-        "ask for it with request_approval."
+        "result: with done, unpinned, or not pinned"
     ),
     _memory_schema("The pinned memory, by its M label."),
 )

@@ -292,9 +292,7 @@ SPAWN: Final = _declared(
         "because: why, with not done, unknown or refused\n"
         "task: with done, the task it wrote:\n"
         "  label: its T label\n"
-        "  read_back: when it falls due and where its work may speak, from the record\n"
-        "\n"
-        "It changes only the system's own records, and can be undone. Not safe to repeat."
+        "  read_back: when it falls due and where its work may speak, from the record"
     ),
     {
         "type": "object",
@@ -419,9 +417,7 @@ CANCEL_TASK: Final = _declared(
         "\n"
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
-        "task: with done, the task as it now stands, as list_tasks shows a scheduled one\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "task: with done, the task as it now stands, as list_tasks shows a scheduled one"
     ),
     {
         "type": "object",
@@ -473,9 +469,7 @@ LIST_TASKS: Final = _declared(
         "  status: how it ended\n"
         "  input: the instruction it ran\n"
         "  wrote_into: where it wrote, by L label, or that it wrote no message\n"
-        "  may_have_written_into: where a message of unknown outcome may have gone\n"
-        "\n"
-        "It changes nothing."
+        "  may_have_written_into: where a message of unknown outcome may have gone"
     ),
     {"type": "object", "properties": {}, "additionalProperties": False},
     writes=False,

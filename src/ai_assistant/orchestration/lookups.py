@@ -316,9 +316,7 @@ SEARCH_MEMORY: Final = _declared(
         "none\n"
         "  resting_on_outside_content: where some found rest on what a source reported, that they "
         "were read for you\n"
-        "evidence: with those, what was read of them for looking_for\n"
-        "\n"
-        "It changes nothing."
+        "evidence: with those, what was read of them for looking_for"
     ),
     properties={
         QUERY_ARGUMENT: {
@@ -344,9 +342,7 @@ READ_STORY: Final = _declared(
         "result: with done, under its R label, the matter as matters are shown, in full: its "
         "summary, its notes, its episodes since it was last tidied and its latest ones, the "
         "larger matters it is part of, and where it stands; its older notes a page at a time, "
-        "newest first\n"
-        "\n"
-        "It changes nothing."
+        "newest first"
     ),
     properties={
         STORY_ARGUMENT: {
@@ -375,9 +371,7 @@ FOLLOW_UP: Final = _declared(
         "\n"
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
-        "evidence: with done, what was read of it for the new looking_for\n"
-        "\n"
-        "It changes nothing."
+        "evidence: with done, what was read of it for the new looking_for"
     ),
     properties={
         RESULT_ARGUMENT: {
@@ -409,9 +403,7 @@ SEARCH_EPISODES: Final = _declared(
         "  page: the page shown\n"
         "  episodes: those found, best first, each as short-term memory shows one, with "
         "in_matters, the matters it belongs to by S label; or none\n"
-        "  more: the next page, where there is one\n"
-        "\n"
-        "It changes nothing."
+        "  more: the next page, where there is one"
     ),
     properties={
         QUERY_ARGUMENT: {
@@ -447,9 +439,7 @@ READ_EPISODE: Final = _declared(
         "the evidence, and what it took in\n"
         "    more: the next page, where there is one\n"
         "  for one still running: what it has found and done so far, as an episode, with status: "
-        "running, or ended\n"
-        "\n"
-        "It changes nothing."
+        "running, or ended"
     ),
     properties={
         EPISODE_ARGUMENT: {
@@ -477,9 +467,7 @@ READ_OLDER_HISTORY: Final = _declared(
         "  page: the page shown, newest first\n"
         "  items: its older items, as stimulus origin knowledge shows them; or episodes: its "
         "earlier episodes, each as short-term memory shows one\n"
-        "  more: the next page, where there is one\n"
-        "\n"
-        "It changes nothing."
+        "  more: the next page, where there is one"
     ),
     properties={PAGE_ARGUMENT: _page("Which page to show. Left out: 1, the newest.")},
     required=(),
@@ -498,9 +486,7 @@ SEARCH_CONNECTIONS: Final = _declared(
         "result: with done, under its R label:\n"
         "  page: the page shown\n"
         "  connections: those found, best first, each as Connections shows one, or none\n"
-        "  more: the next page, where there is one\n"
-        "\n"
-        "It changes nothing."
+        "  more: the next page, where there is one"
     ),
     properties={
         QUERY_ARGUMENT: {

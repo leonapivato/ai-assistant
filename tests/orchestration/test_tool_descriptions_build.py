@@ -65,6 +65,7 @@ from ai_assistant.orchestration.planning import (
     PlanningInputs,
     PlanningStage,
     RefusedCall,
+    effects_line,
     exact_line,
     offered_tools,
 )
@@ -287,7 +288,7 @@ def test_every_email_needs_approval_and_so_do_the_person_models_calls() -> None:
         *(str(one.capability) for one in PERSON_MODEL_CALLS),
     }
     for declaration in (EMAIL, *PERSON_MODEL_CALLS):
-        assert "Always needs approval first" in declaration.description
+        assert "Always needs approval first" in effects_line(declaration)
     assert approval_rule("send_text") is None
 
 

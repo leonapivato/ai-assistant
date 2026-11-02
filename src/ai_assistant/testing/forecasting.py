@@ -351,9 +351,7 @@ FAKE_FORECAST_READ: Final = ToolDefinition(
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
         "result: with done, under its R label, read for you\n"
-        "evidence: what was read of the forecast for looking_for, each item marked outside\n"
-        "\n"
-        "It changes nothing, but what it sends leaves the system."
+        "evidence: what was read of the forecast for looking_for, each item marked outside"
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,
