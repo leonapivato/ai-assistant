@@ -596,6 +596,21 @@ def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
     )
 
 
+def test_only_says_into_wants_every_text_call_into_the_named_connection() -> None:
+    """#3608 review round 2: a report into an origin that takes no text reaches no one."""
+    params: dict[str, object] = {"phrases": ["86.20"], "connection": "L2"}
+    into = RoundResponse(calls=(_text("Invoice #4471 is $86.20.", connection="L2"),))
+    origin = RoundResponse(calls=(_text("Invoice #4471 is $86.20.", connection="L1"),))
+
+    assert _round("only_says_into", params, into) is None
+    assert _round("only_says_into", params, origin) == (
+        "a text call goes into another connection than the one named"
+    )
+    assert _round("only_says_into", params, RoundResponse(text="$86.20")) == (
+        "the round makes no call, so nothing reaches anyone"
+    )
+
+
 def test_the_checks_that_decide_each_class_refuse_their_counterexamples() -> None:
     """Review round 1: each check refuses the counterexample its class names."""
     reliance = ProposedCall(call_id="c9", name="note_reliance", arguments={"memories": ["M1"]})

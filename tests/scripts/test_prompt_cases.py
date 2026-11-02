@@ -196,11 +196,18 @@ def test_every_planning_check_is_decidable_on_its_rendered_input() -> None:
         shown = set(_ANY_LABEL.findall(_shown(case)))
         labels = {
             label
-            for key in ("value", "offer", "read")
+            for key in ("value", "offer", "read", "connection")
             if isinstance(params.get(key), str)
             for label in _ANY_LABEL.findall(params[key])
         }
         assert labels <= shown, (case.name, labels - shown)
+        if isinstance(params.get("connection"), str):
+            # #3608 review round 2: a message the check wants must be one the stage sends.
+            entry = re.search(
+                rf'<connection label="{params["connection"]}"[^>]*can="([^"]*)"', _shown(case)
+            )
+            assert entry is not None, case.name
+            assert "it takes text messages" in entry.group(1), case.name
 
 
 def test_the_follow_up_has_a_seed_case() -> None:
