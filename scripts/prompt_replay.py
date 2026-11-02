@@ -2517,6 +2517,21 @@ def _only_says(reply: Reply, params: Mapping[str, object]) -> Judgement:
     return None
 
 
+def _only_says_into(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """:func:`_only_says`, every text call into the named connection (ADR-0364 §9:1-§9:2).
+
+    For a case whose origin takes no text message, such as a connected source's: a text
+    call into it is refused whole, so it reaches no one, and a check that did not name
+    where the message goes would pass it.
+    """
+    said = _only_says(reply, params)
+    if said is not None or reply.round is None:
+        return said
+    if any(one.arguments.get("connection") != params["connection"] for one in reply.round.calls):
+        return "a text call goes into another connection than the one named"
+    return None
+
+
 def _answers_by_message(reply: Reply, params: Mapping[str, object]) -> Judgement:
     """One message, a ``text`` call whose words hold each named phrase, and no other.
 
@@ -2879,6 +2894,13 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
             frozenset({PLANNING}),
             {"phrases": "strings"},
             _only_says,
+        ),
+        CodeCheck(
+            "only_says_into",
+            "only_says, every text call into the named connection",
+            frozenset({PLANNING}),
+            {"phrases": "strings", "connection": "string"},
+            _only_says_into,
         ),
         CodeCheck(
             "answers_by_message",
