@@ -1223,6 +1223,13 @@ class ForecastEgress:
         origin = checked.request.parameters.get(ORIGIN_ARGUMENT)
         latitude = _real(checked.request.parameters.get(LATITUDE_ARGUMENT))
         longitude = _real(checked.request.parameters.get(LONGITUDE_ARGUMENT))
+        if (
+            LATITUDE_ARGUMENT not in checked.request.parameters
+            and LONGITUDE_ARGUMENT not in checked.request.parameters
+        ):
+            # ADR-0364 §12:2-§12:3: a call naming neither reads the configured place, held
+            # here and never written into the call, so planning is never shown it.
+            latitude, longitude = self._latitude, self._longitude
         if binding is None or not isinstance(origin, str) or latitude is None or longitude is None:
             # The schema refuses a call carrying anything but the string and the two
             # numbers, and revalidation re-ran it; ADR-0148 §8's third floor refuses an
@@ -1235,10 +1242,9 @@ class ForecastEgress:
                 f"so there is no authorised request to make (ADR-0148 §8, ADR-0260 §6)"
             )
             raise ToolBindingError(msg)
-        # ADR-0364 §12:2-§12:3: the coordinates are planning's, the configured place's
-        # where it named none, which the hub fills before the call is ruled on. They are
-        # what the call sends, not where it goes: the origin is still pinned to the one
-        # configured provider, and the ruling ranges over the coordinates it carries.
+        # ADR-0364 §12:2-§12:3: the coordinates are planning's, or the configured
+        # place's where it named none. They are what the call sends, not where it goes:
+        # the origin is still pinned to the one configured provider.
         return checked, binding, origin, latitude, longitude
 
     async def _asked(

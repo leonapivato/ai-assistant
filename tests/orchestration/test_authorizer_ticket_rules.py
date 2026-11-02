@@ -641,3 +641,33 @@ async def test_a_waiting_email_from_before_the_build_runs_as_the_send_email_it_r
         name: value for name, value in allowed.call.request.parameters.items() if name in values
     } == values
     assert "exact" not in allowed.call.request.parameters
+
+
+async def test_an_unknown_effect_recorded_under_an_old_name_still_needs_you() -> None:
+    """ADR-0364 §8:5: an effect recorded as ``web_search`` is ``search_web``'s, so a deliberate
+    repeat of it, whose earlier outcome is unknown, is ruled as one of the same tool."""
+    sends = _tool("book", capability="search_web")
+    hub = _Hub(sends, policy=FakeActionPolicy(confirm_at=None))
+    request = ActionRequest(tool=sends, parameters={"q": "the invoice to Maren"})
+    effect = ActivationEffect(
+        id="effect:earlier",
+        activation_id=_HOLDER,
+        round="round:earlier",
+        capability="web_search",
+        values_digest=values_digest(request),
+        decision_id="decision:earlier",
+        claimed_at=_AT,
+    )
+    await hub.plans.claim_activation_effect(effect, match=None)
+    await hub.plans.finish_activation_effect(effect.id, ToolOutcome.INDETERMINATE)
+
+    decided = await hub.authorize(
+        _round(
+            (_call("c1", "search_web", q="the invoice to Maren"), None),
+            deliberate=frozenset({"c1"}),
+        )
+    )
+
+    (ruled,) = decided.verdicts
+    assert ruled.verdict is Verdict.NEEDS_YOU
+    assert decided.allowed == ()

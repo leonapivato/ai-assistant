@@ -109,6 +109,20 @@ def _value(name: str, schema: dict[str, Any]) -> object:  # noqa: PLR0911 — on
     return scalars.get(kind, {})
 
 
+#: The argument an add's or a remove's matter member is written into (ADR-0364 §8:2).
+_MEMBER_STORY: Final = "member_story"
+
+
+def _one_member(values: dict[str, Any]) -> dict[str, Any]:
+    """An add's or a remove's values as planning's check hands them on: one member, a
+    matter's, written into its argument, ``member`` itself taken out."""
+    if _MEMBER_STORY not in values:
+        return values
+    return {
+        name: value for name, value in values.items() if name not in {"member", "member_episode"}
+    }
+
+
 def _every_argument(tool: ToolDefinition) -> dict[str, Any]:
     schema = tool.model_dump(mode="json")["parameters_schema"]
     return {name: _value(name, one) for name, one in schema.get("properties", {}).items()}
@@ -145,7 +159,7 @@ async def test_every_capabilitys_exact_line_shows_every_argument_it_sends(
     """§8:10: every argument but those the hub fills and the two marks, for every one."""
     pairs = await _registered(tmp_path)
     assert {str(offered.capability) for offered, _ in pairs} >= _FLOOR
-    sent = [_every_argument(selected) for _, selected in pairs]
+    sent = [_one_member(_every_argument(selected)) for _, selected in pairs]
     worded = [worded_argument(str(offered.capability)) for offered, _ in pairs]
     lines = [
         exact_line(
@@ -159,11 +173,13 @@ async def test_every_capabilitys_exact_line_shows_every_argument_it_sends(
     for (offered, _), values, line, by_wording in zip(pairs, sent, lines, worded, strict=True):
         name = str(offered.capability)
         assert line.startswith(name), line
-        left_out = {*offered.system_supplied, LOOKING_FOR, DELIBERATE_REPEAT}
+        # ADR-0364 §8:2: the member planning's check writes is planning's, shown as `member`.
+        left_out = {*offered.system_supplied, LOOKING_FOR, DELIBERATE_REPEAT} - {_MEMBER_STORY}
         for argument, value in values.items():
             # §8:6: the memory an argument names is read as its wording, the argument sent.
             read_as = _WORDING if argument == by_wording else value
-            shown = f"{argument}: {json.dumps(read_as, ensure_ascii=False)}" in line
+            named = "member" if argument == _MEMBER_STORY else argument
+            shown = f"{named}: {json.dumps(read_as, ensure_ascii=False)}" in line
             if shown is (argument in left_out):
                 missing.setdefault(name, []).append(argument)
     assert missing == {}, "arguments shown or left out wrongly, by capability"

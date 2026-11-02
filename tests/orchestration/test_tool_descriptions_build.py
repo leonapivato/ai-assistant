@@ -65,6 +65,7 @@ from ai_assistant.orchestration.planning import (
     PlanningInputs,
     PlanningStage,
     RefusedCall,
+    exact_line,
     offered_tools,
 )
 from ai_assistant.orchestration.remembering import candidate_of, is_remember
@@ -488,7 +489,7 @@ def test_read_forecast_is_offered_its_coordinates_and_never_its_origin() -> None
 @pytest.mark.parametrize(
     ("given", "kept"),
     [
-        pytest.param({}, {"origin": "o", "latitude": 1.0, "longitude": 2.0}, id="neither"),
+        pytest.param({}, {"origin": "o"}, id="neither"),
         pytest.param(
             {"latitude": 42.36, "longitude": -71.06},
             {"origin": "o", "latitude": 42.36, "longitude": -71.06},
@@ -497,12 +498,12 @@ def test_read_forecast_is_offered_its_coordinates_and_never_its_origin() -> None
         pytest.param({"latitude": 42.36}, {"origin": "o", "latitude": 42.36}, id="one"),
     ],
 )
-def test_the_hub_fills_the_origin_and_the_configured_place_only_where_none_was_named(
+def test_the_hub_fills_the_origin_alone_and_never_the_configured_place(
     given: dict[str, Any], kept: dict[str, Any]
 ) -> None:
-    """§12:2: planning's coordinates are what the call sends; left out, the configured."""
-    call = ProposedCall(call_id="c1", name="read_forecast", arguments=given)
-    filled = _forecast_filled(call, {"origin": "o", "latitude": 1.0, "longitude": 2.0})
+    """§12:2-§12:3: planning's coordinates are what the call sends; left out, the
+    forecaster reads its configured place, never written into the call."""
+    filled = _forecast_filled({"origin": "o", "latitude": 1.0, "longitude": 2.0})
     assert {**given, **filled} == kept
 
 
@@ -556,3 +557,55 @@ def test_a_remember_recorded_before_the_renames_is_digested_as_it_was_recorded()
     assert _candidate_digest("episode:e1", new) is not None
     assert _candidate_digest("episode:e1", old) != _candidate_digest("episode:e1", new)
     assert _candidate_digest("episode:e1", {**old, "rests_on_nothing": True}) is None
+
+
+def test_a_cards_line_shows_the_member_an_add_names() -> None:
+    """ADR-0361 §2:11, ADR-0364 §8:2: two adds naming different members read differently;
+    the member is planning's choice though the hub writes it into its argument."""
+    lines = {
+        exact_line(
+            RequestedCall(
+                tool=LINK_STORY,
+                values={"matter": "story:outer", "member_story": inner, "episode": "episode:e"},
+            ),
+            filled=LINK_STORY.system_supplied,
+        )
+        for inner in ("story:one", "story:two")
+    }
+    assert lines == {
+        'add_to_matter — matter: "story:outer"; member: "story:one"',
+        'add_to_matter — matter: "story:outer"; member: "story:two"',
+    }
+
+
+async def test_a_ticket_from_before_the_build_shows_the_call_it_runs() -> None:
+    """ADR-0361 §5:1, ADR-0364 §8:4: a ticket stored as ``email`` shows its arguments
+    under ``send_email``, the tool it runs as, the hub's own left out."""
+    request = ApprovalRequest(
+        id="approval:1",
+        person=OWNER_PERSON_ID,
+        activation_id="asker",
+        round="r1",
+        call=_waiting(
+            {
+                "to": "maren@example.org",
+                "subject": "Dinner",
+                "words": "See you at 8.",
+                "from": "user",
+            }
+        ),
+        why="You asked me to tell Maren.",
+        written_at=_AT - timedelta(minutes=5),
+        expires_at=_AT + timedelta(hours=1),
+        state=ApprovalRequestState.APPROVED,
+        answer=ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=_AT - timedelta(minutes=1)),
+        ticket=TicketState.HELD,
+    )
+    stage, completer = _stage(RoundResponse())
+    await stage.plan(_inputs(tickets=(Ticket(request=request),)))
+
+    (shown,) = tags(completer.last_call.exchange.briefing, "ticket")
+    assert shown.text is not None
+    assert shown.text.startswith("send_email — ")
+    assert '"maren@example.org"' in shown.text
+    assert '"See you at 8."' in shown.text

@@ -753,6 +753,36 @@ async def test_other_work_starting_and_ending_is_named() -> None:
     assert "Book Luigi's for Friday" not in ended
 
 
+async def test_other_work_from_an_unshown_conversation_brings_its_connection() -> None:
+    """ADR-0364 §3:5, §3:10: a work newly running whose origin the exchange has not shown
+    names it by ``where``, and the report shows that connection's entry."""
+    from ai_assistant.orchestration.conversations import conversation_channel  # noqa: PLC0415
+
+    running = InProgressEntry(
+        activation_id="other",
+        channel=conversation_channel("c-far"),
+        input="book the dentist",
+        acted=False,
+        parties=(LEO,),
+        arrived_at=NOW,
+        inputs=(EntryInput(brief="book the dentist", parties=(LEO,)),),
+    )
+    first = RoundResponse(calls=(_call("c1", "list_tasks"),))
+
+    started = await _next_round(
+        _inputs(),
+        first,
+        running=(running,),
+        meanings={"other": "Leo asks to book the dentist."},
+    )
+
+    stimulus = tag(started, "stimulus")
+    where = stimulus.get("where")
+    assert where is not None
+    entry = tag(started, "connection", label=where)
+    assert entry.text == "a conversation in the hub chat"
+
+
 async def test_a_work_this_works_stop_ended_is_not_named_again() -> None:
     """ADR-0360 §3:4: the stop call's result already reported it."""
     running = InProgressEntry(
