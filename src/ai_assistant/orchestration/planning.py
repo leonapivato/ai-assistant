@@ -1780,9 +1780,9 @@ def offered_tools(
     """The capabilities planning is offered, one tool each (ADR-0306 §2:7 to §2:9).
 
     A capability is offered only where every tool satisfying it declares the same five
-    properties and the same schema, and where the schema is an object's that leaves
-    room for the added arguments. Its description is its first tool's, by id, its
-    effects line generated from that tool's declaration and added after it (ADR-0364 §7:1).
+    properties, the same schema and the same generated effects line, and where the schema
+    is an object's that leaves room for the added arguments. Its description is its first
+    tool's, by id, with that effects line added after it (ADR-0364 §7:1).
 
     Each argument naming things by label is offered with its label's pattern, an ``S``
     label's ``^S[1-9][0-9]*$`` (ADR-0364 §5:2): the declaration names them by id once
@@ -1845,7 +1845,12 @@ def _labelled_patterns(schema: dict[str, Any], named: Mapping[str, LabelKinds]) 
 
 
 def _declared(tool: ToolDefinition) -> tuple[object, ...]:
-    """What every tool of one capability must declare alike (ADR-0306 §2:7)."""
+    """What every tool of one capability must declare alike (ADR-0306 §2:7).
+
+    The effects line its declaration generates too (ADR-0364 §7): the offer says it of
+    whichever tool selection runs, so a capability whose tools would say different things,
+    one undone and another not, is not offered.
+    """
     return (
         tool.effect,
         tool.leaves_hub,
@@ -1854,6 +1859,7 @@ def _declared(tool: ToolDefinition) -> tuple[object, ...]:
         tool.safe_to_repeat,
         tool.model_dump()["parameters_schema"],
         tuple(tool.system_supplied),
+        effects_line(tool),
     )
 
 

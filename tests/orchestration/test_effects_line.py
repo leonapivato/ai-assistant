@@ -257,6 +257,37 @@ def test_a_tool_that_changes_nothing_and_always_needs_approval_says_both() -> No
     assert effects_line(tool) == f"It changes nothing. {_ASK}"
 
 
+@pytest.mark.parametrize(
+    "other",
+    [
+        pytest.param(
+            {"reversibility": Reversibility.REVERSIBLE, "id": "b"}, id="one-undone-one-not"
+        ),
+        pytest.param(
+            {"effect": CapabilityEffect.OWN_RECORDS, "writes": (), "id": "b"},
+            id="one-writing-one-not",
+        ),
+    ],
+)
+def test_a_capability_whose_tools_would_say_different_lines_is_not_offered(
+    other: dict[str, Any],
+) -> None:
+    """§7, ADR-0306 §2:7: the offer says the line of whichever tool selection runs, so
+    tools of one capability that would say different lines are not offered."""
+    first = _declared(id="a")
+    base = (
+        first
+        if "effect" not in other
+        else _declared(id="a", effect=CapabilityEffect.OWN_RECORDS, writes=(DataTier.PERSONAL,))
+    )
+    second = base.model_copy(update=other)
+    assert effects_line(base) != effects_line(second)
+
+    assert offered_tools((base, second)) == ()
+    (alike,) = offered_tools((base, base.model_copy(update={"id": "b"})))
+    assert alike.description.endswith(effects_line(base))
+
+
 # --- the register (§7:5) ---------------------------------------------------------------------
 
 
