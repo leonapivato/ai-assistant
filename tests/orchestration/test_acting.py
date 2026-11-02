@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from structlog.testing import capture_logs
 
-from ai_assistant.core.errors import AuditError, AuthorisationSpentError
+from ai_assistant.core.errors import (
+    AuditError,
+    AuthorisationSpentError,
+    SpendError,
+    ToolBindingError,
+)
 from ai_assistant.core.types import (
     ActionRequest,
     ActivationEffect,
@@ -23,6 +28,7 @@ from ai_assistant.core.types import (
     ApprovalEnd,
     ApprovalGiven,
     ApprovalGiver,
+    CallOutcomeKind,
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
@@ -425,6 +431,53 @@ async def test_a_refusal_before_the_call_is_not_done() -> None:
     )
 
     assert acted.calls[0].outcome is ActedOutcome.NOT_DONE
+    (record,) = await plans.activation_effects(["act-1"])
+    assert record.outcome is ToolOutcome.FAILED
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        pytest.param(AuthorisationSpentError("spent"), id="authorisation-spent"),
+        pytest.param(AuditError("the claim could not be written"), id="ledger-claim"),
+        pytest.param(SpendError("over the spend bound"), id="spend"),
+    ],
+)
+async def test_a_call_the_invocation_seam_stopped_is_shown_refused(refusal: Exception) -> None:
+    """ADR-0364 §6:2: stopped before its tool ran, by the invocation seam, it comes back
+    refused to planning, not not done."""
+    from ai_assistant.orchestration.phase_path import _acted_kind  # noqa: PLC0415
+
+    def refuse(_: ToolCall) -> ToolResult:
+        raise refusal
+
+    acted = await _stage(FakePlanStore(now=_now), _Invoker(refuse)).act(
+        held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+    )
+
+    (call,) = acted.calls
+    assert call.outcome is ActedOutcome.NOT_DONE
+    assert _acted_kind(call) is CallOutcomeKind.REFUSED
+
+
+async def test_a_call_its_tools_own_check_would_not_take_is_not_done() -> None:
+    """ADR-0364 §6:2, §12:2, ADR-0357 §5:6: a binding refused at the tool's seam is the
+    tool's own check when called, so the call is not done, not refused."""
+    from ai_assistant.orchestration.phase_path import _acted_kind  # noqa: PLC0415
+
+    plans = FakePlanStore(now=_now)
+
+    def refuse(_: ToolCall) -> ToolResult:
+        raise ToolBindingError("both coordinates or neither")
+
+    acted = await _stage(plans, _Invoker(refuse)).act(
+        held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+    )
+
+    (call,) = acted.calls
+    assert _acted_kind(call) is CallOutcomeKind.NOT_DONE
+    assert call.reason is not None
+    assert "both coordinates" not in call.reason
     (record,) = await plans.activation_effects(["act-1"])
     assert record.outcome is ToolOutcome.FAILED
 
