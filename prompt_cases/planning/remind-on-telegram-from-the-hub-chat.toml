@@ -1,5 +1,5 @@
 # ADR-0350 §13:4, §5:6: "remind me on Telegram at 8", set on the hub chat, suggests the
-# line's chat from the place list, which shows it under its own label beside this
+# line's chat from Connections, which shows it under its own label beside this
 # conversation.
 prompt = "planning"
 guards = "suggested_place_ignored"

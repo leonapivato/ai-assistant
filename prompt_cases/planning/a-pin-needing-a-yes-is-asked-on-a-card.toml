@@ -1,6 +1,6 @@
 # ADR-0362 §6:4's pin, its ask: round 1 pinned the memory that Leo eats no meat, and it came
-# back needing his yes and saying to ask through request_approval with the same arguments
-# (ADR-0361 §2:4). This round asks on a card for that pin, naming the memory by its label.
+# back refused, saying to ask for approval with request_approval (ADR-0361 §2:4, ADR-0364
+# §6:3). This round asks on a card for that pin, naming the memory by its label.
 # A code check of the arguments' text passes a request for another call whose why names
 # this one, so this property is read.
 prompt = "planning"
