@@ -276,6 +276,31 @@ class ConfiguredProvider:
     declaration: ToolDefinition
 
 
+@dataclass(frozen=True)
+class PlacedRead:
+    """A subject prepared to answer, a call naming the coordinates asked for, and how to
+    see which place its read asked about (ADR-0364 §12:2).
+
+    Attributes:
+        forecaster: The subject, ready to be called. Its provider answers with a day.
+        call: The authorised call naming exactly the coordinates the hook was given.
+        configured: The subject's configured place, as ``(latitude, longitude)``: the
+            harness's, because no member of this Protocol reports it (ADR-0260 §3).
+        asked: The places the subject's reads asked about so far, in order, as
+            ``(latitude, longitude)``: the implementation's own observation, since only
+            its harness can see what a read sent. Empty where nothing was read.
+    """
+
+    forecaster: Forecaster
+    call: ToolCall
+    configured: tuple[float, float]
+    asked: Callable[[], tuple[tuple[float, float], ...]]
+
+
+#: A place no harness configures, for the case where the call names its own (§12:2).
+_NAMED_PLACE: Final = (12.5, -45.25)
+
+
 class ForecasterContract:
     """Behaviour every ``Forecaster`` implementation must exhibit (ADR-0260 §4)."""
 
@@ -361,6 +386,18 @@ class ForecasterContract:
         Its id, its origin and its binding are the subject's own; only some field of the
         declaration the policy ruled over differs, and the decision it carries was
         recorded over that very request. Every check but the second therefore passes it.
+        """
+        raise NotImplementedError
+
+    async def naming(self, latitude: float | None, longitude: float | None) -> PlacedRead:
+        """Override with a subject whose provider answers, and a **fully bound,
+        separately authorised** call naming exactly these coordinates.
+
+        ``None`` leaves that coordinate out of the call's arguments altogether, so the
+        case naming one alone, and the one naming neither, are calls planning can make
+        (ADR-0364 §12:2). Everything else about the call is the subject's own.
+
+        Called once per case that needs it, so each gets a fresh subject.
         """
         raise NotImplementedError
 
@@ -821,6 +858,52 @@ class ForecasterContract:
 
         with pytest.raises(ToolBindingError):
             await subject.forecaster.read(subject.call, timeout=subject.timeout)
+
+    # --- the coordinates are planning's (ADR-0364 §12:2) --------------------
+
+    async def test_a_call_naming_both_coordinates_reads_the_place_it_names(self) -> None:
+        """§12:2: the coordinates are planning's, so a call naming both is answered about
+        that place, and not refused for naming somewhere other than the configured one.
+
+        **A suite clause because the obligation is the contract's**: a fake that still
+        pinned the configured place would refuse a call every deployment answers.
+        """
+        subject = await self.naming(*_NAMED_PLACE)
+        assert subject.configured != _NAMED_PLACE
+
+        outcome = await subject.forecaster.read(subject.call, timeout=A_BOUND)
+
+        assert outcome.records
+        assert subject.asked() == (_NAMED_PLACE,)
+
+    async def test_a_call_naming_neither_coordinate_reads_the_configured_place(self) -> None:
+        """§12:2: left out, the configured place's, which the call never carries."""
+        subject = await self.naming(None, None)
+
+        outcome = await subject.forecaster.read(subject.call, timeout=A_BOUND)
+
+        assert outcome.records
+        assert subject.asked() == (subject.configured,)
+
+    @pytest.mark.parametrize(
+        ("latitude", "longitude"),
+        [
+            pytest.param(_NAMED_PLACE[0], None, id="latitude-alone"),
+            pytest.param(None, _NAMED_PLACE[1], id="longitude-alone"),
+        ],
+    )
+    async def test_a_call_naming_one_coordinate_alone_is_refused_before_any_read(
+        self, latitude: float | None, longitude: float | None
+    ) -> None:
+        """§12:2: both or neither, which is the tool's check when called, so one alone
+        is refused, raised as a binding error and not returned as an outcome, and no
+        place is asked about at all."""
+        subject = await self.naming(latitude, longitude)
+
+        with pytest.raises(ToolBindingError):
+            await subject.forecaster.read(subject.call, timeout=A_BOUND)
+
+        assert subject.asked() == ()
 
     async def test_a_cancelled_read_is_delivered_onward_unchanged(self) -> None:
         """ADR-0060 through this seam: a cancellation is never absorbed (§4).

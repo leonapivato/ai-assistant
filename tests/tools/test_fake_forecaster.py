@@ -33,6 +33,7 @@ from forecaster_contract import (
     ConfiguredProvider,
     ForecasterContract,
     GatedRead,
+    PlacedRead,
     ScriptedRead,
     ScriptedRefusal,
 )
@@ -236,6 +237,24 @@ class TestFakeForecasterContract(ForecasterContract):
 
     async def unconfigured(self) -> Forecaster:
         return FakeForecaster(origin=None)
+
+    async def naming(self, latitude: float | None, longitude: float | None) -> PlacedRead:
+        forecaster, proposed = await _prepared()
+        parameters = {
+            name: value
+            for name, value in proposed.request.parameters.items()
+            if name not in {"latitude", "longitude"}
+        }
+        for name, value in (("latitude", latitude), ("longitude", longitude)):
+            if value is not None:
+                parameters[name] = value
+        call = _authorised(ActionRequest(tool=proposed.request.tool, parameters=parameters))
+        return PlacedRead(
+            forecaster=forecaster,
+            call=call,
+            configured=(DEFAULT_FORECAST_LATITUDE, DEFAULT_FORECAST_LONGITUDE),
+            asked=lambda: tuple(forecaster.places_read),
+        )
 
 
 # --- what only this implementation can exhibit (ADR-0260 §4, §13's preamble) ---
