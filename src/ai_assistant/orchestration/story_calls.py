@@ -393,7 +393,10 @@ START_STORY: Final = _declared(
     ),
     properties={
         NOTES_ARGUMENT: {
-            **_NOTE_SCHEMA,
+            "type": "array",
+            "items": _NOTE_SCHEMA,
+            "minItems": 1,
+            "maxItems": START_NOTES_MAX,
             "description": "Its first notes: what the matter is, and what is open.",
         },
         INSIDE_ARGUMENT: {
@@ -610,7 +613,9 @@ GROUP_STORY: Final = _declared(
     properties={
         STORIES_ARGUMENT: _labels("The matters grouped, by S label.", min_items=1),
         NOTES_ARGUMENT: {
-            **_NOTE_SCHEMA,
+            "type": "array",
+            "items": _NOTE_SCHEMA,
+            "maxItems": START_NOTES_MAX,
             "description": (
                 "The larger matter's first notes: what the bigger matter is. Left out: none."
             ),
@@ -737,11 +742,8 @@ def _optional_text(parameters: Mapping[str, FrozenJson], name: str) -> str | Non
 def _first_notes(value: object) -> tuple[str, ...]:
     """A start's or a group's first notes, or none where they are malformed.
 
-    One non-blank text since ADR-0364 §8:2's agreed declaration; a list of them, each
-    non-blank and no more than :data:`START_NOTES_MAX`, as a call recorded before it held.
+    A list of them, each non-blank and no more than :data:`START_NOTES_MAX`.
     """
-    if isinstance(value, str):
-        return (value,) if value.strip() else ()
     if (
         isinstance(value, tuple | list)
         and len(value) <= START_NOTES_MAX

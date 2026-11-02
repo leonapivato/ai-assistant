@@ -525,11 +525,15 @@ class AllowedCall:
         requested: For a ``request_approval`` call, the call it asks about as ruled
             here, with the values the hub filled in and its binding (ADR-0361 §2:3,
             §2:6), which its request records; ``None`` on every other call.
+        recorded: For a call that runs under a ticket, its capability as the request
+            records it, an old name included, which its effect record is claimed under
+            (ADR-0364 §8:5-§8:6); ``None`` on every other call.
     """
 
     call: ToolCall
     deliberate_repeat: bool = False
     requested: RequestedCall | None = None
+    recorded: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -962,6 +966,7 @@ class _Shown:
     approval: Approval
     request: ActionRequest
     repeat: bool = False
+    recorded: str | None = None
 
 
 @dataclass
@@ -1755,7 +1760,12 @@ class AuthorizingStage:
             given=ApprovalGiven(activation_id=state.activation_id, at=answer.at),
             ends=ApprovalEnd.WHEN_USED_OR_EXPIRED,
         )
-        return _Shown(approval=approval, request=rebuilt, repeat=held.deliberate_repeat)
+        return _Shown(
+            approval=approval,
+            request=rebuilt,
+            repeat=held.deliberate_repeat,
+            recorded=str(request.call.tool.capability),
+        )
 
     async def _declared_by_name(self) -> Callable[[str], ToolDefinition | None]:
         """Each capability's first declaration the registry offers, by its name."""
@@ -1851,6 +1861,7 @@ class AuthorizingStage:
             AllowedCall(
                 ToolCall(request=request, decision=decision),
                 deliberate_repeat=shown.repeat and not tool.safe_to_repeat,
+                recorded=shown.recorded,
             )
         )
 

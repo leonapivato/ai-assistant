@@ -376,7 +376,7 @@ async def test_a_story_started_keeps_the_story_its_report_showed() -> None:
     from ai_assistant.testing import FakeStoryStore  # noqa: PLC0415
 
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "start_matter", notes="A camping trip to Riverside."),)),
+        RoundResponse(calls=(_call("c1", "start_matter", notes=["A camping trip to Riverside."]),)),
         RoundResponse(text="Noted."),
     )
     stories = FakeStoryStore(now=lambda: _AT)

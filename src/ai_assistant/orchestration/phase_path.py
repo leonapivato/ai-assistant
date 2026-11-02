@@ -3056,7 +3056,7 @@ def authorized_round(decided: RoundAuthorization) -> AuthorizedRound:
         activation_id=decided.activation_id,
         round_id=decided.round_id,
         calls=tuple(
-            AuthorizedCall(one.call, deliberate_repeat=one.deliberate_repeat)
+            AuthorizedCall(one.call, deliberate_repeat=one.deliberate_repeat, recorded=one.recorded)
             for one in decided.allowed
         ),
         story_activations=decided.story_activations,

@@ -111,9 +111,6 @@ ARGUMENT_RENAMES: Final[Mapping[str, Mapping[str, str]]] = {
 #: ``request_approval``'s nested call: its key, and its tool's and arguments' keys, the
 #: tool's once ``capability`` (ADR-0364 §8:2).
 _REQUEST_APPROVAL: Final = "request_approval"
-#: The tools whose ``notes`` are one text, which their old names took as a list.
-_ONE_TEXT_NOTES: Final = frozenset({"start_matter", "group_matters"})
-_NOTES: Final = "notes"
 _NESTED_CALL: Final = "call"
 _NESTED_TOOL: Final = "tool"
 _NESTED_TOOL_BEFORE: Final = "capability"
@@ -173,16 +170,12 @@ def carried(requested: RequestedCall) -> Void | None:
     ADR-0364 §8:6: read by its values alone, so a card and the panel can say so without
     the declarations a run reads it with.
     """
-    new = CAPABILITY_RENAMES.get(str(requested.tool.capability))
-    values = current_arguments(str(requested.tool.capability), dict(requested.values))
-    if new in _ONE_TEXT_NOTES and isinstance(values.get(_NOTES), list | tuple):
-        # Its notes were a list, which the new tool takes as one text, so the translation
-        # cannot send what the old call would have, and a run reads it void too.
-        return Void(reason=f"its call no longer fits {new}, so it cannot run as asked")
-    if new != "send_email":
+    if CAPABILITY_RENAMES.get(str(requested.tool.capability)) != "send_email":
         return None
-    carried = _email_values(values)
-    return carried if isinstance(carried, Void) else None
+    values = _email_values(
+        current_arguments(str(requested.tool.capability), dict(requested.values))
+    )
+    return values if isinstance(values, Void) else None
 
 
 def translated(

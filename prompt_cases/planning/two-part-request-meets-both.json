@@ -215,9 +215,13 @@
             "minItems": 1
           },
           "notes": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 2000,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "maxItems": 8,
             "description": "The larger matter's first notes: what the bigger matter is. Left out: none."
           },
           "deliberate_repeat": {
@@ -719,7 +723,7 @@
               "minLength": 1,
               "pattern": "^L[1-9][0-9]*$"
             },
-            "description": "The connections its work may speak in, by L label. The messaging line, where one is connected, is always open to it too. Left out: none."
+            "description": "The connections its work may speak in, by L label. The messaging line, where one is connected, is always open to it too. Left out: none; from a task's work, its own task's."
           },
           "replaces": {
             "type": "string",
@@ -794,9 +798,14 @@
         "type": "object",
         "properties": {
           "notes": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 2000,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "minItems": 1,
+            "maxItems": 8,
             "description": "Its first notes: what the matter is, and what is open."
           },
           "inside": {

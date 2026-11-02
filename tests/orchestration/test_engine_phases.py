@@ -2827,7 +2827,7 @@ async def _the_story(stories: FakeStoryStore, activation_id: str) -> str:
 _STARTED: Final = RoundResponse(
     calls=(
         text_call("I'll keep track of the trip."),
-        _call("c1", "start_matter", notes="A camping trip to Riverside."),
+        _call("c1", "start_matter", notes=["A camping trip to Riverside."]),
     ),
 )
 
@@ -3067,9 +3067,9 @@ async def test_a_note_is_moved_between_stories_by_its_label_end_to_end() -> None
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             text="I'll keep track of the dog.",
-            calls=(_call("c1", "start_matter", notes="The dog's paperwork is open."),),
+            calls=(_call("c1", "start_matter", notes=["The dog's paperwork is open."]),),
         ),
-        RoundResponse(calls=(_call("c2", "start_matter", notes="The dog's vet visit."),)),
+        RoundResponse(calls=(_call("c2", "start_matter", notes=["The dog's vet visit."]),)),
         RoundResponse(calls=(_call("c3", "move_to_matter", matter="S1", to="S2", notes=["N1"]),)),
     )
     stories = FakeStoryStore(now=lambda: AT)
@@ -3859,7 +3859,7 @@ async def test_an_event_remembers_starts_a_story_and_notes_it() -> None:
         RoundResponse(
             calls=(
                 _remember("c1", "The thermostat goes to eco mode at 18:00."),
-                _call("c2", "start_matter", notes="The thermostat's schedule."),
+                _call("c2", "start_matter", notes=["The thermostat's schedule."]),
             ),
         ),
         RoundResponse(
@@ -4074,7 +4074,7 @@ async def test_an_add_and_a_remove_name_one_member_or_this_work_end_to_end() -> 
     else, so both forms run."""
     completer = FakeToolCallingCompleter.scripted(
         _STARTED,
-        RoundResponse(calls=(_call("c2", "start_matter", notes="The gear for the trip."),)),
+        RoundResponse(calls=(_call("c2", "start_matter", notes=["The gear for the trip."]),)),
         RoundResponse(
             calls=(
                 _call("c3", "add_to_matter", matter="S1", member="S2"),

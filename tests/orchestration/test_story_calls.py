@@ -307,7 +307,7 @@ async def test_a_start_holds_this_activation_its_first_notes_and_sits_inside_a_s
     result = await calls.run(
         _call(
             START_STORY,
-            {NOTES_ARGUMENT: "A camping trip. Waiting on the reply.", INSIDE_ARGUMENT: summer},
+            {NOTES_ARGUMENT: ["A camping trip.", "Waiting on the reply."], INSIDE_ARGUMENT: summer},
         )
     )
 
@@ -315,7 +315,7 @@ async def test_a_start_holds_this_activation_its_first_notes_and_sits_inside_a_s
     own = StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)
     (started,) = await stories.stories_of(own)
     notes = await _notes(stories, str(started.story_id))
-    assert [one.text for one in notes] == ["A camping trip. Waiting on the reply."]
+    assert [one.text for one in notes] == ["A camping trip.", "Waiting on the reply."]
     assert {(one.author, one.written_during, one.outside) for one in notes} == {
         (StoryNoteAuthor.PLANNING, _ACTIVATION, False)
     }
@@ -335,7 +335,7 @@ async def test_a_start_inside_a_story_not_there_starts_nothing() -> None:
     calls = StoryCalls(stories=stories, memory=memory)
 
     result = await calls.run(
-        _call(START_STORY, {NOTES_ARGUMENT: "A trip.", INSIDE_ARGUMENT: "story:gone"})
+        _call(START_STORY, {NOTES_ARGUMENT: ["A trip."], INSIDE_ARGUMENT: "story:gone"})
     )
 
     assert result.outcome is ToolOutcome.FAILED
@@ -348,7 +348,7 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
     stories, memory = await _stores()
     plans = FakePlanStore(now=_now)
     acting = _acting(plans, StoryCalls(stories=stories, memory=memory))
-    notes: dict[str, FrozenJson] = {NOTES_ARGUMENT: "A camping trip."}
+    notes: dict[str, FrozenJson] = {NOTES_ARGUMENT: ["A camping trip."]}
 
     first = await acting.act(
         AuthorizedRound(
@@ -374,7 +374,11 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
         AuthorizedRound(
             _ACTIVATION,
             "round:3",
-            (AuthorizedCall(_call(START_STORY, {NOTES_ARGUMENT: "Visiting Mum."}, decision="d3")),),
+            (
+                AuthorizedCall(
+                    _call(START_STORY, {NOTES_ARGUMENT: ["Visiting Mum."]}, decision="d3")
+                ),
+            ),
         ),
         held=HeldResults(),
     )
@@ -416,6 +420,7 @@ class _FailsAfterCreate:
     "stories",
     [
         pytest.param(_FailsAfterCreate(note_at=1), id="the-first-note"),
+        pytest.param(_FailsAfterCreate(note_at=2), id="between-the-notes"),
         pytest.param(_FailsAfterCreate(link=True), id="placing-it-inside"),
     ],
 )
@@ -434,7 +439,7 @@ async def test_a_start_that_made_its_story_is_never_reported_not_done(
     plans = FakePlanStore(now=_now)
     acting = _acting(plans, StoryCalls(stories=cast("StoryStore", stories), memory=memory))
     arguments: dict[str, FrozenJson] = {
-        NOTES_ARGUMENT: "A camping trip.",
+        NOTES_ARGUMENT: ["A camping trip.", "Waiting on the reply."],
         INSIDE_ARGUMENT: summer,
     }
 
@@ -1138,7 +1143,7 @@ async def test_a_group_puts_the_stories_under_a_new_larger_one_with_its_first_no
             GROUP_STORY,
             {
                 STORIES_ARGUMENT: [trip, absorbed, other],
-                NOTES_ARGUMENT: "The summer.",
+                NOTES_ARGUMENT: ["The summer."],
                 OUTSIDE_CONTENT_ARGUMENT: True,
             },
         )
@@ -1196,7 +1201,7 @@ async def test_a_group_that_made_its_story_is_never_reported_not_done() -> None:
 
     with pytest.raises(StartUnfinishedError):
         await calls.run(
-            _call(GROUP_STORY, {STORIES_ARGUMENT: [trip], NOTES_ARGUMENT: "The summer."})
+            _call(GROUP_STORY, {STORIES_ARGUMENT: [trip], NOTES_ARGUMENT: ["The summer."]})
         )
     assert (
         len(await stories.inner.stories_of(StoryMember(kind=StoryMemberKind.STORY, id=trip))) == 1

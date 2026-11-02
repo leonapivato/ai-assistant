@@ -381,7 +381,8 @@ SPAWN: Final = _declared(
                 "items": {"type": "string", "minLength": 1},
                 "description": (
                     "The connections its work may speak in, by L label. The messaging line, "
-                    "where one is connected, is always open to it too. Left out: none."
+                    "where one is connected, is always open to it too. Left out: none; from a "
+                    "task's work, its own task's."
                 ),
             },
             REPLACES_ARGUMENT: {
