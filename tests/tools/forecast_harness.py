@@ -484,8 +484,8 @@ async def bound(  # noqa: PLR0913 — one knob per argument a case varies about 
     subject: Built,
     *,
     origin: str = ORIGIN,
-    latitude: float = LATITUDE,
-    longitude: float = LONGITUDE,
+    latitude: float | None = LATITUDE,
+    longitude: float | None = LONGITUDE,
     tool: Any = FORECAST_READ,
     forecast_reach: bool = True,
 ) -> BoundEgressCall:
@@ -520,11 +520,12 @@ async def bound(  # noqa: PLR0913 — one knob per argument a case varies about 
         registrations=egress_registrations(None, None, subject.integration),
         records=Records(KEYLESS),
     )
-    parameters: dict[str, FrozenJson] = {
-        "origin": origin,
-        "latitude": latitude,
-        "longitude": longitude,
-    }
+    parameters: dict[str, FrozenJson] = {"origin": origin}
+    # ADR-0364 §12:2: a coordinate left out is no argument the call carries.
+    if latitude is not None:
+        parameters["latitude"] = latitude
+    if longitude is not None:
+        parameters["longitude"] = longitude
     derived = await seam.bind(
         tool,
         parameters=parameters,
@@ -543,8 +544,8 @@ async def request(  # noqa: PLR0913 — one knob per thing a case varies about t
     subject: Built,
     *,
     origin: str = ORIGIN,
-    latitude: float = LATITUDE,
-    longitude: float = LONGITUDE,
+    latitude: float | None = LATITUDE,
+    longitude: float | None = LONGITUDE,
     tool: Any = FORECAST_READ,
     elsewhere: Mapping[str, Any] | None = None,
     unbound: bool = False,

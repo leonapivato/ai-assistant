@@ -149,6 +149,7 @@ __all__ = [
     "MEMBER_EPISODE_ARGUMENT",
     "MEMBER_SPLIT",
     "MEMBER_STORY_ARGUMENT",
+    "MEMBER_WRITTEN",
     "MERGE_STORY",
     "MERGE_STORY_CAPABILITY",
     "MOVE_STORY",
@@ -239,12 +240,20 @@ MEMBER_STORY_ARGUMENT: Final = "member_story"
 MEMBER_EPISODE_ARGUMENT: Final = "member_episode"
 
 #: ADR-0364 §8:2: where planning's check puts ``member``'s id, by the kind its label names.
+#: ADR-0364 §8:2: planning names one member as ``member``; its check writes the id that
+#: label names into the argument its kind is read by, which the offer leaves out and the
+#: model never names. The member is planning's choice, so the call's identity holds it.
 MEMBER_SPLIT: Final[Mapping[str, Mapping[LabelKind, str]]] = {
     MEMBER_ARGUMENT: {
         LabelKind.STORY: MEMBER_STORY_ARGUMENT,
         LabelKind.EPISODE: MEMBER_EPISODE_ARGUMENT,
     },
 }
+
+#: The arguments :data:`MEMBER_SPLIT` writes into, which the offer leaves out.
+MEMBER_WRITTEN: Final = frozenset(
+    target for split in MEMBER_SPLIT.values() for target in split.values()
+)
 
 #: The most first notes one start carries. The page's tidy-up condenses them, so this
 #: bounds one call rather than the page; several matters are several starts.
@@ -445,7 +454,7 @@ LINK_STORY: Final = _declared(
     ),
     properties=_ADD_PROPERTIES,
     required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
-    system_supplied=(EPISODE_ARGUMENT, MEMBER_STORY_ARGUMENT, MEMBER_EPISODE_ARGUMENT),
+    system_supplied=(EPISODE_ARGUMENT,),
     safe_to_repeat=True,
     idempotency=Idempotency.NATURAL,
 )
@@ -465,7 +474,7 @@ UNLINK_STORY: Final = _declared(
     ),
     properties=_REMOVE_PROPERTIES,
     required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
-    system_supplied=(EPISODE_ARGUMENT, MEMBER_STORY_ARGUMENT, MEMBER_EPISODE_ARGUMENT),
+    system_supplied=(EPISODE_ARGUMENT,),
     safe_to_repeat=True,
     idempotency=Idempotency.NATURAL,
 )

@@ -264,6 +264,7 @@ from ai_assistant.orchestration.renames import (
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_calls import (
     MEMBER_SPLIT,
+    MEMBER_WRITTEN,
     STORY_CALL_CAPABILITIES,
     TIDY_STORY_CAPABILITY,
 )
@@ -2384,6 +2385,9 @@ _CANNOT_ASK: Final = "it needs approval, and nothing here can ask for it, so it 
 #: ADR-0364 §6:1: why a call whose outcome the record does not hold is unknown.
 _NO_OUTCOME_RECORDED: Final = "no outcome was recorded for it"
 
+#: ADR-0364 §9:5: the calls whose result is their outcome alone, the message calls.
+_OUTCOME_ALONE: Final = frozenset({TEXT_CAPABILITY, EMAIL_CAPABILITY})
+
 #: ADR-0364 §6:1: the why of an outcome other than done that recorded no reason of its own.
 _NO_REASON: Final[Mapping[CallOutcomeKind, str]] = {
     CallOutcomeKind.NOT_DONE: "its tool did not do it, and said no more",
@@ -3133,13 +3137,9 @@ class _Request:
         Nothing already sent is re-rendered (ADR-0356 §5:6).
         """
         self._entries.update(shown.connections)
-        listed = {one.place for one in self._inputs.places or ()}
-        fresh = [
-            one
-            for one in self._connection_entries()
-            if one.place not in self._entries
-            and (one.place in listed or self._book.held(LabelKind.PLACE, one.place) is not None)
-        ]
+        # Every connection the hub hands now that the exchange has not shown, such as a
+        # conversation newly among the recent ones, joins (§3:5, §3:10).
+        fresh = [one for one in self._connection_entries() if one.place not in self._entries]
         fresh.extend(
             entry
             for place in list(self._named_places)
@@ -4706,6 +4706,9 @@ class _Request:
             return shown, outcome.kind
         # ADR-0364 §5:1: a ticket's result is written as the tool it ran writes one.
         ran = outcome.ran if outcome.ran is not None else self._as_run(call).name
+        if ran in _OUTCOME_ALONE:
+            # ADR-0364 §9:5: a message call's result is its outcome alone, whatever ran it.
+            return shown, outcome.kind
         shown |= self._result(ran, outcome, outcome.result_id)
         return shown, outcome.kind
 
@@ -5699,9 +5702,7 @@ def exact_line(
     Returns:
         The line, with no line break in it.
     """
-    # ADR-0364 §8:2: the member an add or a remove names is planning's, written into the
-    # argument its kind is read by, so it is shown, as `member`, though the hub fills it.
-    left_out = _NEVER_SHOWN | (frozenset(filled) - _MEMBER_WRITTEN)
+    left_out = _NEVER_SHOWN | frozenset(filled)
     shown = {} if worded is None else worded
     capability = str(call.tool.capability)
     # ADR-0364 §8:4-§8:5: a call stored under an old name is shown under its name now.
@@ -5719,11 +5720,6 @@ def exact_line(
         line = f"{line} — " + "; ".join(arguments)
     return line
 
-
-#: The arguments planning's check writes a named member into (ADR-0364 §8:2).
-_MEMBER_WRITTEN: Final = frozenset(
-    target for split in MEMBER_SPLIT.values() for target in split.values()
-)
 
 #: A name an exact line shows bare: one that can carry no line break, quote or
 #: delimiter of the line's own.
@@ -5772,8 +5768,11 @@ def _filled(capabilities: Sequence[ToolDefinition], call: RequestedCall) -> froz
     to the model (ADR-0260 §3:2, ADR-0324 §3), and a search's no origin. Such a call
     runs nowhere either, since authorizing finds no tool for a capability not offered.
     """
-    # ADR-0364 §8:4: a call stored under an old name is the new tool's.
-    capability = current_name(str(call.tool.capability))
+    # ADR-0364 §8:4: a call stored under an old name is the new tool's; one stored as
+    # ``forecast_read`` carried the configured place, the hub's then (§12:3).
+    recorded = str(call.tool.capability)
+    capability = current_name(recorded)
+    before = _FILLED_BEFORE.get(recorded, frozenset())
     offered = next(
         (
             tool
@@ -5784,7 +5783,18 @@ def _filled(capabilities: Sequence[ToolDefinition], call: RequestedCall) -> froz
     )
     if offered is None:
         return frozenset(call.values)
-    return frozenset({*call.tool.system_supplied, *offered.system_supplied})
+    # ADR-0364 §8:2: the member an add or a remove names is planning's, though the offer
+    # leaves out the argument its check writes it into.
+    hidden = frozenset(offered.system_supplied) - MEMBER_WRITTEN
+    return frozenset({*call.tool.system_supplied, *hidden, *before})
+
+
+#: ADR-0364 §12:3: the arguments a call stored under an old name carried that the hub
+#: filled then, and never planning: a ``forecast_read``'s coordinates were the configured
+#: place's, which planning is never shown.
+_FILLED_BEFORE: Final[Mapping[str, frozenset[str]]] = {
+    "forecast_read": frozenset({"latitude", "longitude"}),
+}
 
 
 #: ADR-0361 §5:2: the tool a ticket is run by, by its ``A`` label alone. Offered on every

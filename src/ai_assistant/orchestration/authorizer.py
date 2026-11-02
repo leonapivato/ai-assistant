@@ -164,7 +164,6 @@ from ai_assistant.orchestration.selection import (
     select,
 )
 from ai_assistant.orchestration.stories import episode_address
-from ai_assistant.orchestration.story_calls import MEMBER_SPLIT
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -210,11 +209,6 @@ _log = structlog.get_logger(__name__)
 _NO_TOOL: Final = "no tool satisfies this capability"
 _DISAGREE: Final = "the tools satisfying this capability do not declare alike"
 _HUB_FILLS: Final = "the call names an argument the hub fills"
-#: The system-supplied arguments planning's own check writes, from a label the model
-#: named (ADR-0364 §8:2): the member an add or a remove names, by its kind.
-_WRITTEN_BY_PLANNING: Final = frozenset(
-    target for split in MEMBER_SPLIT.values() for target in split.values()
-)
 _UNFILLABLE: Final = "the capability names an argument the hub cannot fill"
 _UNCHECKABLE: Final = "the arguments could not be checked against the tool's schema"
 _NO_FIT: Final = "the arguments fit no tool of this capability"
@@ -1394,7 +1388,13 @@ class AuthorizingStage:
             _log.warning("authorizing_requests_unread", stage="authorizing")
             return True
         now = self._now()
-        return any(one.expires_at > now and one.call.same_call(asked) for one in pending)
+        declared = await self._declared_by_name()
+        for one in pending:
+            # ADR-0364 §8:6: a request written under an old name holds the new tool's call.
+            held = translated(one.call, declared)
+            if one.expires_at > now and not isinstance(held, Void) and held.same_call(asked):
+                return True
+        return False
 
     async def _selected(self, call: ProposedCall, state: _Round) -> _Selected | CallVerdict:
         """Bind ``call`` to one tool, its hub-filled arguments added (ADR-0144, ADR-0254 §3)."""
@@ -1427,19 +1427,12 @@ class AuthorizingStage:
         if any(_declared(other) != _declared(first) for other in candidates[1:]):
             return _not_done(call, _DISAGREE)
         arguments: dict[str, FrozenJson] = dict(call.arguments)
-        # ADR-0364 §8:2: planning's own check writes the member an add or a remove names
-        # into the argument its kind is read by, which the model may never name.
-        written = {key: arguments.pop(key) for key in _WRITTEN_BY_PLANNING if key in arguments}
         if model_supplied_keys(arguments, first):
             return _not_done(call, _HUB_FILLS)
-        # The member a call names is planning's to write, and one it names none of is
-        # this work's (§8:2), so neither is the hub's to fill.
-        fills = self._filled(
-            [key for key in first.system_supplied if key not in _WRITTEN_BY_PLANNING], state
-        )
+        fills = self._filled(list(first.system_supplied), state)
         if fills is None:
             return _not_done(call, _UNFILLABLE)
-        return list(candidates), {**arguments, **written, **fills}
+        return list(candidates), {**arguments, **fills}
 
     @staticmethod
     def _filled(keys: Sequence[str], state: _Round) -> Mapping[str, FrozenJson] | None:

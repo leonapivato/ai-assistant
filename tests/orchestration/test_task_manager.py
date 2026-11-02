@@ -574,6 +574,22 @@ async def test_a_spawn_into_the_past_or_off_the_list_writes_nothing() -> None:
     )
 
 
+async def test_a_spawn_from_a_work_keeping_a_list_suggests_only_what_it_may_speak_in() -> None:
+    """ADR-0364 §9:4, §11:3: a task's work keeps its list, so a conversation it was shown
+    but may not speak in is no connection its spawn may suggest; one on its list is."""
+    world = _World()
+    step = activation()
+    other = "conversation:c-other"
+    keeping = _spawner(step, set_in=SCHEDULE, keeps_list=True, shown=(other,))
+
+    refused = await _spawn(world, keeping, connections=[other])
+    listed = await _spawn(world, keeping, connections=[f"conversation:{CHAT.instance_id}"])
+
+    assert isinstance(refused, Unwritten)
+    assert "may not speak in" in refused.reason
+    assert isinstance(listed, ToolResult)
+
+
 async def test_a_step_stating_no_places_carries_its_tasks_places_forward() -> None:
     """§5:6, §13:3: the same work continuing."""
     world = _World()
