@@ -289,8 +289,6 @@ from ai_assistant.core.types import (
     Modality,
     NewMessage,
     PlanningLabel,
-    Profile,
-    ProfileField,
     ProjectedCall,
     ProjectedEvidence,
     ProjectedRecall,
@@ -347,7 +345,7 @@ from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
 )
 from ai_assistant.orchestration.candidates import pending_candidates
-from ai_assistant.orchestration.channel_kinds import place_of
+from ai_assistant.orchestration.channel_kinds import place_of, takes_text
 from ai_assistant.orchestration.chat import couldnt_finish
 from ai_assistant.orchestration.controller import (
     Stage,
@@ -363,6 +361,7 @@ from ai_assistant.orchestration.episode_lookups import OlderSource
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.lookups import (
     OLDER_NOTES_PAGE,
+    READ_EPISODE_CAPABILITY,
     READ_STORY_CAPABILITY,
     SEARCH_MEMORY_CAPABILITY,
     searched_ids,
@@ -385,19 +384,13 @@ from ai_assistant.orchestration.matters import (
 from ai_assistant.orchestration.message_tools import (
     EMAIL_CAPABILITY,
     EMAIL_CHANNEL_TYPE,
-    EXACT_ARGUMENT,
-    PLACE_LABEL,
-    PLATFORMS,
     TEXT_CALL,
     TEXT_CAPABILITY,
     WORDS_ARGUMENT,
-    TextArguments,
     emailed_to,
-    platform_name,
-    platform_type,
+    exact_words,
     reworded,
     text_arguments,
-    who_it_is_for,
 )
 from ai_assistant.orchestration.outside_content import joined_parties, rests_on_outside_content
 from ai_assistant.orchestration.person_block import activation_person, still_held
@@ -412,10 +405,13 @@ from ai_assistant.orchestration.planning import (
     WAITING_ROUND,
     CallOutcome,
     CallOutcomeKind,
+    ConnectionsFound,
+    ConnectionShown,
     DigestedEvidence,
     DigestItem,
     EpisodeRead,
     EpisodesFound,
+    LabelKinds,
     OfferShown,
     OlderHistory,
     PeerShown,
@@ -505,6 +501,7 @@ if TYPE_CHECKING:
         ToolCall,
         TranscriptMessage,
     )
+    from ai_assistant.orchestration.acting import OwnRecordsAnswer, OwnRecordsCalls
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
@@ -603,24 +600,13 @@ _UNKNOWN_SEARCHES: Final = frozenset({"deadline_expired", "transport_failed"})
 #: and ``orchestration`` names it by its capability.
 _NOT_OFFERED: Final = frozenset({"report_current_time"})
 
-#: Why a ``text`` call goes nowhere, by how ADR-0357 §2:4 fails to resolve its place.
-_NO_PLACE_HERE: Final = "this activation's input came from no place that takes a message"
-_SUGGESTS_SEVERAL: Final = "its task suggests more than one place, so via names one"
-_SUGGESTS_NONE: Final = (
-    "its task suggests no place and the line's chat is not on its list, so via names one"
-)
 #: The place check's refusal where it gave no reason of its own.
 _NOT_ALLOWED_THERE: Final = "the message may not go there"
-#: How much of a ``via`` that names nothing its coming back quotes.
-_QUOTED_VIA_CHARS: Final = 40
-#: The line's chat's channel type: where a task's message goes that suggests no place
-#: (ADR-0357 §2:4).
-_LINE_TYPE: Final = PLATFORMS["telegram"]
 
 
 @dataclass(frozen=True, slots=True)
 class _Nowhere:
-    """Why a ``text`` call can go nowhere, with the places it may name (ADR-0357 §6:2)."""
+    """Why a ``send_text`` call can go nowhere, with the connections it may name (§9:2)."""
 
     reason: str
 
@@ -1669,6 +1655,8 @@ def _story_records(given: PlanningStories) -> tuple[EpisodicMemory, ...]:
 
 def _read(found: EpisodeLookedUp) -> tuple[MemoryRecord, ...]:
     """Every record an episode look-up read and shows (ADR-0309 §5:10)."""
+    if isinstance(found, ConnectionsFound):
+        return ()
     if isinstance(found, EpisodesFound):
         return tuple(one.record for one in found.episodes)
     if isinstance(found, OlderHistory):
@@ -1688,6 +1676,9 @@ def _looked_outside(found: EpisodeLookedUp) -> tuple[str, ...]:
     summary shown, by its story; and, of a full view, its evidence, a marked note or a
     marked entry, by the episode.
     """
+    if isinstance(found, ConnectionsFound):
+        # ADR-0364 §3:8: a connections search shows no text it matched against.
+        return ()
     if isinstance(found, EpisodesFound):
         return (
             *(one.record.id for one in found.episodes if rests_on_outside_content(one.record)),
@@ -1921,6 +1912,32 @@ def _taken_places(state: ActivationState | None, own: str | None) -> tuple[str, 
     )
 
 
+class _EpisodeReading:
+    """``read_episode``'s runner: a running episode's findings, or a past one's record.
+
+    ADR-0364 §8:3: an episode the work was shown as running is read through the peer view
+    by :meth:`~ai_assistant.orchestration.matter_calls.MatterCalls.read_running`; any
+    other goes to the runner the composition root wired for the episode look-up.
+    """
+
+    def __init__(self, running: MatterCalls, past: OwnRecordsCalls) -> None:
+        self._running = running
+        self._past = past
+
+    async def run(self, call: ToolCall) -> OwnRecordsAnswer:
+        """Read the episode ``call`` names, running or past."""
+        answered = await self._running.read_running(call)
+        return answered if answered is not None else await self._past.run(call)
+
+
+type ConnectionsSource = Callable[
+    [ChannelIdentity | None],
+    Awaitable[tuple[tuple[ConnectionShown, ...], Mapping[str, PlaceTarget]]],
+]
+"""What builds a work's connections at each round (ADR-0364 §3): given its origin, the
+entries its Connections section shows, and the writer of each that takes a text message."""
+
+
 @dataclass
 class Scheduling:
     """What the phases hold of an activation offered spawn (ADR-0350 §3:4, §5:10-§5:11).
@@ -2085,6 +2102,10 @@ class PhaseWorking:
         # by the activation (§9:1).
         self.scheduling: Scheduling | None = None
         self.task_links: dict[str, str] | None = None
+        # ADR-0364 §3: the connections its Connections section shows, built at every
+        # round, and the writer of each that takes a text message, by place (§9:3).
+        self.connections: tuple[ConnectionShown, ...] = ()
+        self.connection_targets: Mapping[str, PlaceTarget] = {}
         # ADR-0349 §7:28: how the waits on an older activation move the pass's deadline,
         # which the engine hands in with the pass; ``None`` moves nothing.
         self.move_deadline: Callable[[float], None] | None = None
@@ -2102,9 +2123,6 @@ class PhaseWorking:
         # entries the episode already records, by their round and id (§8:6).
         self.work: PlanningWork | None = None
         self._entered: set[tuple[str, str]] = set()
-        # ADR-0360 §4:1, ADR-0357 §2:3: the person's names as the news last showed them, a
-        # name changed mid-work being one planning was shown, which a message may use.
-        self.named_now: tuple[str, ...] = ()
         # ADR-0358 §7-§10: what each done episode look-up read, by its result's id; and
         # where the place window came from, which the older history is read from (§9:2).
         self.looked: dict[str, EpisodeLookedUp] = {}
@@ -2494,7 +2512,12 @@ class PhaseWorking:
         found = self._found(outcome, result_id, capability)
         if found is not None:
             return found
-        if capability in TASK_SCHEDULER_CAPABILITIES or capability in MATTER_CAPABILITIES:
+        if (
+            capability in TASK_SCHEDULER_CAPABILITIES
+            or capability in MATTER_CAPABILITIES
+            # ADR-0364 §8:3: a read of running work is its peer view, as the look-up was.
+            or (capability == READ_EPISODE_CAPABILITY and result_id in self.peers)
+        ):
             return self._labelled(outcome, result_id)
         if capability == REMEMBER_CAPABILITY and is_candidate_result(outcome.result):
             # ADR-0329 §4:1, §4:4: a candidate's similar memories as fetched, or that its
@@ -2507,7 +2530,7 @@ class PhaseWorking:
             return replace(outcome, result=None, candidate=RecordedCandidate(similar=similar))
         return outcome
 
-    def _found(
+    def _found(  # noqa: PLR0911 — one return per kind of look-up
         self, outcome: CallOutcome, result_id: str, capability: str | None
     ) -> CallOutcome | None:
         """``outcome``, carrying what its look-up found, or ``None`` where it found none.
@@ -2528,6 +2551,8 @@ class PhaseWorking:
             return replace(outcome, result=None, history=looked)
         if isinstance(looked, EpisodeRead):
             return replace(outcome, result=None, full=looked)
+        if isinstance(looked, ConnectionsFound):
+            return replace(outcome, result=None, connections=looked)
         return None
 
     def unfetched_searches(self) -> dict[str, tuple[str, ...]]:
@@ -2945,15 +2970,16 @@ def _emailed(one: ActedCall) -> RecordedDelivery | None:
         return None
     if one.effect_id is None:
         return None
+    # ADR-0364 §9:7: authorizing ruled on the words as the wording step renders them, the
+    # tags removed, so the words the call carries are the words it sent.
     words = request.parameters.get(WORDS_ARGUMENT)
     where = emailed_to(request.parameters)
     if not isinstance(words, str) or not words.strip() or where is None:
         return None
-    exact = request.parameters.get(EXACT_ARGUMENT) is True
     status = _EMAIL_STATUS[one.outcome]
     reason = None if status is DeliveryStatus.SENT else (one.reason or _UNKNOWN_WRITE)
     return RecordedDelivery(
-        words=reworded(words, exact=exact),
+        words=words,
         went=ChannelIdentity(channel_type=EMAIL_CHANNEL_TYPE, instance_id=where),
         status=status,
         reason=reason,
@@ -3601,7 +3627,7 @@ class PhasePath:
         capabilities: Sequence[str] | None = None,
         planning_model: str | None = None,
         story_reads: StoryReads | None = None,
-        label_arguments: Mapping[str, Mapping[str, LabelKind]] | None = None,
+        label_arguments: Mapping[str, Mapping[str, LabelKinds]] | None = None,
         story_calls: StoryCalls | None = None,
         look_ups: LookUps | None = None,
         showed_chars: int = SHOWED_CHARS,
@@ -3718,7 +3744,7 @@ class PhasePath:
         self._recall_cap = recall_cap
         self._recall_digest_wait = recall_digest_wait
         self._story_reads = story_reads
-        self._label_arguments: dict[str, Mapping[str, LabelKind]] = {
+        self._label_arguments: dict[str, Mapping[str, LabelKinds]] = {
             name: dict(arguments) for name, arguments in (label_arguments or {}).items()
         }
         # ADR-0357 §2:4: a ``text`` call's ``via`` names a place by its L label or a
@@ -3738,6 +3764,7 @@ class PhasePath:
         self._tickets: TicketsHeld | None = None
         # ADR-0349 §4-§7: what crosses the engine's activations, attached by the engine.
         self._matters: Matters | None = None
+        self._connections: ConnectionsSource | None = None
         self._append: Callable[[], Awaitable[None]] | None = None
         self._spawn: Callable[[Coroutine[None, None, None]], None] = self._spawn_held
         self._closing: Callable[[], bool] = _never
@@ -3870,8 +3897,28 @@ class PhasePath:
         self._tools.add_own_records(MATTER_CALLS)
         calls = MatterCalls(matters=matters)
         self._acting.add_own_records(dict.fromkeys(MATTER_CAPABILITIES, calls))
+        # ADR-0364 §8:3: ``read_episode`` reads an episode still running through the peer
+        # view, as the look-up it folds in did, and a past one as the episode look-up does.
+        past = self._acting.own_records
+        self._acting.add_own_records({READ_EPISODE_CAPABILITY: _EpisodeReading(calls, past)})
         self._label_arguments.update(MATTER_LABEL_ARGUMENTS)
         self._matters = matters
+
+    def attach_connections(self, connections: ConnectionsSource) -> None:
+        """Show every work its connections, read through ``connections`` (ADR-0364 §3).
+
+        Built at every round, beside the place list, from the hub's own records: the
+        many-place connections' most recent places, every single-place connection, the
+        system's own channels and the accounts the composition root registered, each with
+        the writer a text message into it takes (§3:2-§3:6, §9:3).
+
+        Raises:
+            ValueError: If they are attached already.
+        """
+        if self._connections is not None:
+            msg = "the connections are attached once"
+            raise ValueError(msg)
+        self._connections = connections
 
     def conversation_target(self, conversation_id: str) -> PlaceTarget:
         """A conversation of the hub's chat as a place a message goes into, with its writer."""
@@ -4472,6 +4519,7 @@ class PhasePath:
             not_taken=working.not_taken(),
             person=person,
             places=None if working.scheduling is None else working.scheduling.places,
+            connections=working.connections,
             offers=offers,
             waiting=waiting,
             declined=() if state is None else state.declined,
@@ -4578,8 +4626,6 @@ class PhasePath:
         matters = await self._matter_states(sorted(work.shown.matters))
         meanings, ended = await self._works_now(work.shown.running, state, given)
         person = await self._person_now(state, given)
-        if person is not None:
-            working.named_now = _names_of(person.profile)
         # ADR-0309 §5:10: a record the news shows is held among what the activation was
         # given, so the episode inherits its placement, as any record shown is.
         working.supplied.obtained(record for record in ended.values() if record is not None)
@@ -4876,6 +4922,12 @@ class PhasePath:
             scheduling.places, scheduling.targets = await scheduling.build()
             if scheduling.speaks_by_label:
                 working.place = replace(working.place, takes_message=bool(scheduling.targets))
+        if self._connections is not None:
+            # ADR-0364 §3:1: every round of every work is shown its connections.
+            trigger = working.trigger
+            working.connections, working.connection_targets = await self._connections(
+                None if trigger is None else trigger.channel
+            )
         if self._task_calls is None or working.task_links is not None:
             return
         linked = {
@@ -5243,6 +5295,8 @@ class PhasePath:
                 call=await self._filled(one.call),
                 deliberate_repeat=one.deliberate_repeat,
                 ticket=one.ticket,
+                nested_repeat=one.nested_repeat,
+                nested_looking_for=one.nested_looking_for,
             )
             for one in planned.calls
             if one.call.name != TEXT_CAPABILITY
@@ -5303,6 +5357,15 @@ class PhasePath:
             person=None if state is None else activation_person(state.trigger),
             tickets=frozenset(one.request_id for one in await self._held_tickets(state)),
             taken_places=() if places is not None else _taken_places(state, place),
+            # ADR-0364 §9:3: a work that keeps no list may send a text into any connection
+            # it was shown that takes one.
+            shown_places=()
+            if places is not None
+            else tuple(
+                one.id
+                for one in working.labels.labels
+                if one.kind is LabelKind.PLACE and takes_text(one.id)
+            ),
         )
         try:
             async with asyncio.timeout_at(given.deadline):
@@ -5331,164 +5394,75 @@ class PhasePath:
     def _text_messages(
         self, working: PhaseWorking, latest: _Round, texts: Sequence[ProposedCall]
     ) -> tuple[RoundMessage, ...]:
-        """Each ``text`` call as the message it is, with the place it names or resolves.
+        """Each ``send_text`` call as the message it is, with the place its connection names.
 
-        ADR-0357 §2:2-§2:4, §6:1: its arguments checked, who it is for found, and where it
-        goes resolved from its ``via`` or, where it names none, chosen as §2:4 says
-        (:meth:`_text_place`). One that cannot be carried out runs nothing: it comes back
-        with why and what it may name instead, and is never checked or written.
+        ADR-0364 §9:1-§9:2, §9:6-§9:9: its arguments checked, its connection resolved from
+        its ``L`` label to a connection the work was shown that takes a text message, and
+        its words' exact parts read. A connection that takes no text message, or one the
+        work was not shown, comes back refused, saying what it may name; words whose exact
+        tags do not close come back not done. Neither is checked or written.
         """
         messages: list[RoundMessage] = []
-        named = self._named(working)
         labels = working.labels.labels
         for call in texts:
             checked = text_arguments(call.arguments)
             if isinstance(checked, str):
                 latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=checked)
                 continue
-            nobody = who_it_is_for(checked.to, named=named)
-            if nobody is not None:
-                latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=nobody)
-                continue
-            place = self._text_place(working, checked, labels)
+            place = self._text_place(working, checked.connection, labels)
             if isinstance(place, _Nowhere):
                 latest.sent[call.call_id] = _Sent(CallOutcomeKind.REFUSED, reason=place.reason)
                 continue
-            messages.append(RoundMessage(checked.words, place, call.call_id))
+            read = exact_words(checked.words)
+            if isinstance(read, str):
+                latest.sent[call.call_id] = _Sent(CallOutcomeKind.NOT_DONE, reason=read)
+                continue
+            messages.append(RoundMessage(reworded(read), place, call.call_id))
         return tuple(messages)
 
-    @staticmethod
-    def _named(working: PhaseWorking) -> tuple[str, ...]:
-        """The names the user's profile gives them, as planning is shown them (§2:3).
-
-        The block's, as the briefing showed them, and any the news has shown since
-        (ADR-0360 §4:1), so a name changed mid-work names the person too.
-        """
-        state = active_state()
-        block = None if state is None else state.person_block
-        if block is None:
-            return ()
-        return tuple(dict.fromkeys((*_names_of(block.profile), *working.named_now)))
-
     def _text_place(
-        self, working: PhaseWorking, checked: TextArguments, labels: Sequence[PlanningLabel]
+        self, working: PhaseWorking, connection: str, labels: Sequence[PlanningLabel]
     ) -> str | _Nowhere:
-        """Where a ``text`` call goes, or why it can go nowhere (ADR-0357 §2:4, §6:2).
+        """The place a ``send_text`` call's connection names, or why it goes nowhere.
 
-        ``via`` names a place by its ``L`` label, which names what it named when planning
-        was shown it, or a platform by name (:meth:`_platform_place`); left out, the tool
-        chooses (:meth:`_chosen_place`). Whether the place may take the message is the
-        message place check's, after this (ADR-0306 §4:1).
+        ADR-0364 §9:2: the ``L`` label names what it named when the work was shown it,
+        and it must be a connection that takes a text message. Whether the place may take
+        this work's message is the message place check's, after this (ADR-0306 §4:1).
         """
-        scheduling = working.scheduling
-        listed = (
-            scheduling.places if scheduling is not None and scheduling.speaks_by_label else None
+        place = next(
+            (one.id for one in labels if one.label == connection and one.kind is LabelKind.PLACE),
+            None,
         )
-        via = checked.via
-        if via is None:
-            return self._chosen_place(working, listed, labels)
-        if PLACE_LABEL.fullmatch(via):
-            place = next(
-                (one.id for one in labels if one.label == via and one.kind is LabelKind.PLACE),
-                None,
-            )
-            if place is None:
-                return self._nowhere(working, labels, f"{via!r} names no place you were shown")
-            return place
-        return self._platform_place(working, via, listed, labels)
-
-    def _chosen_place(
-        self,
-        working: PhaseWorking,
-        listed: Sequence[ListedPlace] | None,
-        labels: Sequence[PlanningLabel],
-    ) -> str | _Nowhere:
-        """Where a ``text`` call naming no place goes (ADR-0357 §2:4).
-
-        The place the input came from; or, for an activation the Task Scheduler started,
-        the one place its task suggests, or the line's chat where it suggests none. Where
-        no such place is on the list, or the task suggests more than one, it goes nowhere.
-        """
-        if listed is None:
-            target = self._target(working)
-            if target is None:
-                return self._nowhere(working, labels, _NO_PLACE_HERE)
-            return target.place
-        suggested = [one for one in listed if one.suggested]
-        if len(suggested) > 1:
-            return self._nowhere(working, labels, _SUGGESTS_SEVERAL)
-        if suggested:
-            return suggested[0].place
-        lines = [one for one in listed if one.channel.channel_type == _LINE_TYPE]
-        if len(lines) == 1:
-            return lines[0].place
-        return self._nowhere(working, labels, _SUGGESTS_NONE)
-
-    def _platform_place(
-        self,
-        working: PhaseWorking,
-        via: str,
-        listed: Sequence[ListedPlace] | None,
-        labels: Sequence[PlanningLabel],
-    ) -> str | _Nowhere:
-        """Where a ``text`` call naming a platform goes (ADR-0357 §2:4).
-
-        The place the input came from, where it is on that platform; or, for an
-        activation the Task Scheduler started, the one place on its list on that platform,
-        or its task's one suggestion among several there.
-        """
-        channel_type = platform_type(via)
-        if channel_type is None:
-            quoted = repr(via[:_QUOTED_VIA_CHARS])
+        if place is None:
             return self._nowhere(
-                working, labels, f"{quoted} names no place by its L label and no platform"
+                working, labels, f"{connection!r} names no connection you were shown"
             )
-        platform = platform_name(channel_type)
-        if listed is None:
-            target = self._target(working)
-            if target is not None and target.channel.channel_type == channel_type:
-                return target.place
-            return self._nowhere(
-                working, labels, f"no place this message may go into is on {platform}"
-            )
-        on = [one for one in listed if one.channel.channel_type == channel_type]
-        if not on:
-            return self._nowhere(working, labels, f"no place on your list is on {platform}")
-        suggested = [one for one in on if one.suggested]
-        if len(on) == 1 or len(suggested) == 1:
-            return (on if len(on) == 1 else suggested)[0].place
-        return self._nowhere(working, labels, f"more than one place on your list is on {platform}")
+        if not takes_text(place):
+            return self._nowhere(working, labels, f"{connection!r} takes no text message")
+        return place
 
     def _nowhere(
         self, working: PhaseWorking, labels: Sequence[PlanningLabel], why: str
     ) -> _Nowhere:
-        """A ``text`` call that can go nowhere: why, and the places it may name (§6:2)."""
+        """A ``send_text`` call that can go nowhere: why, and what it may name (§9:2)."""
         return _Nowhere(f"{why}; {self._may_use(working, labels)}")
 
     def _may_use(self, working: PhaseWorking, labels: Sequence[PlanningLabel]) -> str:
-        """The places a ``text`` call may name, as its coming back says them (§2:4-§2:5).
+        """The connections a ``send_text`` call may name, as its coming back says them.
 
-        For an activation the Task Scheduler started, each place on its list, by its ``L``
-        label and its platform; for every other, the place its input came from alone,
-        with its platform and its label where it has one, since a message goes into no
-        other (ADR-0306 §4:1, ADR-0356 §7:10).
+        For a work that keeps a list, a task's or an approval's (ADR-0364 §9:4), each place
+        on it, by its ``L`` label; for every other, each connection it was shown that
+        takes a text message (§9:3).
         """
         held = {one.id: one.label for one in labels if one.kind is LabelKind.PLACE}
         scheduling = working.scheduling
         if scheduling is not None and scheduling.speaks_by_label:
-            named = [
-                f"{held.get(one.place, one.place)} ({platform_name(one.channel.channel_type)})"
-                for one in scheduling.places
-            ]
-            if not named:
-                return "your place list is empty, so a message goes nowhere"
-            return "the places it may name: " + ", ".join(named)
-        target = self._target(working)
-        if target is None:
-            return "this activation can message no one: its input came from no place that takes one"
-        label = held.get(target.place)
-        where = platform_name(target.channel.channel_type) + ("" if label is None else f", {label}")
-        return f"it may go only into the place your input came from ({where}): leave via out"
+            named = [held[one.place] for one in scheduling.places if one.place in held]
+        else:
+            named = [label for place, label in held.items() if takes_text(place)]
+        if not named:
+            return "no connection you were shown takes a text message here"
+        return "the connections it may name: " + ", ".join(named)
 
     @staticmethod
     async def _gone_since(scheduling: Scheduling) -> tuple[str, ...]:
@@ -5906,6 +5880,8 @@ class PhasePath:
             read_outside_content=working.read_outside_content,
             supply=given.supply,
             sees_running=standing is not None and standing.author is not None,
+            keeps_list=scheduling.speaks_by_label,
+            shown=tuple(one.id for one in working.labels.labels if one.kind is LabelKind.PLACE),
         )
 
     @staticmethod
@@ -6011,10 +5987,11 @@ class PhasePath:
             if not one.allowed or one.effect_id is None or call is None:
                 continue
             checked = text_arguments(call.arguments)
-            if isinstance(checked, str):  # pragma: no cover — checked before authorizing
+            read = None if isinstance(checked, str) else exact_words(checked.words)
+            if read is None or isinstance(read, str):  # pragma: no cover — checked before
                 continue
-            # ADR-0357 §4: the words as the wording step renders them.
-            words = reworded(checked.words, exact=checked.exact)
+            # ADR-0364 §9:7, §9:9: the words as the wording step renders them.
+            words = reworded(read)
             try:
                 latest.sent[call.call_id] = await self._sent(
                     working,
@@ -6139,6 +6116,9 @@ class PhasePath:
             # ADR-0361 §7:3: a place an input taken by a take came from, on its list; one
             # gone since goes nowhere, never into another place.
             return None if scheduling is None else scheduling.targets.get(place)
+        if place is not None and place != own_place:
+            # ADR-0364 §9:3: any connection the work was shown that takes a text message.
+            return working.connection_targets.get(place)
         return own
 
     # --- the place ---
@@ -6344,9 +6324,3 @@ class _RecallDigestFailedError(ToleratedStageError):
     evidence and planning is told it could not read recall's outside records
     (ADR-0308 §4:12-§4:13).
     """
-
-
-def _names_of(profile: Profile) -> tuple[str, ...]:
-    """The names a profile gives the person: their name and how they are addressed."""
-    values = (profile.value(one) for one in (ProfileField.NAME, ProfileField.ADDRESS))
-    return tuple(one for one in values if isinstance(one, str) and one.strip())

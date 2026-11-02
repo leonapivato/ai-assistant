@@ -8,7 +8,7 @@ samples = 3
 
 [property]
 check = "acts_within"
-capabilities = ["text", "search_memory", "note_reliance"]
+capabilities = ["send_text", "search_memories", "note_reliance"]
 
 [input]
 file = "invoice-email-is-reported-not-paid.json"

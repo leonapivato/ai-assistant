@@ -8,7 +8,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one spawn to remind Leo to stretch his legs, falling due ten minutes from now (delay_minutes 10, or at 2026-10-29T17:50), whose places name L1. It names no task in replaces, no rule, and cancels nothing."""
+read = """The round makes one spawn_task call to remind Leo to stretch his legs, falling due ten minutes from now (delay_minutes 10, or at 2026-10-29T17:50), whose connections name L1. It names no task in replaces, no rule, and cancels nothing."""
 
 [input]
 file = "snooze-is-a-one-off-with-the-same-instruction.json"

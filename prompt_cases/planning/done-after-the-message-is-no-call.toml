@@ -8,7 +8,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes no cancel_task and no spawn call. It may make one text call with a short acknowledgement."""
+read = """The round makes no cancel_task and no spawn_task call. It may make one send_text call with a short acknowledgement."""
 
 [input]
 file = "done-after-the-message-is-no-call.json"

@@ -33,7 +33,6 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.matter_calls import (
     ANSWER_OFFER,
-    LOOK_UP_ACTIVATION,
     MATTER_LABEL_ARGUMENTS,
     STOP_ACTIVATION,
 )
@@ -103,7 +102,7 @@ async def _results(
 def _matters(**fields: Any) -> dict[str, Any]:
     """Inputs of a round offered the calls on running work, with their labels."""
     values: dict[str, Any] = {
-        "capabilities": (STOP_ACTIVATION, LOOK_UP_ACTIVATION, ANSWER_OFFER),
+        "capabilities": (STOP_ACTIVATION, ANSWER_OFFER),
         "label_arguments": MATTER_LABEL_ARGUMENTS,
     }
     values.update(fields)

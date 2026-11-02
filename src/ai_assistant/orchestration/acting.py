@@ -628,6 +628,11 @@ class ActingStage:
         self._now = checked_clock(now, owner="ActingStage")
         self._new_result_id = new_result_id
 
+    @property
+    def own_records(self) -> OwnRecordsCalls:
+        """The own-records seam as it stands now, every runner it holds by capability."""
+        return self._own_records
+
     def add_own_records(self, runners: Mapping[str, OwnRecordsCalls]) -> None:
         """Hold a runner for each further capability on the assistant's own records.
 

@@ -10,7 +10,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one text call reminding Leo to call his mother, whose via names L1, the hub's chat conversation the task suggests, and makes no other call. It does not send it via L2 or telegram, and its words carry no L label."""
+read = """The round makes one send_text call reminding Leo to call his mother, whose connection is L1, the hub's chat conversation the task suggests, and makes no other call. It does not send it into L2 or the Telegram chat, and its words carry no L label."""
 
 [input]
 file = "a-reminders-activation-writes-one-message-where-suggested.json"

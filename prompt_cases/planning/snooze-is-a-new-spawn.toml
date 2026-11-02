@@ -9,7 +9,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one spawn, about taking the vitamins, falling due ten minutes from now: delay_minutes 10, or an instant ten minutes after the current time. It names no task in replaces, cancels nothing and does not call list_tasks first."""
+read = """The round makes one spawn_task call, about taking the vitamins, falling due ten minutes from now: delay_minutes 10, or an instant ten minutes after the current time. It names no task in replaces, cancels nothing and does not call list_tasks first."""
 
 [input]
 file = "snooze-is-a-new-spawn.json"

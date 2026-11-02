@@ -9,7 +9,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one spawn whose replaces names T1, the reminder to water the balcony plants, falling due at 21:00 Lisbon time today (a local time with no offset, 2026-10-29T21:00, or the same instant with its offset). It makes no cancel_task call."""
+read = """The round makes one spawn_task call whose replaces names T1, the reminder to water the balcony plants, falling due at 21:00 Lisbon time today (a local time with no offset, 2026-10-29T21:00, or the same instant with its offset). It makes no cancel_task call."""
 
 [input]
 file = "make-it-nine-replaces.json"

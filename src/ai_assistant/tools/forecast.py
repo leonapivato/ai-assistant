@@ -184,10 +184,26 @@ def _coordinate(*, maximum: float) -> dict[str, FrozenJson]:
     }
 
 
+#: The capability, ``read_forecast`` (ADR-0364 §8:1), renamed from ``forecast_read`` with
+#: every other field of its declaration kept, its id among them.
+FORECAST_READ_CAPABILITY: Final = "read_forecast"
+
 FORECAST_READ: Final = ToolDefinition(
     id=FORECAST_READ_ID,
-    capability="forecast_read",
-    description="Ask the configured forecast provider what it says about the days ahead.",
+    capability=FORECAST_READ_CAPABILITY,
+    description=(
+        "Read the forecast for the next few days at a place.\n"
+        "\n"
+        "Give the coordinates of a place that was named, such as a city, both or neither; left "
+        "out, it reads the system's configured place.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label, read for you\n"
+        "evidence: what was read of the forecast for looking_for, each item marked outside\n"
+        "\n"
+        "It changes nothing, but what it sends leaves the system."
+    ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,
     side_effecting=True,
@@ -201,15 +217,29 @@ FORECAST_READ: Final = ToolDefinition(
     result=CapabilityResult.MAY_CARRY_OUTSIDE_TEXT,
     outcome_can_be_unknown=True,
     safe_to_repeat=True,
+    # ADR-0364 §12:1: the origin is the hub's to fill, absent from the schema planning is
+    # offered, and keeps its destination keyword. §12:2: the coordinates are planning's,
+    # optional, both or neither, and left out the configured place's.
+    system_supplied=(ORIGIN_ARGUMENT,),
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
             ORIGIN_ARGUMENT: _origin(),
-            LATITUDE_ARGUMENT: _coordinate(maximum=_MAX_LATITUDE),
-            LONGITUDE_ARGUMENT: _coordinate(maximum=_MAX_LONGITUDE),
+            LATITUDE_ARGUMENT: {
+                **_coordinate(maximum=_MAX_LATITUDE),
+                "description": (
+                    "The place's latitude, in degrees. Left out: the configured place's."
+                ),
+            },
+            LONGITUDE_ARGUMENT: {
+                **_coordinate(maximum=_MAX_LONGITUDE),
+                "description": (
+                    "The place's longitude, in degrees. Left out: the configured place's."
+                ),
+            },
         },
-        "required": [ORIGIN_ARGUMENT, LATITUDE_ARGUMENT, LONGITUDE_ARGUMENT],
+        "required": [ORIGIN_ARGUMENT],
         "additionalProperties": False,
     },
 )
@@ -1209,26 +1239,10 @@ class ForecastEgress:
                 f"so there is no authorised request to make (ADR-0148 §8, ADR-0260 §6)"
             )
             raise ToolBindingError(msg)
-        if (latitude, longitude) != (self._latitude, self._longitude):
-            # **§3's clause at the seam, and it is ADR-0231 §5's origin pin one value
-            # over.** "The place is the deployment's own configured place, and the
-            # configuration is the naming act … held by the forecaster as its own
-            # configuration", and §3 is absolute that no caller widens, narrows or
-            # offsets the read — "a caller able to widen the read is a caller able to
-            # defeat the bound" (ADR-0093 §10). §6's "every subsequent step reads the
-            # revalidated copy" says which *copy* to trust, not that a copy may name a
-            # place this forecaster was not configured for: a validly authorised call
-            # carrying another coordinate passes all three checks and would send it.
-            #
-            # Refused **before** the connection record is read and before any channel
-            # is opened, and synchronously with the three above, so nothing observed
-            # here can move between the check and the send.
-            msg = (
-                f"{self._declaration.id}: this call names a place this forecaster is not "
-                f"configured for, so the request would ask about somewhere the "
-                f"deployment did not choose (ADR-0260 §3, §6)"
-            )
-            raise ToolBindingError(msg)
+        # ADR-0364 §12:2-§12:3: the coordinates are planning's, the configured place's
+        # where it named none, which the hub fills before the call is ruled on. They are
+        # what the call sends, not where it goes: the origin is still pinned to the one
+        # configured provider, and the ruling ranges over the coordinates it carries.
         return checked, binding, origin, latitude, longitude
 
     async def _asked(
@@ -1696,6 +1710,7 @@ def _decimal(value: float) -> str:
 
 __all__ = [
     "FORECAST_READ",
+    "FORECAST_READ_CAPABILITY",
     "FORECAST_READ_ID",
     "FORECAST_SOURCE_NAME",
     "LATITUDE_ARGUMENT",

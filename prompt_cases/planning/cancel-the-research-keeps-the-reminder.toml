@@ -11,7 +11,7 @@ samples = 3
 
 [property]
 check = "read"
-read = """The round makes no cancel_task call and no stop_activation call. A text call tells Leo the blender research is stopped and that the reminder to check the project notes is still set, and its words use no T, E or R label."""
+read = """The round makes no cancel_task call and no stop_work call. A send_text call tells Leo the blender research is stopped and that the reminder to check the project notes is still set, and its words use no T, E or R label."""
 
 [input]
 file = "cancel-the-research-keeps-the-reminder.json"

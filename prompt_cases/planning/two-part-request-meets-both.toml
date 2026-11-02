@@ -8,7 +8,7 @@ samples = 3
 
 [property]
 check = "includes_with"
-capabilities = ["book_table", "spawn"]
+capabilities = ["book_table", "spawn_task"]
 phrases = ["Luigi", "Maren"]
 
 [input]

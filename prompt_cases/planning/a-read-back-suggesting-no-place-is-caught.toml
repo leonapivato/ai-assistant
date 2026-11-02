@@ -11,7 +11,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round cancels T1 and makes a new spawn, one that names no task it replaces, whose places name L1, about checking whether it will rain tonight and telling Leo, still due at 6 pm as T1 was. No text call in this round tells Leo that the forecast will be reported, here or anywhere."""
+read = """The round cancels T1 and makes a new spawn_task call, one that names no task it replaces, whose connections name L1, about checking whether it will rain tonight and telling Leo, still due at 6 pm as T1 was. No send_text call in this round tells Leo that the forecast will be reported, here or anywhere."""
 
 [input]
 file = "a-read-back-suggesting-no-place-is-caught.json"

@@ -1,22 +1,24 @@
-"""The message tools: ``text``, ``email``'s names, and what every message call shares (ADR-0357).
+"""The message tools: ``send_text``, ``send_email``'s names, and what both share (ADR-0357).
 
 Saying something to someone is a call to a tool chosen by its modality (ADR-0357 §2:1):
-``text`` for a short written message, ``email`` for an email. This module holds what the
-phases, planning and authorizing read alike, and imports nothing of theirs:
+``send_text`` for a text message into a connection, ``send_email`` for an email from an
+email account (ADR-0364 §8:1). This module holds what the phases, planning and
+authorizing read alike, and imports nothing of theirs:
 
-- **``text``'s declaration** (§2:2), offered on every round (ADR-0356 §4:3), and the
-  check of its arguments, which code makes because a ``text`` call is never selected or
-  ruled on as a call (ADR-0356 §7:7).
-- **Who it is for** (§2:3): ``to`` names a person as planning was shown them, and a name
-  that fits no one comes back with who it could be, never a guess. The only person a
-  message reaches today is the user, by the place their input came from or a place on
-  the activation's place list (§1:4).
-- **Where it goes** (§2:4): ``via`` names a place by its ``L`` label or a platform by
-  name, and the platforms are named here, with how a result names them (§3:1).
-- **The wording step** (§4): it passes the words through unchanged, ``exact`` or not,
-  until the decision §4:5 names builds it.
-- **``email``'s names** (§2:5-§2:10): the capability and its arguments, which the
-  declaration in ``tools`` spells and authorizing's gate reads, pinned equal by test.
+- **``send_text``'s declaration** (ADR-0364 §9:1), offered on every round (ADR-0356
+  §4:3), and the check of its arguments, which code makes because a ``send_text`` call is
+  never selected or ruled on as a call (ADR-0356 §7:7). It takes ``connection``, an ``L``
+  label checked by its pattern with no ``enum``, so the offered tools stay identical
+  across works (§9:2), and ``words``. Who a message reaches is its connection's (§9:1).
+- **Exact parts** (§9:6-§9:9): words mark a part to be sent exactly as written with an
+  ``<exact>`` tag and its closing tag, a backslash before a tag sending it as literal text
+  and two sending one backslash and leaving the tag a tag. :func:`exact_words` reads them
+  and :func:`reworded` sends them.
+- **The wording step** (ADR-0357 §4): until it is built, words are sent as written with
+  the tags removed (ADR-0364 §9:9).
+- **``send_email``'s names** (ADR-0357 §2:5-§2:10, ADR-0364 §9:11-§9:14): the capability
+  and its arguments, which the declaration in ``tools`` spells and authorizing's gate
+  reads, pinned equal by test.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from ai_assistant.core.types import (
     CapabilityResult,
     CostBasis,
     Idempotency,
+    LabelKind,
     Reversibility,
     RiskLevel,
     ToolCost,
@@ -37,63 +40,61 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
 __all__ = [
-    "ATTACHMENTS_ARGUMENT",
     "BCC_ARGUMENT",
     "CC_ARGUMENT",
+    "CONNECTION_ARGUMENT",
     "EMAIL_CAPABILITY",
     "EMAIL_CHANNEL_TYPE",
-    "EXACT_ARGUMENT",
+    "EMAIL_LABEL_ARGUMENTS",
+    "EXACT_CLOSE",
+    "EXACT_OPEN",
     "FROM_ARGUMENT",
-    "FROM_ASSISTANT",
-    "FROM_USER",
+    "FROM_THE_PERSONS_ACCOUNT",
     "PLACE_LABEL",
-    "PLATFORMS",
     "SUBJECT_ARGUMENT",
     "TEXT_CALL",
     "TEXT_CAPABILITY",
-    "THE_USER",
     "TO_ARGUMENT",
-    "VIA_ARGUMENT",
     "WORDS_ARGUMENT",
+    "ExactWords",
     "TextArguments",
     "emailed_to",
+    "escaped_exact",
+    "exact_words",
     "platform_name",
-    "platform_type",
     "reworded",
     "text_arguments",
-    "who_it_is_for",
 ]
 
 # --- the names ------------------------------------------------------------------------
 
-TEXT_CAPABILITY: Final = "text"
-TO_ARGUMENT: Final = "to"
+TEXT_CAPABILITY: Final = "send_text"
 WORDS_ARGUMENT: Final = "words"
-VIA_ARGUMENT: Final = "via"
-EXACT_ARGUMENT: Final = "exact"
+CONNECTION_ARGUMENT: Final = "connection"
 
-#: ``email`` (ADR-0357 §2:5), as ``tools``' declaration names it and its arguments.
-EMAIL_CAPABILITY: Final = "email"
+#: ``send_email`` (ADR-0357 §2:5, ADR-0364 §8:1), as ``tools``' declaration names it and
+#: its arguments.
+EMAIL_CAPABILITY: Final = "send_email"
+TO_ARGUMENT: Final = "to"
 SUBJECT_ARGUMENT: Final = "subject"
 CC_ARGUMENT: Final = "cc"
 BCC_ARGUMENT: Final = "bcc"
-ATTACHMENTS_ARGUMENT: Final = "attachments"
 FROM_ARGUMENT: Final = "from"
-#: The two addresses ``from`` names (§2:9): the assistant's own, or the user's.
-FROM_ASSISTANT: Final = "assistant"
-FROM_USER: Final = "user"
+#: What ``from`` carries once planning's check has mapped an email account's ``L`` label:
+#: the person's own account, the one kind this build connects (ADR-0364 §9:11), as
+#: ``tools``' ``FROM_THE_PERSONS_ACCOUNT`` spells it, pinned equal by test.
+FROM_THE_PERSONS_ACCOUNT: Final = "user"
 
-#: How planning is shown the person a message reaches, as the place window names them.
-THE_USER: Final = "the user"
+#: ``send_email``'s ``from`` names its account by the connection's ``L`` label (ADR-0364
+#: §9:11), which planning's check maps to the connection it names (ADR-0307 §5:2).
+EMAIL_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind]]] = {
+    EMAIL_CAPABILITY: {FROM_ARGUMENT: LabelKind.PLACE},
+}
 
-#: The platforms a ``text`` call may name in ``via`` (§2:2, §2:4), by name, each with
-#: its channel type: the hub chat and the Telegram line as built.
-PLATFORMS: Final[Mapping[str, str]] = {"hub_chat": "conversation", "telegram": "telegram"}
-
-#: How a result names each platform, by channel type (§3:1).
+#: How a result names each platform, by channel type (ADR-0357 §3:1).
 _PLATFORM_NAMES: Final[Mapping[str, str]] = {
     "conversation": "the hub chat",
     "telegram": "Telegram",
@@ -104,17 +105,22 @@ _PLATFORM_NAMES: Final[Mapping[str, str]] = {
 #: platform, with its recipients as the place.
 EMAIL_CHANNEL_TYPE: Final = "email"
 
-# --- text's declaration (§2:2) ---------------------------------------------------------
+#: A connection's label, as a ``send_text`` call names one (ADR-0364 §9:2).
+PLACE_LABEL: Final = re.compile(r"L[1-9][0-9]{0,8}")
+
+# --- send_text's declaration (ADR-0364 §9:1) ---------------------------------------------
 
 TEXT_CALL: Final = ToolDefinition(
-    id=TEXT_CAPABILITY,
+    # ADR-0364 §8:1: renamed, keeping its declaration's other fields, its id among them.
+    id="text",
     capability=TEXT_CAPABILITY,
     description=(
-        "Send a short written message to someone, in the system's own voice. It goes "
-        "into the place the stimulus came from unless via names another, and the "
-        "result says what was sent, where it went and how. Its words are sent as you "
-        "write them; set exact where the wording itself must not change, such as a "
-        "quote or a relayed message. Never claim to be human."
+        "Send a text message from the system into one of its connections.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "\n"
+        "It acts outside the system and can't be undone. Safe to repeat."
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.IRREVERSIBLE,
@@ -132,159 +138,186 @@ TEXT_CALL: Final = ToolDefinition(
     parameters_schema={
         "type": "object",
         "properties": {
-            TO_ARGUMENT: {
+            CONNECTION_ARGUMENT: {
+                "type": "string",
+                "pattern": "^L[1-9][0-9]*$",
+                "description": (
+                    "Which connection to send the text through. It must support text messages, "
+                    "and the message must be for who it reaches."
+                ),
+            },
+            WORDS_ARGUMENT: {
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "Who it is for, as you were shown them: the person the system serves "
-                    f"by their name, or {THE_USER!r}."
+                    "What to say. Wrap any part that must be sent exactly as written, such as a "
+                    "quote, in <exact>…</exact>; the rest may be reworded for the recipient and "
+                    "the connection."
                 ),
-            },
-            WORDS_ARGUMENT: {"type": "string", "minLength": 1, "description": "What to say."},
-            VIA_ARGUMENT: {
-                "type": "string",
-                "minLength": 1,
-                "description": (
-                    "Where it goes: a place on your place list, by its L label, or a "
-                    "platform: " + " or ".join(sorted(PLATFORMS)) + "."
-                ),
-            },
-            EXACT_ARGUMENT: {
-                "type": "boolean",
-                "description": "Send the words exactly as written.",
             },
         },
-        "required": [TO_ARGUMENT, WORDS_ARGUMENT],
+        "required": [CONNECTION_ARGUMENT, WORDS_ARGUMENT],
         "additionalProperties": False,
     },
 )
-"""``text``'s declaration (ADR-0357 §2:2), offered on every round (ADR-0356 §4:3).
+"""``send_text``'s declaration (ADR-0364 §9:1), offered on every round (ADR-0356 §4:3).
 
-It is never selected, ruled on or run as a call: the phases take each ``text`` call out
-of the round's calls before authorizing, which checks it by its place alone as the
-round's message is checked (ADR-0356 §7:7), and write it into its place under an effect
-record as a message is written (§7:8). So nothing reads its egress fields, which declare
-none: where a message may go is the message place check's, and its place's writer holds
-the channel's rules (ADR-0306 §4:7, ADR-0292 §8:3).
+It is never selected, ruled on or run as a call: the phases take each ``send_text`` call
+out of the round's calls before authorizing, which checks it by its connection alone as
+the round's message is checked (ADR-0356 §7:7), and write it into its place under an
+effect record as a message is written (§7:8). So nothing reads its egress fields, which
+declare none: where a message may go is the message place check's, and its place's writer
+holds the channel's rules (ADR-0306 §4:7, ADR-0292 §8:3).
 
 ``safe_to_repeat`` is set, so the offer adds no *deliberate repeat* mark: a message's
 effect record is a message's, which carries no capability or values digest for
-ADR-0306 §5:9's backstop to compare (ADR-0306 §6:1), so no repeat of one is refused as
-*already done* (ADR-0357 §6:4 for ``text`` waits on #3548). The words of the rules
-ADR-0357 §7:2 moves into this description ship in ADR-0356's P3 (ADR-0357 §7:3).
+ADR-0306 §5:9's backstop to compare (ADR-0306 §6:1). Its description is the coordinator's
+agreed words (ADR-0364 §2:1, §5), its effects line written by hand until lane T2's
+generator writes it (§7:1).
 """
 
-# --- text's arguments -------------------------------------------------------------------
+# --- send_text's arguments -------------------------------------------------------------
 
-#: Why a ``text`` call runs nothing, by what was wrong with its arguments (§6:3).
+#: Why a ``send_text`` call runs nothing, by what was wrong with its arguments.
 _NO_WORDS: Final = f"{WORDS_ARGUMENT!r} is what the message says, and it said nothing"
-_NO_ONE: Final = f"{TO_ARGUMENT!r} names who the message is for, as you were shown them"
-_NOT_ONE_PLACE: Final = (
-    f"{VIA_ARGUMENT!r} names one place, by its L label, or one platform, by its name"
-)
-_NOT_EXACT: Final = f"{EXACT_ARGUMENT!r} is true or false"
+_NOT_A_CONNECTION: Final = f"{CONNECTION_ARGUMENT!r} names one connection, by its L label"
 _UNDECLARED: Final = (
-    f"{TEXT_CAPABILITY} takes {TO_ARGUMENT}, {WORDS_ARGUMENT}, {VIA_ARGUMENT} and "
-    f"{EXACT_ARGUMENT}, and nothing else"
+    f"{TEXT_CAPABILITY} takes {CONNECTION_ARGUMENT} and {WORDS_ARGUMENT}, and nothing else"
 )
-_DECLARED: Final = frozenset({TO_ARGUMENT, WORDS_ARGUMENT, VIA_ARGUMENT, EXACT_ARGUMENT})
+_DECLARED: Final = frozenset({CONNECTION_ARGUMENT, WORDS_ARGUMENT})
 
 
 @dataclass(frozen=True, slots=True)
 class TextArguments:
-    """A ``text`` call's arguments, checked (ADR-0357 §2:2).
+    """A ``send_text`` call's arguments, checked (ADR-0364 §9:1).
 
     Attributes:
-        to: Who it is for, as planning named them.
-        words: What to say, as planning wrote it.
-        via: Where it goes, as planning named it; ``None`` where it named nowhere, and
-            the tool chooses (§2:4).
-        exact: Whether the words go exactly as written (§4:2).
+        connection: The connection it goes into, by the ``L`` label planning named.
+        words: What to say, as planning wrote it, its exact parts marked.
     """
 
-    to: str
+    connection: str
     words: str
-    via: str | None = None
-    exact: bool = False
 
 
 def text_arguments(arguments: Mapping[str, object]) -> TextArguments | str:
-    """A ``text`` call's arguments, or why the call runs nothing (ADR-0357 §6:1, §6:3).
+    """A ``send_text`` call's arguments, or why the call runs nothing (ADR-0364 §9:1-§9:2).
 
-    ``text`` is never ruled on as a call, so its schema is checked here: a missing or
+    ``send_text`` is never ruled on as a call, so its schema is checked here: a missing or
     wrong argument is never guessed, and an argument it does not declare is refused.
 
     Returns:
-        The arguments, or the reason the call comes back.
+        The arguments, or the reason the call comes back refused.
     """
     if set(arguments) - _DECLARED:
         return _UNDECLARED
     words = arguments.get(WORDS_ARGUMENT)
     if not isinstance(words, str) or not words.strip():
         return _NO_WORDS
-    to = arguments.get(TO_ARGUMENT)
-    if not isinstance(to, str) or not to.strip():
-        return _NO_ONE
-    via = arguments.get(VIA_ARGUMENT)
-    if VIA_ARGUMENT in arguments and (not isinstance(via, str) or not via.strip()):
-        return _NOT_ONE_PLACE
-    exact = arguments.get(EXACT_ARGUMENT, False)
-    if not isinstance(exact, bool):
-        return _NOT_EXACT
-    return TextArguments(
-        to=to, words=words, via=via.strip() if isinstance(via, str) else None, exact=exact
-    )
+    connection = arguments.get(CONNECTION_ARGUMENT)
+    if not isinstance(connection, str) or PLACE_LABEL.fullmatch(connection) is None:
+        return _NOT_A_CONNECTION
+    return TextArguments(connection=connection, words=words)
 
 
-# --- who it is for (§2:3) ---------------------------------------------------------------
+# --- exact parts (ADR-0364 §9:6-§9:9) -----------------------------------------------------
+
+EXACT_OPEN: Final = "<exact>"
+EXACT_CLOSE: Final = "</exact>"
+
+#: A tag with the run of backslashes before it.
+_TAG: Final = re.compile(r"(\\*)(<exact>|</exact>)")
+
+#: Why words with exact parts come back not done (§9:8).
+_UNCLOSED: Final = f"an {EXACT_OPEN} tag is never closed"
+_NESTED: Final = f"an {EXACT_OPEN} tag is opened inside a part already marked exact"
+_STRAY_CLOSE: Final = f"a {EXACT_CLOSE} tag closes no {EXACT_OPEN} tag"
 
 
-def _bare(name: str) -> str:
-    return " ".join(name.casefold().split())
+@dataclass(frozen=True, slots=True)
+class ExactWords:
+    """A message's words with their exact parts read out (ADR-0364 §9:6-§9:8).
+
+    Attributes:
+        text: The words with every tag removed and every escape resolved.
+        parts: Each part marked exact, as it reads in ``text``, in order.
+    """
+
+    text: str
+    parts: tuple[str, ...] = ()
 
 
-def who_it_is_for(to: str, *, named: Sequence[str] = ()) -> str | None:
-    """Why ``to`` reaches no one, or ``None`` where it names the user (ADR-0357 §2:3).
+def exact_words(words: str) -> ExactWords | str:
+    """``words`` with their exact parts read out, or why they come back not done (§9:8).
 
-    The only person a message reaches today is the user (§1:4): named as planning is
-    shown them, :data:`THE_USER` or ``user``, or by a name their profile gives,
-    ``named``, whole or by its first word. A name that fits no one comes back with who it
-    could be, never a guess.
-
-    Args:
-        to: Who the call says it is for.
-        named: The names the user's profile gives them, as planning was shown them.
+    An ``<exact>`` tag opens a part and ``</exact>`` closes it. A run of backslashes before
+    a tag sends half of them, rounded down, as backslashes; where the run is odd the tag is
+    sent as literal text, and where it is even, two backslashes for one included, the tag
+    stays a tag. An unclosed tag, a tag opened inside a marked part, and a closing tag with
+    none open each come back not done.
 
     Returns:
-        ``None`` where ``to`` names the user; otherwise the reason the call comes back.
+        The words read out, or the reason they come back not done.
     """
-    wanted = _bare(to)
-    known = {_bare(THE_USER), "user"}
-    for name in named:
-        if name.strip():
-            known.add(_bare(name))
-            known.add(_bare(name).split(" ", 1)[0])
-    if wanted in known:
-        return None
-    shown = ", ".join(repr(one.strip()) for one in named if one.strip())
-    could_be = THE_USER if not shown else f"{THE_USER} ({shown})"
-    return f"{TO_ARGUMENT!r} names no one a message here reaches: it could be {could_be}"
+    text: list[str] = []
+    parts: list[str] = []
+    part: list[str] | None = None
+    at = 0
+    for found in _TAG.finditer(words):
+        slashes, tag = found.group(1), found.group(2)
+        before = words[at : found.start()] + "\\" * (len(slashes) // 2)
+        at = found.end()
+        literal = len(slashes) % 2 == 1
+        piece = before + (tag if literal else "")
+        text.append(piece)
+        if part is not None:
+            part.append(piece)
+        if literal:
+            continue
+        if tag == EXACT_OPEN:
+            if part is not None:
+                return _NESTED
+            part = []
+        else:
+            if part is None:
+                return _STRAY_CLOSE
+            parts.append("".join(part))
+            part = None
+    if part is not None:
+        return _UNCLOSED
+    text.append(words[at:])
+    return ExactWords(text="".join(text), parts=tuple(parts))
 
 
-# --- where it goes (§2:4, §3:1) ---------------------------------------------------------
+def escaped_exact(words: str) -> str:
+    """``words`` wrapped whole in an exact part, any tag they hold escaped first (§8:6).
 
-#: A place label, as planning names one in ``via`` (ADR-0350 §5:13).
-PLACE_LABEL: Final = re.compile(r"L[1-9][0-9]{0,8}")
-
-
-def platform_type(name: str) -> str | None:
-    """The channel type of the platform ``name`` names, or ``None`` where it names none.
-
-    Read with its case, its spaces and a leading *the* ignored, so "Telegram" and "the
-    hub chat" name what ``telegram`` and ``hub_chat`` name.
+    Each tag already in them, with the run of backslashes before it, is written so that
+    :func:`exact_words` reads it back as the same literal text: the run doubled and one
+    backslash more. So the wrapped words read back as ``words`` exactly, one part whole.
     """
-    bare = re.sub(r"[\s\-]+", "_", name.strip().casefold())
-    return PLATFORMS.get(bare.removeprefix("the_"))
+    escaped = _TAG.sub(lambda found: "\\" * (2 * len(found.group(1)) + 1) + found.group(2), words)
+    return f"{EXACT_OPEN}{escaped}{EXACT_CLOSE}"
+
+
+# --- the wording step (ADR-0357 §4, ADR-0364 §9:7, §9:9) -----------------------------------
+
+
+def reworded(words: ExactWords) -> str:
+    """A message's words as they are sent (ADR-0364 §9:7, §9:9).
+
+    The wording step, once built (ADR-0357 §4:5), may reword what no exact part marks.
+    Until then the words are sent as written, with the tags removed. Each marked part
+    must appear verbatim in what is sent; where one does not, planning's words are sent
+    unchanged instead, their tags removed either way.
+    """
+    sent = words.text
+    if any(part not in sent for part in words.parts):
+        return words.text
+    return sent
+
+
+# --- where it went (ADR-0357 §3:1) ---------------------------------------------------------
 
 
 def platform_name(channel_type: str) -> str:
@@ -305,16 +338,3 @@ def emailed_to(arguments: Mapping[str, object]) -> str | None:
         if isinstance(values, list | tuple):
             named.extend(one.strip() for one in values if isinstance(one, str) and one.strip())
     return ", ".join(dict.fromkeys(named)) or None
-
-
-# --- the wording step (§4) ----------------------------------------------------------------
-
-
-def reworded(words: str, *, exact: bool) -> str:
-    """A message's words as the wording step renders them (ADR-0357 §4).
-
-    Until the decision §4:5 names builds the step, every message's words are sent
-    unchanged, ``exact`` or not, and ``exact`` changes nothing (§4:3).
-    """
-    del exact
-    return words

@@ -30,7 +30,6 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.matter_calls import (
     ANSWER_OFFER,
-    LOOK_UP_ACTIVATION,
     MATTER_LABEL_ARGUMENTS,
     STOP_ACTIVATION,
 )
@@ -275,7 +274,7 @@ async def test_the_given_entry_holds_its_two_messages_only_while_the_briefing_is
 
 def _matters(**fields: Any) -> PlanningInputs:
     return _inputs(
-        capabilities=(STOP_ACTIVATION, LOOK_UP_ACTIVATION, ANSWER_OFFER),
+        capabilities=(STOP_ACTIVATION, ANSWER_OFFER),
         label_arguments=MATTER_LABEL_ARGUMENTS,
         labels=(
             PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=episode_address(_A)),

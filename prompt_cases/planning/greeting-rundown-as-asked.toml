@@ -11,7 +11,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """A text call greets Leo back, may call him Leo, and, because he said he likes a short rundown of what's coming up when he says good morning, briefly brings up what is due soon: at least the dentist appointment tomorrow, Friday 30 October at 10:30, and it may mention Saturday's trains or the gift for Ines. It recites nothing of always in mind: not his zone or language, and it does not say that it knows or was told that he likes a rundown."""
+read = """A send_text call greets Leo back, may call him Leo, and, because he said he likes a short rundown of what's coming up when he says good morning, briefly brings up what is due soon: at least the dentist appointment tomorrow, Friday 30 October at 10:30, and it may mention Saturday's trains or the gift for Ines. It recites nothing of always in mind: not his zone or language, and it does not say that it knows or was told that he likes a rundown."""
 
 [input]
 file = "greeting-rundown-as-asked.json"

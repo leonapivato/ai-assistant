@@ -220,17 +220,20 @@ def news(call: RoundCall, step: int = -1) -> str:
     return call.exchange.steps[step].report.news
 
 
-def text_call(words: str, *, call_id: str = "say", **arguments: object) -> ProposedCall:
-    """A ``text`` call to the user carrying ``words`` (ADR-0357 §2).
+def text_call(
+    words: str, *, call_id: str = "say", connection: str = "L1", **arguments: object
+) -> ProposedCall:
+    """A ``send_text`` call into a connection, carrying ``words`` (ADR-0364 §9:1).
 
     A round's own text is its notes alone (ADR-0356 §7:3): what reaches a person comes
     only from a message call, so a scripted round that answers the person makes this.
-    ``arguments`` are any more of the call's (``via``, ``asks``, ``exact``).
+    ``connection`` is the connection's ``L`` label: ``L1``, the stimulus's origin, which its
+    ``where`` names first, unless the case names another. ``arguments`` are any more.
     """
     return ProposedCall(
         call_id=call_id,
-        name="text",
-        arguments={"to": "the user", "words": words, **arguments},  # type: ignore[dict-item]  # JSON values
+        name="send_text",
+        arguments={"connection": connection, "words": words, **arguments},  # type: ignore[dict-item]  # JSON values
     )
 
 

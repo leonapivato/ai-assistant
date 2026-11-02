@@ -8,7 +8,7 @@ samples = 3
 
 [property]
 check = "calls_are"
-capabilities = ["spawn"]
+capabilities = ["spawn_task"]
 
 [input]
 file = "clear-request-is-simply-set.json"

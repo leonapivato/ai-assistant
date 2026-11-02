@@ -1,14 +1,15 @@
-"""The first egress integration, ``email``: declared in full, registered where configured.
+"""The first egress integration, ``send_email``: declared in full, registered where configured.
 
-**It is the message tool for an email** (ADR-0357 §2:5): today's ``send_email``, renamed
-``email`` and reshaped. Its arguments are ``to``, the recipients, ``subject`` and
-``words``, required; and ``cc``, ``bcc``, ``attachments``, ``from`` and ``exact``,
-optional. ``from`` names whose address it is sent from, the assistant's or the user's
-(§2:9), and selects nothing at this seam: one tool is registered per connected account
-(ADR-0148 §6), and the one account this build connects is the user's own, so
-authorizing's gate lets through only an email ``from`` the user, on their yes (§2:10).
-``exact`` is the wording step's (§4:2) and ``attachments`` the email tool's (§2:8); none of
-the three is transmitted, and the transport refuses an attachment it cannot send.
+**It is the message tool for an email** (ADR-0357 §2:5, ADR-0364 §8:1): renamed
+``send_email``, its id still ``email``. Its arguments are ``from``, the email account it
+is sent from, ``to``, the recipients, ``subject`` and ``words``, required; and ``cc`` and
+``bcc``, optional (ADR-0364 §9:11-§9:14). Planning names ``from`` by its account's
+connection label, and the hub writes in its place what this seam reads, the person's own
+account (:data:`FROM_THE_PERSONS_ACCOUNT`): one tool is registered per connected account
+(ADR-0148 §6), and the one account this build connects is the user's own. ``from`` is
+never transmitted. Every email needs approval, by rule (ADR-0364 §9:12). Words mark
+their exact parts inline, and the hub removes the tags before the call is ruled on
+(§9:6-§9:9), so the words this seam sends are the words the person approves.
 
 **This tool transmits.** ADR-0154 §1 designates ``ai_assistant.tools.egress`` and
 §4 attests every one of ADR-0017 §3's fourteen conditions in code; ADR-0155
@@ -117,9 +118,14 @@ if TYPE_CHECKING:
 #: ``email`` (ADR-0357 §2:5).
 EMAIL_ID: Final = "email"
 
-#: The two addresses ``from`` names (ADR-0357 §2:9): the assistant's own, or the user's.
-FROM_ASSISTANT: Final = "assistant"
-FROM_USER: Final = "user"
+#: The capability, ``send_email`` (ADR-0364 §8:1), renamed from ``email`` with every other
+#: field of its declaration kept, its id among them.
+EMAIL_CAPABILITY: Final = "send_email"
+
+#: What ``from`` carries when the call reaches this seam: the person's own account, the
+#: one kind this build connects (ADR-0357 §2:9). Planning names the account by its
+#: connection's ``L`` label (ADR-0364 §9:11), and the hub writes this in its place.
+FROM_THE_PERSONS_ACCOUNT: Final = "user"
 
 
 def _recipients(*, minimum: int | None = None) -> dict[str, FrozenJson]:
@@ -176,14 +182,15 @@ def _recipients(*, minimum: int | None = None) -> dict[str, FrozenJson]:
 
 EMAIL: Final = ToolDefinition(
     id=EMAIL_ID,
-    capability=EMAIL_ID,
+    capability=EMAIL_CAPABILITY,
     description=(
-        "Send an email to the recipients, each a person as you were shown them or an "
-        "address, from the system's own address or the person's, as from says; one "
-        "from the person's address goes in their name, and never runs without their "
-        "yes. Its words are sent as you write them; set exact where the wording "
-        "itself must not change. The result says what was sent, to whom and how. "
-        "Never claim to be human."
+        "Send an email from one of the system's email accounts.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "\n"
+        "It acts outside the system and can't be undone. Not safe to repeat. Always needs approval "
+        "first: ask for it with request_approval."
     ),
     risk_level=RiskLevel.HIGH,
     reversibility=Reversibility.IRREVERSIBLE,
@@ -202,27 +209,43 @@ EMAIL: Final = ToolDefinition(
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
-            "to": _recipients(minimum=1),
-            "cc": _recipients(),
-            "bcc": _recipients(),
-            "subject": {"type": "string"},
-            "words": {"type": "string", "description": "What the email says."},
-            "attachments": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Things you were shown to attach, each by how you were shown it.",
-            },
             "from": {
                 "type": "string",
-                "enum": [FROM_ASSISTANT, FROM_USER],
+                "minLength": 1,
                 "description": (
-                    "Whose address it is sent from: the assistant's, or the user's, which "
-                    "needs their yes."
+                    "Which email account to send it from. It must be one of the system's "
+                    "connections."
                 ),
             },
-            "exact": {"type": "boolean", "description": "Send the words exactly as written."},
+            "to": {
+                **_recipients(minimum=1),
+                "description": "Who it is to: an email address, or a list of them.",
+            },
+            "cc": {
+                **_recipients(),
+                "description": (
+                    "Who it is copied to: an email address, or a list of them. Left out: no one."
+                ),
+            },
+            "bcc": {
+                **_recipients(),
+                "description": (
+                    "Who it is copied to, unseen by the other recipients: an email address, or a "
+                    "list of them. Left out: no one."
+                ),
+            },
+            "subject": {"type": "string", "description": "The subject line."},
+            "words": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "What to say. Wrap any part that must be sent exactly as written, such as a "
+                    "quote, in <exact>…</exact>; the rest may be reworded for the recipient and "
+                    "the connection."
+                ),
+            },
         },
-        "required": ["to", "subject", "words"],
+        "required": ["from", "to", "subject", "words"],
         "additionalProperties": False,
     },
 )
@@ -287,8 +310,8 @@ wire.
 
 **It also carries the whole egress declaration** (ADR-0152 §3). ``to``, ``cc`` and
 ``bcc`` each declare ``x-egress-destination: "smtp"`` and
-``x-egress-tier: "personal"``; ``subject``, ``words``, ``attachments``, ``from`` and
-``exact`` declare neither, and the absence is the statement rather than an omission:
+``x-egress-tier: "personal"``; ``subject``, ``words`` and ``from`` declare neither, and
+the absence is the statement rather than an omission:
 
 - **Destination-bearing.** All three select recipients, and nothing else does. No
   semantic recipient of this call is determined from a subject or its words, and an
@@ -304,8 +327,7 @@ wire.
   it, carrying "arbitrary text the user supplied … however well the implementation
   knows what that field is for", which is §5's round-4 repair over this exact pair
   of fields (the body, renamed ``words`` by ADR-0357 §2:5). Stating a tier for them
-  would assert a fact nobody established. ``from``, ``exact`` and ``attachments`` are
-  never transmitted.
+  would assert a fact nobody established. ``from`` is never transmitted.
 
 Both keywords are unknown to draft 2020-12, which treats an unrecognised keyword
 as an annotation — so this schema validates exactly as the same schema without
@@ -435,9 +457,9 @@ class SendEmail:
 
 __all__ = [
     "EMAIL",
+    "EMAIL_CAPABILITY",
     "EMAIL_ID",
-    "FROM_ASSISTANT",
-    "FROM_USER",
+    "FROM_THE_PERSONS_ACCOUNT",
     "BoundTransport",
     "SendEmail",
 ]

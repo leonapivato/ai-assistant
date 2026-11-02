@@ -9,7 +9,7 @@ samples = 2
 
 [property]
 check = "calls_within"
-capabilities = ["stop_activation", "look_up_activation"]
+capabilities = ["stop_work", "read_episode"]
 argument = "activation"
 value = "E1"
 

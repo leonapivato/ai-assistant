@@ -64,6 +64,7 @@ from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.approvals import REQUEST_APPROVAL_CAPABILITY, WHY_ARGUMENT
 from ai_assistant.orchestration.person_calls import NotDone, recorded_wording
 from ai_assistant.orchestration.planning import exact_line
+from ai_assistant.orchestration.renames import carried
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -218,11 +219,13 @@ class ApprovalsSeams:
 
 
 #: What the result says of the card, by how it went (§2:7).
+#: ADR-0364 §10:1: how a request's card went, one of three; the two panel-only ones, a
+#: card that failed and no line, differ for the hub and not for planning.
 _CARD_WORDS: Final = {
-    CardOutcome.SENT: "sent: the card is in the person's Telegram chat",
-    CardOutcome.NOT_DONE: "not done: the card could not be posted, so the panel alone shows it",
-    CardOutcome.UNKNOWN: "unknown: whether the card reached the line is not known",
-    CardOutcome.NOT_POSTED: "not posted: no card goes to the line, so the panel alone shows it",
+    CardOutcome.SENT: "sent",
+    CardOutcome.NOT_DONE: "not sent, so only the approvals panel shows it",
+    CardOutcome.UNKNOWN: "unknown",
+    CardOutcome.NOT_POSTED: "not sent, so only the approvals panel shows it",
 }
 
 
@@ -350,8 +353,8 @@ class ApprovalCalls:
             _log.info("approval_not_written", stage="acting", reason="already_waiting")
             return Unwritten(
                 reason=(
-                    "not asked again: the same request already waits on the person"
-                    f"{since}; it is on the hub page's approvals panel"
+                    f"not asked again: the same request already waits for its answer{since}; "
+                    "it is on the approvals panel"
                 )
             )
         written = answer.request
@@ -365,12 +368,7 @@ class ApprovalCalls:
         _log.info("approval_written", stage="acting", card=card.value)
         return ToolResult(
             outcome=ToolOutcome.SUCCEEDED,
-            output={
-                "request": "written: it waits on the person's yes or no",
-                "panel": "the hub page's approvals panel shows it",
-                "card": _CARD_WORDS[card],
-                "expires": _instant(written.expires_at),
-            },
+            output={"card": _CARD_WORDS[card], "expires": _instant(written.expires_at)},
         )
 
     async def _card(self, request: ApprovalRequest, asker: ApprovalAsker) -> CardPosted:
@@ -461,9 +459,13 @@ def card_text(request: ApprovalRequest, facts: CardFacts, *, now: datetime) -> s
     )
     kind = None if facts.origin is None else origin_kind(facts.origin.channel_type)
     where = "Where it was asked is not recorded." if kind is None else f"Asked {kind.where}."
+    void = carried(call)
     lines = [
         "Approval needed:",
         line,
+        # ADR-0364 §8:6: a call stored under an old name that the renames cannot carry is
+        # void, and its card and the panel say so.
+        *(() if void is None else (f"This request can no longer run as asked: {void.reason}.",)),
         "",
         f"Why: {request.why}",
         where,

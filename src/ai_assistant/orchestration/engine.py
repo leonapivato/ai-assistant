@@ -69,7 +69,9 @@ from ai_assistant.core.device_context import (
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     ActivationStoppedError,
+    AssistantError,
     ConfigurationError,
+    ConversationStoreError,
     MemoryStoreError,
     MemoryStoreStaleError,
     ModelError,
@@ -198,7 +200,12 @@ from ai_assistant.orchestration.approvals import (
 )
 from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
-from ai_assistant.orchestration.channel_kinds import place_of
+from ai_assistant.orchestration.channel_kinds import (
+    CONNECTION_KINDS,
+    AccountConnection,
+    account_kind,
+    place_of,
+)
 from ai_assistant.orchestration.channels import (
     UNCAPTURED,
     ChannelProjection,
@@ -228,6 +235,7 @@ from ai_assistant.orchestration.controller import (
 from ai_assistant.orchestration.conversations import (
     check_devices_fit,
     check_message_fits,
+    conversation_channel,
     episode_conversation,
     fit_changes,
     fit_transcript,
@@ -265,7 +273,12 @@ from ai_assistant.orchestration.payloads import (
 from ai_assistant.orchestration.person_block import activation_person, person_zone, still_held
 from ai_assistant.orchestration.person_calls import recorded_wording
 from ai_assistant.orchestration.phase_path import PlaceTarget, Scheduling, failing_stage
-from ai_assistant.orchestration.planning import PlaceAuthor, PlaceItem, exact_line
+from ai_assistant.orchestration.planning import (
+    ConnectionShown,
+    PlaceAuthor,
+    PlaceItem,
+    exact_line,
+)
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.speech import (
     DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
@@ -416,6 +429,10 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.upcoming import UpcomingEventStage
 
 _log = structlog.get_logger(__name__)
+
+#: How many of a many-place connection's most recent places a work's Connections section
+#: shows where the composition root hands none (ADR-0364 §3:5).
+DEFAULT_CONNECTIONS_RECENT: Final = 3
 
 #: What a pass whose deadline expired before or inside the understanding stage says
 #: (ADR-0276 §5, §6): code-owned, so no provider content reaches the caller.
@@ -1654,6 +1671,8 @@ class Engine:
         person_blocks: PersonBlocks | None = None,
         task_scheduler: TaskSchedulerSeams | None = None,
         approvals: ApprovalsSeams | None = None,
+        account_connections: Sequence[AccountConnection] = (),
+        connections_recent: int = DEFAULT_CONNECTIONS_RECENT,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -2047,6 +2066,11 @@ class Engine:
                 (§2, §5:2); and each request answered or expired starts an activation of
                 its own, offered to the work that asked where it still runs (§6). It is
                 refused without the phases.
+            account_connections: The account connections the composition root
+                registers, each with its kind (ADR-0364 §3:6), which every work's
+                Connections section shows with its state.
+            connections_recent: How many of a many-place connection's most recent places
+                Connections shows (ADR-0364 §3:5), the composition root's constant.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2285,11 +2309,16 @@ class Engine:
             closing=lambda: self._closing,
             person_blocks=person_blocks,
         )
+        # ADR-0364 §3:5-§3:6: the account connections and the recent places shown.
+        self._account_connections = tuple(account_connections)
+        self._connections_recent = connections_recent
         if self._phases is not None:
             # ADR-0349 §4:6, §6:1, §7:20: planning's stop call, its findings look-up and
             # its answer to an offer, and the waits acting and planning hold (§7:12,
             # §7:25), over what crosses this engine's activations.
             self._phases.attach_matters(self._matters)
+            # ADR-0364 §3: every work's connections, read at every round.
+            self._phases.attach_connections(self._shown_connections)
         # ADR-0323 §2:2: the Telegram line's spoke in the hub, its reader and its writer,
         # wired only beside the phases, which plan every activation it starts.
         self._telegram_writer: TelegramWriter | None = None
@@ -7452,6 +7481,90 @@ class Engine:
             return places, targets
 
         return Scheduling(person=person, set_in=set_in, build=build, task=task)
+
+    async def _shown_connections(
+        self, origin: ChannelIdentity | None
+    ) -> tuple[tuple[ConnectionShown, ...], dict[str, PlaceTarget]]:
+        """Every connection a work is shown, and the writer of each that takes text.
+
+        ADR-0364 §3:2-§3:6, from the hub's own records: the hub chat's most recent
+        conversations, ``connections_recent`` of them, the origin's among them where it is
+        one (§3:5); the line's chat, disconnected where its connection is not active; the
+        schedule and the approvals, where each is wired; and each account the composition
+        root registered, pending or disconnected where its record is not active. A read
+        that fails shows what it could not read as nothing, never as something it is not.
+        """
+        shown: list[ConnectionShown] = []
+        targets: dict[str, PlaceTarget] = {}
+        conversation = CONNECTION_KINDS["conversation"]
+        try:
+            recent = await self._conversations.chat_space.recent(limit=self._connections_recent)
+        except ConversationStoreError:
+            _log.warning("connections_unread", stage="planning", reason="conversations")
+            recent = []
+        channels = [conversation_channel(one.id) for one in recent]
+        if origin is not None and origin.channel_type == "conversation" and origin not in channels:
+            channels.insert(0, origin)
+        for channel in channels:
+            place = place_of(channel)
+            shown.append(ConnectionShown(place=place, kind=conversation))
+            target = self._place_target(channel)
+            if target is not None:
+                targets[place] = target
+        line = self._telegram_seams
+        if line is not None:
+            connected = await self._line_connected()
+            place = place_of(line.channel)
+            shown.append(
+                ConnectionShown(
+                    place=place,
+                    kind=CONNECTION_KINDS[TELEGRAM.channel_type],
+                    state=None if connected else "disconnected",
+                )
+            )
+            target = self._place_target(line.channel) if connected else None
+            if target is not None:
+                targets[place] = target
+        if self._task_manager is not None:
+            shown.append(
+                ConnectionShown(
+                    place=place_of(SCHEDULE), kind=CONNECTION_KINDS[SCHEDULE.channel_type]
+                )
+            )
+        if self._approvals_sensor is not None:
+            shown.append(
+                ConnectionShown(
+                    place=place_of(THE_APPROVALS), kind=CONNECTION_KINDS[THE_APPROVALS.channel_type]
+                )
+            )
+        shown.extend(await self._accounts_shown())
+        return tuple(shown), targets
+
+    async def _accounts_shown(self) -> list[ConnectionShown]:
+        """Each registered account connection, with its state where it is not normal."""
+        if not self._account_connections:
+            return []
+        try:
+            live = {one.reference: one.state for one in await self._connections.connected()}
+        except AssistantError:
+            _log.warning("connections_unread", stage="planning", reason="accounts")
+            live = None
+        shown: list[ConnectionShown] = []
+        for account in self._account_connections:
+            kind = account_kind(account.kind)
+            if kind is None:
+                continue
+            state: str | None = None
+            if live is not None:
+                held = live.get(account.reference)
+                if held is None:
+                    state = "disconnected"
+                elif held is ProvisioningState.PENDING:
+                    state = "pending"
+            shown.append(
+                ConnectionShown(place=account.place, kind=kind, state=state, account=account.kind)
+            )
+        return shown
 
     def _place_target(self, channel: ChannelIdentity) -> PlaceTarget | None:
         """A place on a place list, with its writer: the hub chat's, or the line's."""

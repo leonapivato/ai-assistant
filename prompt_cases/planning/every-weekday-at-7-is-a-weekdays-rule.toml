@@ -7,7 +7,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one spawn about the bins whose rule repeats on weekdays at 07:00, with no days, no zone and no at, delay_minutes or after. It does not set one task per day."""
+read = """The round makes one spawn_task call about the bins whose rule repeats on weekdays at 07:00, with no days, no zone and no at, delay_minutes or after. It does not set one task per day."""
 
 [input]
 file = "every-weekday-at-7-is-a-weekdays-rule.json"

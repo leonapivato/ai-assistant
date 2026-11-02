@@ -82,7 +82,7 @@ from ai_assistant.core.types import (
     parties_are_assistants,
 )
 from ai_assistant.orchestration.acting import TICKET_CLAIM_TEXT, Unwritten
-from ai_assistant.orchestration.channel_kinds import place_channel, place_of
+from ai_assistant.orchestration.channel_kinds import place_channel, place_of, takes_text
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.matters import in_progress
@@ -213,7 +213,15 @@ _UNTIL_BEFORE_FROM: Final = "the rule's until is earlier than its from"
 _NO_OCCURRENCE: Final = "the rule yields no occurrence later than now before its until"
 _RULE_DAYS: Final = "a weekly rule names one or more days of the week, and no other rule names any"
 _RULE_TIME: Final = "a rule's time is a local time of day to the minute, such as 07:00"
-_OFF_THE_LIST: Final = "it suggests a place that is not on this activation's place list"
+_OFF_THE_LIST: Final = (
+    "it suggests a connection this work may not speak in, so no task's work may speak there"
+)
+#: ADR-0364 §11:3: why a spawn suggesting a connection that takes no text is refused whole.
+_TAKES_NO_TEXT: Final = (
+    "it suggests a connection that takes no text message, where its work could never speak"
+)
+#: ADR-0364 §11:3: why a spawn suggesting a connection the work was not shown is refused.
+_NOT_SHOWN: Final = "it suggests a connection this work was not shown"
 _MALFORMED: Final = "the call's arguments are malformed"
 _STORE_FAULT: Final = "the Task Scheduler could not be read or written"
 _ZONE_UNREAD: Final = "the person's zone could not be read, so no time was read in it"
@@ -1416,18 +1424,22 @@ def _caller(call: ToolCall) -> Spawner | None:
 def _suggested(
     spawner: Spawner, arguments: Mapping[str, FrozenJson]
 ) -> tuple[ChannelIdentity, ...] | str:
-    """The places a spawn suggests, each on its activation's list, or why not (§5:6).
+    """The connections a spawn suggests, or why it is refused whole (ADR-0364 §11:3).
 
-    A spawn stating none from an activation the Task Scheduler started carries its own
-    task's suggested places forward.
+    Any connection the work was shown that takes a text message; one that takes none is
+    refused, with the reason. A spawn from a work that keeps a list, a task's or an
+    approval's, may suggest only connections on that list, so no task widens where such a
+    work may speak (§9:4). A spawn stating none from an activation the Task Scheduler
+    started carries its own task's suggested places forward (ADR-0350 §5:6).
     """
     named = arguments.get(PLACES_ARGUMENT)
     if named is None:
         chosen = spawner.carried
     elif isinstance(named, list | tuple) and all(isinstance(one, str) for one in named):
         chosen = tuple(str(one) for one in named)
-        if any(one not in spawner.places for one in chosen):
-            return _OFF_THE_LIST
+        refused = _not_suggestible(spawner, chosen)
+        if refused is not None:
+            return refused
     else:
         return _MALFORMED
     channels: list[ChannelIdentity] = []
@@ -1437,6 +1449,16 @@ def _suggested(
             return _MALFORMED
         channels.append(channel)
     return tuple(channels)
+
+
+def _not_suggestible(spawner: Spawner, chosen: Sequence[str]) -> str | None:
+    """Why a spawn may not suggest ``chosen``, or ``None`` where it may (ADR-0364 §11:3)."""
+    if any(not takes_text(one) for one in chosen):
+        return _TAKES_NO_TEXT
+    if spawner.keeps_list:
+        return _OFF_THE_LIST if any(one not in spawner.places for one in chosen) else None
+    allowed = {*spawner.shown, *spawner.places}
+    return _NOT_SHOWN if any(one not in allowed for one in chosen) else None
 
 
 @dataclass(frozen=True, slots=True)

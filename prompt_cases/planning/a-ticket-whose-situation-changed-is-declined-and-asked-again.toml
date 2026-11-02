@@ -10,7 +10,7 @@ samples = 3
 
 [property]
 check = "none_of"
-capabilities = ["run_approved", "email"]
+capabilities = ["run_approved", "send_email"]
 
 [input]
 file = "a-ticket-whose-situation-changed-is-declined-and-asked-again.json"

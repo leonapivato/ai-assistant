@@ -7,7 +7,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one cancel_task naming T1, the reminder to pick up the dry cleaning. It makes no spawn."""
+read = """The round makes one cancel_task naming T1, the reminder to pick up the dry cleaning. It makes no spawn_task call."""
 
 [input]
 file = "skip-a-one-off-is-its-cancel.json"

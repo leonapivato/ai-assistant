@@ -13,7 +13,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """A text call greets Leo back, and may call him Leo. Because he said he doesn't want earlier things brought up when he only says hello, it brings up no earlier matter: not the dentist appointment, not the train times, not the gift for Ines, nor anything else he did not ask about in this stimulus. It does not say that it is leaving anything out, or that it knows or was told how he likes a greeting answered."""
+read = """A send_text call greets Leo back, and may call him Leo. Because he said he doesn't want earlier things brought up when he only says hello, it brings up no earlier matter: not the dentist appointment, not the train times, not the gift for Ines, nor anything else he did not ask about in this stimulus. It does not say that it is leaving anything out, or that it knows or was told how he likes a greeting answered."""
 
 [input]
 file = "greeting-no-recap-as-asked.json"

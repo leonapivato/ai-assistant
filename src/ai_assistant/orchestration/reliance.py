@@ -62,10 +62,16 @@ NOTE_RELIANCE: Final = ToolDefinition(
     id=NOTE_RELIANCE_CAPABILITY,
     capability=NOTE_RELIANCE_CAPABILITY,
     description=(
-        "Note the memories you relied on, by their M labels, and say what the "
-        "reliance shaped: a suggestion, an answer or an action. Note only a memory "
-        "that shaped one, never one only mentioned in passing. Nothing runs; the note "
-        "is kept with this round."
+        "Note the memories you relied on, and what relying on them shaped: a suggestion, an "
+        "answer or an action.\n"
+        "\n"
+        "Note only a memory that shaped one, never one only mentioned in passing. Nothing runs; "
+        "the note is kept with this round.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "\n"
+        "It changes nothing."
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,
@@ -87,7 +93,7 @@ NOTE_RELIANCE: Final = ToolDefinition(
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
                 "minItems": 1,
-                "description": "The memories you relied on, by their M labels.",
+                "description": "The memories you relied on, by M label.",
             },
             SHAPED_ARGUMENT: {
                 "type": "string",

@@ -73,6 +73,7 @@ from ai_assistant.orchestration.story_calls import (
     INSIDE_ARGUMENT,
     INTO_ARGUMENT,
     LINK_STORY,
+    MEMBER_ARGUMENT,
     MEMBER_EPISODE_ARGUMENT,
     MEMBER_STORY_ARGUMENT,
     MERGE_STORY,
@@ -236,10 +237,10 @@ def test_story_arguments_are_labels() -> None:
     assert STORY_LABEL_ARGUMENTS[str(NOTE_STORY.capability)] == {STORY_ARGUMENT: LabelKind.STORY}
     assert STORY_LABEL_ARGUMENTS[str(START_STORY.capability)] == {INSIDE_ARGUMENT: LabelKind.STORY}
     for tool in (LINK_STORY, UNLINK_STORY):
+        # ADR-0364 §8:2: one member, an episode or a matter, its label saying which.
         assert STORY_LABEL_ARGUMENTS[str(tool.capability)] == {
             STORY_ARGUMENT: LabelKind.STORY,
-            MEMBER_STORY_ARGUMENT: LabelKind.STORY,
-            MEMBER_EPISODE_ARGUMENT: LabelKind.EPISODE,
+            MEMBER_ARGUMENT: (LabelKind.EPISODE, LabelKind.STORY),
         }
     # ADR-0303 §9:4: stories by S, members by E or S, and notes by N.
     assert STORY_LABEL_ARGUMENTS[str(MOVE_STORY.capability)] == {

@@ -10,7 +10,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one spawn, falling due in 3 minutes, whose places name L1, and whose instruction says what to remind Leo of and nothing of where to say it: it names no chat, conversation, platform or place, and does not say here."""
+read = """The round makes one spawn_task call, falling due in 3 minutes, whose connections name L1, and whose instruction says what to remind Leo of and nothing of where to say it: it names no chat, conversation, platform or place, and does not say here."""
 
 [input]
 file = "a-task-instruction-says-what-not-where.json"

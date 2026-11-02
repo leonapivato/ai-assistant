@@ -8,7 +8,7 @@ samples = 3
 
 [property]
 check = "read"
-read = """The round makes no call, or at most one text call with a brief acknowledgement. It offers nothing, lists no services, asks no question and makes no other call."""
+read = """The round makes no call, or at most one send_text call with a brief acknowledgement. It offers nothing, lists no services, asks no question and makes no other call."""
 
 [input]
 file = "thanks-after-a-booking-brings-no-extras.json"
