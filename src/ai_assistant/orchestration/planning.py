@@ -1564,6 +1564,8 @@ class NewsShown:
         profile: The person's fields as it showed them, each by name, ``None`` not set.
         connections: The connections whose entries it showed, by what their labels name
             (ADR-0364 §3:10).
+        connection_states: The state each entry it showed carried, ``None`` where normal,
+            so a connection whose state changes is shown again under its label (§3:3).
         zone: The zone its briefing's situation named, in which every time of the work is
             written, whatever the person sets meanwhile (ADR-0360 §2:3).
     """
@@ -1581,6 +1583,7 @@ class NewsShown:
     profile: tuple[tuple[str, str | None], ...] = ()
     zone: str | None = None
     connections: frozenset[str] = frozenset()
+    connection_states: Mapping[str, str | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2476,6 +2479,7 @@ class _Request:
         # The connections whose entries this request shows, and the places it named by
         # ``where`` (ADR-0364 §3:5).
         self._entries: set[str] = set()
+        self._states: dict[str, str | None] = {}
         self._named_places: dict[str, ChannelIdentity | None] = {}
         trigger = inputs.trigger
         self._origin: ChannelIdentity | None = None if trigger is None else trigger.channel
@@ -2629,6 +2633,7 @@ class _Request:
             profile=_profile_of(None if inputs.person is None else inputs.person.profile),
             zone=self._zone.key,
             connections=frozenset(self._entries),
+            connection_states=dict(self._states),
         )
 
     def _running_shown(self) -> frozenset[str]:
@@ -3106,6 +3111,7 @@ class _Request:
         state where not normal; and whether its task suggests it. No contents, history,
         credential or identifier, an account's own address among them (§3:4).
         """
+        self._states[one.place] = one.state
         attributes = [
             ("label", self._book.label(LabelKind.PLACE, one.place)),
             ("from", _SYSTEM),
@@ -3151,6 +3157,16 @@ class _Request:
         for one in fresh:
             self._entries.add(one.place)
             lines.append(f"- A connection is now shown: {self._entry(one)}")
+        # §3:3: an entry already shown whose state is not what it showed, such as the line
+        # reconnected or disconnected, is shown again under its label.
+        joined = {one.place for one in fresh}
+        held = shown.connection_states
+        for one in self._connection_entries():
+            if one.place in joined or one.place not in held or held[one.place] == one.state:
+                continue
+            if self._states.get(one.place, held[one.place]) == one.state:
+                continue
+            lines.append(f"- A connection now stands otherwise: {self._entry(one)}")
         return lines
 
     # --- the origin's window (ADR-0353 §2, ADR-0356 §3:2) ---
@@ -4125,6 +4141,7 @@ class _Request:
                 matters=dict(self._matters),
                 running=(shown.running - frozenset(inputs.ended)) | self._running_shown(),
                 connections=shown.connections | frozenset(self._entries),
+                connection_states={**shown.connection_states, **self._states},
                 kept=self._kept_now(shown),
                 profile=(
                     shown.profile

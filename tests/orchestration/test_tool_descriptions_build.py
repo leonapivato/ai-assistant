@@ -726,3 +726,37 @@ async def test_search_connections_matches_what_an_entry_says_it_can_do() -> None
     found = await search.search("text messages", 1)
 
     assert [one.place for one in found.connections] == [f"conversation:{quiet.id}"]
+
+
+async def test_a_connection_whose_state_changes_is_shown_again_under_its_label() -> None:
+    """§3:3: the line disconnected when the work began, connected by the next round, is
+    shown again under the label it had, without its state."""
+    line = CONNECTION_KINDS["telegram"]
+    stage, completer = _stage(RoundResponse(text="Looking."), RoundResponse())
+    inputs = _inputs(
+        connections=tuple(
+            replace(one, state="disconnected") if one.kind == line else one
+            for one in _connections()
+        )
+    )
+    first = await stage.plan(inputs)
+    (before,) = [
+        one
+        for one in tags(completer.calls[0].exchange.briefing, "connection")
+        if "Telegram" in (one.text or "")
+    ]
+    assert before.get("state") == "disconnected"
+    await stage.plan(
+        replace(
+            inputs,
+            work=first.work,
+            rounds=(first.round,),
+            labels=(*inputs.labels, *first.labels),
+            connections=_connections(),
+        )
+    )
+
+    news = completer.calls[1].exchange.steps[0].report.news
+    (after,) = [one for one in tags(news, "connection") if "Telegram" in (one.text or "")]
+    assert after.get("label") == before.get("label")
+    assert after.get("state") is None

@@ -1015,8 +1015,10 @@ class StoryCalls:
         unfinished, never not done, as a start does (ADR-0306 §5:6, §5:11).
         """
         held = parameters.get(NOTES_ARGUMENT)
-        notes = () if held is None else _first_notes(held)
-        if held is not None and not notes:
+        # An empty list is no first notes, as main read it; anything else must read.
+        empty = held is None or (isinstance(held, list | tuple) and not held)
+        notes = () if empty else _first_notes(held)
+        if not empty and not notes:
             raise _malformed("a group's first notes are each non-blank text")
         activation = self._activation(parameters)
         outside = self._mark(parameters)

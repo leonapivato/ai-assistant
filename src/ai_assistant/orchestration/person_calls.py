@@ -85,6 +85,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.person_block import PinRefusal, activation_person
+from ai_assistant.orchestration.renames import current_name
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
@@ -454,7 +455,8 @@ class PersonModelCalls:
             or request.id != tap.request
             or request.person != person
             or request.pushed_to is None
-            or str(request.call.tool.capability) != capability
+            # ADR-0364 §8:6: a request written under the tool's old name is its.
+            or current_name(str(request.call.tool.capability)) != capability
         ):
             return _not_done(_UNAPPROVED, "unapproved_ticket")
         act = PersonModelAct(

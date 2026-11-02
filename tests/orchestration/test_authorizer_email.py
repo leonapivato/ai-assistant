@@ -117,3 +117,22 @@ async def test_a_deny_still_refuses_an_email() -> None:
 
     _, _, verdict = await _decided(_Denying())
     assert verdict.verdict is Verdict.NOT_DONE
+
+
+@pytest.mark.parametrize(
+    ("arguments", "tool_check"),
+    [
+        pytest.param({"to": "Anna"}, True, id="a-recipient-not-an-address"),
+        pytest.param({"words": "Say <exact>this"}, True, id="an-unclosed-tag"),
+        pytest.param({"from": "the-assistants"}, False, id="no-account"),
+    ],
+)
+async def test_an_emails_own_checks_are_marked_as_the_tools(
+    arguments: dict[str, Any], tool_check: bool
+) -> None:
+    """ADR-0364 §6:2, §9:8, §9:11, §9:13: recipients and exact parts are the email tool's
+    own checks, shown not done; a sender naming no account is refused."""
+    _, _round_decided, verdict = await _decided(_Allowing(), **arguments)
+
+    assert verdict.verdict is Verdict.NOT_DONE
+    assert verdict.tool_check is tool_check

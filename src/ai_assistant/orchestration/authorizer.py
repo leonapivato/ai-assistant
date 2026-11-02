@@ -503,6 +503,9 @@ class CallVerdict:
         decision_id: The recorded ``PermissionDecision``, where a ruling was sought.
         effect_id: The effect record the call is or would be claimed under, where its
             capability's calls get one, or where it runs under an approval.
+        tool_check: Whether it is not done by the tool's own checks, which code runs here
+            before the ruling, as an email's recipients and exact parts are, so planning
+            is shown it not done rather than refused (ADR-0364 §6:2, §9:8, §9:13).
     """
 
     call_id: str
@@ -510,6 +513,7 @@ class CallVerdict:
     reason: str | None = None
     decision_id: str | None = None
     effect_id: str | None = None
+    tool_check: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1038,6 +1042,14 @@ def _not_done(call: ProposedCall, reason: str) -> CallVerdict:
     return CallVerdict(call.call_id, Verdict.NOT_DONE, reason=reason)
 
 
+def _email_not_done(call: ProposedCall, reason: str) -> CallVerdict:
+    """An email the tool's own checks stop, or one naming no account, which is refused."""
+    _log.info("authorizing_call_not_done", stage="authorizing")
+    return CallVerdict(
+        call.call_id, Verdict.NOT_DONE, reason=reason, tool_check=reason != _NOT_AN_ACCOUNT
+    )
+
+
 def _needs_you_by_rule(request: ActionRequest) -> tuple[str, str] | None:
     """The check that needs approval by rule, and why, or ``None`` where none does.
 
@@ -1317,7 +1329,7 @@ class AuthorizingStage:
             back = _email_comes_back(one.call.arguments)
             if isinstance(back, str):
                 state.note(one.call, "email", Verdict.NOT_DONE.value, back)
-                state.verdicts.append(_not_done(one.call, back))
+                state.verdicts.append(_email_not_done(one.call, back))
                 return
             one = replace(
                 one,
@@ -1632,7 +1644,7 @@ class AuthorizingStage:
             back = _email_comes_back(inner.arguments)
             if isinstance(back, str):
                 state.note(call, "email", Verdict.NOT_DONE.value, back)
-                state.verdicts.append(_not_done(call, back))
+                state.verdicts.append(_email_not_done(call, back))
                 return
             inner = ProposedCall(call_id=call.call_id, name=capability, arguments=back)
         selected = await self._selected(inner, state)

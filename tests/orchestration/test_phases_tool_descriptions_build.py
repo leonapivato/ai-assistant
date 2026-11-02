@@ -153,11 +153,15 @@ async def test_a_conversation_search_connections_found_takes_a_text() -> None:
     ``search_connections`` under its own ``L`` label, takes a ``send_text`` like any
     connection the work was shown."""
     found: list[str] = []
+    shown_first: list[str] = []
 
     def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
         if "tell the Porto chat" not in exchange.briefing:
             return RoundResponse()
         if not exchange.steps:
+            shown_first.extend(
+                str(one.get("label")) for one in tags(exchange.briefing, "connection")
+            )
             search = ProposedCall(
                 call_id="c1", name="search_connections", arguments={"query": "flight"}
             )
@@ -171,20 +175,21 @@ async def test_a_conversation_search_connections_found_takes_a_text() -> None:
         return RoundResponse()
 
     harness = phases_harness(FakeToolCallingCompleter(response=respond), phases={"look_ups": True})
-    older = await open_conversation(harness)
+    conversations = [await open_conversation(harness) for _ in range(5)]
+    asking = await open_conversation(harness)
+    # The search's target is one the section does not show: outside the store's three most
+    # recent, which the origin's own conversation is among.
+    recent = {one.id for one in await harness.conversation_store.recent(limit=3)}
+    older = next(one for one in conversations if one not in recent)
     await harness.conversation_store.append_message(
         older, NewMessage(author=MessageAuthor.ASSISTANT, text="the flight to Porto leaves at nine")
     )
-    for _ in range(4):
-        newer = await open_conversation(harness)
-        await harness.conversation_store.append_message(
-            newer, NewMessage(author=MessageAuthor.ASSISTANT, text="hello")
-        )
-    asking = await open_conversation(harness)
+    assert older not in {one.id for one in await harness.conversation_store.recent(limit=3)}
     await say(harness, asking, "tell the Porto chat I found it")
     await settled(harness, asking)
 
     assert len(found) == 1
+    assert found[0] not in shown_first, "the search found a conversation the work was not shown"
     assert "Found it." in [one.text for one in await written(harness, older)]
 
 

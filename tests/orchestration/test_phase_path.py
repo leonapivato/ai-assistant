@@ -162,6 +162,27 @@ def test_each_call_reaches_planning_as_what_came_of_it() -> None:
     ]
 
 
+def test_a_call_its_tools_own_checks_stop_is_not_done_and_one_authorizing_stops_refused() -> None:
+    """ADR-0364 §6:2, §9:8, §9:13: the tool's own checks, which authorizing runs first for an
+    email, are not done; a check that is authorizing's own is refused."""
+    calls = (ProposedCall(call_id="e", name="send_email"), ProposedCall(call_id="f", name="x"))
+    decided = RoundAuthorization(
+        activation_id="act",
+        round_id="round:1",
+        verdicts=(
+            CallVerdict(
+                "e", Verdict.NOT_DONE, reason="an <exact> tag is never closed", tool_check=True
+            ),
+            CallVerdict("f", Verdict.NOT_DONE, reason="no capability of that name was offered"),
+        ),
+    )
+    outcomes = call_outcomes(_planned(*calls), decided, None)
+    assert [(one.call_id, one.kind) for one in outcomes] == [
+        ("e", CallOutcomeKind.NOT_DONE),
+        ("f", CallOutcomeKind.REFUSED),
+    ]
+
+
 def test_a_digest_is_shown_under_the_thing_its_source_label_names() -> None:
     """ADR-0308 §4:15: an item's source label resolves to the record it names."""
     digested = Digested(
