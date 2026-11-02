@@ -25,8 +25,10 @@ from phases_composition_support import (
     UNDERSTANDING_INSTRUCTIONS,
     Phased,
     Turn,
+    answering,
     build_phased,
     phased,
+    reply_to,
     until,
 )
 
@@ -72,7 +74,7 @@ class Hub:
 @pytest.fixture
 async def hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Hub]:
     """Wire production stores, receiver and reader, then serve them on a hub socket."""
-    phased_root = build_phased(tmp_path, monkeypatch)
+    phased_root = build_phased(tmp_path, monkeypatch, completer=answering())
     served = phased_root.settings
     listener = Listener(phased_root.engine, served, data_dir=tmp_path)
     await phased_root.engine.start()
@@ -149,7 +151,8 @@ async def test_an_event_over_the_hub_socket_runs_the_phases_and_starts_no_conver
     assert understanding
     assert hub.phased.completer.calls, "planning ran"
     asked = hub.phased.completer.calls[0].exchange.briefing
-    assert "No reply can be written there." in asked
+    # ADR-0364 §3:9: an event's origin is no connection, so nothing could be sent to it.
+    assert reply_to(asked) is None
     assert await hub.client.recent_conversations() == before
     assert result.capture.episode_id is not None
     episode = phased(await hub.phased.stored(result.capture.episode_id))
@@ -177,7 +180,7 @@ async def _canonical(client: HubEngineClient, address: str) -> str:
 async def _reopened_records(
     monkeypatch: pytest.MonkeyPatch, data_dir: Path, expected: dict[str, str]
 ) -> None:
-    reopened = build_phased(data_dir, monkeypatch)
+    reopened = build_phased(data_dir, monkeypatch, completer=answering())
     listener = Listener(reopened.engine, reopened.settings, data_dir=data_dir)
     await reopened.engine.start()
     await listener.start(build="phases-restart-acceptance")

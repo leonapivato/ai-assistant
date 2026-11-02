@@ -84,7 +84,7 @@ class PendingCandidatesSubject:
 
 
 def _arguments(fact: str) -> dict[str, Any]:
-    return {"fact": fact, "why": "it is about their travel", "rests_on_input": True}
+    return {"fact": fact, "why": "it is about their travel", "rests_on_this_stimulus": True}
 
 
 async def hold_episode(
@@ -105,7 +105,7 @@ async def hold_episode(
     episode = f"activation:{activation}"
     round_id = f"round:{activation}"
     calls = tuple(
-        ProposedCall(call_id=f"c{index}", name="remember", arguments=_arguments(fact))
+        ProposedCall(call_id=f"c{index}", name="remember_fact", arguments=_arguments(fact))
         for index, fact in enumerate(facts, start=1)
     )
     at = PENDING_AT - age
@@ -116,7 +116,7 @@ async def hold_episode(
             id=f"effect:{activation}:{index}",
             activation_id=activation,
             round=round_id,
-            capability="remember",
+            capability="remember_fact",
             values_digest=values_digest(ActionRequest(tool=REMEMBER_CANDIDATE, parameters=filled)),
             decision_id=f"decision:{activation}:{index}",
             claimed_at=at,

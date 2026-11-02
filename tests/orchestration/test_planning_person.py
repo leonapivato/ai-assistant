@@ -158,7 +158,8 @@ async def test_the_fields_are_the_persons_own_choices_and_unset_ones_say_so() ->
 
     lines = _always(completer).split("\n")
     assert lines[:4] == [
-        "- Robin Vale is the one the system serves, and has not set a name for it, so it "
+        # ADR-0364 §4:2: always in mind says who each P label is.
+        "- P1 is Robin Vale, the one the system serves, and has not set a name for it, so it "
         "is called Aether.",
         "- How Robin Vale likes to be addressed: Robin.",
         "- Robin Vale has not set the language they write in.",
@@ -194,7 +195,8 @@ async def test_the_whole_slot_is_shown_by_label_with_why_each_is_kept() -> None:
     # §7:7: each memory takes its label the first time planning is shown it, recorded
     # with the round, so a later round and a call name it by that label.
     (_, labels) = recorder.recorded[0]
-    assert [(one.label, one.kind, one.id) for one in labels][:2] == [
+    memories = [one for one in labels if one.kind is LabelKind.MEMORY]
+    assert [(one.label, one.kind, one.id) for one in memories][:2] == [
         ("M1", LabelKind.MEMORY, "m:diet"),
         ("M2", LabelKind.MEMORY, "m:brief"),
     ]
@@ -239,7 +241,7 @@ async def test_labels_recorded_in_an_earlier_round_are_kept() -> None:
     first, _, earlier = _stage()
     await first.plan(_inputs(person=BLOCK))
     (_, labels) = earlier.recorded[0]
-    assert [(one.label, one.id) for one in labels] == [
+    assert [(one.label, one.id) for one in labels if one.kind is LabelKind.MEMORY] == [
         ("M1", "m:diet"),
         ("M2", "m:brief"),
         ("M3", "m:sister"),
@@ -256,7 +258,9 @@ async def test_labels_recorded_in_an_earlier_round_are_kept() -> None:
     found = tag(section(_sent(completer), "### Recalled memories"), "memory")
     assert (found.get("label"), found.text) == ("M4", NEW.content)
     (_, minted) = recorder.recorded[0]
-    assert [(one.label, one.id) for one in minted] == [("M4", "m:new")]
+    assert [(one.label, one.id) for one in minted if one.kind is LabelKind.MEMORY] == [
+        ("M4", "m:new")
+    ]
 
 
 @pytest.mark.parametrize(

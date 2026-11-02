@@ -5,7 +5,7 @@ it when the round was recorded, and a card shows that exact line, so the wording
 with the request: ``RequestedCall.wording``. It is carried only by a call whose exact line
 shows one, it is never blank, it is no part of the call that runs or of its sameness, and
 a dump leaves it out where it is unset, so every request stored before it serialises as
-it did. A request carrying one is an export of a new shape, so the label moves to 28.
+it did. A request carrying one is an export of a new shape, so the label moved to 28.
 """
 
 from __future__ import annotations
@@ -157,11 +157,14 @@ def test_the_wording_is_shown_never_sent_and_no_part_of_the_calls_sameness() -> 
     assert not worded.same_call(_call(values={"memory": "m:sister"}, wording=_WORDING))
 
 
-def test_an_export_holding_a_worded_request_is_at_twenty_eight_and_round_trips() -> None:
-    """ADR-0039 §10: a reader of 27 would refuse the wording as extra, so the label moves."""
+def test_an_export_holding_a_worded_request_round_trips_at_the_current_label() -> None:
+    """ADR-0039 §10: a reader of 27 would refuse the wording as extra, so the label moved.
+
+    It is 29 since ADR-0364 §10:6 gave a request's call ``looking_for``.
+    """
     export = PlanExport(exported_at=_AT, approval_requests=(_request(_call(wording=_WORDING)),))
 
-    assert export.schema_version == 28
+    assert export.schema_version == 29
     assert PlanExport.model_validate_json(export.model_dump_json()) == export
     with pytest.raises(ValidationError):
         PlanExport.model_validate({**export.model_dump(mode="json"), "schema_version": 27})

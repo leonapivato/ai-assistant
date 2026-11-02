@@ -556,7 +556,7 @@ def test_the_values_digest_is_actings() -> None:
             parameters={
                 "fact": "likes tea",
                 "why": "a taste",
-                "rests_on_input": True,
+                "rests_on_this_stimulus": True,
                 EPISODE_ARGUMENT: "activation:a",
                 OUTSIDE_CONTENT_ARGUMENT: False,
             },

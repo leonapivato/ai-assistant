@@ -58,6 +58,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
 )
+from ai_assistant.orchestration.renames import current_arguments, current_name
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import FrozenJson, ToolCall
@@ -87,6 +88,7 @@ __all__ = [
     "candidate_of",
     "candidate_similar",
     "is_candidate_result",
+    "is_remember",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -308,6 +310,14 @@ class Candidate:
     confirm: bool = False
 
 
+def is_remember(capability: str | None, /) -> bool:
+    """Whether a recorded call or effect is a ``remember_fact``, under either name (§8:1).
+
+    ADR-0364 §8:4: a record written before the renames names the tool ``remember``.
+    """
+    return capability is not None and current_name(capability) == REMEMBER_CAPABILITY
+
+
 def candidate_of(parameters: Mapping[str, FrozenJson], /) -> Candidate:
     """The candidate a ``remember`` call records, its labels already mapped to ids.
 
@@ -323,6 +333,8 @@ def candidate_of(parameters: Mapping[str, FrozenJson], /) -> Candidate:
             memory without the note §3:1 has it carry, or a note without the memory
             the note is about.
     """
+    # ADR-0364 §8:2: a call recorded before the renames names its arguments the old way.
+    parameters = current_arguments(REMEMBER_CAPABILITY, parameters)
     fact = parameters.get(FACT_ARGUMENT)
     why = parameters.get(WHY_ARGUMENT)
     if not isinstance(fact, str) or not fact.strip():

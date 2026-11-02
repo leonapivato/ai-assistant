@@ -11906,12 +11906,16 @@ class ScheduledDue(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 28 because a request's call gained ``wording``**
+    **``schema_version`` is 29 because a request's call gained ``looking_for``**
+    (ADR-0364 §10:6): planning's *looking for*, kept beside the deliberate-repeat mark for
+    the digest when the ticket's call runs. No member is added, since it rides inside
+    ``approval_requests``, and a dump leaves it out where it is unset, but a reader of 28
+    refuses it as extra wherever it is set, so the label moves (ADR-0039 §10). The
+    closure rule is extended by nothing: it names no record.
+
+    **It was 28 because a request's call gained ``wording``**
     (ADR-0338 §8:6, ADR-0361 §2:11): the wording of the memory a ``pin`` or an ``unpin``
-    names, as the store held it in the asking round. No member is added, since it rides
-    inside ``approval_requests``, and a dump leaves it out where it is unset, but a reader
-    of 27 refuses it as extra wherever it is set, so the label moves (ADR-0039 §10). The
-    closure rule is extended by nothing: the wording names no record.
+    names, as the store held it in the asking round, carried the same way.
 
     **It was 27 because the document gained ``approval_requests``**
     (ADR-0361 §8:2): the Approvals channel's content, each request with its call, its
@@ -12011,12 +12015,12 @@ class PlanExport(BaseModel):
     # Its approval requests hold the person's call arguments (ADR-0145 §8).
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
-    schema_version: Literal[28] = Field(
-        default=28,
+    schema_version: Literal[29] = Field(
+        default=29,
         description=(
-            "Shape of this export, pinned to exactly 28 (ADR-0039 §10, ADR-0338 §8:6): an "
+            "Shape of this export, pinned to exactly 29 (ADR-0039 §10, ADR-0364 §10:6): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[28]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[29]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."

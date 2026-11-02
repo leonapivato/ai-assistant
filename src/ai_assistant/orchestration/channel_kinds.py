@@ -338,7 +338,10 @@ CONNECTION_KINDS: Final[dict[str, ConnectionKind]] = {
     ),
     "telegram": ConnectionKind(
         is_a="the messaging line's chat, on Telegram",
-        can="sense it, and act in it: it takes text messages",
+        can=(
+            "sense it, and act in it: it takes text messages, in plain text: formatting"
+            " such as Markdown is not rendered"
+        ),
         takes_text=True,
     ),
     TASK_SCHEDULER: ConnectionKind(

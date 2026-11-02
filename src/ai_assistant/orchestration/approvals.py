@@ -88,12 +88,13 @@ __all__ = [
 THE_APPROVALS: Final = ChannelIdentity(channel_type=APPROVALS, instance_id="approvals")
 
 #: What planning is shown of the approvals' place (ADR-0292 §8:1), for an activation an
-#: outcome started: no one is waiting on a reply here, and its messages go into the places
-#: on its place list (§6:7).
+#: outcome started: no one is waiting on a reply here, and its messages go into the
+#: connections it may speak in (§6:7, ADR-0364 §3:9).
 APPROVALS_DESCRIPTION: Final = (
     "Approvals: the person answered a request for their yes, or it expired, and that "
-    "started this activation. No one is waiting on a reply here; a message you write goes "
-    "into the one place on your place list that it names."
+    "started this work. No one is waiting on a reply here; a message you write goes into "
+    "the one connection it names by its L label, one marked suggested or the messaging "
+    "line's chat."
 )
 
 #: ADR-0361 §3:6: what the Approvals channel's kind declares, each row in the ADR-0292

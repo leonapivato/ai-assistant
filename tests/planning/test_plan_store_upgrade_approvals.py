@@ -187,7 +187,7 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
         store.close()
 
     assert _label(legacy) == "19"
-    assert export.schema_version == 28
+    assert export.schema_version == 29
     assert export.stopped_activations == ("act-before-stopped",)
     effects = {one.id: one for one in export.activation_effects}
     assert list(effects) == _EFFECTS

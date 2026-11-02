@@ -198,9 +198,9 @@ async def test_a_candidate_resting_on_an_earlier_message_call_names_its_part() -
     values = {
         "fact": "The user flies to Lisbon on Thursday.",
         "why": "travel",
-        "rests_on_assistant_messages": [past],
+        "rests_on_responses": [past],
     }
-    call = remember_call(fact=values["fact"], why="travel", rests_on_assistant_messages=["E1"])
+    call = remember_call(fact=values["fact"], why="travel", rests_on_responses=["E1"])
     await harness.hold(
         episode(
             "past",

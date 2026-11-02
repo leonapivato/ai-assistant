@@ -106,7 +106,7 @@ async def test_every_round_of_two_activations_is_offered_one_tool_set() -> None:
     offered = [call.tools for call in completer.calls]
     assert len(offered) == 4
     assert all(one == offered[0] for one in offered)
-    assert offered[0][-1].name == TEXT_CAPABILITY
+    assert TEXT_CAPABILITY in {one.name for one in offered[0]}
     await harness.engine.aclose()
 
 
@@ -123,8 +123,8 @@ async def test_a_spawn_in_an_activation_that_may_set_no_task_comes_back_refused(
 
     assert SPAWN_CAPABILITY in {one.name for one in completer.calls[0].tools}
     (spawned,) = reported(completer.calls[1], 0)
-    assert spawned["outcome"].startswith("refused")
-    assert "may set a task" in spawned["outcome"]
+    assert spawned["outcome"] == "refused"
+    assert "may set a task" in spawned["because"]
     entry = _entries(episode)["c1"]
     assert (entry.outcome, entry.delivered) == (CallOutcomeKind.REFUSED, None)
     assert entry.reason is not None
@@ -148,7 +148,7 @@ def test_each_condition_refuses_the_calls_it_once_withheld() -> None:
     none_hold = PhasePath._not_here(
         every, person=False, scheduling=False, running=frozenset(), standing=True, waiting=False
     )
-    assert "set_profile" in none_hold
+    assert "set_profile_field" in none_hold
     assert SPAWN_CAPABILITY in none_hold
     assert "authority" in none_hold[STOP_ACTIVATION_CAPABILITY]
     assert "no offer is open" in none_hold["answer_offer"]
@@ -157,13 +157,13 @@ def test_each_condition_refuses_the_calls_it_once_withheld() -> None:
         every,
         person=True,
         scheduling=True,
-        running=frozenset({STOP_ACTIVATION_CAPABILITY, "look_up_activation"}),
+        running=frozenset({STOP_ACTIVATION_CAPABILITY, "answer_offer"}),
         standing=True,
         waiting=True,
     )
     assert STOP_ACTIVATION_CAPABILITY not in waiting
     assert TEXT_CAPABILITY not in waiting
-    assert waiting["look_up_activation"] == WAITING_ROUND
+    assert waiting["answer_offer"] == WAITING_ROUND
     assert waiting[SPAWN_CAPABILITY] == WAITING_ROUND
 
 
@@ -178,12 +178,12 @@ async def test_a_text_call_is_written_into_its_place_and_its_entry_holds_what_it
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _call("c1", TEXT_CAPABILITY, to="the user", words="On it."),
-                _call("c2", TEXT_CAPABILITY, to="the user", words="Over there.", via="L7"),
+                _call("c1", TEXT_CAPABILITY, connection="L1", words="On it."),
+                _call("c2", TEXT_CAPABILITY, connection="L7", words="Over there."),
                 _call("c3", "nowhere"),
             )
         ),
-        RoundResponse(calls=(_call("c4", TEXT_CAPABILITY, to="the user", words="Done."),)),
+        RoundResponse(calls=(_call("c4", TEXT_CAPABILITY, connection="L1", words="Done."),)),
         RoundResponse(),
     )
     harness = phases_harness(completer)
@@ -219,10 +219,10 @@ async def test_a_text_call_is_written_into_its_place_and_its_entry_holds_what_it
         (record.rounds[1].id, ToolOutcome.SUCCEEDED),
     ]
     assert all(one.position is not None for one in messages)
-    # The next round was shown what the message call sent.
+    # ADR-0364 §9:5: the next round is shown a message call's outcome alone.
     first, elsewhere_shown, _ = reported(completer.calls[1], 0)
-    assert first["delivered"]["words"] == "On it."
-    assert elsewhere_shown["outcome"].startswith("refused")
+    assert first == {"outcome": "done"}
+    assert elsewhere_shown["outcome"] == "refused"
     # §8:9: the episode's outcome is the words each message call delivered, in order.
     assert episode.outcome == "On it.\n\nDone."
     await harness.engine.aclose()
@@ -424,10 +424,10 @@ def test_a_call_whose_sibling_raised_is_recorded_from_its_effect_record() -> Non
 
 
 async def test_a_text_call_naming_its_place_by_anything_but_one_label_sends_nothing() -> None:
-    """ADR-0356 §7:7: ``via`` names one place by its L label; a list of none is no place,
-    and never the input's by default."""
+    """ADR-0364 §9:2: ``connection`` names one connection by its L label; a list of none is
+    no connection, and never the input's by default."""
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", TEXT_CAPABILITY, to="the user", words="Hello.", via=[]),)),
+        RoundResponse(calls=(_call("c1", TEXT_CAPABILITY, connection=[], words="Hello."),)),
         RoundResponse(),
     )
     harness = phases_harness(completer)
@@ -439,7 +439,7 @@ async def test_a_text_call_naming_its_place_by_anything_but_one_label_sends_noth
     entry = _entries(episode)["c1"]
     assert (entry.outcome, entry.delivered) == (CallOutcomeKind.REFUSED, None)
     assert entry.reason is not None
-    assert "one place" in entry.reason
+    assert "names one connection, by its L label" in entry.reason
     await harness.engine.aclose()
 
 
@@ -482,7 +482,7 @@ async def test_each_calls_entry_is_stored_before_the_next_rounds_request() -> No
         holder,
         RoundResponse(
             calls=(
-                _call("c1", TEXT_CAPABILITY, to="the user", words="On it."),
+                _call("c1", TEXT_CAPABILITY, connection="L1", words="On it."),
                 _call("c2", "nowhere"),
             )
         ),

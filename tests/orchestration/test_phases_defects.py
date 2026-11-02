@@ -264,7 +264,7 @@ async def test_a_defect_in_acting_is_named_acting_not_the_digest_cancelled_besid
         RoundResponse(
             calls=(
                 text_call("Let me look that up."),
-                _call("c1", "web_search", query="museum hours", looking_for="opening"),
+                _call("c1", "search_web", query="museum hours", looking_for="opening"),
             ),
         )
     )

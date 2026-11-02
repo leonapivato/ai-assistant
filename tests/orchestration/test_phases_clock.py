@@ -49,7 +49,7 @@ async def test_what_time_is_it_takes_two_model_calls() -> None:
     completer = FakeToolCallingCompleter(response=_calls_the_clock_when_offered)
     harness = phases_harness(
         completer,
-        phases={"capabilities": (_CLOCK, "remember", "book")},
+        phases={"capabilities": (_CLOCK, "remember_fact", "book")},
         understanding=understanding_stage(model=understanding_model),
         tools=(_BOOK, CURRENT_TIME),
     )
@@ -62,7 +62,7 @@ async def test_what_time_is_it_takes_two_model_calls() -> None:
     (planning_round,) = completer.calls
     offered = {one.name for one in planning_round.tools}
     assert _CLOCK not in offered
-    assert {"remember", "book"} <= offered
+    assert {"remember_fact", "book"} <= offered
     # What planning answers from instead: its input carries the current time.
     assert section(planning_round.exchange.briefing, "## The situation").startswith("- Now: ")
 
@@ -75,7 +75,7 @@ async def test_a_clock_call_that_arrives_anyway_is_refused_as_not_offered() -> N
     )
     harness = phases_harness(
         completer,
-        phases={"capabilities": (_CLOCK, "remember", "book")},
+        phases={"capabilities": (_CLOCK, "remember_fact", "book")},
         tools=(_BOOK, CURRENT_TIME),
     )
 

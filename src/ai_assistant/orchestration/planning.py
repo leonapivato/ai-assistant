@@ -247,7 +247,13 @@ from ai_assistant.orchestration.message_tools import (
     platform_name,
 )
 from ai_assistant.orchestration.person_block import activation_person, person_zone
-from ai_assistant.orchestration.person_calls import PERSON_MODEL_CAPABILITIES, recorded_wording
+from ai_assistant.orchestration.person_calls import (
+    PERSON_MODEL_CAPABILITIES,
+    PIN_CAPABILITY,
+    SET_PROFILE_CAPABILITY,
+    UNPIN_CAPABILITY,
+    recorded_wording,
+)
 from ai_assistant.orchestration.renames import (
     Void,
     carried,
@@ -2997,6 +3003,12 @@ class _Request:
         if channel is None:
             return None
         place = place_of(channel)
+        if connection_kind(place) is None and all(
+            one.place != place for one in self._inputs.connections
+        ):
+            # A place no connection kind declares has no entry to show, so it takes no
+            # label: every L label the briefing shows names an entry (§3:5).
+            return None
         self._named_places.setdefault(place, channel)
         return self._book.label(LabelKind.PLACE, place)
 
@@ -3110,11 +3122,12 @@ class _Request:
         Nothing already sent is re-rendered (ADR-0356 §5:6).
         """
         self._entries.update(shown.connections)
+        listed = {one.place for one in self._inputs.places or ()}
         fresh = [
             one
             for one in self._connection_entries()
             if one.place not in self._entries
-            and self._book.held(LabelKind.PLACE, one.place) is not None
+            and (one.place in listed or self._book.held(LabelKind.PLACE, one.place) is not None)
         ]
         fresh.extend(
             entry
@@ -4348,7 +4361,7 @@ class _Request:
                 if proposed.call_id not in done:
                     continue
                 call = self._as_run(proposed)
-                if call.name in {"pin", "unpin"}:
+                if call.name in {PIN_CAPABILITY, UNPIN_CAPABILITY}:
                     given = str(call.arguments.get("memory", ""))
                     named = self._book.resolve(given)
                     # A ticket's values hold the memory by its id, the label resolved.
@@ -4360,8 +4373,8 @@ class _Request:
                         else None
                     )
                     if memory_id is not None:
-                        (pinned if call.name == "pin" else unpinned).add(memory_id)
-                elif call.name == "set_profile":
+                        (pinned if call.name == PIN_CAPABILITY else unpinned).add(memory_id)
+                elif call.name == SET_PROFILE_CAPABILITY:
                     value = call.arguments.get("value")
                     fields[str(call.arguments.get("field", ""))] = (
                         value if isinstance(value, str) or value is None else str(value)
@@ -4384,7 +4397,7 @@ class _Request:
                 return call
             return ProposedCall(
                 call_id=call.call_id,
-                name=str(ticket.request.call.tool.capability),
+                name=current_name(str(ticket.request.call.tool.capability)),
                 arguments=dict(ticket.request.call.values),
             )
         return call
@@ -4540,7 +4553,7 @@ class _Request:
         held = self._book.held(LabelKind.PLACE, place)
         if held is not None:
             return held
-        return f"{place_description(place_channel(place))}, not on your place list"
+        return f"{place_description(place_channel(place))}, not among your connections"
 
     def _task(self, entry: TaskEntry) -> dict[str, object]:
         """A scheduled task, as the Task Scheduler's calls show it (ADR-0350 §4:6-§4:8)."""
@@ -4687,7 +4700,9 @@ class _Request:
         if outcome.candidate is not None or name in PERSON_MODEL_CAPABILITIES:
             return {"result": value}
         result: dict[str, object] = {"label": self._book.label(LabelKind.RESULT, result_id)}
-        if isinstance(value, dict):
+        # A value with a label of its own, such as an episode's full view, keeps it beside
+        # the R label rather than over it.
+        if isinstance(value, dict) and "label" not in value:
             result |= value
         else:
             result["value"] = value

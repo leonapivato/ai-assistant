@@ -150,7 +150,7 @@ def _remember_outcomes(world: PhasesWorld) -> list[str]:
         assert isinstance(calls, list)
         for call in calls:
             assert isinstance(call, dict)
-            if call["capability"] == "remember":
+            if call["capability"] == "remember_fact":
                 assert call["arguments"]["fact"] == FORBIDDEN_BELIEF
                 outcome = call["outcome"]
                 assert isinstance(outcome, str)

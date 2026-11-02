@@ -83,37 +83,46 @@ async def _reported(call: ProposedCall, outcome: CallOutcome) -> dict[str, Any]:
     return result
 
 
-async def test_the_place_list_groups_places_under_headings_that_take_no_label() -> None:
-    """§5:10, §5:13: each place carries its own ``L`` label, a heading none."""
+async def test_connections_group_places_under_headings_that_take_no_label() -> None:
+    """ADR-0364 §3:2, §3:9: each connection carries its own ``L`` label, a heading none.
+
+    A many-place connection's places sit under its heading; the task's suggested place
+    is marked so.
+    """
     stage, completer, _ = _stage(RoundResponse(text=""))
 
     await stage.plan(_inputs(**_scheduled()))
 
-    situation = section(_sent(completer), "## The situation")
-    listed = situation.split("Places a message can be sent by its label:\n", 1)[1]
-    headings = [line for line in listed.split("\n") if "<place" not in line]
-    assert headings == ["  - The hub's chat:", "  - Telegram:"]
-    here, line = tags(listed, "place")
+    listed = section(_sent(completer), "## Connections")
+    headings = [line for line in listed.split("\n") if "<connection" not in line]
+    assert headings == ["- The hub chat:"]
+    here, line = tags(listed, "connection")
     assert (here.get("label"), here.text, here.get("suggested")) == (
         "L1",
-        "the conversation this input came from",
+        "a conversation in the hub chat",
         None,
     )
     assert (line.get("label"), line.text, line.get("suggested")) == (
         "L2",
-        "the person's Telegram chat",
+        "the messaging line's chat, on Telegram",
         "yes",
     )
 
 
 async def test_a_spawn_naming_a_heading_or_a_label_never_shown_is_refused_whole() -> None:
-    """§5:13, §13:3: a channel heading is never named, and an unshown label refuses."""
+    """§5:13, §13:3: a connection's heading is never named, and an unshown label refuses."""
     calls = (
         ProposedCall(
-            call_id="c1", name="spawn", arguments={"instruction": "x", "places": ["Telegram"]}
+            call_id="c1",
+            name="spawn_task",
+            arguments={"instruction": "x", "connections": ["The hub chat"]},
         ),
-        ProposedCall(call_id="c2", name="spawn", arguments={"instruction": "x", "places": ["L7"]}),
-        ProposedCall(call_id="c3", name="spawn", arguments={"instruction": "x", "places": ["L2"]}),
+        ProposedCall(
+            call_id="c2", name="spawn_task", arguments={"instruction": "x", "connections": ["L7"]}
+        ),
+        ProposedCall(
+            call_id="c3", name="spawn_task", arguments={"instruction": "x", "connections": ["L2"]}
+        ),
     )
     stage, _, _ = _stage(RoundResponse(calls=calls))
 
@@ -122,20 +131,20 @@ async def test_a_spawn_naming_a_heading_or_a_label_never_shown_is_refused_whole(
     assert [one.call.call_id for one in planned.refused] == ["c1", "c2"]
     assert all(isinstance(one, RefusedCall) for one in planned.refused)
     (kept,) = planned.calls
-    assert kept.call.model_dump()["arguments"]["places"] == ["telegram:ref/42"]
+    assert kept.call.model_dump()["arguments"]["connections"] == ["telegram:ref/42"]
 
 
-async def test_a_scheduled_activations_message_goes_where_its_text_calls_via_names() -> None:
-    """ADR-0357 §2:4: a message's place is a ``text`` call's ``via``, by its ``L`` label.
+async def test_a_scheduled_activations_message_goes_where_its_send_text_names() -> None:
+    """ADR-0364 §9: a message's place is a ``send_text`` call's ``connection``, by ``L`` label.
 
     ADR-0356 §7 retires §6:7's leading label on the round's text: that text is its notes
-    alone and places nothing, and ``via`` is handed on as planning named it, for the tool
-    to resolve against the place list.
+    alone and places nothing, and ``connection`` is handed on as planning named it, for
+    the tool to resolve against the connections shown.
     """
     pills = ProposedCall(
         call_id="c1",
-        name="text",
-        arguments={"to": "the user", "words": "time for the pills", "via": "L2"},
+        name="send_text",
+        arguments={"connection": "L2", "words": "time for the pills"},
     )
     stage, _, recorder = _stage(RoundResponse(text="L2: time for the pills", calls=(pills,)))
 
@@ -184,7 +193,10 @@ async def test_another_activations_message_keeps_a_leading_label_as_text() -> No
 
 
 async def test_a_listing_shows_tasks_and_their_parents_by_label() -> None:
-    """§4:6-§4:8, §9:2: tasks under ``T`` labels, parents under ``E``, places under ``L``."""
+    """§4:6-§4:8, §9:2: tasks under ``T`` labels, parents under ``E``, connections under ``L``.
+
+    ADR-0364 §5:1: the Task Scheduler's fields are shown as they are, beside the outcome.
+    """
     entry = TaskEntry(
         task_id="task:bins",
         state="pending",
@@ -206,7 +218,7 @@ async def test_a_listing_shows_tasks_and_their_parents_by_label() -> None:
 
     result = await _reported(ProposedCall(call_id="c1", name="list_tasks", arguments={}), outcome)
 
-    shown = result["result"]["value"]
+    shown = result
     (task,) = shown["scheduled"]
     assert task["label"].startswith("T")
     assert task["suggests"] == ["L2"]
@@ -265,19 +277,21 @@ async def _shown(listing: TaskListing, call: str) -> dict[str, Any]:
     outcome = CallOutcome(
         "round:earlier", "c1", CallOutcomeKind.DONE, result_id="result:1", tasks=listing
     )
-    result = await _reported(ProposedCall(call_id="c1", name=call, arguments={}), outcome)
-    shown: dict[str, Any] = result["result"]["value"]
-    return shown
+    # ADR-0364 §5:1: the Task Scheduler's fields as they are, beside the outcome.
+    return await _reported(ProposedCall(call_id="c1", name=call, arguments={}), outcome)
 
 
-async def test_a_spawns_read_back_and_its_rules_words_reach_planning() -> None:
-    """ADR-0340 §6:2-§6:3, §8:2: the spawned task's read-back, said back from the record."""
+async def test_a_spawns_result_is_its_label_and_read_back_alone() -> None:
+    """ADR-0340 §6:2-§6:3: the spawned task's read-back, said back from the record.
+
+    ADR-0364 §11:4: with done, the result is the task's ``T`` label and its read-back
+    alone, so the rule's words, which the read-back says, are not shown beside it.
+    """
     said = "Every weekday at 7:00 AM; next: Monday 26 October, at 7:00 AM. It suggests no place."
 
-    shown = await _shown(TaskListing(spawned=_rule_entry(read_back=said)), "spawn")
+    shown = await _shown(TaskListing(spawned=_rule_entry(read_back=said)), "spawn_task")
 
-    assert shown["spawned"]["read_back"] == said
-    assert shown["spawned"]["repeats"] == "every weekday at 7:00 AM"
+    assert shown == {"outcome": "done", "task": {"label": "T1", "read_back": said}}
 
 
 async def test_a_listed_task_shows_its_rule_and_no_read_back() -> None:
@@ -297,10 +311,14 @@ async def test_a_refused_spawn_is_said_not_done_once() -> None:
     outcome = CallOutcome("round:earlier", "c1", CallOutcomeKind.NOT_DONE, reason)
 
     result = await _reported(
-        ProposedCall(call_id="c1", name="spawn", arguments={"instruction": "x"}), outcome
+        ProposedCall(call_id="c1", name="spawn_task", arguments={"instruction": "x"}), outcome
     )
 
-    assert result["outcome"] == "not done: the instant it would fall due is earlier than now"
+    # ADR-0364 §6:1: the outcome alone, and the Task Manager's reason as its why.
+    assert result == {
+        "outcome": "not done",
+        "because": "the instant it would fall due is earlier than now",
+    }
 
 
 def _ended(**fields: Any) -> ActivationEntry:
@@ -317,7 +335,11 @@ def _ended(**fields: Any) -> ActivationEntry:
 
 
 async def test_an_ended_step_says_where_its_messages_went_as_the_place_list_shows_places() -> None:
-    """#3445, ADR-0350 §12:8: by label and description on the list, by kind off it."""
+    """#3445, ADR-0350 §12:8: by label on the list, by kind off it.
+
+    ADR-0364 §3:5: a connection shown is named by its ``L`` label alone, its entry in
+    Connections saying what it is.
+    """
     gone = "conversation:deleted"
     listing = TaskListing(
         recent=(
@@ -334,14 +356,12 @@ async def test_an_ended_step_says_where_its_messages_went_as_the_place_list_show
     shown = await _shown(listing, "list_tasks")
 
     told, off_the_list, silent, unread = shown["ended_lately"]
-    assert told["wrote_into"] == [{"label": "L2", "is": "the person's Telegram chat"}]
+    assert told["wrote_into"] == ["L2"]
     assert "may_have_written_into" not in told
     assert off_the_list["wrote_into"] == [
-        {"is": "a conversation in the hub's chat", "on_your_place_list": False}
+        "a conversation in the hub's chat, not among your connections"
     ]
-    assert off_the_list["may_have_written_into"] == [
-        {"label": "L1", "is": "the conversation this input came from"}
-    ]
+    assert off_the_list["may_have_written_into"] == ["L1"]
     assert silent["wrote_into"] == "wrote no message"
     assert "wrote_into" not in unread
 
@@ -359,4 +379,4 @@ async def test_an_ended_step_whose_only_message_is_not_known_is_not_said_to_have
 
     (unknown,) = shown["ended_lately"]
     assert "wrote_into" not in unknown
-    assert unknown["may_have_written_into"] == [{"label": "L2", "is": "the person's Telegram chat"}]
+    assert unknown["may_have_written_into"] == ["L2"]

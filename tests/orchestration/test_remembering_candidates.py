@@ -90,8 +90,9 @@ def test_the_candidates_declaration_is_as_ruled() -> None:
     §4:3: its result carries no outside text, so it goes to planning whole. The hub
     fills the episode and the outside mark (§3:4).
     """
-    assert REMEMBER_CANDIDATE.id == REMEMBER_CAPABILITY
-    assert REMEMBER_CANDIDATE.capability == REMEMBER_CAPABILITY
+    # ADR-0364 §8:1: renamed, its declaration keeping its id.
+    assert REMEMBER_CANDIDATE.id == "remember"
+    assert REMEMBER_CANDIDATE.capability == REMEMBER_CAPABILITY == "remember_fact"
     assert REMEMBER_CANDIDATE.effect is CapabilityEffect.OWN_RECORDS
     assert REMEMBER_CANDIDATE.leaves_hub is False
     assert REMEMBER_CANDIDATE.outcome_can_be_unknown is False
@@ -118,8 +119,8 @@ def test_a_candidate_names_earlier_messages_results_and_a_memory_by_label() -> N
     """§3:1, §3:4: each label argument is checked as ADR-0307 §5:3 checks one."""
     assert CANDIDATE_LABEL_ARGUMENTS == {
         REMEMBER_CAPABILITY: {
-            "rests_on_user_messages": LabelKind.EPISODE,
-            "rests_on_assistant_messages": LabelKind.EPISODE,
+            "rests_on_stimuli": LabelKind.EPISODE,
+            "rests_on_responses": LabelKind.EPISODE,
             "rests_on_results": LabelKind.RESULT,
             "memory": LabelKind.MEMORY,
         }
@@ -132,8 +133,8 @@ def test_a_candidate_names_earlier_messages_results_and_a_memory_by_label() -> N
 def test_a_call_records_one_fact_what_it_rests_on_and_why() -> None:
     candidate = candidate_of(
         _arguments(
-            rests_on_input=True,
-            rests_on_user_messages=["activation:e1"],
+            rests_on_this_stimulus=True,
+            rests_on_stimuli=["activation:e1"],
             rests_on_results=["result:r1"],
             memory="m1",
             note="it narrows that",
@@ -158,22 +159,28 @@ def test_a_call_records_one_fact_what_it_rests_on_and_why() -> None:
     [
         pytest.param(_arguments(), "rests on the input", id="rests-on-nothing"),
         pytest.param(
-            _arguments(rests_on_input=False, rests_on_results=[]),
+            _arguments(rests_on_this_stimulus=False, rests_on_results=[]),
             "rests on the input",
             id="rests-on-nothing-said-twice",
         ),
-        pytest.param(_arguments(fact=" ", rests_on_input=True), "non-blank fact", id="blank"),
-        pytest.param({"fact": "x", "rests_on_input": True}, "why it is worth keeping", id="no-why"),
         pytest.param(
-            _arguments(rests_on_input=True, note="bears on it"), "the memory it names", id="note"
+            _arguments(fact=" ", rests_on_this_stimulus=True), "non-blank fact", id="blank"
         ),
         pytest.param(
-            _arguments(rests_on_input=True, memory="m1"), "says in a note how", id="memory"
+            {"fact": "x", "rests_on_this_stimulus": True}, "why it is worth keeping", id="no-why"
         ),
-        pytest.param(_arguments(rests_on_input="yes"), "true or false", id="flag"),
-        pytest.param(_arguments(rests_on_user_messages=[3]), "names things by label", id="labels"),
         pytest.param(
-            _arguments(rests_on_input=True, confirm=1), "true or false", id="confirm-type"
+            _arguments(rests_on_this_stimulus=True, note="bears on it"),
+            "the memory it names",
+            id="note",
+        ),
+        pytest.param(
+            _arguments(rests_on_this_stimulus=True, memory="m1"), "says in a note how", id="memory"
+        ),
+        pytest.param(_arguments(rests_on_this_stimulus="yes"), "true or false", id="flag"),
+        pytest.param(_arguments(rests_on_stimuli=[3]), "names things by label", id="labels"),
+        pytest.param(
+            _arguments(rests_on_this_stimulus=True, confirm=1), "true or false", id="confirm-type"
         ),
     ],
 )
@@ -194,7 +201,7 @@ async def test_a_candidate_is_recorded_with_the_similar_memories_ids_and_nothing
     similar = _Similar((_fact("m1", "prefers aisle seats"), _fact("m2", "flies often")))
     runner = CandidateCalls(similar=similar, limit=3)
 
-    result = await runner.run(_call(_arguments(rests_on_input=True, **_FILLED)))
+    result = await runner.run(_call(_arguments(rests_on_this_stimulus=True, **_FILLED)))
 
     assert result.outcome is ToolOutcome.SUCCEEDED
     assert result.output == {SIMILAR_KEY: ("m1", "m2")}
@@ -207,7 +214,7 @@ async def test_a_failed_lookup_leaves_the_candidate_recorded_and_says_so() -> No
     """§4:4: the call is done, and its result says the memories could not be read."""
     runner = CandidateCalls(similar=_Similar(None), limit=3)
 
-    result = await runner.run(_call(_arguments(rests_on_input=True, **_FILLED)))
+    result = await runner.run(_call(_arguments(rests_on_this_stimulus=True, **_FILLED)))
 
     assert result.outcome is ToolOutcome.SUCCEEDED
     assert result.output == {SIMILAR_KEY: None}
@@ -218,7 +225,7 @@ async def test_a_failed_lookup_leaves_the_candidate_recorded_and_says_so() -> No
 async def test_a_candidate_a_tap_approved_is_recorded_the_same_way() -> None:
     """§5:3, ADR-0361 §5:10: under a ticket it records the candidate, and nothing else."""
     runner = CandidateCalls(similar=_Similar(()), limit=3)
-    call = _call(_arguments(rests_on_input=True, confirm=True, **_FILLED))
+    call = _call(_arguments(rests_on_this_stimulus=True, confirm=True, **_FILLED))
 
     result = await runner.run(call)
 
@@ -230,7 +237,9 @@ async def test_an_unclaimed_call_is_not_done() -> None:
     """§3:3: a candidate is joined to its effect record, so one claimed under none is not."""
     runner = CandidateCalls(similar=_Similar(()), limit=3)
 
-    result = await runner.run(_call(_arguments(rests_on_input=True, **_FILLED), effect=None))
+    result = await runner.run(
+        _call(_arguments(rests_on_this_stimulus=True, **_FILLED), effect=None)
+    )
 
     assert result.outcome is ToolOutcome.FAILED
     assert result.failure is not None

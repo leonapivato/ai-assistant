@@ -224,20 +224,6 @@ class TestFakeForecasterContract(ForecasterContract):
         rewritten = ActionRequest(tool=weakened, parameters=dict(proposal.parameters))
         return ScriptedRead(forecaster=forecaster, call=_authorised(rewritten))
 
-    async def elsewhere(self) -> ScriptedRead:
-        # This fake holds no binding and derives none, so "fully bound" is vacuous for
-        # it: what the shared case needs is a *valid, separately authorised* call naming
-        # another place, and that is what this is.
-        forecaster = FakeForecaster(max_day_chars=_SMALL_CONTENT_BOUND)
-        proposal = await forecaster.request()
-        assert proposal is not None
-        moved = {
-            name: (0.0 if isinstance(value, float) else value)
-            for name, value in proposal.parameters.items()
-        }
-        somewhere_else = ActionRequest(tool=proposal.tool, parameters=moved)
-        return ScriptedRead(forecaster=forecaster, call=_authorised(somewhere_else))
-
     async def configured(self) -> ConfiguredProvider:
         forecaster, _ = await _prepared()
         return ConfiguredProvider(

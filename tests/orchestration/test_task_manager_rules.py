@@ -170,7 +170,7 @@ async def test_a_local_time_is_read_in_the_persons_profile_zone_not_the_hubs() -
     """§3:2-§3:3, §10:4: 20:00 with no offset is 20:00 in New York, said in New York."""
     world = await _world()
 
-    entry = _spawned(await _spawn(world, at="2026-10-23T20:00", places=[CHAT_PLACE]))
+    entry = _spawned(await _spawn(world, at="2026-10-23T20:00", connections=[CHAT_PLACE]))
 
     task = await _only_task(world)
     assert task.when == DueAt(at=datetime(2026, 10, 24, 0, 0, tzinfo=UTC))
@@ -257,7 +257,7 @@ async def test_a_weekdays_rule_writes_its_first_occurrence_and_says_it_back() ->
     world = await _world()
 
     entry = _spawned(
-        await _spawn(world, rule={"repeats": "weekdays", "time": "07:00"}, places=[CHAT_PLACE])
+        await _spawn(world, rule={"repeats": "weekdays", "time": "07:00"}, connections=[CHAT_PLACE])
     )
 
     task = await _only_task(world)
@@ -387,7 +387,7 @@ async def test_a_rule_from_an_activation_without_the_persons_authority_is_refuse
 
 
 async def _rule_task(world: _World, rule: dict[str, Any]) -> ScheduledTask:
-    _spawned(await _spawn(world, rule=rule, places=[CHAT_PLACE]))
+    _spawned(await _spawn(world, rule=rule, connections=[CHAT_PLACE]))
     return await _only_task(world)
 
 
@@ -559,7 +559,7 @@ async def test_a_task_suggesting_the_line_says_on_telegram() -> None:
             world,
             _spawner(places=(CHAT_PLACE, LINE_PLACE)),
             at="2026-10-24T08:00",
-            places=[LINE_PLACE, CHAT_PLACE],
+            connections=[LINE_PLACE, CHAT_PLACE],
         )
     )
 

@@ -1252,7 +1252,7 @@ async def _card_on_the_line(line: _Line, plans: FakePlanStore) -> ApprovalReques
         round="round:1",
         call=RequestedCall(
             tool=REQUEST_APPROVAL,
-            values={"call": {"capability": "book", "arguments": {"date": "x"}}, "why": "w"},
+            values={"call": {"tool": "book", "arguments": {"date": "x"}}, "why": "w"},
         ),
         why="You asked me to book the table.",
         written_at=AT,
@@ -1489,7 +1489,7 @@ async def test_two_cards_of_one_round_each_show_their_own_request() -> None:
             round="round:1",
             call=RequestedCall(
                 tool=REQUEST_APPROVAL,
-                values={"call": {"capability": "book", "arguments": {"date": date}}, "why": "w"},
+                values={"call": {"tool": "book", "arguments": {"date": date}}, "why": "w"},
             ),
             why=f"Booking {date}.",
             written_at=AT,
@@ -1568,7 +1568,7 @@ async def test_after_a_start_the_window_shows_each_card_by_its_entry() -> None:
             round="round:1",
             call=RequestedCall(
                 tool=REQUEST_APPROVAL,
-                values={"call": {"capability": "book", "arguments": {"date": date}}, "why": "w"},
+                values={"call": {"tool": "book", "arguments": {"date": date}}, "why": "w"},
             ),
             why=f"Booking {date}.",
             written_at=AT,

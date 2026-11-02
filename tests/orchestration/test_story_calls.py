@@ -227,8 +227,15 @@ def test_the_hub_fills_the_episode_and_the_mark_and_planning_is_never_offered_th
         )
     for marked in (START_STORY, NOTE_STORY, GROUP_STORY):
         assert marked.system_supplied == (EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT)
-    for unmarked in (LINK_STORY, UNLINK_STORY, MOVE_STORY, MERGE_STORY, SPLIT_STORY):
+    for unmarked in (MOVE_STORY, MERGE_STORY, SPLIT_STORY):
         assert unmarked.system_supplied == (EPISODE_ARGUMENT,)
+    # ADR-0364 §8:2: the member's id, by its kind, is the hub's to place from ``member``.
+    for member in (LINK_STORY, UNLINK_STORY):
+        assert member.system_supplied == (
+            EPISODE_ARGUMENT,
+            MEMBER_STORY_ARGUMENT,
+            MEMBER_EPISODE_ARGUMENT,
+        )
     assert TIDY_STORY.system_supplied == ()
 
 
@@ -279,7 +286,7 @@ async def test_a_start_holds_this_activation_its_first_notes_and_sits_inside_a_s
     result = await calls.run(
         _call(
             START_STORY,
-            {NOTES_ARGUMENT: ["A camping trip.", "Waiting on the reply."], INSIDE_ARGUMENT: summer},
+            {NOTES_ARGUMENT: "A camping trip. Waiting on the reply.", INSIDE_ARGUMENT: summer},
         )
     )
 
@@ -287,7 +294,7 @@ async def test_a_start_holds_this_activation_its_first_notes_and_sits_inside_a_s
     own = StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)
     (started,) = await stories.stories_of(own)
     notes = await _notes(stories, str(started.story_id))
-    assert [one.text for one in notes] == ["A camping trip.", "Waiting on the reply."]
+    assert [one.text for one in notes] == ["A camping trip. Waiting on the reply."]
     assert {(one.author, one.written_during, one.outside) for one in notes} == {
         (StoryNoteAuthor.PLANNING, _ACTIVATION, False)
     }
@@ -307,7 +314,7 @@ async def test_a_start_inside_a_story_not_there_starts_nothing() -> None:
     calls = StoryCalls(stories=stories, memory=memory)
 
     result = await calls.run(
-        _call(START_STORY, {NOTES_ARGUMENT: ["A trip."], INSIDE_ARGUMENT: "story:gone"})
+        _call(START_STORY, {NOTES_ARGUMENT: "A trip.", INSIDE_ARGUMENT: "story:gone"})
     )
 
     assert result.outcome is ToolOutcome.FAILED
@@ -320,7 +327,7 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
     stories, memory = await _stores()
     plans = FakePlanStore(now=_now)
     acting = _acting(plans, StoryCalls(stories=stories, memory=memory))
-    notes: dict[str, FrozenJson] = {NOTES_ARGUMENT: ["A camping trip."]}
+    notes: dict[str, FrozenJson] = {NOTES_ARGUMENT: "A camping trip."}
 
     first = await acting.act(
         AuthorizedRound(
@@ -346,11 +353,7 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
         AuthorizedRound(
             _ACTIVATION,
             "round:3",
-            (
-                AuthorizedCall(
-                    _call(START_STORY, {NOTES_ARGUMENT: ["Visiting Mum."]}, decision="d3")
-                ),
-            ),
+            (AuthorizedCall(_call(START_STORY, {NOTES_ARGUMENT: "Visiting Mum."}, decision="d3")),),
         ),
         held=HeldResults(),
     )
@@ -392,7 +395,6 @@ class _FailsAfterCreate:
     "stories",
     [
         pytest.param(_FailsAfterCreate(note_at=1), id="the-first-note"),
-        pytest.param(_FailsAfterCreate(note_at=2), id="between-the-notes"),
         pytest.param(_FailsAfterCreate(link=True), id="placing-it-inside"),
     ],
 )
@@ -411,7 +413,7 @@ async def test_a_start_that_made_its_story_is_never_reported_not_done(
     plans = FakePlanStore(now=_now)
     acting = _acting(plans, StoryCalls(stories=cast("StoryStore", stories), memory=memory))
     arguments: dict[str, FrozenJson] = {
-        NOTES_ARGUMENT: ["A camping trip.", "Waiting on the reply."],
+        NOTES_ARGUMENT: "A camping trip.",
         INSIDE_ARGUMENT: summer,
     }
 
@@ -550,7 +552,7 @@ async def test_a_loop_of_merges_is_the_store_s_failure_and_writes_nothing() -> N
     calls = StoryCalls(stories=cast("StoryStore", stories), memory=memory)
 
     result = await calls.run(_call(NOTE_STORY, {STORY_ARGUMENT: "story:a", NOTE_ARGUMENT: "noted"}))
-    reason = await calls.refusal(_carrying("move_story", "story:a", ["1"]), owner_records=True)
+    reason = await calls.refusal(_carrying("move_to_matter", "story:a", ["1"]), owner_records=True)
 
     assert result.outcome is ToolOutcome.FAILED
     assert result.failure is not None
@@ -742,9 +744,10 @@ async def test_a_story_label_planning_was_never_shown_refuses_the_call_whole() -
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _proposed("c1", "note_story", story="S1", note="noted"),
-                _proposed("c2", "note_story", story="S9", note="noted"),
-                _proposed("c3", "link_story", story="S1", member_episode="S1"),
+                _proposed("c1", "note_matter", matter="S1", note="noted"),
+                _proposed("c2", "note_matter", matter="S9", note="noted"),
+                _proposed("c3", "note_matter", matter="E1", note="noted"),
+                _proposed("c4", "add_to_matter", matter="S1", member="E1"),
             )
         )
     )
@@ -760,19 +763,27 @@ async def test_a_story_label_planning_was_never_shown_refuses_the_call_whole() -
         PlanningInputs(
             activation_id=_ACTIVATION,
             place=PlaceWindow(takes_message=True),
-            labels=(shown,),
+            labels=(
+                shown,
+                PlanningLabel(label="E1", kind=LabelKind.EPISODE, id="activation:act-0"),
+            ),
             capabilities=STORY_CALLS,
             label_arguments=STORY_LABEL_ARGUMENTS,
         )
     )
 
-    (passed,) = planned.calls
+    passed, member = planned.calls
     assert passed.call.arguments[STORY_ARGUMENT] == "story:trip"
+    # ADR-0364 §8:2: ``member`` names an episode or a matter, and its id is placed by kind.
+    assert member.call.arguments == {
+        STORY_ARGUMENT: "story:trip",
+        MEMBER_EPISODE_ARGUMENT: "activation:act-0",
+    }
     refused = {one.call.call_id: one for one in planned.refused}
     assert set(refused) == {"c2", "c3"}
     assert all(isinstance(one, RefusedCall) for one in refused.values())
     assert refused["c2"].reason == "'S9' names nothing you were shown"
-    assert refused["c3"].reason == "'S1' names a story, not an episode"
+    assert refused["c3"].reason == "'E1' names an episode, not a matter"
 
 
 def _proposed(call_id: str, name: str, **arguments: Any) -> ProposedCall:
@@ -786,7 +797,7 @@ async def test_an_earlier_tidy_up_is_shown_as_started_and_nothing_more() -> None
     and nothing more (ADR-0356 §5:4).
     """
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_proposed("c0", "tidy_story", story="story:trip"),)),
+        RoundResponse(calls=(_proposed("c0", "tidy_matter", matter="story:trip"),)),
         RoundResponse(text="ok"),
     )
     stage = PlanningStage(
@@ -1106,7 +1117,7 @@ async def test_a_group_puts_the_stories_under_a_new_larger_one_with_its_first_no
             GROUP_STORY,
             {
                 STORIES_ARGUMENT: [trip, absorbed, other],
-                NOTES_ARGUMENT: ["The summer."],
+                NOTES_ARGUMENT: "The summer.",
                 OUTSIDE_CONTENT_ARGUMENT: True,
             },
         )
@@ -1164,7 +1175,7 @@ async def test_a_group_that_made_its_story_is_never_reported_not_done() -> None:
 
     with pytest.raises(StartUnfinishedError):
         await calls.run(
-            _call(GROUP_STORY, {STORIES_ARGUMENT: [trip], NOTES_ARGUMENT: ["The summer."]})
+            _call(GROUP_STORY, {STORIES_ARGUMENT: [trip], NOTES_ARGUMENT: "The summer."})
         )
     assert (
         len(await stories.inner.stories_of(StoryMember(kind=StoryMemberKind.STORY, id=trip))) == 1
@@ -1191,7 +1202,7 @@ def _carrying(name: str, story: str, notes: list[str], **rest: FrozenJson) -> Pr
     )
 
 
-@pytest.mark.parametrize("name", ["move_story", "split_story"])
+@pytest.mark.parametrize("name", ["move_to_matter", "split_matter"])
 async def test_the_hub_refuses_a_move_or_a_split_naming_a_note_not_held(name: str) -> None:
     """ADR-0307 §5:3-§5:4: against the stories as they stand, naming the note by its label."""
     stories, memory = await _stores()
@@ -1236,7 +1247,7 @@ async def _past_one_page() -> tuple[_PagesCounted, StoryCalls, str, list[int]]:
     return stories, StoryCalls(stories=cast("StoryStore", stories), memory=memory), trip, held
 
 
-@pytest.mark.parametrize("name", ["move_story", "split_story"])
+@pytest.mark.parametrize("name", ["move_to_matter", "split_matter"])
 async def test_the_hub_accepts_a_note_held_on_the_second_page(name: str) -> None:
     """#2882: the check reads the story's notes page by page, past the first."""
     stories, calls, trip, held = await _past_one_page()
@@ -1247,7 +1258,7 @@ async def test_the_hub_accepts_a_note_held_on_the_second_page(name: str) -> None
     assert stories.pages_read == 2  # one page more than a page holds
 
 
-@pytest.mark.parametrize("name", ["move_story", "split_story"])
+@pytest.mark.parametrize("name", ["move_to_matter", "split_matter"])
 async def test_the_hub_refuses_held_and_missing_notes_after_reading_every_page(name: str) -> None:
     """#2882: the held note on the second page is found; the missing one is named."""
     stories, calls, trip, held = await _past_one_page()
@@ -1271,9 +1282,9 @@ async def test_the_hub_checks_the_story_a_merged_one_went_into() -> None:
     await stories.merge(trip, other, actor=StoryActor.OWNER)
     calls = StoryCalls(stories=stories, memory=memory)
 
-    assert await calls.refusal(_carrying("move_story", trip, [str(note)]), owner_records=True) is (
-        None
-    )
+    assert await calls.refusal(
+        _carrying("move_to_matter", trip, [str(note)]), owner_records=True
+    ) is (None)
 
 
 async def test_on_an_owner_only_pass_a_move_or_a_split_carries_members_only() -> None:
@@ -1284,10 +1295,10 @@ async def test_on_an_owner_only_pass_a_move_or_a_split_carries_members_only() ->
     calls = StoryCalls(stories=stories, memory=memory)
 
     with_notes = await calls.refusal(
-        _carrying("split_story", trip, [str(note)]), owner_records=False
+        _carrying("split_matter", trip, [str(note)]), owner_records=False
     )
     members_only = await calls.refusal(
-        _carrying("split_story", trip, [], episodes=["activation:act-0"]), owner_records=False
+        _carrying("split_matter", trip, [], episodes=["activation:act-0"]), owner_records=False
     )
 
     assert with_notes is not None
@@ -1316,7 +1327,7 @@ async def test_the_hub_check_fails_closed_where_the_stories_cannot_be_read() -> 
     trip = await _story(stories.inner)
     calls = StoryCalls(stories=cast("StoryStore", stories), memory=memory)
 
-    reason = await calls.refusal(_carrying("move_story", trip, ["1"]), owner_records=True)
+    reason = await calls.refusal(_carrying("move_to_matter", trip, ["1"]), owner_records=True)
 
     assert reason == "the stories could not be read, so the notes named could not be checked"
 
@@ -1326,9 +1337,9 @@ async def test_the_hub_check_passes_every_other_call() -> None:
     calls = StoryCalls(stories=stories, memory=memory)
 
     for call in (
-        ProposedCall(call_id="c1", name="note_story", arguments={STORY_ARGUMENT: "story:x"}),
-        _carrying("merge_stories", "story:x", ["1"]),
-        _carrying("move_story", "story:x", []),
+        ProposedCall(call_id="c1", name="note_matter", arguments={STORY_ARGUMENT: "story:x"}),
+        _carrying("merge_matters", "story:x", ["1"]),
+        _carrying("move_to_matter", "story:x", []),
     ):
         assert await calls.refusal(call, owner_records=False) is None
 
@@ -1337,7 +1348,9 @@ async def test_the_hub_check_refuses_a_story_not_there_with_the_reason() -> None
     stories, memory = await _stores()
     calls = StoryCalls(stories=stories, memory=memory)
 
-    reason = await calls.refusal(_carrying("move_story", "story:gone", ["1"]), owner_records=True)
+    reason = await calls.refusal(
+        _carrying("move_to_matter", "story:gone", ["1"]), owner_records=True
+    )
 
     assert reason == "the story named is not there"
 
@@ -1352,8 +1365,8 @@ async def test_planning_refuses_a_note_label_it_was_never_shown() -> None:
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _proposed("c1", "move_story", story="S1", to="S2", notes=["N1"]),
-                _proposed("c2", "move_story", story="S1", to="S2", notes=["N1", "N4"]),
+                _proposed("c1", "move_to_matter", matter="S1", to="S2", notes=["N1"]),
+                _proposed("c2", "move_to_matter", matter="S1", to="S2", notes=["N1", "N4"]),
             )
         )
     )

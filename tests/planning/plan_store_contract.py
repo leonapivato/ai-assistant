@@ -1489,7 +1489,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 28
+        assert export.schema_version == 29
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -2118,7 +2118,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 28
+        assert export.schema_version == 29
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -2365,7 +2365,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 28
+        assert export.schema_version == 29
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -3107,7 +3107,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 28
+        assert exported.schema_version == 29
         assert [one.id for one in exported.scheduled_tasks] == ["t2", "t1"]
         assert removed == 4
         cleared = await store.export()
@@ -3507,7 +3507,7 @@ class PlanStoreContract:
         exported = await store.export()
         await store.clear()
 
-        assert exported.schema_version == 28
+        assert exported.schema_version == 29
         assert exported.scheduled_tasks == (held,)
         assert len(exported.scheduled_tasks[0].occurrences) == 4
         assert (await store.export()).scheduled_tasks == ()
@@ -4249,7 +4249,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 28
+        assert exported.schema_version == 29
         assert exported.approval_requests == held
         # Two requests and their two effect records.
         assert removed == 4

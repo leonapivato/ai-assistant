@@ -45,7 +45,7 @@ async def test_a_call_its_runner_refuses_is_not_done_with_the_runners_reason() -
 
 
 def _pin() -> AuthorizedCall:
-    """A ``pin`` allowed under the approval ``_approved`` names."""
+    """A ``pin_memory`` allowed under the approval ``_approved`` names."""
     request = ActionRequest(tool=PIN, parameters={"memory": "m:diet"})
     template = _approved("remember").call.decision
     decision = PermissionDecision.from_request(
@@ -64,7 +64,7 @@ async def test_runners_added_beside_the_seam_reach_their_capabilities_alone() ->
     base = _Approving()
     added = _Approving(NotDone(reason=_REASON))
     stage = _over(FakePlanStore(now=_now), base)
-    stage.add_own_records({"pin": added})
+    stage.add_own_records({"pin_memory": added})
     remember = _approved("remember", decision="d2", effect="e2", part=2)
 
     acted = await stage.act(held=HeldResults(), authorized=_round(_pin(), remember))
@@ -72,7 +72,7 @@ async def test_runners_added_beside_the_seam_reach_their_capabilities_alone() ->
     pinned, remembered = acted.calls
     assert (pinned.outcome, pinned.reason) == (ActedOutcome.NOT_DONE, _REASON)
     assert remembered.outcome is ActedOutcome.DONE
-    assert [str(call.request.tool.capability) for call in added.run_calls] == ["pin"]
+    assert [str(call.request.tool.capability) for call in added.run_calls] == ["pin_memory"]
     assert [str(call.request.tool.capability) for call in base.run_calls] == ["remember"]
 
 

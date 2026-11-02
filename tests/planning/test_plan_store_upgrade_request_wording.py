@@ -246,5 +246,5 @@ async def test_the_opened_file_holds_a_worded_request_across_a_reopen(legacy: Pa
     assert [one.id for one in export.approval_requests] == [*_REQUESTS, "q-after-pin"]
     assert export.approval_requests[-1] == request
     assert export.approval_requests[-1].call.wording == "Robin takes green tea."
-    assert export.schema_version == 28
+    assert export.schema_version == 29
     assert _label(legacy) == "19"

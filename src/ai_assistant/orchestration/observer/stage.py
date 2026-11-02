@@ -164,7 +164,7 @@ from ai_assistant.orchestration.observer.writing import (
     WriteLimits,
     outcome_of,
 )
-from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
+from ai_assistant.orchestration.remembering import is_remember
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -1349,7 +1349,7 @@ def _nothing_to_read(episode: EpisodicMemory) -> bool:
         return True
     if episode_text(episode).strip():
         return False
-    if any(call.name == REMEMBER_CAPABILITY for one in processing.rounds for call in one.calls):
+    if any(is_remember(call.name) for one in processing.rounds for call in one.calls):
         return False
     return not any(digest.evidence for digest in processing.digests)
 

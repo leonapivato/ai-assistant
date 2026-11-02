@@ -233,7 +233,7 @@ async def test_an_activation_cut_off_after_a_story_read_of_a_marked_note_is_clos
     marked, and the next process's close keeps it.
     """
     completer = _GatedCompleter(
-        RoundResponse(calls=(_call("c1", "read_story", story="S1"),)),
+        RoundResponse(calls=(_call("c1", "read_matter", matter="S1"),)),
         RoundResponse(text="Saturday."),
         gated=2,
     )

@@ -336,7 +336,10 @@ async def test_the_stimulus_comes_first_framed_and_attributed_by_its_record() ->
 
     assert briefing.startswith("# The stimulus\nA stimulus reached the system at 5:40 pm on ")
     said = tag(section(briefing, "# The stimulus"), "said")
-    assert (said.get("from"), said.text) == ("Leo", "What's on tonight?")
+    # ADR-0364 §4:2: a tag's from names a person by their P label, and §3:9: its where
+    # names its origin's L label.
+    assert (said.get("from"), said.text) == ("P1", "What's on tonight?")
+    assert said.get("where") == "L1"
 
 
 # --- §3:6, §3:7: withheld words, and the work's own relayed stimulus ----------------------
@@ -825,8 +828,8 @@ async def test_a_change_after_the_works_own_is_still_news() -> None:
     given = _inputs(person=_block(KeptInMind(memory=BEACH, pinned=True)))
     own = RoundResponse(
         calls=(
-            _call("c1", "set_profile", field="address", value="Lee"),
-            _call("c2", "pin", memory="M2"),
+            _call("c1", "set_profile_field", field="address", value="Lee"),
+            _call("c2", "pin_memory", memory="M2"),
         )
     )
     stage, completer = _stage(own, RoundResponse(calls=(_call("c3", "list_tasks"),)))
@@ -867,7 +870,7 @@ async def test_an_own_change_undone_before_its_report_is_news() -> None:
     """ADR-0360 §4:1, §4:4, review round 5: the result's value joins the baseline."""
     news = await _next_round(
         _inputs(),
-        RoundResponse(calls=(_call("c1", "set_profile", field="address", value="Lee"),)),
+        RoundResponse(calls=(_call("c1", "set_profile_field", field="address", value="Lee"),)),
         person_now=_now(),
     )
 
@@ -893,7 +896,7 @@ async def test_an_approved_profile_change_is_not_named_again() -> None:
 
     news = await _next_round(
         given,
-        RoundResponse(calls=(_call("c1", RUN_APPROVED_TOOL, label="A1"),)),
+        RoundResponse(calls=(_call("c1", RUN_APPROVED_TOOL, ticket="A1"),)),
         person_now=_now(address="Lee"),
     )
 

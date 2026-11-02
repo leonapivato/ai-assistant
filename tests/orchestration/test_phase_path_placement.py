@@ -274,7 +274,7 @@ async def test_end_to_end_an_outside_fact_recall_kept_places_the_episode() -> No
 
 def _search_then_answer() -> FakeToolCallingCompleter:
     return FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "search_memory", query="dentist", looking_for="when"),)),
+        RoundResponse(calls=(_call("c1", "search_memories", query="dentist", looking_for="when"),)),
         RoundResponse(text="It is with Dr Rao."),
     )
 
@@ -359,7 +359,7 @@ async def test_a_stamped_episode_a_storys_full_view_shows_is_held_for_the_freeze
     created = await stories.create([activation("past")], actor=StoryActor.OWNER)
     assert created.story_id is not None
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "read_story", story="S1"),)),
+        RoundResponse(calls=(_call("c1", "read_matter", matter="S1"),)),
     )
     harness = Harness(understanding=understanding_stage(), memory=memory)
     path = _phases(completer, stories=stories, look_ups=True)(harness)
@@ -399,8 +399,14 @@ async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_roun
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _call("c1", "read_story", story="S1"),
-                _call("c2", "remember", fact="The trip is on.", why="a plan", rests_on_input=True),
+                _call("c1", "read_matter", matter="S1"),
+                _call(
+                    "c2",
+                    "remember_fact",
+                    fact="The trip is on.",
+                    why="a plan",
+                    rests_on_this_stimulus=True,
+                ),
             )
         ),
     )
@@ -408,7 +414,7 @@ async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_roun
     claim = harness.plans.claim_activation_effect
 
     async def unclaimable(effect: ActivationEffect, /, **kwargs: Any) -> Any:
-        if effect.capability == "remember":
+        if effect.capability == "remember_fact":
             msg = "the plan store could not record the claim"
             raise PlanningError(msg)
         return await claim(effect, **kwargs)
@@ -453,12 +459,12 @@ async def test_the_value_is_taken_over_every_round() -> None:
             calls=(
                 _call(
                     "c1",
-                    "remember",
+                    "remember_fact",
                     fact="The user sees a dentist.",
                     why="health",
-                    rests_on_input=True,
+                    rests_on_this_stimulus=True,
                 ),
-                _call("c2", "search_memory", query="dentist", looking_for="when"),
+                _call("c2", "search_memories", query="dentist", looking_for="when"),
             ),
         ),
         RoundResponse(
@@ -466,7 +472,7 @@ async def test_the_value_is_taken_over_every_round() -> None:
             calls=(
                 _call(
                     "c3",
-                    "remember",
+                    "remember_fact",
                     fact="The dentist is Dr Rao.",
                     why="health",
                     rests_on_results=["R1"],
@@ -484,7 +490,7 @@ async def test_the_value_is_taken_over_every_round() -> None:
     effects = await harness.plans.activation_effects([frozen.id.removeprefix("activation:")])
     assert frozen.processing_record is not None
     rounds = [one.id for one in frozen.processing_record.rounds]
-    remembered = [one.round for one in effects if one.capability == "remember"]
+    remembered = [one.round for one in effects if one.capability == "remember_fact"]
     assert remembered == rounds
     assert [one.id for one in await harness.memory.export() if isinstance(one, Memory)] == ["said"]
     assert frozen.placement == _STAMPED

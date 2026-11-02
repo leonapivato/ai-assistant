@@ -210,7 +210,7 @@ def _call(call_id: str, name: str, **arguments: Any) -> ProposedCall:
 
 def _fact(fact: str) -> dict[str, Any]:
     """A candidate's arguments, as planning writes them (ADR-0329 §3:1)."""
-    return {"fact": fact, "why": "worth keeping", "rests_on_input": True}
+    return {"fact": fact, "why": "worth keeping", "rests_on_this_stimulus": True}
 
 
 def _round(
@@ -423,7 +423,7 @@ async def test_a_call_naming_an_argument_the_hub_fills_is_refused() -> None:
     hub = _Hub()
 
     decided = await hub.authorize(
-        _round(_call("c1", "remember", **_fact("tea"), **{EPISODE_ARGUMENT: "activation:x"}))
+        _round(_call("c1", "remember_fact", **_fact("tea"), **{EPISODE_ARGUMENT: "activation:x"}))
     )
 
     (verdict,) = decided.verdicts
@@ -707,7 +707,7 @@ async def test_a_note_the_owner_wrote_leaves_a_call_leaving_the_hub_and_a_rememb
     decided = await hub.authorize(
         _round(
             _call("c1", "lookup", q="x"),
-            _call("c2", "remember", **_fact("likes mornings")),
+            _call("c2", "remember_fact", **_fact("likes mornings")),
             working=held,
         )
     )
@@ -745,7 +745,7 @@ async def test_a_candidate_after_outside_content_is_marked_and_allowed() -> None
     """
     hub = _Hub(episode=_episode(parties=UNIDENTIFIED_WORDS))
 
-    decided = await hub.authorize(_round(_call("c1", "remember", **_fact("the 9:10 runs"))))
+    decided = await hub.authorize(_round(_call("c1", "remember_fact", **_fact("the 9:10 runs"))))
 
     assert decided.verdicts[0].verdict is Verdict.ALLOWED
     (allowed,) = decided.allowed
@@ -863,7 +863,7 @@ async def test_a_scheduled_activations_text_call_goes_only_into_a_place_on_its_l
     assert [one.allowed for one in decided.call_messages] == [True, False, False, False]
     gone = decided.call_messages[1]
     assert gone.reason is not None
-    assert "gone since its place list was built" in gone.reason
+    assert "gone since it was shown" in gone.reason
 
 
 def test_a_text_call_checked_names_a_call_the_round_proposed_once() -> None:
@@ -923,7 +923,7 @@ async def test_a_scheduled_activations_message_to_a_place_gone_since_its_list_is
     assert gone.message.allowed is False
     assert gone.message.effect_id is None
     assert gone.message.reason is not None
-    assert "gone since its place list was built" in gone.message.reason
+    assert "gone since it was shown" in gone.message.reason
     assert other.message is not None
     assert other.message.allowed is True
 
@@ -998,15 +998,15 @@ async def test_a_candidate_is_recorded_once_through_actings_own_records_seam() -
         plans=plans,
         invoker=_NoInvoker(),
         own_records=OwnRecordsByCapability(
-            {"remember": CandidateCalls(similar=_NoneSimilar(), limit=5)}
+            {"remember_fact": CandidateCalls(similar=_NoneSimilar(), limit=5)}
         ),
         timeout=timedelta(seconds=5),
         now=_now,
     )
 
-    first = await hub.authorize(_round(_call("c1", "remember", **_fact("likes tea"))))
+    first = await hub.authorize(_round(_call("c1", "remember_fact", **_fact("likes tea"))))
     acted = await stage.act(_for_acting(first), held=HeldResults())
-    again = await hub.authorize(_round(_call("c1", "remember", **_fact("likes tea"))))
+    again = await hub.authorize(_round(_call("c1", "remember_fact", **_fact("likes tea"))))
     repeated = await stage.act(_for_acting(again), held=HeldResults())
 
     assert acted.calls[0].outcome is ActedOutcome.DONE

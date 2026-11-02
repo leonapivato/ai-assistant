@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
-from exchange_support import tags, text_call
+from exchange_support import section, tags, text_call
 from phases_support import open_conversation, phases_harness, said, until
 from task_support import activation, write_task
 from task_support import seams as task_seams
@@ -128,8 +128,11 @@ def _text(exchange: PlanningExchange) -> str:
 
 
 def _approving(exchange: PlanningExchange) -> bool:
-    """Whether the work is an approval's: its origin is the approvals (§3:6)."""
-    return "- The origin: the approvals," in exchange.briefing
+    """Whether the work is an approval's: its origin is the approvals (§3:6).
+
+    Since ADR-0364 §2:2 the situation names no origin; the stimulus's framing does.
+    """
+    return "arrived on the approvals" in section(exchange.briefing, "# The stimulus")
 
 
 def _results(exchange: PlanningExchange) -> list[dict[str, Any]]:
@@ -156,14 +159,14 @@ def _ask(date: str = _DATE, *, call_id: str = "ask-1") -> ProposedCall:
         call_id=call_id,
         name="request_approval",
         arguments={
-            "call": {"capability": "book", "arguments": {"date": date}},
+            "call": {"tool": "book", "arguments": {"date": date}},
             "why": "You asked me to book the table.",
         },
     )
 
 
 def _run(label: str, *, call_id: str = "run-1") -> ProposedCall:
-    return ProposedCall(call_id=call_id, name="run_approved", arguments={"label": label})
+    return ProposedCall(call_id=call_id, name="run_approved", arguments={"ticket": label})
 
 
 type Script = Callable[[PlanningExchange], Awaitable[RoundResponse]]
@@ -297,8 +300,11 @@ async def test_a_direct_call_needing_a_yes_runs_nothing_and_names_request_approv
         await _start(harness)
         await until(lambda: _settled(told), what="the second round")
         (result,) = told
-        assert "request_approval" in result["outcome"]
-        assert "same arguments" in result["outcome"]
+        # ADR-0364 §6:3: refused, its why saying to ask with request_approval.
+        assert result == {
+            "outcome": "refused",
+            "because": "it needs approval: ask for it with request_approval",
+        }
         assert _books(harness) == []
         assert await _requests(harness) == ()
     finally:
@@ -322,7 +328,7 @@ async def test_a_nested_call_failing_its_schema_or_denied_writes_no_request() ->
                 call_id="ask-1",
                 name="request_approval",
                 arguments={
-                    "call": {"capability": "book", "arguments": {}},
+                    "call": {"tool": "book", "arguments": {}},
                     "why": "You asked me to book the table.",
                 },
             )
@@ -337,8 +343,9 @@ async def test_a_nested_call_failing_its_schema_or_denied_writes_no_request() ->
         await _start(harness)
         await until(lambda: _settled(told), what="the second round")
         unfit, denied = told
-        assert "do not fit" in unfit["outcome"]
-        assert "do not ask" in denied["outcome"]
+        assert unfit["outcome"] == "refused"
+        assert "do not fit" in unfit["because"]
+        assert "do not ask" in denied["because"]
         assert await _requests(harness) == ()
     finally:
         await harness.engine.aclose()
@@ -363,10 +370,12 @@ async def test_a_second_identical_pending_request_is_refused_as_waiting() -> Non
         await _start(harness)
         await until(lambda: _settled(told[2:]), what="the third round")
         (written,) = told[1]
-        assert written["result"]["value"]["request"].startswith("written")
-        assert written["result"]["value"]["card"].startswith("not posted")
+        # ADR-0364 §10:1: done, how its card went, and when it expires.
+        assert written["outcome"] == "done"
+        assert written["card"] == "not sent, so only the approvals panel shows it"
+        assert "expires" in written
         (again,) = told[2]
-        assert "already waits" in again["outcome"]
+        assert "already waits" in again["because"]
         (request,) = await _requests(harness)
         assert request.state is ApprovalRequestState.PENDING
         assert request.person == OWNER_PERSON_ID
@@ -451,7 +460,7 @@ async def test_a_yes_to_running_work_is_offered_across_places_taken_and_run_once
         assert own_record is not None
         assert own_record.understanding[-1].continues == (asking,), "code's link (§6:3)"
         second = running.results[-1]
-        assert any("names no ticket" in str(one.get("outcome")) for one in second), (
+        assert any("names no ticket" in str(one.get("because")) for one in second), (
             "a second run_approved of one ticket is refused"
         )
     finally:
@@ -698,7 +707,7 @@ def _asking(capability: str, call_id: str, **arguments: FrozenJson) -> ProposedC
         call_id=call_id,
         name="request_approval",
         arguments={
-            "call": {"capability": capability, "arguments": arguments},
+            "call": {"tool": capability, "arguments": arguments},
             "why": f"You asked me to {capability}.",
         },
     )
@@ -803,8 +812,8 @@ async def test_a_set_profile_and_a_pin_each_run_under_a_ticket_naming_the_reques
             return RoundResponse()
         return RoundResponse(
             calls=(
-                _asking("set_profile", "ask-1", field="address", value="Leo"),
-                _asking("pin", "ask-2", memory=_memory_label(exchange)),
+                _asking("set_profile_field", "ask-1", field="address", value="Leo"),
+                _asking("pin_memory", "ask-2", memory=_memory_label(exchange)),
             )
         )
 
@@ -821,25 +830,25 @@ async def test_a_set_profile_and_a_pin_each_run_under_a_ticket_naming_the_reques
 
     # ADR-0338 §8:6, ADR-0361 §2:11: the pin's card and its ticket show the memory's
     # wording as the asking round read it, never its id.
-    pinning = held["pin"]
+    pinning = held["pin_memory"]
     assert pinning.call.wording == _DIET.content
     card = card_text(pinning, CardFacts(origin=None, read_outside=False), now=AT)
-    assert f'pin — memory: "{_DIET.content}"' in card
+    assert f'pin_memory — memory: "{_DIET.content}"' in card
     assert _DIET.id not in card
     tickets = [
         one.text or ""
         for exchange in planner.approval
         for one in tags(_text(exchange), "ticket")
-        if "pin" in (one.text or "")
+        if "pin_memory" in (one.text or "")
     ]
     assert tickets
     assert all(_DIET.content in one and _DIET.id not in one for one in tickets)
-    assert held["set_profile"].call.wording is None
+    assert held["set_profile_field"].call.wording is None
     assert model.profile.address == "Leo"
     (change,) = [one for one in model.changes if one.field is ProfileField.ADDRESS]
     (pin,) = model.standing_pins
     assert pin.memory_id == _DIET.id
-    for act, capability in ((change.act, "set_profile"), (pin.act, "pin")):
+    for act, capability in ((change.act, "set_profile_field"), (pin.act, "pin_memory")):
         request = held[capability]
         assert request.pushed_to is not None
         assert act == PersonModelAct(
@@ -861,7 +870,9 @@ async def test_an_unpin_under_a_ticket_removes_the_pin_and_leaves_the_act_that_m
     async def person(exchange: PlanningExchange) -> RoundResponse:
         if exchange.steps:
             return RoundResponse()
-        return RoundResponse(calls=(_asking("unpin", "ask-1", memory=_memory_label(exchange)),))
+        return RoundResponse(
+            calls=(_asking("unpin_memory", "ask-1", memory=_memory_label(exchange)),)
+        )
 
     planner = _Planner(person, _run_each_ticket)
     harness = _harness(planner, **people.stores)
@@ -881,7 +892,7 @@ async def test_an_unpin_under_a_ticket_removes_the_pin_and_leaves_the_act_that_m
     assert model.standing_pins == ()
     (spent,) = [one for one in effects if one.id == request.spent_by]
     assert spent.ticket == request.id
-    assert spent.capability == "unpin"
+    assert spent.capability == "unpin_memory"
 
 
 async def test_a_ticketed_spawn_runs_in_the_approvals_own_activation_as_the_persons() -> None:
@@ -892,7 +903,7 @@ async def test_a_ticketed_spawn_runs_in_the_approvals_own_activation_as_the_pers
     async def person(exchange: PlanningExchange) -> RoundResponse:
         if exchange.steps:
             return RoundResponse()
-        ask = _asking("spawn", "ask-1", instruction="say hello", delay_minutes=_LATER)
+        ask = _asking("spawn_task", "ask-1", instruction="say hello", delay_minutes=_LATER)
         return RoundResponse(calls=(ask,))
 
     planner = _Planner(person, _run_each_ticket)
@@ -912,15 +923,17 @@ async def test_a_ticketed_spawn_runs_in_the_approvals_own_activation_as_the_pers
     assert task.set_in == THE_APPROVALS
     (spent,) = [one for one in effects if one.id == request.spent_by]
     assert spent.ticket == request.id
-    assert spent.capability == "spawn"
-    shown = " ".join(one.text for one in planner.approval[-1].steps[-1].report.results)
-    assert "the person's tap on a card in the approvals" in shown, "said as the person's"
+    assert spent.capability == "spawn_task"
+    # ADR-0364 §11:4: a spawn's result is its T label and its read-back alone, so who set
+    # it is the task's own record, above, and a list pull's to show.
+    shown = [json.loads(one.text) for one in planner.approval[-1].steps[-1].report.results]
+    assert [set(one.get("task", {})) for one in shown] == [{"label", "read_back"}]
 
 
 async def test_a_ticketed_spawn_taken_by_the_running_work_is_the_persons() -> None:
     """ADR-0362 §3:4-§3:5, §6:3: after a take, the work holding the input runs the spawn."""
     running = _Running(
-        asks=_asking("spawn", "ask-1", instruction="say hello", delay_minutes=_LATER)
+        asks=_asking("spawn_task", "ask-1", instruction="say hello", delay_minutes=_LATER)
     )
     planner = _Planner(running)
     harness = _harness(planner, task_scheduler=task_seams())
@@ -970,7 +983,7 @@ async def test_a_ticketed_cancel_and_replace_reach_tasks_the_running_work_did_no
         first, second = _task_labels(exchange)
         cancel = _asking("cancel_task", "ask-1", task=first)
         replace = _asking(
-            "spawn", "ask-2", instruction="call the vet", delay_minutes=_LATER, replaces=second
+            "spawn_task", "ask-2", instruction="call the vet", delay_minutes=_LATER, replaces=second
         )
         return RoundResponse(calls=(cancel, replace))
 
@@ -1009,7 +1022,7 @@ async def test_a_request_for_a_call_the_asking_activation_cannot_run_writes_noth
 
     async def approval(exchange: PlanningExchange) -> RoundResponse:
         if not exchange.steps:
-            ask = _asking("spawn", "ask-9", instruction="say hello", delay_minutes=_LATER)
+            ask = _asking("spawn_task", "ask-9", instruction="say hello", delay_minutes=_LATER)
             return RoundResponse(calls=(ask,))
         told.extend(_results(exchange))
         return RoundResponse()
@@ -1027,12 +1040,13 @@ async def test_a_request_for_a_call_the_asking_activation_cannot_run_writes_noth
         await harness.engine.aclose()
 
     (refused,) = told
-    assert "cannot run here" in refused["outcome"]
+    assert refused["outcome"] == "refused"
+    assert "cannot run here" in refused["because"]
     assert len(requests) == 1, "only the person's work's request"
     assert tasks == ()
 
 
-@pytest.mark.parametrize("capability", ["pin", "unpin"])
+@pytest.mark.parametrize("capability", ["pin_memory", "unpin_memory"])
 @pytest.mark.parametrize("change", ["gone", "outside"])
 async def test_a_worded_request_whose_memory_cannot_be_shown_is_not_written(
     capability: str, change: str
@@ -1041,7 +1055,7 @@ async def test_a_worded_request_whose_memory_cannot_be_shown_is_not_written(
     content, since the round saw it leaves its card no wording to show, so no request."""
     people = _People()
     await people.memory.add(_REMEMBERED_DIET)
-    if capability == "pin":
+    if capability == "pin_memory":
         await people.store.record_suggestion(
             OWNER_PERSON_ID,
             ProposedSuggestion(

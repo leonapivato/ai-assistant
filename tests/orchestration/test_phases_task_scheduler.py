@@ -12,8 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, cast
 
-from exchange_support import labels as shown_labels
-from exchange_support import section, tag, text_call
+from exchange_support import Tag, section, tag, tags, text_call
 from phases_support import open_conversation, phases_harness, said, until, working, written
 from task_support import AT, activation, seams, spawn_effect, write_task
 from telegram_support import CHAT as LINE_CHAT
@@ -94,14 +93,31 @@ class _Request:
         return section(self.exchange.briefing, "# The stimulus")
 
     @property
-    def places(self) -> list[str]:
-        """The place list's ``L`` labels, in order (ADR-0357 §2:13)."""
-        return shown_labels(self.situation, "place")
+    def connections(self) -> list[Tag]:
+        """The Connections section's entries, in order (ADR-0364 §3)."""
+        return tags(section(self.exchange.briefing, "## Connections"), "connection")
 
     @property
-    def takes_message(self) -> bool:
-        """Whether the situation says a reply can be written at the origin."""
-        return "A reply can be written there." in self.situation
+    def places(self) -> list[str]:
+        """The ``L`` labels of the connections that take a text message, suggested first.
+
+        A task's work speaks only in the connections its task suggests (ADR-0364 §9:4).
+        """
+        texting = [
+            one for one in self.connections if "takes text messages" in (one.get("can") or "")
+        ]
+        suggested = [one for one in texting if one.get("suggested") == "yes"]
+        rest = [one for one in texting if one.get("suggested") != "yes"]
+        return [str(one.get("label")) for one in [*suggested, *rest]]
+
+    @property
+    def origin(self) -> Tag | None:
+        """The connection the stimulus's ``where`` names (ADR-0364 §3:9)."""
+        where = next(
+            (one.get("where") for one in tags(self.stimulus) if one.get("where") is not None),
+            None,
+        )
+        return next((one for one in self.connections if one.get("label") == where), None)
 
 
 def _request(exchange: PlanningExchange) -> _Request:
@@ -111,11 +127,12 @@ def _request(exchange: PlanningExchange) -> _Request:
 
 def _started_by_a_task(request: _Request) -> bool:
     """Whether the stimulus came from the Task Scheduler: its origin is the schedule."""
-    return f"- The origin: {_THE_SCHEDULE}," in request.situation
+    origin = request.origin
+    return origin is not None and (origin.text or "").startswith("the schedule")
 
 
 def _first_place(request: _Request) -> str:
-    """The first place label on the place list."""
+    """The first connection that takes a text message, a suggested one first."""
     return request.places[0]
 
 
@@ -130,20 +147,19 @@ def _responder(
     return FakeToolCallingCompleter(response=respond)
 
 
-def _texting(words: str, *, via: str | None = None) -> Callable[[_Request], RoundResponse]:
+def _texting(words: str, *, connection: str | None = None) -> Callable[[_Request], RoundResponse]:
     """A task's activation that sends ``words`` in its first round, then says nothing.
 
-    The message goes where its ``text`` call's ``via`` names, the first place on the list
-    unless ``via`` names another (ADR-0357 §2:13); a round's own text reaches no one
-    (ADR-0356 §7:3).
+    The message goes into the connection its ``send_text`` call names, the first one its
+    task suggests unless ``connection`` names another (ADR-0364 §9:1); a round's own text
+    reaches no one (ADR-0356 §7:3).
     """
 
     def task(request: _Request) -> RoundResponse:
         if request.rounds:
             return RoundResponse()
-        return RoundResponse(
-            calls=(text_call(words, via=via if via is not None else _first_place(request)),)
-        )
+        named = connection if connection is not None else _first_place(request)
+        return RoundResponse(calls=(text_call(words, connection=named),))
 
     return task
 
@@ -162,7 +178,7 @@ def _spawning(**arguments: object) -> Callable[[_Request], RoundResponse]:
             calls=(
                 ProposedCall(
                     call_id="spawn-1",
-                    name="spawn",
+                    name="spawn_task",
                     arguments={"instruction": "say hello", **named},
                 ),
             )
@@ -198,7 +214,9 @@ async def _until_no_tasks(harness: Harness) -> None:
 
 async def test_a_spawn_to_start_now_starts_an_activation_that_speaks_where_it_names() -> None:
     """§3:2, §6:7: every spawn goes through the Task Scheduler, now included."""
-    completer = _responder(_spawning(places="first place"), _texting("hello from the schedule"))
+    completer = _responder(
+        _spawning(connections="first place"), _texting("hello from the schedule")
+    )
     harness = phases_harness(completer, task_scheduler=seams())
     await harness.engine.start()
     try:
@@ -215,7 +233,7 @@ async def test_a_spawn_to_start_now_starts_an_activation_that_speaks_where_it_na
         await until(spoken, what="the task's message")
         assert episode.processing_record is not None
         assert episode.processing_record.status is ProcessingStatus.COMPLETED
-        # §12:8: the message's call records the place it went into, which its ``via``
+        # §12:8: the message's call records the place it went into, which its connection
         # named by its label (ADR-0357 §2:13); the round's own text is its notes alone.
         (sent,) = [one for one in episode.processing_record.call_records if one.delivered]
         assert sent.delivered is not None
@@ -237,7 +255,9 @@ async def test_a_spawn_to_start_now_starts_an_activation_that_speaks_where_it_na
 
 async def test_a_message_naming_a_place_off_its_list_is_refused() -> None:
     """§6:7, §13:3: refused by authorizing; *couldn't finish* goes to its suggested place."""
-    completer = _responder(_spawning(places="first place"), _texting("somewhere else", via="L9"))
+    completer = _responder(
+        _spawning(connections="first place"), _texting("somewhere else", connection="L9")
+    )
     harness = phases_harness(completer, task_scheduler=seams())
     await harness.engine.start()
     try:
@@ -274,7 +294,7 @@ async def test_a_deleted_conversation_cancels_nothing_and_with_no_line_nothing_i
 
     def task(request: _Request) -> RoundResponse:
         spoken.append(request)
-        return _texting("hello", via="L1")(request)
+        return _texting("hello", connection="L1")(request)
 
     harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
     gone = await harness.conversation_store.start()
@@ -287,9 +307,8 @@ async def test_a_deleted_conversation_cancels_nothing_and_with_no_line_nothing_i
         assert episode.processing_record is not None
         assert episode.processing_record.status is ProcessingStatus.COMPLETED
         request, _ = spoken
-        assert request.places == []
-        assert "- Places a message can be sent by its label: none." in request.situation
-        assert not request.takes_message
+        # ADR-0364 §9:4: its task suggests only a place since gone, so it may speak nowhere.
+        assert not any(one.get("suggested") == "yes" for one in request.connections)
     finally:
         await harness.engine.aclose()
 
@@ -330,7 +349,7 @@ async def test_a_message_to_a_place_deleted_after_its_list_was_built_is_refused_
         record = episode.processing_record
         assert record is not None
         (refused,) = record.call_records
-        assert (refused.capability, refused.outcome) == ("text", CallOutcomeKind.REFUSED)
+        assert (refused.capability, refused.outcome) == ("send_text", CallOutcomeKind.REFUSED)
         effects = await harness.plans.activation_effects([record.activation_id])
         assert [one for one in effects if not one.is_call and one.round is not None] == []
     finally:
@@ -407,7 +426,7 @@ async def test_a_stop_command_leaves_what_its_activation_spawned_and_it_still_fa
                     calls=(
                         ProposedCall(
                             call_id="spawn-1",
-                            name="spawn",
+                            name="spawn_task",
                             arguments={"instruction": "check the notes", "delay_minutes": 40},
                         ),
                     )
@@ -669,7 +688,7 @@ async def test_a_child_that_ends_before_its_scheduled_parent_is_removed_with_it(
             if not request.rounds:
                 spawn = ProposedCall(
                     call_id="spawn-1",
-                    name="spawn",
+                    name="spawn_task",
                     arguments={"instruction": "the child step"},
                 )
                 return RoundResponse(calls=(spawn,))
@@ -699,7 +718,7 @@ async def test_a_known_outcome_the_store_failed_to_take_is_written_as_decided() 
             return RoundResponse(text="")
         spawn = ProposedCall(
             call_id="spawn-1",
-            name="spawn",
+            name="spawn_task",
             arguments={"instruction": "the next step", "delay_minutes": 1440},
         )
         return RoundResponse(calls=(spawn,))
@@ -751,7 +770,7 @@ async def test_a_stop_of_an_ended_activation_awaiting_its_outcome_changes_nothin
             return RoundResponse(text="")
         spawn = ProposedCall(
             call_id="spawn-1",
-            name="spawn",
+            name="spawn_task",
             arguments={"instruction": "the next step", "delay_minutes": 1440},
         )
         return RoundResponse(calls=(spawn,))
@@ -823,7 +842,7 @@ class _Step(FakeToolCallingCompleter):
                 calls=(
                     ProposedCall(
                         call_id="spawn-1",
-                        name="spawn",
+                        name="spawn_task",
                         arguments={"instruction": "the next step", "delay_minutes": 60},
                     ),
                 )

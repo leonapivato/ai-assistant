@@ -533,19 +533,19 @@ async def test_a_round_text_is_its_notes_and_never_a_message() -> None:
 
 
 @pytest.mark.parametrize("takes_message", [True, False], ids=["message", "no-message"])
-async def test_the_situation_says_whether_a_reply_can_be_written_at_the_origin(
+async def test_the_situation_names_the_time_and_the_last_stimulus_alone(
     takes_message: bool,
 ) -> None:
-    """ADR-0307 §3:8, ADR-0353 §6: the code computes whether the place takes a message,
-    and the briefing says so; the instruction is the same either way (ADR-0356 §4:2)."""
+    """ADR-0364 §2:2, §3:1: the situation's lines are the time now and the person's last
+    stimulus alone, whether or not the origin takes a message, which its connection's
+    entry says; the instruction is the same either way (ADR-0356 §4:2)."""
     sink = FakeDiagnosticSink()
     stage, completer, _ = _stage(prompt=FLAG_ECHO, diagnostics=sink)
     inputs = _inputs(place=PlaceWindow(takes_message=takes_message))
     assert await _echoed(stage, completer, sink, inputs) == set()
-    origin = section(_sent(completer), "## The situation").split("\n")[2]
-    assert origin.endswith(
-        "A reply can be written there." if takes_message else "No reply can be written there."
-    )
+    situation = section(_sent(completer), "## The situation").split("\n")
+    assert len([one for one in situation if one.startswith("- ")]) == 2
+    assert not any("reply can be written" in one for one in situation)
 
 
 async def test_the_instruction_takes_no_flag_and_no_value() -> None:
@@ -658,7 +658,9 @@ async def test_what_understanding_names_is_labelled_on_first_show() -> None:
     assert [one.name for one in tags(sent)] == ["understanding"]
     assert sent.split("\n")[-1] == "- Belongs to: S1, E1."
     # Where it belongs is named first, so a cited item named there too keeps that label.
+    # ADR-0364 §4:1: P1, the owner, is minted first, in every work.
     assert [(one.label, one.kind, one.id) for one in planned.labels] == [
+        ("P1", LabelKind.PERSON, "person:owner"),
         ("S1", LabelKind.STORY, "story:dinner"),
         ("E1", LabelKind.EPISODE, "activation:old"),
         ("M1", LabelKind.MEMORY, "mem-1"),
@@ -1056,10 +1058,10 @@ async def test_a_relayed_exchange_s_item_is_withheld_as_a_forward_is() -> None:
     sent = _sent(completer)
     shown = tags(section(sent, "## Stimulus origin knowledge"))
     assert [(one.get("from"), one.get("withheld"), one.text) for one in shown[:4]] == [
-        ("the owner", "yes", None),
+        ("P1", "yes", None),
         ("the system", None, "Booked a table earlier."),
-        ("the owner", None, "Book the cleaning for me."),
-        ("someone other than the owner or the system", "yes", None),
+        ("P1", None, "Book the cleaning for me."),
+        ("someone other than P1 or the system", "yes", None),
     ]
     pasted_shown = _view(sent, label="E1")
     assert pasted_shown.get("outside") == "yes"
@@ -1145,7 +1147,7 @@ async def test_labels_hold_for_the_activation_and_new_ones_continue_the_count() 
     assert section(sent, "# Understanding").split("\n")[-1] == "- Belongs to: S1, S2."
     assert labels(section(sent, "## Short-term memory"), "episode") == ["E2", "E3"]
     # Minted in the order shown; the understanding is rendered last (ADR-0356 §3:1).
-    assert [one.label for one in planned.labels] == ["E3", "S2"]
+    assert [one.label for one in planned.labels] == ["P1", "E3", "S2"]
     assert recorder.recorded[0][1] == planned.labels
 
 
@@ -1191,7 +1193,8 @@ async def test_a_done_calls_result_takes_a_result_label() -> None:
         "round:0", "c1", CallOutcomeKind.DONE, result_id="result:1", result={"saved": True}
     )
     (result,), _, planned = await _reported_after((_call("c1", "remember", fact="x"),), outcome)
-    assert result["result"] == {"label": "R1", "value": {"saved": True}}
+    # ADR-0364 §6:1: the tool's own fields, under its R label.
+    assert result["result"] == {"label": "R1", "saved": True}
     assert planned.labels == (PlanningLabel(label="R1", kind=LabelKind.RESULT, id="result:1"),)
 
 
@@ -1223,7 +1226,10 @@ async def test_an_episode_stored_at_any_address_takes_a_label(episode_id: str) -
     stage, completer, _ = _stage()
     planned = await stage.plan(_inputs(episodes=(_episode(episode_id),)))
     assert labels(section(_sent(completer), "## Short-term memory"), "episode") == ["E1"]
-    assert planned.labels == (PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=episode_id),)
+    assert planned.labels == (
+        PlanningLabel(label="P1", kind=LabelKind.PERSON, id="person:owner"),
+        PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=episode_id),
+    )
 
 
 # --- earlier rounds, outcomes and evidence ------------------------------------------------------
@@ -1232,19 +1238,25 @@ async def test_an_episode_stored_at_any_address_takes_a_label(episode_id: str) -
 @pytest.mark.parametrize(
     ("kind", "reason", "shown"),
     [
-        (CallOutcomeKind.DONE, None, "done"),
-        (CallOutcomeKind.NOT_DONE, "the call failed (timeout)", "not done: the call failed"),
-        (CallOutcomeKind.UNKNOWN, None, "unknown: it may or may not have happened"),
-        (CallOutcomeKind.NEEDS_YOU, None, "needs a yes, and it cannot be asked about"),
-        (CallOutcomeKind.REFUSED, "'S9' names nothing you were shown", "refused before it ran"),
+        (CallOutcomeKind.DONE, None, ("done", None)),
+        (CallOutcomeKind.NOT_DONE, "the call failed (timeout)", ("not done", "the call failed")),
+        (CallOutcomeKind.UNKNOWN, None, ("unknown", None)),
+        (CallOutcomeKind.NEEDS_YOU, None, ("refused", "it needs approval, and nothing here")),
+        (CallOutcomeKind.REFUSED, "'S9' names nothing you were shown", ("refused", "'S9'")),
     ],
 )
 async def test_each_earlier_calls_outcome_is_shown(
-    kind: CallOutcomeKind, reason: str | None, shown: str
+    kind: CallOutcomeKind, reason: str | None, shown: tuple[str, str | None]
 ) -> None:
+    """ADR-0364 §6:1-§6:3: the outcome, one of four, then, with any but done, why."""
     outcome = CallOutcome("round:0", "c1", kind, reason)
     (result,), _, _ = await _reported_after((_call("c1", "book", slot="19:00"),), outcome)
-    assert result["outcome"].startswith(shown)
+    word, because = shown
+    assert result["outcome"] == word
+    if because is None:
+        assert "because" not in result
+    else:
+        assert result["because"].startswith(because)
 
 
 async def test_an_earlier_round_and_its_notes_are_shown_whatever_the_audience() -> None:
@@ -1543,6 +1555,7 @@ async def test_a_found_episode_is_shown_by_its_records_with_its_stories_labels()
     ]
     # Its matters are labelled as its container is opened, before its own label.
     assert [(one.label, one.kind, one.id) for one in planned.labels] == [
+        ("P1", LabelKind.PERSON, "person:owner"),
         ("S1", LabelKind.STORY, "story-1"),
         ("S2", LabelKind.STORY, "story-2"),
         ("E1", LabelKind.EPISODE, "activation:found"),
@@ -1807,10 +1820,10 @@ async def test_labels_in_a_call_are_mapped_to_ids() -> None:
     ("arguments", "reason"),
     [
         pytest.param({"story": "S9"}, "'S9' names nothing you were shown", id="never-shown"),
-        pytest.param({"story": "E1"}, "'E1' names an episode, not a story", id="wrong-kind"),
+        pytest.param({"story": "E1"}, "'E1' names an episode, not a matter", id="wrong-kind"),
         pytest.param({"episodes": ["E1", "E7"]}, "'E7' names nothing", id="one-of-several"),
         pytest.param(
-            {"story": 3}, "an argument naming stories takes their labels", id="not-a-label"
+            {"story": 3}, "an argument naming matters takes their labels", id="not-a-label"
         ),
         pytest.param(
             {"episodes": [1]}, "an argument naming episodes takes their labels", id="not-labels"
@@ -2004,7 +2017,7 @@ async def test_a_reference_to_an_unlinked_item_is_cited_by_no_label() -> None:
     await stage.plan(_inputs(place=place, understanding=_naming("message:3", "message:4")))
     assert _cites(completer) is None
     assert [(one.get("from"), one.get("at")) for one in _window_items(completer)[:2]] == [
-        ("the owner", "Sun 11 Oct 2026, 11:55 am"),
+        ("P1", "Sun 11 Oct 2026, 11:55 am"),
         ("the system", "Sun 11 Oct 2026, 12:00 pm"),
     ]
 
@@ -2090,7 +2103,10 @@ async def test_a_referent_with_a_blank_id_is_still_labelled() -> None:
     stage, completer, _ = _stage()
     planned = await stage.plan(_inputs(understanding=understanding))
     assert _cites(completer) == "E1"
-    assert planned.labels == (PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=""),)
+    assert planned.labels == (
+        PlanningLabel(label="P1", kind=LabelKind.PERSON, id="person:owner"),
+        PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=""),
+    )
 
 
 # --- a saved call whose capability is not offered on this pass (ADR-0260 §3:2) -------

@@ -143,12 +143,12 @@ __all__ = [
 SCHEDULE: Final = ChannelIdentity(channel_type=TASK_SCHEDULER, instance_id="schedule")
 
 #: What planning is shown of the schedule's place (ADR-0292 §8:1), for an activation the
-#: Task Scheduler started: no one is waiting on it, and its messages go into the places
-#: on its place list.
+#: Task Scheduler started: no one is waiting on it, and its messages go into the
+#: connections it may speak in (ADR-0364 §3:9).
 TASK_SCHEDULER_DESCRIPTION: Final = (
-    "The Task Scheduler: a scheduled task fell due and started this activation. No one "
-    "is waiting on a reply here; a message you write goes into the one place on your "
-    "place list that it names."
+    "The Task Scheduler: a scheduled task fell due and started this work. No one is "
+    "waiting on a reply here; a message you write goes into the one connection it names "
+    "by its L label, one marked suggested or the messaging line's chat."
 )
 
 #: ADR-0350 §2:6: what the Task Scheduler's kind declares, each row in the ADR-0292
