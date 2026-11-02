@@ -1764,8 +1764,14 @@ class _LabelBook:
 #:   round with no calls ends the work (ADR-0315 §4:3, read with ADR-0356 §10:4, which
 #:   moves the tidy-up's exception into the tidy-up's description);
 #: - that a round's calls run at the same time, so a call that needs another's result goes
-#:   in a later round (ADR-0307 §2:5); and
-#: - that planning never substitutes something else for what was asked (ADR-0307 §9:3).
+#:   in a later round (ADR-0307 §2:5);
+#: - that planning never substitutes something else for what was asked (ADR-0307 §9:3);
+#: - that the situation names the time now and the person's last stimulus, that a
+#:   Connections section follows it, that an item's ``where`` is its connection's label
+#:   and the stimulus's its origin, and that short-term memory's items are episodes
+#:   (ADR-0364 §2:2); and
+#: - the four outcomes a call's result opens with, done, not done, unknown and refused,
+#:   defined once, so no description restates them (ADR-0364 §6:7).
 #:
 #: A rule about one tool is said in that tool's description, never here (ADR-0357 §7:1).
 PLANNING_PROMPT: Final = PromptDeclaration(
