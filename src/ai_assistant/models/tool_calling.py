@@ -22,6 +22,16 @@ of the provider's tool-result parts, under their call ids and in order, then the
 a user part. The newest report carries a cache point, so the exchange up to it is read
 back from the cache on the next round; a model that caches nothing drops the point.
 
+**A failed call is flagged to the provider** (ADR-0364 §6:5-§6:6). A result whose
+outcome is not done or refused goes back as a tool result whose ``outcome`` is
+``failed``, and an unknown, a done and a result with no outcome as ``success``. Where the
+provider takes a flag of its own, it carries it: Anthropic's ``is_error``. pydantic-ai's
+Anthropic model sends every tool result with ``is_error`` false whatever its outcome, so
+a round to it goes through :func:`_flagging`'s subclass, which sets the flag on each
+result whose outcome is ``failed`` once pydantic-ai has mapped the request, and changes
+nothing else. The flag is never set by handing pydantic-ai a ``RetryPromptPart``, whose
+wording tells the model to retry (§6:6).
+
 **Thinking is handed back** (ADR-0356 §6). A response's continuation is the provider's
 whole response, every part in order, thinking and the thinking's signatures included,
 with the ``"provider:model"`` that wrote it. It is handed back as it was only to the
@@ -86,9 +96,11 @@ another (§4:7), and it sends once and continues nothing (§4:10).
 from __future__ import annotations
 
 import copy
+import functools
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from pydantic import ValidationError
 from pydantic_ai.direct import model_request
@@ -114,6 +126,7 @@ from pydantic_ai.tools import ToolDefinition as NativeTool
 from ai_assistant.core.diagnostics import failure_body, write_diagnostic
 from ai_assistant.core.errors import ModelError, ModelResponseError
 from ai_assistant.core.types import (
+    CallOutcomeKind,
     DiagnosticKind,
     DiagnosticSource,
     OfferedTool,
@@ -133,6 +146,7 @@ if TYPE_CHECKING:
     from pydantic_ai.settings import ThinkingLevel
 
     from ai_assistant.core.protocols import DiagnosticSink
+    from ai_assistant.core.types import CallResult
 
 #: How much a round may reason before it writes (#2861): on, at the provider's own
 #: default effort. On a model with adaptive thinking that is the model's own judgement of
@@ -152,6 +166,13 @@ _UNPREPARED: Final = "offered_tools_unprepared"
 #: The output a round's message and calls had before it could think: pydantic-ai's
 #: Anthropic default ceiling. Thinking is given its room on top of this, never out of it.
 _MESSAGE_TOKENS: Final = 4096
+
+#: ADR-0364 §6:5: the outcomes flagged to the provider as an error. An unknown is not, and
+#: a result with no outcome is not.
+_FLAGGED: Final = frozenset({CallOutcomeKind.NOT_DONE, CallOutcomeKind.REFUSED})
+
+#: pydantic-ai's Anthropic model's module, read only where a round has resolved it.
+_ANTHROPIC_MODULE: Final = "pydantic_ai.models.anthropic"
 
 
 class PydanticAIToolCallingCompleter:
@@ -221,7 +242,7 @@ class PydanticAIToolCallingCompleter:
         """
         parameters = _round_parameters(tools, caller="respond()")
         try:
-            chosen = infer_model(self._default_model if model is None else model)
+            chosen = _flagging(infer_model(self._default_model if model is None else model))
             settings = _settings(self._thinking, chosen, summarised=self._diagnostics is not None)
             recipient = model_id(chosen)
             history = exchange_history(
@@ -294,7 +315,7 @@ class PydanticAIToolCallingCompleter:
         parameters = _round_parameters(tools, caller="replay_round()")
         sent = candidate_exchange(exchange, instruction, caller="replay_round()")
         try:
-            chosen = infer_model(model)
+            chosen = _flagging(infer_model(model))
         except Exception as exc:
             # As in `respond`: resolving a string model may fail, and is classified.
             raise _classify(exc) from exc
@@ -487,7 +508,10 @@ def exchange_history(
         names = {call.call_id: call.name for call in step.response.calls}
         parts: list[ModelRequestPart] = [
             ToolReturnPart(
-                tool_name=names[result.call_id], content=result.text, tool_call_id=result.call_id
+                tool_name=names[result.call_id],
+                content=result.text,
+                tool_call_id=result.call_id,
+                outcome=_returned_outcome(result),
             )
             for result in step.report.results
         ]
@@ -497,6 +521,79 @@ def exchange_history(
         )
         history.append(ModelRequest(parts=parts))
     return history
+
+
+def _returned_outcome(result: CallResult) -> Literal["success", "failed"]:
+    """How a call's result goes back to the provider (ADR-0364 §6:5).
+
+    ``failed`` where planning was shown it not done or refused, and ``success`` for a
+    done, an unknown and a result with no outcome.
+    """
+    return "failed" if result.outcome in _FLAGGED else "success"
+
+
+def _flagging(model: models.Model) -> models.Model:
+    """``model``, flagging a failed call's result where its provider takes a flag (§6:5).
+
+    pydantic-ai's own Anthropic model, unwrapped, is rebuilt as :func:`_flagging_class`'s
+    subclass of it, with its name, provider, profile and settings; every other model is
+    returned as it is. A wrapped one is left alone, so a wrapper's request is never
+    rebuilt under it.
+    """
+    module = sys.modules.get(_ANTHROPIC_MODULE)
+    if module is None or type(model) is not module.AnthropicModel:
+        return model
+    flagging = _flagging_class(module.AnthropicModel)
+    return cast(
+        "models.Model",
+        flagging(
+            model.model_name,
+            provider=model._provider,
+            profile=model._profile,
+            settings=model._settings,
+        ),
+    )
+
+
+@functools.cache
+def _flagging_class(anthropic: type[Any]) -> type[Any]:
+    """The subclass of pydantic-ai's Anthropic model that sets ``is_error`` (§6:5).
+
+    pydantic-ai maps a round's history to Anthropic's messages in ``_map_message`` and
+    sends every tool result with ``is_error`` false. The subclass lets it map them, then
+    sets ``is_error`` on each tool result whose part's ``outcome`` is ``failed``, by its
+    call id, and changes nothing else: preparation, settings and the response are
+    pydantic-ai's own.
+    """
+
+    class FlaggingAnthropicModel(anthropic):  # type: ignore[misc]  # built from the module the round resolved
+        async def _map_message(  # type: ignore[no-untyped-def]  # pydantic-ai's own signature
+            self, messages, model_request_parameters, model_settings
+        ):
+            system, mapped = await super()._map_message(
+                messages, model_request_parameters, model_settings
+            )
+            failed = {
+                part.tool_call_id
+                for message in messages
+                if isinstance(message, ModelRequest)
+                for part in message.parts
+                if isinstance(part, ToolReturnPart) and part.outcome == "failed"
+            }
+            for one in mapped:
+                content = one.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_result"
+                        and block.get("tool_use_id") in failed
+                    ):
+                        block["is_error"] = True
+            return system, mapped
+
+    return FlaggingAnthropicModel
 
 
 def _handed_back(response: RoundResponse, recipient: str | None) -> ModelResponse | None:
@@ -768,6 +865,10 @@ def _pydantic_ais_own(model: models.Model) -> bool:
     """
     cls = type(model)
     shadowed = any(callable(getattr(cls, name, None)) for name in getattr(model, "__dict__", {}))
+    if cls.__qualname__.endswith("FlaggingAnthropicModel") and cls.__module__ == __name__:
+        # The flagging subclass overrides the message mapping alone, which preparation
+        # never calls (ADR-0364 §6:5), so its preparation is pydantic-ai's own.
+        cls = cls.__mro__[1]
     return _pydantic_ais(cls) and not shadowed
 
 

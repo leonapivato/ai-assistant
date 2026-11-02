@@ -82,11 +82,15 @@ def _request(call: RequestedCall) -> ApprovalRequest:
 
 
 def test_the_worded_capabilities_are_a_pin_and_an_unpin() -> None:
-    """§8:6 names the two whose exact line shows a memory by its wording."""
-    assert frozenset({"pin", "unpin"}) == WORDED_CAPABILITIES
+    """§8:6 names the two whose exact line shows a memory by its wording.
+
+    Under their names since ADR-0364 §8:1, and under the names a stored request was
+    written with (§8:5).
+    """
+    assert frozenset({"pin", "unpin", "pin_memory", "unpin_memory"}) == WORDED_CAPABILITIES
 
 
-@pytest.mark.parametrize("capability", ["pin", "unpin"])
+@pytest.mark.parametrize("capability", ["pin", "unpin", "pin_memory", "unpin_memory"])
 def test_a_pins_or_an_unpins_call_carries_its_wording_and_round_trips(capability: str) -> None:
     """The wording is held with the request, and a stored request reads it back whole."""
     request = _request(_call(capability, wording=_WORDING))

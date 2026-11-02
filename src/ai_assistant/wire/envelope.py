@@ -2791,7 +2791,14 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``PlanStore.write_scheduled_task`` takes a spawn under a ticket and answers
 #:     ``TaskWriteAnswer.ticket_refused`` with the ticket's ``TicketClaim``, but no engine
 #:     method changes, and the spawn's write crosses no frame.
-PROTOCOL_VERSION: Final[int] = 127
+#: 128: ADR-0364 §14:3 advances the version once for its lane B (§14:1), on this ground:
+#:     ``LabelKind`` gains ``person``, the ``P`` label (§4:1), on the labels the
+#:     wire-carried ``EpisodicMemory.processing_record`` holds. A peer at 127 refuses the
+#:     new member as unknown (ADR-0124 §9:2). ``CallResult`` gains ``outcome`` and
+#:     ``RequestedCall`` gains ``looking_for``, but neither crosses a frame: the round's
+#:     report and the approval request are carried by no engine method. The method set
+#:     does not move.
+PROTOCOL_VERSION: Final[int] = 128
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

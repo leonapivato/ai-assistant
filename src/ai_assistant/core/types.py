@@ -4507,16 +4507,51 @@ class RoundResponse(BaseModel):
         return self
 
 
+class CallOutcomeKind(StrEnum):
+    """What came of one call a planning round proposed, as planning was shown it.
+
+    Closed, **added to and never renamed**. Moved into ``core`` with its members
+    unchanged (ADR-0356 §13), since each call's entry the episode records names one
+    (:class:`RecordedCall`, §8:3).
+    """
+
+    DONE = "done"
+    NOT_DONE = "not_done"
+    UNKNOWN = "unknown"
+    NEEDS_YOU = "needs_you"
+    """Authorizing ruled that it needs the user (ADR-0306 §4:8): it runs on their yes to a
+    question that showed it (ADR-0321 §2, §4). Since ADR-0364 §6:3 planning is shown it as
+    refused, its why saying to ask with ``request_approval``; a recorded one keeps it."""
+
+    REFUSED = "refused"
+    """Refused before it ran, by planning's own check or by authorizing's rules, a deny
+    among them: no yes lets it run, so it is never asked about (ADR-0321 §2:10)."""
+
+
 class CallResult(BaseModel):
     """What came of one call of a round, as its report tells it (ADR-0356 §5:3, §13).
 
     ``call_id`` is the id the call was proposed under, and ``text`` code's rendering of
-    what came of it (§5:4).
+    what came of it (§5:4). ``outcome`` is the outcome planning is shown, or ``None``
+    where it is shown none, such as a tidy-up that started (ADR-0364 §6:1, §6:4): a fact,
+    which ``models/`` maps to whatever its provider flags a failed call with (§6:5).
+
+    Raises:
+        ValueError: If ``outcome`` is ``needs_you``, which planning is shown as refused
+            (§6:3).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     call_id: Identifier
     text: NonBlankEncodableText
+    outcome: CallOutcomeKind | None = None
+
+    @model_validator(mode="after")
+    def _a_shown_outcome(self) -> Self:
+        if self.outcome is CallOutcomeKind.NEEDS_YOU:
+            msg = "a call needing approval is shown as refused (ADR-0364 §6:3)"
+            raise ValueError(msg)
+        return self
 
 
 class RoundReport(BaseModel):
@@ -4602,11 +4637,14 @@ class LabelKind(StrEnum):
     PLACE = "place"
     """A place on the activation's place list, which a spawn suggests and a message of an
     activation the Task Scheduler started goes into (ADR-0350 §5:13). A channel heading
-    takes no label."""
+    takes no label. Since ADR-0364 §3:3 it names any connection planning is shown."""
+    PERSON = "person"
+    """A person, ``P1`` the owner, a stable label over ADR-0345 §2:5's identifier, the
+    same in every work (ADR-0364 §4:1)."""
 
 
-#: Each kind's label prefix (ADR-0307 §5:1, ADR-0321 §4:2, ADR-0350 §12:2): S1…, E1…,
-#: N1…, M1…, R1…, A1…, T1… and L1….
+#: Each kind's label prefix (ADR-0307 §5:1, ADR-0321 §4:2, ADR-0350 §12:2, ADR-0364 §4:1):
+#: S1…, E1…, N1…, M1…, R1…, A1…, T1…, L1… and P1….
 _LABEL_PREFIXES: Final[dict[LabelKind, str]] = {
     LabelKind.STORY: "S",
     LabelKind.EPISODE: "E",
@@ -4616,9 +4654,10 @@ _LABEL_PREFIXES: Final[dict[LabelKind, str]] = {
     LabelKind.APPROVED_ACTION: "A",
     LabelKind.SCHEDULED_TASK: "T",
     LabelKind.PLACE: "L",
+    LabelKind.PERSON: "P",
 }
 
-_LABEL_SHAPE: Final = re.compile(r"[SENMRATL][1-9][0-9]{0,8}")
+_LABEL_SHAPE: Final = re.compile(r"[SENMRATLP][1-9][0-9]{0,8}")
 
 
 def label_prefix(kind: LabelKind) -> str:
@@ -4628,7 +4667,7 @@ def label_prefix(kind: LabelKind) -> str:
         kind: What the label names.
 
     Returns:
-        ``S``, ``E``, ``N``, ``M``, ``R``, ``A``, ``T`` or ``L``.
+        ``S``, ``E``, ``N``, ``M``, ``R``, ``A``, ``T``, ``L`` or ``P``.
     """
     return _LABEL_PREFIXES[kind]
 
@@ -4845,26 +4884,6 @@ class JoinedInput(BaseModel):
             msg = "a joined input's messages all carry a party, or none does (ADR-0351 §2:6)"
             raise ValueError(msg)
         return self
-
-
-class CallOutcomeKind(StrEnum):
-    """What came of one call a planning round proposed, as planning was shown it.
-
-    Closed, **added to and never renamed**. Moved into ``core`` with its members
-    unchanged (ADR-0356 §13), since each call's entry the episode records names one
-    (:class:`RecordedCall`, §8:3).
-    """
-
-    DONE = "done"
-    NOT_DONE = "not_done"
-    UNKNOWN = "unknown"
-    NEEDS_YOU = "needs_you"
-    """Authorizing ruled that it needs the user (ADR-0306 §4:8): it runs on their yes to a
-    question that showed it (ADR-0321 §2, §4)."""
-
-    REFUSED = "refused"
-    """Refused before it ran, by planning's own check or by authorizing's rules, a deny
-    among them: no yes lets it run, so it is never asked about (ADR-0321 §2:10)."""
 
 
 class DeliveryStatus(StrEnum):
@@ -16673,7 +16692,9 @@ class TicketState(StrEnum):
 #: memory's wording as the store held it when the round was recorded (ADR-0338 §8:3,
 #: §8:6): ``pin`` and ``unpin``. A request's call carries a :attr:`RequestedCall.wording`
 #: only for one of these.
-WORDED_CAPABILITIES: Final[frozenset[str]] = frozenset({"pin", "unpin"})
+WORDED_CAPABILITIES: Final[frozenset[str]] = frozenset(
+    {"pin", "unpin", "pin_memory", "unpin_memory"}
+)
 
 
 class RequestedCall(BaseModel):
@@ -16696,6 +16717,13 @@ class RequestedCall(BaseModel):
     It is ``None`` for any other call, and for a request written before it was recorded,
     and a dump leaves it out where it is ``None``. It is shown, never sent: it is no part
     of the call a ticket runs, of :attr:`request`, or of :meth:`same_call`'s sameness.
+
+    ``looking_for`` is planning's *looking for*, where the requested call takes one
+    (ADR-0364 §10:2, §10:6): recorded beside the deliberate-repeat mark and handed to the
+    digest when the ticket's call runs. It is ``None`` where the call takes none and for a
+    request written before it, and a dump leaves it out where it is ``None``. It is no
+    part of :attr:`values`, of the call a ticket runs, of :attr:`request` or of
+    :meth:`same_call`'s sameness, and no card or panel shows it.
 
     The record **is** a request's content, checked as :class:`AskedCall` checks its own:
     :attr:`request` is the request it makes, so a call that could not be ruled on cannot
@@ -16720,6 +16748,10 @@ class RequestedCall(BaseModel):
     # Left out of a dump where it is unset, so a request of every earlier form is stored
     # and exported exactly as it was before ADR-0338 §8:6's wording was recorded with it.
     wording: NonBlankEncodableText | None = Field(default=None, exclude_if=_is_none)
+    # ADR-0364 §10:6: planning's *looking for*, kept beside the deliberate-repeat mark for
+    # the digest when the ticket's call runs. Left out of a dump where it is unset, so a
+    # request written before it reads and is stored as it was.
+    looking_for: NonBlankEncodableText | None = Field(default=None, exclude_if=_is_none)
 
     @property
     def request(self) -> ActionRequest:
