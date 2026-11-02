@@ -36,9 +36,9 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
 )
+from ai_assistant.orchestration.lookups import READ_EPISODE
 from ai_assistant.orchestration.matter_calls import (
     ANSWER_OFFER,
-    LOOK_UP_ACTIVATION,
     STOP_ACTIVATION,
     MatterCaller,
     MatterCalls,
@@ -122,7 +122,7 @@ async def test_a_stop_call_without_the_users_authority_is_refused_and_stops_noth
     _, calls, stops, _ = _wired([older, asker])
     caller = _caller(asker, authority=False, running=frozenset({_A}))
     with calling(caller):
-        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        answer = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
     assert isinstance(answer, NotDone)
     assert "authority" in answer.reason
     # #3452: planning's rendering says "not done" before the reason, so it never does.
@@ -136,7 +136,7 @@ async def test_a_stop_call_naming_a_label_not_shown_as_running_is_refused_whole(
     older, asker = _running("a", _A, order=1), _running("b", _B, order=2)
     _, calls, stops, _ = _wired([older, asker])
     with calling(_caller(asker)):
-        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        answer = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
     assert isinstance(answer, NotDone)
     assert "not shown as running" in answer.reason
     assert stops.stopped == []
@@ -152,8 +152,8 @@ async def test_a_waiting_rounds_stop_call_names_only_what_it_waits_on() -> None:
     _, calls, stops, _ = _wired([older, other, asker])
     caller = _caller(asker, running=frozenset({_A, _C}), waiting=frozenset({_A}))
     with calling(caller):
-        refused = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_C)))
-        done = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        refused = await calls.run(_call(STOP_ACTIVATION, work=_episode(_C)))
+        done = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
     assert isinstance(refused, NotDone)
     assert isinstance(done, ToolResult)
     assert stops.stopped == [_A]
@@ -171,7 +171,7 @@ async def test_a_stop_call_naming_an_absorbed_activation_is_refused_and_names_it
     matters.merge(absorber, _understood(absorber, _A), at=_AT)
     caller = _caller(asker, running=frozenset({_A}))
     with calling(caller):
-        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        answer = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
     assert isinstance(answer, NotDone)
     assert "absorbed" in answer.reason
     (shown,) = caller.shown.values()
@@ -186,7 +186,7 @@ async def test_a_stop_call_naming_work_stopped_since_it_was_shown_stops_nothing(
     older.stop()
     caller = _caller(asker, running=frozenset({_A}))
     with calling(caller):
-        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        answer = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
     assert isinstance(answer, ToolResult)
     assert answer.outcome is ToolOutcome.SUCCEEDED
     (shown,) = caller.shown.values()
@@ -211,8 +211,8 @@ async def test_a_stop_whose_record_cannot_be_written_is_not_done_in_full_and_ret
     matters._stop = failing_once  # the Task Manager's stop, its first record write failing
     caller = _caller(asker, running=frozenset({_A}))
     with calling(caller):
-        first = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
-        again = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        first = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
+        again = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
     assert isinstance(first, NotDone)
     assert "could not be recorded" in first.reason
     assert isinstance(again, ToolResult)
@@ -225,7 +225,7 @@ async def test_a_stop_call_runs_the_task_managers_stop_and_shows_the_work() -> N
     _, calls, stops, _ = _wired([older, asker])
     caller = _caller(asker, running=frozenset({_A}))
     with calling(caller):
-        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        answer = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
     assert isinstance(answer, ToolResult)
     assert stops.stopped == [_A]
     (shown,) = caller.shown.values()
@@ -236,10 +236,10 @@ async def test_a_stop_call_runs_the_task_managers_stop_and_shows_the_work() -> N
 async def test_a_call_with_no_caller_or_malformed_arguments_is_not_done() -> None:
     older = _running("a", _A, order=1)
     _, calls, stops, _ = _wired([older])
-    assert isinstance(await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A))), NotDone)
+    assert isinstance(await calls.run(_call(STOP_ACTIVATION, work=_episode(_A))), NotDone)
     with calling(_caller(older, running=frozenset({_A}))):
         # A label maps to its episode's id; anything else names no activation.
-        assert isinstance(await calls.run(_call(STOP_ACTIVATION, activation=_A)), NotDone)
+        assert isinstance(await calls.run(_call(STOP_ACTIVATION, work=_A)), NotDone)
     assert stops.stopped == []
 
 
@@ -251,8 +251,9 @@ async def test_a_look_up_naming_a_label_not_shown_as_running_runs_nothing() -> N
     _, calls, _, _ = _wired([older, asker])
     caller = _caller(asker)
     with calling(caller):
-        answer = await calls.run(_call(LOOK_UP_ACTIVATION, activation=_episode(_A)))
-    assert isinstance(answer, NotDone)
+        answer = await calls.read_running(_call(READ_EPISODE, episode=_episode(_A)))
+    # ADR-0364 §8:3: an episode not shown as running is a past one, the look-up's to read.
+    assert answer is None
     assert caller.shown == {}
 
 
@@ -263,9 +264,9 @@ async def test_a_look_up_shows_the_work_and_whether_it_has_ended() -> None:
     _, calls, _, _ = _wired(states)
     caller = _caller(asker, running=frozenset({_A}))
     with calling(caller):
-        running = await calls.run(_call(LOOK_UP_ACTIVATION, activation=_episode(_A)))
+        running = await calls.read_running(_call(READ_EPISODE, episode=_episode(_A)))
         states.remove(older)
-        ended = await calls.run(_call(LOOK_UP_ACTIVATION, activation=_episode(_A)))
+        ended = await calls.read_running(_call(READ_EPISODE, episode=_episode(_A)))
     assert isinstance(running, ToolResult)
     assert isinstance(ended, ToolResult)
     assert [one.ended for one in caller.shown.values()] == [True], (
@@ -383,8 +384,8 @@ async def test_a_stop_whose_findings_cannot_be_read_is_still_done() -> None:
     matters.peer = unreadable  # type: ignore[method-assign]  # the read fails, once stopped
     caller = _caller(asker, running=frozenset({_A}))
     with calling(caller):
-        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
-        refused = await calls.run(_call(LOOK_UP_ACTIVATION, activation=_episode(_A)))
+        answer = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
+        refused = await calls.read_running(_call(READ_EPISODE, episode=_episode(_A)))
     assert isinstance(answer, ToolResult)
     assert answer.outcome is ToolOutcome.SUCCEEDED
     assert stops.stopped == [_A]
@@ -432,7 +433,7 @@ async def test_a_stop_calls_result_reads_what_the_work_set_up_once_it_is_stopped
     calls, stops, set_up = _wired_with_set_up([older, asker])
     caller = _caller(asker, running=frozenset({_A}))
     with calling(caller):
-        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        answer = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
     assert isinstance(answer, ToolResult)
     ((named, person, viewer, stopped_then),) = set_up.asked
     assert (named, viewer) == (_A, _B)
@@ -449,7 +450,7 @@ async def test_a_stop_call_finding_the_work_ended_still_reads_what_it_set_up() -
     calls, stops, set_up = _wired_with_set_up([asker])
     caller = _caller(asker, running=frozenset({_A}))
     with calling(caller):
-        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        answer = await calls.run(_call(STOP_ACTIVATION, work=_episode(_A)))
     assert isinstance(answer, ToolResult)
     assert stops.stopped == []
     ((named, _, _, _),) = set_up.asked
@@ -465,7 +466,7 @@ async def test_a_look_up_reads_nothing_of_what_the_work_set_up() -> None:
     calls, _, set_up = _wired_with_set_up([older, asker])
     caller = _caller(asker, running=frozenset({_A}))
     with calling(caller):
-        await calls.run(_call(LOOK_UP_ACTIVATION, activation=_episode(_A)))
+        await calls.read_running(_call(READ_EPISODE, episode=_episode(_A)))
     assert set_up.asked == []
     (shown,) = caller.shown.values()
     assert shown.set_up is None
@@ -477,12 +478,11 @@ def test_the_stop_calls_declaration_is_the_routed_text() -> None:
     ADR-0357 §7:1: ADR-0352 §3:8's line, that a stop reaches only what the person's words
     cover, is said in this description, not in planning's instruction.
     """
-    assert STOP_ACTIVATION.description == (
-        "Stop running work you were shown as running, and that work alone. Nothing it "
-        "already did is undone, and what it set up stays. The result shows what it "
-        "had finished and what it set up that is still live, so say that. Stop work "
-        'only where the person asks for it, such as "never mind the booking" after it '
-        "has booked, or means to take over work this work waits on. Stop exactly what "
-        "their words cover, including what a stop's result lists, and keep the rest; "
-        "where it is unclear what the words cover, ask which."
+    # ADR-0364 §2:1: the coordinator's agreed words, which say the stop reaches only what
+    # was asked and that its result lists what is still live.
+    description = STOP_ACTIVATION.description
+    assert description.startswith(
+        "Stop running work you were shown as running, and that work alone.\n\n"
     )
+    assert "Stop exactly what was asked, including what a stop's result lists" in description
+    assert "set_up_still_live" in description

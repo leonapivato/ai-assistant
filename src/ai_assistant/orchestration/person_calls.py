@@ -119,10 +119,18 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: The three capabilities, each its declaration's id (ADR-0338 §8:4).
-SET_PROFILE_CAPABILITY: Final = "set_profile"
-PIN_CAPABILITY: Final = "pin"
-UNPIN_CAPABILITY: Final = "unpin"
+#: The three capabilities (ADR-0338 §8:4), renamed by ADR-0364 §8:1. Each declaration
+#: keeps its id, the name it was first declared under (:data:`_IDS`).
+SET_PROFILE_CAPABILITY: Final = "set_profile_field"
+PIN_CAPABILITY: Final = "pin_memory"
+UNPIN_CAPABILITY: Final = "unpin_memory"
+
+#: Each declaration's id: its capability's name before ADR-0364 §8:1 renamed it.
+_IDS: Final[Mapping[str, str]] = {
+    SET_PROFILE_CAPABILITY: "set_profile",
+    PIN_CAPABILITY: "pin",
+    UNPIN_CAPABILITY: "unpin",
+}
 
 #: Every capability this module declares: authorizing's rule needs the person's yes for
 #: each (ADR-0338 §8:5).
@@ -155,7 +163,7 @@ def _declared(capability: str, description: str, schema: dict[str, FrozenJson]) 
       nothing is spent.
     """
     return ToolDefinition(
-        id=capability,
+        id=_IDS[capability],
         capability=capability,
         description=description,
         risk_level=RiskLevel.LOW,
@@ -189,10 +197,17 @@ def _memory_schema(description: str) -> dict[str, FrozenJson]:
 SET_PROFILE: Final = _declared(
     SET_PROFILE_CAPABILITY,
     (
-        "Set one field of the person's profile to a value, or clear it. It runs only "
-        "once they say yes to the question that shows it. Raise a suggestion the "
-        "system noticed only where it bears on what is being done, and only by asking "
-        "with this call, never as a change already made."
+        "Set or clear one field of the profile of the person this work is for.\n"
+        "\n"
+        "Bring up a change the system suggests only where it bears on what is being done, and "
+        "only by asking for approval of this call, never as a change already made.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, set, cleared, or already so\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat. Always needs approval first: "
+        "ask for it with request_approval."
     ),
     {
         "type": "object",
@@ -200,11 +215,15 @@ SET_PROFILE: Final = _declared(
             FIELD_ARGUMENT: {
                 "type": "string",
                 "enum": [field.value for field in ProfileField],
-                "description": "The field to set.",
+                "description": (
+                    "The field: name, what they are called; address, how to address them; "
+                    "assistant_name, what they call the assistant; time_zone, an IANA zone such "
+                    "as Europe/Lisbon; language, the language to write to them in."
+                ),
             },
             VALUE_ARGUMENT: {
                 "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}],
-                "description": "Its new value, as the person gave it; null clears it.",
+                "description": "Its new value, as they gave it; null clears it.",
             },
         },
         "required": [FIELD_ARGUMENT, VALUE_ARGUMENT],
@@ -216,11 +235,18 @@ SET_PROFILE: Final = _declared(
 PIN: Final = _declared(
     PIN_CAPABILITY,
     (
-        "Pin one memory, so it is kept in mind in every conversation with the person; "
-        "pinning confirms its wording. It runs only once they say yes to the question "
-        "that shows it. Raise a suggestion the system noticed only where it bears on "
-        "what is being done, and only by asking with this call, never as a change "
-        "already made."
+        "Pin one memory, so the system always has it in mind for the person this work is for; "
+        "pinning confirms its wording.\n"
+        "\n"
+        "Bring up a pin the system suggests only where it bears on what is being done, and only "
+        "by asking for approval of this call, never as a change already made.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, pinned, or already pinned\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat. Always needs approval first: "
+        "ask for it with request_approval."
     ),
     _memory_schema("The memory to pin, by its M label."),
 )
@@ -229,8 +255,15 @@ PIN: Final = _declared(
 UNPIN: Final = _declared(
     UNPIN_CAPABILITY,
     (
-        "Unpin one memory the person keeps in mind; the memory itself stays as it is. "
-        "It runs only once they say yes to the question that shows it."
+        "Unpin one memory from what the system always has in mind; the memory itself stays as it "
+        "is.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, unpinned, or not pinned\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat. Always needs approval first: "
+        "ask for it with request_approval."
     ),
     _memory_schema("The pinned memory, by its M label."),
 )

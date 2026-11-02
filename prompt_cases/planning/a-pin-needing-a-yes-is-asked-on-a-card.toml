@@ -11,7 +11,7 @@ samples = 3
 
 [property]
 check = "read"
-read = "Calls request_approval for a pin call whose memory is M2, and asks Leo no question in words about it."
+read = "Calls request_approval for a pin_memory call whose memory is M2, and asks Leo no question in words about it."
 
 [input]
 file = "a-pin-needing-a-yes-is-asked-on-a-card.json"

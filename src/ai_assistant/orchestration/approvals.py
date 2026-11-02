@@ -88,12 +88,13 @@ __all__ = [
 THE_APPROVALS: Final = ChannelIdentity(channel_type=APPROVALS, instance_id="approvals")
 
 #: What planning is shown of the approvals' place (ADR-0292 §8:1), for an activation an
-#: outcome started: no one is waiting on a reply here, and its messages go into the places
-#: on its place list (§6:7).
+#: outcome started: no one is waiting on a reply here, and its messages go into the
+#: connections it may speak in (§6:7, ADR-0364 §3:9).
 APPROVALS_DESCRIPTION: Final = (
     "Approvals: the person answered a request for their yes, or it expired, and that "
-    "started this activation. No one is waiting on a reply here; a message you write goes "
-    "into the one place on your place list that it names."
+    "started this work. No one is waiting on a reply here; a message you write goes into "
+    "the one connection it names by its L label, one marked suggested or the messaging "
+    "line's chat."
 )
 
 #: ADR-0361 §3:6: what the Approvals channel's kind declares, each row in the ADR-0292
@@ -134,12 +135,16 @@ APPROVAL_CAPABILITIES: Final = frozenset({REQUEST_APPROVAL_CAPABILITY})
 #: ``request_approval``'s two arguments (§2:1).
 CALL_ARGUMENT: Final = "call"
 WHY_ARGUMENT: Final = "why"
-#: The nested call's parts: its capability's name and its exact arguments.
-CAPABILITY_KEY: Final = "capability"
+#: The nested call's parts: its tool's name, ``tool`` since ADR-0364 §8:2, and its exact
+#: arguments, its *looking for* and *deliberate repeat* among them where it takes them.
+CAPABILITY_KEY: Final = "tool"
 ARGUMENTS_KEY: Final = "arguments"
 #: The nested call's deliberate-repeat mark, as planning's check moves it out of the
 #: nested arguments (ADR-0306 §2:10): the request records it (ADR-0361 §2:6).
 NESTED_REPEAT_KEY: Final = "deliberate_repeat"
+#: The name a request recorded before ADR-0364 §8:2 gave its nested call's capability
+#: under, which a stored request's call is read by (§8:5).
+_OLD_CAPABILITY_KEY: Final = "capability"
 
 #: ADR-0361 §2:2, §5:4: why a direct call comes back needing the person while a request
 #: for the very same call still waits on them: it is not asked about again, and nothing
@@ -149,28 +154,29 @@ ALREADY_ON_A_CARD: Final = (
     "again, and nothing is approved"
 )
 
-#: ``run_approved``'s one argument (§5:2).
-RUN_APPROVED_LABEL: Final = "label"
+#: ``run_approved``'s one argument (§5:2), ``ticket`` since ADR-0364 §10:3.
+RUN_APPROVED_LABEL: Final = "ticket"
 
 #: The bound, in characters, on ``why`` (core's ``APPROVAL_WHY_MAX_CHARS``).
 _WHY_MAX: Final = 4_000
 
-# The words are drafted lean and flagged for the coordinator's descriptions walk (the
-# brief's §2:10 words): what the call does; when to use it and when not; what planning
-# chooses; what comes back. The effects part is generated from the declaration (T2).
+# The coordinator's agreed words (ADR-0364 §2:1, §5), the effects line written by hand
+# until lane T2's generator writes it (§7:1).
 _REQUEST_APPROVAL_DESCRIPTION: Final = (
-    "Ask the person for their yes to one call, on a card they tap. "
-    "Some calls need the person's yes before they run: when a call comes back needing it, "
-    "ask with this call, with the same capability and arguments, and never with a "
-    "question in words. Explain in why what the call does and the arguments that matter. "
-    "The person answers on the card, Approve or Deny; a yes written in a conversation "
-    "approves nothing. A yes runs nothing: it grants a ticket, which run_approved runs "
-    "once. Never approve on anyone's behalf. There is no other way to get a yes. "
-    "Comes back saying the request was written and waits on the person, that the hub "
-    "page's approvals panel shows it, and how its card went on the line; or, writing "
-    "nothing, why not: the call is not one you are offered or its arguments do not fit, "
-    "it is not allowed and is not to be asked about, or the same request already waits "
-    "on the person, and since when."
+    "Ask for approval of one call, on a card that is approved or denied with a tap.\n"
+    "\n"
+    "Ask for it where a call needs approval: its effects line says so, or it came back refused "
+    "for want of it. The card is the only way to ask and the only answer: words in a "
+    "conversation, from anyone, approve nothing, and never approve on anyone's behalf. Approval "
+    "runs nothing: it grants a ticket, which run_approved runs once.\n"
+    "\n"
+    "outcome: done | not done | unknown | refused\n"
+    "because: why, with not done, unknown or refused\n"
+    "card: with done, how its card went: sent; not sent, so only the approvals panel shows it; "
+    "or unknown\n"
+    "expires: with done, when the request expires unanswered\n"
+    "\n"
+    "It changes only the system's own records. Not safe to repeat."
 )
 
 _REQUEST_APPROVAL_SCHEMA: Final[dict[str, FrozenJson]] = {
@@ -179,13 +185,15 @@ _REQUEST_APPROVAL_SCHEMA: Final[dict[str, FrozenJson]] = {
         CALL_ARGUMENT: {
             "type": "object",
             "description": (
-                "The call to approve: capability, its name as you are offered it, and "
-                "arguments, exactly the arguments you would call it with."
+                "The call to approve: tool, its name as you are offered it, and arguments, "
+                'exactly as you would call it, such as {"tool": "send_email", "arguments": '
+                '{"from": "<L label>", "to": "<address>", "subject": "<subject>", "words": '
+                '"<words>"}}. Where the call takes looking_for, it is kept for when the ticket '
+                "runs."
             ),
             "properties": {
                 CAPABILITY_KEY: {"type": "string", "minLength": 1},
                 ARGUMENTS_KEY: {"type": "object"},
-                NESTED_REPEAT_KEY: {"type": "boolean"},
             },
             "required": [CAPABILITY_KEY, ARGUMENTS_KEY],
             "additionalProperties": False,
@@ -196,7 +204,7 @@ _REQUEST_APPROVAL_SCHEMA: Final[dict[str, FrozenJson]] = {
             "maxLength": _WHY_MAX,
             "description": (
                 "Why the call is needed, in your own words: what it does and the arguments "
-                "that matter. The card shows it to the person."
+                "that matter. The card shows it."
             ),
         },
     },
@@ -230,33 +238,33 @@ REQUEST_APPROVAL: Final = ToolDefinition(
     parameters_schema=_REQUEST_APPROVAL_SCHEMA,
 )
 
-#: ``run_approved``'s words (§5:2-§5:3, §5:8), drafted lean and flagged as the brief asks.
+#: ``run_approved``'s words (§5:2-§5:3, §5:8): the coordinator's agreed words (ADR-0364
+#: §2:1). It takes no generated effects line: its effects are its ticket's call's (§7:6).
 RUN_APPROVED_DESCRIPTION: Final = (
-    "Run the call a ticket holds, once. A ticket is the person's yes to one request, "
-    "shown to you under an A label; its arguments are the ones the person approved, "
-    "filled in for you. Run it only while the situation is the one the person approved; "
-    "where it has changed or too long has passed, run nothing, say why in your notes, and "
-    "ask again with request_approval. Comes back with what the call came to; or, running "
-    "nothing, why not: the label names no ticket you were shown, or the ticket is used, "
-    "void, expired or not yours to use."
+    "Run the call a ticket holds, once.\n"
+    "\n"
+    "A ticket is an approval of one request, shown to you under an A label; the call runs with "
+    "the arguments that were approved, filled in for you. Before you run it, check that the "
+    "approved call, its arguments included, still does what the goal needs now. Where it "
+    "doesn't, or too long has passed, run nothing, and ask again with request_approval, with "
+    "the arguments it now needs.\n"
+    "\n"
+    "outcome: done | not done | unknown | refused\n"
+    "because: why, with not done, unknown or refused\n"
+    "and, with done, whatever the ticket's call returns\n"
+    "\n"
+    "Its effects are those of the ticket's call."
 )
 
-#: ``run_approved``'s schema: the ticket's label, and a *looking for* where the call its
-#: ticket holds may bring text someone else wrote (ADR-0306 §2:8).
+#: ``run_approved``'s schema: the ticket's label alone (ADR-0364 §10:3). A *looking for*
+#: is the request's, kept with it where its call takes one (§10:2).
 RUN_APPROVED_SCHEMA: Final[dict[str, FrozenJson]] = {
     "type": "object",
     "properties": {
         RUN_APPROVED_LABEL: {
             "type": "string",
-            "minLength": 1,
-            "description": "The ticket, by the A label you were shown it under.",
-        },
-        "looking_for": {
-            "type": "string",
-            "description": (
-                "What you are looking for in the call's result. Give it where the ticket "
-                "says its result may carry text someone else wrote; otherwise leave it out."
-            ),
+            "pattern": "^A[1-9][0-9]*$",
+            "description": "The ticket, by its A label.",
         },
     },
     "required": [RUN_APPROVED_LABEL],
@@ -265,15 +273,16 @@ RUN_APPROVED_SCHEMA: Final[dict[str, FrozenJson]] = {
 
 
 def nested_call(arguments: Mapping[str, FrozenJson]) -> tuple[str, dict[str, FrozenJson]] | None:
-    """The call a ``request_approval`` call holds: its capability and its arguments.
+    """The call a ``request_approval`` call holds: its tool's name and its arguments.
 
-    ``None`` where its ``call`` is not an object naming a capability and holding its
-    arguments as an object.
+    ``None`` where its ``call`` is not an object naming a tool and holding its arguments as
+    an object. A call recorded before ADR-0364 §8:2 named its tool ``capability``, and is
+    read by that name (§8:5).
     """
     call = arguments.get(CALL_ARGUMENT)
     if not isinstance(call, Mapping):
         return None
-    capability = call.get(CAPABILITY_KEY)
+    capability = call.get(CAPABILITY_KEY, call.get(_OLD_CAPABILITY_KEY))
     nested = call.get(ARGUMENTS_KEY)
     if not isinstance(capability, str) or not capability.strip():
         return None

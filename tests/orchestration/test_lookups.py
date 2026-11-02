@@ -123,14 +123,16 @@ def _failed(answer: OwnRecordsAnswer, kind: ToolFailureKind) -> None:
 def test_each_look_up_reads_the_assistants_own_records_and_writes_nothing() -> None:
     """ADR-0306 §3:1, ADR-0308 §6:6: own records, never leaving the hub, never unknown."""
     assert [str(one.capability) for one in LOOK_UPS] == list(LOOK_UP_CAPABILITIES)
+    # ADR-0364 §8:1: under their names now; §3:7: and the connections search.
     assert LOOK_UP_CAPABILITIES == (
-        "search_memory",
-        "read_story",
-        "follow_up",
+        "search_memories",
+        "read_matter",
+        "reread_result",
         # ADR-0358 §6:1: the episode look-ups, each a read of the assistant's own records.
         "search_episodes",
         "read_episode",
-        "read_older_history",
+        "read_origin_history",
+        "search_connections",
     )
     for one in LOOK_UPS:
         assert one.effect is CapabilityEffect.OWN_RECORDS
@@ -156,7 +158,7 @@ def test_the_look_ups_are_offered_with_looking_for_where_outside_text_may_come_b
     assert set(offered) == set(LOOK_UP_CAPABILITIES)
     assert offered[SEARCH_MEMORY_CAPABILITY]["required"] == ["query", LOOKING_FOR]
     assert offered[FOLLOW_UP_CAPABILITY]["required"] == ["result", LOOKING_FOR]
-    assert offered[READ_STORY_CAPABILITY]["required"] == ["story"]
+    assert offered[READ_STORY_CAPABILITY]["required"] == ["matter"]
     # #2893: which page of the story's older notes, optional, a whole number from 1.
     older = offered[READ_STORY_CAPABILITY]["properties"][OLDER_NOTES_PAGE_ARGUMENT]
     assert (older["type"], older["minimum"]) == ("integer", 1)
@@ -166,7 +168,7 @@ def test_the_look_ups_are_offered_with_looking_for_where_outside_text_may_come_b
 def test_a_story_read_names_a_story_and_a_follow_up_a_result_by_label() -> None:
     """ADR-0307 §5:2, ADR-0308 §6:6: the follow-up's one planner argument is an R label."""
     assert LOOK_UP_LABEL_ARGUMENTS == {
-        READ_STORY_CAPABILITY: {"story": LabelKind.STORY},
+        READ_STORY_CAPABILITY: {"matter": LabelKind.STORY},
         FOLLOW_UP_CAPABILITY: {"result": LabelKind.RESULT},
         # ADR-0358 §10:1: the episode look-up names its episode by its E label.
         "read_episode": {"episode": LabelKind.EPISODE},
@@ -331,7 +333,7 @@ async def test_a_story_read_reads_the_view_under_the_scope_and_holds_it_for_the_
     look_ups = LookUps(memory=FakeMemoryStore(), views=views, search_limit=5)
 
     with look_ups.scope(audience=UNBOUNDED, owner_records=False) as scope:
-        answer = await look_ups.run(_call(READ_STORY, decision="d7", story="story-1"))
+        answer = await look_ups.run(_call(READ_STORY, decision="d7", matter="story-1"))
 
     assert isinstance(answer, ToolResult)
     assert answer.outcome is ToolOutcome.SUCCEEDED
@@ -347,7 +349,7 @@ async def test_a_story_read_asks_for_the_page_of_older_notes_it_names() -> None:
     look_ups = LookUps(memory=FakeMemoryStore(), views=views, search_limit=5)
 
     with look_ups.scope(audience=BOUNDED, owner_records=True):
-        answer = await look_ups.run(_call(READ_STORY, story="story-1", older_notes_page=3))
+        answer = await look_ups.run(_call(READ_STORY, matter="story-1", older_notes_page=3))
 
     assert isinstance(answer, ToolResult)
     assert answer.outcome is ToolOutcome.SUCCEEDED
@@ -362,7 +364,7 @@ async def test_a_story_read_naming_no_page_of_one_or_more_is_not_done(page: obje
     # The offered schema refuses it first; the runner refuses it again.
     loose = READ_STORY.model_copy(update={"parameters_schema": {"type": "object"}})
     with look_ups.scope(audience=BOUNDED, owner_records=True) as scope:
-        answer = await look_ups.run(_call(loose, story="story-1", older_notes_page=page))
+        answer = await look_ups.run(_call(loose, matter="story-1", older_notes_page=page))
 
     _failed(answer, ToolFailureKind.INVALID_REQUEST)
     assert views.reads == []
@@ -373,7 +375,7 @@ async def test_a_story_read_of_a_story_not_held_is_not_done() -> None:
     look_ups = LookUps(memory=FakeMemoryStore(), views=_Views(), search_limit=5)
 
     with look_ups.scope(audience=BOUNDED, owner_records=True) as scope:
-        answer = await look_ups.run(_call(READ_STORY, story="gone"))
+        answer = await look_ups.run(_call(READ_STORY, matter="gone"))
 
     _failed(answer, ToolFailureKind.INVALID_REQUEST)
     assert scope.views == {}
@@ -388,7 +390,7 @@ async def test_a_story_read_whose_stores_cannot_be_read_is_not_done(error: Excep
     look_ups = LookUps(memory=FakeMemoryStore(), views=_Views(raises=error), search_limit=5)
 
     with look_ups.scope(audience=BOUNDED, owner_records=True) as scope:
-        answer = await look_ups.run(_call(READ_STORY, story="story-1"))
+        answer = await look_ups.run(_call(READ_STORY, matter="story-1"))
 
     _failed(answer, ToolFailureKind.UNAVAILABLE)
     assert scope.views == {}
@@ -398,10 +400,10 @@ async def test_a_story_read_with_no_views_or_no_scope_is_not_done() -> None:
     views = _Views({"story-1": PlanningStory(story_id="story-1", tidied_at=None, changes=0)})
     unwired = LookUps(memory=FakeMemoryStore(), views=None, search_limit=5)
     with unwired.scope(audience=BOUNDED, owner_records=True):
-        _failed(await unwired.run(_call(READ_STORY, story="story-1")), ToolFailureKind.INTERNAL)
+        _failed(await unwired.run(_call(READ_STORY, matter="story-1")), ToolFailureKind.INTERNAL)
 
     wired = LookUps(memory=FakeMemoryStore(), views=views, search_limit=5)
-    _failed(await wired.run(_call(READ_STORY, story="story-1")), ToolFailureKind.INTERNAL)
+    _failed(await wired.run(_call(READ_STORY, matter="story-1")), ToolFailureKind.INTERNAL)
     assert views.reads == []
 
 

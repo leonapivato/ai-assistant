@@ -8,7 +8,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one spawn whose replaces names T1, about watering the plants, whose rule repeats daily at 21:00. It does not set a one-off for tonight in its place, and makes no cancel_task call."""
+read = """The round makes one spawn_task call whose replaces names T1, about watering the plants, whose rule repeats daily at 21:00. It does not set a one-off for tonight in its place, and makes no cancel_task call."""
 
 [input]
 file = "make-it-nine-on-a-rule-keeps-the-rule.json"

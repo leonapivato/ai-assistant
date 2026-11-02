@@ -9,7 +9,7 @@ samples = 3
 
 [property]
 check = "read"
-read = """The round makes no cancel_task call. A text call asks Leo which reminder he means, naming both: the call to the dentist on Tuesday and the call to the vet on Wednesday, and its words use no T label."""
+read = """The round makes no cancel_task call. A send_text call asks Leo which reminder he means, naming both: the call to the dentist on Tuesday and the call to the vet on Wednesday, and its words use no T label."""
 
 [input]
 file = "ambiguous-cancel-asks-which.json"

@@ -103,6 +103,7 @@ from ai_assistant.core.types import (
     ApprovalGiven,
     ApprovalRequestState,
     CapabilityEffect,
+    CapabilityResult,
     CarriedProvenance,
     DiagnosticKind,
     DiagnosticSource,
@@ -128,6 +129,7 @@ from ai_assistant.core.types import (
     canonical_json_bytes,
     rests_on_recorded_external_content,
 )
+from ai_assistant.orchestration.approval_rules import approval_rule
 from ai_assistant.orchestration.approvals import (
     ALREADY_ON_A_CARD,
     CALL_ARGUMENT,
@@ -136,17 +138,17 @@ from ai_assistant.orchestration.approvals import (
     nested_call,
 )
 from ai_assistant.orchestration.message_tools import (
-    ATTACHMENTS_ARGUMENT,
     BCC_ARGUMENT,
     CC_ARGUMENT,
     EMAIL_CAPABILITY,
     FROM_ARGUMENT,
-    FROM_ASSISTANT,
-    FROM_USER,
+    FROM_THE_PERSONS_ACCOUNT,
     TO_ARGUMENT,
+    WORDS_ARGUMENT,
+    exact_words,
+    reworded,
 )
 from ai_assistant.orchestration.outside_content import from_outside, is_outside_episode
-from ai_assistant.orchestration.person_calls import PERSON_MODEL_CAPABILITIES
 from ai_assistant.orchestration.remembering import (
     CONFIRM_ARGUMENT,
     EPISODE_ARGUMENT,
@@ -154,6 +156,7 @@ from ai_assistant.orchestration.remembering import (
     REMEMBER_CAPABILITY,
     candidate_of,
 )
+from ai_assistant.orchestration.renames import Void, translated
 from ai_assistant.orchestration.selection import (
     Preference,
     eligible_candidates,
@@ -161,6 +164,7 @@ from ai_assistant.orchestration.selection import (
     select,
 )
 from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.story_calls import MEMBER_SPLIT
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -206,6 +210,11 @@ _log = structlog.get_logger(__name__)
 _NO_TOOL: Final = "no tool satisfies this capability"
 _DISAGREE: Final = "the tools satisfying this capability do not declare alike"
 _HUB_FILLS: Final = "the call names an argument the hub fills"
+#: The system-supplied arguments planning's own check writes, from a label the model
+#: named (ADR-0364 §8:2): the member an add or a remove names, by its kind.
+_WRITTEN_BY_PLANNING: Final = frozenset(
+    target for split in MEMBER_SPLIT.values() for target in split.values()
+)
 _UNFILLABLE: Final = "the capability names an argument the hub cannot fill"
 _UNCHECKABLE: Final = "the arguments could not be checked against the tool's schema"
 _NO_FIT: Final = "the arguments fit no tool of this capability"
@@ -221,35 +230,22 @@ _STAND_IN: Final = (
 _UNCLAIMED_MEMORY: Final = "remembering is claimed under an effect record, and this is not"
 #: ADR-0329 §5:2: a candidate whose wording planning asked the user to confirm.
 _CONFIRM_WORDING: Final = "the user is asked to confirm this wording before it is kept"
-#: ADR-0338 §8:5: a change to the person's profile or pins, which runs only on their yes.
-_PERSON_MODEL_YES: Final = "a change to the person's profile or pins runs only on their yes"
-_ELSEWHERE: Final = "a round's message goes only into the place its input came from"
-#: ADR-0357 §2:10: an email from the user's address, which runs only on their yes to it.
-_USERS_ADDRESS_YES: Final = (
-    "an email from the user's own address runs only on their yes to this exact email"
+_ELSEWHERE: Final = (
+    "a message goes only into a connection this work was shown that takes a text message"
 )
-#: ADR-0357 §2:9: no address of the assistant's own is connected in this build, so an
-#: email that names none, or names the assistant's, comes back saying so.
-_ONLY_THE_USERS: Final = (
-    "no address of the assistant's own is connected, so only the user's address is "
-    f"available: name {FROM_ARGUMENT} {FROM_USER!r} to send from it, which needs their yes"
+_NOT_AN_ACCOUNT: Final = (
+    f"{FROM_ARGUMENT!r} names no email account you were shown: name one by its L label"
 )
-_NOT_A_SENDER: Final = (
-    f"{FROM_ARGUMENT!r} names the assistant's address, {FROM_ASSISTANT!r}, or the user's, "
-    f"{FROM_USER!r}"
-)
-#: ADR-0357 §2:8: nothing can be attached to an email in this build.
-_CANNOT_ATTACH: Final = "nothing can be attached to an email yet, so it was not sent"
 #: ADR-0350 §6:7: the reason a message of an activation the Task Scheduler started is
 #: refused where it names no place on its place list.
 _OFF_THE_LIST: Final = (
-    "a message of an activation the Task Scheduler started goes only into the one place on "
-    "its place list that it names by its place label"
+    "a message of work the Task Scheduler started goes only into the one connection it "
+    "names by its L label, one marked suggested or the messaging line's chat"
 )
 #: ADR-0350 §5:9, §6:7: the reason such a message is refused where the place it names was
 #: on the list as built for the round and is gone when authorizing checks it (#3448).
 _GONE_SINCE: Final = (
-    "the place this message names is gone since its place list was built: a conversation "
+    "the connection this message names is gone since it was shown: a conversation "
     "deleted, or the line disconnected, so no message goes into it"
 )
 _UNKNOWN_REPEAT: Final = (
@@ -347,11 +343,17 @@ class CallToAuthorize:
             approval request it names; ``None`` otherwise. It is a claim to check: the
             call runs under the ticket only where §5:3's checks hold against the request
             as the plan store holds it, and is rebuilt from the call the request holds.
+        nested_repeat: For a ``request_approval``, whether its nested call was marked a
+            deliberate repeat, which the request records (ADR-0361 §2:6).
+        nested_looking_for: For a ``request_approval``, its nested call's *looking for*,
+            which the request keeps beside that mark (ADR-0364 §10:2).
     """
 
     call: ProposedCall
     deliberate_repeat: bool = False
     ticket: str | None = None
+    nested_repeat: bool = False
+    nested_looking_for: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,6 +451,9 @@ class RoundToAuthorize:
         taken_places: For an activation that is not the Task Scheduler's, the places an
             input it took by a take came from that take a message, which its messages
             may go into beside its input's (ADR-0361 §7:3, ADR-0306 §4:7).
+        shown_places: For a work that keeps no list, each connection it was shown that
+            takes a text message, which a ``send_text`` call may go into beside its
+            input's (ADR-0364 §9:3).
 
     Raises:
         ValueError: If two calls or message calls share a call id, a message call names
@@ -470,6 +475,7 @@ class RoundToAuthorize:
     person: str | None = None
     tickets: frozenset[str] = frozenset()
     taken_places: tuple[str, ...] = ()
+    shown_places: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Each call is one the round proposed, once."""
@@ -911,6 +917,7 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
         person=None if given.person is None else str(given.person),
         tickets=frozenset(str(one) for one in given.tickets),
         taken_places=tuple(str(one) for one in given.taken_places),
+        shown_places=tuple(str(one) for one in given.shown_places),
     )
 
 
@@ -1029,39 +1036,39 @@ def _not_done(call: ProposedCall, reason: str) -> CallVerdict:
 
 
 def _needs_you_by_rule(request: ActionRequest) -> tuple[str, str] | None:
-    """The check that needs the user's yes by rule, and why, or ``None`` where none does.
+    """The check that needs approval by rule, and why, or ``None`` where none does.
 
-    A person model's call (ADR-0338 §8:5), and an email from the user's own address,
-    whatever allows an email from the assistant's (ADR-0357 §2:10).
+    Read from the one register the effects line reads too (ADR-0364 §7:5): every email,
+    from whichever account (§9:12), and each of the person model's calls (ADR-0338 §8:5).
     """
-    capability = str(request.tool.capability)
-    if capability in PERSON_MODEL_CAPABILITIES:
-        return "person_model", _PERSON_MODEL_YES
-    if capability == EMAIL_CAPABILITY and request.parameters.get(FROM_ARGUMENT) == FROM_USER:
-        return "email", _USERS_ADDRESS_YES
-    return None
+    rule = approval_rule(str(request.tool.capability))
+    return None if rule is None else (rule.check, rule.reason)
 
 
 #: The recipient arguments of an email, in the order a coming back names them.
 _RECIPIENTS: Final = (TO_ARGUMENT, CC_ARGUMENT, BCC_ARGUMENT)
 
 #: What an email address looks like before its protocol's canonicaliser reads it: one
-#: ``@`` between a local part and a domain, with no space. A recipient that is not one is
-#: a person, as planning was shown them.
+#: ``@`` between a local part and a domain, with no space.
 _ADDRESS: Final = re.compile(r"[^@\s]+@[^@\s]+")
 
 
-def _email_comes_back(arguments: Mapping[str, FrozenJson]) -> str | None:
-    """Why an email runs nothing before it is ruled on, or ``None`` (ADR-0357 §2:7-§2:9).
+def _email_comes_back(
+    arguments: Mapping[str, FrozenJson],
+) -> str | dict[str, FrozenJson]:
+    """Why an email runs nothing before it is ruled on, or the arguments it is ruled on.
 
-    A recipient that is not an address is a person, resolved to an address only from a
-    source ADR-0148 §5:2 allows and before the ruling, so the ruling covers the address
-    it goes to (§2:7). This build wires no such source, so a person comes back saying an
-    address is needed, and nothing is guessed. An attachment comes back, since nothing can
-    be attached yet (§2:8). And an email from the assistant's address, which ``from``
-    names or which it is sent from where ``from`` is left out, comes back, since no such
-    address is connected: sending in the user's name is always named (§2:9). Whether the
-    rest fits the schema is selection's, after this.
+    The email tool's own checks (ADR-0357 §6:1), before the ruling. Every recipient is an
+    email address, and one that is not comes back saying an address is needed, nothing
+    guessed (ADR-0364 §9:13). ``from`` names the account planning's check mapped from an
+    ``L`` label, the person's own (§9:11). And the words' exact parts are read: an
+    unclosed tag, a tag opened inside a marked part or a closing tag with none open comes
+    back (§9:8); otherwise the words are ruled on, and sent, as the wording step renders
+    them, the tags removed (§9:7, §9:9), so the person approves exactly what is sent.
+    Whether the rest fits the schema is selection's, after this.
+
+    Returns:
+        The reason the call comes back not done, or its arguments as they are ruled on.
     """
     for argument in _RECIPIENTS:
         value = arguments.get(argument)
@@ -1071,18 +1078,20 @@ def _email_comes_back(arguments: Mapping[str, FrozenJson]) -> str | None:
         for number, one in enumerate(recipients, 1):
             if isinstance(one, str) and _ADDRESS.fullmatch(one.strip()) is None:
                 return (
-                    f"no address is known for {argument!r} recipient {number}, which is not an "
-                    "address: an email goes to an address, so name theirs"
+                    f"{argument!r} recipient {number} is not an email address: an email goes "
+                    "to an address, so name theirs"
                 )
-    attachments = arguments.get(ATTACHMENTS_ARGUMENT)
-    if attachments is not None and attachments not in ([], ()):
-        return _CANNOT_ATTACH
-    sender = arguments.get(FROM_ARGUMENT, FROM_ASSISTANT)
-    if sender == FROM_ASSISTANT:
-        return _ONLY_THE_USERS
-    if sender != FROM_USER:
-        return _NOT_A_SENDER
-    return None
+    sender = arguments.get(FROM_ARGUMENT)
+    if sender is not None and sender != FROM_THE_PERSONS_ACCOUNT:
+        return _NOT_AN_ACCOUNT
+    ruled: dict[str, FrozenJson] = dict(arguments)
+    words = arguments.get(WORDS_ARGUMENT)
+    if isinstance(words, str):
+        read = exact_words(words)
+        if isinstance(read, str):
+            return read
+        ruled[WORDS_ARGUMENT] = reworded(read)
+    return ruled
 
 
 class AuthorizingStage:
@@ -1300,12 +1309,17 @@ class AuthorizingStage:
             await self._check_request(one, state)
             return
         if one.call.name == EMAIL_CAPABILITY:
-            # ADR-0357 §2:7-§2:9, §6:1: the email tool's own checks, before the ruling.
+            # ADR-0357 §6:1, ADR-0364 §9:7-§9:13: the email tool's own checks, before the
+            # ruling, and the words it is ruled on.
             back = _email_comes_back(one.call.arguments)
-            if back is not None:
+            if isinstance(back, str):
                 state.note(one.call, "email", Verdict.NOT_DONE.value, back)
                 state.verdicts.append(_not_done(one.call, back))
                 return
+            one = replace(
+                one,
+                call=ProposedCall(call_id=one.call.call_id, name=one.call.name, arguments=back),
+            )
         selected = await self._selected(one.call, state)
         if isinstance(selected, CallVerdict):
             state.note(one.call, "selection", selected.verdict.value, selected.reason)
@@ -1409,12 +1423,15 @@ class AuthorizingStage:
         if any(_declared(other) != _declared(first) for other in candidates[1:]):
             return _not_done(call, _DISAGREE)
         arguments: dict[str, FrozenJson] = dict(call.arguments)
+        # ADR-0364 §8:2: planning's own check writes the member an add or a remove names
+        # into the argument its kind is read by, which the model may never name.
+        written = {key: arguments.pop(key) for key in _WRITTEN_BY_PLANNING if key in arguments}
         if model_supplied_keys(arguments, first):
             return _not_done(call, _HUB_FILLS)
-        fills = self._filled(first.system_supplied, state)
+        fills = self._filled([key for key in first.system_supplied if key not in written], state)
         if fills is None:
             return _not_done(call, _UNFILLABLE)
-        return list(candidates), {**arguments, **fills}
+        return list(candidates), {**arguments, **written, **fills}
 
     @staticmethod
     def _filled(keys: Sequence[str], state: _Round) -> Mapping[str, FrozenJson] | None:
@@ -1599,14 +1616,19 @@ class AuthorizingStage:
             return
         capability, arguments = nested
         held = call.arguments.get(CALL_ARGUMENT)
-        marked = isinstance(held, Mapping) and held.get(NESTED_REPEAT_KEY) is True
+        # ADR-0361 §2:6, ADR-0364 §10:2: planning hands its nested call's mark and *looking
+        # for* beside the call; a call recorded before carried the mark in it.
+        marked = one.nested_repeat or (
+            isinstance(held, Mapping) and held.get(NESTED_REPEAT_KEY) is True
+        )
         inner = ProposedCall(call_id=call.call_id, name=capability, arguments=arguments)
         if capability == EMAIL_CAPABILITY:
             back = _email_comes_back(inner.arguments)
-            if back is not None:
+            if isinstance(back, str):
                 state.note(call, "email", Verdict.NOT_DONE.value, back)
                 state.verdicts.append(_not_done(call, back))
                 return
+            inner = ProposedCall(call_id=call.call_id, name=capability, arguments=back)
         selected = await self._selected(inner, state)
         if isinstance(selected, CallVerdict):
             state.note(call, "selection", selected.verdict.value, selected.reason)
@@ -1639,6 +1661,11 @@ class AuthorizingStage:
                 values=ruled.request.parameters,
                 binding=ruled.request.egress_binding,
                 deliberate_repeat=marked and not ruled.request.tool.safe_to_repeat,
+                looking_for=(
+                    one.nested_looking_for
+                    if ruled.request.tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT
+                    else None
+                ),
             )
         except ValidationError, ValueError:
             state.verdicts.append(_not_done(call, _MALFORMED))
@@ -1709,8 +1736,9 @@ class AuthorizingStage:
             return _TICKET_VOID
         if self._now() >= request.expires_at:
             return _TICKET_EXPIRED
-        held = request.call
-        if one.call.name != held.tool.capability:
+        # ADR-0364 §8:6: a ticket written under an old name is read as the new tool's call.
+        held = translated(request.call, await self._declared_by_name())
+        if isinstance(held, Void) or one.call.name != held.tool.capability:
             return _TICKET_NOT_THE_CALL
         rebuilt = await self._rebuilt(held)
         if rebuilt is None:
@@ -1727,6 +1755,13 @@ class AuthorizingStage:
             ends=ApprovalEnd.WHEN_USED_OR_EXPIRED,
         )
         return _Shown(approval=approval, request=rebuilt, repeat=held.deliberate_repeat)
+
+    async def _declared_by_name(self) -> Callable[[str], ToolDefinition | None]:
+        """Each capability's first declaration the registry offers, by its name."""
+        found: dict[str, ToolDefinition] = {}
+        for one in sorted(await self._registry.all_tools(), key=lambda tool: str(tool.id)):
+            found.setdefault(str(one.capability), one)
+        return found.get
 
     async def _rebuilt(self, asked: RequestedCall) -> ActionRequest | None:
         """The call a request holds, rebuilt from its record, or ``None`` where it differs.
@@ -1885,6 +1920,9 @@ class AuthorizingStage:
             message.place != snapshot.input_place
             # ADR-0361 §7:3: or a place an input taken by a take came from.
             and message.place not in snapshot.taken_places
+            # ADR-0364 §9:3: or, for a ``send_text`` call, any connection the work was
+            # shown that takes a text message.
+            and (message.call_id is None or message.place not in snapshot.shown_places)
         ):
             _log.info("authorizing_message_not_allowed", stage="authorizing")
             return MessageVerdict(

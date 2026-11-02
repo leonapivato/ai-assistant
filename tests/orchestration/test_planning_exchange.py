@@ -30,7 +30,6 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.matter_calls import (
     ANSWER_OFFER,
-    LOOK_UP_ACTIVATION,
     MATTER_LABEL_ARGUMENTS,
     STOP_ACTIVATION,
 )
@@ -81,7 +80,7 @@ async def test_a_later_round_hands_in_the_first_rounds_briefing_byte_for_byte() 
     """§5:2, §14:9: the briefing is rendered once, and the instruction and tools with it."""
     first = RoundResponse(
         text="Looking it up.",
-        calls=(_call("c1", "web_search", query="museum", looking_for="hours"),),
+        calls=(_call("c1", "search_web", query="museum", looking_for="hours"),),
         continuation=RoundContinuation(model="test:planner", parts={"signed": "thinking"}),
     )
     stage, completer, _ = _stage(first, RoundResponse(text="Done."), RoundResponse())
@@ -110,8 +109,8 @@ async def test_a_report_holds_one_result_for_each_call_in_order_then_the_news() 
     first = RoundResponse(
         calls=(
             _call("c1", "book", slot="19:00"),
-            _call("c2", "web_search", query="q", looking_for="it"),
-            _call("c3", "tidy_story", story="S1"),
+            _call("c2", "search_web", query="q", looking_for="it"),
+            _call("c3", "tidy_matter", matter="S1"),
         )
     )
     stage, completer, _ = _stage(first, RoundResponse())
@@ -132,15 +131,15 @@ async def test_a_report_holds_one_result_for_each_call_in_order_then_the_news() 
     assert [one.call_id for one in report.results] == ["c1", "c2", "c3"]
     booked, refused, tidied = reported(completer.calls[1], 0)
     assert booked == {"outcome": "done", "result": {"label": "R1", "value": "ok"}}
-    assert refused["outcome"].startswith("refused")
-    assert refused["outcome"].endswith(": no such thing")
+    # ADR-0364 §6:1: the outcome, then, with any but done, why.
+    assert refused == {"outcome": "refused", "because": "no such thing"}
     assert tidied["outcome"].startswith("started")
     assert _after_now(report.news) == NOTHING_NEW
 
 
 async def test_a_result_resting_on_outside_content_is_its_digests_evidence_marked() -> None:
     """§5:4: never the raw content: the digest's evidence, each item marked outside."""
-    first = RoundResponse(calls=(_call("c1", "web_search", query="q", looking_for="hours"),))
+    first = RoundResponse(calls=(_call("c1", "search_web", query="q", looking_for="hours"),))
     stage, completer, _ = _stage(first, RoundResponse(text="It opens at nine."))
     inputs = _inputs()
     planned = await stage.plan(inputs)
@@ -216,10 +215,12 @@ async def test_an_offer_the_briefing_showed_is_no_news() -> None:
     assert _after_now(news(completer.calls[1], 0)) == NOTHING_NEW
 
 
-async def test_a_message_calls_result_says_what_it_sent_where_and_how() -> None:
-    """§8:4: a ``text`` call's result holds its delivered words, where they went and how."""
+async def test_a_message_calls_result_is_its_outcome_alone() -> None:
+    """ADR-0364 §9:5: a ``send_text`` call's result is its outcome alone; its entry still
+    holds what was sent, where and how (ADR-0357 §3:4)."""
     stage, completer, _ = _stage(
-        RoundResponse(calls=(_call("c1", "text", to="the user", words="Booked."),)), RoundResponse()
+        RoundResponse(calls=(_call("c1", "send_text", connection="L1", words="Booked."),)),
+        RoundResponse(),
     )
     inputs = _inputs()
     planned = await stage.plan(inputs)
@@ -234,15 +235,7 @@ async def test_a_message_calls_result_says_what_it_sent_where_and_how() -> None:
     )
 
     (sent,) = reported(completer.calls[1], 0)
-    assert sent == {
-        "outcome": "done",
-        "delivered": {
-            "words": "Booked.",
-            "went": "conversation:chat-1",
-            "by": "the hub chat",
-            "how": "sent",
-        },
-    }
+    assert sent == {"outcome": "done"}
 
 
 async def test_the_given_entry_holds_its_two_messages_only_while_the_briefing_is_alone() -> None:
@@ -275,7 +268,7 @@ async def test_the_given_entry_holds_its_two_messages_only_while_the_briefing_is
 
 def _matters(**fields: Any) -> PlanningInputs:
     return _inputs(
-        capabilities=(STOP_ACTIVATION, LOOK_UP_ACTIVATION, ANSWER_OFFER),
+        capabilities=(STOP_ACTIVATION, ANSWER_OFFER),
         label_arguments=MATTER_LABEL_ARGUMENTS,
         labels=(
             PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=episode_address(_A)),
@@ -287,10 +280,10 @@ def _matters(**fields: Any) -> PlanningInputs:
 
 async def test_a_call_whose_condition_does_not_hold_comes_back_refused_saying_why() -> None:
     """§4:4: refused before authorizing, with the reason it is given, and runs nothing."""
-    stage, _, _ = _stage(RoundResponse(calls=(_call("c1", "stop_activation", activation="E1"),)))
+    stage, _, _ = _stage(RoundResponse(calls=(_call("c1", "stop_work", work="E1"),)))
 
     planned = await stage.plan(
-        _matters(not_here={"stop_activation": "a stop runs only on the user's authority"})
+        _matters(not_here={"stop_work": "a stop runs only on the user's authority"})
     )
 
     assert planned.calls == ()
@@ -309,8 +302,8 @@ async def test_a_waiting_rounds_stop_runs_only_naming_the_work_it_waits_on() -> 
     stage, _, _ = _stage(
         RoundResponse(
             calls=(
-                _call("c1", "stop_activation", activation="E1"),
-                _call("c2", "stop_activation", activation="E2"),
+                _call("c1", "stop_work", work="E1"),
+                _call("c2", "stop_work", work="E2"),
             )
         )
     )
@@ -319,6 +312,6 @@ async def test_a_waiting_rounds_stop_runs_only_naming_the_work_it_waits_on() -> 
 
     (allowed,) = planned.calls
     assert allowed.call.call_id == "c1"
-    assert allowed.call.arguments["activation"] == episode_address(_A)
+    assert allowed.call.arguments["work"] == episode_address(_A)
     (refused,) = planned.refused
     assert (refused.call.call_id, refused.reason) == ("c2", WAITING_ROUND)

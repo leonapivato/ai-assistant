@@ -8,7 +8,7 @@ samples = 3
 
 [property]
 check = "calls_are"
-capabilities = ["text"]
+capabilities = ["send_text"]
 
 [input]
 file = "booking-not-done-asks-and-books-nothing-else.json"

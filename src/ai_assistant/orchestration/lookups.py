@@ -91,6 +91,7 @@ nothing.
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -122,12 +123,17 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
+    TranscriptMessage,
 )
 from ai_assistant.orchestration.acting import HeldByIds, NamedResult
+from ai_assistant.orchestration.channel_kinds import CONNECTION_KINDS, place_of
+from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.planning import (
     OLDER_NOTES_PAGE_ARGUMENT,
     PAGE_ARGUMENT,
+    ConnectionsFound,
+    ConnectionShown,
     EpisodeRead,
     EpisodesFound,
     OlderHistory,
@@ -137,7 +143,7 @@ from ai_assistant.orchestration.story_calls import STORY_ARGUMENT
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from ai_assistant.core.protocols import MemoryStore
+    from ai_assistant.core.protocols import ConversationStore, MemoryStore
     from ai_assistant.core.types import FrozenJson, ToolCall
     from ai_assistant.orchestration.acting import OwnRecordsAnswer
     from ai_assistant.orchestration.disclosure import TurnSupply
@@ -164,10 +170,13 @@ __all__ = [
     "READ_STORY_CAPABILITY",
     "RECORDS_KEY",
     "RESULT_ARGUMENT",
+    "SEARCH_CONNECTIONS",
+    "SEARCH_CONNECTIONS_CAPABILITY",
     "SEARCH_EPISODES",
     "SEARCH_EPISODES_CAPABILITY",
     "SEARCH_MEMORY",
     "SEARCH_MEMORY_CAPABILITY",
+    "ConnectionSearch",
     "EpisodeLookedUp",
     "LookUpScope",
     "LookUps",
@@ -177,13 +186,24 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: The capabilities, each the id of its one declaration.
-SEARCH_MEMORY_CAPABILITY: Final = "search_memory"
-READ_STORY_CAPABILITY: Final = "read_story"
-FOLLOW_UP_CAPABILITY: Final = "follow_up"
+#: The capabilities, renamed by ADR-0364 §8:1. Each declaration keeps its id, the name it
+#: was first declared under.
+SEARCH_MEMORY_CAPABILITY: Final = "search_memories"
+READ_STORY_CAPABILITY: Final = "read_matter"
+FOLLOW_UP_CAPABILITY: Final = "reread_result"
 SEARCH_EPISODES_CAPABILITY: Final = "search_episodes"
 READ_EPISODE_CAPABILITY: Final = "read_episode"
-READ_OLDER_HISTORY_CAPABILITY: Final = "read_older_history"
+READ_OLDER_HISTORY_CAPABILITY: Final = "read_origin_history"
+#: ADR-0364 §3:7: the connections search, new.
+SEARCH_CONNECTIONS_CAPABILITY: Final = "search_connections"
+
+#: Each look-up's declaration id: its capability's name before ADR-0364 §8:1 renamed it.
+_IDS: Final[Mapping[str, str]] = {
+    SEARCH_MEMORY_CAPABILITY: "search_memory",
+    READ_STORY_CAPABILITY: "read_story",
+    FOLLOW_UP_CAPABILITY: "follow_up",
+    READ_OLDER_HISTORY_CAPABILITY: "read_older_history",
+}
 
 #: The episode look-up's one planner argument: the episode, by its ``E`` label.
 EPISODE_ARGUMENT: Final = "episode"
@@ -256,7 +276,7 @@ def _declared(
       nothing leaves the device, nothing is spent, and a read twice is the same read.
     """
     return ToolDefinition(
-        id=capability,
+        id=_IDS.get(capability, capability),
         capability=capability,
         description=description,
         risk_level=RiskLevel.LOW,
@@ -284,9 +304,21 @@ def _declared(
 SEARCH_MEMORY: Final = _declared(
     SEARCH_MEMORY_CAPABILITY,
     (
-        "Search what you remember about the user and their world for a query. What "
-        "rests on what a source reported is read for you against what you are looking "
-        "for; the rest is shown to you."
+        "Search the system's memories, what it has learned, for a query.\n"
+        "\n"
+        "Memories that rest on what a source reported are read for you against looking_for; the "
+        "rest are shown as they are.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label:\n"
+        "  remembered: the memories found, best first, each as long-term memory shows one, or "
+        "none\n"
+        "  resting_on_outside_content: where some found rest on what a source reported, that they "
+        "were read for you\n"
+        "evidence: with those, what was read of them for looking_for\n"
+        "\n"
+        "It changes nothing."
     ),
     properties={
         QUERY_ARGUMENT: {
@@ -305,23 +337,27 @@ it is offered with a required *looking for* (§2:9) and routed record by record 
 READ_STORY: Final = _declared(
     READ_STORY_CAPABILITY,
     (
-        "Read the full view of a story you were shown: its summary, its notes and "
-        "episodes since, its older notes, newest first a page at a time, its latest "
-        "episodes, the larger stories it is part of, and where its matter stands."
+        "Read the full view of a matter you were shown.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label, the matter as matters are shown, in full: its "
+        "summary, its notes, its episodes since it was last tidied and its latest ones, the "
+        "larger matters it is part of, and where it stands; its older notes a page at a time, "
+        "newest first\n"
+        "\n"
+        "It changes nothing."
     ),
     properties={
         STORY_ARGUMENT: {
             "type": "string",
             "minLength": 1,
-            "description": "The story, by the S label you were shown it under.",
+            "description": "The matter, by its S label.",
         },
         OLDER_NOTES_PAGE_ARGUMENT: {
             "type": "integer",
             "minimum": 1,
-            "description": (
-                "Which page of the story's older notes to show, the newest page 1; leave "
-                "it out for the newest."
-            ),
+            "description": "Which page of its older notes to show. Left out: 1, the newest.",
         },
     },
     required=(STORY_ARGUMENT,),
@@ -333,15 +369,21 @@ shows its marks (ADR-0306 §3:1)."""
 FOLLOW_UP: Final = _declared(
     FOLLOW_UP_CAPABILITY,
     (
-        "Ask a new question of a result that was read for you, by its R label: say the "
-        "new question in looking_for. The result as it came back is read again for it; "
-        "nothing is called again."
+        "Ask a new question of a result that was read for you.\n"
+        "\n"
+        "The result as it came back is read again for it; nothing is called again.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "evidence: with done, what was read of it for the new looking_for\n"
+        "\n"
+        "It changes nothing."
     ),
     properties={
         RESULT_ARGUMENT: {
             "type": "string",
             "minLength": 1,
-            "description": "The result, by the R label you were shown it under.",
+            "description": "The result, by its R label.",
         },
     },
     required=(RESULT_ARGUMENT,),
@@ -350,18 +392,26 @@ FOLLOW_UP: Final = _declared(
 """The follow-up (ADR-0308 §6:6): one planner argument, a result's R label, and the
 *looking for* the hub adds carries the new question."""
 
-_PAGE: Final[FrozenJson] = {
-    "type": "integer",
-    "minimum": 1,
-    "description": "Which page to show, the first 1; leave it out for the first.",
-}
+
+def _page(description: str) -> dict[str, FrozenJson]:
+    """A look-up's page argument, its description its own (ADR-0364 §5:2)."""
+    return {"type": "integer", "minimum": 1, "description": description}
+
 
 SEARCH_EPISODES: Final = _declared(
     SEARCH_EPISODES_CAPABILITY,
     (
-        "Search past episodes, the work done on earlier inputs, for a query. Returns one "
-        "page of the episodes found, best first, each as its short view under its E label, "
-        "with the matters it belongs to by their S labels."
+        "Search past episodes, each the record of the work on an earlier stimulus, for a query.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label:\n"
+        "  page: the page shown\n"
+        "  episodes: those found, best first, each as short-term memory shows one, with "
+        "in_matters, the matters it belongs to by S label; or none\n"
+        "  more: the next page, where there is one\n"
+        "\n"
+        "It changes nothing."
     ),
     properties={
         QUERY_ARGUMENT: {
@@ -370,7 +420,7 @@ SEARCH_EPISODES: Final = _declared(
             "maxLength": QUERY_MAX_CHARS,
             "description": "What to search for, in a few words.",
         },
-        PAGE_ARGUMENT: _PAGE,
+        PAGE_ARGUMENT: _page("Which page to show. Left out: 1, the first."),
     },
     required=(QUERY_ARGUMENT,),
     result=CapabilityResult.NO_OUTSIDE_TEXT,
@@ -381,19 +431,33 @@ content withheld, so its result carries no outside text and shows its marks."""
 READ_EPISODE: Final = _declared(
     READ_EPISODE_CAPABILITY,
     (
-        "Read one past episode's full record by its E label. Returns one page of it, in "
-        "the order it happened: each understanding, what recall found, each round's notes, "
-        "each call with its arguments, what came of it and what it showed, the evidence, "
-        "what it took in, and how it ended. Records it shows again are shown as they are "
-        "held now."
+        "Read one episode: a past one's full record, or what one still running has found and done "
+        "so far.\n"
+        "\n"
+        "Records it shows again are shown as they are held now.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label:\n"
+        "  for a past one, a page of its full record:\n"
+        "    label, at, input, understood_then, response and how it ended, on every page\n"
+        "    in_matters: the matters it belongs to, by S label\n"
+        "    page, and parts: in the order they happened: each understanding, what recall found, "
+        "each round's notes, each call with its arguments, what came of it and what it showed, "
+        "the evidence, and what it took in\n"
+        "    more: the next page, where there is one\n"
+        "  for one still running: what it has found and done so far, as an episode, with status: "
+        "running, or ended\n"
+        "\n"
+        "It changes nothing."
     ),
     properties={
         EPISODE_ARGUMENT: {
             "type": "string",
             "minLength": 1,
-            "description": "The episode, by the E label you were shown it under.",
+            "description": "The episode, by its E label.",
         },
-        PAGE_ARGUMENT: _PAGE,
+        PAGE_ARGUMENT: _page("Which page of a past one's record to show. Left out: 1, the first."),
     },
     required=(EPISODE_ARGUMENT,),
     result=CapabilityResult.NO_OUTSIDE_TEXT,
@@ -405,16 +469,54 @@ text and shows its marks."""
 READ_OLDER_HISTORY: Final = _declared(
     READ_OLDER_HISTORY_CAPABILITY,
     (
-        "Read this place's history older than the place window shows. Returns one page, "
-        "newest page first: its older messages, or its earlier episodes, each as its short "
-        "view under its E label."
+        "Read the stimulus origin's history older than you were shown.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label:\n"
+        "  page: the page shown, newest first\n"
+        "  items: its older items, as stimulus origin knowledge shows them; or episodes: its "
+        "earlier episodes, each as short-term memory shows one\n"
+        "  more: the next page, where there is one\n"
+        "\n"
+        "It changes nothing."
     ),
-    properties={PAGE_ARGUMENT: _PAGE},
+    properties={PAGE_ARGUMENT: _page("Which page to show. Left out: 1, the newest.")},
     required=(),
     result=CapabilityResult.NO_OUTSIDE_TEXT,
 )
 """Read the origin's older history (ADR-0358 §9): each item as the place window shows
 one, someone else's withheld, so its result carries no outside text."""
+
+SEARCH_CONNECTIONS: Final = _declared(
+    SEARCH_CONNECTIONS_CAPABILITY,
+    (
+        "Search the system's connections for a query, beyond those Connections shows.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label:\n"
+        "  page: the page shown\n"
+        "  connections: those found, best first, each as Connections shows one, or none\n"
+        "  more: the next page, where there is one\n"
+        "\n"
+        "It changes nothing."
+    ),
+    properties={
+        QUERY_ARGUMENT: {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": QUERY_MAX_CHARS,
+            "description": "What to search for, such as a name, a platform or what was said there.",
+        },
+        PAGE_ARGUMENT: _page("Which page to show. Left out: 1, the first."),
+    },
+    required=(QUERY_ARGUMENT,),
+    result=CapabilityResult.NO_OUTSIDE_TEXT,
+)
+"""Search the connections (ADR-0364 §3:7-§3:8): a read of the system's own records, each
+connection found shown as Connections shows one, so its result carries no outside
+text."""
 
 #: Every look-up's declaration.
 LOOK_UPS: Final = (
@@ -424,6 +526,7 @@ LOOK_UPS: Final = (
     SEARCH_EPISODES,
     READ_EPISODE,
     READ_OLDER_HISTORY,
+    SEARCH_CONNECTIONS,
 )
 
 #: Every look-up's capability, in :data:`LOOK_UPS`' order.
@@ -437,8 +540,70 @@ LOOK_UP_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind]]] = {
     READ_EPISODE_CAPABILITY: {EPISODE_ARGUMENT: LabelKind.EPISODE},
 }
 
-type EpisodeLookedUp = EpisodesFound | EpisodeRead | OlderHistory
-"""What an episode look-up read, held in the scope by its call's decision (ADR-0358 §7-§10)."""
+type EpisodeLookedUp = EpisodesFound | EpisodeRead | OlderHistory | ConnectionsFound
+"""What an episode look-up, or a connections search, read, held in the scope by its call's
+decision (ADR-0358 §7-§10, ADR-0364 §3:7)."""
+
+
+class ConnectionSearch:
+    """``search_connections``' read of the hub's own records (ADR-0364 §3:7-§3:8).
+
+    It finds the hub chat's conversations the Connections section does not show: every
+    single-place connection is always shown (§3:5), so a many-place connection's places
+    are what a search finds. A conversation matches a query by what its entry would
+    show and by the text of its transcript, which the hub hosts, read through the
+    conversation store's existing reads alone: its recent conversations, then each one's
+    recent transcript. Best first, by how many of the query's words it holds, the more
+    recent first among equals, a page at a time. It shows no text it matched against.
+    """
+
+    def __init__(self, *, conversations: ConversationStore, scan: int, page_size: int) -> None:
+        """Wire the search to the conversation store.
+
+        Args:
+            conversations: The chat space, whose conversations are places.
+            scan: How many of the most recent conversations one search reads.
+            page_size: How many connections one page shows.
+
+        Raises:
+            ValueError: If either bound is below 1.
+        """
+        if scan < 1 or page_size < 1:
+            msg = "a connections search reads one conversation and shows one at least"
+            raise ValueError(msg)
+        self._conversations = conversations
+        self._scan = scan
+        self._page_size = page_size
+
+    async def search(self, query: str, page: int) -> ConnectionsFound:
+        """One page of the conversations ``query`` matches, best first.
+
+        Raises:
+            ConversationStoreError: If the store cannot be read.
+        """
+        words = {one for one in re.findall(r"\w+", query.casefold()) if len(one) > 1}
+        kind = CONNECTION_KINDS["conversation"]
+        scored: list[tuple[int, int, ConnectionShown]] = []
+        for order, one in enumerate(await self._conversations.recent(limit=self._scan)):
+            transcript = await self._conversations.transcript(one.id)
+            texts = [kind.is_a, kind.group or ""]
+            if transcript is not None:
+                texts.extend(
+                    entry.text
+                    for entry in transcript.entries
+                    if isinstance(entry, TranscriptMessage)
+                )
+            held = " ".join(texts).casefold()
+            score = sum(1 for word in words if word in held)
+            if score:
+                place = place_of(conversation_channel(one.id))
+                scored.append((-score, order, ConnectionShown(place=place, kind=kind)))
+        scored.sort(key=lambda one: (one[0], one[1]))
+        start = (page - 1) * self._page_size
+        shown = tuple(one for _, _, one in scored[start : start + self._page_size])
+        return ConnectionsFound(
+            page=page, connections=shown, more=len(scored) > start + self._page_size
+        )
 
 
 def searched_ids(output: object) -> tuple[str, ...]:
@@ -526,6 +691,7 @@ class LookUps:
         views: StoryViews | None,
         search_limit: int,
         episodes: EpisodeLookUpReads | None = None,
+        connections: ConnectionSearch | None = None,
     ) -> None:
         """Wire the runner to the stores it reads.
 
@@ -536,6 +702,8 @@ class LookUps:
             search_limit: The most records one memory search keeps (#2589's number).
             episodes: The episode look-ups' reads (ADR-0358 §7-§10), or ``None`` where
                 none are wired, which makes every episode look-up not done.
+            connections: The connections search's read (ADR-0364 §3:7), or ``None``
+                where none is wired, which makes every connections search not done.
 
         Raises:
             ValueError: If ``search_limit`` is below 1.
@@ -547,6 +715,7 @@ class LookUps:
         self._views = views
         self._search_limit = search_limit
         self._episodes = episodes
+        self._connections = connections
 
     @staticmethod
     @contextlib.contextmanager
@@ -571,7 +740,7 @@ class LookUps:
         finally:
             _SCOPE.reset(token)
 
-    async def run(self, call: ToolCall) -> OwnRecordsAnswer:
+    async def run(self, call: ToolCall) -> OwnRecordsAnswer:  # noqa: PLR0911 — one return per look-up
         """Run one look-up and say what the records answered.
 
         Args:
@@ -587,6 +756,8 @@ class LookUps:
         parameters = call.request.parameters
         if capability in _EPISODE_LOOK_UPS:
             return await self._episode_look_up(capability, parameters, call.decision.id)
+        if capability == SEARCH_CONNECTIONS_CAPABILITY:
+            return await self._connections_search(parameters, call.decision.id)
         if capability == SEARCH_MEMORY_CAPABILITY:
             return await self._search(parameters.get(QUERY_ARGUMENT))
         if capability == READ_STORY_CAPABILITY:
@@ -723,6 +894,42 @@ class LookUps:
         scope.found[decision_id] = found
         _log.info("look_up_read", stage="acting", look_up=capability)
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={_LOOKED_UP_KEY: capability})
+
+    async def _connections_search(
+        self, parameters: Mapping[str, object], decision_id: str
+    ) -> ToolResult:
+        """Search the connections under the scope, and hold what it found (§3:7-§3:8).
+
+        A read of the system's own records under ADR-0358 §6's rules: run outside a
+        scope, or with no search wired, it reads nothing and is not done; on a pass that
+        may not be shown a record placed for the owner alone, whose conversations every
+        place of the hub chat is, it finds none.
+        """
+        query = parameters.get(QUERY_ARGUMENT)
+        page = parameters.get(PAGE_ARGUMENT, 1)
+        if not isinstance(query, str) or not query.strip():
+            _log.info("look_up_not_done", stage="acting", reason="malformed")
+            return _not_done(ToolFailureKind.INVALID_REQUEST, "the query is blank")
+        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+            _log.info("look_up_not_done", stage="acting", reason="malformed")
+            return _not_done(ToolFailureKind.INVALID_REQUEST, "the page is not 1 or more")
+        scope = _SCOPE.get()
+        if scope is None or self._connections is None:
+            _log.warning("look_up_not_done", stage="acting", reason="no_scope")
+            return _not_done(ToolFailureKind.INTERNAL, _NOT_IN_SCOPE)
+        if not scope.owner_records:
+            found = ConnectionsFound(page=page)
+        else:
+            try:
+                found = await self._connections.search(query, page)
+            except ConversationStoreError:
+                _log.warning("look_up_not_done", stage="acting", reason="unreadable")
+                return _not_done(ToolFailureKind.UNAVAILABLE, "the records could not be read")
+        scope.found[decision_id] = found
+        _log.info("look_up_read", stage="acting", look_up=SEARCH_CONNECTIONS_CAPABILITY)
+        return ToolResult(
+            outcome=ToolOutcome.SUCCEEDED, output={_LOOKED_UP_KEY: SEARCH_CONNECTIONS_CAPABILITY}
+        )
 
     async def _read(self, story_id: object, older_page: object, decision_id: str) -> ToolResult:
         """Read one story's full view under the scope, and hold it for the glue."""

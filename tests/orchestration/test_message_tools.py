@@ -1,9 +1,8 @@
-"""ADR-0357 §2 and §4: what every message call shares, read without the phases.
+"""ADR-0364 §9: what every message call shares, read without the phases.
 
-``text``'s declaration and the check of its arguments, who a message is for, the
-platforms ``via`` names, the pass-through wording step, and ``email``'s names, pinned to
-the declaration ``tools`` spells. ``text`` takes no ``asks`` and no message carries exact
-lines (ADR-0361 §8:5): a yes is asked for by ``request_approval`` alone.
+``send_text``'s declaration and the check of its arguments (§9:1-§9:2), the exact parts
+words mark and their escapes (§9:6-§9:8), the pass-through wording step (§9:9), and
+``send_email``'s names, pinned to the declaration ``tools`` spells (§9:11-§9:14).
 """
 
 from __future__ import annotations
@@ -13,26 +12,23 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from ai_assistant.orchestration.message_tools import (
-    ATTACHMENTS_ARGUMENT,
     BCC_ARGUMENT,
     CC_ARGUMENT,
+    CONNECTION_ARGUMENT,
     EMAIL_CAPABILITY,
-    EXACT_ARGUMENT,
     FROM_ARGUMENT,
-    FROM_ASSISTANT,
-    FROM_USER,
     SUBJECT_ARGUMENT,
     TEXT_CALL,
     TEXT_CAPABILITY,
     TO_ARGUMENT,
-    VIA_ARGUMENT,
     WORDS_ARGUMENT,
+    ExactWords,
     TextArguments,
+    escaped_exact,
+    exact_words,
     platform_name,
-    platform_type,
     reworded,
     text_arguments,
-    who_it_is_for,
 )
 from ai_assistant.tools import send_email
 from ai_assistant.tools.send_email import EMAIL
@@ -47,154 +43,151 @@ def _schema(tool: ToolDefinition) -> dict[str, Any]:
     return schema
 
 
-# --- text's declaration (§2:2) ----------------------------------------------------------
+# --- send_text's declaration (§9:1-§9:2) -------------------------------------------------
 
 
-def test_text_takes_to_and_words_required_and_via_and_exact_optional() -> None:
-    """§2:2: who and what are the choices that cannot be left to the tool (§5:3).
-
-    ADR-0361 §8:5: ``asks`` is no longer among them.
-    """
+def test_send_text_takes_a_connection_and_words_and_nothing_else() -> None:
+    """§9:1: ``to`` goes, since who a message reaches is its connection's."""
     schema = _schema(TEXT_CALL)
-    assert TEXT_CALL.capability == TEXT_CAPABILITY
-    assert list(schema["required"]) == [TO_ARGUMENT, WORDS_ARGUMENT]
-    assert set(schema["properties"]) == {TO_ARGUMENT, WORDS_ARGUMENT, VIA_ARGUMENT, EXACT_ARGUMENT}
+    assert TEXT_CALL.capability == TEXT_CAPABILITY == "send_text"
+    assert TEXT_CALL.id == "text"
+    assert list(schema["required"]) == [CONNECTION_ARGUMENT, WORDS_ARGUMENT]
+    assert set(schema["properties"]) == {CONNECTION_ARGUMENT, WORDS_ARGUMENT}
     assert schema["additionalProperties"] is False
 
 
-def test_texts_schema_encodes_no_conditional_requirement() -> None:
-    """§5:6: a requirement that depends on other arguments is the tool's check."""
-    schema = _schema(TEXT_CALL)
-    for keyword in ("if", "then", "else", "dependentRequired", "dependentSchemas", "oneOf"):
-        assert keyword not in schema
-    assert "anyOf" not in schema
-
-
-def test_texts_description_says_it_is_sent_as_the_assistant() -> None:
-    """§2:9: text is always sent in the system's own voice, and takes no argument naming whose.
-
-    The assistant is named "the system" everywhere planning reads (ADR-0353 §4:2).
-    """
-    assert "in the system's own voice" in TEXT_CALL.description
-    assert FROM_ARGUMENT not in _schema(TEXT_CALL)["properties"]
-
-
-# --- text's arguments (§6:1, §6:3) -------------------------------------------------------
+def test_the_connection_is_checked_by_its_pattern_with_no_enum() -> None:
+    """§9:2: an ``L`` label by pattern, so the offered tools stay identical across works."""
+    connection = _schema(TEXT_CALL)["properties"][CONNECTION_ARGUMENT]
+    assert connection["pattern"] == "^L[1-9][0-9]*$"
+    assert "enum" not in connection
 
 
 def test_well_formed_arguments_are_read_whole() -> None:
-    checked = text_arguments({"to": "the user", "words": "On it.", "via": " L2 ", "exact": True})
-    assert checked == TextArguments(to="the user", words="On it.", via="L2", exact=True)
-
-
-def test_left_out_optional_arguments_are_the_tools_to_decide() -> None:
-    assert text_arguments({"to": "the user", "words": "On it."}) == TextArguments(
-        to="the user", words="On it."
-    )
+    checked = text_arguments({CONNECTION_ARGUMENT: "L2", WORDS_ARGUMENT: "Running late."})
+    assert checked == TextArguments(connection="L2", words="Running late.")
 
 
 @pytest.mark.parametrize(
-    ("arguments", "says"),
+    ("arguments", "said"),
     [
-        pytest.param({"to": "the user"}, "'words'", id="no-words"),
-        pytest.param({"to": "the user", "words": "  "}, "'words'", id="blank-words"),
-        pytest.param({"words": "Hi."}, "'to'", id="no-one"),
-        pytest.param({"to": 3, "words": "Hi."}, "'to'", id="to-not-text"),
-        pytest.param({"to": "the user", "words": "Hi.", "via": []}, "'via'", id="via-list"),
-        pytest.param({"to": "the user", "words": "Hi.", "via": " "}, "'via'", id="via-blank"),
-        pytest.param({"to": "the user", "words": "Hi.", "exact": "yes"}, "'exact'", id="exact"),
+        pytest.param({CONNECTION_ARGUMENT: "L1"}, WORDS_ARGUMENT, id="no-words"),
+        pytest.param({CONNECTION_ARGUMENT: "L1", WORDS_ARGUMENT: "  "}, WORDS_ARGUMENT, id="blank"),
+        pytest.param({WORDS_ARGUMENT: "Hi."}, CONNECTION_ARGUMENT, id="no-connection"),
         pytest.param(
-            {"to": "the user", "words": "Hi.", "asks": ["1.1"]}, "nothing else", id="asks"
+            {CONNECTION_ARGUMENT: "Telegram", WORDS_ARGUMENT: "Hi."},
+            CONNECTION_ARGUMENT,
+            id="a-platform-by-name",
         ),
-        pytest.param({"to": "the user", "words": "Hi.", "from": "user"}, "nothing else", id="from"),
+        pytest.param(
+            {CONNECTION_ARGUMENT: "L1", WORDS_ARGUMENT: "Hi.", "to": "the owner"},
+            "nothing else",
+            id="undeclared",
+        ),
     ],
 )
 def test_an_argument_missing_or_wrong_comes_back_saying_which(
-    arguments: dict[str, object], says: str
+    arguments: dict[str, object], said: str
 ) -> None:
-    """§6:3: an argument that is missing or wrong is never guessed."""
     checked = text_arguments(arguments)
     assert isinstance(checked, str)
-    assert says in checked
-
-
-# --- who it is for (§2:3) ---------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "to", ["the user", "The User", "user", "Leonardo", "leonardo pivato", "Leo"]
-)
-def test_the_user_is_found_as_planning_was_shown_them(to: str) -> None:
-    assert who_it_is_for(to, named=("Leonardo Pivato", "Leo")) is None
-
-
-def test_a_name_that_fits_no_one_comes_back_with_who_it_could_be() -> None:
-    """§2:3: never a guess."""
-    why = who_it_is_for("Anna", named=("Leonardo Pivato",))
-    assert why is not None
-    assert "the user ('Leonardo Pivato')" in why
-    bare = who_it_is_for("Anna")
-    assert bare is not None
-    assert bare.endswith("it could be the user")
-
-
-# --- where it goes (§2:4, §3:1) ---------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("name", "channel_type"),
-    [
-        ("telegram", "telegram"),
-        ("Telegram", "telegram"),
-        ("hub_chat", "conversation"),
-        ("the hub chat", "conversation"),
-        ("hub-chat", "conversation"),
-        ("whatsapp", None),
-    ],
-)
-def test_a_platform_is_named_as_planning_writes_it(name: str, channel_type: str | None) -> None:
-    assert platform_type(name) == channel_type
+    assert said in checked
 
 
 def test_a_result_names_each_platform() -> None:
-    assert platform_name("telegram") == "Telegram"
     assert platform_name("conversation") == "the hub chat"
-    assert platform_name("imessage") == "imessage"
+    assert platform_name("telegram") == "Telegram"
+    assert platform_name("email") == "email"
 
 
-# --- the wording step (§4) ----------------------------------------------------------------
+# --- exact parts (§9:6-§9:8) -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("exact", [True, False])
-def test_until_the_wording_step_is_built_every_messages_words_go_unchanged(exact: bool) -> None:
-    """§4:3: ``exact`` is accepted and changes nothing."""
-    words = "  Tell her: 'I'll be late'  \n"
-    assert reworded(words, exact=exact) == words
+def test_words_with_no_tag_are_read_as_written() -> None:
+    assert exact_words("See you at 7.") == ExactWords(text="See you at 7.")
 
 
-# --- email's names (§2:5) ---------------------------------------------------------------
+def test_a_marked_part_is_read_out_and_its_tags_removed() -> None:
+    read = exact_words('She said <exact>"bring the blue folder"</exact>, so bring it.')
+    assert read == ExactWords(
+        text='She said "bring the blue folder", so bring it.',
+        parts=('"bring the blue folder"',),
+    )
+
+
+def test_a_message_wrapped_whole_is_one_part() -> None:
+    read = exact_words("<exact>Dinner moved to 8.</exact>")
+    assert read == ExactWords(text="Dinner moved to 8.", parts=("Dinner moved to 8.",))
+
+
+@pytest.mark.parametrize(
+    ("words", "said"),
+    [
+        pytest.param("Say <exact>this", "never closed", id="unclosed"),
+        pytest.param("<exact>a <exact>b</exact></exact>", "inside", id="nested"),
+        pytest.param("this</exact>", "closes no", id="stray-close"),
+    ],
+)
+def test_a_tag_that_does_not_close_comes_back_not_done(words: str, said: str) -> None:
+    """§9:8: an unclosed tag, a tag opened inside a part, or a stray close."""
+    read = exact_words(words)
+    assert isinstance(read, str)
+    assert said in read
+
+
+def test_a_backslash_before_a_tag_sends_it_as_literal_text() -> None:
+    """§9:8: one backslash sends the tag as written, and is itself not sent."""
+    read = exact_words(r"Type \<exact> to mark a part.")
+    assert read == ExactWords(text="Type <exact> to mark a part.")
+
+
+def test_two_backslashes_send_one_and_leave_the_tag_a_tag() -> None:
+    read = exact_words("a path C:\\\\<exact>dir</exact>")
+    assert read == ExactWords(text="a path C:\\dir", parts=("dir",))
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "Plain words.",
+        "A literal <exact> tag and a </exact> one.",
+        "Escaped already: \\<exact> and \\\\</exact>.",
+    ],
+)
+def test_words_wrapped_whole_read_back_exactly(words: str) -> None:
+    """§8:6: an old ``exact`` call's words, wrapped whole with their tags escaped."""
+    assert exact_words(escaped_exact(words)) == ExactWords(text=words, parts=(words,))
+
+
+def test_until_the_wording_step_is_built_the_words_go_as_written_tags_removed() -> None:
+    """§9:9: nothing is reworded, and the tags are removed."""
+    read = exact_words("Tell her <exact>the code is 4471</exact>.")
+    assert not isinstance(read, str)
+    assert reworded(read) == "Tell her the code is 4471."
+
+
+# --- send_email's names (§9:11-§9:14) ------------------------------------------------------
 
 
 def test_emails_names_are_the_ones_its_declaration_spells() -> None:
-    """§2:5: the gate reads the arguments the tool declares, by the same names."""
-    properties = _schema(EMAIL)["properties"]
-    assert EMAIL.capability == EMAIL_CAPABILITY
-    assert {
+    """ADR-0364 §8:1: the capability is ``send_email``, its id still ``email``."""
+    schema = _schema(EMAIL)
+    assert EMAIL.capability == EMAIL_CAPABILITY == send_email.EMAIL_CAPABILITY == "send_email"
+    assert EMAIL.id == send_email.EMAIL_ID == "email"
+    properties = schema["properties"]
+    assert set(properties) == {
+        FROM_ARGUMENT,
         TO_ARGUMENT,
         CC_ARGUMENT,
         BCC_ARGUMENT,
         SUBJECT_ARGUMENT,
         WORDS_ARGUMENT,
-        ATTACHMENTS_ARGUMENT,
-        FROM_ARGUMENT,
-        EXACT_ARGUMENT,
-    } == set(properties)
-    assert list(_schema(EMAIL)["required"]) == [
-        TO_ARGUMENT,
-        SUBJECT_ARGUMENT,
-        WORDS_ARGUMENT,
-    ]
-    assert list(properties[FROM_ARGUMENT]["enum"]) == [FROM_ASSISTANT, FROM_USER]
-    assert (send_email.FROM_ASSISTANT, send_email.FROM_USER) == (FROM_ASSISTANT, FROM_USER)
-    assert "asks" not in properties  # ADR-0361 §8:5: no message asks
-    assert EMAIL.safe_to_repeat is False
+    }
+    assert list(schema["required"]) == [FROM_ARGUMENT, TO_ARGUMENT, SUBJECT_ARGUMENT, "words"]
+
+
+def test_an_email_takes_no_attachment_and_no_exact() -> None:
+    """§9:6, §9:14: ``exact`` and ``attachments`` go."""
+    properties = _schema(EMAIL)["properties"]
+    assert "attachments" not in properties
+    assert "exact" not in properties

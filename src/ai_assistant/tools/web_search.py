@@ -175,10 +175,23 @@ def _origin() -> dict[str, FrozenJson]:
     }
 
 
+#: The capability, ``search_web`` (ADR-0364 §8:1), renamed from ``web_search`` with every
+#: other field of its declaration kept, its id among them.
+WEB_SEARCH_CAPABILITY: Final = "search_web"
+
 WEB_SEARCH: Final = ToolDefinition(
     id=WEB_SEARCH_ID,
-    capability="web_search",
-    description="Ask the connected search account one question and read back its results.",
+    capability=WEB_SEARCH_CAPABILITY,
+    description=(
+        "Search the web for a query, through the connected search account.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label, read for you\n"
+        "evidence: what was read of the results for looking_for, each item marked outside\n"
+        "\n"
+        "It changes nothing, but what it sends leaves the system."
+    ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,
     side_effecting=True,
@@ -195,7 +208,14 @@ WEB_SEARCH: Final = ToolDefinition(
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "properties": {ORIGIN_ARGUMENT: _origin(), QUERY_ARGUMENT: {"type": "string"}},
+        "properties": {
+            ORIGIN_ARGUMENT: _origin(),
+            QUERY_ARGUMENT: {
+                "type": "string",
+                "minLength": 1,
+                "description": "What to search for.",
+            },
+        },
         "required": [ORIGIN_ARGUMENT, QUERY_ARGUMENT],
         "additionalProperties": False,
     },
@@ -1506,6 +1526,7 @@ __all__ = [
     "ORIGIN_ARGUMENT",
     "QUERY_ARGUMENT",
     "WEB_SEARCH",
+    "WEB_SEARCH_CAPABILITY",
     "WEB_SEARCH_ID",
     "WEB_SEARCH_SOURCE_NAME",
     "WebSearchEgress",

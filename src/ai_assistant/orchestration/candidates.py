@@ -66,7 +66,9 @@ from ai_assistant.orchestration.remembering import (
     OUTSIDE_CONTENT_ARGUMENT,
     REMEMBER_CANDIDATE,
     REMEMBER_CAPABILITY,
+    is_remember,
 )
+from ai_assistant.orchestration.renames import current_arguments
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -115,7 +117,7 @@ async def pending_candidates(
         for record in episodes
         if (processing := record.processing_record) is not None
         and not processing.is_open
-        and any(call.name == REMEMBER_CAPABILITY for one in processing.rounds for call in one.calls)
+        and any(is_remember(call.name) for one in processing.rounds for call in one.calls)
     ]
     if not recorded:
         return {}
@@ -134,7 +136,7 @@ async def pending_candidates(
     done: _Done = frozenset(
         (effect.activation_id, effect.round, effect.values_digest)
         for effect in effects
-        if effect.capability == REMEMBER_CAPABILITY
+        if is_remember(effect.capability)
         and effect.outcome is ToolOutcome.SUCCEEDED
         and effect.round is not None
         and effect.values_digest is not None
@@ -193,7 +195,7 @@ def done_candidates(
     joined: list[DoneCandidate] = []
     for one in processing.rounds:
         for call in one.calls:
-            if call.name != REMEMBER_CAPABILITY:
+            if not is_remember(call.name):
                 continue
             values = _ruled_values(call, labels)
             digest = None if values is None else _digest(episode, values)
@@ -276,7 +278,7 @@ async def _page_candidates(
 def _done_remember(effect: ActivationEffect) -> bool:
     """Whether an effect record shows a ``remember`` call done, as a candidate's must."""
     return (
-        effect.capability == REMEMBER_CAPABILITY
+        is_remember(effect.capability)
         and effect.outcome is ToolOutcome.SUCCEEDED
         and effect.round is not None
         and effect.values_digest is not None
@@ -346,7 +348,7 @@ def _approved_fact(effect: ActivationEffect, rounds: Mapping[str, PlanningRound]
     if part is None or (asking := rounds.get(part.round)) is None:
         return None
     asked: AskedCall | None = next((one for one in asking.asked if one.part == part.part), None)
-    if asked is None or asked.tool.capability != REMEMBER_CAPABILITY:
+    if asked is None or not is_remember(asked.tool.capability):
         return None
     try:
         digest = values_digest(asked.request)
@@ -364,7 +366,7 @@ def _facts(episode: str, processing: EpisodeProcessingRecord, done: _Done) -> tu
     facts: list[str] = []
     for one in processing.rounds:
         for call in one.calls:
-            if call.name != REMEMBER_CAPABILITY:
+            if not is_remember(call.name):
                 continue
             values = _ruled_values(call, labels)
             digest = None if values is None else _digest(episode, values)
@@ -396,6 +398,11 @@ def _digest(episode: str, values: dict[str, FrozenJson]) -> str | None:
     return values_digest(request)
 
 
+def _renamed(capability: str, values: Mapping[str, FrozenJson]) -> dict[str, str]:
+    """Each recorded argument's name, by the name it goes by now."""
+    return {name: next(iter(current_arguments(capability, {name: None}))) for name in values}
+
+
 def _ruled_values(
     call: ProposedCall, labels: Mapping[str, PlanningLabel]
 ) -> dict[str, FrozenJson] | None:
@@ -410,8 +417,12 @@ def _ruled_values(
     values: dict[str, FrozenJson] = dict(call.model_dump()["arguments"])
     values.pop(DELIBERATE_REPEAT, None)
     values.pop(LOOKING_FOR, None)
-    for argument, kind in CANDIDATE_LABEL_ARGUMENTS[REMEMBER_CAPABILITY].items():
-        if argument not in values:
+    # ADR-0364 §8:2: a call recorded before the renames names its label arguments the
+    # old way; the recorded name is kept, so the digest still matches its effect's.
+    recorded = {current: name for name, current in _renamed(call.name, values).items()}
+    for current, kind in CANDIDATE_LABEL_ARGUMENTS[REMEMBER_CAPABILITY].items():
+        argument = recorded.get(current)
+        if argument is None:
             continue
         given = values[argument]
         named = [given] if isinstance(given, str) else given

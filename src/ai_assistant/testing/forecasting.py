@@ -341,8 +341,20 @@ def _coordinate_schema(*, maximum: float) -> dict[str, FrozenJson]:
 #: credential.
 FAKE_FORECAST_READ: Final = ToolDefinition(
     id=FAKE_FORECAST_ID,
-    capability="forecast_read",
-    description="Ask the configured forecast provider what it says about the days ahead.",
+    capability="read_forecast",
+    description=(
+        "Read the forecast for the next few days at a place.\n"
+        "\n"
+        "Give the coordinates of a place that was named, such as a city, both or neither; left "
+        "out, it reads the system's configured place.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label, read for you\n"
+        "evidence: what was read of the forecast for looking_for, each item marked outside\n"
+        "\n"
+        "It changes nothing, but what it sends leaves the system."
+    ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,
     side_effecting=True,
@@ -361,10 +373,20 @@ FAKE_FORECAST_READ: Final = ToolDefinition(
         "type": "object",
         "properties": {
             "origin": _origin_schema(),
-            "latitude": _coordinate_schema(maximum=_MAX_LATITUDE),
-            "longitude": _coordinate_schema(maximum=_MAX_LONGITUDE),
+            "latitude": {
+                **_coordinate_schema(maximum=_MAX_LATITUDE),
+                "description": (
+                    "The place's latitude, in degrees. Left out: the configured place's."
+                ),
+            },
+            "longitude": {
+                **_coordinate_schema(maximum=_MAX_LONGITUDE),
+                "description": (
+                    "The place's longitude, in degrees. Left out: the configured place's."
+                ),
+            },
         },
-        "required": ["origin", "latitude", "longitude"],
+        "required": ["origin"],
         "additionalProperties": False,
     },
 )
@@ -970,21 +992,16 @@ class FakeForecaster:
             _real(checked.request.parameters.get("latitude")),
             _real(checked.request.parameters.get("longitude")),
         )
-        if named != (self._origin, self._latitude, self._longitude):
-            # **§3's place clause, which is every forecaster's and not the production
-            # one's alone.** "The place is the deployment's own configured place, and the
-            # configuration is the naming act … held by the forecaster as its own
-            # configuration", and no caller widens, narrows or offsets the read
-            # (ADR-0093 §10). A call carrying this fake's declaration with another
-            # coordinate is *validly authorised* — its own decision was recorded over its
-            # own request — so the three checks above pass it, and only this comparison
-            # stands between it and a scripted answer about somewhere the deployment did
-            # not choose. A fake that answered it would let a consumer's test pass over an
-            # exchange no deployment can have.
+        if named[0] != self._origin or named[1] is None or named[2] is None:
+            # **The origin is still the configured provider's** (ADR-0364 §12:3): the
+            # coordinates are planning's, the configured place's where it named none, and
+            # what the call sends, never where it goes. A call carrying this fake's
+            # declaration to another origin, or without both coordinates, is no call a
+            # deployment makes, so a fake that answered it would let a consumer's test
+            # pass over an exchange no deployment can have.
             msg = (
-                f"{self._declaration.id}: this call names a place this forecaster is not "
-                f"configured for, so the request would ask about somewhere the "
-                f"deployment did not choose (ADR-0260 §3, §6)"
+                f"{self._declaration.id}: this call is not bound to the configured provider "
+                f"or does not carry both coordinates (ADR-0260 §6, ADR-0364 §12:2)"
             )
             raise ToolBindingError(msg)
 

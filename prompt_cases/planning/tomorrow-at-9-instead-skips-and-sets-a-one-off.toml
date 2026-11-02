@@ -8,7 +8,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes two spawns: one whose replaces names T1, about the vitamin, whose rule repeats daily at 07:00 from 2026-10-31; and one with no rule and no replaces, about the vitamin, whose at is 2026-10-30T09:00. It makes no cancel_task call."""
+read = """The round makes two spawn_task calls: one whose replaces names T1, about the vitamin, whose rule repeats daily at 07:00 from 2026-10-31; and one with no rule and no replaces, about the vitamin, whose at is 2026-10-30T09:00. It makes no cancel_task call."""
 
 [input]
 file = "tomorrow-at-9-instead-skips-and-sets-a-one-off.json"

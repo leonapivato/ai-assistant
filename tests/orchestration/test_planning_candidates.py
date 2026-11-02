@@ -172,7 +172,7 @@ async def test_a_candidates_result_says_pending_and_shows_similar_memories_by_m_
 
     (call,) = reported(completer.last_call)
     assert call["outcome"] == "done"
-    value = call["result"]["value"]
+    value = call["result"]
     assert value["candidate"].startswith("recorded as a candidate for long-term memory")
     assert "the observer decides whether and how it is kept" in value["candidate"]
     assert "never that it is saved" not in value["candidate"]
@@ -180,14 +180,15 @@ async def test_a_candidates_result_says_pending_and_shows_similar_memories_by_m_
     shown = tag(similar, "memory")
     assert (shown.get("label"), shown.text) == ("M1", "prefers aisle seats")
     assert "booked by airline" not in completer.last_call.exchange.steps[-1].report.results[0].text
-    assert [one.label for one in planned.labels] == ["R1", "M1"]
+    # ADR-0364 §6:1: a candidate's result carries no R label; its similar memories keep theirs.
+    assert [one.label for one in planned.labels] == ["M1"]
 
 
 async def test_a_candidate_with_nothing_similar_says_none() -> None:
     _, completer = await _after_remember(RecordedCandidate(similar=()))
 
     (call,) = reported(completer.last_call)
-    assert call["result"]["value"]["similar_memories"] == "none"
+    assert call["result"]["similar_memories"] == "none"
 
 
 async def test_a_failed_lookup_is_said_and_the_candidate_is_still_recorded() -> None:
@@ -196,7 +197,7 @@ async def test_a_failed_lookup_is_said_and_the_candidate_is_still_recorded() -> 
 
     (call,) = reported(completer.last_call)
     assert call["outcome"] == "done"
-    value = call["result"]["value"]
+    value = call["result"]
     assert value["candidate"].startswith("recorded as a candidate for long-term memory")
     assert value["similar_memories"] == "could not be read; the candidate is still recorded"
 
@@ -328,7 +329,7 @@ async def test_another_holder_and_a_dispute_are_conveyed() -> None:
 
     shown = _recalled(completer)
     assert shown.get("held_by") == "a person the system knows"
-    assert shown.get("disputed_by") == "the owner"
+    assert shown.get("disputed_by") == "P1"
 
 
 async def test_a_future_validity_end_is_conveyed() -> None:
@@ -362,7 +363,7 @@ async def test_an_assistant_statement_is_conveyed_as_what_the_assistant_said() -
     )
     assert shown.get("standing") is None
     assert shown.get("said_in") == "an earlier exchange at Sun 18 Oct 2026, 12:00 pm"
-    assert shown.get("kept_by") == "the owner"
+    assert shown.get("kept_by") == "P1"
     assert shown.get("held_by") is None
 
 

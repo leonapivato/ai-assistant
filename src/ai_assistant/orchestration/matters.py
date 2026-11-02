@@ -139,10 +139,11 @@ _log = structlog.get_logger(__name__)
 #: design names more (ADR-0349 §11).
 THE_USER: Final = "user"
 
-#: Planning's three calls on running work (ADR-0349 §4:6, §6:1, §7:20), whose
-#: declarations and runner are :mod:`~ai_assistant.orchestration.matter_calls`'s; named
-#: here, where planning may read them.
-STOP_ACTIVATION_CAPABILITY: Final = "stop_activation"
+#: Planning's calls on running work (ADR-0349 §4:6, §7:20), whose declarations and
+#: runner are :mod:`~ai_assistant.orchestration.matter_calls`'s; named here, where planning
+#: may read them. The stop is ``stop_work`` since ADR-0364 §8:1, and the findings look-up
+#: is folded into ``read_episode`` (§8:3): its old name is read only from stored records.
+STOP_ACTIVATION_CAPABILITY: Final = "stop_work"
 LOOK_UP_ACTIVATION_CAPABILITY: Final = "look_up_activation"
 ANSWER_OFFER_CAPABILITY: Final = "answer_offer"
 

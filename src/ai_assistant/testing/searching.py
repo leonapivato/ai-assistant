@@ -147,8 +147,17 @@ _ATTESTED_CONFIDENCE: Final = 0.9
 #: arguments: an origin bearing both egress keywords, and a query bearing neither.
 FAKE_WEB_SEARCH: Final = ToolDefinition(
     id=FAKE_WEB_SEARCH_ID,
-    capability="web_search",
-    description="Ask the connected search account one question and read its results.",
+    capability="search_web",
+    description=(
+        "Search the web for a query, through the connected search account.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label, read for you\n"
+        "evidence: what was read of the results for looking_for, each item marked outside\n"
+        "\n"
+        "It changes nothing, but what it sends leaves the system."
+    ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,
     side_effecting=True,
@@ -176,7 +185,7 @@ FAKE_WEB_SEARCH: Final = ToolDefinition(
                 "x-egress-destination": "https",
                 "x-egress-tier": "operational",
             },
-            "query": {"type": "string"},
+            "query": {"type": "string", "minLength": 1, "description": "What to search for."},
         },
         "required": ["origin", "query"],
         "additionalProperties": False,

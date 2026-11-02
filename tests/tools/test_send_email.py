@@ -217,10 +217,8 @@ def test_every_recipient_argument_declares_both_keywords_and_no_other_does() -> 
         "bcc": {DESTINATION_KEYWORD, TIER_KEYWORD},
         "subject": set(),
         "words": set(),
-        # ADR-0357 §2:5: never transmitted, so none is destination-bearing or tiered.
-        "attachments": set(),
+        # ADR-0364 §9:11: never transmitted, so neither destination-bearing nor tiered.
         "from": set(),
-        "exact": set(),
     }
 
 
@@ -298,7 +296,10 @@ def test_the_required_arguments_bound_is_not_shared_with_the_optional_two() -> N
     under ADR-0157 §1: the bound now sits one level down, on a branch, where a
     shared literal would be shared by two objects rather than one.
     """
-    assert _subschema("cc") == _subschema("bcc")
+    # Each carries its own description (ADR-0364 §5:2), so the schemas less it are compared.
+    assert {k: v for k, v in _subschema("cc").items() if k != "description"} == {
+        k: v for k, v in _subschema("bcc").items() if k != "description"
+    }
     assert _subschema("to") != _subschema("cc")
     for name in ("cc", "bcc"):
         assert all(
@@ -331,7 +332,12 @@ def test_what_the_widened_schema_accepts_for_to(value: FrozenJson, violates: boo
     (§2), so an empty array, an array of non-strings, a number and a structure each
     stay exactly as refused as they were.
     """
-    parameters: Mapping[str, FrozenJson] = {"to": value, "subject": "s", "words": "b"}
+    parameters: Mapping[str, FrozenJson] = {
+        "from": "user",
+        "to": value,
+        "subject": "s",
+        "words": "b",
+    }
 
     assert bool(parameter_violations(EMAIL.parameters_schema, parameters)) is violates
 
@@ -351,16 +357,7 @@ def test_the_declaration_the_seam_reads_is_the_one_this_tool_intends() -> None:
         canonicalises=frozenset(DestinationProtocol),
     )
 
-    assert declaration.named == (
-        "to",
-        "cc",
-        "bcc",
-        "subject",
-        "words",
-        "attachments",
-        "from",
-        "exact",
-    )
+    assert declaration.named == ("from", "to", "cc", "bcc", "subject", "words")
     assert {
         name: (argument.protocol, argument.tier) for name, argument in declaration.arguments.items()
     } == {
@@ -369,9 +366,7 @@ def test_the_declaration_the_seam_reads_is_the_one_this_tool_intends() -> None:
         "bcc": (DestinationProtocol.SMTP, DataTier.PERSONAL),
         "subject": (None, None),
         "words": (None, None),
-        "attachments": (None, None),
         "from": (None, None),
-        "exact": (None, None),
     }
 
 
@@ -400,6 +395,7 @@ def test_the_keywords_leave_the_schema_validating_identically() -> None:
         },
     }
     accepted: Mapping[str, FrozenJson] = {
+        "from": "user",
         "to": ("bob@example.com",),
         "subject": "lunch",
         "words": "one o'clock",

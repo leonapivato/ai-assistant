@@ -181,8 +181,11 @@ async def test_each_part_of_a_story_view_is_shown_and_labelled() -> None:
     assert [one.get("episode") for one in timeline] == ["E1", "E2"]
     assert timeline[0].text == "booking the site"
     assert "- S1 is part of S2, with 2 members." in stands
-    # §5:1, §5:7: each thing is labelled on first show, and recorded with the episode.
+    # §5:1, §5:7: each thing is labelled on first show, and recorded with the episode;
+    # the owner and the connection the stimulus came in on among them (ADR-0364 §3, §4).
     assert _labels(planned) == {
+        "P1": (LabelKind.PERSON, "person:owner"),
+        "L1": (LabelKind.PLACE, "conversation:new"),
         "S1": (LabelKind.STORY, "story:trip"),
         "N1": (LabelKind.NOTE, "7"),
         "E1": (LabelKind.EPISODE, "activation:b"),

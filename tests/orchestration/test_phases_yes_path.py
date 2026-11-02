@@ -160,7 +160,7 @@ _EMAIL: Final = _tool("send_email", {"to": {"type": "string"}, "body": {"type": 
 _WIPE: Final = _tool("wipe_calendar", {"month": {"type": "string"}})
 
 _TOOLS: Final = (_BOOK, _EMAIL, _WIPE)
-_CAPABILITIES: Final = ("web_search", "remember", "book", "send_email", "wipe_calendar")
+_CAPABILITIES: Final = ("search_web", "remember_fact", "book", "send_email", "wipe_calendar")
 
 #: What a digest of the search's result answers.
 _DIGESTED: Final = json.dumps({"evidence": [{"text": "It opens at nine.", "source": "D1"}]})
@@ -183,7 +183,7 @@ class _Policy:
         capability = str(request.tool.capability)
         if capability == _WIPE.capability:
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason="test: not allowed")
-        if request.tool.effect is CapabilityEffect.WORLD and capability != "web_search":
+        if request.tool.effect is CapabilityEffect.WORLD and capability != "search_web":
             return PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="test: the world")
         return PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="test: allowed")
 
@@ -234,7 +234,7 @@ class _Planner(FakeToolCallingCompleter):
         model: str | None = None,
     ) -> RoundResponse:
         latest = exchange.steps[-1].response.calls if exchange.steps else ()
-        if latest and all(one.name == "text" for one in latest):
+        if latest and all(one.name == "send_text" for one in latest):
             return RoundResponse()
         assert self._steps, "planning ran a round the case did not script"
         step = self._steps.popleft()
@@ -402,7 +402,7 @@ class _Hub:
                 plans=harness.plans,
                 invoker=tools,
                 own_records=OwnRecordsByCapability(
-                    {"remember": CandidateCalls(similar=similar, limit=5)}
+                    {"remember_fact": CandidateCalls(similar=similar, limit=5)}
                 ),
                 timeout=timedelta(seconds=5),
                 now=lambda: AT,
@@ -490,6 +490,8 @@ def _run_approved(label: str = "A1") -> RoundResponse:
 
 
 _DONE: Final = says("Done.", call_id="done")
+#: ADR-0364 §6:3: why a call needing approval is refused where nothing can ask for it.
+_CANNOT_ASK: Final = "it needs approval, and nothing here can ask for it, so it will not run"
 
 
 async def _asked(hub: _Hub) -> tuple[str, EpisodicMemory]:
@@ -522,7 +524,7 @@ async def test_a_booking_is_asked_and_a_yes_runs_nothing() -> None:
     assert question.text == _ASKING
     assert not question.cut_off
     assert all(one == () for one in _asked_calls(asking))
-    assert "needs a yes, and it cannot be asked about" in hub.planner.shown(1)
+    assert _CANNOT_ASK in hub.planner.shown(1)
     assert hub.world.of("book") == []
 
     hub.reader.yes()
@@ -532,7 +534,7 @@ async def test_a_booking_is_asked_and_a_yes_runs_nothing() -> None:
     assert hub.world.of("book") == []
     assert "<ticket " not in hub.planner.shown(2)
     assert "run_approved_action" not in hub.planner.offered(2)
-    assert "needs a yes, and it cannot be asked about" in hub.planner.shown(3)
+    assert _CANNOT_ASK in hub.planner.shown(3)
     assert all(one == () for one in _asked_calls(yes))
     assert "answers" not in processing(yes).understanding[-1].model_dump()
     # Understanding was shown the question's message, and no mark on it.
@@ -594,7 +596,7 @@ async def test_a_yes_arriving_as_an_event_approves_nothing() -> None:
 
     assert hub.world.of("book") == []
     assert "<ticket " not in hub.planner.shown(2)
-    assert "it cannot be asked about" in hub.planner.shown(3)
+    assert _CANNOT_ASK in hub.planner.shown(3)
     assert result.capture.episode_id is not None
     event = await hub.memory.get(result.capture.episode_id)
     assert event is not None
@@ -810,7 +812,9 @@ async def test_a_deny_is_never_asked_about() -> None:
     )
     conversation, denied = await hub.turn("Wipe my calendar for May.")
 
-    assert "never ask about it" in hub.planner.shown(1)
+    # ADR-0364 §6:1: refused with the policy's own why, which names no way to ask.
+    assert '"because": "the permission policy denies this call"' in hub.planner.shown(1)
+    assert "request_approval" not in hub.planner.shown(1)
     assert all(one == () for one in _asked_calls(denied))
     (said,) = await hub.said(conversation)
     assert said.text == "Your settings do not allow that."

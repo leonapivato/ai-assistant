@@ -145,7 +145,9 @@ __all__ = [
     "INTO_ARGUMENT",
     "LINK_STORY",
     "LINK_STORY_CAPABILITY",
+    "MEMBER_ARGUMENT",
     "MEMBER_EPISODE_ARGUMENT",
+    "MEMBER_SPLIT",
     "MEMBER_STORY_ARGUMENT",
     "MERGE_STORY",
     "MERGE_STORY_CAPABILITY",
@@ -176,19 +178,33 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: The capabilities, each the id of its one declaration.
-START_STORY_CAPABILITY: Final = "start_story"
-NOTE_STORY_CAPABILITY: Final = "note_story"
-LINK_STORY_CAPABILITY: Final = "link_story"
-UNLINK_STORY_CAPABILITY: Final = "unlink_story"
-TIDY_STORY_CAPABILITY: Final = "tidy_story"
-MOVE_STORY_CAPABILITY: Final = "move_story"
-MERGE_STORY_CAPABILITY: Final = "merge_stories"
-SPLIT_STORY_CAPABILITY: Final = "split_story"
-GROUP_STORY_CAPABILITY: Final = "group_stories"
+#: The capabilities, renamed by ADR-0364 §8:1: "story" is "matter" wherever planning sees
+#: it. Each declaration keeps its id, the name it was first declared under (:data:`_IDS`).
+START_STORY_CAPABILITY: Final = "start_matter"
+NOTE_STORY_CAPABILITY: Final = "note_matter"
+LINK_STORY_CAPABILITY: Final = "add_to_matter"
+UNLINK_STORY_CAPABILITY: Final = "remove_from_matter"
+TIDY_STORY_CAPABILITY: Final = "tidy_matter"
+MOVE_STORY_CAPABILITY: Final = "move_to_matter"
+MERGE_STORY_CAPABILITY: Final = "merge_matters"
+SPLIT_STORY_CAPABILITY: Final = "split_matter"
+GROUP_STORY_CAPABILITY: Final = "group_matters"
 
-#: The argument naming the story a call writes to, by its ``S`` label.
-STORY_ARGUMENT: Final = "story"
+#: Each declaration's id: its capability's name before ADR-0364 §8:1 renamed it.
+_IDS: Final[Mapping[str, str]] = {
+    START_STORY_CAPABILITY: "start_story",
+    NOTE_STORY_CAPABILITY: "note_story",
+    LINK_STORY_CAPABILITY: "link_story",
+    UNLINK_STORY_CAPABILITY: "unlink_story",
+    TIDY_STORY_CAPABILITY: "tidy_story",
+    MOVE_STORY_CAPABILITY: "move_story",
+    MERGE_STORY_CAPABILITY: "merge_stories",
+    SPLIT_STORY_CAPABILITY: "split_story",
+    GROUP_STORY_CAPABILITY: "group_stories",
+}
+
+#: The argument naming the matter a call writes to, by its ``S`` label (ADR-0364 §8:2).
+STORY_ARGUMENT: Final = "matter"
 
 #: A note call's note.
 NOTE_ARGUMENT: Final = "note"
@@ -206,18 +222,29 @@ INTO_ARGUMENT: Final = "into"
 #: The activations a move or a split carries, by their episodes' ``E`` labels.
 EPISODES_ARGUMENT: Final = "episodes"
 
-#: The member stories a split carries, or the stories a group puts under a new one, by
+#: The member matters a split carries, or the matters a group puts under a new one, by
 #: their ``S`` labels.
-STORIES_ARGUMENT: Final = "stories"
+STORIES_ARGUMENT: Final = "matters"
 
 #: The story a start sits inside, by its ``S`` label.
 INSIDE_ARGUMENT: Final = "inside"
 
-#: The story a link or an unlink names as the member, by its ``S`` label.
-MEMBER_STORY_ARGUMENT: Final = "member_story"
+#: The member an add or a remove names, a matter by its ``S`` label or an activation by
+#: its episode's ``E`` label, its label saying which; left out, this work (ADR-0364 §8:2).
+MEMBER_ARGUMENT: Final = "member"
 
-#: The activation a link or an unlink names as the member, by its episode's ``E`` label.
+#: The member as the runner reads it, once planning's check has read its label: a matter,
+#: by its id, or an activation, by its episode's. The hub fills them, from ``member``.
+MEMBER_STORY_ARGUMENT: Final = "member_story"
 MEMBER_EPISODE_ARGUMENT: Final = "member_episode"
+
+#: ADR-0364 §8:2: where planning's check puts ``member``'s id, by the kind its label names.
+MEMBER_SPLIT: Final[Mapping[str, Mapping[LabelKind, str]]] = {
+    MEMBER_ARGUMENT: {
+        LabelKind.STORY: MEMBER_STORY_ARGUMENT,
+        LabelKind.EPISODE: MEMBER_EPISODE_ARGUMENT,
+    },
+}
 
 #: The most first notes one start carries. The page's tidy-up condenses them, so this
 #: bounds one call rather than the page; several matters are several starts.
@@ -234,7 +261,7 @@ _NOTE_SCHEMA: Final[dict[str, FrozenJson]] = {
 _STORY_SCHEMA: Final[dict[str, FrozenJson]] = {
     "type": "string",
     "minLength": 1,
-    "description": "The story, by the S label you were shown it under.",
+    "description": "The matter, by S label.",
 }
 
 
@@ -252,8 +279,8 @@ def _labels(description: str, *, min_items: int = 0) -> dict[str, FrozenJson]:
 
 
 _CARRIED_NOTES: Final = _labels(
-    "The story's notes that go with it, by their N labels; each must be on the story it "
-    "leaves. Name none to leave every note where it is."
+    "The notes that go, by N label, each on the matter they leave. Left out: none, so every "
+    "note stays."
 )
 
 
@@ -287,7 +314,7 @@ def _declared(  # noqa: PLR0913 — one keyword per property a story call varies
     if required:
         schema["required"] = list(required)
     return ToolDefinition(
-        id=capability,
+        id=_IDS[capability],
         capability=capability,
         description=description,
         risk_level=RiskLevel.LOW,
@@ -311,43 +338,59 @@ def _declared(  # noqa: PLR0913 — one keyword per property a story call varies
 _EPISODE_FILLED: Final[dict[str, FrozenJson]] = {"type": "string", "minLength": 1}
 _MARK_FILLED: Final[dict[str, FrozenJson]] = {"type": "boolean"}
 
-_MEMBER_PROPERTIES: Final[dict[str, FrozenJson]] = {
+_ADD_PROPERTIES: Final[dict[str, FrozenJson]] = {
     STORY_ARGUMENT: _STORY_SCHEMA,
-    MEMBER_STORY_ARGUMENT: {
-        "type": "string",
-        "minLength": 1,
-        "description": "A story as the member, by its S label. Name this or member_episode.",
-    },
-    MEMBER_EPISODE_ARGUMENT: {
+    MEMBER_ARGUMENT: {
         "type": "string",
         "minLength": 1,
         "description": (
-            "An activation as the member, by its episode's E label. Name this or "
-            "member_story; name neither for this activation."
+            "What to add: an episode by its E label, or a matter by its S label. Left out: "
+            "this work."
         ),
     },
+    MEMBER_STORY_ARGUMENT: {"type": "string", "minLength": 1},
+    MEMBER_EPISODE_ARGUMENT: {"type": "string", "minLength": 1},
+    EPISODE_ARGUMENT: _EPISODE_FILLED,
+}
+
+_REMOVE_PROPERTIES: Final[dict[str, FrozenJson]] = {
+    STORY_ARGUMENT: _STORY_SCHEMA,
+    MEMBER_ARGUMENT: {
+        "type": "string",
+        "minLength": 1,
+        "description": (
+            "What to remove: an episode by its E label, or a matter by its S label. Left out: "
+            "this work."
+        ),
+    },
+    MEMBER_STORY_ARGUMENT: {"type": "string", "minLength": 1},
+    MEMBER_EPISODE_ARGUMENT: {"type": "string", "minLength": 1},
     EPISODE_ARGUMENT: _EPISODE_FILLED,
 }
 
 START_STORY: Final = _declared(
     START_STORY_CAPABILITY,
     (
-        "Start a story when someone takes up a matter that will come up again, with "
-        "its first notes. This activation joins it. Name the story it sits inside, if "
-        "the person frames it so."
+        "Start a matter, with its first notes, when something is taken up that will come up "
+        "again.\n"
+        "\n"
+        "This work joins it. Name the larger matter it sits inside, where it was framed so.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "matters: with done, the new matter, as matters are shown\n"
+        "\n"
+        "It changes only the system's own records. Not safe to repeat."
     ),
     properties={
         NOTES_ARGUMENT: {
-            "type": "array",
-            "items": _NOTE_SCHEMA,
-            "minItems": 1,
-            "maxItems": START_NOTES_MAX,
-            "description": "The story's first notes: what the matter is, and what is open.",
+            **_NOTE_SCHEMA,
+            "description": "Its first notes: what the matter is, and what is open.",
         },
         INSIDE_ARGUMENT: {
             "type": "string",
             "minLength": 1,
-            "description": "The larger story it sits inside, by its S label.",
+            "description": "The larger matter it sits inside, by S label. Left out: none.",
         },
         EPISODE_ARGUMENT: _EPISODE_FILLED,
         OUTSIDE_CONTENT_ARGUMENT: _MARK_FILLED,
@@ -357,16 +400,23 @@ START_STORY: Final = _declared(
     safe_to_repeat=False,
     idempotency=Idempotency.NONE,
 )
-"""Start a story (ADR-0300 §10:3): not safe to repeat, so acting's backstop refuses a
-second identical start in the matter as already done (ADR-0306 §3:1, §5:9)."""
+"""Start a matter (ADR-0300 §10:3): not safe to repeat, so acting's backstop refuses a
+second identical start in the matter as already done (ADR-0306 §3:1, §5:9). Its first
+notes are one text since ADR-0364 §8:2's agreed declaration."""
 
 NOTE_STORY: Final = _declared(
     NOTE_STORY_CAPABILITY,
     (
-        "Write a note on a story's page: what its records cannot show and the matter "
-        "needs, such as what is open, what you are waiting on, who will do what, why "
-        "something was decided, or what comes next. Your text outside a call stays "
-        "with this episode and never reaches a story."
+        "Write a note on a matter.\n"
+        "\n"
+        "Note what its records can't show and the matter needs, such as what is open, what you "
+        "are waiting on, who will do what, why something was decided, or what comes next. Your "
+        "notes outside a call stay with this episode and never reach a matter.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
     properties={
         STORY_ARGUMENT: _STORY_SCHEMA,
@@ -379,46 +429,63 @@ NOTE_STORY: Final = _declared(
     safe_to_repeat=True,
     idempotency=Idempotency.NONE,
 )
-"""Write a note on a story (ADR-0300 §10:2, ADR-0303 §9:3), safe to repeat as ruled."""
+"""Write a note on a matter (ADR-0300 §10:2, ADR-0303 §9:3), safe to repeat as ruled."""
 
 LINK_STORY: Final = _declared(
     LINK_STORY_CAPABILITY,
     (
-        "Link this activation, another activation or a story into a story, where it "
-        "belongs to that matter."
+        "Add this work, an episode or a matter to a matter it belongs to.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "matters: with done, where this work joined a matter you weren't shown, that matter, as "
+        "matters are shown\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
-    properties=_MEMBER_PROPERTIES,
+    properties=_ADD_PROPERTIES,
     required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
-    system_supplied=(EPISODE_ARGUMENT,),
+    system_supplied=(EPISODE_ARGUMENT, MEMBER_STORY_ARGUMENT, MEMBER_EPISODE_ARGUMENT),
     safe_to_repeat=True,
     idempotency=Idempotency.NATURAL,
 )
-"""Link to a story (ADR-0300 §10:3): a member already there is passed over."""
+"""Add to a matter (ADR-0300 §10:3): a member already there is passed over."""
 
 UNLINK_STORY: Final = _declared(
     UNLINK_STORY_CAPABILITY,
     (
-        "Remove this activation, another activation or a story from a story it is in, "
-        "where it does not belong to that matter. Do it only where someone asked for "
-        "it, or the work in hand needs it now."
+        "Remove this work, an episode or a matter from a matter it doesn't belong to.\n"
+        "\n"
+        "Only where it was asked for, or this work needs it now.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
-    properties=_MEMBER_PROPERTIES,
+    properties=_REMOVE_PROPERTIES,
     required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
-    system_supplied=(EPISODE_ARGUMENT,),
+    system_supplied=(EPISODE_ARGUMENT, MEMBER_STORY_ARGUMENT, MEMBER_EPISODE_ARGUMENT),
     safe_to_repeat=True,
     idempotency=Idempotency.NATURAL,
 )
-"""Unlink from a story (ADR-0303 §9:1): a member the story no longer holds is passed
+"""Remove from a matter (ADR-0303 §9:1): a member the matter no longer holds is passed
 over, and no note moves (§6:4)."""
 
 TIDY_STORY: Final = _declared(
     TIDY_STORY_CAPABILITY,
     (
-        "Tidy a story's summary: rewrite it from its notes and episodes since it was "
-        "last tidied. Do it only where someone asked for it, or the work in hand "
-        "needs it now. It runs on its own, brings no further round, and how it went "
-        "is not shown to you. A tidy-up reads only what came since the last, so after "
-        "moving a note away, tidy the story it left so its summary drops it."
+        "Tidy a matter's summary: rewrite it from its notes and episodes since it was last "
+        "tidied.\n"
+        "\n"
+        "Only where it was asked for, or this work needs it now. It runs on its own and brings no "
+        "further round. It reads only what came since the last tidy-up, so after moving a note "
+        "away, tidy the matter it left so its summary drops it.\n"
+        "\n"
+        "outcome: started: it runs on its own, and how it went is recorded on the matter, not "
+        "shown here\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
     properties={STORY_ARGUMENT: _STORY_SCHEMA},
     required=(STORY_ARGUMENT,),
@@ -426,25 +493,30 @@ TIDY_STORY: Final = _declared(
     safe_to_repeat=True,
     idempotency=Idempotency.NATURAL,
 )
-"""Tidy a story's page (ADR-0300 §10:4, ADR-0307 §7): planning's choice, never added by
+"""Tidy a matter's page (ADR-0300 §10:4, ADR-0307 §7): planning's choice, never added by
 rule."""
 
 MOVE_STORY: Final = _declared(
     MOVE_STORY_CAPABILITY,
     (
-        "Move activations, notes, or both, from one story to another, where they "
-        "belong to the other matter. Do it only where someone asked for it, or the "
-        "work in hand needs it now. It carries only the notes you name by their N "
-        "labels, each on the story it leaves; one naming a note that story does not "
-        "hold is refused whole. To move something a story's summary holds, read the "
-        "story, find the note it came from, if one did, and name that note rather "
-        "than restating it as a new note; then note on the story it left where that "
-        "went, and tidy that story."
+        "Move episodes, notes or both from one matter to another, where they belong to the "
+        "other.\n"
+        "\n"
+        "Only where it was asked for, or this work needs it now. It carries only the notes you "
+        "name, each on the matter they leave; naming a note it doesn't hold refuses the whole "
+        "call. To move something a summary holds, read the matter, find the note it came from, if "
+        "one did, and name that note rather than restating it as a new one; then note on the "
+        "matter it left where that went, and tidy that matter.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
     properties={
-        STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The story they leave, by its S label."},
-        TO_ARGUMENT: {**_STORY_SCHEMA, "description": "The story they go to, by its S label."},
-        EPISODES_ARGUMENT: _labels("The activations that go, by their episodes' E labels."),
+        STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The matter they leave, by S label."},
+        TO_ARGUMENT: {**_STORY_SCHEMA, "description": "The matter they go to, by S label."},
+        EPISODES_ARGUMENT: _labels("The episodes that go, by E label. Left out: none."),
         NOTES_ARGUMENT: _CARRIED_NOTES,
         EPISODE_ARGUMENT: _EPISODE_FILLED,
     },
@@ -453,19 +525,25 @@ MOVE_STORY: Final = _declared(
     safe_to_repeat=True,
     idempotency=Idempotency.NATURAL,
 )
-"""Move members (ADR-0303 §9:1): a repeat names members the first story no longer holds
+"""Move members (ADR-0303 §9:1): a repeat names members the first matter no longer holds
 and is refused, changing nothing."""
 
 MERGE_STORY: Final = _declared(
     MERGE_STORY_CAPABILITY,
     (
-        "Merge one story into another when they are one matter: its activations, "
-        "stories and every note join the other. Do it only where someone asked for "
-        "it, or the work in hand needs it now."
+        "Merge one matter into another when they are one: its episodes, matters and every note "
+        "join the other.\n"
+        "\n"
+        "Only where it was asked for, or this work needs it now.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
     properties={
-        STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The story absorbed, by its S label."},
-        INTO_ARGUMENT: {**_STORY_SCHEMA, "description": "The story it joins, by its S label."},
+        STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The matter absorbed, by S label."},
+        INTO_ARGUMENT: {**_STORY_SCHEMA, "description": "The matter it joins, by S label."},
         EPISODE_ARGUMENT: _EPISODE_FILLED,
     },
     required=(STORY_ARGUMENT, INTO_ARGUMENT, EPISODE_ARGUMENT),
@@ -473,22 +551,30 @@ MERGE_STORY: Final = _declared(
     safe_to_repeat=True,
     idempotency=Idempotency.NATURAL,
 )
-"""Merge stories (ADR-0303 §9:1): a repeat names a merged story and is refused, changing
+"""Merge matters (ADR-0303 §9:1): a repeat names a merged matter and is refused, changing
 nothing."""
 
 SPLIT_STORY: Final = _declared(
     SPLIT_STORY_CAPABILITY,
     (
-        "Split activations or stories off a story into a new story of their own, "
-        "where they are a matter apart. Do it only where someone asked for it, or the "
-        "work in hand needs it now. It carries only the notes you name by their N "
-        "labels, each on the story it leaves; one naming a note that story does not "
-        "hold is refused whole."
+        "Split episodes or matters off a matter into a new matter of their own, where they are a "
+        "matter apart.\n"
+        "\n"
+        "Only where it was asked for, or this work needs it now. It carries only the notes you "
+        "name, each on the matter they leave; naming a note it doesn't hold refuses the whole "
+        "call.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "matters: with done, where this work joined the new matter, that matter, as matters are "
+        "shown\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
     properties={
-        STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The story split, by its S label."},
-        EPISODES_ARGUMENT: _labels("The activations that leave, by their episodes' E labels."),
-        STORIES_ARGUMENT: _labels("The stories it holds that leave, by their S labels."),
+        STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The matter split, by S label."},
+        EPISODES_ARGUMENT: _labels("The episodes that leave, by E label. Left out: none."),
+        STORIES_ARGUMENT: _labels("The matters it holds that leave, by S label. Left out: none."),
         NOTES_ARGUMENT: _CARRIED_NOTES,
         EPISODE_ARGUMENT: _EPISODE_FILLED,
     },
@@ -497,23 +583,28 @@ SPLIT_STORY: Final = _declared(
     safe_to_repeat=True,
     idempotency=Idempotency.NATURAL,
 )
-"""Split a story (ADR-0303 §9:1): a repeat names members the story no longer holds and is
-refused, changing nothing."""
+"""Split a matter (ADR-0303 §9:1): a repeat names members the matter no longer holds and
+is refused, changing nothing."""
 
 GROUP_STORY: Final = _declared(
     GROUP_STORY_CAPABILITY,
     (
-        "Group stories under a new, larger story, where they are parts of one bigger "
-        "matter. Do it only where someone asked for it, or the work in hand needs it "
-        "now."
+        "Group matters under a new, larger matter, where they are parts of one bigger matter.\n"
+        "\n"
+        "Only where it was asked for, or this work needs it now.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "\n"
+        "It changes only the system's own records. Not safe to repeat."
     ),
     properties={
-        STORIES_ARGUMENT: _labels("The stories grouped, by their S labels.", min_items=1),
+        STORIES_ARGUMENT: _labels("The matters grouped, by S label.", min_items=1),
         NOTES_ARGUMENT: {
-            "type": "array",
-            "items": _NOTE_SCHEMA,
-            "maxItems": START_NOTES_MAX,
-            "description": "The larger story's first notes, if any: what the bigger matter is.",
+            **_NOTE_SCHEMA,
+            "description": (
+                "The larger matter's first notes: what the bigger matter is. Left out: none."
+            ),
         },
         EPISODE_ARGUMENT: _EPISODE_FILLED,
         OUTSIDE_CONTENT_ARGUMENT: _MARK_FILLED,
@@ -523,8 +614,9 @@ GROUP_STORY: Final = _declared(
     safe_to_repeat=False,
     idempotency=Idempotency.NONE,
 )
-"""Group stories under a larger one (ADR-0303 §9:1): not safe to repeat, so a second
-identical grouping is refused as already done (ADR-0306 §3:1, §5:9)."""
+"""Group matters under a larger one (ADR-0303 §9:1): not safe to repeat, so a second
+identical grouping is refused as already done (ADR-0306 §3:1, §5:9). Its first notes are
+one text since ADR-0364 §8:2's agreed declaration."""
 
 #: Every story call this module declares, in the order planning is offered them.
 STORY_CALLS: Final = (
@@ -544,18 +636,16 @@ STORY_CALL_CAPABILITIES: Final = tuple(str(one.capability) for one in STORY_CALL
 
 #: Which arguments of each story call name things by label, and what each names
 #: (ADR-0307 §5:2): planning's own check maps them to ids before authorizing.
-STORY_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind]]] = {
+STORY_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind | tuple[LabelKind, ...]]]] = {
     START_STORY_CAPABILITY: {INSIDE_ARGUMENT: LabelKind.STORY},
     NOTE_STORY_CAPABILITY: {STORY_ARGUMENT: LabelKind.STORY},
     LINK_STORY_CAPABILITY: {
         STORY_ARGUMENT: LabelKind.STORY,
-        MEMBER_STORY_ARGUMENT: LabelKind.STORY,
-        MEMBER_EPISODE_ARGUMENT: LabelKind.EPISODE,
+        MEMBER_ARGUMENT: (LabelKind.EPISODE, LabelKind.STORY),
     },
     UNLINK_STORY_CAPABILITY: {
         STORY_ARGUMENT: LabelKind.STORY,
-        MEMBER_STORY_ARGUMENT: LabelKind.STORY,
-        MEMBER_EPISODE_ARGUMENT: LabelKind.EPISODE,
+        MEMBER_ARGUMENT: (LabelKind.EPISODE, LabelKind.STORY),
     },
     TIDY_STORY_CAPABILITY: {STORY_ARGUMENT: LabelKind.STORY},
     MOVE_STORY_CAPABILITY: {
@@ -633,6 +723,23 @@ def _optional_text(parameters: Mapping[str, FrozenJson], name: str) -> str | Non
     if parameters.get(name) is None:
         return None
     return _text(parameters, name)
+
+
+def _first_notes(value: object) -> tuple[str, ...]:
+    """A start's or a group's first notes, or none where they are malformed.
+
+    One non-blank text since ADR-0364 §8:2's agreed declaration; a list of them, each
+    non-blank and no more than :data:`START_NOTES_MAX`, as a call recorded before it held.
+    """
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    if (
+        isinstance(value, tuple | list)
+        and len(value) <= START_NOTES_MAX
+        and all(isinstance(one, str) and one.strip() for one in value)
+    ):
+        return tuple(str(one) for one in value)
+    return ()
 
 
 def _activation_of_episode(episode_id: str) -> str | None:
@@ -733,13 +840,8 @@ class StoryCalls:
     async def _start(self, call: ToolCall) -> None:
         """Start a story with this activation and its first notes (ADR-0300 §10:3)."""
         parameters = call.request.parameters
-        notes = parameters.get(NOTES_ARGUMENT)
-        if (
-            not isinstance(notes, tuple | list)
-            or not notes
-            or len(notes) > START_NOTES_MAX
-            or not all(isinstance(one, str) and one.strip() for one in notes)
-        ):
+        notes = _first_notes(parameters.get(NOTES_ARGUMENT))
+        if not notes:
             raise _malformed("a start carries its first notes, each non-blank text")
         activation = self._activation(parameters)
         outside = self._mark(parameters)
@@ -901,12 +1003,9 @@ class StoryCalls:
         once the larger story exists, a first note not written leaves the call
         unfinished, never not done, as a start does (ADR-0306 §5:6, §5:11).
         """
-        notes = parameters.get(NOTES_ARGUMENT) or ()
-        if (
-            not isinstance(notes, tuple | list)
-            or len(notes) > START_NOTES_MAX
-            or not all(isinstance(one, str) and one.strip() for one in notes)
-        ):
+        held = parameters.get(NOTES_ARGUMENT)
+        notes = () if held is None else _first_notes(held)
+        if held is not None and not notes:
             raise _malformed("a group's first notes are each non-blank text")
         activation = self._activation(parameters)
         outside = self._mark(parameters)
@@ -1028,11 +1127,15 @@ class StoryCalls:
         return outside
 
     async def _member(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryMember:
-        """The member a link or an unlink names, or this activation where it names none."""
+        """The member an add or a remove names, or this activation where it names none.
+
+        ``member`` names a matter or an episode by label, and planning's check puts the id
+        it names in the argument its kind is read by (ADR-0364 §8:2, :data:`MEMBER_SPLIT`).
+        """
         story = _optional_text(parameters, MEMBER_STORY_ARGUMENT)
         episode = _optional_text(parameters, MEMBER_EPISODE_ARGUMENT)
         if story is not None and episode is not None:
-            raise _malformed("a link or an unlink names one member: a story or an episode")
+            raise _malformed("an add or a remove names one member: a matter or an episode")
         if story is not None:
             return StoryMember(kind=StoryMemberKind.STORY, id=await self._current(story))
         if episode is None:

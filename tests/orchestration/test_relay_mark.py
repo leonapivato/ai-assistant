@@ -50,7 +50,6 @@ from ai_assistant.core.types import (
     stamped_support,
 )
 from ai_assistant.orchestration.matters import (
-    LOOK_UP_ACTIVATION_CAPABILITY,
     STOP_ACTIVATION_CAPABILITY,
     Became,
     TakeAnswer,
@@ -164,9 +163,7 @@ async def test_a_pasted_email_marked_relayed_carries_no_authority_and_is_read_as
     Every capability is offered on every round (ADR-0356 §4:3), so the stop call is offered
     and comes back refused, saying why, running nothing (§4:4-§4:5).
     """
-    stop = ProposedCall(
-        call_id="c-stop", name=STOP_ACTIVATION_CAPABILITY, arguments={"activation": "E9"}
-    )
+    stop = ProposedCall(call_id="c-stop", name=STOP_ACTIVATION_CAPABILITY, arguments={"work": "E9"})
     planner = FakeToolCallingCompleter.scripted(RoundResponse(calls=(stop,)), RoundResponse())
     episode, planner = await _turn(_EMAIL, planner)
 
@@ -174,10 +171,10 @@ async def test_a_pasted_email_marked_relayed_carries_no_authority_and_is_read_as
     assert [one.relayed for one in record.understanding] == [True]
     assert record.trigger.parties == OWNERS_WORDS, "the relay mark changes no party (§5:8)"
     offered = _offered(planner)
-    assert {LOOK_UP_ACTIVATION_CAPABILITY, STOP_ACTIVATION_CAPABILITY} <= offered
+    assert {STOP_ACTIVATION_CAPABILITY} <= offered
     (refused,) = reported(planner.calls[1], 0)
-    assert refused["outcome"].startswith("refused"), "its stop call is refused (§6:5)"
-    assert "authority" in refused["outcome"]
+    assert refused["outcome"] == "refused", "its stop call is refused (§6:5)"
+    assert "authority" in refused["because"]
     # Shown, marked relayed: its words are the owner's, carrying no authority (ADR-0356
     # §3:7).
     assert _stimulus(planner).get("relayed") == "yes"
@@ -196,7 +193,7 @@ async def test_an_unmarked_typed_message_keeps_its_authority_its_standing_and_it
 
     record = processing(episode)
     assert [one.relayed for one in record.understanding] == [False]
-    assert {LOOK_UP_ACTIVATION_CAPABILITY, STOP_ACTIVATION_CAPABILITY} <= _offered(planner)
+    assert {STOP_ACTIVATION_CAPABILITY} <= _offered(planner)
     assert _stimulus(planner).get("relayed") is None
     assert not from_outside(episode)
     origin = input_support_origin(record, None)

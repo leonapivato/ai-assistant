@@ -101,7 +101,7 @@ _BOOK: Final = ToolDefinition(
 )
 
 _ARGUMENTS: Final[dict[str, FrozenJson]] = {
-    "call": {"capability": "book", "arguments": {"date": "2026-11-02"}},
+    "call": {"tool": "book", "arguments": {"date": "2026-11-02"}},
     "why": "You asked me to book the table.",
 }
 
@@ -177,7 +177,11 @@ async def test_a_request_is_written_with_every_part_code_fills_in() -> None:
     assert isinstance(answer, ToolResult)
     assert answer.outcome is ToolOutcome.SUCCEEDED
     assert isinstance(answer.output, Mapping)
-    assert str(answer.output["card"]).startswith("not posted")
+    # ADR-0364 §10:1: not sent, so only the approvals panel shows it.
+    assert answer.output == {
+        "card": "not sent, so only the approvals panel shows it",
+        "expires": "2026-11-01 12:00 UTC",
+    }
     (request,) = (await plans.export()).approval_requests
     assert (request.person, request.activation_id, request.round) == (
         OWNER_PERSON_ID,
@@ -194,11 +198,12 @@ async def test_a_request_is_written_with_every_part_code_fills_in() -> None:
 
 @pytest.mark.parametrize(
     ("outcome", "said"),
-    [(CardOutcome.SENT, "sent"), (CardOutcome.NOT_DONE, "not done"), (None, "unknown")],
+    [(CardOutcome.SENT, "sent"), (CardOutcome.NOT_DONE, "not sent"), (None, "unknown")],
     ids=["sent", "not-done", "raised"],
 )
 async def test_the_result_says_how_the_card_went(outcome: CardOutcome | None, said: str) -> None:
-    """§2:7: sent, not done or unknown; a card that failed leaves the request on the panel."""
+    """ADR-0364 §10:1: sent, not sent or unknown; a card that failed leaves the request on
+    the panel alone."""
     cards = _Cards(outcome)
     runner = ApprovalCalls(plans=FakePlanStore(), expiry=_DAY, now=lambda: _AT, cards=cards)
     with asking(_asker()):
@@ -272,7 +277,7 @@ def test_request_approval_is_declared_not_safe_to_repeat_on_the_assistants_recor
     assert not REQUEST_APPROVAL.safe_to_repeat
     assert not REQUEST_APPROVAL.leaves_hub
     assert nested_call(_ARGUMENTS) == ("book", {"date": "2026-11-02"})
-    assert nested_call({"call": {"capability": "book"}, "why": "x"}) is None
+    assert nested_call({"call": {"tool": "book"}, "why": "x"}) is None
 
 
 def test_the_input_states_the_outcome_and_a_ticket_is_held_only_while_usable() -> None:

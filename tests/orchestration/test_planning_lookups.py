@@ -51,7 +51,7 @@ type _Outcomes = Callable[[str], tuple[CallOutcome, ...]]
 
 
 def _search(call_id: str = "c1") -> ProposedCall:
-    return ProposedCall(call_id=call_id, name="search_memory", arguments={"query": "dentist"})
+    return ProposedCall(call_id=call_id, name="search_memories", arguments={"query": "dentist"})
 
 
 async def _reported(
@@ -125,15 +125,17 @@ async def test_a_searchs_records_are_shown_under_their_own_m_labels() -> None:
 
     result = _result(completer)
     assert result["label"] == "R1"
-    value = result["value"]
+    # ADR-0364 §6:1: a look-up's fields stand beside its R label.
+    value = result
     remembered = [tag(one, "memory") for one in value["remembered"]]
     assert [(one.get("label"), one.text) for one in remembered] == [("M1", "dentist with Dr Rao")]
     assert value["resting_on_outside_content"] == "read for you by a digest, under evidence"
     report = completer.last_call.exchange.steps[-1].report
     assert "moved to 3pm" not in "\n".join(one.text for one in report.results)
+    # The result's fields are read before its R label is minted, so M1 is minted first.
     assert planned.labels == (
-        PlanningLabel(label="R1", kind=LabelKind.RESULT, id="result:search"),
         PlanningLabel(label="M1", kind=LabelKind.MEMORY, id="said"),
+        PlanningLabel(label="R1", kind=LabelKind.RESULT, id="result:search"),
     )
 
 
@@ -147,10 +149,10 @@ async def test_a_search_that_found_nothing_shown_says_so() -> None:
         ),
     )
 
-    assert _result(completer)["value"] == {"remembered": "none"}
+    assert _result(completer) == {"label": "R1", "remembered": "none"}
 
 
-_READ: ProposedCall = ProposedCall(call_id="c1", name="read_story", arguments={"story": "S1"})
+_READ: ProposedCall = ProposedCall(call_id="c1", name="read_matter", arguments={"matter": "S1"})
 
 
 def _read(view: PlanningStory) -> _Outcomes:
@@ -203,8 +205,8 @@ async def test_a_follow_ups_digest_is_told_apart_by_the_question_it_answered() -
 
     completer, _ = await _reported(
         (
-            ProposedCall(call_id="c1", name="web_search", arguments={"query": "trail"}),
-            ProposedCall(call_id="c2", name="follow_up", arguments={"result": "R1"}),
+            ProposedCall(call_id="c1", name="search_web", arguments={"query": "trail"}),
+            ProposedCall(call_id="c2", name="reread_result", arguments={"result": "R1"}),
         ),
         lambda round_id: (
             CallOutcome(round_id, "c1", CallOutcomeKind.DONE, result_id="result:1", digested=True),
@@ -440,7 +442,9 @@ async def test_two_follow_ups_each_take_the_digest_of_their_own_question() -> No
 
     def follow(call_id: str, question: str) -> ProposedCall:
         return ProposedCall(
-            call_id=call_id, name="follow_up", arguments={"result": "R1", "looking_for": question}
+            call_id=call_id,
+            name="reread_result",
+            arguments={"result": "R1", "looking_for": question},
         )
 
     completer, _ = await _reported(
@@ -467,7 +471,9 @@ async def test_two_follow_ups_asking_alike_each_take_one_digest_in_order() -> No
     )
     calls = tuple(
         ProposedCall(
-            call_id=call_id, name="follow_up", arguments={"result": "R1", "looking_for": "hours"}
+            call_id=call_id,
+            name="reread_result",
+            arguments={"result": "R1", "looking_for": "hours"},
         )
         for call_id in ("c1", "c2")
     )

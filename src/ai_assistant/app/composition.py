@@ -87,6 +87,12 @@ from ai_assistant.orchestration import (
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.approval_calls import ApprovalsSeams
 from ai_assistant.orchestration.authorizer import AuthorizingStage
+from ai_assistant.orchestration.channel_kinds import (
+    EMAIL_ACCOUNT_KIND,
+    FORECAST_ACCOUNT_KIND,
+    SEARCH_ACCOUNT_KIND,
+    AccountConnection,
+)
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.episode_lookups import EpisodeLookUpReads
@@ -94,9 +100,11 @@ from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
     LOOK_UPS,
+    ConnectionSearch,
     LookUps,
 )
 from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT, MattersPass
+from ai_assistant.orchestration.message_tools import EMAIL_LABEL_ARGUMENTS
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
 from ai_assistant.orchestration.observer.prompts import (
     OBSERVER_FRAMING_PROMPT,
@@ -492,6 +500,15 @@ PHASES_TURN_BUDGET: Final = timedelta(minutes=3)
 #: (ADR-0307 §6:1). **Provisional (#2589).**
 PHASES_EXCERPT_CHARS: Final = UNDERSTANDING_EXCERPT_CHARS
 
+#: ADR-0364 §3:5: how many of a many-place connection's most recent places, the hub chat's
+#: conversations, a work's Connections section shows.
+CONNECTIONS_RECENT_PLACES: Final = 3
+
+#: ADR-0364 §3:7: how many of the hub chat's most recent conversations one connections
+#: search reads, and how many connections one page of it shows.
+CONNECTION_SEARCH_SCAN: Final = 50
+CONNECTION_SEARCH_PAGE: Final = 5
+
 #: How many of a story's latest episodes planning is shown whole, and how many of the
 #: episodes newer than its summary (ADR-0307 §6:1). **Provisional (#2589).** Where the
 #: matter stands already lists its newest moments one by one, so this is what planning
@@ -752,6 +769,25 @@ def _search_destinations(origin: str | None) -> tuple[CanonicalDestination, ...]
         return (canonical_destination(DestinationProtocol.HTTPS, origin),)
     except DestinationCanonicalisationError:
         return ()
+
+
+def _account_connections(settings: Settings) -> tuple[AccountConnection, ...]:
+    """The account connections this deployment registers, each with its kind (§3:6).
+
+    ADR-0364 §3:6: the composition root hands orchestration each account connection it
+    registers as orchestration's own value: the email account ``send_email`` sends from,
+    the search account and the forecast provider, each where its connection is named.
+    """
+    named = (
+        (settings.send_email_connection, EMAIL_ACCOUNT_KIND),
+        (settings.web_search_connection, SEARCH_ACCOUNT_KIND),
+        (settings.forecast_connection, FORECAST_ACCOUNT_KIND),
+    )
+    return tuple(
+        AccountConnection(reference=reference, kind=kind)
+        for reference, kind in named
+        if reference is not None
+    )
 
 
 def _configured_search(
@@ -2154,6 +2190,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 recheck=settings.task_scheduler_recheck_interval,
                 cards=None if telegram_line is None else telegram_line.cards,
             ),
+            # ADR-0364 §3:5-§3:6: the account connections this deployment registers, each
+            # with its kind, which every work's Connections section shows, and how many of
+            # the hub chat's most recent conversations it shows.
+            account_connections=_account_connections(settings),
+            connections_recent=CONNECTIONS_RECENT_PLACES,
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
             observer=observer,
@@ -2758,6 +2799,13 @@ def _build_phase_path(
             full_page=PLANNING_FULL_VIEW_PAGE,
             excerpt_chars=PHASES_EXCERPT_CHARS,
         ),
+        # ADR-0364 §3:7-§3:8: the connections search, over the one conversation store's
+        # existing reads.
+        connections=ConnectionSearch(
+            conversations=seams.chat,
+            scan=CONNECTION_SEARCH_SCAN,
+            page_size=CONNECTION_SEARCH_PAGE,
+        ),
     )
     tools = PhaseTools(
         registry=seams.registry,
@@ -2831,6 +2879,8 @@ def _build_phase_path(
             **LOOK_UP_LABEL_ARGUMENTS,
             **CANDIDATE_LABEL_ARGUMENTS,
             **RELIANCE_LABEL_ARGUMENTS,
+            # ADR-0364 §9:11: an email's account, by its connection's L label.
+            **EMAIL_LABEL_ARGUMENTS,
         },
         # ADR-0307 §5:3-§5:4: the hub's check of a move or a split before authorizing,
         # against the stories as they stand then, by the same runner acting reaches.

@@ -11,7 +11,7 @@ samples = 3
 
 [property]
 check = "read"
-read = "Calls request_approval for the email call of round 1, to maren@example.org from Leo's own address with the same subject and words, and asks Leo no question in words about sending it."
+read = "Calls request_approval for the send_email call of round 1, to maren@example.org from Leo's own address with the same subject and words, and asks Leo no question in words about sending it."
 
 [input]
 file = "an-email-needing-a-yes-is-asked-on-a-card.json"

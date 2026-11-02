@@ -39,6 +39,16 @@ transcript records it (ADR-0292 §7:4), and the transcript records with each of 
 assistant's messages the effect record it was claimed under (§12:9). The line cannot: the
 Bot API gives a bot no way to read its chat's history (ADR-0323 §10). Every other kind
 declares that it cannot.
+
+**What a connection is, and what the system can do with it** (ADR-0364 §3:3). Planning's
+Connections section shows each connection by what its kind declares here, written once:
+:data:`CONNECTION_KINDS`, keyed by channel type for a channel's places, and
+:data:`ACCOUNT_KINDS` beside it, keyed by an account kind for a connected account. A kind
+says what one of its connections is, what the system can do with it, sense it, look
+things up in it or act in it, with its limits, whether its places take a text message,
+the many-place connection it groups under, where it has one, and whether it reaches the
+addresses a call names. :func:`takes_text` reads from a recorded place whether a text
+message may go into it.
 """
 
 from __future__ import annotations
@@ -50,6 +60,8 @@ from typing import TYPE_CHECKING, Final
 from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import (
+    APPROVALS,
+    TASK_SCHEDULER,
     declared_input,
     establishes_the_user,
     origin_kind,
@@ -63,14 +75,25 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import ApprovalGiver, RecordedInputMessage, SupportHolder
 
 __all__ = [
+    "ACCOUNT_KINDS",
+    "ACCOUNT_PREFIX",
+    "CONNECTION_KINDS",
+    "EMAIL_ACCOUNT_KIND",
+    "FORECAST_ACCOUNT_KIND",
+    "SEARCH_ACCOUNT_KIND",
+    "AccountConnection",
     "Audience",
     "ChannelKind",
+    "ConnectionKind",
     "Direction",
     "Reach",
     "WindowSource",
+    "account_kind",
     "confirms_delivery",
+    "connection_kind",
     "place_channel",
     "place_of",
+    "takes_text",
     "users_place",
 ]
 
@@ -273,3 +296,132 @@ def users_place(place: str | None) -> bool:
         return False
     channel_type, separator, instance = place.partition(_PLACE_SEPARATOR)
     return bool(separator and instance) and establishes_the_user(channel_type)
+
+
+# --- what a connection is (ADR-0364 §3:3) ---------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionKind:
+    """What a connection of one kind is, and what the system can do with it (§3:3).
+
+    Attributes:
+        is_a: What one of its connections is, in planning's words.
+        can: What the system can do with it, sense it, look things up in it or act in it,
+            with its limits.
+        takes_text: Whether a text message may go into it.
+        group: The many-place connection its places are grouped under, where it is one,
+            shown for reading only and taking no label (§3:2); ``None`` for a connection
+            with one place.
+        reaches_named: Whether it reaches the addresses a call names in place of a person,
+            as an email account does (§4:3).
+        reaches_people: Whether it reaches the people it is for, the owner alone today
+            (ADR-0361 §7:4).
+    """
+
+    is_a: str
+    can: str
+    takes_text: bool = False
+    group: str | None = None
+    reaches_named: bool = False
+    reaches_people: bool = True
+
+
+#: Each channel kind's connections, by channel type (ADR-0364 §3:3): the hub chat's
+#: conversations, the line's chat, the schedule and the approvals.
+CONNECTION_KINDS: Final[dict[str, ConnectionKind]] = {
+    "conversation": ConnectionKind(
+        is_a="a conversation in the hub chat",
+        can="sense it, and act in it: it takes text messages",
+        takes_text=True,
+        group="The hub chat",
+    ),
+    "telegram": ConnectionKind(
+        is_a="the messaging line's chat, on Telegram",
+        can=(
+            "sense it, and act in it: it takes text messages, in plain text: formatting"
+            " such as Markdown is not rendered"
+        ),
+        takes_text=True,
+    ),
+    TASK_SCHEDULER: ConnectionKind(
+        is_a="the schedule, where scheduled tasks fall due and start work",
+        can="sense it, look things up in it and act in it: it takes no message",
+        reaches_people=False,
+    ),
+    APPROVALS: ConnectionKind(
+        is_a="the approvals, where a request for approval waits on a card for its answer",
+        can="sense it, and act in it: it takes no message",
+    ),
+}
+
+#: What an account connection's id starts with: ``account:`` and its reference.
+ACCOUNT_PREFIX: Final = "account:"
+
+#: The account kinds the composition root registers (ADR-0364 §3:6).
+EMAIL_ACCOUNT_KIND: Final = "email"
+SEARCH_ACCOUNT_KIND: Final = "search"
+FORECAST_ACCOUNT_KIND: Final = "forecast"
+
+#: Each account kind's connections, by kind, beside the channel kinds (ADR-0364 §3:3,
+#: §3:6): what the composition root registers, each with its kind.
+ACCOUNT_KINDS: Final[dict[str, ConnectionKind]] = {
+    EMAIL_ACCOUNT_KIND: ConnectionKind(
+        is_a="an email account",
+        can="act in it: it sends email, and takes no text message",
+        reaches_named=True,
+        reaches_people=False,
+    ),
+    SEARCH_ACCOUNT_KIND: ConnectionKind(
+        is_a="the search account, which searches the web",
+        can="look things up in it: it takes no message",
+        reaches_people=False,
+    ),
+    FORECAST_ACCOUNT_KIND: ConnectionKind(
+        is_a="the forecast provider, which reads the weather forecast",
+        can="look things up in it: it takes no message",
+        reaches_people=False,
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class AccountConnection:
+    """One account connection the composition root registers, with its kind (§3:6).
+
+    Orchestration's own value: no ``core`` type gains a kind for an account, and
+    ``ConnectedAccount`` is unchanged (ADR-0151 §18).
+
+    Attributes:
+        reference: The connection record's reference, as ``Settings`` names it, which
+            its state is read by and which no entry shows (§3:4).
+        kind: Its account kind, one of :data:`ACCOUNT_KINDS`.
+    """
+
+    reference: str
+    kind: str
+
+    @property
+    def place(self) -> str:
+        """What its ``L`` label names: ``account:`` and its reference."""
+        return f"{ACCOUNT_PREFIX}{self.reference}"
+
+
+def connection_kind(place: str) -> ConnectionKind | None:
+    """What the connection ``place`` names is, by its channel type or account kind.
+
+    ``None`` where its kind declares nothing here.
+    """
+    channel = place_channel(place)
+    return None if channel is None else CONNECTION_KINDS.get(channel.channel_type)
+
+
+def account_kind(kind: str) -> ConnectionKind | None:
+    """What an account connection of ``kind`` is, or ``None`` where none is declared."""
+    return ACCOUNT_KINDS.get(kind)
+
+
+def takes_text(place: str) -> bool:
+    """Whether a text message may go into the connection ``place`` names (ADR-0364 §9:2)."""
+    kind = connection_kind(place)
+    return kind is not None and kind.takes_text

@@ -83,7 +83,27 @@ async def _shown(name: str, outcome_fields: dict[str, Any], **inputs: Any) -> An
         "round:0", "c1", CallOutcomeKind.DONE, result_id="result:1", **outcome_fields
     )
     (result,), _, planned = await _reported_after((call,), outcome, **inputs)
-    return result["result"]["value"], planned
+    return _value(result), planned
+
+
+def _value(result: dict[str, Any]) -> Any:
+    """What a done call's result shows, past its outcome and its R label (ADR-0364 §6:1).
+
+    A look-up's fields sit under ``result`` beside its label, or under ``value`` where
+    what it shows is text; a call on the Task Scheduler's sit beside the outcome.
+    """
+    held = result.get("result")
+    if held is None:
+        return {key: value for key, value in result.items() if key not in {"outcome", "because"}}
+    if isinstance(held, dict) and "value" in held:
+        return held["value"]
+    if isinstance(held, dict):
+        return {
+            key: value
+            for key, value in held.items()
+            if not (key == "label" and str(value).startswith("R"))
+        }
+    return held
 
 
 # --- §7, §8:1: a search of past episodes ----------------------------------------------------
@@ -192,7 +212,8 @@ async def test_older_items_are_shown_as_the_place_window_shows_items() -> None:
     value, _ = await _shown("read_older_history", {"history": history})
 
     mine, forwarded = (tag(one, "message") for one in value["items"])
-    assert (mine.get("from"), mine.text, mine.get("episode")) == ("the owner", "book it", "E1")
+    # ADR-0364 §4:2: a tag's ``from`` names the person by their ``P`` label.
+    assert (mine.get("from"), mine.text, mine.get("episode")) == ("P1", "book it", "E1")
     assert "a forward's own words" not in json.dumps(value)
     assert (forwarded.get("withheld"), forwarded.text) == ("yes", None)
     assert "page 2" in value["more"]
@@ -313,7 +334,8 @@ async def test_a_full_view_shows_its_parts_in_order_and_records_as_held_now() ->
     assert value["response"] == "Booked a table earlier."
     notes, searched, story, booking_notes, booked = value["parts"]
     assert notes == {"round": 1, "notes": "looking for the dentist"}
-    assert searched["capability"] == "search_memory"
+    # ADR-0364 §8:4-§8:5: a recorded call is shown under its tool's name now.
+    assert searched["tool"] == "search_memories"
     memory, episode, rest = searched["showed"]
     remembered = tag(memory["memory"], "memory")
     assert (remembered.get("label"), remembered.text) == ("M1", "dentist with Dr Rao")
@@ -478,7 +500,7 @@ async def test_a_story_read_names_a_matter_an_episode_search_showed() -> None:
     found = EpisodesFound(
         episodes=(EpisodeShown(record=_episode("activation:one"), matters=(matter,)),)
     )
-    read = ProposedCall(call_id="c2", name="read_story", arguments={"story": "S1"})
+    read = ProposedCall(call_id="c2", name="read_matter", arguments={"matter": "S1"})
     stage, _, _ = _stage(RoundResponse(calls=(search,)), RoundResponse(calls=(read,)))
     given = _inputs(
         capabilities=(*_TOOLS, READ_STORY, SEARCH_EPISODES),
@@ -492,7 +514,7 @@ async def test_a_story_read_names_a_matter_an_episode_search_showed() -> None:
     planned = await _next_round(stage, given, first, outcomes=(outcome,))
 
     (call,) = planned.calls
-    assert call.call.arguments["story"] == "story:dentist"
+    assert call.call.arguments["matter"] == "story:dentist"
 
 
 # --- review round 1: what a relayed item, and a full view's matters, show --------------------

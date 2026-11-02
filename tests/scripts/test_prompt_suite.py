@@ -561,8 +561,8 @@ def test_no_label_takes_a_label_as_a_whole_word_alone() -> None:
 
 
 def _text(words: str, call_id: str = "c1", **more: Any) -> ProposedCall:
-    arguments: dict[str, Any] = {"to": "the user", "words": words, **more}
-    return ProposedCall(call_id=call_id, name="text", arguments=arguments)
+    arguments: dict[str, Any] = {"connection": "L1", "words": words, **more}
+    return ProposedCall(call_id=call_id, name="send_text", arguments=arguments)
 
 
 def test_no_label_reads_a_rounds_notes_and_its_messages_apart() -> None:
@@ -582,7 +582,7 @@ def test_no_label_reads_a_rounds_notes_and_its_messages_apart() -> None:
 def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
     """ADR-0356 §11:2: a plain question comes back as a message call, not as text."""
     params: dict[str, object] = {"phrases": ["10:30"]}
-    search = ProposedCall(call_id="c2", name="web_search", arguments={"query": "x"})
+    search = ProposedCall(call_id="c2", name="search_web", arguments={"query": "x"})
 
     assert _round("only_says", params, RoundResponse(calls=(_text("At 10:30."),))) is None
     assert _round("only_says", params, RoundResponse(text="At 10:30.")) == (
@@ -599,15 +599,19 @@ def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
 def test_the_checks_that_decide_each_class_refuse_their_counterexamples() -> None:
     """Review round 1: each check refuses the counterexample its class names."""
     reliance = ProposedCall(call_id="c9", name="note_reliance", arguments={"memories": ["M1"]})
-    spawn = ProposedCall(call_id="c8", name="spawn", arguments={"instruction": "Pay the invoice."})
+    spawn = ProposedCall(
+        call_id="c8", name="spawn_task", arguments={"instruction": "Pay the invoice."}
+    )
     book = ProposedCall(
         call_id="c7", name="book_table", arguments={"restaurant": "Luigi's", "party": 2}
     )
     parking = ProposedCall(
-        call_id="c6", name="spawn", arguments={"instruction": "Research parking near Luigi's."}
+        call_id="c6", name="spawn_task", arguments={"instruction": "Research parking near Luigi's."}
     )
     maren = ProposedCall(
-        call_id="c5", name="spawn", arguments={"instruction": "Remind Leo to confirm with Maren."}
+        call_id="c5",
+        name="spawn_task",
+        arguments={"instruction": "Remind Leo to confirm with Maren."},
     )
     told: dict[str, object] = {"phrases": ["mother"]}
     assert (
@@ -616,7 +620,7 @@ def test_the_checks_that_decide_each_class_refuse_their_counterexamples() -> Non
     assert _round(
         "tells", told, RoundResponse(calls=(_text("Remind you to call your mother?"),))
     ) == ("the message asks something, rather than telling")
-    report: dict[str, object] = {"capabilities": ["text", "search_memory", "note_reliance"]}
+    report: dict[str, object] = {"capabilities": ["send_text", "search_memories", "note_reliance"]}
     assert _round("acts_within", report, RoundResponse(calls=(_text("Invoice due."),))) is None
     assert _round("acts_within", report, RoundResponse()) == "the round makes no call"
     assert _round("acts_within", report, RoundResponse(calls=(spawn,))) == (
@@ -629,7 +633,7 @@ def test_the_checks_that_decide_each_class_refuse_their_counterexamples() -> Non
         "the round makes a call to a capability not named"
     )
     both: dict[str, object] = {
-        "capabilities": ["book_table", "spawn"],
+        "capabilities": ["book_table", "spawn_task"],
         "phrases": ["Luigi", "Maren"],
     }
     assert _round("includes_with", both, RoundResponse(calls=(book, maren))) is None
@@ -640,7 +644,7 @@ def test_the_checks_that_decide_each_class_refuse_their_counterexamples() -> Non
     assert _round(
         "answers_by_message", answer, RoundResponse(calls=(_text("Is it at 10:30?"),))
     ) == ("the message asks something, rather than telling")
-    search = ProposedCall(call_id="c4", name="search_memory", arguments={"query": "dentist"})
+    search = ProposedCall(call_id="c4", name="search_memories", arguments={"query": "dentist"})
     assert _round("answers_or_searches", answer, RoundResponse(calls=(search,))) is None
     assert _round("answers_or_searches", answer, RoundResponse(text="It is at 10:30.")) == (
         "the answer is written as the round's text, and no message carries it"
@@ -651,7 +655,7 @@ def test_answers_by_message_allows_a_call_that_sends_nothing_beside_the_answer()
     """ADR-0356 §11:2, as ruled: no other reply is no other message."""
     params: dict[str, object] = {"phrases": ["10:30"]}
     reliance = ProposedCall(call_id="c2", name="note_reliance", arguments={"memories": ["M1"]})
-    search = ProposedCall(call_id="c3", name="search_memory", arguments={"query": "x"})
+    search = ProposedCall(call_id="c3", name="search_memories", arguments={"query": "x"})
 
     assert (
         _round("answers_by_message", params, RoundResponse(calls=(_text("At 10:30."), reliance)))
@@ -671,14 +675,16 @@ def test_answers_by_message_allows_a_call_that_sends_nothing_beside_the_answer()
 
 
 def test_the_capability_checks_read_the_rounds_calls() -> None:
-    spawn = ProposedCall(call_id="c1", name="spawn", arguments={"instruction": "x"})
+    spawn = ProposedCall(call_id="c1", name="spawn_task", arguments={"instruction": "x"})
     both = RoundResponse(calls=(spawn, _text("Set.", call_id="c2")))
 
-    assert _round("calls_are", {"capabilities": ["spawn"]}, RoundResponse(calls=(spawn,))) is None
-    assert _round("calls_are", {"capabilities": ["spawn"]}, both) == (
+    assert (
+        _round("calls_are", {"capabilities": ["spawn_task"]}, RoundResponse(calls=(spawn,))) is None
+    )
+    assert _round("calls_are", {"capabilities": ["spawn_task"]}, both) == (
         "the round calls 2 capabilities, 1 of the 1 named"
     )
-    assert _round("calls_include", {"capabilities": ["spawn"]}, both) is None
+    assert _round("calls_include", {"capabilities": ["spawn_task"]}, both) is None
     assert _round("calls_include", {"capabilities": ["book_table"]}, both) == (
         "the round leaves out 1 of the named capabilities"
     )

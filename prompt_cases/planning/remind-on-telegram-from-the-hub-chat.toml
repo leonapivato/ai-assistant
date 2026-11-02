@@ -9,7 +9,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes a spawn to remind Leo to call his mum about Sunday, falling due at 20:00 Lisbon time today (a local time with no offset, 2026-10-29T20:00, or the same instant with its offset), whose places name L2, the Telegram chat. It does not suggest only L1, the hub chat's conversation."""
+read = """The round makes a spawn_task call to remind Leo to call his mum about Sunday, falling due at 20:00 Lisbon time today (a local time with no offset, 2026-10-29T20:00, or the same instant with its offset), whose connections name L2, the Telegram chat. It does not suggest only L1, the hub chat's conversation."""
 
 [input]
 file = "remind-on-telegram-from-the-hub-chat.json"

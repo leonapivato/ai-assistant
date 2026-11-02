@@ -11,7 +11,7 @@ samples = 3
 
 [property]
 check = "read"
-read = """The round makes no cancel_task call. A text call tells Leo the blender research is stopped and asks whether the reminder tonight at 8 to check his blender notes should go too, and its words use no T, E or R label."""
+read = """The round makes no cancel_task call. A send_text call tells Leo the blender research is stopped and asks whether the reminder tonight at 8 to check his blender notes should go too, and its words use no T, E or R label."""
 
 [input]
 file = "never-mind-that-blender-request-asks-about-its-reminder.json"

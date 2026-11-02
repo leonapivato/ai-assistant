@@ -8,9 +8,9 @@
           "calls": [
             {
               "call_id": "toolu_01",
-              "name": "look_up_activation",
+              "name": "read_episode",
               "arguments": {
-                "activation": "E1"
+                "episode": "E1"
               }
             }
           ],
@@ -31,14 +31,15 @@
   "tools": [
     {
       "name": "answer_offer",
-      "description": "Answer newer input offered to this work, in the round it is offered. Take it unless this work has already done something it would change that cannot be undone, and then carry it out as part of this work. Otherwise decline it, with the reason in a few words, and it is done once this work ends.",
+      "description": "Answer a newer stimulus offered to this work: take it or decline it.\n\nAnswer it in the round it is offered. Take it unless this work has already done something it would change that can't be undone; otherwise decline it, with the reason in a few words.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label, the offering work as an episode:\n  answer: taken, declined, or withdrawn\n  because: where it came to something else: the offering work was stopped or ended first, so nothing is to be done; or this work already holds as much as it may, so the take counts as a decline\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
           "offer": {
             "type": "string",
             "minLength": 1,
-            "description": "The offer, by its E label."
+            "description": "The offer, by its E label.",
+            "pattern": "^E[1-9][0-9]*$"
           },
           "take": {
             "type": "boolean",
@@ -48,7 +49,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 300,
-            "description": "Why you decline it, in a few words."
+            "description": "Why you decline it, in a few words. Left out: none."
           }
         },
         "required": [
@@ -94,14 +95,15 @@
     },
     {
       "name": "cancel_task",
-      "description": "Cancel what is still pending of a scheduled task. It stops nothing already running. A task you were shown by its T label is cancelled by one call; find any other with list_tasks first. Skipping a one-off task is its cancel. \"Done\" or \"I already took it\" before a task's message is that skip, and after its message is no call. Cancel exactly what the person's words cover, by the labels you were shown, and keep the rest; where the words could mean more than one task, ask which.",
+      "description": "Cancel what is still pending of a scheduled task.\n\nIt stops nothing already running. Find a task you weren't shown by its T label with list_tasks first. Skipping a one-off task is its cancel: “done” or “I already took it” before the task's message is that skip, and after its message is no call. Cancel exactly what was asked, and keep the rest.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\ntask: with done, the task as it now stands, as list_tasks shows a scheduled one\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
           "task": {
             "type": "string",
             "minLength": 1,
-            "description": "The task, by its T label."
+            "description": "The task, by its T label.",
+            "pattern": "^T[1-9][0-9]*$"
           }
         },
         "required": [
@@ -111,12 +113,18 @@
       }
     },
     {
-      "name": "email",
-      "description": "Send an email to the recipients, each a person as you were shown them or an address, from the system's own address or the person's, as from says; one from the person's address goes in their name, and never runs without their yes. Its words are sent as you write them; set exact where the wording itself must not change. The result says what was sent, to whom and how. Never claim to be human.",
+      "name": "send_email",
+      "description": "Send an email from one of the system's email accounts.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\n\nIt acts outside the system and can't be undone. Not safe to repeat. Always needs approval first: ask for it with request_approval.",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
+          "from": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Which email account to send it from. It must be one of the system's connections.",
+            "pattern": "^L[1-9][0-9]*$"
+          },
           "to": {
             "anyOf": [
               {
@@ -131,7 +139,8 @@
               }
             ],
             "x-egress-destination": "smtp",
-            "x-egress-tier": "personal"
+            "x-egress-tier": "personal",
+            "description": "Who it is to: an email address, or a list of them."
           },
           "cc": {
             "anyOf": [
@@ -146,7 +155,8 @@
               }
             ],
             "x-egress-destination": "smtp",
-            "x-egress-tier": "personal"
+            "x-egress-tier": "personal",
+            "description": "Who it is copied to: an email address, or a list of them. Left out: no one."
           },
           "bcc": {
             "anyOf": [
@@ -161,40 +171,25 @@
               }
             ],
             "x-egress-destination": "smtp",
-            "x-egress-tier": "personal"
+            "x-egress-tier": "personal",
+            "description": "Who it is copied to, unseen by the other recipients: an email address, or a list of them. Left out: no one."
           },
           "subject": {
-            "type": "string"
+            "type": "string",
+            "description": "The subject line."
           },
           "words": {
             "type": "string",
-            "description": "What the email says."
-          },
-          "attachments": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Things you were shown to attach, each by how you were shown it."
-          },
-          "from": {
-            "type": "string",
-            "enum": [
-              "assistant",
-              "user"
-            ],
-            "description": "Whose address it is sent from: the assistant's, or the user's, which needs their yes."
-          },
-          "exact": {
-            "type": "boolean",
-            "description": "Send the words exactly as written."
+            "minLength": 1,
+            "description": "What to say. Wrap any part that must be sent exactly as written, such as a quote, in <exact>…</exact>; the rest may be reworded for the recipient and the connection."
           },
           "deliberate_repeat": {
             "type": "boolean",
-            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+            "description": "Make this call again on purpose. Without it, a call with the same values as one already made in this matter is refused as already done. Left out: false."
           }
         },
         "required": [
+          "from",
           "to",
           "subject",
           "words"
@@ -203,19 +198,21 @@
       }
     },
     {
-      "name": "follow_up",
-      "description": "Ask a new question of a result that was read for you, by its R label: say the new question in looking_for. The result as it came back is read again for it; nothing is called again.",
+      "name": "reread_result",
+      "description": "Ask a new question of a result that was read for you.\n\nThe result as it came back is read again for it; nothing is called again.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nevidence: with done, what was read of it for the new looking_for\n\nIt changes nothing.",
       "parameters": {
         "type": "object",
         "properties": {
           "result": {
             "type": "string",
             "minLength": 1,
-            "description": "The result, by the R label you were shown it under."
+            "description": "The result, by its R label.",
+            "pattern": "^R[1-9][0-9]*$"
           },
           "looking_for": {
             "type": "string",
-            "description": "What you are looking for in this call's result. Its result may carry text someone else wrote, which is read for you against what you say here."
+            "minLength": 1,
+            "description": "The new question to ask of it."
           }
         },
         "required": [
@@ -226,73 +223,67 @@
       }
     },
     {
-      "name": "group_stories",
-      "description": "Group stories under a new, larger story, where they are parts of one bigger matter. Do it only where someone asked for it, or the work in hand needs it now.",
+      "name": "group_matters",
+      "description": "Group matters under a new, larger matter, where they are parts of one bigger matter.\n\nOnly where it was asked for, or this work needs it now.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\n\nIt changes only the system's own records. Not safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
-          "stories": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "uniqueItems": true,
-            "description": "The stories grouped, by their S labels.",
-            "minItems": 1
-          },
-          "notes": {
+          "matters": {
             "type": "array",
             "items": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 2000
+              "pattern": "^S[1-9][0-9]*$"
             },
-            "maxItems": 8,
-            "description": "The larger story's first notes, if any: what the bigger matter is."
+            "uniqueItems": true,
+            "description": "The matters grouped, by S label.",
+            "minItems": 1
+          },
+          "notes": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "The larger matter's first notes: what the bigger matter is. Left out: none."
           },
           "deliberate_repeat": {
             "type": "boolean",
-            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+            "description": "Make this call again on purpose. Without it, a call with the same values as one already made in this matter is refused as already done. Left out: false."
           }
         },
         "additionalProperties": false,
         "required": [
-          "stories"
+          "matters"
         ]
       }
     },
     {
-      "name": "link_story",
-      "description": "Link this activation, another activation or a story into a story, where it belongs to that matter.",
+      "name": "add_to_matter",
+      "description": "Add this work, an episode or a matter to a matter it belongs to.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nmatters: with done, where this work joined a matter you weren't shown, that matter, as matters are shown\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
-          "story": {
+          "matter": {
             "type": "string",
             "minLength": 1,
-            "description": "The story, by the S label you were shown it under."
+            "description": "The matter, by S label.",
+            "pattern": "^S[1-9][0-9]*$"
           },
-          "member_story": {
+          "member": {
             "type": "string",
             "minLength": 1,
-            "description": "A story as the member, by its S label. Name this or member_episode."
-          },
-          "member_episode": {
-            "type": "string",
-            "minLength": 1,
-            "description": "An activation as the member, by its episode's E label. Name this or member_story; name neither for this activation."
+            "description": "What to add: an episode by its E label, or a matter by its S label. Left out: this work.",
+            "pattern": "^[ES][1-9][0-9]*$"
           }
         },
         "additionalProperties": false,
         "required": [
-          "story"
+          "matter"
         ]
       }
     },
     {
       "name": "list_tasks",
-      "description": "List the person's work: what is running, the scheduled tasks still pending, and the scheduled work that ended most recently. Use it to find a task you were not shown by its T label before you replace or cancel it.",
+      "description": "List the work running and the scheduled tasks pending for the person this work is for, and the scheduled work that ended most recently.\n\nUse it to find a task you weren't shown by its T label.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nrunning: the work running now besides this one, or none; each with\n  episode: its E label\n  where: where it started, by L label, or in words\n  input: what started it\n  has_acted: true or false\nscheduled: the tasks still pending, or none; each with\n  label: its T label\n  state: pending, or running or about to start\n  falls_due: when it next falls due\n  repeats: its rule in words, for a task with one\n  waits_on: the tasks it waits on, by T label, for a task that waits\n  carries: its instruction\n  set_by: who set it\n  suggests: its connections, by L label\n  parent: the work that spawned it, by E label, and what that was\nended_lately: the scheduled work that ended most recently, or none; each with\n  episode: its E label\n  started: when it started\n  where: where it started\n  status: how it ended\n  input: the instruction it ran\n  wrote_into: where it wrote, by L label, or that it wrote no message\n  may_have_written_into: where a message of unknown outcome may have gone\n\nIt changes nothing.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -300,92 +291,128 @@
       }
     },
     {
-      "name": "look_up_activation",
-      "description": "See what running work you were shown as running has found and done so far.",
+      "name": "read_episode",
+      "description": "Read one episode: a past one's full record, or what one still running has found and done so far.\n\nRecords it shows again are shown as they are held now.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label:\n  for a past one, a page of its full record:\n    label, at, input, understood_then, response and how it ended, on every page\n    in_matters: the matters it belongs to, by S label\n    page, and parts: in the order they happened: each understanding, what recall found, each round's notes, each call with its arguments, what came of it and what it showed, the evidence, and what it took in\n    more: the next page, where there is one\n  for one still running: what it has found and done so far, as an episode, with status: running, or ended\n\nIt changes nothing.",
       "parameters": {
         "type": "object",
         "properties": {
-          "activation": {
+          "episode": {
             "type": "string",
             "minLength": 1,
-            "description": "The running work, by its E label."
+            "description": "The episode, by its E label.",
+            "pattern": "^E[1-9][0-9]*$"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Which page of a past one's record to show. Left out: 1, the first."
           }
         },
         "required": [
-          "activation"
+          "episode"
         ],
         "additionalProperties": false
       }
     },
     {
-      "name": "merge_stories",
-      "description": "Merge one story into another when they are one matter: its activations, stories and every note join the other. Do it only where someone asked for it, or the work in hand needs it now.",
+      "name": "search_connections",
+      "description": "Search the system's connections for a query, beyond those Connections shows.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label:\n  page: the page shown\n  connections: those found, best first, each as Connections shows one, or none\n  more: the next page, where there is one\n\nIt changes nothing.",
       "parameters": {
         "type": "object",
         "properties": {
-          "story": {
+          "query": {
             "type": "string",
             "minLength": 1,
-            "description": "The story absorbed, by its S label."
+            "maxLength": 500,
+            "description": "What to search for, such as a name, a platform or what was said there."
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Which page to show. Left out: 1, the first."
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "merge_matters",
+      "description": "Merge one matter into another when they are one: its episodes, matters and every note join the other.\n\nOnly where it was asked for, or this work needs it now.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\n\nIt changes only the system's own records. Safe to repeat.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "matter": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The matter absorbed, by S label.",
+            "pattern": "^S[1-9][0-9]*$"
           },
           "into": {
             "type": "string",
             "minLength": 1,
-            "description": "The story it joins, by its S label."
+            "description": "The matter it joins, by S label.",
+            "pattern": "^S[1-9][0-9]*$"
           }
         },
         "additionalProperties": false,
         "required": [
-          "story",
+          "matter",
           "into"
         ]
       }
     },
     {
-      "name": "move_story",
-      "description": "Move activations, notes, or both, from one story to another, where they belong to the other matter. Do it only where someone asked for it, or the work in hand needs it now. It carries only the notes you name by their N labels, each on the story it leaves; one naming a note that story does not hold is refused whole. To move something a story's summary holds, read the story, find the note it came from, if one did, and name that note rather than restating it as a new note; then note on the story it left where that went, and tidy that story.",
+      "name": "move_to_matter",
+      "description": "Move episodes, notes or both from one matter to another, where they belong to the other.\n\nOnly where it was asked for, or this work needs it now. It carries only the notes you name, each on the matter they leave; naming a note it doesn't hold refuses the whole call. To move something a summary holds, read the matter, find the note it came from, if one did, and name that note rather than restating it as a new one; then note on the matter it left where that went, and tidy that matter.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
-          "story": {
+          "matter": {
             "type": "string",
             "minLength": 1,
-            "description": "The story they leave, by its S label."
+            "description": "The matter they leave, by S label.",
+            "pattern": "^S[1-9][0-9]*$"
           },
           "to": {
             "type": "string",
             "minLength": 1,
-            "description": "The story they go to, by its S label."
+            "description": "The matter they go to, by S label.",
+            "pattern": "^S[1-9][0-9]*$"
           },
           "episodes": {
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^E[1-9][0-9]*$"
             },
             "uniqueItems": true,
-            "description": "The activations that go, by their episodes' E labels."
+            "description": "The episodes that go, by E label. Left out: none."
           },
           "notes": {
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^N[1-9][0-9]*$"
             },
             "uniqueItems": true,
-            "description": "The story's notes that go with it, by their N labels; each must be on the story it leaves. Name none to leave every note where it is."
+            "description": "The notes that go, by N label, each on the matter they leave. Left out: none, so every note stays."
           }
         },
         "additionalProperties": false,
         "required": [
-          "story",
+          "matter",
           "to"
         ]
       }
     },
     {
       "name": "note_reliance",
-      "description": "Note the memories you relied on, by their M labels, and say what the reliance shaped: a suggestion, an answer or an action. Note only a memory that shaped one, never one only mentioned in passing. Nothing runs; the note is kept with this round.",
+      "description": "Note the memories you relied on, and what relying on them shaped: a suggestion, an answer or an action.\n\nNote only a memory that shaped one, never one only mentioned in passing. Nothing runs; the note is kept with this round.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\n\nIt changes nothing.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -393,10 +420,11 @@
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^M[1-9][0-9]*$"
             },
             "minItems": 1,
-            "description": "The memories you relied on, by their M labels."
+            "description": "The memories you relied on, by M label."
           },
           "shaped": {
             "type": "string",
@@ -413,15 +441,16 @@
       }
     },
     {
-      "name": "note_story",
-      "description": "Write a note on a story's page: what its records cannot show and the matter needs, such as what is open, what you are waiting on, who will do what, why something was decided, or what comes next. Your text outside a call stays with this episode and never reaches a story.",
+      "name": "note_matter",
+      "description": "Write a note on a matter.\n\nNote what its records can't show and the matter needs, such as what is open, what you are waiting on, who will do what, why something was decided, or what comes next. Your notes outside a call stay with this episode and never reach a matter.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
-          "story": {
+          "matter": {
             "type": "string",
             "minLength": 1,
-            "description": "The story, by the S label you were shown it under."
+            "description": "The matter, by S label.",
+            "pattern": "^S[1-9][0-9]*$"
           },
           "note": {
             "type": "string",
@@ -432,21 +461,22 @@
         },
         "additionalProperties": false,
         "required": [
-          "story",
+          "matter",
           "note"
         ]
       }
     },
     {
-      "name": "pin",
-      "description": "Pin one memory, so it is kept in mind in every conversation with the person; pinning confirms its wording. It runs only once they say yes to the question that shows it. Raise a suggestion the system noticed only where it bears on what is being done, and only by asking with this call, never as a change already made.",
+      "name": "pin_memory",
+      "description": "Pin one memory, so the system always has it in mind for the person this work is for; pinning confirms its wording.\n\nBring up a pin the system suggests only where it bears on what is being done, and only by asking for approval of this call, never as a change already made.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, pinned, or already pinned\n\nIt changes only the system's own records. Safe to repeat. Always needs approval first: ask for it with request_approval.",
       "parameters": {
         "type": "object",
         "properties": {
           "memory": {
             "type": "string",
             "minLength": 1,
-            "description": "The memory to pin, by its M label."
+            "description": "The memory to pin, by its M label.",
+            "pattern": "^M[1-9][0-9]*$"
           }
         },
         "required": [
@@ -456,31 +486,32 @@
       }
     },
     {
-      "name": "read_story",
-      "description": "Read the full view of a story you were shown: its summary, its notes and episodes since, its older notes, newest first a page at a time, its latest episodes, the larger stories it is part of, and where its matter stands.",
+      "name": "read_matter",
+      "description": "Read the full view of a matter you were shown.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label, the matter as matters are shown, in full: its summary, its notes, its episodes since it was last tidied and its latest ones, the larger matters it is part of, and where it stands; its older notes a page at a time, newest first\n\nIt changes nothing.",
       "parameters": {
         "type": "object",
         "properties": {
-          "story": {
+          "matter": {
             "type": "string",
             "minLength": 1,
-            "description": "The story, by the S label you were shown it under."
+            "description": "The matter, by its S label.",
+            "pattern": "^S[1-9][0-9]*$"
           },
           "older_notes_page": {
             "type": "integer",
             "minimum": 1,
-            "description": "Which page of the story's older notes to show, the newest page 1; leave it out for the newest."
+            "description": "Which page of its older notes to show. Left out: 1, the newest."
           }
         },
         "required": [
-          "story"
+          "matter"
         ],
         "additionalProperties": false
       }
     },
     {
-      "name": "remember",
-      "description": "Record a candidate for long-term memory: one fact, in your own words, what it rests on, and briefly why it is worth keeping. Record one only where someone asked for something to be kept, or the work in hand needs something kept now, such as a fact a task it sets for later will rely on; anything else said or seen is found later from the episode. A candidate is not yet a memory: whether and how it is kept is decided later. The result shows the memories already held that are similar to its fact; ask about one in the moment only where it conflicts with the candidate and the conflict matters to what is being done.",
+      "name": "remember_fact",
+      "description": "Record a candidate for long-term memory: one fact, what it rests on, and why it is worth keeping.\n\nRecord one only where it was asked for, or this work needs something kept now, such as a fact a task it sets will rely on; anything else is found later from the episode. A candidate isn't yet a memory: whether and how it is kept is decided later. Ask about a similar memory its result shows only where it conflicts with the fact and the conflict matters to what is being done.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done:\n  candidate: recorded; whether and how it is kept is decided once this episode leaves short-term memory\n  similar_memories: the memories already held like its fact, each as long-term memory shows one, or none\n\nIt changes only the system's own records. Not safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -490,58 +521,62 @@
             "maxLength": 2000,
             "description": "One fact, in your own words, that will still make sense on its own later."
           },
-          "rests_on_input": {
-            "type": "boolean",
-            "description": "True where the fact rests on this activation's input."
-          },
-          "rests_on_user_messages": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "description": "The earlier exchanges, by their E labels, whose user's message the fact rests on."
-          },
-          "rests_on_assistant_messages": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "description": "The earlier exchanges, by their E labels, whose assistant's message the fact rests on."
-          },
-          "rests_on_results": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "description": "The results, by their R labels, the fact rests on."
-          },
           "why": {
             "type": "string",
             "minLength": 1,
             "maxLength": 500,
             "description": "Why it is worth keeping, in a few words."
           },
+          "rests_on_this_stimulus": {
+            "type": "boolean",
+            "description": "Whether the fact rests on this work's stimulus. Left out: false."
+          },
+          "rests_on_stimuli": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^E[1-9][0-9]*$"
+            },
+            "description": "Earlier episodes whose stimulus the fact rests on, by E label. Left out: none."
+          },
+          "rests_on_responses": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^E[1-9][0-9]*$"
+            },
+            "description": "Earlier episodes whose response from the system the fact rests on, by E label. Left out: none."
+          },
+          "rests_on_results": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^R[1-9][0-9]*$"
+            },
+            "description": "The results the fact rests on, by R label. Left out: none."
+          },
           "memory": {
             "type": "string",
             "minLength": 1,
-            "description": "A memory you were shown that the fact bears on, by its M label."
+            "description": "A memory you were shown that the fact bears on, by M label. Left out: none.",
+            "pattern": "^M[1-9][0-9]*$"
           },
           "note": {
             "type": "string",
             "minLength": 1,
             "maxLength": 500,
-            "description": "Required with memory: how the fact bears on that memory, in words."
+            "description": "How the fact bears on that memory. Required with memory."
           },
           "confirm": {
             "type": "boolean",
-            "description": "True to ask the user's yes to the fact's wording before it is kept."
+            "description": "Have the fact's wording approved before it is kept: with it, this call needs approval, so ask for it with request_approval. Left out: false."
           },
           "deliberate_repeat": {
             "type": "boolean",
-            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+            "description": "Make this call again on purpose. Without it, a call with the same values as one already made in this matter is refused as already done. Left out: false."
           }
         },
         "required": [
@@ -552,8 +587,8 @@
       }
     },
     {
-      "name": "search_memory",
-      "description": "Search what you remember about the user and their world for a query. What rests on what a source reported is read for you against what you are looking for; the rest is shown to you.",
+      "name": "search_memories",
+      "description": "Search the system's memories, what it has learned, for a query.\n\nMemories that rest on what a source reported are read for you against looking_for; the rest are shown as they are.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label:\n  remembered: the memories found, best first, each as long-term memory shows one, or none\n  resting_on_outside_content: where some found rest on what a source reported, that they were read for you\nevidence: with those, what was read of them for looking_for\n\nIt changes nothing.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -565,7 +600,8 @@
           },
           "looking_for": {
             "type": "string",
-            "description": "What you are looking for in this call's result. Its result may carry text someone else wrote, which is read for you against what you say here."
+            "minLength": 1,
+            "description": "What you want from the call's result, such as a question it should answer. Text someone else wrote, such as a web page or an email, is never shown to you as it is: it is read for you, and you are shown what it says about this."
           }
         },
         "required": [
@@ -576,8 +612,8 @@
       }
     },
     {
-      "name": "set_profile",
-      "description": "Set one field of the person's profile to a value, or clear it. It runs only once they say yes to the question that shows it. Raise a suggestion the system noticed only where it bears on what is being done, and only by asking with this call, never as a change already made.",
+      "name": "set_profile_field",
+      "description": "Set or clear one field of the profile of the person this work is for.\n\nBring up a change the system suggests only where it bears on what is being done, and only by asking for approval of this call, never as a change already made.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, set, cleared, or already so\n\nIt changes only the system's own records. Safe to repeat. Always needs approval first: ask for it with request_approval.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -590,7 +626,7 @@
               "time_zone",
               "language"
             ],
-            "description": "The field to set."
+            "description": "The field: name, what they are called; address, how to address them; assistant_name, what they call the assistant; time_zone, an IANA zone such as Europe/Lisbon; language, the language to write to them in."
           },
           "value": {
             "anyOf": [
@@ -602,7 +638,7 @@
                 "type": "null"
               }
             ],
-            "description": "Its new value, as the person gave it; null clears it."
+            "description": "Its new value, as they gave it; null clears it."
           }
         },
         "required": [
@@ -613,8 +649,8 @@
       }
     },
     {
-      "name": "spawn",
-      "description": "Set up work that runs later or separately: a scheduled task, which starts an activation of its own when it falls due, reading what it carries. Spawn only work that runs later or separately. Give at most one of at, delay_minutes, after and rule; with none it falls due now. A task suggests only places on your place list. A task you were shown by its T label is replaced by one spawn naming it in replaces; find any other with list_tasks first. \"Snooze 10 minutes\" or \"again tomorrow\", after a task's message, is a new spawn: a one-off task with the same instruction, written from what you were shown of the episode that wrote the message, suggesting the place the person said it in. Skipping a rule's next occurrence (\"skip tomorrow's\") is a spawn replacing it with the same rule from the local date after the skipped one, or its cancel where none would follow before its until. \"Tomorrow at 9 instead\" is that skip and a one-off task at the new time, in the same round. Write a local time with no UTC offset unless the person named one, and give a zone only where the person named one. Say a task back from its read_back, never from your own reckoning of the time. Where the words could mean more than one task, ask which.",
+      "name": "spawn_task",
+      "description": "Set up a scheduled task: work that starts on its own when the task falls due, reading only what the task carries.\n\nSpawn only work that runs later or separately. Give at most one of at, delay_minutes, after and rule; with none, it falls due now. The task's work carries no one's authority: it can't stop running work, and it needs approval to set a rule or change a task it didn't spawn, so promise only what it can do. Its work can speak only in the connections it suggests. Write a local time with no UTC offset, and give a zone, only where one was named. Say a task back from its read_back, never from your own reckoning of the time.\n\nA task you were shown by its T label is replaced by one spawn naming it in replaces; find any other with list_tasks first. “Snooze 10 minutes” or “again tomorrow”, after a task's message, is a new one-off task with the same instruction, written from what you were shown of the episode that wrote the message, suggesting the connection it was said in. Skipping a rule's next occurrence (“skip tomorrow's”) is a spawn replacing it with the same rule from the local date after the skipped one, or its cancel where none would follow before its until. “Tomorrow at 9 instead” is that skip and a one-off task at the new time, in the same round.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\ntask: with done, the task it wrote:\n  label: its T label\n  read_back: when it falls due and where its work may speak, from the record\n\nIt changes only the system's own records, and can be undone. Not safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -622,12 +658,12 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 4000,
-            "description": "What the task's activation is to do, in your own words."
+            "description": "What the task's work is to do, in your own words. Say what to do, not where: its connections say where."
           },
           "at": {
             "type": "string",
             "minLength": 1,
-            "description": "When it falls due: an ISO 8601 local date and time with no offset, such as 2026-10-25T20:00, read in the person's zone, or in zone; or an instant with its UTC offset, such as 2026-10-25T20:00:00-04:00."
+            "description": "When it falls due: an ISO 8601 local date and time with no offset, such as 2026-10-25T20:00, read in the situation's time zone, or in zone; or an instant with its UTC offset, such as 2026-10-25T20:00:00-04:00."
           },
           "delay_minutes": {
             "type": "number",
@@ -638,27 +674,15 @@
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^T[1-9][0-9]*$"
             },
             "minItems": 1,
             "description": "When it falls due: once every one of these tasks has ended, by T label."
           },
-          "places": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "description": "The places it suggests speaking in, by L label."
-          },
-          "replaces": {
-            "type": "string",
-            "minLength": 1,
-            "description": "A pending task this one replaces, by T label."
-          },
           "rule": {
             "type": "object",
-            "description": "When it falls due, again and again: a rule, at a local time of day in the person's zone, or in zone. Only for a task the person asked for.",
+            "description": "When it falls due, again and again, at a local time of day read in the situation's time zone, or in zone. Only where one was asked for.",
             "properties": {
               "repeats": {
                 "type": "string",
@@ -694,12 +718,12 @@
               "from": {
                 "type": "string",
                 "minLength": 1,
-                "description": "A local date, such as 2026-10-27, before which none falls."
+                "description": "A local date, such as 2026-10-27, before which none falls. Left out: now."
               },
               "until": {
                 "type": "string",
                 "minLength": 1,
-                "description": "The last local date one may fall on, such as 2026-11-30."
+                "description": "The last local date one may fall on, such as 2026-11-30. Left out: no end."
               }
             },
             "required": [
@@ -711,11 +735,26 @@
           "zone": {
             "type": "string",
             "minLength": 1,
-            "description": "The IANA zone at or rule is read in, such as Europe/Lisbon, only where the person named one."
+            "description": "The IANA zone at or rule is read in, such as Europe/Lisbon. Only where one was named. Left out: the situation's time zone."
+          },
+          "connections": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^L[1-9][0-9]*$"
+            },
+            "description": "The connections its work may speak in, by L label. The messaging line, where one is connected, is always open to it too. Left out: none."
+          },
+          "replaces": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A pending task this one replaces, by T label. Left out: none, so it is a new task.",
+            "pattern": "^T[1-9][0-9]*$"
           },
           "deliberate_repeat": {
             "type": "boolean",
-            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+            "description": "Make this call again on purpose. Without it, a call with the same values as one already made in this matter is refused as already done. Left out: false."
           }
         },
         "required": [
@@ -725,75 +764,75 @@
       }
     },
     {
-      "name": "split_story",
-      "description": "Split activations or stories off a story into a new story of their own, where they are a matter apart. Do it only where someone asked for it, or the work in hand needs it now. It carries only the notes you name by their N labels, each on the story it leaves; one naming a note that story does not hold is refused whole.",
+      "name": "split_matter",
+      "description": "Split episodes or matters off a matter into a new matter of their own, where they are a matter apart.\n\nOnly where it was asked for, or this work needs it now. It carries only the notes you name, each on the matter they leave; naming a note it doesn't hold refuses the whole call.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nmatters: with done, where this work joined the new matter, that matter, as matters are shown\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
-          "story": {
+          "matter": {
             "type": "string",
             "minLength": 1,
-            "description": "The story split, by its S label."
+            "description": "The matter split, by S label.",
+            "pattern": "^S[1-9][0-9]*$"
           },
           "episodes": {
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^E[1-9][0-9]*$"
             },
             "uniqueItems": true,
-            "description": "The activations that leave, by their episodes' E labels."
+            "description": "The episodes that leave, by E label. Left out: none."
           },
-          "stories": {
+          "matters": {
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^S[1-9][0-9]*$"
             },
             "uniqueItems": true,
-            "description": "The stories it holds that leave, by their S labels."
+            "description": "The matters it holds that leave, by S label. Left out: none."
           },
-          "notes": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "uniqueItems": true,
-            "description": "The story's notes that go with it, by their N labels; each must be on the story it leaves. Name none to leave every note where it is."
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "story"
-        ]
-      }
-    },
-    {
-      "name": "start_story",
-      "description": "Start a story when someone takes up a matter that will come up again, with its first notes. This activation joins it. Name the story it sits inside, if the person frames it so.",
-      "parameters": {
-        "type": "object",
-        "properties": {
           "notes": {
             "type": "array",
             "items": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 2000
+              "pattern": "^N[1-9][0-9]*$"
             },
-            "minItems": 1,
-            "maxItems": 8,
-            "description": "The story's first notes: what the matter is, and what is open."
+            "uniqueItems": true,
+            "description": "The notes that go, by N label, each on the matter they leave. Left out: none, so every note stays."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "matter"
+        ]
+      }
+    },
+    {
+      "name": "start_matter",
+      "description": "Start a matter, with its first notes, when something is taken up that will come up again.\n\nThis work joins it. Name the larger matter it sits inside, where it was framed so.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nmatters: with done, the new matter, as matters are shown\n\nIt changes only the system's own records. Not safe to repeat.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Its first notes: what the matter is, and what is open."
           },
           "inside": {
             "type": "string",
             "minLength": 1,
-            "description": "The larger story it sits inside, by its S label."
+            "description": "The larger matter it sits inside, by S label. Left out: none.",
+            "pattern": "^S[1-9][0-9]*$"
           },
           "deliberate_repeat": {
             "type": "boolean",
-            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+            "description": "Make this call again on purpose. Without it, a call with the same values as one already made in this matter is refused as already done. Left out: false."
           }
         },
         "additionalProperties": false,
@@ -803,112 +842,103 @@
       }
     },
     {
-      "name": "stop_activation",
-      "description": "Stop running work you were shown as running, and that work alone. Nothing it already did is undone, and what it set up stays. The result shows what it had finished and what it set up that is still live, so say that. Stop work only where the person asks for it, such as \"never mind the booking\" after it has booked, or means to take over work this work waits on. Stop exactly what their words cover, including what a stop's result lists, and keep the rest; where it is unclear what the words cover, ask which.",
+      "name": "stop_work",
+      "description": "Stop running work you were shown as running, and that work alone.\n\nNothing it already did is undone, and what it set up stays: say what its result shows it had finished and set up that is still live. Stop work only where it was asked for, such as “never mind the booking” after it has booked, or to take over work this work waits on. Stop exactly what was asked, including what a stop's result lists, and keep the rest.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label, the stopped work as an episode:\n  stopped_by_this_call: yes, or no where it had already ended\n  what it took in, was understood to mean, noted, found and did\n  set_up_still_live: the tasks and running work it set up that are still live, each as list_tasks shows one, or nothing\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
-          "activation": {
+          "work": {
             "type": "string",
             "minLength": 1,
-            "description": "The running work, by its E label."
+            "description": "The running work, by its E label.",
+            "pattern": "^E[1-9][0-9]*$"
           }
         },
         "required": [
-          "activation"
+          "work"
         ],
         "additionalProperties": false
       }
     },
     {
-      "name": "text",
-      "description": "Send a short written message to someone, in the system's own voice. It goes into the place the stimulus came from unless via names another, and the result says what was sent, where it went and how. Its words are sent as you write them; set exact where the wording itself must not change, such as a quote or a relayed message. Never claim to be human.",
+      "name": "send_text",
+      "description": "Send a text message from the system into one of its connections.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\n\nIt acts outside the system and can't be undone. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
-          "to": {
+          "connection": {
             "type": "string",
-            "minLength": 1,
-            "description": "Who it is for, as you were shown them: the person the system serves by their name, or 'the user'."
+            "pattern": "^L[1-9][0-9]*$",
+            "description": "Which connection to send the text through. It must support text messages, and the message must be for who it reaches."
           },
           "words": {
             "type": "string",
             "minLength": 1,
-            "description": "What to say."
-          },
-          "via": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Where it goes: a place on your place list, by its L label, or a platform: hub_chat or telegram."
-          },
-          "exact": {
-            "type": "boolean",
-            "description": "Send the words exactly as written."
+            "description": "What to say. Wrap any part that must be sent exactly as written, such as a quote, in <exact>…</exact>; the rest may be reworded for the recipient and the connection."
           }
         },
         "required": [
-          "to",
+          "connection",
           "words"
         ],
         "additionalProperties": false
       }
     },
     {
-      "name": "tidy_story",
-      "description": "Tidy a story's summary: rewrite it from its notes and episodes since it was last tidied. Do it only where someone asked for it, or the work in hand needs it now. It runs on its own, brings no further round, and how it went is not shown to you. A tidy-up reads only what came since the last, so after moving a note away, tidy the story it left so its summary drops it.",
+      "name": "tidy_matter",
+      "description": "Tidy a matter's summary: rewrite it from its notes and episodes since it was last tidied.\n\nOnly where it was asked for, or this work needs it now. It runs on its own and brings no further round. It reads only what came since the last tidy-up, so after moving a note away, tidy the matter it left so its summary drops it.\n\noutcome: started: it runs on its own, and how it went is recorded on the matter, not shown here\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
-          "story": {
+          "matter": {
             "type": "string",
             "minLength": 1,
-            "description": "The story, by the S label you were shown it under."
+            "description": "The matter, by S label.",
+            "pattern": "^S[1-9][0-9]*$"
           }
         },
         "additionalProperties": false,
         "required": [
-          "story"
+          "matter"
         ]
       }
     },
     {
-      "name": "unlink_story",
-      "description": "Remove this activation, another activation or a story from a story it is in, where it does not belong to that matter. Do it only where someone asked for it, or the work in hand needs it now.",
+      "name": "remove_from_matter",
+      "description": "Remove this work, an episode or a matter from a matter it doesn't belong to.\n\nOnly where it was asked for, or this work needs it now.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
-          "story": {
+          "matter": {
             "type": "string",
             "minLength": 1,
-            "description": "The story, by the S label you were shown it under."
+            "description": "The matter, by S label.",
+            "pattern": "^S[1-9][0-9]*$"
           },
-          "member_story": {
+          "member": {
             "type": "string",
             "minLength": 1,
-            "description": "A story as the member, by its S label. Name this or member_episode."
-          },
-          "member_episode": {
-            "type": "string",
-            "minLength": 1,
-            "description": "An activation as the member, by its episode's E label. Name this or member_story; name neither for this activation."
+            "description": "What to remove: an episode by its E label, or a matter by its S label. Left out: this work.",
+            "pattern": "^[ES][1-9][0-9]*$"
           }
         },
         "additionalProperties": false,
         "required": [
-          "story"
+          "matter"
         ]
       }
     },
     {
-      "name": "unpin",
-      "description": "Unpin one memory the person keeps in mind; the memory itself stays as it is. It runs only once they say yes to the question that shows it.",
+      "name": "unpin_memory",
+      "description": "Unpin one memory from what the system always has in mind; the memory itself stays as it is.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, unpinned, or not pinned\n\nIt changes only the system's own records. Safe to repeat. Always needs approval first: ask for it with request_approval.",
       "parameters": {
         "type": "object",
         "properties": {
           "memory": {
             "type": "string",
             "minLength": 1,
-            "description": "The pinned memory, by its M label."
+            "description": "The pinned memory, by its M label.",
+            "pattern": "^M[1-9][0-9]*$"
           }
         },
         "required": [

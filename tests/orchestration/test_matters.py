@@ -55,7 +55,6 @@ from ai_assistant.orchestration.disclosure import (
 from ai_assistant.orchestration.lookups import LOOK_UPS, READ_STORY, SEARCH_MEMORY
 from ai_assistant.orchestration.matter_calls import (
     ANSWER_OFFER,
-    LOOK_UP_ACTIVATION,
     STOP_ACTIVATION,
 )
 from ai_assistant.orchestration.matters import (
@@ -252,9 +251,7 @@ def test_an_input_whose_parties_are_unknown_or_empty_meets_nothing() -> None:
 # --- ADR-0341 §2: the pure read ------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "declared", [*LOOK_UPS, LOOK_UP_ACTIVATION], ids=lambda one: str(one.capability)
-)
+@pytest.mark.parametrize("declared", LOOK_UPS, ids=lambda one: str(one.capability))
 def test_each_look_up_is_a_pure_read(declared: ToolDefinition) -> None:
     """§2:1, ADR-0349 §6:4: a look-up writes nothing, its own records, in the hub."""
     assert declared.writes == ()
@@ -292,7 +289,7 @@ def test_a_declaration_decides_never_a_name() -> None:
     assert not is_pure_read(writing)
 
 
-@pytest.mark.parametrize("declared", [STOP_ACTIVATION, LOOK_UP_ACTIVATION, ANSWER_OFFER])
+@pytest.mark.parametrize("declared", [STOP_ACTIVATION, ANSWER_OFFER])
 def test_the_calls_on_running_work_are_declared_as_a_cancel_is(declared: ToolDefinition) -> None:
     """§4:7, §6:4, §7:20: own records, in the hub, never unknown, safe to repeat."""
     assert declared.effect is CapabilityEffect.OWN_RECORDS
