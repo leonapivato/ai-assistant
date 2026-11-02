@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     ProfileField,
     ProposedCall,
     ProposedSuggestion,
+    RequestedCall,
     RoundResponse,
     ScheduledTaskAuthor,
     SuggestionKind,
@@ -1190,3 +1191,39 @@ async def test_an_approved_search_runs_with_the_looking_for_its_request_kept() -
         assert digest.question == "When does it open on Sunday?"
     finally:
         await harness.engine.aclose()
+
+
+async def test_a_profile_ticket_from_before_the_renames_sets_the_field() -> None:
+    """ADR-0364 §8:6, the coordinator's ruling on #3602: a request the build before wrote
+    as ``set_profile`` runs as ``set_profile_field`` under its ticket, its effect claimed
+    under the name it records and the person model's own check reading it through the
+    renames."""
+    people = _People()
+
+    async def person(exchange: PlanningExchange) -> RoundResponse:
+        if exchange.steps:
+            return RoundResponse()
+        return RoundResponse(
+            calls=(_asking("set_profile_field", "ask-1", field="address", value="Leo"),)
+        )
+
+    planner = _Planner(person, _run_each_ticket)
+    harness = _harness(planner, **people.stores)
+    await harness.engine.start()
+    try:
+        await _start(harness, "call me Leo")
+        (request,) = await _until_requests(harness, 1)
+        # As the build before wrote it: the same call under the tool's old name.
+        before = request.call.tool.model_copy(update={"capability": "set_profile"})
+        harness.plans._requests[str(request.id)] = request.model_copy(
+            update={"call": RequestedCall(tool=before, values=dict(request.call.values))}
+        )
+        await _frozen(harness, str(request.activation_id))
+        await _tap(harness, request)
+        (held,) = await _until_used(harness, [request])
+        model = await people.model()
+    finally:
+        await harness.engine.aclose()
+
+    assert held.ticket is TicketState.USED
+    assert model.profile.address == "Leo"

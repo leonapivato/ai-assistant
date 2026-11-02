@@ -2933,9 +2933,10 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
             )
             continue
         if verdict.verdict is Verdict.NOT_DONE:
-            outcomes.append(
-                CallOutcome(round_id, call_id, CallOutcomeKind.REFUSED, reason=verdict.reason)
-            )
+            # ADR-0364 §6:2: stopped before its tool ran is refused; the tool's own checks,
+            # which authorizing runs first for an email (§9:8, §9:13), are not done.
+            kind = CallOutcomeKind.NOT_DONE if verdict.tool_check else CallOutcomeKind.REFUSED
+            outcomes.append(CallOutcome(round_id, call_id, kind, reason=verdict.reason))
             continue
         one = None if verdict.decision_id is None else ran.get(verdict.decision_id)
         if one is None:

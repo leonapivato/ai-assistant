@@ -1422,3 +1422,17 @@ async def test_planning_refuses_a_note_label_it_was_never_shown() -> None:
     assert list(notes) == ["7"]
     (refused,) = planned.refused
     assert refused.reason == "'N4' names nothing you were shown"
+
+
+async def test_a_group_with_an_empty_list_of_notes_groups_and_writes_none() -> None:
+    """ADR-0364 §8:1: the declaration is main's, so an empty list of first notes is none."""
+    stories = FakeStoryStore(now=_now)
+    memory = FakeMemoryStore(now=_now)
+    await memory.add(_episode(_EPISODE))
+    trip = await _story(stories)
+    calls = StoryCalls(stories=stories, memory=memory)
+
+    result = await calls.run(_call(GROUP_STORY, {STORIES_ARGUMENT: [trip], NOTES_ARGUMENT: []}))
+
+    assert isinstance(result, ToolResult)
+    assert result.outcome is ToolOutcome.SUCCEEDED
