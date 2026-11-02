@@ -1,7 +1,6 @@
 # ADR-0352 §7:8, the owner's case: "Remind me in 40 minutes to check the project notes,
 # meanwhile research blenders" in the hub's chat, then "cancel the blenders research" on
-# Telegram. No offer goes across places, so this activation waited on the research, and
-# its waiting round stopped it. The stop's result lists the reminder as still set. This
+# Telegram. This activation waited on the research, and its waiting round stopped it. The stop's result lists the reminder as still set. This
 # round stops and cancels nothing more, and tells Leo the reminder is still set.
 prompt = "planning"
 guards = "ambiguous_task_guessed"

@@ -1,6 +1,9 @@
 # ADR-0349 §7:19, §7:22-§7:23: the email accepting the lease has gone, and the offered
 # input asks to say the opposite, which would change what cannot be undone, so the round
 # declines the offer with a short reason, and the newer input is done once it ends.
+# Every email needs approval (ADR-0364 §9:12), so the email went by its ticket: this is the
+# approval's work, whose round 1 ran it with run_approved, and the newer input is offered
+# to it from Telegram (ADR-0361 §7:1).
 prompt = "planning"
 guards = "offer_misanswered"
 came_from = "2026-10-26"
@@ -10,7 +13,7 @@ samples = 2
 [property]
 check = "answers_offer"
 answer = "decline"
-offer = "E1"
+offer = "E2"
 
 [input]
 file = "offer-declined-where-it-would-undo-what-was-sent.json"

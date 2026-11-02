@@ -1,6 +1,6 @@
 # ADR-0362 §6:4's profile change, its ask: round 1 set how Leo is addressed, and it came back
-# needing his yes and saying to ask through request_approval with the same arguments
-# (ADR-0361 §2:4). Now that a ticket runs the person model's calls, this round asks on a
+# refused, saying to ask for approval with request_approval (ADR-0361 §2:4, ADR-0364
+# §6:3). Now that a ticket runs the person model's calls, this round asks on a
 # card, for the same call.
 # A code check of the arguments' text passes a request for another field whose why names
 # this one, so this property is read.

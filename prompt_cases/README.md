@@ -40,7 +40,7 @@ records it, and its offered tools (ADR-0356 §11:4), best held in a JSON file be
 ```json
 {
   "exchange": {"briefing": "# The stimulus\n...", "steps": [{"response": {}, "report": {}}]},
-  "tools": [{"name": "text", "description": "...", "parameters": {}}]
+  "tools": [{"name": "send_text", "description": "...", "parameters": {}}]
 }
 ```
 

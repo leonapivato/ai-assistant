@@ -1,5 +1,5 @@
 # #3445, part 2: a task's instruction says what its activation is to do, and where it
-# speaks is its places. An instruction that restates the place, such as "Deliver in the
+# speaks is its connections. An instruction that restates the place, such as "Deliver in the
 # hub chat", goes stale once that place is gone, and later readers take it as where the
 # task spoke.
 prompt = "planning"
