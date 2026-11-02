@@ -506,7 +506,7 @@
     },
     {
       "name": "save_shortlist",
-      "description": "Save a shortlist of listings to the person's notes, under a title.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label:\n  saved: the shortlist's title\n  listings: how many listings it holds\n\nIt acts outside the system, and can be undone. Not safe to repeat.",
+      "description": "Save a shortlist of listings to the person's notes, under a title.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label:\n  saved: the shortlist's title\n  listings: how many listings it holds\n\nIt acts outside the system and can be undone. Not safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
