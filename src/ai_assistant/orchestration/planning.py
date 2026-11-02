@@ -2365,7 +2365,8 @@ _DID_TEXT: Final = {
     CallOutcomeKind.NOT_DONE: "Not done",
     CallOutcomeKind.UNKNOWN: "Its outcome is unknown",
     CallOutcomeKind.REFUSED: "Refused",
-    CallOutcomeKind.NEEDS_YOU: "It needed a yes",
+    # ADR-0364 §6:3: a recorded needs_you is shown refused, saying why.
+    CallOutcomeKind.NEEDS_YOU: "Refused: it needed approval",
 }
 
 #: ADR-0364 §6:3: a call needing approval comes back refused, its why saying to ask with
