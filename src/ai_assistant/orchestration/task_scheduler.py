@@ -182,9 +182,13 @@ SPAWNING_KINDS: Final = frozenset({"conversation", "telegram", TASK_SCHEDULER})
 
 # --- the three capabilities (ADR-0350 §4:1) -----------------------------------------------
 
-SPAWN_CAPABILITY: Final = "spawn"
+#: ``spawn`` is ``spawn_task`` since ADR-0364 §8:1; its declaration keeps its id, ``spawn``.
+SPAWN_CAPABILITY: Final = "spawn_task"
 CANCEL_TASK_CAPABILITY: Final = "cancel_task"
 LIST_TASKS_CAPABILITY: Final = "list_tasks"
+
+#: Each declaration's id: its capability's name before ADR-0364 §8:1 renamed it.
+_IDS: Final[Mapping[str, str]] = {SPAWN_CAPABILITY: "spawn"}
 
 #: Every capability this module declares.
 TASK_SCHEDULER_CAPABILITIES: Final = frozenset(
@@ -196,7 +200,8 @@ INSTRUCTION_ARGUMENT: Final = "instruction"
 AT_ARGUMENT: Final = "at"
 DELAY_ARGUMENT: Final = "delay_minutes"
 AFTER_ARGUMENT: Final = "after"
-PLACES_ARGUMENT: Final = "places"
+#: The connections its work may speak in, by their ``L`` labels (ADR-0364 §8:2).
+PLACES_ARGUMENT: Final = "connections"
 REPLACES_ARGUMENT: Final = "replaces"
 #: ADR-0340 §8:1's two: a rule, and the zone a local time or a rule is read in.
 RULE_ARGUMENT: Final = "rule"
@@ -211,7 +216,7 @@ UNTIL_PART: Final = "until"
 TASK_ARGUMENT: Final = "task"
 
 
-def _declared(  # noqa: PLR0913 — the capability, its words, its schema, and the three properties that differ between them
+def _declared(  # noqa: PLR0913 — the capability, its words, its schema, and the four properties that differ between them
     capability: str,
     description: str,
     schema: dict[str, FrozenJson],
@@ -219,6 +224,7 @@ def _declared(  # noqa: PLR0913 — the capability, its words, its schema, and t
     writes: bool,
     safe_to_repeat: bool,
     idempotency: Idempotency,
+    reversibility: Reversibility | None = None,
 ) -> ToolDefinition:
     """One capability's declaration, the five properties as ADR-0350 §4:1 rules them.
 
@@ -227,13 +233,15 @@ def _declared(  # noqa: PLR0913 — the capability, its words, its schema, and t
     own rendering of the stored record, with any text resting on outside content withheld
     (§4:7). Spawn and cancel write the person's tier; the list pull writes nothing.
     """
+    if reversibility is None:
+        # A write can be cancelled or replaced; a read has nothing to reverse.
+        reversibility = Reversibility.RECOVERABLE if writes else Reversibility.REVERSIBLE
     return ToolDefinition(
-        id=capability,
+        id=_IDS.get(capability, capability),
         capability=capability,
         description=description,
         risk_level=RiskLevel.LOW,
-        # A write can be cancelled or replaced; a read has nothing to reverse.
-        reversibility=Reversibility.RECOVERABLE if writes else Reversibility.REVERSIBLE,
+        reversibility=reversibility,
         side_effecting=True,
         reads=(DataTier.PERSONAL,),
         writes=(DataTier.PERSONAL,) if writes else (),
@@ -261,23 +269,32 @@ def _labels(description: str) -> dict[str, FrozenJson]:
 SPAWN: Final = _declared(
     SPAWN_CAPABILITY,
     (
-        "Set up work that runs later or separately: a scheduled task, which starts an "
-        "activation of its own when it falls due, reading what it carries. Spawn only "
-        "work that runs later or separately. Give at most one of at, delay_minutes, "
-        "after and rule; with none it falls due now. A task suggests only places on "
-        "your place list. A task you were shown by its T label is replaced by one "
-        'spawn naming it in replaces; find any other with list_tasks first. "Snooze '
-        '10 minutes" or "again tomorrow", after a task\'s message, is a new spawn: a '
-        "one-off task with the same instruction, written from what you were shown of "
-        "the episode that wrote the message, suggesting the place the person said it "
-        "in. Skipping a rule's next occurrence (\"skip tomorrow's\") is a spawn "
-        "replacing it with the same rule from the local date after the skipped one, "
-        'or its cancel where none would follow before its until. "Tomorrow at 9 '
-        'instead" is that skip and a one-off task at the new time, in the same round. '
-        "Write a local time with no UTC offset unless the person named one, and give "
-        "a zone only where the person named one. Say a task back from its read_back, "
-        "never from your own reckoning of the time. Where the words could mean more "
-        "than one task, ask which."
+        "Set up a scheduled task: work that starts on its own when the task falls due, reading "
+        "only what the task carries.\n"
+        "\n"
+        "Spawn only work that runs later or separately. Give at most one of at, delay_minutes, "
+        "after and rule; with none, it falls due now. The task's work carries no one's authority: "
+        "it can't stop running work, and it needs approval to set a rule or change a task it "
+        "didn't spawn, so promise only what it can do. Its work can speak only in the connections "
+        "it suggests. Write a local time with no UTC offset, and give a zone, only where one was "
+        "named. Say a task back from its read_back, never from your own reckoning of the time.\n"
+        "\n"
+        "A task you were shown by its T label is replaced by one spawn naming it in replaces; "
+        "find any other with list_tasks first. “Snooze 10 minutes” or “again tomorrow”, after a "
+        "task's message, is a new one-off task with the same instruction, written from what you "
+        "were shown of the episode that wrote the message, suggesting the connection it was said "
+        "in. Skipping a rule's next occurrence (“skip tomorrow's”) is a spawn replacing it with "
+        "the same rule from the local date after the skipped one, or its cancel where none would "
+        "follow before its until. “Tomorrow at 9 instead” is that skip and a one-off task at the "
+        "new time, in the same round.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "task: with done, the task it wrote:\n"
+        "  label: its T label\n"
+        "  read_back: when it falls due and where its work may speak, from the record\n"
+        "\n"
+        "It changes only the system's own records, and can be undone. Not safe to repeat."
     ),
     {
         "type": "object",
@@ -286,15 +303,18 @@ SPAWN: Final = _declared(
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4000,
-                "description": "What the task's activation is to do, in your own words.",
+                "description": (
+                    "What the task's work is to do, in your own words. Say what to do, not "
+                    "where: its connections say where."
+                ),
             },
             AT_ARGUMENT: {
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "When it falls due: an ISO 8601 local date and time with no offset, "
-                    "such as 2026-10-25T20:00, read in the person's zone, or in zone; or "
-                    "an instant with its UTC offset, such as 2026-10-25T20:00:00-04:00."
+                    "When it falls due: an ISO 8601 local date and time with no offset, such as "
+                    "2026-10-25T20:00, read in the situation's time zone, or in zone; or an "
+                    "instant with its UTC offset, such as 2026-10-25T20:00:00-04:00."
                 ),
             },
             DELAY_ARGUMENT: {
@@ -305,21 +325,11 @@ SPAWN: Final = _declared(
             AFTER_ARGUMENT: _labels(
                 "When it falls due: once every one of these tasks has ended, by T label."
             ),
-            PLACES_ARGUMENT: {
-                "type": "array",
-                "items": {"type": "string", "minLength": 1},
-                "description": "The places it suggests speaking in, by L label.",
-            },
-            REPLACES_ARGUMENT: {
-                "type": "string",
-                "minLength": 1,
-                "description": "A pending task this one replaces, by T label.",
-            },
             RULE_ARGUMENT: {
                 "type": "object",
                 "description": (
-                    "When it falls due, again and again: a rule, at a local time of day in "
-                    "the person's zone, or in zone. Only for a task the person asked for."
+                    "When it falls due, again and again, at a local time of day read in the "
+                    "situation's time zone, or in zone. Only where one was asked for."
                 ),
                 "properties": {
                     REPEATS_PART: {
@@ -341,12 +351,18 @@ SPAWN: Final = _declared(
                     FROM_PART: {
                         "type": "string",
                         "minLength": 1,
-                        "description": "A local date, such as 2026-10-27, before which none falls.",
+                        "description": (
+                            "A local date, such as 2026-10-27, before which none falls. Left "
+                            "out: now."
+                        ),
                     },
                     UNTIL_PART: {
                         "type": "string",
                         "minLength": 1,
-                        "description": "The last local date one may fall on, such as 2026-11-30.",
+                        "description": (
+                            "The last local date one may fall on, such as 2026-11-30. Left out: "
+                            "no end."
+                        ),
                     },
                 },
                 "required": [REPEATS_PART, TIME_PART],
@@ -356,8 +372,24 @@ SPAWN: Final = _declared(
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "The IANA zone at or rule is read in, such as Europe/Lisbon, only where "
-                    "the person named one."
+                    "The IANA zone at or rule is read in, such as Europe/Lisbon. Only where one "
+                    "was named. Left out: the situation's time zone."
+                ),
+            },
+            PLACES_ARGUMENT: {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "description": (
+                    "The connections its work may speak in, by L label. The messaging line, "
+                    "where one is connected, is always open to it too. Left out: none."
+                ),
+            },
+            REPLACES_ARGUMENT: {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "A pending task this one replaces, by T label. Left out: none, so it is a "
+                    "new task."
                 ),
             },
         },
@@ -367,19 +399,28 @@ SPAWN: Final = _declared(
     writes=True,
     safe_to_repeat=False,
     idempotency=Idempotency.NONE,
+    # ADR-0364 §7:7: ``cancel_task`` undoes it while it is pending, as ADR-0016 reads a
+    # calendar event its tool can delete.
+    reversibility=Reversibility.REVERSIBLE,
 )
-"""``spawn``: write a scheduled task, which may replace a pending one (ADR-0350 §4:1, §9:4)."""
+"""``spawn_task``: write a scheduled task, which may replace a pending one (ADR-0350 §4:1,
+§9:4, ADR-0364 §8:1, §11)."""
 
 CANCEL_TASK: Final = _declared(
     CANCEL_TASK_CAPABILITY,
     (
-        "Cancel what is still pending of a scheduled task. It stops nothing already "
-        "running. A task you were shown by its T label is cancelled by one call; find "
-        "any other with list_tasks first. Skipping a one-off task is its cancel. "
-        '"Done" or "I already took it" before a task\'s message is that skip, and '
-        "after its message is no call. Cancel exactly what the person's words cover, "
-        "by the labels you were shown, and keep the rest; where the words could mean "
-        "more than one task, ask which."
+        "Cancel what is still pending of a scheduled task.\n"
+        "\n"
+        "It stops nothing already running. Find a task you weren't shown by its T label with "
+        "list_tasks first. Skipping a one-off task is its cancel: “done” or “I already took it” "
+        "before the task's message is that skip, and after its message is no call. Cancel exactly "
+        "what was asked, and keep the rest.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "task: with done, the task as it now stands, as list_tasks shows a scheduled one\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
     {
         "type": "object",
@@ -402,9 +443,38 @@ CANCEL_TASK: Final = _declared(
 LIST_TASKS: Final = _declared(
     LIST_TASKS_CAPABILITY,
     (
-        "List the person's work: what is running, the scheduled tasks still pending, "
-        "and the scheduled work that ended most recently. Use it to find a task you "
-        "were not shown by its T label before you replace or cancel it."
+        "List the work running and the scheduled tasks pending for the person this work is for, "
+        "and the scheduled work that ended most recently.\n"
+        "\n"
+        "Use it to find a task you weren't shown by its T label.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "running: the work running now besides this one, or none; each with\n"
+        "  episode: its E label\n"
+        "  where: where it started, by L label, or in words\n"
+        "  input: what started it\n"
+        "  has_acted: true or false\n"
+        "scheduled: the tasks still pending, or none; each with\n"
+        "  label: its T label\n"
+        "  state: pending, or running or about to start\n"
+        "  falls_due: when it next falls due\n"
+        "  repeats: its rule in words, for a task with one\n"
+        "  waits_on: the tasks it waits on, by T label, for a task that waits\n"
+        "  carries: its instruction\n"
+        "  set_by: who set it\n"
+        "  suggests: its connections, by L label\n"
+        "  parent: the work that spawned it, by E label, and what that was\n"
+        "ended_lately: the scheduled work that ended most recently, or none; each with\n"
+        "  episode: its E label\n"
+        "  started: when it started\n"
+        "  where: where it started\n"
+        "  status: how it ended\n"
+        "  input: the instruction it ran\n"
+        "  wrote_into: where it wrote, by L label, or that it wrote no message\n"
+        "  may_have_written_into: where a message of unknown outcome may have gone\n"
+        "\n"
+        "It changes nothing."
     ),
     {"type": "object", "properties": {}, "additionalProperties": False},
     writes=False,
@@ -472,8 +542,8 @@ class Spawner:
             spawns is the person's (§3:7) and it may cancel or replace any of the
             person's tasks (§4:4).
         set_in: The place of its input, where a task it spawns is set (§3:6, §3:10).
-        places: The places on its place list as last shown, by place: the only places
-            a spawn may suggest (§5:6).
+        places: The places on its place list as last shown, by place: for a work that
+            keeps a list, the only places a spawn may suggest (§5:6, ADR-0364 §11:3).
         carried: For an activation the Task Scheduler started, its own task's suggested
             places, which a spawn stating none carries forward (§5:6); empty otherwise.
         read_outside_content: Whether it has read outside content, so a task it spawns
@@ -482,6 +552,11 @@ class Spawner:
             activations are admitted under (ADR-0332 §4:2).
         sees_running: Whether its input's author is established, the one viewer
             ADR-0332 §4:3 shows running work to.
+        keeps_list: Whether it keeps a list it speaks in alone, a task's or an
+            approval's work (ADR-0364 §9:4).
+        shown: Each connection it was shown, by what its ``L`` label names, which a
+            spawn from a work keeping no list may suggest where it takes a text message
+            (ADR-0364 §11:3).
     """
 
     activation_id: str
@@ -493,6 +568,8 @@ class Spawner:
     read_outside_content: bool = False
     supply: TurnSupply | None = None
     sees_running: bool = False
+    keeps_list: bool = False
+    shown: tuple[str, ...] = ()
 
     @property
     def author(self) -> ScheduledTaskAuthor:

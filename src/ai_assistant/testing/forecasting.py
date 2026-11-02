@@ -341,8 +341,20 @@ def _coordinate_schema(*, maximum: float) -> dict[str, FrozenJson]:
 #: credential.
 FAKE_FORECAST_READ: Final = ToolDefinition(
     id=FAKE_FORECAST_ID,
-    capability="forecast_read",
-    description="Ask the configured forecast provider what it says about the days ahead.",
+    capability="read_forecast",
+    description=(
+        "Read the forecast for the next few days at a place.\n"
+        "\n"
+        "Give the coordinates of a place that was named, such as a city, both or neither; left "
+        "out, it reads the system's configured place.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label, read for you\n"
+        "evidence: what was read of the forecast for looking_for, each item marked outside\n"
+        "\n"
+        "It changes nothing, but what it sends leaves the system."
+    ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,
     side_effecting=True,
@@ -356,15 +368,28 @@ FAKE_FORECAST_READ: Final = ToolDefinition(
     result=CapabilityResult.MAY_CARRY_OUTSIDE_TEXT,
     outcome_can_be_unknown=True,
     safe_to_repeat=True,
+    # ADR-0364 §12:1-§12:2: the origin is the hub's to fill, and the coordinates are
+    # planning's, optional, as production declares them.
+    system_supplied=("origin",),
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
             "origin": _origin_schema(),
-            "latitude": _coordinate_schema(maximum=_MAX_LATITUDE),
-            "longitude": _coordinate_schema(maximum=_MAX_LONGITUDE),
+            "latitude": {
+                **_coordinate_schema(maximum=_MAX_LATITUDE),
+                "description": (
+                    "The place's latitude, in degrees. Left out: the configured place's."
+                ),
+            },
+            "longitude": {
+                **_coordinate_schema(maximum=_MAX_LONGITUDE),
+                "description": (
+                    "The place's longitude, in degrees. Left out: the configured place's."
+                ),
+            },
         },
-        "required": ["origin", "latitude", "longitude"],
+        "required": ["origin"],
         "additionalProperties": False,
     },
 )

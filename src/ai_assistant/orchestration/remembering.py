@@ -91,8 +91,9 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: The capability planning is offered, and the declaration's id.
-REMEMBER_CAPABILITY: Final = "remember"
+#: The capability planning is offered, ``remember_fact`` since ADR-0364 §8:1. The
+#: declaration keeps its id, ``remember``.
+REMEMBER_CAPABILITY: Final = "remember_fact"
 
 #: The one argument a remember call took under ADR-0328 §13's interim: the statement it
 #: wrote. No call takes it now; it names what the calls earlier rounds recorded stated.
@@ -110,15 +111,14 @@ STATEMENT_MAX_CHARS: Final = 2000
 #: A candidate's fact (ADR-0329 §3:1): one thing, self-contained, in planning's words.
 FACT_ARGUMENT: Final = "fact"
 
-#: Whether a candidate rests on the activation's input.
-INPUT_ARGUMENT: Final = "rests_on_input"
+#: Whether a candidate rests on this work's stimulus (ADR-0364 §8:2).
+INPUT_ARGUMENT: Final = "rests_on_this_stimulus"
 
-#: The earlier exchanges, by their episodes' ``E`` labels, whose user's message it rests on.
-USER_MESSAGES_ARGUMENT: Final = "rests_on_user_messages"
+#: The earlier episodes, by their ``E`` labels, whose stimulus it rests on.
+USER_MESSAGES_ARGUMENT: Final = "rests_on_stimuli"
 
-#: The earlier exchanges, by their episodes' ``E`` labels, whose assistant's message it
-#: rests on.
-ASSISTANT_MESSAGES_ARGUMENT: Final = "rests_on_assistant_messages"
+#: The earlier episodes, by their ``E`` labels, whose response from the system it rests on.
+ASSISTANT_MESSAGES_ARGUMENT: Final = "rests_on_responses"
 
 #: The results, by their ``R`` labels, it rests on.
 RESULTS_ARGUMENT: Final = "rests_on_results"
@@ -155,50 +155,55 @@ _CANDIDATE_SCHEMA: Final[dict[str, FrozenJson]] = {
                 "One fact, in your own words, that will still make sense on its own later."
             ),
         },
-        INPUT_ARGUMENT: {
-            "type": "boolean",
-            "description": "True where the fact rests on this activation's input.",
-        },
-        USER_MESSAGES_ARGUMENT: {
-            "type": "array",
-            "items": _LABELS_SCHEMA_ITEMS,
-            "description": (
-                "The earlier exchanges, by their E labels, whose user's message the fact rests on."
-            ),
-        },
-        ASSISTANT_MESSAGES_ARGUMENT: {
-            "type": "array",
-            "items": _LABELS_SCHEMA_ITEMS,
-            "description": (
-                "The earlier exchanges, by their E labels, whose assistant's message the "
-                "fact rests on."
-            ),
-        },
-        RESULTS_ARGUMENT: {
-            "type": "array",
-            "items": _LABELS_SCHEMA_ITEMS,
-            "description": "The results, by their R labels, the fact rests on.",
-        },
         WHY_ARGUMENT: {
             "type": "string",
             "minLength": 1,
             "maxLength": _REASON_MAX_CHARS,
             "description": "Why it is worth keeping, in a few words.",
         },
+        INPUT_ARGUMENT: {
+            "type": "boolean",
+            "description": "Whether the fact rests on this work's stimulus. Left out: false.",
+        },
+        USER_MESSAGES_ARGUMENT: {
+            "type": "array",
+            "items": _LABELS_SCHEMA_ITEMS,
+            "description": (
+                "Earlier episodes whose stimulus the fact rests on, by E label. Left out: none."
+            ),
+        },
+        ASSISTANT_MESSAGES_ARGUMENT: {
+            "type": "array",
+            "items": _LABELS_SCHEMA_ITEMS,
+            "description": (
+                "Earlier episodes whose response from the system the fact rests on, by E label. "
+                "Left out: none."
+            ),
+        },
+        RESULTS_ARGUMENT: {
+            "type": "array",
+            "items": _LABELS_SCHEMA_ITEMS,
+            "description": "The results the fact rests on, by R label. Left out: none.",
+        },
         MEMORY_ARGUMENT: {
             "type": "string",
             "minLength": 1,
-            "description": "A memory you were shown that the fact bears on, by its M label.",
+            "description": (
+                "A memory you were shown that the fact bears on, by M label. Left out: none."
+            ),
         },
         NOTE_ARGUMENT: {
             "type": "string",
             "minLength": 1,
             "maxLength": _REASON_MAX_CHARS,
-            "description": ("Required with memory: how the fact bears on that memory, in words."),
+            "description": "How the fact bears on that memory. Required with memory.",
         },
         CONFIRM_ARGUMENT: {
             "type": "boolean",
-            "description": ("True to ask the user's yes to the fact's wording before it is kept."),
+            "description": (
+                "Have the fact's wording approved before it is kept: with it, this call needs "
+                "approval, so ask for it with request_approval. Left out: false."
+            ),
         },
         EPISODE_ARGUMENT: {"type": "string", "minLength": 1},
         OUTSIDE_CONTENT_ARGUMENT: {"type": "boolean"},
@@ -207,18 +212,28 @@ _CANDIDATE_SCHEMA: Final[dict[str, FrozenJson]] = {
     "additionalProperties": False,
 }
 REMEMBER_CANDIDATE: Final = ToolDefinition(
-    id=REMEMBER_CAPABILITY,
+    # ADR-0364 §8:1: renamed, keeping its declaration's other fields, its id among them.
+    id="remember",
     capability=REMEMBER_CAPABILITY,
     description=(
-        "Record a candidate for long-term memory: one fact, in your own words, what "
-        "it rests on, and briefly why it is worth keeping. Record one only where "
-        "someone asked for something to be kept, or the work in hand needs something "
-        "kept now, such as a fact a task it sets for later will rely on; anything "
-        "else said or seen is found later from the episode. A candidate is not yet a "
-        "memory: whether and how it is kept is decided later. The result shows the "
-        "memories already held that are similar to its fact; ask about one in the "
-        "moment only where it conflicts with the candidate and the conflict matters "
-        "to what is being done."
+        "Record a candidate for long-term memory: one fact, what it rests on, and why it is worth "
+        "keeping.\n"
+        "\n"
+        "Record one only where it was asked for, or this work needs something kept now, such as a "
+        "fact a task it sets will rely on; anything else is found later from the episode. A "
+        "candidate isn't yet a memory: whether and how it is kept is decided later. Ask about a "
+        "similar memory its result shows only where it conflicts with the fact and the conflict "
+        "matters to what is being done.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done:\n"
+        "  candidate: recorded; whether and how it is kept is decided once this episode leaves "
+        "short-term memory\n"
+        "  similar_memories: the memories already held like its fact, each as long-term memory "
+        "shows one, or none\n"
+        "\n"
+        "It changes only the system's own records. Not safe to repeat."
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.RECOVERABLE,

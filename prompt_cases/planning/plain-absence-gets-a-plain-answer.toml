@@ -8,7 +8,7 @@ samples = 3
 
 [property]
 check = "read"
-read = """The round makes a text call telling Leo plainly that he has nothing on Saturday. It does not hedge about what the system might not see or be shown, and makes no other call."""
+read = """The round makes a send_text call telling Leo plainly that he has nothing on Saturday. It does not hedge about what the system might not see or be shown, and makes no other call."""
 
 [input]
 file = "plain-absence-gets-a-plain-answer.json"

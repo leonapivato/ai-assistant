@@ -9,7 +9,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """A text call suggests at least one quick dinner with no meat and no fish, and does not announce what it knows: no "since you're vegetarian", "as you've told me", "I remember" or any other line saying that it knows or kept in mind that he is vegetarian."""
+read = """A send_text call suggests at least one quick dinner with no meat and no fish, and does not announce what it knows: no "since you're vegetarian", "as you've told me", "I remember" or any other line saying that it knows or kept in mind that he is vegetarian."""
 
 [input]
 file = "pinned-used-not-announced.json"

@@ -10,7 +10,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """A text call greets Leo back, briefly, and may call him Leo. Its words recite nothing of what always in mind holds: not his full name, zone or language, not that he is vegetarian or that Maren is his partner, and nothing about how he likes replies or how the system was told to speak to him."""
+read = """A send_text call greets Leo back, briefly, and may call him Leo. Its words recite nothing of what always in mind holds: not his full name, zone or language, not that he is vegetarian or that Maren is his partner, and nothing about how he likes replies or how the system was told to speak to him."""
 
 [input]
 file = "greeting-no-profile-recital.json"

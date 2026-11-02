@@ -2482,8 +2482,10 @@ def _no_label(reply: Reply, params: Mapping[str, object]) -> Judgement:
     return None
 
 
-#: The message calls a round's words go out by (ADR-0357 §2), whose words a check reads.
-_MESSAGE_CALLS: Final = frozenset({"text", "email"})
+#: The message calls a round's words go out by (ADR-0357 §2), whose words a check reads,
+#: under their names since ADR-0364 §8:1.
+_TEXT_CALL: Final = "send_text"
+_MESSAGE_CALLS: Final = frozenset({_TEXT_CALL, "send_email"})
 
 
 def _said(planning_round: RoundResponse) -> list[str]:
@@ -2506,7 +2508,7 @@ def _only_says(reply: Reply, params: Mapping[str, object]) -> Judgement:
     calls = reply.round.calls
     if not calls:
         return "the round makes no call, so nothing reaches anyone"
-    if any(one.name != "text" for one in calls):
+    if any(one.name != _TEXT_CALL for one in calls):
         return "the round makes a call other than a text call"
     phrases = [one.casefold() for one in cast("list[str]", params["phrases"])]
     if not any(all(one in words.casefold() for one in phrases) for words in _said(reply.round)):
@@ -2532,7 +2534,7 @@ def _answers_by_message(reply: Reply, params: Mapping[str, object]) -> Judgement
         return "the round sends no message, so nothing reaches anyone"
     if len(said) > 1:
         return "the round sends more than one message"
-    if any(one.name != "text" for one in reply.round.calls if one.name in _MESSAGE_CALLS):
+    if any(one.name != _TEXT_CALL for one in reply.round.calls if one.name in _MESSAGE_CALLS):
         return "the round's message is not a text call"
     return _told(said[0], params)
 
@@ -2555,7 +2557,9 @@ def _tells(reply: Reply, params: Mapping[str, object]) -> Judgement:
     """
     if reply.round is None:
         return "the response reads as no round"
-    others = [one.name for one in reply.round.calls if one.name not in {"text", "note_reliance"}]
+    others = [
+        one.name for one in reply.round.calls if one.name not in {_TEXT_CALL, "note_reliance"}
+    ]
     if others:
         return "the round makes a call other than a text call and a reliance note"
     said = _said(reply.round)
@@ -2622,7 +2626,7 @@ def _answers_or_searches(reply: Reply, params: Mapping[str, object]) -> Judgemen
         return _answers_by_message(reply, params)
     if all(one in reply.round.text.casefold() for one in phrases):
         return "the answer is written as the round's text, and no message carries it"
-    if not any(one.name == "search_memory" for one in reply.round.calls):
+    if not any(one.name == "search_memories" for one in reply.round.calls):
         return "the round neither answers by a text call nor searches memory"
     return None
 

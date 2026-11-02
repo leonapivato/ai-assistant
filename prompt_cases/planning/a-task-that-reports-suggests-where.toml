@@ -10,7 +10,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one spawn, falling due in 20 minutes, whose instruction is to check whether it will rain tonight and tell Leo, and whose places name L1. It makes no text call."""
+read = """The round makes one spawn_task call, falling due in 20 minutes, whose instruction is to check whether it will rain tonight and tell Leo, and whose connections name L1. It makes no send_text call."""
 
 [input]
 file = "a-task-that-reports-suggests-where.json"

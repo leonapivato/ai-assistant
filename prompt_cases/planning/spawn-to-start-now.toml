@@ -11,7 +11,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes a spawn whose instruction is the flight research for Porto over the long weekend, with no at, delay_minutes or after, so it falls due now. It does not start the research itself in this round, and any text call it makes says the research is being looked into separately, never that anything was found."""
+read = """The round makes a spawn_task call whose instruction is the flight research for Porto over the long weekend, with no at, delay_minutes or after, so it falls due now. It does not start the research itself in this round, and any text call it makes says the research is being looked into separately, never that anything was found."""
 
 [input]
 file = "spawn-to-start-now.json"

@@ -8,7 +8,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes one spawn, to remind Leo to call his mother, whose at is 2026-10-29T20:00, a local time with no UTC offset, and which names no zone and no rule. It falls due tonight, not at 08:00."""
+read = """The round makes one spawn_task call, to remind Leo to call his mother, whose at is 2026-10-29T20:00, a local time with no UTC offset, and which names no zone and no rule. It falls due tonight, not at 08:00."""
 
 [input]
 file = "remind-at-8-said-at-9-is-tonight.json"

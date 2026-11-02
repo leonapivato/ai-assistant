@@ -1,6 +1,7 @@
-"""Planning's three calls on running work: the stop, the look-up, and the answer (ADR-0349).
+"""Planning's calls on running work: the stop, the answer, and a running episode's read.
 
-- **The stop call** (§4:6-§4:12), :data:`STOP_ACTIVATION`: the Task Manager's stop, by the
+- **The stop call** (§4:6-§4:12), :data:`STOP_ACTIVATION`, ``stop_work`` since ADR-0364
+  §8:1: the Task Manager's stop, by the
   one implementation ``AssistantEngine.stop_activation`` runs, which stops exactly the
   activation it names and nothing below it (ADR-0352 §2:1). Offered where the
   activation's input carries the user's authority. It names one
@@ -13,8 +14,9 @@
   and what that activation set up that is still live below it, or that nothing is
   (ADR-0352 §3:1-§3:6). It writes the plan store's stop record, so it is an act, and
   commits its activation.
-- **The findings look-up** (§6:1, §6:4-§6:6), :data:`LOOK_UP_ACTIVATION`: a pure read of
-  a running activation's findings, by the same label, through the peer view; where it has
+- **The findings look-up** (§6:1, §6:4-§6:6), folded into ``read_episode`` by ADR-0364
+  §8:3 (:meth:`MatterCalls.read_running`): a pure read of a running activation's findings,
+  by any ``E`` label the work was shown it under, through the peer view; where it has
   ended since, its finished work, saying so.
 - **The answer call** (§7:20), :data:`ANSWER_OFFER`: take an offer open to this
   activation, or decline it with a short reason, naming it by the offering activation's
@@ -66,7 +68,6 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.matters import (
     ANSWER_OFFER_CAPABILITY,
-    LOOK_UP_ACTIVATION_CAPABILITY,
     STOP_ACTIVATION_CAPABILITY,
     NotAsAsked,
     TakeAnswer,
@@ -87,8 +88,6 @@ __all__ = [
     "ACTIVATION_ARGUMENT",
     "ANSWER_OFFER",
     "ANSWER_OFFER_CAPABILITY",
-    "LOOK_UP_ACTIVATION",
-    "LOOK_UP_ACTIVATION_CAPABILITY",
     "MATTER_CALLS",
     "MATTER_CAPABILITIES",
     "MATTER_LABEL_ARGUMENTS",
@@ -106,12 +105,14 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: Every capability this module declares.
-MATTER_CAPABILITIES: Final = frozenset(
-    {STOP_ACTIVATION_CAPABILITY, LOOK_UP_ACTIVATION_CAPABILITY, ANSWER_OFFER_CAPABILITY}
-)
+MATTER_CAPABILITIES: Final = frozenset({STOP_ACTIVATION_CAPABILITY, ANSWER_OFFER_CAPABILITY})
 
-#: The stop's and the look-up's one argument: the running activation, by its ``E`` label.
-ACTIVATION_ARGUMENT: Final = "activation"
+#: The stop's one argument: the running work, by its ``E`` label (ADR-0364 §8:2).
+ACTIVATION_ARGUMENT: Final = "work"
+
+#: ``read_episode``'s argument, which names a running episode as it names a past one
+#: (ADR-0364 §8:3): ``lookups``' ``EPISODE_ARGUMENT``, which this module cannot import.
+_EPISODE_ARGUMENT: Final = "episode"
 #: The answer's arguments: the offer, by the offering activation's ``E`` label; whether it
 #: is taken; and a decline's short reason.
 OFFER_ARGUMENT: Final = "offer"
@@ -121,12 +122,16 @@ REASON_ARGUMENT: Final = "reason"
 _EPISODE: Final = "activation:"
 
 
+#: Each declaration's id: its capability's name before ADR-0364 §8:1 renamed it.
+_IDS: Final[Mapping[str, str]] = {STOP_ACTIVATION_CAPABILITY: "stop_activation"}
+
+
 def _declared(
     capability: str, description: str, schema: dict[str, FrozenJson], *, writes: bool
 ) -> ToolDefinition:
     """One call's declaration, as ADR-0350 §4:1 declares the cancel of a scheduled task."""
     return ToolDefinition(
-        id=capability,
+        id=_IDS.get(capability, capability),
         capability=capability,
         description=description,
         risk_level=RiskLevel.LOW,
@@ -161,36 +166,49 @@ def _naming(description: str) -> dict[str, FrozenJson]:
 STOP_ACTIVATION: Final = _declared(
     STOP_ACTIVATION_CAPABILITY,
     (
-        "Stop running work you were shown as running, and that work alone. Nothing it "
-        "already did is undone, and what it set up stays. The result shows what it "
-        "had finished and what it set up that is still live, so say that. Stop work "
-        'only where the person asks for it, such as "never mind the booking" after it '
-        "has booked, or means to take over work this work waits on. Stop exactly what "
-        "their words cover, including what a stop's result lists, and keep the rest; "
-        "where it is unclear what the words cover, ask which."
+        "Stop running work you were shown as running, and that work alone.\n"
+        "\n"
+        "Nothing it already did is undone, and what it set up stays: say what its result shows it "
+        "had finished and set up that is still live. Stop work only where it was asked for, such "
+        "as “never mind the booking” after it has booked, or to take over work this work waits "
+        "on. Stop exactly what was asked, including what a stop's result lists, and keep the "
+        "rest.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label, the stopped work as an episode:\n"
+        "  stopped_by_this_call: yes, or no where it had already ended\n"
+        "  what it took in, was understood to mean, noted, found and did\n"
+        "  set_up_still_live: the tasks and running work it set up that are still live, each as "
+        "list_tasks shows one, or nothing\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
     _naming("The running work, by its E label."),
     writes=True,
 )
-"""``stop_activation``: planning's stop call (ADR-0349 §4:6-§4:7, ADR-0352 §3:9).
+"""``stop_work``: planning's stop call (ADR-0349 §4:6-§4:7, ADR-0352 §3:9, ADR-0364 §8:1).
 
-Its description is the prompts front's words, as routed for ADR-0352 §3:10."""
-
-LOOK_UP_ACTIVATION: Final = _declared(
-    LOOK_UP_ACTIVATION_CAPABILITY,
-    "See what running work you were shown as running has found and done so far.",
-    _naming("The running work, by its E label."),
-    writes=False,
-)
-"""``look_up_activation``: the findings look-up, a pure read (ADR-0349 §6:1, §6:4)."""
+Its description is the coordinator's agreed words (ADR-0364 §2:1)."""
 
 ANSWER_OFFER: Final = _declared(
     ANSWER_OFFER_CAPABILITY,
     (
-        "Answer newer input offered to this work, in the round it is offered. Take it "
-        "unless this work has already done something it would change that cannot be "
-        "undone, and then carry it out as part of this work. Otherwise decline it, "
-        "with the reason in a few words, and it is done once this work ends."
+        "Answer a newer stimulus offered to this work: take it or decline it.\n"
+        "\n"
+        "Answer it in the round it is offered. Take it unless this work has already done "
+        "something it would change that can't be undone; otherwise decline it, with the reason in "
+        "a few words.\n"
+        "\n"
+        "outcome: done | not done | unknown | refused\n"
+        "because: why, with not done, unknown or refused\n"
+        "result: with done, under its R label, the offering work as an episode:\n"
+        "  answer: taken, declined, or withdrawn\n"
+        "  because: where it came to something else: the offering work was stopped or ended "
+        "first, so nothing is to be done; or this work already holds as much as it may, so the "
+        "take counts as a decline\n"
+        "\n"
+        "It changes only the system's own records. Safe to repeat."
     ),
     {
         "type": "object",
@@ -205,7 +223,7 @@ ANSWER_OFFER: Final = _declared(
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 300,
-                "description": "Why you decline it, in a few words.",
+                "description": "Why you decline it, in a few words. Left out: none.",
             },
         },
         "required": [OFFER_ARGUMENT, TAKE_ARGUMENT],
@@ -215,15 +233,14 @@ ANSWER_OFFER: Final = _declared(
 )
 """``answer_offer``: the answer call (ADR-0349 §7:20)."""
 
-#: The three declarations, in the order they are offered.
-MATTER_CALLS: Final = (STOP_ACTIVATION, LOOK_UP_ACTIVATION, ANSWER_OFFER)
+#: The declarations, in the order they are offered.
+MATTER_CALLS: Final = (STOP_ACTIVATION, ANSWER_OFFER)
 
 #: Which of the calls' arguments name a running activation by its episode's label
 #: (ADR-0307 §5:2): planning maps each to its episode's id, and refuses whole a call
 #: naming a label it was never shown (§5:3).
 MATTER_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind]]] = {
     STOP_ACTIVATION_CAPABILITY: {ACTIVATION_ARGUMENT: LabelKind.EPISODE},
-    LOOK_UP_ACTIVATION_CAPABILITY: {ACTIVATION_ARGUMENT: LabelKind.EPISODE},
     ANSWER_OFFER_CAPABILITY: {OFFER_ARGUMENT: LabelKind.EPISODE},
 }
 
@@ -338,8 +355,6 @@ class MatterCalls:
         try:
             if capability == STOP_ACTIVATION_CAPABILITY:
                 return await self._stop(caller, call.decision.id, arguments)
-            if capability == LOOK_UP_ACTIVATION_CAPABILITY:
-                return await self._look_up(caller, call.decision.id, arguments)
             if capability == ANSWER_OFFER_CAPABILITY:
                 return await self._answer(caller, call.decision.id, arguments)
         except PlanningError, MemoryStoreError:
@@ -405,17 +420,24 @@ class MatterCalls:
             return NotDone(reason=_ABSORBED)
         return None
 
-    async def _look_up(
-        self, caller: MatterCaller, decision: str, arguments: Mapping[str, FrozenJson]
-    ) -> OwnRecordsAnswer:
-        """§6:1, §6:5-§6:6: the activation's findings, read fresh, or a refusal whole."""
-        named = _named(arguments, ACTIVATION_ARGUMENT)
-        if named is None:
-            return NotDone(reason=_MALFORMED)
-        if named not in caller.running:
-            _log.info("matter_call_not_done", stage="acting", reason="not_shown_running")
-            return NotDone(reason=_NOT_SHOWN_RUNNING)
-        await self._show(caller, decision, named, stopped=None)
+    async def read_running(self, call: ToolCall) -> OwnRecordsAnswer | None:
+        """A ``read_episode`` of running work: its findings, or ``None`` where it is past.
+
+        ADR-0364 §8:3, folding ADR-0349 §6:1's look-up into ``read_episode``: an episode
+        the calling work was shown as running is read through the peer view, fresh, as
+        the look-up read it (§6:5-§6:6); where it has ended since, its finished work,
+        saying so. Any other episode is a past one's, and ``None`` hands it to the
+        episode look-up.
+        """
+        caller = current_caller()
+        named = _named(call.request.parameters, _EPISODE_ARGUMENT)
+        if caller is None or named is None or named not in caller.running:
+            return None
+        try:
+            await self._show(caller, call.decision.id, named, stopped=None)
+        except PlanningError, MemoryStoreError:
+            _log.warning("matter_call_not_done", stage="acting", reason="store_failed")
+            return NotDone(reason=_STORE_FAULT)
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"kind": "matter_look_up"})
 
     async def _answer(

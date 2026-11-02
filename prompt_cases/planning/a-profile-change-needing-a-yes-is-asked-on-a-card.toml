@@ -12,7 +12,7 @@ samples = 3
 
 [property]
 check = "read"
-read = "Calls request_approval for a set_profile call whose field is address and whose value is Leonardo, and asks Leo no question in words about it."
+read = "Calls request_approval for a set_profile_field call whose field is address and whose value is Leonardo, and asks Leo no question in words about it."
 
 [input]
 file = "a-profile-change-needing-a-yes-is-asked-on-a-card.json"

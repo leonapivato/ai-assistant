@@ -12,7 +12,7 @@ samples = 2
 
 [property]
 check = "read"
-read = """The round makes a stop_activation naming E2 and a cancel_task naming T2, and no call naming T1, so the reminder to check the project notes stays. Any text call it makes says nothing is done yet and its words use no T, E or R label."""
+read = """The round makes a stop_work naming E2 and a cancel_task naming T2, and no call naming T1, so the reminder to check the project notes stays. Any send_text call it makes says nothing is done yet and its words use no T, E or R label."""
 
 [input]
 file = "never-mind-all-the-blender-stuff-cancels-what-it-set-up.json"

@@ -180,8 +180,10 @@ INPUT_CHARS: Final = 160
 ROUND_TOOL: Final = "planning_round"
 
 #: The message call, and the argument holding its words (ADR-0356 §7:7): since ADR-0356 a
-#: round's text is its notes, and what people receive comes from these calls.
-MESSAGE_CALL: Final = "text"
+#: round's text is its notes, and what people receive comes from these calls. A record
+#: keeps the name it was written under, ``text`` before ADR-0364 §8:1, so both are read.
+MESSAGE_CALL: Final = "send_text"
+MESSAGE_CALLS: Final = frozenset({MESSAGE_CALL, "text"})
 MESSAGE_WORDS: Final = "words"
 
 #: What the walk says of a round's calls where no later round's request reports them.
@@ -1085,7 +1087,7 @@ class _Timeline:
                     marked = marked or arguments.get("another_round") is True
                 else:
                     calls.append({"id": _text(shown.get("tool_call_id")), "name": name})
-                    if name == MESSAGE_CALL:
+                    if name in MESSAGE_CALLS:
                         words = _words_of(shown.get("args"))
                         if words is not None:
                             messages.append(words)
@@ -4215,7 +4217,7 @@ def _exchanged_before(steps: Sequence[object]) -> dict[str, object] | None:
                 "outcome": None,
                 "because": None,
                 "result": None if result is None else {"label": None, "text": _cut(result)},
-                "message": words if name == MESSAGE_CALL and isinstance(words, str) else None,
+                "message": words if name in MESSAGE_CALLS and isinstance(words, str) else None,
             }
         )
     return {
@@ -4336,7 +4338,7 @@ def _proposed(body: Mapping[str, object], *, exchange: bool | None = False) -> d
                 calls.append(
                     {"name": name, "id": call_id, "arguments": _arguments_text(raw, parsed)}
                 )
-                words = _words_of(raw) if name == MESSAGE_CALL else None
+                words = _words_of(raw) if name in MESSAGE_CALLS else None
                 if words is not None:
                     messages.append({"id": call_id, "words": words})
     text = "".join(texts)

@@ -219,7 +219,6 @@ from ai_assistant.orchestration.approvals import (
     ARGUMENTS_KEY,
     CALL_ARGUMENT,
     CAPABILITY_KEY,
-    NESTED_REPEAT_KEY,
     REQUEST_APPROVAL_CAPABILITY,
     RUN_APPROVED_DESCRIPTION,
     RUN_APPROVED_LABEL,
@@ -228,17 +227,37 @@ from ai_assistant.orchestration.approvals import (
     Ticket,
     nested_call,
 )
-from ai_assistant.orchestration.channel_kinds import place_channel, place_of
+from ai_assistant.orchestration.channel_kinds import (
+    EMAIL_ACCOUNT_KIND,
+    ConnectionKind,
+    connection_kind,
+    place_channel,
+    place_of,
+)
 from ai_assistant.orchestration.matters import (
     STOP_ACTIVATION_CAPABILITY,
     EntryInput,
     NotAsAsked,
 )
-from ai_assistant.orchestration.message_tools import platform_name
+from ai_assistant.orchestration.message_tools import (
+    EMAIL_CAPABILITY,
+    FROM_ARGUMENT,
+    FROM_THE_PERSONS_ACCOUNT,
+    TEXT_CAPABILITY,
+    platform_name,
+)
 from ai_assistant.orchestration.person_block import activation_person, person_zone
-from ai_assistant.orchestration.person_calls import recorded_wording
+from ai_assistant.orchestration.person_calls import PERSON_MODEL_CAPABILITIES, recorded_wording
+from ai_assistant.orchestration.renames import (
+    Void,
+    carried,
+    current_arguments,
+    current_name,
+    translated,
+)
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_calls import (
+    MEMBER_SPLIT,
     STORY_CALL_CAPABILITIES,
     TIDY_STORY_CAPABILITY,
 )
@@ -293,12 +312,15 @@ __all__ = [
     "WAITING_ROUND",
     "CallOutcome",
     "CallOutcomeKind",
+    "ConnectionShown",
+    "ConnectionsFound",
     "DigestItem",
     "DigestedEvidence",
     "EpisodeRead",
     "EpisodeShown",
     "EpisodesFound",
     "FullViewPart",
+    "LabelKinds",
     "MatterShown",
     "NewsShown",
     "OfferShown",
@@ -323,12 +345,17 @@ __all__ = [
     "call_showed",
     "exact_line",
     "full_view_parts",
+    "label_pattern",
     "offered_tools",
     "relayed_episodes",
     "shown_within",
 ]
 
 _log = structlog.get_logger(__name__)
+
+type LabelKinds = LabelKind | tuple[LabelKind, ...]
+"""What a label argument names: one kind, or any of several, as ``add_to_matter``'s
+``member`` names an episode or a matter (ADR-0364 §8:2)."""
 
 #: ADR-0306 §2:9's *looking for* argument, required where a result may carry outside text.
 LOOKING_FOR: Final = "looking_for"
@@ -346,25 +373,38 @@ PAGE_ARGUMENT: Final = "page"
 #: The story read's capability, :mod:`~ai_assistant.orchestration.lookups`'
 #: ``READ_STORY_CAPABILITY``, which planning cannot import: the look-ups reach acting,
 #: and planning never reaches the held results.
-_READ_STORY: Final = "read_story"
+_READ_STORY: Final = "read_matter"
+
+#: The follow-up's capability, ``lookups``' ``FOLLOW_UP_CAPABILITY``, for the same reason:
+#: its *looking for* is the new question, and says so (ADR-0364 §5:2).
+_REREAD_RESULT: Final = "reread_result"
 
 #: ADR-0306 §2:9's *deliberate repeat* mark, offered where a capability is not safe to
 #: repeat.
 DELIBERATE_REPEAT: Final = "deliberate_repeat"
 
+#: ADR-0364 §5:2: the hub's two shared arguments, each with the coordinator's agreed words,
+#: the same on every tool that takes it.
 _LOOKING_FOR_SCHEMA: Final[dict[str, Any]] = {
     "type": "string",
+    "minLength": 1,
     "description": (
-        "What you are looking for in this call's result. Its result may carry text "
-        "someone else wrote, which is read for you against what you say here."
+        "What you want from the call's result, such as a question it should answer. Text "
+        "someone else wrote, such as a web page or an email, is never shown to you as it "
+        "is: it is read for you, and you are shown what it says about this."
     ),
+}
+
+#: The follow-up's *looking for* is the new question it asks (ADR-0364 §5:2).
+_LOOKING_FOR_DESCRIBED: Final[Mapping[str, str]] = {
+    _REREAD_RESULT: "The new question to ask of it.",
 }
 
 _DELIBERATE_REPEAT_SCHEMA: Final[dict[str, Any]] = {
     "type": "boolean",
     "description": (
-        "Set true only to make this call again on purpose, with the same values as a call "
-        "already made in this matter. Otherwise such a call is refused as already done."
+        "Make this call again on purpose. Without it, a call with the same values as one "
+        "already made in this matter is refused as already done. Left out: false."
     ),
 }
 
@@ -398,14 +438,15 @@ _QUOTED_LABEL_CHARS: Final = 32
 
 #: Each kind of thing a label names, one and several, for a refusal's reason.
 _THINGS: Final = {
-    LabelKind.STORY: ("a story", "stories"),
+    LabelKind.STORY: ("a matter", "matters"),
     LabelKind.EPISODE: ("an episode", "episodes"),
     LabelKind.NOTE: ("a note", "notes"),
     LabelKind.MEMORY: ("a memory", "memories"),
     LabelKind.RESULT: ("a result", "results"),
-    LabelKind.APPROVED_ACTION: ("an approved action", "approved actions"),
+    LabelKind.APPROVED_ACTION: ("a ticket", "tickets"),
     LabelKind.SCHEDULED_TASK: ("a scheduled task", "scheduled tasks"),
-    LabelKind.PLACE: ("a place", "places"),
+    LabelKind.PLACE: ("a connection", "connections"),
+    LabelKind.PERSON: ("a person", "people"),
 }
 
 
@@ -558,6 +599,7 @@ class CallOutcome:
     episodes: EpisodesFound | None = None
     history: OlderHistory | None = None
     full: EpisodeRead | None = None
+    connections: ConnectionsFound | None = None
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
@@ -1062,7 +1104,7 @@ def _rendering(
         zone=ZoneInfo("UTC"),
     )
     # The result as its report renders it, what a stop set up still live included.
-    request._result(outcome, outcome.result_id or "showed")
+    request._result("", outcome, outcome.result_id or "showed")
     for one in started:
         request._story(one)
     return request
@@ -1282,8 +1324,13 @@ class PlanningInputs:
             for an activation that is no person's or where no person-model store is
             wired, which shows none and leaves the instruction as it was.
         places: The activation's place list, as built for this round (ADR-0350
-            §5:10-§5:12): each place under its channel's heading and its own ``L``
-            label. ``None`` for an activation not offered spawn, which is shown none.
+            §5:10-§5:12), which a work that keeps one speaks in alone (ADR-0364 §9:4).
+            ``None`` for an activation not offered spawn.
+        connections: The connections the hub hands the work's Connections section, in
+            the order shown (ADR-0364 §3): the many-place connections' most recent places,
+            then every single-place connection, the system's own channels and the
+            accounts among them. The origin, a suggested place, and any connection an
+            item names by ``where`` are added where they are not among them (§3:5).
         offers: The offers open to this activation, shown at the start of each of its
             rounds (ADR-0349 §7:19).
         waiting: Where this round is a waiting round, each activation it waits on, as an
@@ -1350,7 +1397,7 @@ class PlanningInputs:
     labels: tuple[PlanningLabel, ...] = ()
     outcomes: tuple[CallOutcome, ...] = ()
     capabilities: tuple[ToolDefinition, ...] = ()
-    label_arguments: Mapping[str, Mapping[str, LabelKind]] = field(default_factory=dict)
+    label_arguments: Mapping[str, Mapping[str, LabelKinds]] = field(default_factory=dict)
     evidence: tuple[DigestedEvidence, ...] = ()
     outside_content_read: bool = False
     stories: PlanningStories | None = None
@@ -1359,6 +1406,7 @@ class PlanningInputs:
     not_taken: frozenset[str] = frozenset()
     person: PersonBlock | None = None
     places: tuple[ListedPlace, ...] | None = None
+    connections: tuple[ConnectionShown, ...] = ()
     offers: tuple[OfferShown, ...] = ()
     waiting: tuple[RunningShown, ...] = ()
     declined: tuple[tuple[str, str], ...] = ()
@@ -1380,6 +1428,43 @@ class PlanningInputs:
     person_now: PersonNow | None = None
     tickets: tuple[Ticket, ...] = ()
     approvals: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionShown:
+    """One connection the work's Connections section may show (ADR-0364 §3:2-§3:4).
+
+    Attributes:
+        place: What its ``L`` label names: a place, as a message's effect record names
+            it, or ``account:`` and an account's reference.
+        kind: What its kind declares it is, and what the system can do with it.
+        state: Its state, only where it is not normal: disconnected, pending or gone.
+        suggested: For a work the Task Scheduler started, whether its task suggests it
+            (§3:9).
+        account: For an account connection, its account kind; ``None`` otherwise.
+    """
+
+    place: str
+    kind: ConnectionKind
+    state: str | None = None
+    suggested: bool = False
+    account: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionsFound:
+    """One page of what a connections search found, best first (ADR-0364 §3:7-§3:8).
+
+    Attributes:
+        page: The page shown, the first 1.
+        connections: The connections found on it, each to be shown as Connections shows
+            an entry, taking its ``L`` label the first time it is shown.
+        more: Whether a later page holds more.
+    """
+
+    page: int
+    connections: tuple[ConnectionShown, ...] = ()
+    more: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1466,6 +1551,8 @@ class NewsShown:
             names once they end (ADR-0360).
         kept: The memories of the person block's slot it showed as pinned, by id.
         profile: The person's fields as it showed them, each by name, ``None`` not set.
+        connections: The connections whose entries it showed, by what their labels name
+            (ADR-0364 §3:10).
         zone: The zone its briefing's situation named, in which every time of the work is
             written, whatever the person sets meanwhile (ADR-0360 §2:3).
     """
@@ -1482,6 +1569,7 @@ class NewsShown:
     kept: frozenset[str] = frozenset()
     profile: tuple[tuple[str, str | None], ...] = ()
     zone: str | None = None
+    connections: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1527,12 +1615,19 @@ class PlannedCall:
             (ADR-0361 §5:2), the approval request whose ticket it is; its call then
             carries the values recorded with the request, those the hub fills apart.
             ``None`` for every other call.
+        nested_repeat: For a ``request_approval``, whether its nested call was marked a
+            deliberate repeat, which the request records (ADR-0361 §2:6).
+        nested_looking_for: For a ``request_approval``, its nested call's *looking for*,
+            where that call takes one, which the request keeps for when the ticket runs
+            (ADR-0364 §10:2).
     """
 
     call: ProposedCall
     looking_for: str | None = None
     deliberate_repeat: bool = False
     ticket: str | None = None
+    nested_repeat: bool = False
+    nested_looking_for: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1599,15 +1694,24 @@ class RoundRecorder(Protocol):
 # --- offering the capabilities -----------------------------------------------------------
 
 
-def offered_tools(capabilities: Sequence[ToolDefinition]) -> tuple[OfferedTool, ...]:
+def offered_tools(
+    capabilities: Sequence[ToolDefinition],
+    label_arguments: Mapping[str, Mapping[str, LabelKinds]] | None = None,
+) -> tuple[OfferedTool, ...]:
     """The capabilities planning is offered, one tool each (ADR-0306 §2:7 to §2:9).
 
     A capability is offered only where every tool satisfying it declares the same five
     properties and the same schema, and where the schema is an object's that leaves
     room for the added arguments. Its description is its first tool's, by id.
 
+    Each argument naming things by label is offered with its label's pattern, an ``S``
+    label's ``^S[1-9][0-9]*$`` (ADR-0364 §5:2): the declaration names them by id once
+    planning's check has mapped them, so the pattern is the offer's alone.
+
     Args:
         capabilities: The tool declarations, any number per capability.
+        label_arguments: For a capability, which of its arguments name things by label,
+            and what kind each names.
 
     Returns:
         One offered tool per capability that may be offered, by name.
@@ -1626,8 +1730,38 @@ def offered_tools(capabilities: Sequence[ToolDefinition]) -> tuple[OfferedTool, 
         if schema is None:
             _log.info("planning_capability_not_offered", stage="planning", reason="schema")
             continue
+        _labelled_patterns(schema, (label_arguments or {}).get(name, {}))
         offered.append(OfferedTool(name=name, description=first.description, parameters=schema))
     return tuple(offered)
+
+
+def label_pattern(kinds: LabelKinds) -> str:
+    """The pattern an argument naming ``kinds`` by label is offered with (ADR-0364 §5:2)."""
+    several = kinds if isinstance(kinds, tuple) else (kinds,)
+    prefixes = "".join(label_prefix(one) for one in several)
+    prefix = prefixes if len(prefixes) == 1 else f"[{prefixes}]"
+    return f"^{prefix}[1-9][0-9]*$"
+
+
+def _labelled_patterns(schema: dict[str, Any], named: Mapping[str, LabelKinds]) -> None:
+    """Give each label argument of ``schema`` its label's pattern, in place.
+
+    A string argument takes it, and an array's items do; an argument already carrying a
+    pattern keeps its own.
+    """
+    properties: dict[str, Any] = schema.get("properties") or {}
+    for argument, kinds in named.items():
+        held = properties.get(argument)
+        if not isinstance(held, dict):
+            continue
+        shown = dict(held)
+        if shown.get("type") == "array" and isinstance(shown.get("items"), dict):
+            items = dict(shown["items"])
+            items.setdefault("pattern", label_pattern(kinds))
+            shown["items"] = items
+        elif shown.get("type") == "string":
+            shown.setdefault("pattern", label_pattern(kinds))
+        properties[argument] = shown
 
 
 def _declared(tool: ToolDefinition) -> tuple[object, ...]:
@@ -1661,6 +1795,9 @@ def _offered_schema(tool: ToolDefinition) -> dict[str, Any] | None:
     added: dict[str, dict[str, Any]] = {}
     if tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
         added[LOOKING_FOR] = dict(_LOOKING_FOR_SCHEMA)
+        described = _LOOKING_FOR_DESCRIBED.get(str(tool.capability))
+        if described is not None:
+            added[LOOKING_FOR]["description"] = described
     if not tool.safe_to_repeat:
         added[DELIBERATE_REPEAT] = dict(_DELIBERATE_REPEAT_SCHEMA)
     properties: dict[str, Any] = dict(schema.get("properties") or {})
@@ -1846,6 +1983,7 @@ _STIMULUS: Final = "# The stimulus"
 _UNDERSTANDING: Final = "# Understanding"
 _KNOWLEDGE: Final = "# Knowledge"
 _SITUATION: Final = "## The situation"
+_CONNECTIONS: Final = "## Connections"
 _ORIGIN_KNOWLEDGE: Final = "## Stimulus origin knowledge"
 _CONCURRENT: Final = "## Concurrent stimuli"
 _MEMORY: Final = "# Memory"
@@ -1861,6 +1999,7 @@ BRIEFING_HEADINGS: Final = (
     _UNDERSTANDING,
     _KNOWLEDGE,
     _SITUATION,
+    _CONNECTIONS,
     _ORIGIN_KNOWLEDGE,
     _CONCURRENT,
     _MEMORY,
@@ -2003,14 +2142,20 @@ def _ended(status: object, reason: object) -> str | None:
 class _Naming:
     """Who the stimulus is for, and how each party is named (ADR-0353 §4).
 
+    A tag's ``from`` names a person by their ``P`` label, which always in mind says who
+    they are (ADR-0364 §4:2); the lines between the tags name them in words.
+
     Attributes:
         person_id: The person the stimulus is for, or ``None`` where it is no person's.
         name: Their name, as the person block holds it, or ``None`` where it is not set
             or no block was assembled.
+        book: The work's labels, which name a person by ``P`` label; ``None`` names them
+            in words.
     """
 
     person_id: str | None
     name: str | None
+    book: _LabelBook | None = None
 
     @property
     def who(self) -> str:
@@ -2019,13 +2164,28 @@ class _Naming:
             return self.name
         return _UNNAMED if self.person_id in {None, OWNER_PERSON_ID} else _SOMEONE
 
+    @property
+    def speaker(self) -> str:
+        """The person the stimulus is for, as a tag's ``from`` names them (ADR-0364 §4:2)."""
+        return self.person(self.person_id or OWNER_PERSON_ID)
+
     def person(self, identifier: str | None) -> str:
-        """A person, by the block's name where the block is theirs (§4:1)."""
+        """A person, by ``P`` label where the work names them so, else by name (§4:1-§4:2).
+
+        The person the work is for and the owner take ``P`` labels; any other is named in
+        words that stay true.
+        """
         if identifier == self.person_id or (
             identifier == OWNER_PERSON_ID and self.person_id is None
         ):
+            if self.book is not None and identifier is not None:
+                return self.book.label(LabelKind.PERSON, identifier)
             return self.who
-        return _UNNAMED if identifier == OWNER_PERSON_ID else _SOMEONE
+        if identifier == OWNER_PERSON_ID:
+            if self.book is not None:
+                return self.book.label(LabelKind.PERSON, OWNER_PERSON_ID)
+            return _UNNAMED
+        return _SOMEONE
 
     def party(self, holder: SupportHolder) -> str:
         """One party, named by what its record holds, never by its text (§4:3)."""
@@ -2051,9 +2211,9 @@ class _Naming:
     def author(self, author: PlaceAuthor) -> str:
         """Who wrote a place-window item, by its record (§4:1-§4:3)."""
         if author is PlaceAuthor.USER:
-            return self.who
+            return self.speaker
         if author is PlaceAuthor.OTHER:
-            return f"someone other than {self.who} or the system"
+            return f"someone other than {self.speaker} or the system"
         return _SYSTEM
 
 
@@ -2093,7 +2253,7 @@ _NOT_YET_READ: Final = "not read yet: its digest's evidence comes as news once i
 #: text would no longer match its items and would be shown again, never dropped.
 _JOINED: Final = "\n\n"
 _TIDY_STARTED: Final = (
-    "started: it runs on its own, and how it went is recorded on the story, not here"
+    "started: it runs on its own, and how it went is recorded on the matter, not shown here"
 )
 
 #: What was done, by where it stands (ADR-0300 §8:1).
@@ -2172,18 +2332,20 @@ _NOT_AN_EXCHANGE: Final = frozenset(
     {PlaceAuthor.OTHER, PlaceAuthor.TASK_SCHEDULER, PlaceAuthor.APPROVALS}
 )
 
+#: ADR-0364 §6:1: the outcome every result opens with, one of four, which the instruction
+#: defines once (§6:7).
 _OUTCOME_TEXT: Final = {
     CallOutcomeKind.DONE: "done",
     CallOutcomeKind.NOT_DONE: "not done",
-    CallOutcomeKind.UNKNOWN: (
-        "unknown: it may or may not have happened, and it is reported as unknown"
-    ),
-    CallOutcomeKind.REFUSED: (
-        "refused before it ran, so nothing in it ran, and no yes lets it run: never ask about it"
-    ),
+    CallOutcomeKind.UNKNOWN: "unknown",
+    CallOutcomeKind.REFUSED: "refused",
 }
 
 #: How a short view's ``did`` says each outcome (ADR-0356 §9:2).
+#: ADR-0364 §5:1: the calls whose done fields are shown as they are, not under an R
+#: label: a request's card and expiry, and the Task Scheduler's task or listing.
+_FIELDS_AS_THEY_ARE: Final = frozenset({REQUEST_APPROVAL_CAPABILITY})
+
 _DID_TEXT: Final = {
     CallOutcomeKind.DONE: "Done",
     CallOutcomeKind.NOT_DONE: "Not done",
@@ -2192,27 +2354,25 @@ _DID_TEXT: Final = {
     CallOutcomeKind.NEEDS_YOU: "It needed a yes",
 }
 
-#: ADR-0361 §2:4: a direct call ruled to need the person ran nothing, and is asked about
-#: through request_approval, with the same arguments.
-_ASK_BY_REQUEST: Final = (
-    "needs the person's yes, so nothing ran: to ask, call request_approval with this "
-    "call's capability and the same arguments, and say in why what it does"
-)
-#: ADR-0361 §2:5: in an activation that is no person's, nothing can be asked.
+#: ADR-0364 §6:3: a call needing approval comes back refused, its why saying to ask with
+#: request_approval.
+_ASK_BY_REQUEST: Final = "it needs approval: ask for it with request_approval"
+#: ADR-0361 §2:5: in a work that is no person's, nothing can be asked.
 _NO_ONE_TO_APPROVE: Final = (
-    "needs the person's yes, and this activation is no person's, so it will not run and "
-    "is not asked about"
+    "it needs approval, and this work is no person's, so no one can be asked for it"
 )
 #: ADR-0361 §5:1-§5:2: what a work is told of the tickets it holds.
 _TICKETS_HELD: Final = (
-    "- Tickets you hold, each the person's yes on a card to one call, which run_approved "
-    "runs once by its label:"
+    "- Tickets you hold, each an approval of one call on a card, which run_approved runs once "
+    "by its label:"
 )
 #: ADR-0361 §5:1: how a ticket came to be granted.
-_TICKET_BY: Final = "by the person's tap on its card"
-#: ADR-0361 §2:4, §4:10: where the Approvals channel is not wired, nothing can ask for a
-#: yes, and no input approves anything.
-_CANNOT_ASK: Final = "needs a yes, and it cannot be asked about, so it will not run"
+_TICKET_BY: Final = "by a tap on its card"
+#: ADR-0361 §2:4, §4:10: where the Approvals channel is not wired, nothing can ask for
+#: approval, and no input approves anything.
+_CANNOT_ASK: Final = "it needs approval, and nothing here can ask for it, so it will not run"
+#: ADR-0364 §6:1: why a call whose outcome the record does not hold is unknown.
+_NO_OUTCOME_RECORDED: Final = "no outcome was recorded for it"
 
 #: What a peer view's reader is told where the episode could not be read (§6:7).
 _PEER_UNREAD: Final = "could not be read"
@@ -2285,10 +2445,17 @@ class _Request:
         self._own_zone = own_zone
         self._notes_bound = notes_bound
         person = inputs.person
+        # ADR-0364 §4:1: ``P1`` is the owner, the same in every work, so it is minted first.
+        book.label(LabelKind.PERSON, OWNER_PERSON_ID)
         self._naming = _Naming(
             person_id=inputs.person_id if person is None else person.person_id,
             name=None if person is None else person.profile.value(ProfileField.NAME),
+            book=book,
         )
+        # The connections whose entries this request shows, and the places it named by
+        # ``where`` (ADR-0364 §3:5).
+        self._entries: set[str] = set()
+        self._named_places: dict[str, ChannelIdentity | None] = {}
         trigger = inputs.trigger
         self._origin: ChannelIdentity | None = None if trigger is None else trigger.channel
         if (
@@ -2369,6 +2536,7 @@ class _Request:
         # is rendered last and placed second.
         stimulus = self._stimulus()
         situation = self._situation()
+        connections = self._connections()
         always = self._always_in_mind()
         knowledge, origin_memory = self._origin_sections()
         concurrent = self._concurrent()
@@ -2377,6 +2545,8 @@ class _Request:
         matters = self._matters_section()
         origin_memory = origin_memory + self._origin_episodes()
         understanding = self._understanding()
+        # §3:5: every connection an item names by ``where`` is shown, after the rest.
+        connections.extend(self._connections_named())
         sections = [
             _STIMULUS,
             *stimulus,
@@ -2388,6 +2558,9 @@ class _Request:
             "",
             _SITUATION,
             *situation,
+            "",
+            _CONNECTIONS,
+            *connections,
             "",
             _ORIGIN_KNOWLEDGE,
             *(knowledge or [self._knowledge_note()]),
@@ -2434,6 +2607,7 @@ class _Request:
             else frozenset(one.id for one in inputs.person.pinned),
             profile=_profile_of(None if inputs.person is None else inputs.person.profile),
             zone=self._zone.key,
+            connections=frozenset(self._entries),
         )
 
     def _running_shown(self) -> frozenset[str]:
@@ -2526,7 +2700,7 @@ class _Request:
         ]
         if items:
             tag = "said" if trigger is None else _words_tag(parties)
-            writer = self._naming.who if trigger is None else self._naming.parties(parties)
+            writer = self._naming.speaker if trigger is None else self._naming.parties(parties)
             return [_Words(tag=tag, writer=writer, at=None, text=_JOINED.join(items))]
         text: str | None = None
         if trigger is not None:
@@ -2585,10 +2759,13 @@ class _Request:
         several = len(words) > 1
         verb = "They contain" if several else "It contains"
         lines = [f"{opening}. {verb} {content}:"]
+        where = self._where(channel)
         for one in words:
             attributes = [("from", one.writer)]
             if one.at is not None:
                 attributes.append(("at", self._at(one.at)))
+            if where is not None:
+                attributes.append(("where", where))
             if withheld or (withhold_received and one.tag == "received"):
                 lines.append(_tag(one.tag, [*attributes, ("withheld", "yes")], None))
                 continue
@@ -2659,12 +2836,14 @@ class _Request:
             ("approved", _TICKET_BY),
             ("expires", self._at(request.expires_at)),
         ]
-        if request.call.tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
-            attributes.append(("result", "may carry text someone else wrote: give looking_for"))
         # ADR-0338 §8:6: a pin's or an unpin's memory by the wording its card showed.
         line = exact_line(
             call, filled=_filled(self._inputs.capabilities, call), worded=recorded_wording(call)
         )
+        void = carried(call)
+        if void is not None:
+            # ADR-0364 §8:6: a ticket whose call the renames cannot carry is void.
+            attributes.append(("void", void.reason))
         return _tag("ticket", attributes, line)
 
     def tickets_news(self) -> list[str]:
@@ -2738,7 +2917,7 @@ class _Request:
     # --- the situation (ADR-0353 §6, ADR-0356 §3:2, ADR-0357 §2:13) ---
 
     def _situation(self) -> list[str]:
-        """Now with the zone, the person's last stimulus, the origin, and the place list."""
+        """Now with the zone, and the person's last stimulus (ADR-0364 §2:2, §3:1)."""
         local = self._now.astimezone(self._zone)
         now = f"{_long_day(local)}, {_clock(local)}"
         naming = self._naming
@@ -2772,24 +2951,9 @@ class _Request:
             )
         else:
             second = f"- {_upper(who)}'s last stimulus: {self._at(last[0])}, {_line(last[1])}."
-        reply = (
-            "A reply can be written there."
-            if self._inputs.place.takes_message
-            else "No reply can be written there."
-        )
-        kind = None if self._origin is None else origin_kind(self._origin.channel_type)
-        name = _origin_name(self._origin)
-        if kind is None:
-            third = f"- The origin: {_line(name)}; the system has no description of it. {reply}"
-        else:
-            described = kind.described.replace("{person}", who)
-            third = f"- The origin: {name}, {described}. {reply}"
-        lines = [first, second, third]
-        description = self._inputs.place.description
-        if description:
-            # ADR-0292 §8:1: how a reply is shown there, which is planning's to know.
-            lines.append(f"- What the origin's kind says of it: {_line(description)}")
-        return [*lines, *self._place_list()]
+        # ADR-0364 §2:2, §3:1: the time now and the person's last stimulus alone; the
+        # origin is the stimulus's ``where``, and Connections shows it.
+        return [first, second]
 
     def _last(self) -> tuple[datetime, str] | None:
         """The newest earlier stimulus for the same person among what the pass holds (§6:2).
@@ -2822,58 +2986,147 @@ class _Request:
         earlier = [one for one in found if one[0] < before]
         return max(earlier, key=lambda one: one[0]) if earlier else None
 
-    def _place_list(self) -> list[str]:
-        """The place list, after the origin's line: each place under its channel's heading.
+    # --- connections (ADR-0364 §3) ---
 
-        ADR-0357 §2:13: each place carries its ``L`` label, so a ``text`` call's ``via`` can
-        name one. Where the pass holds no list, the line says so.
+    def _where(self, channel: ChannelIdentity | None) -> str | None:
+        """An item's ``where``: its connection's ``L`` label, or ``None`` where it has none.
+
+        ADR-0364 §3:9: the stimulus's is its origin's, and every other item's its own
+        connection's. A connection named so is shown in Connections (§3:5).
         """
-        places = self._inputs.places
-        if places is None:
-            return [
-                "- Places a message can be sent by its label: the system holds no place list "
-                "for this stimulus, so a text call goes where its tool chooses."
+        if channel is None:
+            return None
+        place = place_of(channel)
+        self._named_places.setdefault(place, channel)
+        return self._book.label(LabelKind.PLACE, place)
+
+    def _connection_entries(self) -> list[ConnectionShown]:
+        """The connections the section shows, before those items name (§3:5).
+
+        The hub's, in its order, with the origin first where the hub did not hand it,
+        and each place the work's task suggests, marked suggested (§3:9).
+        """
+        entries = list(self._inputs.connections)
+        held = {one.place for one in entries}
+        suggested = {one.place for one in self._inputs.places or () if one.suggested}
+        entries = [
+            replace(one, suggested=True) if one.place in suggested else one for one in entries
+        ]
+        extra: list[ConnectionShown] = []
+        if self._origin is not None and place_of(self._origin) not in held:
+            built = self._built_entry(place_of(self._origin))
+            if built is not None:
+                extra.append(built)
+        for one in self._inputs.places or ():
+            if one.place not in held and one.place not in {x.place for x in extra}:
+                built = self._built_entry(one.place)
+                if built is not None:
+                    extra.append(replace(built, suggested=one.suggested))
+        return [*extra, *entries]
+
+    @staticmethod
+    def _built_entry(place: str) -> ConnectionShown | None:
+        """An entry for a place the hub did not hand, from its kind's declaration alone."""
+        kind = connection_kind(place)
+        return None if kind is None else ConnectionShown(place=place, kind=kind)
+
+    def _connections(self) -> list[str]:
+        """The Connections section: every connection the work is shown (ADR-0364 §3)."""
+        lines = self._entry_lines(self._connection_entries())
+        return lines or [f"{_NOTHING_SHOWN}: the system holds no connection to show here."]
+
+    def _connections_named(self) -> list[str]:
+        """The entries of connections items named by ``where`` and the section did not show."""
+        return self._entry_lines(
+            [
+                entry
+                for place in list(self._named_places)
+                if place not in self._entries and (entry := self._built_entry(place)) is not None
             ]
-        if not places:
-            return ["- Places a message can be sent by its label: none."]
-        lines = ["- Places a message can be sent by its label:"]
-        grouped: dict[str, list[ListedPlace]] = {}
-        for one in places:
-            grouped.setdefault(one.heading, []).append(one)
-        for heading, held in grouped.items():
-            lines.append(f"  - {_line(heading)}:")
-            for one in held:
-                attributes = [
-                    ("label", self._book.label(LabelKind.PLACE, one.place)),
-                    ("from", _SYSTEM),
-                ]
-                if one.suggested:
-                    attributes.append(("suggested", "yes"))
-                lines.append(f"    {_tag('place', attributes, one.description)}")
+        )
+
+    def _entry_lines(self, entries: Sequence[ConnectionShown]) -> list[str]:
+        """Entries, each under its ``L`` label, a many-place connection's grouped (§3:2)."""
+        # Each block is a single-place connection's entry, or a many-place connection's
+        # heading, which carries no label, and its places' entries, in the order first met.
+        blocks: list[tuple[str | None, list[str]]] = []
+        groups: dict[str, list[str]] = {}
+        for one in entries:
+            if one.place in self._entries:
+                continue
+            self._entries.add(one.place)
+            tag = self._entry(one)
+            group = one.kind.group
+            if group is None:
+                blocks.append((None, [f"- {tag}"]))
+                continue
+            if group not in groups:
+                groups[group] = []
+                blocks.append((group, groups[group]))
+            groups[group].append(f"  - {tag}")
+        lines: list[str] = []
+        for heading, held in blocks:
+            if heading is not None:
+                lines.append(f"- {_line(heading)}:")
+            lines.extend(held)
         return lines
 
-    def _places_added(self) -> list[str]:
-        """Each place newly on the work's list, under its ``L`` label (ADR-0361 §7:3).
+    def _entry(self, one: ConnectionShown) -> str:
+        """One connection's entry: its label, who it reaches, what can be done with it (§3:3).
 
-        A place an input taken by a take came from joins the list mid-work; a ``text``
-        call may name it by ``via`` once it is shown here.
+        What it is, from its kind's declaration; who it reaches, by ``P`` label, or the
+        addresses a call names; what the system can do with it, with its limits; its
+        state where not normal; and whether its task suggests it. No contents, history,
+        credential or identifier, an account's own address among them (§3:4).
         """
+        attributes = [
+            ("label", self._book.label(LabelKind.PLACE, one.place)),
+            ("from", _SYSTEM),
+        ]
+        if one.kind.reaches_named:
+            attributes.append(("reaches", "the addresses a call names"))
+        elif one.kind.reaches_people:
+            attributes.append(("reaches", self._naming.speaker))
+        attributes.append(("can", one.kind.can))
+        if one.state is not None:
+            attributes.append(("state", one.state))
+        if one.suggested:
+            attributes.append(("suggested", "yes"))
+        is_a = one.kind.is_a
+        if one.account == EMAIL_ACCOUNT_KIND:
+            is_a = f"{is_a} of {self._naming.speaker}'s"
+        return _tag("connection", attributes, is_a)
+
+    def connection_entry(self, one: ConnectionShown) -> str:
+        """One connection's entry, as Connections shows it, for a search's result (§3:7)."""
+        self._entries.add(one.place)
+        return self._entry(one)
+
+    def _connections_joined(self, shown: NewsShown) -> list[str]:
+        """Each connection newly shown mid-work, under its ``L`` label (ADR-0364 §3:10).
+
+        The origin of an input taken by a take, a place a task newly suggests, and any
+        connection the report named by ``where`` that no entry the exchange showed covers.
+        Nothing already sent is re-rendered (ADR-0356 §5:6).
+        """
+        self._entries.update(shown.connections)
         fresh = [
             one
-            for one in self._inputs.places or ()
-            if self._book.held(LabelKind.PLACE, one.place) is None
+            for one in self._connection_entries()
+            if one.place not in self._entries
+            and self._book.held(LabelKind.PLACE, one.place) is not None
         ]
+        fresh.extend(
+            entry
+            for place in list(self._named_places)
+            if place not in self._entries
+            and place not in {one.place for one in fresh}
+            and (entry := self._built_entry(place)) is not None
+        )
         lines: list[str] = []
         for one in fresh:
-            attributes = [
-                ("label", self._book.label(LabelKind.PLACE, one.place)),
-                ("from", _SYSTEM),
-            ]
-            if one.suggested:
-                attributes.append(("suggested", "yes"))
-            lines.append(
-                f"- A place is now on your place list: {_tag('place', attributes, one.description)}"
-            )
+            self._entries.add(one.place)
+            lines.append(f"- A connection is now shown: {self._entry(one)}")
         return lines
 
     # --- the origin's window (ADR-0353 §2, ADR-0356 §3:2) ---
@@ -2918,6 +3171,9 @@ class _Request:
         attributes = [("from", self._naming.author(item.author))]
         if item.at is not None:
             attributes.append(("at", self._at(item.at)))
+        where = self._where(self._origin)
+        if where is not None:
+            attributes.append(("where", where))
         if item.episode_id is not None:
             attributes.append(("episode", self._book.label(LabelKind.EPISODE, item.episode_id)))
         if item.task_id is not None:
@@ -3075,7 +3331,7 @@ class _Request:
         """One concurrent stimulus, as a ``stimulus`` container."""
         attributes = [
             ("label", self._book.label(LabelKind.EPISODE, episode_address(activation_id))),
-            ("origin", _origin_name(channel)),
+            ("where", self._where(channel) or _origin_name(channel)),
         ]
         if arrived_at is not None:
             attributes.append(("at", self._at(arrived_at)))
@@ -3096,7 +3352,7 @@ class _Request:
 
     def _offer_lines(self, one: OfferShown) -> list[str]:
         """An offer open to this work, as a concurrent stimulus marked offered (§7:19)."""
-        who = self._naming.who
+        who = self._naming.speaker
         tag = (
             _withheld_tag("said", who)
             if one.input is None
@@ -3132,19 +3388,25 @@ class _Request:
         name = profile.value(ProfileField.NAME)
         assistant = profile.value(ProfileField.ASSISTANT_NAME)
         who = _line(self._naming.who)
+        # ADR-0364 §4:2: who each ``P`` label is.
+        label = self._naming.speaker
         if name and assistant:
-            serves = f"- {who} is the one the system serves, and calls it {_line(assistant)}."
+            serves = (
+                f"- {label} is {who}, the one the system serves, and calls it {_line(assistant)}."
+            )
         elif name:
             serves = (
-                f"- {who} is the one the system serves, and has not set a name for it, so it "
-                f"is called {DEFAULT_ASSISTANT_NAME}."
+                f"- {label} is {who}, the one the system serves, and has not set a name for "
+                f"it, so it is called {DEFAULT_ASSISTANT_NAME}."
             )
         elif assistant:
-            serves = f"- {_upper(who)} has not set a name, and calls the system {_line(assistant)}."
+            serves = (
+                f"- {label}, {who}, has not set a name, and calls the system {_line(assistant)}."
+            )
         else:
             serves = (
-                f"- {_upper(who)} has not set a name, nor one for the system, so it is called "
-                f"{DEFAULT_ASSISTANT_NAME}."
+                f"- {label}, {who}, has not set a name, nor one for the system, so it is "
+                f"called {DEFAULT_ASSISTANT_NAME}."
             )
         address = profile.value(ProfileField.ADDRESS)
         language = profile.value(ProfileField.LANGUAGE)
@@ -3379,7 +3641,7 @@ class _Request:
 
     def _note(self, note: StoryNote, *, older: bool = False) -> str:
         """A matter's note under its label, by who wrote it and its mark, never its text."""
-        writer = self._naming.who if note.author is StoryNoteAuthor.OWNER else _SYSTEM
+        writer = self._naming.speaker if note.author is StoryNoteAuthor.OWNER else _SYSTEM
         attributes = [
             ("label", self._book.label(LabelKind.NOTE, str(note.note_id))),
             ("from", writer),
@@ -3505,6 +3767,7 @@ class _Request:
             naming=self._naming,
             at=self._at,
             place=self._book.held,
+            where=self._where,
             notes_bound=self._notes_bound,
             in_place=in_place,
             extra=extra,
@@ -3801,7 +4064,7 @@ class _Request:
         results: list[CallResult] = []
         for call in work.response.calls:
             outcome = outcomes.get(call.call_id)
-            result = self._call(call, outcome)
+            result, shown_as = self._call(call, outcome)
             if outcome is not None and outcome.digested and outcome.result_id is not None:
                 # §5:4: a result resting on outside content is its digest's evidence.
                 read = digests.get(call.call_id, [])
@@ -3810,6 +4073,7 @@ class _Request:
                 CallResult(
                     call_id=call.call_id,
                     text=json.dumps(result, ensure_ascii=False, sort_keys=False),
+                    outcome=shown_as,
                 )
             )
         started = self._stories_started(work, outcomes, results, shown.stories)
@@ -3836,6 +4100,7 @@ class _Request:
                 memories=frozenset(self._memories),
                 matters=dict(self._matters),
                 running=(shown.running - frozenset(inputs.ended)) | self._running_shown(),
+                connections=shown.connections | frozenset(self._entries),
                 kept=self._kept_now(shown),
                 profile=(
                     shown.profile
@@ -3889,9 +4154,11 @@ class _Request:
                 and outcome.kind is CallOutcomeKind.DONE
             ):
                 result = json.loads(results[at].text)
-                result["stories"] = ["\n".join(self._story(one)) for one in fresh]
+                result["matters"] = ["\n".join(self._story(one)) for one in fresh]
                 results[at] = CallResult(
-                    call_id=call.call_id, text=json.dumps(result, ensure_ascii=False)
+                    call_id=call.call_id,
+                    text=json.dumps(result, ensure_ascii=False),
+                    outcome=results[at].outcome,
                 )
                 return frozenset(one.story_id for one in fresh)
         return frozenset()
@@ -3930,7 +4197,7 @@ class _Request:
         for digest in evidence:
             news.extend(self._evidence_lines(digest))
         news.extend(self.tickets_news())
-        news.extend(self._places_added())
+        news.extend(self._connections_joined(shown))
         news.extend(self._matters_changed())
         news.extend(self._forgotten(shown))
         news.extend(self._works_changed(shown))
@@ -4284,8 +4551,6 @@ class _Request:
         }
         if entry.repeats is not None:
             shown["repeats"] = entry.repeats
-        if entry.read_back is not None:
-            shown["read_back"] = entry.read_back
         if entry.waits_on:
             shown["waits_on"] = [
                 self._book.label(LabelKind.SCHEDULED_TASK, one) for one in entry.waits_on
@@ -4337,68 +4602,98 @@ class _Request:
                 else _tag("task", [("from", _SYSTEM)], entry.input)
             )
         if entry.input is None:
-            return _withheld_tag("said", self._naming.who)
-        return _tag("said", [("from", self._naming.who)], entry.input)
+            return _withheld_tag("said", self._naming.speaker)
+        return _tag("said", [("from", self._naming.speaker)], entry.input)
 
-    def _listed_place(self, place: str) -> dict[str, object]:
-        """A place a message went into, as the place list shows it (ADR-0350 §5:10-§5:12)."""
-        for one in self._inputs.places or ():
-            if one.place == place:
-                return {"label": self._book.label(LabelKind.PLACE, place), "is": one.description}
-        return {"is": place_description(place_channel(place)), "on_your_place_list": False}
+    def _listed_place(self, place: str) -> str:
+        """A connection a message went into, by its ``L`` label, or in words (ADR-0364 §8:4)."""
+        return self._place_named(place)
 
     def _running(self, entry: ActivationEntry) -> dict[str, object]:
         """A running activation, as the list pull's running part shows it (ADR-0349 §6:2)."""
         return {
             "episode": self._book.label(LabelKind.EPISODE, f"activation:{entry.activation_id}"),
-            "place": entry.place,
+            "where": entry.place,
             "input": self._entry_words(entry),
             "has_acted": entry.acted,
         }
 
     def _listing(self, listing: TaskListing) -> dict[str, object]:
-        """What a call on the Task Scheduler came back with, labelled (ADR-0350 §4:6-§4:8)."""
+        """What a call on the Task Scheduler came back with, labelled (ADR-0350 §4:6-§4:8).
+
+        ADR-0364 §11:4: a spawn's is the task's ``T`` label and its read-back alone; a
+        cancel's the task as it now stands, as the list pull shows a scheduled one.
+        """
         shown: dict[str, object] = {}
         if listing.spawned is not None:
-            shown["spawned"] = self._task(listing.spawned)
+            spawned: dict[str, object] = {
+                "label": self._book.label(LabelKind.SCHEDULED_TASK, listing.spawned.task_id)
+            }
+            if listing.spawned.read_back is not None:
+                spawned["read_back"] = listing.spawned.read_back
+            shown["task"] = spawned
         if listing.cancelled is not None:
-            shown["cancelled"] = self._task(listing.cancelled)
+            shown["task"] = self._task(listing.cancelled)
         if listing.listed:
             shown["running"] = [self._running(one) for one in listing.running] or _NONE_FOUND
             shown["scheduled"] = [self._task(one) for one in listing.scheduled] or _NONE_FOUND
             shown["ended_lately"] = [self._activation(one) for one in listing.recent] or _NONE_FOUND
         return shown
 
-    def _call(self, call: ProposedCall, outcome: CallOutcome | None) -> dict[str, object]:
-        """What came of one call, as its result shows it (ADR-0356 §5:4)."""
-        shown: dict[str, object] = {}
+    def _call(
+        self, call: ProposedCall, outcome: CallOutcome | None
+    ) -> tuple[dict[str, object], CallOutcomeKind | None]:
+        """What came of one call, as its result shows it, and the outcome it is shown under.
+
+        ADR-0364 §6:1: it opens with its outcome, one of done, not done, unknown or
+        refused; then, with any but done, why; then the tool's own fields. A tidy-up that
+        started says only that, under no outcome. §6:3: a call needing approval is shown
+        refused, its why saying to ask with ``request_approval``. §9:5: a message call's
+        result is its outcome alone, its entry holding what was sent.
+        """
         if outcome is None:
             # ADR-0307 §7:1: a tidy-up's outcome is the story's version log's, never
             # the episode's, and nothing waits for it.
-            shown["outcome"] = (
-                _TIDY_STARTED if call.name == TIDY_STORY_CAPABILITY else "no outcome recorded"
+            if call.name == TIDY_STORY_CAPABILITY:
+                return {"outcome": _TIDY_STARTED}, None
+            return (
+                {
+                    "outcome": _OUTCOME_TEXT[CallOutcomeKind.UNKNOWN],
+                    "because": _NO_OUTCOME_RECORDED,
+                },
+                CallOutcomeKind.UNKNOWN,
             )
-            return shown
         if outcome.kind is CallOutcomeKind.NEEDS_YOU:
-            return shown | self._needs_you(outcome)
-        text = _OUTCOME_TEXT[outcome.kind]
-        if outcome.reason is not None:
-            text = f"{text}: {outcome.reason}"
-        shown["outcome"] = text
-        shown |= self._delivered(outcome.delivered)
+            return self._needs_you(outcome), CallOutcomeKind.REFUSED
+        shown: dict[str, object] = {"outcome": _OUTCOME_TEXT[outcome.kind]}
+        if outcome.reason is not None and outcome.kind is not CallOutcomeKind.DONE:
+            shown["because"] = outcome.reason
         shown |= self._absorbed_by(outcome.peer)
         if outcome.kind is not CallOutcomeKind.DONE or outcome.result_id is None:
-            return shown
-        shown["result"] = self._result(outcome, outcome.result_id)
-        return shown
+            return shown, outcome.kind
+        shown |= self._result(call.name, outcome, outcome.result_id)
+        return shown, outcome.kind
 
-    def _result(self, outcome: CallOutcome, result_id: str) -> dict[str, object]:
-        """A done call's result under its R label: what it found, as planning may see it."""
+    def _result(self, name: str, outcome: CallOutcome, result_id: str) -> dict[str, object]:
+        """A done call's fields, as its description writes its result (ADR-0364 §5:1, §6:1).
+
+        A look-up's, an answer's and a stop's under ``result``, with its R label; a call on
+        the Task Scheduler's and a request's fields as they are; a candidate's and the
+        person model's under ``result``, with no label.
+        """
+        value = self._result_value(outcome)
+        if (name in _FIELDS_AS_THEY_ARE or outcome.tasks is not None) and isinstance(value, dict):
+            return value
+        if outcome.candidate is not None or name in PERSON_MODEL_CAPABILITIES:
+            return {"result": value}
         result: dict[str, object] = {"label": self._book.label(LabelKind.RESULT, result_id)}
-        result["value"] = self._result_value(outcome)
+        if isinstance(value, dict):
+            result |= value
+        else:
+            result["value"] = value
         if outcome.peer is not None and outcome.peer.set_up is not None:
             result["set_up_still_live"] = self._set_up(outcome.peer.set_up)
-        return result
+        return {"result": result}
 
     def _result_value(self, outcome: CallOutcome) -> object:
         """What a done call's result shows: what it looked up, or what it returned.
@@ -4418,11 +4713,33 @@ class _Request:
             (outcome.episodes, self._found_episodes),
             (outcome.history, self._older_history),
             (outcome.full, self._full_episode),
+            (outcome.connections, self._found_connections),
         )
         for found, rendered in looked:
             if found is not None:
                 return rendered(found)
         return _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
+
+    def _found_connections(self, found: ConnectionsFound) -> dict[str, object]:
+        """A connections search: one page of what it found (ADR-0364 §3:7).
+
+        Each connection found as Connections shows an entry, taking its ``L`` label the
+        first time it is shown, and one already shown pointed at by its label.
+        """
+        shown: dict[str, object] = {
+            "page": found.page,
+            "connections": [
+                held
+                if (held := self._book.held(LabelKind.PLACE, one.place)) is not None
+                and one.place in self._entries
+                else self.connection_entry(one)
+                for one in found.connections
+            ]
+            or _NONE_FOUND,
+        }
+        if found.more:
+            shown["more"] = _next_page(found.page)
+        return shown
 
     # --- the episode look-ups' results (ADR-0358 §7-§10) ---
 
@@ -4650,8 +4967,8 @@ class _Request:
         # §10:9: a call whose entry the record does not hold keeps only its arguments.
         return {
             "round": part.position + 1,
-            "capability": part.capability,
-            "arguments": _text(part.arguments),
+            "tool": current_name(part.capability),
+            "arguments": _shown_arguments(part.capability, part.arguments),
             "outcome": _NOT_KEPT,
         }
 
@@ -4659,12 +4976,14 @@ class _Request:
         """One call's entry in the full view: what came of it and what it showed."""
         shown: dict[str, object] = {
             "round": call.position + 1,
-            "capability": call.capability,
-            "arguments": _text(call.arguments),
+            "tool": current_name(call.capability),
+            "arguments": _shown_arguments(call.capability, call.arguments),
         }
         if call.outcome is None:
             shown["outcome"] = (
-                _TIDY_STARTED if call.capability == TIDY_STORY_CAPABILITY else _NO_OUTCOME
+                _TIDY_STARTED
+                if current_name(call.capability) == TIDY_STORY_CAPABILITY
+                else _NO_OUTCOME
             )
         else:
             text = _FULL_OUTCOME_TEXT[call.outcome]
@@ -4728,7 +5047,12 @@ class _Request:
         return shown | {"shown": _AS_HELD_NOW}
 
     def _delivered(self, delivered: RecordedDelivery | None) -> dict[str, object]:
-        """What a message call sent, where it went and how (ADR-0356 §8:4), or nothing."""
+        """What a message call sent, where it went and how, as its entry holds it.
+
+        ADR-0364 §9:5: a message call's result is its outcome alone; its episode's entry
+        still holds what was sent, where and how (ADR-0357 §3:4), which the full view of
+        an earlier episode shows.
+        """
         if delivered is None:
             return {}
         place = place_of(delivered.went)
@@ -4751,22 +5075,21 @@ class _Request:
         }
 
     def _needs_you(self, outcome: CallOutcome) -> dict[str, object]:
-        """Which case of needing a yes applies to a call (ADR-0361 §2:4-§2:5).
+        """A call needing approval, shown refused, its why saying what applies (§6:3).
 
-        A yes is asked for by ``request_approval`` alone, in any activation that is a
-        person's, never by a question in words. Where the Approvals channel is not
-        wired, nothing can ask for one.
+        ADR-0361 §2:4-§2:5: approval is asked for by ``request_approval`` alone, in any
+        work that is a person's, never by a question in words. Where the Approvals channel
+        is not wired, nothing can ask for it.
         """
-        shown: dict[str, object] = {}
+        shown: dict[str, object] = {"outcome": _OUTCOME_TEXT[CallOutcomeKind.REFUSED]}
         if outcome.reason == ALREADY_ON_A_CARD:
-            shown["outcome"] = ALREADY_ON_A_CARD
-            return shown
-        if not self._inputs.approvals:
-            shown["outcome"] = _CANNOT_ASK
+            shown["because"] = ALREADY_ON_A_CARD
+        elif not self._inputs.approvals:
+            shown["because"] = _CANNOT_ASK
+        elif self._inputs.person_id:
+            shown["because"] = _ASK_BY_REQUEST
         else:
-            shown["outcome"] = _ASK_BY_REQUEST if self._inputs.person_id else _NO_ONE_TO_APPROVE
-        if outcome.reason is not None:
-            shown["because"] = outcome.reason
+            shown["because"] = _NO_ONE_TO_APPROVE
         return shown
 
     def _searched(self, outcome: CallOutcome) -> dict[str, object]:
@@ -4803,6 +5126,7 @@ def short_view(  # noqa: PLR0913 — the projection, its label, and how its part
     naming: _Naming,
     at: Callable[[datetime], str],
     place: Callable[[LabelKind, str], str | None],
+    where: Callable[[ChannelIdentity | None], str | None] | None = None,
     notes_bound: int = SHORT_VIEW_NOTES,
     in_place: _InPlace | None = None,
     extra: Sequence[tuple[str, str]] = (),
@@ -4829,6 +5153,8 @@ def short_view(  # noqa: PLR0913 — the projection, its label, and how its part
         naming: How its parties are named.
         at: How an instant is written, in the work's zone.
         place: The label a place holds, where it holds one.
+        where: The ``L`` label of the connection its origin is, which its ``where`` names
+            (ADR-0364 §3:9); ``None`` names the origin in words, as ADR-0353 §4:4 did.
         notes_bound: How many rounds' notes are shown, the newest kept.
         in_place: Which of its texts another section shows whole, which are pointed at.
         extra: Further attributes of the container, each a fact the record holds.
@@ -4836,7 +5162,7 @@ def short_view(  # noqa: PLR0913 — the projection, its label, and how its part
     Returns:
         Its lines, and whether it showed outside content.
     """
-    attributes, marked = _view_attributes(projection, label, at=at, extra=extra)
+    attributes, marked = _view_attributes(projection, label, at=at, where=where, extra=extra)
     tags = _view_input(projection, naming, in_place)
     if projection.meaning is not None:
         tags.append(_tag("understood", [("from", _SYSTEM)], projection.meaning))
@@ -4862,12 +5188,17 @@ def _view_attributes(
     label: str,
     *,
     at: Callable[[datetime], str],
+    where: Callable[[ChannelIdentity | None], str | None] | None,
     extra: Sequence[tuple[str, str]],
 ) -> tuple[list[tuple[str, str]], bool]:
     """A short view's container attributes, and whether its episode rests on outside content."""
     attributes: list[tuple[str, str]] = [("label", label)]
     if projection.channel is not None:
-        attributes.append(("origin", _origin_name(projection.channel)))
+        named = None if where is None else where(projection.channel)
+        if named is not None:
+            attributes.append(("where", named))
+        else:
+            attributes.append(("origin", _origin_name(projection.channel)))
     attributes.append(("at", at(projection.occurred_at)))
     ended = _ended(projection.status, projection.reason)
     if ended is not None:
@@ -5120,17 +5451,34 @@ def _did_text(
         )
         how = delivered.status.value
         why = "" if delivered.reason is None else f": {delivered.reason}"
+        name = current_name(call.capability)
         if shown:
             by = platform_name(delivered.went.channel_type)
-            return (
-                f"{call.capability} by {by}, into {went}, shown in the window. {_upper(how)}{why}."
-            )
+            return f"{name} by {by}, into {went}, shown in the window. {_upper(how)}{why}."
         return (
-            f"{call.capability} by {platform_name(delivered.went.channel_type)}, into {went}: "
+            f"{name} by {platform_name(delivered.went.channel_type)}, into {went}: "
             f"{delivered.words} — {_upper(how)}{why}."
         )
-    arguments = call.arguments.text + ("…" if call.arguments.cut else "")
-    return f"{call.capability} {arguments}. {outcome}."
+    arguments = _shown_arguments(call.capability, call.arguments)
+    return f"{current_name(call.capability)} {arguments}. {outcome}."
+
+
+def _shown_arguments(capability: str, arguments: ProjectedText) -> str:
+    """A recorded call's arguments as planning is shown them, renamed (ADR-0364 §8:4-§8:5).
+
+    The record keeps the names it was written under; where its text is whole JSON, each
+    argument is shown under its name now, through the one table of the renames.
+    """
+    text = arguments.text + ("…" if arguments.cut else "")
+    if arguments.cut:
+        return text
+    try:
+        held = json.loads(arguments.text)
+    except ValueError:
+        return text
+    if not isinstance(held, dict):
+        return text
+    return json.dumps(current_arguments(capability, held), ensure_ascii=False)
 
 
 def _effect_text(effect: PeerEffect) -> str:
@@ -5139,9 +5487,10 @@ def _effect_text(effect: PeerEffect) -> str:
         return PEER_COULDNT_FINISH_LINE
     unknown = effect.outcome is ToolOutcome.INDETERMINATE
     if effect.capability is not None:
+        name = current_name(effect.capability)
         if unknown:
-            return f"the tool {effect.capability} may have run; whether it did is not known"
-        return f"the tool {effect.capability} ran"
+            return f"the tool {name} may have run; whether it did is not known"
+        return f"the tool {name} ran"
     if effect.message is None:
         message = "a message"
     else:
@@ -5315,14 +5664,18 @@ def exact_line(
     """
     left_out = _NEVER_SHOWN | frozenset(filled)
     shown = {} if worded is None else worded
+    capability = str(call.tool.capability)
+    # ADR-0364 §8:4-§8:5: a call stored under an old name is shown under its name now.
+    named = current_arguments(
+        capability,
+        {name: value for name, value in call.values.items() if name not in left_out},
+    )
     arguments = [
-        f"{_name_text(name)}: {_json_text(shown.get(name, value))}"
-        for name, value in call.values.items()
-        if name not in left_out
+        f"{_name_text(name)}: {_json_text(shown.get(name, value))}" for name, value in named.items()
     ]
     if replacing:
         arguments.append("replacing " + ", ".join(_json_text(one) for one in replacing))
-    line = _name_text(str(call.tool.capability))
+    line = _name_text(current_name(capability))
     if arguments:
         line = f"{line} — " + "; ".join(arguments)
     return line
@@ -5407,7 +5760,7 @@ class _Judge:
     """Planning's check of a round's calls before authorizing (§5:3 to §5:4)."""
 
     offered: Mapping[str, ToolDefinition]
-    label_arguments: Mapping[str, Mapping[str, LabelKind]]
+    label_arguments: Mapping[str, Mapping[str, LabelKinds]]
     book: _LabelBook
     capabilities: Sequence[ToolDefinition] = ()
     not_here: Mapping[str, str] = field(default_factory=dict)
@@ -5421,6 +5774,10 @@ class _Judge:
     tickets: Mapping[str, Ticket] = field(default_factory=dict)
     """The tickets this activation holds that a round has shown under an ``A`` label, by
     the request they name (ADR-0361 §5:3)."""
+    accounts: Mapping[str, str] = field(default_factory=dict)
+    """Each email account connection the work may name in ``send_email``'s ``from``, by
+    the id its ``L`` label names, with the value the email tool reads for it (ADR-0364
+    §9:11)."""
 
     def __call__(self, call: ProposedCall) -> PlannedCall | RefusedCall:
         if call.name == RUN_APPROVED_TOOL and RUN_APPROVED_TOOL in self.schemas:
@@ -5469,17 +5826,42 @@ class _Judge:
             if not isinstance(mark, bool):
                 return RefusedCall(call, f"{DELIBERATE_REPEAT!r} is true or false")
             deliberate = mark
-        for argument, kind in self.label_arguments.get(call.name, {}).items():
-            if argument not in arguments:
-                continue
-            mapped = self._mapped(arguments[argument], kind)
-            if isinstance(mapped, str):
-                return RefusedCall(call, mapped)
-            arguments[argument] = mapped[0]
+        refused = self._labels_mapped(call.name, arguments)
+        if refused is not None:
+            return RefusedCall(call, refused)
         planned = ProposedCall(call_id=call.call_id, name=call.name, arguments=arguments)
         return PlannedCall(planned, looking_for=looking_for, deliberate_repeat=deliberate)
 
-    def _ticket(self, call: ProposedCall) -> PlannedCall | RefusedCall:
+    def _labels_mapped(self, name: str, arguments: dict[str, Any]) -> str | None:
+        """Replace a call's labels by the ids they name, in place, or say why it is refused.
+
+        ADR-0364 §9:11: ``send_email``'s ``from`` names an email account connection the
+        work was shown, and the email tool reads the account it names.
+        """
+        for argument, kind in self.label_arguments.get(name, {}).items():
+            if argument not in arguments:
+                continue
+            held = arguments[argument]
+            mapped = self._mapped(held, kind)
+            if isinstance(mapped, str):
+                return mapped
+            split = MEMBER_SPLIT.get(argument)
+            known = self.book.resolve(held) if isinstance(held, str) else None
+            if split is not None and known is not None and known.kind in split:
+                # ADR-0364 §8:2: one argument names an episode or a matter, its label
+                # saying which, and the runner reads the id by its kind.
+                del arguments[argument]
+                arguments[split[known.kind]] = mapped[0]
+                continue
+            arguments[argument] = mapped[0]
+        if name == EMAIL_CAPABILITY and FROM_ARGUMENT in arguments:
+            account = self.accounts.get(str(arguments[FROM_ARGUMENT]))
+            if account is None:
+                return _NOT_AN_ACCOUNT
+            arguments[FROM_ARGUMENT] = account
+        return None
+
+    def _ticket(self, call: ProposedCall) -> PlannedCall | RefusedCall:  # noqa: PLR0911 — each check §5:3 names is a return of its own
         """A ticket, run by its ``A`` label, as the call its request holds (ADR-0361 §5:2).
 
         Code fills in the values recorded with the request, those the hub fills apart, and
@@ -5498,15 +5880,18 @@ class _Judge:
         ticket = self.tickets.get(resolved)
         if ticket is None:
             return RefusedCall(call, _NO_TICKET.format(label=label[:_QUOTED_LABEL_CHARS]))
-        looking_for = arguments.pop(LOOKING_FOR, None)
         if arguments:
             return RefusedCall(call, _TICKET_LABEL_ALONE)
-        requested = ticket.request.call
+        # ADR-0364 §8:6: a ticket written under an old name is read as the new tool's call.
+        requested = translated(ticket.request.call, self._declared)
+        if isinstance(requested, Void):
+            return RefusedCall(call, f"{_TICKET_VOID}: {requested.reason}")
+        # ADR-0364 §10:2: the *looking for* is the request's, kept with its call.
+        looking_for: str | None = None
         if requested.tool.result is CapabilityResult.MAY_CARRY_OUTSIDE_TEXT:
-            if not isinstance(looking_for, str) or not looking_for.strip():
-                return RefusedCall(call, f"{LOOKING_FOR!r} must say what you are looking for")
-        else:
-            looking_for = None
+            looking_for = requested.looking_for
+            if looking_for is None:
+                return RefusedCall(call, _NO_KEPT_LOOKING_FOR)
         filled = _filled(self.capabilities, requested)
         values = {name: value for name, value in requested.values.items() if name not in filled}
         planned = ProposedCall(
@@ -5517,6 +5902,17 @@ class _Judge:
             looking_for=looking_for,
             deliberate_repeat=requested.deliberate_repeat,
             ticket=ticket.request_id,
+        )
+
+    def _declared(self, capability: str) -> ToolDefinition | None:
+        """The declaration a capability is offered under here, its first by id, or ``None``."""
+        return next(
+            (
+                tool
+                for tool in sorted(self.capabilities, key=lambda one: str(one.id))
+                if str(tool.capability) == capability
+            ),
+            None,
         )
 
     def _request_approval(self, call: ProposedCall) -> PlannedCall | RefusedCall:  # noqa: PLR0911 — each check §2:2 names is a return of its own
@@ -5557,18 +5953,17 @@ class _Judge:
         )
         if isinstance(inner, RefusedCall):
             return RefusedCall(call, f"the call to approve: {inner.reason}")
-        held = arguments.get(CALL_ARGUMENT)
-        stated = held.get(NESTED_REPEAT_KEY) if isinstance(held, Mapping) else None
-        shaped: dict[str, Any] = {CAPABILITY_KEY: capability, ARGUMENTS_KEY: inner.call.arguments}
-        if inner.deliberate_repeat or stated is True:
-            shaped[NESTED_REPEAT_KEY] = True
-        arguments[CALL_ARGUMENT] = shaped
+        # ADR-0364 §10:2: its *looking for* and its deliberate-repeat mark, taken out of its
+        # arguments as any call's are, are kept beside the call the request records.
+        arguments[CALL_ARGUMENT] = {CAPABILITY_KEY: capability, ARGUMENTS_KEY: inner.call.arguments}
         return PlannedCall(
             ProposedCall(call_id=call.call_id, name=call.name, arguments=arguments),
             deliberate_repeat=judged.deliberate_repeat,
+            nested_repeat=inner.deliberate_repeat,
+            nested_looking_for=inner.looking_for,
         )
 
-    def _mapped(self, value: object, kind: LabelKind) -> tuple[object] | str:
+    def _mapped(self, value: object, kind: LabelKinds) -> tuple[object] | str:
         """A label argument with its labels replaced by ids, or why it is refused."""
         if isinstance(value, str):
             return self._wrapped(self._id(value, kind))
@@ -5576,33 +5971,40 @@ class _Judge:
             ids: list[str] = []
             for one in value:
                 if not isinstance(one, str):
-                    return f"an argument naming {_THINGS[kind][1]} takes their labels"
+                    return f"an argument naming {_things(kind, 1)} takes their labels"
                 resolved = self._id(one, kind)
                 if isinstance(resolved, _Refusal):
                     return resolved.reason
                 ids.append(resolved)
             return (ids,)
-        return f"an argument naming {_THINGS[kind][1]} takes their labels"
+        return f"an argument naming {_things(kind, 1)} takes their labels"
 
     def _wrapped(self, resolved: str | _Refusal) -> tuple[object] | str:
         if isinstance(resolved, _Refusal):
             return resolved.reason
         return (resolved,)
 
-    def _id(self, label: str, kind: LabelKind) -> str | _Refusal:
+    def _id(self, label: str, kind: LabelKinds) -> str | _Refusal:
         """The id ``label`` names, where it names a thing of ``kind`` planning was shown."""
         quoted = label[:_QUOTED_LABEL_CHARS]
         known = self.book.resolve(label)
         if known is None:
             return _Refusal(f"{quoted!r} names nothing you were shown")
-        if known.kind is not kind:
-            return _Refusal(f"{quoted!r} names {_THINGS[known.kind][0]}, not {_THINGS[kind][0]}")
+        kinds = kind if isinstance(kind, tuple) else (kind,)
+        if known.kind not in kinds:
+            return _Refusal(f"{quoted!r} names {_THINGS[known.kind][0]}, not {_things(kind, 0)}")
         return known.id
 
 
 @dataclass(frozen=True, slots=True)
 class _Refusal:
     reason: str
+
+
+def _things(kind: LabelKinds, number: int) -> str:
+    """What ``kind`` names, one (``0``) or several (``1``), for a refusal's reason."""
+    kinds = kind if isinstance(kind, tuple) else (kind,)
+    return " or ".join(_THINGS[one][number] for one in kinds)
 
 
 #: ADR-0356 §4:5, ADR-0349 §7:26: why a call on a waiting round runs nothing, unless it
@@ -5621,8 +6023,18 @@ _NO_TICKET: Final = (
     "request_approval"
 )
 _TICKET_LABEL_ALONE: Final = (
-    "a ticket is run by its label alone: its values are the ones the person approved"
+    "a ticket is run by its label alone: its arguments are the ones that were approved"
 )
+#: ADR-0364 §8:6: a ticket whose stored call the renames cannot carry.
+_TICKET_VOID: Final = "the ticket's call cannot run as it was approved"
+#: ADR-0364 §10:2: a ticket whose request, written before it kept one, holds no *looking
+#: for* for a call whose result is read for planning.
+_NO_KEPT_LOOKING_FOR: Final = (
+    "the ticket's request was written before it kept what you were looking for, so its "
+    "result could not be read for you: ask again with request_approval"
+)
+#: ADR-0364 §9:11: ``send_email``'s ``from`` names no email account the work was shown.
+_NOT_AN_ACCOUNT: Final = "'from' names no email account you were shown: name one by its L label"
 
 #: ADR-0361 §2:2: why a ``request_approval`` call writes nothing before authorizing.
 _NESTED_MALFORMED: Final = (
@@ -5630,7 +6042,7 @@ _NESTED_MALFORMED: Final = (
 )
 _NOT_ASKABLE: Final = "is not a call you are offered that a yes can approve"
 #: The calls no request asks about: asking itself, and a message, which needs no yes.
-_NEVER_ASKED: Final = frozenset({REQUEST_APPROVAL_CAPABILITY, RUN_APPROVED_TOOL, "text"})
+_NEVER_ASKED: Final = frozenset({REQUEST_APPROVAL_CAPABILITY, RUN_APPROVED_TOOL, TEXT_CAPABILITY})
 
 
 # --- the stage -------------------------------------------------------------------------------
@@ -5736,7 +6148,7 @@ class PlanningStage:
             ModelError: Whatever the tool-calling seam raised; nothing is recorded.
         """
         book = _LabelBook(inputs.labels)
-        offered = offered_tools(inputs.capabilities)
+        offered = offered_tools(inputs.capabilities, inputs.label_arguments)
         work = inputs.work
         if work is None:
             offered_here = offered
@@ -5817,6 +6229,11 @@ class PlanningStage:
                 one.request_id: one
                 for one in inputs.tickets
                 if book.held(LabelKind.APPROVED_ACTION, one.request_id) is not None
+            },
+            accounts={
+                one.place: FROM_THE_PERSONS_ACCOUNT
+                for one in inputs.connections
+                if one.account == EMAIL_ACCOUNT_KIND
             },
             waited=(
                 frozenset(episode_address(one.activation_id) for one in inputs.waiting)
