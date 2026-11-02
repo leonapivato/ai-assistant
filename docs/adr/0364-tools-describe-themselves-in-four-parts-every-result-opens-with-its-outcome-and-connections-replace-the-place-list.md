@@ -5,7 +5,7 @@
 - Scope: milestone 18's last design piece, the walk of planning's instruction and of every tool's description. It decides the instruction's changed sections (§2); the Connections section, which replaces the place list (§3); people's `P` labels (§4); the shape of a description (§5) and of a result (§6); the effects line's template (§7); the renames, and how stored records under the old names keep reading (§8); the message tools (§9); approvals (§10); scheduled work (§11); the look-ups (§12); the person model's calls (§13); and the lanes (§14).
 - Dependency: [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md), [ADR-0357](0357-messages-are-tools-by-modality-planning-chooses-and-tools-carry-out-and-a-rule-about-one-tool-sits-in-its-description.md) and [ADR-0358](0358-planning-keeps-memory-only-on-purpose-a-matter-that-has-changed-is-tidied-in-the-background-and-planning-can-search-past-episodes-read-one-whole-and-read-its-origins-older-history.md), whose exchange, tools and look-ups this decision reshapes; [ADR-0361](0361-approvals-are-cards-the-person-taps-and-a-yes-is-a-one-time-ticket-for-the-exact-call.md) and [ADR-0362](0362-a-ticket-runs-the-person-models-calls-and-the-task-schedulers-and-a-cards-edit-and-a-taps-answer-need-no-claim-of-the-lines.md), whose approvals it reshapes; and [ADR-0350](0350-every-spawn-is-a-scheduled-task-written-into-the-task-scheduler-whose-sensor-starts-it-when-it-comes-due-and-the-task-manager-is-the-one-way-in-from-outside.md), whose place list it replaces. All Accepted, as their status lines leave them.
 - Authorization: the owner walked planning's instruction and all 32 tool descriptions with the coordinator on 2026-11-01 and ruled as they went. On people labels, verbatim: "record it, but build our current stuff around it" (§4). The words of the instruction and of every description are the coordinator's agreed words, routed to the build lane (ADR-0357 §7:5); this decision quotes none of them. The coordinator assigned 0364 and ratifies it once its reviews are green. Where a ruling left a point open, this decision says what it decided, in §15.
-- **Contract-surface decision, and a breaking change under golden rule 5.** No Protocol changes. Two `core` types do: `CallResult` gains `outcome`, so that `models/` can flag a failed call to the provider (§6:4), and `LabelKind` gains `PERSON`, the `P` label (§4:1). `PROTOCOL_VERSION` advances where the build lane finds either crossing the wire (§14:3).
+- **Contract-surface decision, and a breaking change under golden rule 5.** No Protocol changes. Three `core` types do: `CallResult` gains `outcome`, so that `models/` can flag a failed call to the provider (§6:4); `LabelKind` gains `PERSON`, the `P` label (§4:1); and `RequestedCall` gains `looking_for`, so a request keeps it (§10:6). `PROTOCOL_VERSION` advances where the build lane finds any of them crossing the wire (§14:3).
 - **Partially supersedes**, in the clauses §16's first table names: ADR-0260, ADR-0306, ADR-0307, ADR-0338, ADR-0349, ADR-0350, ADR-0356, ADR-0357, ADR-0358 and ADR-0361.
 
 ## Context
@@ -271,9 +271,11 @@ and what it acts on.
 > **Normative.** A waiting request or an unused ticket whose call names an old capability is read
 > as the new tool's call, its arguments translated by the table, where the translation sends what
 > the old call would have sent: an `email` `from` `user` reads as the person's one email account,
-> and `exact` reads as the words wrapped whole (§9:6), which are sent unchanged today either way
-> (§9:9). One the translation cannot carry, such as a recipient that is not an address, is void,
-> and its card and panel say so.
+> and `exact` reads as the words wrapped whole (§9:6), any tag they already hold escaped first
+> (§9:8), which are sent unchanged today either way (§9:9). The request's `RequestedCall` is read
+> with the new tool's declaration and the translated values, and rebound as ADR-0321 §4:2 rebinds.
+> One the translation cannot carry, such as a recipient that is not an address, is void, and its
+> card and panel say so.
 
 > **Normative.** A grant or authorization that names a tool by its declaration's value covers no
 > call to a tool whose declaration changed, as after any description change (ADR-0254 §3:1). This
@@ -300,9 +302,10 @@ and what it acts on.
 > owner alone (ADR-0361 §7:4).
 
 > **Normative.** A work the Task Scheduler started, and an approval's work, still send only where
-> ADR-0350 §6:7 and ADR-0361 §6:7 let them: the connections their task or request suggests, and the
-> line's chat where the line is connected. Their inputs carry no person's authority, and this
-> decision widens nothing for them.
+> ADR-0350 §6:7, ADR-0361 §6:7 and ADR-0361 §7:3 let them: the connections their task or request
+> suggests, the line's chat where the line is connected, and the origin of each input they took by a
+> take, where it takes a text. Their inputs carry no person's authority, and this decision widens
+> nothing for them.
 
 > **Normative.** `send_text`'s result is its outcome alone (§6:1). Its call's episode entry still
 > holds what was sent, where and how (ADR-0357 §3:4). This replaces ADR-0357 §3:1 and §3:2 in what
@@ -316,7 +319,8 @@ and what it acts on.
 > where one does not, sends planning's words unchanged instead. It removes the tags either way.
 
 > **Normative.** An unclosed tag, a tag opened inside a marked part, or a closing tag with none open
-> comes back not done. A backslash before the opening tag sends it as literal text.
+> comes back not done. A backslash before an opening or a closing tag sends that tag as literal
+> text, and two backslashes before a tag send one backslash and leave the tag a tag.
 
 > **Normative.** Until the wording step is built (ADR-0357 §4:5), words are sent as written, with
 > the tags removed.
@@ -349,7 +353,7 @@ and what it acts on.
 
 > **Normative.** `looking_for`, where the requested call takes one, stays in the requested call. The
 > request records it beside the call's deliberate-repeat mark, which adds to ADR-0361 §2:6; the
-> card never shows it; and it goes to the digest when the ticket's call runs.
+> card never shows it; and it goes to the digest when the ticket's call runs (§10:6).
 
 > **Normative.** `run_approved` takes `ticket`, required, and nothing else. This replaces ADR-0361
 > §5:2's argument name; §5:2's one argument stands.
@@ -360,6 +364,11 @@ and what it acts on.
 > **Normative.** `looking_for` never changes what a call does, since the hub strips it before the
 > tool runs (ADR-0306 §2:10), so it is never the person's to approve. A new question of a result is
 > `reread_result`'s.
+
+> **Normative.** `RequestedCall` gains `looking_for: NonBlankEncodableText | None`, defaulting to
+> `None` and left out of a dump where it is `None`, so a request written before it reads and is
+> stored as it was. It is no part of `values`, of the call a ticket runs, of `RequestedCall.request`
+> or of `same_call`'s sameness, and no card or panel shows it.
 
 ### 11. Scheduled work
 
@@ -410,7 +419,7 @@ and what it acts on.
 
 > **Normative.** One build lane, B, ships the instruction, every description, the renames,
 > Connections and `search_connections`, the result shape and the provider flag. It may touch `core`
-> for §4:1's `LabelKind` and §6:4's `CallResult`, `testing`, `models/tool_calling.py`,
+> for §4:1's `LabelKind`, §6:4's `CallResult` and §10:6's `RequestedCall`, `testing`, `models/tool_calling.py`,
 > `orchestration`, `tools/send_email.py`, `tools/web_search.py`, `tools/forecast.py` and the
 > registration that names them, `app/` for §3:5's constant and §3:6's account connections,
 > `interfaces/` and `scripts/` where they show a capability's name, for the name alone,
@@ -431,7 +440,9 @@ and what it acts on.
 > and the line is refused; an exact part reworded away sends planning's words, and an unclosed tag
 > comes back not done; an email `from` a label that is no email account is refused, and every email
 > needs approval; a waiting `email` request from before the build runs as the `send_email` it
-> translates to; Connections shows the origin, every single-place connection and three places of a
+> translates to; an approved search's `looking_for` survives a restart and reaches its digest when
+> the ticket runs; a task's work may reply into the origin of an input it took; a literal tag sent
+> escaped arrives as written; Connections shows the origin, every single-place connection and three places of a
 > many-place one, and no address; `search_connections` finds an unshown conversation and labels it;
 > and the offered tools stay identical across two works. These replace ADR-0357 §10:1's tests of
 > `exact` and of an email from the person's address.
