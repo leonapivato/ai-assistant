@@ -174,7 +174,7 @@ and what it acts on.
 > as refused.
 
 > **Normative.** `CallResult` gains `outcome: CallOutcomeKind | None`, defaulting to `None`: the
-> outcome planning is shown, never `needs_you`, and `None` where it shows none.
+> outcome planning is shown, and `None` where it shows none. Its validator refuses `needs_you`.
 
 > **Normative.** Where the provider supports it, `models/` flags a result whose outcome is not done
 > or refused as an error, as Anthropic's `is_error`. An unknown is not flagged, and a result with no
@@ -209,9 +209,10 @@ and what it acts on.
 > `safe_to_repeat`, except for a tool that changes nothing.
 
 > **Normative.** Approval: where a rule always asks for approval of every call to the tool, the line
-> says it always needs approval first. The generator reads that from the same register authorizing
-> rules by (`_needs_you_by_rule`), so the two cannot disagree. Today that is `send_email` and the
-> person model's three calls.
+> says it always needs approval first. The generator and authorizing read that from one register
+> in code, the one `_needs_you_by_rule` reads today, moved where both can import it without one
+> phase module importing another (ADR-0309 §2:3), so the two cannot disagree. Today that is
+> `send_email` and the person model's three calls.
 
 > **Normative.** `run_approved` takes no generated line: its effects are its ticket's call's, which
 > its description says.
@@ -384,8 +385,10 @@ and what it acts on.
 > in the connections it suggests ([#3450](https://github.com/leonapivato/ai-assistant/issues/3450)).
 
 > **Normative.** A spawn may suggest any connection the work was shown that takes a text message,
-> and one naming a connection that takes none is refused whole, with the reason. This replaces
-> ADR-0350 §5:6's *only places on its own activation's place list*.
+> and one naming a connection that takes none is refused whole, with the reason. A spawn from a
+> work that keeps a list (§9:4) may suggest only connections on that list, so no task widens where
+> such a work may speak. This replaces ADR-0350 §5:6's *only places on its own activation's place
+> list*, outside such a work.
 
 > **Normative.** Its result, with done, is the task's `T` label and its read-back alone.
 
@@ -428,7 +431,7 @@ and what it acts on.
 > **Normative.** Then lane T2 builds the effects generator (§7) and a test that each offered
 > description's effects line equals what the generator writes from its declaration. It may touch
 > the module that builds the offered tools, each description's effects line wherever it is
-> declared, and their tests. The bytes the model is offered do not change under it.
+> declared, the register §7:5 names and its two readers, and their tests. The bytes the model is offered do not change under it.
 
 > **Normative.** Where a type this decision changes crosses the wire, B advances
 > `PROTOCOL_VERSION`, as ADR-0356 §13 did.
@@ -489,7 +492,7 @@ Superseded in part. Every clause the middle column does not name stands:
 | --- | --- | --- |
 | ADR-0356 | §3:1's sections, in the addition alone: Connections; §3:2's table, its situation row: the time and the last stimulus alone, and a Connections row; §3:3, in planning's briefing alone: `where` by `L` label and `from` by `P` label; §7:7 and §7:10's second sentence: any shown connection that takes text; §10:1's text, for this version; §10:2's list, in the addition alone; §10:6's second sentence | §2, §3, §4:2, §9:3, §9:10 |
 | ADR-0357 | §2:1's and §7:2's names; §2:2–§2:5: `send_text` takes `connection` and `words`; §2:6's person recipient and `attachments`; §2:7 and §2:8, retired; §2:10; §2:11, made unconditional; §2:13; §3:1 and §3:2, in what the result shows planning; §4:2 and §4:3's `exact`; §5:4, where the tool used the default its argument's description names; §5:9's line; §6:3's *goes back as needing them*; §7:2's human row; §10:1's `exact` and email tests | §5, §6, §7, §8, §9 |
-| ADR-0350 | §5:6's *only places on its own place list*; §5:10, whole; §5:11, outside a task's work; §5:12's description: an entry says what the system can do with it; §5:13, in that an `L` label names any connection | §3, §9:3, §11:3 |
+| ADR-0350 | §5:6's *only places on its own place list*, outside a work that keeps a list; §5:10, whole; §5:11, outside a task's work; §5:12's description: an entry says what the system can do with it; §5:13, in that an `L` label names any connection | §3, §9:3, §11:3 |
 | ADR-0306 | §4:7's one place; §4:8's *needing you* and §4:9's *not done*, in the outcome planning is shown | §6:3, §9:3 |
 | ADR-0307 | §5:1's label kinds, in the addition alone: `P` | §4:1 |
 | ADR-0361 | §2:1's `capability`: `tool`; §2:4's result: refused; §2:6, in the addition alone: `looking_for`; §2:7's result; §5:2's argument name; §5:3's *not done*: refused; §7:3's `via`: `connection` | §6:3, §8:2, §10 |
