@@ -5656,7 +5656,8 @@ _FULL_OUTCOME_TEXT: Final = {
     CallOutcomeKind.NOT_DONE: "not done",
     CallOutcomeKind.UNKNOWN: "unknown: it may or may not have happened",
     CallOutcomeKind.REFUSED: "refused before it ran",
-    CallOutcomeKind.NEEDS_YOU: "needed the user's yes",
+    # ADR-0364 §6:3: a recorded needs_you is shown refused, saying why.
+    CallOutcomeKind.NEEDS_YOU: "refused before it ran: it needed approval",
 }
 
 

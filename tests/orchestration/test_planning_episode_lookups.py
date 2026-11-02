@@ -1025,3 +1025,20 @@ async def test_a_matter_a_search_showed_is_named_when_it_changes() -> None:
         "- S1 changed: its summary was rewritten, and now begins: The dentist moved; "
         "it gained a note."
     ) in news
+
+
+async def test_a_recorded_call_that_needed_a_yes_reads_as_refused() -> None:
+    """ADR-0364 §6:3: a call recorded needing the person's yes is shown refused, saying
+    it needed approval, in a past episode's full record too."""
+    asked = _earlier(
+        "round:one", calls=(ProposedCall(call_id="c1", name="book", arguments={"slot": "9"}),)
+    )
+    record = _with_calls(
+        _episode("activation:full", rounds=(asked,)),
+        _entry("round:one", "c1", "book", outcome=CallOutcomeKind.NEEDS_YOU),
+    )
+
+    value, _ = await _shown("read_episode", {"full": _read(record)}, owner_records=True)
+
+    (booked,) = [one for one in value["parts"] if one.get("tool") == "book"]
+    assert booked["outcome"].startswith("refused before it ran: it needed approval")
