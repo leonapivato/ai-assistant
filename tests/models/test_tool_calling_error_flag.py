@@ -12,9 +12,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
+import pytest
 from anthropic import AsyncAnthropic
 from network_guard import network_denied
 from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.fallback import FallbackModel
+from pydantic_ai.models.instrumented import InstrumentedModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from vendor_stacks import RequestRecorder, anthropic_success
 
@@ -31,7 +34,9 @@ from ai_assistant.core.types import (
 from ai_assistant.models import PydanticAIToolCallingCompleter
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
+
+    from pydantic_ai.models import Model
 
 _DUMMY_KEY: Final = "sk-ant-test-not-a-key"
 
@@ -70,7 +75,9 @@ def _exchange() -> PlanningExchange:
     )
 
 
-async def _tool_results() -> dict[str, dict[str, Any]]:
+async def _tool_results(
+    wrap: Callable[[AnthropicModel], Model] = lambda model: model,
+) -> dict[str, dict[str, Any]]:
     """The tool results the round put on Anthropic's wire, by their call id."""
     recorder = RequestRecorder(anthropic_success)
     with network_denied():
@@ -79,7 +86,7 @@ async def _tool_results() -> dict[str, dict[str, Any]]:
             model = AnthropicModel(
                 "claude-opus-4-8", provider=AnthropicProvider(anthropic_client=client)
             )
-            completer = PydanticAIToolCallingCompleter(model, thinking=False)
+            completer = PydanticAIToolCallingCompleter(wrap(model), thinking=False)
             tool = OfferedTool(
                 name="search_web", description="Search.", parameters={"type": "object"}
             )
@@ -114,3 +121,20 @@ async def test_the_flag_carries_no_retry_wording() -> None:
         texts = [content] if isinstance(content, str) else [one["text"] for one in content]
         assert texts == [_text(call_id)]
         assert not any("try again" in one.casefold() for one in texts)
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param(InstrumentedModel, id="instrumented"),
+        pytest.param(FallbackModel, id="fallback"),
+    ],
+)
+async def test_a_wrapped_anthropic_model_is_flagged_too(
+    wrap: Callable[[AnthropicModel], Model],
+) -> None:
+    """§6:5: the flag reaches the provider through a wrapper or a fallback model."""
+    results = await _tool_results(wrap)
+
+    flagged = {call_id for call_id, block in results.items() if block.get("is_error")}
+    assert flagged == {"toolu_not_done", "toolu_refused"}

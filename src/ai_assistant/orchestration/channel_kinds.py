@@ -410,10 +410,21 @@ class AccountConnection:
 def connection_kind(place: str) -> ConnectionKind | None:
     """What the connection ``place`` names is, by its channel type or account kind.
 
-    ``None`` where its kind declares nothing here.
+    A channel no kind here declares, such as one an informational event comes from, is
+    still a connection, since every origin is one (§3:2): the system senses it and it
+    takes no message. ``None`` where ``place`` names no channel.
     """
     channel = place_channel(place)
-    return None if channel is None else CONNECTION_KINDS.get(channel.channel_type)
+    if channel is None:
+        return None
+    declared = CONNECTION_KINDS.get(channel.channel_type)
+    if declared is not None:
+        return declared
+    return ConnectionKind(
+        is_a=f"a place of the {channel.channel_type} channel",
+        can="sense it: it takes no message",
+        reaches_people=False,
+    )
 
 
 def account_kind(kind: str) -> ConnectionKind | None:

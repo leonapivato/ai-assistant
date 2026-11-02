@@ -345,7 +345,7 @@ from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
 )
 from ai_assistant.orchestration.candidates import pending_candidates
-from ai_assistant.orchestration.channel_kinds import place_of, takes_text
+from ai_assistant.orchestration.channel_kinds import place_channel, place_of, takes_text
 from ai_assistant.orchestration.chat import couldnt_finish
 from ai_assistant.orchestration.controller import (
     Stage,
@@ -6154,7 +6154,18 @@ class PhasePath:
             return None if scheduling is None else scheduling.targets.get(place)
         if place is not None and place != own_place:
             # ADR-0364 §9:3: any connection the work was shown that takes a text message.
-            return working.connection_targets.get(place)
+            # A conversation the work was shown outside the hub's recent ones, such as one
+            # `search_connections` found, is written as its own is; whether it is still
+            # there is its writer's to say when the message is delivered.
+            listed = working.connection_targets.get(place)
+            if listed is not None:
+                return listed
+            channel = place_channel(place)
+            if channel is None or channel != conversation_channel(channel.instance_id):
+                return None
+            return PlaceTarget(
+                channel=channel, writer=_ConversationWriter(self._writer, channel.instance_id)
+            )
         return own
 
     # --- the place ---

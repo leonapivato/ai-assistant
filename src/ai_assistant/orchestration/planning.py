@@ -2380,6 +2380,13 @@ _CANNOT_ASK: Final = "it needs approval, and nothing here can ask for it, so it 
 #: ADR-0364 §6:1: why a call whose outcome the record does not hold is unknown.
 _NO_OUTCOME_RECORDED: Final = "no outcome was recorded for it"
 
+#: ADR-0364 §6:1: the why of an outcome other than done that recorded no reason of its own.
+_NO_REASON: Final[Mapping[CallOutcomeKind, str]] = {
+    CallOutcomeKind.NOT_DONE: "its tool did not do it, and said no more",
+    CallOutcomeKind.UNKNOWN: "whether it was done could not be established",
+    CallOutcomeKind.REFUSED: "it was stopped before its tool ran, and no more was said",
+}
+
 #: What a peer view's reader is told where the episode could not be read (§6:7).
 _PEER_UNREAD: Final = "could not be read"
 #: ADR-0352 §3:1: a stop call's result where the stopped activation set up nothing live.
@@ -4679,8 +4686,12 @@ class _Request:
         if outcome.kind is CallOutcomeKind.NEEDS_YOU:
             return self._needs_you(outcome), CallOutcomeKind.REFUSED
         shown: dict[str, object] = {"outcome": _OUTCOME_TEXT[outcome.kind]}
-        if outcome.reason is not None and outcome.kind is not CallOutcomeKind.DONE:
-            shown["because"] = outcome.reason
+        if outcome.kind is not CallOutcomeKind.DONE:
+            # §6:1: with any outcome but done, why, a reason it recorded or, with none,
+            # what can be said of it all the same.
+            shown["because"] = (
+                outcome.reason if outcome.reason is not None else _NO_REASON[outcome.kind]
+            )
         shown |= self._absorbed_by(outcome.peer)
         if outcome.kind is not CallOutcomeKind.DONE or outcome.result_id is None:
             return shown, outcome.kind

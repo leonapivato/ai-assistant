@@ -8,18 +8,23 @@ work was not shown, is refused (§9:2).
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 from exchange_support import reported, section, tags, text_call
 from phases_support import open_conversation, phases_harness, say, settled, written
 
-from ai_assistant.core.types import MessageAuthor, RoundResponse
+from ai_assistant.core.errors import ConnectionStoreError
+from ai_assistant.core.types import MessageAuthor, NewMessage, ProposedCall, RoundResponse
 from ai_assistant.orchestration.approval_calls import ApprovalsSeams
+from ai_assistant.orchestration.channel_kinds import EMAIL_ACCOUNT_KIND, AccountConnection
 from ai_assistant.testing import FakeToolCallingCompleter
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    import pytest
 
     from ai_assistant.core.types import OfferedTool, PlanningExchange
 
@@ -141,3 +146,66 @@ async def test_every_work_is_shown_its_connections_and_the_approvals_among_them(
     texts = [one.text or "" for one in tags(shown, "connection")]
     assert "a conversation in the hub chat" in texts
     assert any("the approvals" in one for one in texts)
+
+
+async def test_a_conversation_search_connections_found_takes_a_text() -> None:
+    """§3:7, §9:3: a conversation outside the recent ones the section shows, found by
+    ``search_connections`` under its own ``L`` label, takes a ``send_text`` like any
+    connection the work was shown."""
+    found: list[str] = []
+
+    def respond(exchange: PlanningExchange, _tools: Sequence[OfferedTool]) -> RoundResponse:
+        if "tell the Porto chat" not in exchange.briefing:
+            return RoundResponse()
+        if not exchange.steps:
+            search = ProposedCall(
+                call_id="c1", name="search_connections", arguments={"query": "flight"}
+            )
+            return RoundResponse(calls=(search,))
+        if len(exchange.steps) == 1:
+            (result,) = [json.loads(one.text) for one in exchange.steps[-1].report.results]
+            (entry,) = result["result"]["connections"]
+            (shown,) = tags(entry, "connection")
+            found.append(shown.attributes["label"])
+            return RoundResponse(calls=(text_call("Found it.", connection=found[0]),))
+        return RoundResponse()
+
+    harness = phases_harness(FakeToolCallingCompleter(response=respond), phases={"look_ups": True})
+    older = await open_conversation(harness)
+    await harness.conversation_store.append_message(
+        older, NewMessage(author=MessageAuthor.ASSISTANT, text="the flight to Porto leaves at nine")
+    )
+    for _ in range(4):
+        newer = await open_conversation(harness)
+        await harness.conversation_store.append_message(
+            newer, NewMessage(author=MessageAuthor.ASSISTANT, text="hello")
+        )
+    asking = await open_conversation(harness)
+    await say(harness, asking, "tell the Porto chat I found it")
+    await settled(harness, asking)
+
+    assert len(found) == 1
+    assert "Found it." in [one.text for one in await written(harness, older)]
+
+
+async def test_an_account_whose_state_could_not_be_read_is_not_shown_as_normal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§3:3: an entry's state shows where it is not normal, and unread is not normal."""
+    harness = phases_harness(FakeToolCallingCompleter())
+    engine = harness.engine
+    monkeypatch.setattr(
+        engine,
+        "_account_connections",
+        (AccountConnection(reference="conn-1", kind=EMAIL_ACCOUNT_KIND),),
+    )
+
+    async def unreadable() -> tuple[object, ...]:
+        msg = "the connection log could not be read"
+        raise ConnectionStoreError(msg)
+
+    monkeypatch.setattr(engine._connections, "connected", unreadable)
+
+    (shown,) = await engine._accounts_shown()
+
+    assert shown.state == "its state could not be read"

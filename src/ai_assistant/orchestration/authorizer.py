@@ -906,6 +906,10 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
                 call=ProposedCall.model_validate(one.call.model_dump()),
                 deliberate_repeat=bool(one.deliberate_repeat),
                 ticket=None if one.ticket is None else str(one.ticket),
+                nested_repeat=bool(one.nested_repeat),
+                nested_looking_for=(
+                    None if one.nested_looking_for is None else str(one.nested_looking_for)
+                ),
             )
             for one in given.calls
         ),
@@ -1428,7 +1432,11 @@ class AuthorizingStage:
         written = {key: arguments.pop(key) for key in _WRITTEN_BY_PLANNING if key in arguments}
         if model_supplied_keys(arguments, first):
             return _not_done(call, _HUB_FILLS)
-        fills = self._filled([key for key in first.system_supplied if key not in written], state)
+        # The member a call names is planning's to write, and one it names none of is
+        # this work's (§8:2), so neither is the hub's to fill.
+        fills = self._filled(
+            [key for key in first.system_supplied if key not in _WRITTEN_BY_PLANNING], state
+        )
         if fills is None:
             return _not_done(call, _UNFILLABLE)
         return list(candidates), {**arguments, **written, **fills}

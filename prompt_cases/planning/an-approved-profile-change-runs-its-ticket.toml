@@ -11,7 +11,7 @@ samples = 3
 [property]
 check = "proposes"
 capability = "run_approved"
-argument = "label"
+argument = "ticket"
 value = "A1"
 
 [input]

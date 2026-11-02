@@ -535,11 +535,25 @@ def _returned_outcome(result: CallResult) -> Literal["success", "failed"]:
 def _flagging(model: models.Model) -> models.Model:
     """``model``, flagging a failed call's result where its provider takes a flag (§6:5).
 
-    pydantic-ai's own Anthropic model, unwrapped, is rebuilt as :func:`_flagging_class`'s
-    subclass of it, with its name, provider, profile and settings; every other model is
-    returned as it is. A wrapped one is left alone, so a wrapper's request is never
-    rebuilt under it.
+    pydantic-ai's own Anthropic model is rebuilt as :func:`_flagging_class`'s subclass
+    of it, with its name, provider, profile and settings; every other model is returned
+    as it is. A wrapper or a fallback model holding one is copied around the rebuilt
+    model, so what the wrapper does is kept and its request reaches the flagging one.
     """
+    if isinstance(model, WrapperModel):
+        inner = _flagging(model.wrapped)
+        if inner is model.wrapped:
+            return model
+        wrapper = _copied(model)
+        wrapper.wrapped = inner
+        return wrapper
+    if isinstance(model, FallbackModel):
+        held = [_flagging(one) for one in model.models]
+        if all(new is old for new, old in zip(held, model.models, strict=True)):
+            return model
+        fallback = _copied(model)
+        fallback.models = held
+        return fallback
     module = sys.modules.get(_ANTHROPIC_MODULE)
     if module is None or type(model) is not module.AnthropicModel:
         return model
@@ -553,6 +567,17 @@ def _flagging(model: models.Model) -> models.Model:
             settings=model._settings,
         ),
     )
+
+
+def _copied[M: models.Model](model: M) -> M:
+    """A shallow copy of ``model``, its fields shared, made without reading through it.
+
+    A wrapper answers an attribute it lacks from the model it wraps, which a plain
+    :func:`copy.copy` reads before the copy holds one.
+    """
+    copied = object.__new__(type(model))
+    copied.__dict__.update(model.__dict__)
+    return copied
 
 
 @functools.cache
