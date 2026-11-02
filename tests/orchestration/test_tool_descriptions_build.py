@@ -69,8 +69,8 @@ from ai_assistant.orchestration.planning import (
     offered_tools,
 )
 from ai_assistant.orchestration.remembering import candidate_of, is_remember
-from ai_assistant.orchestration.renames import Void, translated
-from ai_assistant.orchestration.story_calls import LINK_STORY
+from ai_assistant.orchestration.renames import Void, carried, current_arguments, translated
+from ai_assistant.orchestration.story_calls import LINK_STORY, START_STORY
 from ai_assistant.testing import FakeConversationStore, FakeToolCallingCompleter, default_prompt
 from ai_assistant.tools.forecast import FORECAST_READ
 from ai_assistant.tools.send_email import EMAIL
@@ -698,3 +698,45 @@ def test_a_call_the_repeat_backstop_stopped_is_refused_not_not_done() -> None:
         assert _acted_kind(stopped) is CallOutcomeKind.REFUSED
     failed = ActedCall(authorized, ActedOutcome.NOT_DONE, reason="the call failed (timeout)")
     assert _acted_kind(failed) is CallOutcomeKind.NOT_DONE
+
+
+def test_a_recorded_request_for_approval_shows_its_nested_call_under_the_names_now() -> None:
+    """§8:2, §8:4-§8:5: ``call.capability`` reads as ``call.tool``, the tool and its
+    arguments under their new names, and nothing stored is rewritten."""
+    recorded = {
+        "call": {"capability": "spawn", "arguments": {"instruction": "x", "places": ["L2"]}},
+        "why": "You asked.",
+    }
+    assert current_arguments("request_approval", recorded) == {
+        "call": {"tool": "spawn_task", "arguments": {"instruction": "x", "connections": ["L2"]}},
+        "why": "You asked.",
+    }
+    assert recorded["call"] == {
+        "capability": "spawn",
+        "arguments": {"instruction": "x", "places": ["L2"]},
+    }
+
+
+def test_a_waiting_start_whose_notes_were_a_list_is_void_on_its_card_too() -> None:
+    """§8:6: the translation cannot carry a list of first notes into one text, so the card
+    and the panel say void, as a run does."""
+    old = START_STORY.model_copy(
+        update={"capability": "start_story", "parameters_schema": {"type": "object"}}
+    )
+    waiting = RequestedCall(
+        tool=old, values={"notes": ["First note", "Second note"], "episode": "episode:e"}
+    )
+    void = carried(waiting)
+    assert isinstance(void, Void)
+    assert isinstance(translated(waiting, {"start_matter": START_STORY}.get), Void)
+
+
+async def test_search_connections_matches_what_an_entry_says_it_can_do() -> None:
+    """§3:8: matched against what the entry would show, what it can do included."""
+    store = FakeConversationStore()
+    quiet = await store.start()
+    search = ConnectionSearch(conversations=store, scan=10, page_size=5)
+
+    found = await search.search("text messages", 1)
+
+    assert [one.place for one in found.connections] == [f"conversation:{quiet.id}"]

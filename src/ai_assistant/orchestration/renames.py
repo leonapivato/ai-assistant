@@ -21,8 +21,9 @@ It imports no phase module, so planning, authorizing and the approvals may each 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 from pydantic import ValidationError
 
@@ -30,7 +31,7 @@ from ai_assistant.core.types import RequestedCall
 from ai_assistant.orchestration.message_tools import FROM_THE_PERSONS_ACCOUNT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from ai_assistant.core.types import EgressBinding, FrozenJson, ToolDefinition
 
@@ -107,6 +108,17 @@ ARGUMENT_RENAMES: Final[Mapping[str, Mapping[str, str]]] = {
     },
 }
 
+#: ``request_approval``'s nested call: its key, and its tool's and arguments' keys, the
+#: tool's once ``capability`` (ADR-0364 §8:2).
+_REQUEST_APPROVAL: Final = "request_approval"
+#: The tools whose ``notes`` are one text, which their old names took as a list.
+_ONE_TEXT_NOTES: Final = frozenset({"start_matter", "group_matters"})
+_NOTES: Final = "notes"
+_NESTED_CALL: Final = "call"
+_NESTED_TOOL: Final = "tool"
+_NESTED_TOOL_BEFORE: Final = "capability"
+_NESTED_ARGUMENTS: Final = "arguments"
+
 #: What an email address looks like before its protocol's canonicaliser reads it, as
 #: authorizing's gate reads one.
 _ADDRESS: Final = re.compile(r"[^@\s]+@[^@\s]+")
@@ -134,8 +146,25 @@ def current_arguments[V](capability: str, arguments: Mapping[str, V]) -> dict[st
     ``capability`` is the call's name as recorded, old or new. An argument the table does
     not rename keeps its name.
     """
-    renamed = ARGUMENT_RENAMES.get(current_name(capability), {})
-    return {renamed.get(name, name): value for name, value in arguments.items()}
+    current = current_name(capability)
+    renamed = ARGUMENT_RENAMES.get(current, {})
+    shown = {renamed.get(name, name): value for name, value in arguments.items()}
+    nested = shown.get(_NESTED_CALL)
+    if current == _REQUEST_APPROVAL and isinstance(nested, Mapping):
+        shown[_NESTED_CALL] = cast("V", _nested_shown(nested))
+    return shown
+
+
+def _nested_shown(nested: Mapping[str, object]) -> dict[str, object]:
+    """A ``request_approval``'s nested call under the names it goes by now (§8:2)."""
+    tool = nested.get(_NESTED_TOOL, nested.get(_NESTED_TOOL_BEFORE))
+    arguments = nested.get(_NESTED_ARGUMENTS)
+    if not isinstance(tool, str) or not isinstance(arguments, Mapping):
+        return dict(nested)
+    return {
+        _NESTED_TOOL: current_name(tool),
+        _NESTED_ARGUMENTS: current_arguments(tool, dict(arguments)),
+    }
 
 
 def carried(requested: RequestedCall) -> Void | None:
@@ -144,12 +173,16 @@ def carried(requested: RequestedCall) -> Void | None:
     ADR-0364 §8:6: read by its values alone, so a card and the panel can say so without
     the declarations a run reads it with.
     """
-    if CAPABILITY_RENAMES.get(str(requested.tool.capability)) != "send_email":
+    new = CAPABILITY_RENAMES.get(str(requested.tool.capability))
+    values = current_arguments(str(requested.tool.capability), dict(requested.values))
+    if new in _ONE_TEXT_NOTES and isinstance(values.get(_NOTES), list | tuple):
+        # Its notes were a list, which the new tool takes as one text, so the translation
+        # cannot send what the old call would have, and a run reads it void too.
+        return Void(reason=f"its call no longer fits {new}, so it cannot run as asked")
+    if new != "send_email":
         return None
-    values = _email_values(
-        current_arguments(str(requested.tool.capability), dict(requested.values))
-    )
-    return values if isinstance(values, Void) else None
+    carried = _email_values(values)
+    return carried if isinstance(carried, Void) else None
 
 
 def translated(

@@ -275,6 +275,9 @@ class MatterCaller:
             only ones its stop call may name (§7:26); ``None`` otherwise.
         supply: Its audience posture, which what a stopped activation set up that is
             running is shown under, as the list pull's running part is (ADR-0352 §3:4).
+        concurrent: Each activation it was shown among the concurrent stimuli, which
+            ``read_episode`` reads as running work too, though a stop may not name it
+            (ADR-0364 §8:3).
         shown: What each call came back with, by its decision's id, for the phases to
             show under its result.
         as_asked: Each answer call that came to what it asked, by its decision's id: a
@@ -291,6 +294,7 @@ class MatterCaller:
     running: frozenset[str]
     waiting: frozenset[str] | None = None
     supply: TurnSupply | None = None
+    concurrent: frozenset[str] = frozenset()
     shown: dict[str, PeerShown] = field(default_factory=dict)
     as_asked: set[str] = field(default_factory=set)
     not_as_asked: dict[str, NotAsAsked] = field(default_factory=dict)
@@ -431,7 +435,7 @@ class MatterCalls:
         """
         caller = current_caller()
         named = _named(call.request.parameters, _EPISODE_ARGUMENT)
-        if caller is None or named is None or named not in caller.running:
+        if caller is None or named is None or named not in caller.running | caller.concurrent:
             return None
         try:
             await self._show(caller, call.decision.id, named, stopped=None)
