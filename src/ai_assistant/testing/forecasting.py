@@ -795,6 +795,11 @@ class FakeForecaster:
         #: on entry, so "``read`` is never reached" is the absence of a row rather than
         #: the absence of a completed one.
         self.read_calls: list[ToolCall] = []
+        #: The place each read that passed :meth:`_authorised` asked about, as
+        #: ``(latitude, longitude)``, in call order: the call's own coordinates, or the
+        #: configured place's where it named neither (ADR-0364 §12:2). A call refused
+        #: before anything was read leaves no row.
+        self.places_read: list[tuple[float, float]] = []
 
     @property
     def name(self) -> str:
@@ -879,9 +884,9 @@ class FakeForecaster:
         :attr:`ForecastRefusal.DEADLINE_EXPIRED`.
 
         Args:
-            call: The authorised call. Recorded and otherwise unread: ADR-0260 §3 gives
-                this kind no argument to script by, so the answer is the one this fake
-                was built with.
+            call: The authorised call. Recorded, and the place it names recorded in
+                :attr:`places_read` once it passes the checks; the answer is the one
+                this fake was built with, whatever the place.
             timeout: The caller's bound on this call (ADR-0241 §1). **Required and
                 strictly positive**, checked here rather than at the suspension, so a
                 consumer that passed a value no deployment could pass is refused at the
@@ -923,7 +928,7 @@ class FakeForecaster:
                 # checks would hand what follows a *fresh* budget. The production
                 # forecaster opens its window at the same point, which is what makes
                 # this a property of the contract rather than of one implementation.
-                self._authorised(call)
+                self.places_read.append(self._authorised(call))
                 return await self._answered()
         except TimeoutError:
             # **Classification keys on whether *this* deadline fired, never on the
@@ -936,7 +941,7 @@ class FakeForecaster:
                 raise
             return ForecastOutcome(refusal=ForecastRefusal.DEADLINE_EXPIRED)
 
-    def _authorised(self, call: ToolCall) -> None:
+    def _authorised(self, call: ToolCall) -> tuple[float, float]:
         """Run ADR-0260 §6's three pre-execution checks, as every ``read`` owes them.
 
         **Stated here rather than inherited, which is this module's whole posture**: a
@@ -963,6 +968,10 @@ class FakeForecaster:
         Args:
             call: The call as handed, read only through the copy this makes of it.
 
+        Returns:
+            The place the read asks about, as ``(latitude, longitude)``: the call's own
+            coordinates, or the configured place's where it named neither.
+
         Raises:
             ToolBindingError: If the call does not survive revalidation, carries a
                 definition unequal to this forecaster's own, or is not authorised by
@@ -988,15 +997,12 @@ class FakeForecaster:
             )
             raise ToolBindingError(msg)
         parameters = checked.request.parameters
-        named = (
-            parameters.get("origin"),
-            _real(parameters.get("latitude")),
-            _real(parameters.get("longitude")),
-        )
+        latitude = _real(parameters.get("latitude"))
+        longitude = _real(parameters.get("longitude"))
         if "latitude" not in parameters and "longitude" not in parameters:
             # ADR-0364 §12:2: naming neither reads the configured place, as production's.
-            named = (named[0], self._latitude, self._longitude)
-        if named[0] != self._origin or named[1] is None or named[2] is None:
+            latitude, longitude = self._latitude, self._longitude
+        if parameters.get("origin") != self._origin or latitude is None or longitude is None:
             # **The origin is still the configured provider's** (ADR-0364 §12:3): the
             # coordinates are planning's, the configured place's where it named none, and
             # what the call sends, never where it goes. A call carrying this fake's
@@ -1008,6 +1014,7 @@ class FakeForecaster:
                 f"or does not carry both coordinates (ADR-0260 §6, ADR-0364 §12:2)"
             )
             raise ToolBindingError(msg)
+        return latitude, longitude
 
     async def _answered(self) -> ForecastOutcome:
         """The scripted outcome, from inside the modelled resource.

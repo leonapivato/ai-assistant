@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -67,6 +68,7 @@ from forecaster_contract import (
     ConfiguredProvider,
     ForecasterContract,
     GatedRead,
+    PlacedRead,
     ScriptedRead,
     ScriptedRefusal,
 )
@@ -229,6 +231,28 @@ def _sent(subject: Built) -> bytes:
     assert isinstance(subject.transport, FakeOutboundTransport)
     (channel,) = subject.transport.channels
     return channel.written
+
+
+#: The place a request's query names (ADR-0344 §4:2).
+_QUERIED_PLACE: Final = re.compile(rb"[?&]latitude=([^&\s]+)&longitude=([^&\s]+)")
+
+
+def _places_asked(subject: Built) -> tuple[tuple[float, float], ...]:
+    """The place each channel ``subject`` opened asked about, in order.
+
+    Args:
+        subject: The configured integration, built over the canonical transport.
+
+    Returns:
+        Each request's ``(latitude, longitude)``; empty where no channel was opened.
+    """
+    assert isinstance(subject.transport, FakeOutboundTransport)
+    places: list[tuple[float, float]] = []
+    for channel in subject.transport.channels:
+        found = _QUERIED_PLACE.search(channel.written)
+        assert found is not None, channel.written
+        places.append((float(found[1]), float(found[2])))
+    return tuple(places)
 
 
 # --- ADR-0344 §4: the request, whole ----------------------------------------
@@ -1973,6 +1997,18 @@ class TestForecastEgressContract(ForecasterContract):
 
     async def unconfigured(self) -> Any:  # pragma: no cover — see the flag
         raise NotImplementedError
+
+    async def naming(self, latitude: float | None, longitude: float | None) -> PlacedRead:
+        # **Bound by the real seam** over the coordinates given, and the place observed
+        # in the query the far end received, which is where a read asks about one.
+        subject = await built(max_day_chars=_SMALL_CONTENT_BOUND, channels=[answering(day())])
+        proposal = await request(subject, latitude=latitude, longitude=longitude)
+        return PlacedRead(
+            forecaster=subject.forecaster,
+            call=await authorised_read(subject.trail, proposal),
+            configured=(LATITUDE, LONGITUDE),
+            asked=lambda: _places_asked(subject),
+        )
 
     async def _prepared(self, **arrangement: Any) -> tuple[Any, ToolCall]:
         """A subject and the authorised call that reaches its scripted answer.
