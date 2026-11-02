@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from exchange_support import reported, section, tags
@@ -609,3 +609,92 @@ async def test_a_ticket_from_before_the_build_shows_the_call_it_runs() -> None:
     assert shown.text.startswith("send_email — ")
     assert '"maren@example.org"' in shown.text
     assert '"See you at 8."' in shown.text
+
+
+async def test_a_connection_the_hub_hands_between_rounds_joins_in_the_news() -> None:
+    """§3:5, §3:10: a conversation newly among the recent ones is shown in the report's
+    news under its own label, though nothing else names it."""
+    stage, completer = _stage(RoundResponse(text="Looking."), RoundResponse())
+    inputs = _inputs()
+    first = await stage.plan(inputs)
+    joined = ConnectionShown(place="conversation:c-new", kind=CONNECTION_KINDS["conversation"])
+    await stage.plan(
+        replace(
+            inputs,
+            work=first.work,
+            rounds=(first.round,),
+            labels=(*inputs.labels, *first.labels),
+            connections=_connections(joined),
+        )
+    )
+
+    news = completer.calls[1].exchange.steps[0].report.news
+    entries = tags(news, "connection")
+    (entry,) = [one for one in entries if one.text == "a conversation in the hub chat"]
+    assert entry.get("label") == "L7"
+
+
+@pytest.mark.parametrize("name", ["send_email", "run_approved"])
+async def test_an_email_done_is_its_outcome_alone_however_it_ran(name: str) -> None:
+    """§9:5: a message call's result is its outcome alone, an email run by a ticket too."""
+    arguments: dict[str, Any] = (
+        {"ticket": "A1"}
+        if name == "run_approved"
+        else {"from": "L6", "to": "maren@example.org", "subject": "s", "words": "w"}
+    )
+    call = ProposedCall(call_id="c1", name=name, arguments=arguments)
+    shown = await _second_round(
+        CallOutcome("r", "c1", CallOutcomeKind.DONE, result_id="result:1", ran="send_email"),
+        call,
+    )
+    assert shown == {"outcome": "done"}
+
+
+async def test_a_forecast_ticket_from_before_the_build_shows_no_coordinate() -> None:
+    """§12:3: a ``forecast_read`` the build before wrote carried the configured place, the
+    hub's then, so its ticket shows no coordinate to planning."""
+    old = FORECAST_READ.model_copy(update={"capability": "forecast_read"})
+    request = ApprovalRequest(
+        id="approval:1",
+        person=OWNER_PERSON_ID,
+        activation_id="asker",
+        round="r1",
+        call=RequestedCall(
+            tool=old,
+            values={"origin": "https://api.example.com", "latitude": 12.345, "longitude": 67.891},
+            looking_for="Will it rain?",
+        ),
+        why="You asked about the weather.",
+        written_at=_AT - timedelta(minutes=5),
+        expires_at=_AT + timedelta(hours=1),
+        state=ApprovalRequestState.APPROVED,
+        answer=ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=_AT - timedelta(minutes=1)),
+        ticket=TicketState.HELD,
+    )
+    stage, completer = _stage(RoundResponse())
+    await stage.plan(
+        _inputs(capabilities=(EMAIL, WEB_SEARCH, FORECAST_READ), tickets=(Ticket(request=request),))
+    )
+
+    (shown,) = tags(completer.last_call.exchange.briefing, "ticket")
+    assert shown.text is not None
+    assert "12.345" not in shown.text
+    assert "67.891" not in shown.text
+
+
+def test_a_call_the_repeat_backstop_stopped_is_refused_not_not_done() -> None:
+    """§6:2: stopped before its tool ran, by the claim, it comes back refused."""
+    from ai_assistant.orchestration.acting import (  # noqa: PLC0415
+        REFUSED_BY_THE_CLAIM,
+        ActedCall,
+        ActedOutcome,
+        AuthorizedCall,
+    )
+    from ai_assistant.orchestration.phase_path import _acted_kind  # noqa: PLC0415
+
+    authorized = cast("AuthorizedCall", object())
+    for reason in REFUSED_BY_THE_CLAIM:
+        stopped = ActedCall(authorized, ActedOutcome.NOT_DONE, reason=reason)
+        assert _acted_kind(stopped) is CallOutcomeKind.REFUSED
+    failed = ActedCall(authorized, ActedOutcome.NOT_DONE, reason="the call failed (timeout)")
+    assert _acted_kind(failed) is CallOutcomeKind.NOT_DONE

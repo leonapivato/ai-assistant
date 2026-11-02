@@ -31,6 +31,7 @@ from ai_assistant.orchestration.matter_calls import MATTER_CAPABILITIES
 from ai_assistant.orchestration.person_calls import worded_argument
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.planning import DELIBERATE_REPEAT, LOOKING_FOR, exact_line
+from ai_assistant.orchestration.story_calls import MEMBER_WRITTEN
 from ai_assistant.orchestration.task_scheduler import TASK_SCHEDULER_CAPABILITIES
 
 if TYPE_CHECKING:
@@ -164,7 +165,9 @@ async def test_every_capabilitys_exact_line_shows_every_argument_it_sends(
     lines = [
         exact_line(
             RequestedCall(tool=selected, values=values),
-            filled={*offered.system_supplied, *selected.system_supplied},
+            # As a ticket's line leaves out what the hub fills: the member planning
+            # names is shown, though the offer leaves its argument out (ADR-0364 §8:2).
+            filled={*(set(offered.system_supplied) - MEMBER_WRITTEN), *selected.system_supplied},
             worded={} if argument is None else {argument: _WORDING},
         )
         for (offered, selected), values, argument in zip(pairs, sent, worded, strict=True)
@@ -173,8 +176,13 @@ async def test_every_capabilitys_exact_line_shows_every_argument_it_sends(
     for (offered, _), values, line, by_wording in zip(pairs, sent, lines, worded, strict=True):
         name = str(offered.capability)
         assert line.startswith(name), line
-        # ADR-0364 §8:2: the member planning's check writes is planning's, shown as `member`.
-        left_out = {*offered.system_supplied, LOOKING_FOR, DELIBERATE_REPEAT} - {_MEMBER_STORY}
+        # ADR-0364 §8:2: the member planning's check writes is planning's, shown as `member`,
+        # though the offer leaves its argument out.
+        left_out = {
+            *(set(offered.system_supplied) - {_MEMBER_STORY, "member_episode"}),
+            LOOKING_FOR,
+            DELIBERATE_REPEAT,
+        }
         for argument, value in values.items():
             # §8:6: the memory an argument names is read as its wording, the argument sent.
             read_as = _WORDING if argument == by_wording else value

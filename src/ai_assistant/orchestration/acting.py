@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.held_results import HeldResults
 
 __all__ = [
+    "REFUSED_BY_THE_CLAIM",
     "TICKET_CLAIM_TEXT",
     "ActedCall",
     "ActedOutcome",
@@ -206,6 +207,11 @@ TICKET_CLAIM_TEXT: Final = {
 }
 
 _REFUSED: Final = "refused before the call was made"
+#: ADR-0364 §6:2: what the claim answered where it stopped a call before its tool ran,
+#: the repeat backstop's and a ticket's, which planning is shown as refused.
+REFUSED_BY_THE_CLAIM: Final = frozenset(
+    {_ALREADY_DONE, _ALREADY_USED, _ANOTHER_ACTIVATIONS, *TICKET_CLAIM_TEXT.values()}
+)
 _NEEDS_YOU: Final = "needs you: nothing was written, and this needs your yes first"
 
 

@@ -1423,6 +1423,41 @@ async def test_a_separately_authorised_call_naming_another_place_reads_that_plac
     assert len(subject.transport.attempts) == 1
 
 
+async def test_a_call_naming_neither_coordinate_reads_the_configured_place() -> None:
+    """ADR-0364 §12:2-§12:3: left out, the configured place's, which the forecaster holds
+    and the call never carries, so planning is never shown it."""
+    subject = await built(channels=[answering(day())])
+    call = await authorised_read(
+        subject.trail, await request(subject, latitude=None, longitude=None)
+    )
+
+    await subject.forecaster.read(call, timeout=_BOUND)
+
+    sent = _sent(subject)
+    assert f"latitude={LATITUDE}&longitude={LONGITUDE}".encode() in sent
+    assert len(subject.transport.attempts) == 1
+
+
+@pytest.mark.parametrize(
+    ("latitude", "longitude"),
+    [pytest.param(0.0, None, id="latitude-alone"), pytest.param(None, 0.0, id="longitude-alone")],
+)
+async def test_a_call_naming_one_coordinate_alone_reads_nothing(
+    latitude: float | None, longitude: float | None
+) -> None:
+    """ADR-0364 §12:2: both or neither; one alone is refused before anything is read."""
+    subject = await built(channels=[answering(day())])
+    call = await authorised_read(
+        subject.trail, await request(subject, latitude=latitude, longitude=longitude)
+    )
+
+    with pytest.raises(ToolBindingError):
+        await subject.forecaster.read(call, timeout=_BOUND)
+
+    assert subject.records.reads == []
+    assert subject.transport.attempts == ()
+
+
 @pytest.mark.parametrize(
     "elsewhere",
     [

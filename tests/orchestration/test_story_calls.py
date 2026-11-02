@@ -57,6 +57,7 @@ from ai_assistant.orchestration.acting import (
     OwnRecordsByCapability,
 )
 from ai_assistant.orchestration.held_results import HeldResults
+from ai_assistant.orchestration.phase_path import PhaseTools
 from ai_assistant.orchestration.planning import (
     DELIBERATE_REPEAT,
     PLANNING_PROMPT,
@@ -96,11 +97,13 @@ from ai_assistant.orchestration.story_calls import (
 )
 from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp
 from ai_assistant.testing import (
+    FakeAuditTrail,
     FakeMemoryStore,
     FakeModelProvider,
     FakePlanStore,
     FakeStoryStore,
     FakeToolCallingCompleter,
+    FakeToolInvoker,
     default_prompt,
 )
 
@@ -229,14 +232,32 @@ def test_the_hub_fills_the_episode_and_the_mark_and_planning_is_never_offered_th
         assert marked.system_supplied == (EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT)
     for unmarked in (MOVE_STORY, MERGE_STORY, SPLIT_STORY):
         assert unmarked.system_supplied == (EPISODE_ARGUMENT,)
-    # ADR-0364 §8:2: the member's id, by its kind, is the hub's to place from ``member``.
+    # ADR-0364 §8:2, ADR-0254 §3: the member is planning's choice, so the call's identity
+    # holds it; planning's check writes the id ``member`` names into the argument its kind
+    # is read by, which the offer leaves out (below).
     for member in (LINK_STORY, UNLINK_STORY):
-        assert member.system_supplied == (
-            EPISODE_ARGUMENT,
-            MEMBER_STORY_ARGUMENT,
-            MEMBER_EPISODE_ARGUMENT,
-        )
+        assert member.system_supplied == (EPISODE_ARGUMENT,)
     assert TIDY_STORY.system_supplied == ()
+
+
+async def test_the_offer_leaves_out_the_arguments_a_member_is_written_into() -> None:
+    """ADR-0364 §8:2: an add and a remove are offered ``member`` alone, never the
+    arguments planning's check writes its id into."""
+    trail = FakeAuditTrail()
+    registry = FakeToolInvoker([], ledger=trail, gate=trail)
+    tools = PhaseTools(registry=registry, invoker=registry, own_records=STORY_CALLS)
+    offered = {
+        one.name: one
+        for one in offered_tools(
+            await tools.offered([str(LINK_STORY.capability), str(UNLINK_STORY.capability)])
+        )
+    }
+    for tool in offered.values():
+        properties = tool.parameters["properties"]
+        assert isinstance(properties, Mapping)
+        assert MEMBER_ARGUMENT in properties
+        assert MEMBER_STORY_ARGUMENT not in properties
+        assert MEMBER_EPISODE_ARGUMENT not in properties
 
 
 def test_story_arguments_are_labels() -> None:

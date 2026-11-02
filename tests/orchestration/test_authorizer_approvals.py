@@ -443,3 +443,50 @@ async def test_a_direct_call_this_rounds_request_asks_about_waits_on_its_card(
     assert verdicts["note-1"].verdict is Verdict.NEEDS_YOU
     assert verdicts["note-1"].reason == ALREADY_ON_A_CARD
     assert [one.call.request.tool.capability for one in decided.allowed] == ["request_approval"]
+
+
+async def test_a_pending_request_from_before_the_renames_still_holds_its_call() -> None:
+    """ADR-0364 §8:6, ADR-0361 §2:8: a request written under a tool's old name holds the
+    call it translates to, so the same call made under the new name waits on its card."""
+    current = _ALLOWED.model_copy(update={"id": "searching", "capability": "search_web"})
+    before = current.model_copy(update={"capability": "web_search"})
+    hub = _Hub(tools=(current,))
+    pending = ApprovalRequest(
+        id="approval:2",
+        person=OWNER_PERSON_ID,
+        activation_id=_ASKER,
+        round="round:ask",
+        call=RequestedCall(tool=before, values={"date": "2026-11-02"}),
+        why="You asked me to note it.",
+        written_at=_AT,
+        expires_at=_AT + _DAY,
+    )
+    effect = ActivationEffect(
+        id="effect:ask-2",
+        activation_id=_ASKER,
+        round="round:ask",
+        capability="request_approval",
+        values_digest="1" * 64,
+        decision_id="decision:ask-2",
+        claimed_at=_AT,
+        request=pending.id,
+    )
+    await hub.plans.write_approval_request(pending, effect, match=None)
+    call = CallToAuthorize(
+        ProposedCall(call_id="note-1", name="search_web", arguments={"date": "2026-11-02"})
+    )
+    decided = await hub.stage.authorize(
+        RoundToAuthorize(
+            activation_id=_ACTIVATION,
+            round=PlanningRound(id="round:1", recorded_at=_AT, calls=(call.call,)),
+            working=WorkingRecord(),
+            calls=(call,),
+            input_place="conversation:c-1",
+            person=OWNER_PERSON_ID,
+        )
+    )
+
+    (verdict,) = decided.verdicts
+    assert verdict.verdict is Verdict.NEEDS_YOU
+    assert verdict.reason == ALREADY_ON_A_CARD
+    assert decided.allowed == ()

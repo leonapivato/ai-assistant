@@ -313,6 +313,7 @@ from ai_assistant.core.types import (
     parties_are_persons_own,
 )
 from ai_assistant.orchestration.acting import (
+    REFUSED_BY_THE_CLAIM,
     ActedCall,
     ActedOutcome,
     ActedRound,
@@ -441,7 +442,11 @@ from ai_assistant.orchestration.remembering import (
     is_candidate_result,
 )
 from ai_assistant.orchestration.stories import episode_address
-from ai_assistant.orchestration.story_calls import STORY_CALL_CAPABILITIES, TIDY_STORY_CAPABILITY
+from ai_assistant.orchestration.story_calls import (
+    MEMBER_WRITTEN,
+    STORY_CALL_CAPABILITIES,
+    TIDY_STORY_CAPABILITY,
+)
 from ai_assistant.orchestration.story_links import admitted_episodes
 from ai_assistant.orchestration.story_privacy import SummaryVisibility
 from ai_assistant.orchestration.story_standing import story_standing
@@ -1041,7 +1046,9 @@ class PhaseTools:
                     # search's is; the coordinates are planning's.
                     hidden = _properties(one) - {_LATITUDE_ARGUMENT, _LONGITUDE_ARGUMENT}
                 else:
-                    hidden = set(self._fills.get(name, {}))
+                    # ADR-0364 §8:2: the member an add or a remove names, written by
+                    # planning's check from ``member``, is no argument the model names.
+                    hidden = set(self._fills.get(name, {})) | (MEMBER_WRITTEN & _properties(one))
                 offered.append(_without(one, hidden))
         return tuple(offered)
 
@@ -2946,11 +2953,7 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
                 CallOutcome(round_id, call_id, CallOutcomeKind.NEEDS_YOU, reason=one.reason)
             )
             continue
-        kind = {
-            ActedOutcome.DONE: CallOutcomeKind.DONE,
-            ActedOutcome.NOT_DONE: CallOutcomeKind.NOT_DONE,
-            ActedOutcome.UNKNOWN: CallOutcomeKind.UNKNOWN,
-        }[one.outcome]
+        kind = _acted_kind(one)
         digested = one.route is ResultRoute.DIGEST
         outcomes.append(
             CallOutcome(
@@ -2966,6 +2969,21 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
             )
         )
     return tuple(outcomes)
+
+
+def _acted_kind(one: ActedCall) -> CallOutcomeKind:
+    """What came of a call acting ran, as planning is shown it (ADR-0364 §6:1-§6:2).
+
+    A call the claim stopped before its tool ran, by the repeat backstop or a ticket's
+    rule, is refused; one whose tool ran and did not do it is not done.
+    """
+    if one.outcome is ActedOutcome.NOT_DONE and one.reason in REFUSED_BY_THE_CLAIM:
+        return CallOutcomeKind.REFUSED
+    return {
+        ActedOutcome.DONE: CallOutcomeKind.DONE,
+        ActedOutcome.NOT_DONE: CallOutcomeKind.NOT_DONE,
+        ActedOutcome.UNKNOWN: CallOutcomeKind.UNKNOWN,
+    }[one.outcome]
 
 
 def _carded(

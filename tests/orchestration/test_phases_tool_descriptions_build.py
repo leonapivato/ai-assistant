@@ -209,3 +209,27 @@ async def test_an_account_whose_state_could_not_be_read_is_not_shown_as_normal(
     (shown,) = await engine._accounts_shown()
 
     assert shown.state == "its state could not be read"
+
+
+async def test_connections_hold_the_three_most_recent_conversations_and_an_older_origin() -> None:
+    """§3:5, §14:4: the hub chat's three most recent conversations, and the origin first
+    where it is older than them; the others are left to search_connections."""
+    from ai_assistant.orchestration.conversations import conversation_channel  # noqa: PLC0415
+
+    harness = phases_harness(FakeToolCallingCompleter())
+    conversations: list[str] = []
+    for one in range(5):
+        conversation = await open_conversation(harness)
+        await harness.conversation_store.append_message(
+            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text=f"note {one}")
+        )
+        conversations.append(conversation)
+    recent = [one.id for one in await harness.conversation_store.recent(limit=3)]
+    origin = next(one for one in conversations if one not in recent)
+
+    shown, targets = await harness.engine._shown_connections(conversation_channel(origin))
+
+    hub_chat = [one.place for one in shown if one.place.startswith("conversation:")]
+    assert hub_chat == [f"conversation:{one}" for one in (origin, *recent)]
+    assert len(set(conversations) - {origin, *recent}) == 1, "one left to the search"
+    assert set(hub_chat) <= set(targets)
