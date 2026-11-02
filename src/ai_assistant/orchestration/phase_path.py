@@ -313,7 +313,7 @@ from ai_assistant.core.types import (
     parties_are_persons_own,
 )
 from ai_assistant.orchestration.acting import (
-    REFUSED_BY_THE_CLAIM,
+    REFUSED_BEFORE_IT_RAN,
     ActedCall,
     ActedOutcome,
     ActedRound,
@@ -2975,10 +2975,11 @@ def call_outcomes(  # noqa: PLR0913 — each decision a round holds, and what ac
 def _acted_kind(one: ActedCall) -> CallOutcomeKind:
     """What came of a call acting ran, as planning is shown it (ADR-0364 §6:1-§6:2).
 
-    A call the claim stopped before its tool ran, by the repeat backstop or a ticket's
-    rule, is refused; one whose tool ran and did not do it is not done.
+    A call stopped before its tool ran, by the repeat backstop, a ticket's rule or the
+    invocation seam's own refusals, is refused; one whose tool ran, or whose tool's own
+    checks would not take it, and did not do it is not done.
     """
-    if one.outcome is ActedOutcome.NOT_DONE and one.reason in REFUSED_BY_THE_CLAIM:
+    if one.outcome is ActedOutcome.NOT_DONE and one.reason in REFUSED_BEFORE_IT_RAN:
         return CallOutcomeKind.REFUSED
     return {
         ActedOutcome.DONE: CallOutcomeKind.DONE,

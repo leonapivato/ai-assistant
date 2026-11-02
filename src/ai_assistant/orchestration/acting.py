@@ -137,7 +137,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.held_results import HeldResults
 
 __all__ = [
-    "REFUSED_BY_THE_CLAIM",
+    "REFUSED_BEFORE_IT_RAN",
     "TICKET_CLAIM_TEXT",
     "ActedCall",
     "ActedOutcome",
@@ -158,8 +158,9 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: The invocation seam's refusals before the callable is reached (ADR-0029 §2,
-#: ADR-0192 §1, ADR-0194 §4). Each means the call did not run, so it is not done.
-_REFUSED_BEFORE_THE_CALL: Final = (ToolBindingError, SpendError, AuditError)
+#: ADR-0192 §1, ADR-0194 §4): a spend refused, or a ledger claim refused or spent. Each
+#: stopped the call before its tool ran, so planning is shown it refused (ADR-0364 §6:2).
+_REFUSED_BEFORE_THE_CALL: Final = (SpendError, AuditError)
 
 
 class ActedOutcome(StrEnum):
@@ -207,10 +208,15 @@ TICKET_CLAIM_TEXT: Final = {
 }
 
 _REFUSED: Final = "refused before the call was made"
-#: ADR-0364 §6:2: what the claim answered where it stopped a call before its tool ran,
-#: the repeat backstop's and a ticket's, which planning is shown as refused.
-REFUSED_BY_THE_CLAIM: Final = frozenset(
-    {_ALREADY_DONE, _ALREADY_USED, _ANOTHER_ACTIVATIONS, *TICKET_CLAIM_TEXT.values()}
+#: ADR-0364 §6:2, §12:2 and ADR-0357 §5:6: a binding refused at the tool's seam, which
+#: holds the tool's own checks when called, such as a forecast's both or neither. The
+#: tool's own checks are its own, so the call is not done, not refused.
+_NOT_TAKEN: Final = "not done: its tool would not take the call as made, so nothing was done"
+#: ADR-0364 §6:2: what acting answered where a call was stopped before its tool ran, by
+#: the repeat backstop, a ticket's claim or the invocation seam's own refusals, which
+#: planning is shown as refused.
+REFUSED_BEFORE_IT_RAN: Final = frozenset(
+    {_ALREADY_DONE, _ALREADY_USED, _ANOTHER_ACTIVATIONS, _REFUSED, *TICKET_CLAIM_TEXT.values()}
 )
 _NEEDS_YOU: Final = "needs you: nothing was written, and this needs your yes first"
 
@@ -1050,6 +1056,12 @@ class ActingStage:
             effect_id=effect_id,
         )
 
+    async def _not_run(self, one: AuthorizedCall, effect_id: str | None, reason: str) -> ActedCall:
+        """A call the invocation seam stopped before its callable, finished not done."""
+        if effect_id is not None:
+            await self._plans.finish_activation_effect(effect_id, ToolOutcome.FAILED, reason=reason)
+        return ActedCall(one, ActedOutcome.NOT_DONE, reason=reason, effect_id=effect_id)
+
     async def _through_invoker(
         self, one: AuthorizedCall, effect_id: str | None, round_id: str, held: HeldResults
     ) -> ActedCall:
@@ -1065,15 +1077,14 @@ class ActingStage:
         """
         try:
             result = _detached_result(await self._invoker.invoke(one.call, timeout=self._timeout))
-        except _REFUSED_BEFORE_THE_CALL:
+        except ToolBindingError:
             # A code-owned reason and never the exception's class name, which a
             # collaborator can make carry content (ADR-0004 §5, ADR-0192 §3).
+            _log.info("acting_call_not_done", stage="acting", reason="not_taken")
+            return await self._not_run(one, effect_id, _NOT_TAKEN)
+        except _REFUSED_BEFORE_THE_CALL:
             _log.info("acting_call_not_done", stage="acting", reason="refused_before_the_call")
-            if effect_id is not None:
-                await self._plans.finish_activation_effect(
-                    effect_id, ToolOutcome.FAILED, reason=_REFUSED
-                )
-            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_REFUSED, effect_id=effect_id)
+            return await self._not_run(one, effect_id, _REFUSED)
         if effect_id is not None:
             await self._finish(effect_id, result)
         return self._acted(one, result, effect_id, round_id, held)

@@ -685,7 +685,7 @@ async def test_a_forecast_ticket_from_before_the_build_shows_no_coordinate() -> 
 def test_a_call_the_repeat_backstop_stopped_is_refused_not_not_done() -> None:
     """§6:2: stopped before its tool ran, by the claim, it comes back refused."""
     from ai_assistant.orchestration.acting import (  # noqa: PLC0415
-        REFUSED_BY_THE_CLAIM,
+        REFUSED_BEFORE_IT_RAN,
         ActedCall,
         ActedOutcome,
         AuthorizedCall,
@@ -693,7 +693,7 @@ def test_a_call_the_repeat_backstop_stopped_is_refused_not_not_done() -> None:
     from ai_assistant.orchestration.phase_path import _acted_kind  # noqa: PLC0415
 
     authorized = cast("AuthorizedCall", object())
-    for reason in REFUSED_BY_THE_CLAIM:
+    for reason in REFUSED_BEFORE_IT_RAN:
         stopped = ActedCall(authorized, ActedOutcome.NOT_DONE, reason=reason)
         assert _acted_kind(stopped) is CallOutcomeKind.REFUSED
     failed = ActedCall(authorized, ActedOutcome.NOT_DONE, reason="the call failed (timeout)")
