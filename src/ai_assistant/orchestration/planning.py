@@ -73,7 +73,9 @@ a marked moment of where a matter stands are each outside content planning has r
 where every tool satisfying it declares the same five properties and one schema. Each
 gets a required *looking for* argument where its result may carry outside text and a
 *deliberate repeat* mark where it is not safe to repeat. Arguments the declaration
-names in ``system_supplied`` are the hub's to fill and are not offered.
+names in ``system_supplied`` are the hub's to fill and are not offered. Each description
+is its declaration's parts with its effects line after them, generated from the
+declaration by :func:`effects_line` and never written by hand (ADR-0364 §7).
 
 **Labels** (§5). Everything planning is shown that it may name gets a label the first
 time it is shown, from any source, and keeps it for the whole activation; the labels
@@ -168,6 +170,7 @@ from ai_assistant.core.types import (
     CallOutcomeKind,
     CallResult,
     CallShowed,
+    CapabilityEffect,
     CapabilityResult,
     ChannelIdentity,
     DeliveryStatus,
@@ -196,6 +199,7 @@ from ai_assistant.core.types import (
     ProposedCall,
     ReadingCertainty,
     RecordedTextInput,
+    Reversibility,
     Role,
     RoundReport,
     ShownRecord,
@@ -214,6 +218,7 @@ from ai_assistant.core.types import (
     relay_mark_counts,
     statement_citations,
 )
+from ai_assistant.orchestration.approval_rules import approval_rule
 from ai_assistant.orchestration.approvals import (
     ALREADY_ON_A_CARD,
     ARGUMENTS_KEY,
@@ -350,6 +355,7 @@ __all__ = [
     "ShowingLabels",
     "answer_fact",
     "call_showed",
+    "effects_line",
     "exact_line",
     "full_view_parts",
     "label_pattern",
@@ -1707,6 +1713,65 @@ class RoundRecorder(Protocol):
 
 # --- offering the capabilities -----------------------------------------------------------
 
+#: ADR-0364 §7:2-§7:5: the effects line's phrases, in the coordinator's agreed words.
+_ACTS_OUTSIDE: Final = "It acts outside the system"
+_CHANGES_OWN_RECORDS: Final = "It changes only the system's own records"
+_CHANGES_NOTHING: Final = "It changes nothing"
+_LEAVES_THE_SYSTEM: Final = ", but what it sends leaves the system"
+_SAFE_TO_REPEAT: Final = "Safe to repeat."
+_NOT_SAFE_TO_REPEAT: Final = "Not safe to repeat."
+_ALWAYS_NEEDS_APPROVAL: Final = "Always needs approval first: ask for it with request_approval."
+
+#: §7:3: what each reversibility says of undoing, joined to what the call changes. A
+#: ``RECOVERABLE`` tool says nothing, since no one phrase fits every tool declared so.
+_UNDOING: Final[Mapping[Reversibility, str]] = {
+    Reversibility.REVERSIBLE: "can be undone",
+    Reversibility.IRREVERSIBLE: "can't be undone",
+}
+
+
+def effects_line(tool: ToolDefinition) -> str:
+    """The effects part of ``tool``'s offered description, from its declaration (ADR-0364 §7).
+
+    Generated, never written by hand (§7:1). What it changes (§7:2): a tool whose
+    ``effect`` is the world acts outside the system; one on the system's own records whose
+    ``writes`` is not empty changes only those; any other changes nothing, and says that
+    what it sends leaves the system where it declares ``leaves_hub``. Where it changes
+    something, whether it can be undone, from ``reversibility`` (§7:3), and whether it is
+    safe to repeat, from ``safe_to_repeat`` (§7:4). And where a rule asks for approval of
+    its every call, that it always needs approval first, read from the one register
+    authorizing reads too (§7:5), so the two cannot disagree.
+
+    ``run_approved`` is no declaration, and takes no line (§7:6).
+
+    Args:
+        tool: The declaration the capability is offered from.
+
+    Returns:
+        The line, its sentences in §7's order.
+    """
+    if tool.effect is CapabilityEffect.WORLD:
+        changes, joined = _ACTS_OUTSIDE, " and "
+    elif tool.effect is CapabilityEffect.OWN_RECORDS and tool.writes:
+        changes, joined = _CHANGES_OWN_RECORDS, ", and "
+    else:
+        changes, joined = _CHANGES_NOTHING, None
+    sentences: list[str] = []
+    if joined is None:
+        sentences.append(f"{changes}{_LEAVES_THE_SYSTEM if tool.leaves_hub else ''}.")
+    else:
+        undoing = _UNDOING.get(tool.reversibility)
+        sentences.append(f"{changes}{'' if undoing is None else joined + undoing}.")
+        sentences.append(_SAFE_TO_REPEAT if tool.safe_to_repeat else _NOT_SAFE_TO_REPEAT)
+    if approval_rule(str(tool.capability)) is not None:
+        sentences.append(_ALWAYS_NEEDS_APPROVAL)
+    return " ".join(sentences)
+
+
+def _described(tool: ToolDefinition) -> str:
+    """``tool``'s description as it is offered: its declared parts, then its effects line."""
+    return f"{tool.description}\n\n{effects_line(tool)}"
+
 
 def offered_tools(
     capabilities: Sequence[ToolDefinition],
@@ -1716,7 +1781,8 @@ def offered_tools(
 
     A capability is offered only where every tool satisfying it declares the same five
     properties and the same schema, and where the schema is an object's that leaves
-    room for the added arguments. Its description is its first tool's, by id.
+    room for the added arguments. Its description is its first tool's, by id, its
+    effects line generated from that tool's declaration and added after it (ADR-0364 §7:1).
 
     Each argument naming things by label is offered with its label's pattern, an ``S``
     label's ``^S[1-9][0-9]*$`` (ADR-0364 §5:2): the declaration names them by id once
@@ -1745,7 +1811,7 @@ def offered_tools(
             _log.info("planning_capability_not_offered", stage="planning", reason="schema")
             continue
         _labelled_patterns(schema, (label_arguments or {}).get(name, {}))
-        offered.append(OfferedTool(name=name, description=first.description, parameters=schema))
+        offered.append(OfferedTool(name=name, description=_described(first), parameters=schema))
     return tuple(offered)
 
 

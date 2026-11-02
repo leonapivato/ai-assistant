@@ -387,9 +387,7 @@ START_STORY: Final = _declared(
         "\n"
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
-        "matters: with done, the new matter, as matters are shown\n"
-        "\n"
-        "It changes only the system's own records. Not safe to repeat."
+        "matters: with done, the new matter, as matters are shown"
     ),
     properties={
         NOTES_ARGUMENT: {
@@ -426,9 +424,7 @@ NOTE_STORY: Final = _declared(
         "notes outside a call stay with this episode and never reach a matter.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
-        "because: why, with not done, unknown or refused\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "because: why, with not done, unknown or refused"
     ),
     properties={
         STORY_ARGUMENT: _STORY_SCHEMA,
@@ -451,9 +447,7 @@ LINK_STORY: Final = _declared(
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
         "matters: with done, where this work joined a matter you weren't shown, that matter, as "
-        "matters are shown\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "matters are shown"
     ),
     properties=_ADD_PROPERTIES,
     required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
@@ -471,9 +465,7 @@ UNLINK_STORY: Final = _declared(
         "Only where it was asked for, or this work needs it now.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
-        "because: why, with not done, unknown or refused\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "because: why, with not done, unknown or refused"
     ),
     properties=_REMOVE_PROPERTIES,
     required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
@@ -495,9 +487,7 @@ TIDY_STORY: Final = _declared(
         "away, tidy the matter it left so its summary drops it.\n"
         "\n"
         "outcome: started: it runs on its own, and how it went is recorded on the matter, not "
-        "shown here\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "shown here"
     ),
     properties={STORY_ARGUMENT: _STORY_SCHEMA},
     required=(STORY_ARGUMENT,),
@@ -521,9 +511,7 @@ MOVE_STORY: Final = _declared(
         "matter it left where that went, and tidy that matter.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
-        "because: why, with not done, unknown or refused\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "because: why, with not done, unknown or refused"
     ),
     properties={
         STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The matter they leave, by S label."},
@@ -549,9 +537,7 @@ MERGE_STORY: Final = _declared(
         "Only where it was asked for, or this work needs it now.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
-        "because: why, with not done, unknown or refused\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "because: why, with not done, unknown or refused"
     ),
     properties={
         STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The matter absorbed, by S label."},
@@ -579,9 +565,7 @@ SPLIT_STORY: Final = _declared(
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
         "matters: with done, where this work joined the new matter, that matter, as matters are "
-        "shown\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "shown"
     ),
     properties={
         STORY_ARGUMENT: {**_STORY_SCHEMA, "description": "The matter split, by S label."},
@@ -606,9 +590,7 @@ GROUP_STORY: Final = _declared(
         "Only where it was asked for, or this work needs it now.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
-        "because: why, with not done, unknown or refused\n"
-        "\n"
-        "It changes only the system's own records. Not safe to repeat."
+        "because: why, with not done, unknown or refused"
     ),
     properties={
         STORIES_ARGUMENT: _labels("The matters grouped, by S label.", min_items=1),

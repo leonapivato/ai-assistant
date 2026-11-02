@@ -180,9 +180,7 @@ STOP_ACTIVATION: Final = _declared(
         "  stopped_by_this_call: yes, or no where it had already ended\n"
         "  what it took in, was understood to mean, noted, found and did\n"
         "  set_up_still_live: the tasks and running work it set up that are still live, each as "
-        "list_tasks shows one, or nothing\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "list_tasks shows one, or nothing"
     ),
     _naming("The running work, by its E label."),
     writes=True,
@@ -206,9 +204,7 @@ ANSWER_OFFER: Final = _declared(
         "  answer: taken, declined, or withdrawn\n"
         "  because: where it came to something else: the offering work was stopped or ended "
         "first, so nothing is to be done; or this work already holds as much as it may, so the "
-        "take counts as a decline\n"
-        "\n"
-        "It changes only the system's own records. Safe to repeat."
+        "take counts as a decline"
     ),
     {
         "type": "object",

@@ -118,9 +118,7 @@ TEXT_CALL: Final = ToolDefinition(
         "Send a text message from the system into one of its connections.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
-        "because: why, with not done, unknown or refused\n"
-        "\n"
-        "It acts outside the system and can't be undone. Safe to repeat."
+        "because: why, with not done, unknown or refused"
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.IRREVERSIBLE,
@@ -172,8 +170,8 @@ holds the channel's rules (ADR-0306 §4:7, ADR-0292 §8:3).
 ``safe_to_repeat`` is set, so the offer adds no *deliberate repeat* mark: a message's
 effect record is a message's, which carries no capability or values digest for
 ADR-0306 §5:9's backstop to compare (ADR-0306 §6:1). Its description is the coordinator's
-agreed words (ADR-0364 §2:1, §5), its effects line written by hand until lane T2's
-generator writes it (§7:1).
+agreed words (ADR-0364 §2:1, §5) but its effects line, which planning's offer generates
+from the declaration (§7:1).
 """
 
 # --- send_text's arguments -------------------------------------------------------------

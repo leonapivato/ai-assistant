@@ -187,10 +187,7 @@ EMAIL: Final = ToolDefinition(
         "Send an email from one of the system's email accounts.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
-        "because: why, with not done, unknown or refused\n"
-        "\n"
-        "It acts outside the system and can't be undone. Not safe to repeat. Always needs approval "
-        "first: ask for it with request_approval."
+        "because: why, with not done, unknown or refused"
     ),
     risk_level=RiskLevel.HIGH,
     reversibility=Reversibility.IRREVERSIBLE,

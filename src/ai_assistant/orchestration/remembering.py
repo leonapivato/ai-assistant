@@ -233,9 +233,7 @@ REMEMBER_CANDIDATE: Final = ToolDefinition(
         "  candidate: recorded; whether and how it is kept is decided once this episode leaves "
         "short-term memory\n"
         "  similar_memories: the memories already held like its fact, each as long-term memory "
-        "shows one, or none\n"
-        "\n"
-        "It changes only the system's own records. Not safe to repeat."
+        "shows one, or none"
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.RECOVERABLE,

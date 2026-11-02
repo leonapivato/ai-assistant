@@ -69,9 +69,7 @@ NOTE_RELIANCE: Final = ToolDefinition(
         "the note is kept with this round.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
-        "because: why, with not done, unknown or refused\n"
-        "\n"
-        "It changes nothing."
+        "because: why, with not done, unknown or refused"
     ),
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,

@@ -160,8 +160,8 @@ RUN_APPROVED_LABEL: Final = "ticket"
 #: The bound, in characters, on ``why`` (core's ``APPROVAL_WHY_MAX_CHARS``).
 _WHY_MAX: Final = 4_000
 
-# The coordinator's agreed words (ADR-0364 §2:1, §5), the effects line written by hand
-# until lane T2's generator writes it (§7:1).
+# The coordinator's agreed words (ADR-0364 §2:1, §5) but the effects line, which planning's
+# offer generates from the declaration (§7:1).
 _REQUEST_APPROVAL_DESCRIPTION: Final = (
     "Ask for approval of one call, on a card that is approved or denied with a tap.\n"
     "\n"
@@ -174,9 +174,7 @@ _REQUEST_APPROVAL_DESCRIPTION: Final = (
     "because: why, with not done, unknown or refused\n"
     "card: with done, how its card went: sent; not sent, so only the approvals panel shows it; "
     "or unknown\n"
-    "expires: with done, when the request expires unanswered\n"
-    "\n"
-    "It changes only the system's own records. Not safe to repeat."
+    "expires: with done, when the request expires unanswered"
 )
 
 _REQUEST_APPROVAL_SCHEMA: Final[dict[str, FrozenJson]] = {
