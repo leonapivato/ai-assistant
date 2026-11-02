@@ -543,6 +543,25 @@ async def test_messages_to_unlabelled_places_are_told_apart() -> None:
     assert "bob@example.com" in str(bob.text)
 
 
+async def test_a_short_view_shows_a_call_that_needed_a_yes_as_refused() -> None:
+    """ADR-0364 §6:3: a call recorded needing the person's yes is shown refused, saying
+    it needed approval, in a short view as in the full one."""
+    asked = _round("r1", _call("c1", "book_table", restaurant="Luigi's"), notes="Asked.")
+    record = _episode(
+        "asked",
+        rounds=(asked,),
+        calls=(_entry("r1", "c1", "book_table", outcome=CallOutcomeKind.NEEDS_YOU),),
+        channel=TELEGRAM,
+    )
+
+    briefing = await _briefing(_inputs(episodes=(record,)))
+
+    episode = tag(section(briefing, "## Short-term memory"), "episode", label="E1")
+    (did,) = episode.held("did")
+    assert str(did.text).endswith(". Refused: it needed approval.")
+    assert "yes" not in str(did.text)
+
+
 async def test_an_episode_recorded_before_adr_0356_shows_its_messages_as_dids() -> None:
     """§9:3, §14:9: a round's text, its message then, is shown as a ``did``."""
     old = _round("r1", notes="Looked it up.")
