@@ -1,6 +1,8 @@
 # ADR-0349 §4:6-§4:7: "never mind the booking" after the booking work has acted on the
 # hub's chat. Concurrent stimuli show that work running and having acted, so this round
-# acts on E1 alone: it stops it, or looks it up first.
+# acts on E1 alone: it stops it in this round, without reading it first, since the stop's
+# result shows what it had done (stop_work's description, the coordinator's ruling on
+# #3618). A round that only looks it up leaves the work running, and fails.
 prompt = "planning"
 guards = "stop_missed"
 came_from = "2026-10-26"
@@ -9,10 +11,8 @@ samples = 2
 
 [property]
 check = "calls_within"
-capabilities = ["stop_work", "read_episode"]
-# The argument both once took as `activation`: `work` for a stop, `episode` for a
-# look-up (ADR-0364 §8:2).
-argument = "activation"
+capabilities = ["stop_work"]
+argument = "work"
 value = "E1"
 
 [input]

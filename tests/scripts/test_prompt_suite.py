@@ -13,6 +13,7 @@ import asyncio
 import json
 import stat
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
@@ -47,6 +48,9 @@ PRIVATE: Final = "private-words-the-run-must-never-print"
 
 #: An understanding reply its stage reads, carrying :data:`PRIVATE`.
 MEANING: Final = json.dumps({"understanding": PRIVATE})
+
+#: The committed planning cases, for a test of one case's own check.
+_CASES: Final = Path(__file__).resolve().parents[2] / "prompt_cases" / "planning"
 
 WEB_SEARCH: Final = {
     "name": "web_search",
@@ -760,6 +764,30 @@ def test_the_capability_checks_read_the_rounds_calls() -> None:
     assert _round("calls_within", within, both) == (
         "the round makes a call to a capability not named"
     )
+
+
+def test_never_mind_the_booking_wants_the_stop_and_fails_a_round_that_only_reads() -> None:
+    """#3618: ``stop_work`` is called in the round it is asked, without reading first."""
+    held = tomllib.loads(
+        (_CASES / "never-mind-stops-the-work-that-acted.toml").read_text(encoding="utf-8")
+    )
+    params: dict[str, object] = {k: v for k, v in held["property"].items() if k != "check"}
+    check = held["property"]["check"]
+    stop = ProposedCall(call_id="c1", name="stop_work", arguments={"work": "E1"})
+    look = ProposedCall(call_id="c2", name="read_episode", arguments={"episode": "E1"})
+    other = ProposedCall(call_id="c3", name="stop_work", arguments={"work": "E2"})
+
+    assert _round(check, params, RoundResponse(calls=(stop,))) is None
+    assert _round(check, params, RoundResponse(calls=(look,))) == (
+        "the round makes a call to a capability not named"
+    )
+    assert _round(check, params, RoundResponse(calls=(look, stop))) == (
+        "the round makes a call to a capability not named"
+    )
+    assert _round(check, params, RoundResponse(calls=(other,))) == (
+        "a call names another value, or none"
+    )
+    assert _round(check, params, RoundResponse(text="Stopping it.")) == "the round makes no call"
 
 
 def test_the_framing_check_reads_whether_any_memory_is_kept() -> None:
