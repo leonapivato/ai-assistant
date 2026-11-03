@@ -88,7 +88,7 @@
     },
     {
       "name": "cancel_task",
-      "description": "Cancel what is still pending of a scheduled task.\n\nIt stops nothing already running. Find a task you weren't shown by its T label with list_tasks first. Skipping a one-off task is its cancel: “done” or “I already took it” before the task's message is that skip, and after its message is no call. Cancel exactly what was asked, and keep the rest.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\ntask: with done, the task as it now stands, as list_tasks shows a scheduled one\n\nIt changes only the system's own records. Safe to repeat.",
+      "description": "Cancel what is still pending of a scheduled task.\n\nIt stops nothing already running. Find a task you weren't shown by its T label with list_tasks first. Skipping a one-off task is its cancel: “done” or “I already took it” before the task's message is that skip, and after its message is no call. Cancel exactly what was asked, and keep the rest; where it is unclear what the words cover, ask which.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\ntask: with done, the task as it now stands, as list_tasks shows a scheduled one\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -509,7 +509,7 @@
     },
     {
       "name": "search_connections",
-      "description": "Search the system's connections for a query, beyond those Connections shows.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label:\n  page: the page shown\n  connections: those found, best first, each as Connections shows one, or none\n  more: the next page, where there is one\n\nIt changes nothing.",
+      "description": "Find connections that Connections doesn't show, by name or by what they are, such as an older conversation with someone.\n\nDon't use it to find what was said: for what was said, or where, use search_episodes.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label:\n  page: the page shown\n  connections: those found, best first, each as Connections shows one, or none\n  more: the next page, where there is one\n\nIt changes nothing.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -517,7 +517,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 500,
-            "description": "What to search for, such as a name, a platform or what was said there."
+            "description": "What to search for, such as a name or a platform."
           },
           "page": {
             "type": "integer",
@@ -704,7 +704,7 @@
     },
     {
       "name": "spawn_task",
-      "description": "Set up a scheduled task: work that starts on its own when the task falls due, reading only what the task carries.\n\nSpawn only work that runs later or separately. Give at most one of at, delay_minutes, after and rule; with none, it falls due now. The task's work carries no one's authority: it can't stop running work, and it needs approval to set a rule or change a task it didn't spawn, so promise only what it can do. Its work can speak only in the connections it suggests. Write a local time with no UTC offset, and give a zone, only where one was named. Say a task back from its read_back, never from your own reckoning of the time.\n\nA task you were shown by its T label is replaced by one spawn naming it in replaces; find any other with list_tasks first. “Snooze 10 minutes” or “again tomorrow”, after a task's message, is a new one-off task with the same instruction, written from what you were shown of the episode that wrote the message, suggesting the connection it was said in. Skipping a rule's next occurrence (“skip tomorrow's”) is a spawn replacing it with the same rule from the local date after the skipped one, or its cancel where none would follow before its until. “Tomorrow at 9 instead” is that skip and a one-off task at the new time, in the same round.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\ntask: with done, the task it wrote:\n  label: its T label\n  read_back: when it falls due and where its work may speak, from the record\n\nIt changes only the system's own records, and can be undone. Not safe to repeat.",
+      "description": "Set up a scheduled task: work that starts on its own when the task falls due, reading only what the task carries.\n\nSpawn only work that runs later or separately. Give at most one of at, delay_minutes, after and rule; with none, it falls due now. The task's work carries no one's authority: it can't stop running work, and it needs approval to set a rule or change a task it didn't spawn. Its work can speak only in the connections it suggests. Write a local time with no UTC offset, and give a zone, only where one was named. Say a task back from its read_back alone, never from your own reckoning of the time, and never promise its work more than it can do: it can't stop running work.\n\nA task you were shown by its T label is replaced by one spawn naming it in replaces; find any other with list_tasks first. “Snooze 10 minutes” or “again tomorrow”, after a task's message, is a new one-off task with the same instruction, written from what you were shown of the episode that wrote the message, suggesting the connection it was said in. Skipping a rule's next occurrence (“skip tomorrow's”) is a spawn replacing it with the same rule from the local date after the skipped one, or its cancel where none would follow before its until. “Tomorrow at 9 instead” is that skip and a one-off task at the new time, in the same round.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\ntask: with done, the task it wrote:\n  label: its T label\n  read_back: when it falls due and where its work may speak, from the record\n\nIt changes only the system's own records, and can be undone. Not safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -712,7 +712,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 4000,
-            "description": "What the task's work is to do, in your own words. Say what to do, not where: its connections say where."
+            "description": "What the task's work is to do, in your own words. Never name a place in it: its connections say where."
           },
           "at": {
             "type": "string",
@@ -798,7 +798,7 @@
               "minLength": 1,
               "pattern": "^L[1-9][0-9]*$"
             },
-            "description": "The connections its work may speak in, by L label. The messaging line, where one is connected, is always open to it too. Left out: none; from a task's work, its own task's."
+            "description": "The connections its work may speak in, by L label. The messaging line, where one is connected, is always open to it too. A spawn naming replaces keeps the replaced task's connections and ignores these: to change where a task speaks, cancel it and spawn a new one. Left out: none; from a task's work, its own task's."
           },
           "replaces": {
             "type": "string",
@@ -902,7 +902,7 @@
     },
     {
       "name": "stop_work",
-      "description": "Stop running work you were shown as running, and that work alone.\n\nNothing it already did is undone, and what it set up stays: say what its result shows it had finished and set up that is still live. Stop work only where it was asked for, such as “never mind the booking” after it has booked, or to take over work this work waits on. Stop exactly what was asked, including what a stop's result lists, and keep the rest.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label, the stopped work as an episode:\n  stopped_by_this_call: yes, or no where it had already ended\n  what it took in, was understood to mean, noted, found and did\n  set_up_still_live: the tasks and running work it set up that are still live, each as list_tasks shows one, or nothing\n\nIt changes only the system's own records. Safe to repeat.",
+      "description": "Stop running work you were shown as running, and that work alone.\n\nNothing it already did is undone, and what it set up stays: say what its result shows it had finished and set up that is still live. Stop work only where it was asked for, such as “never mind the booking” after it has booked, or to take over work this work waits on, and stop it in the round it is asked, without reading it first: its result shows what it had done. Stop exactly what was asked, including what a stop's result lists, and keep the rest; where it is unclear what the words cover, ask which.\n\noutcome: done | not done | unknown | refused\nbecause: why, with not done, unknown or refused\nresult: with done, under its R label, the stopped work as an episode:\n  stopped_by_this_call: yes, or no where it had already ended\n  what it took in, was understood to mean, noted, found and did\n  set_up_still_live: the tasks and running work it set up that are still live, each as list_tasks shows one, or nothing\n\nIt changes only the system's own records. Safe to repeat.",
       "parameters": {
         "type": "object",
         "properties": {

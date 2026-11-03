@@ -598,7 +598,11 @@ def test_only_says_wants_a_text_call_answering_and_no_other_reply() -> None:
 
 def test_only_says_into_wants_every_text_call_into_the_named_connection() -> None:
     """#3608 review round 2: a report into an origin that takes no text reaches no one."""
-    params: dict[str, object] = {"phrases": ["86.20"], "connection": "L2"}
+    params: dict[str, object] = {
+        "phrases": ["86.20"],
+        "connection": "L2",
+        "beside": ["start_matter", "note_matter"],
+    }
     into = RoundResponse(calls=(_text("Invoice #4471 is $86.20.", connection="L2"),))
     origin = RoundResponse(calls=(_text("Invoice #4471 is $86.20.", connection="L1"),))
 
@@ -608,6 +612,31 @@ def test_only_says_into_wants_every_text_call_into_the_named_connection() -> Non
     )
     assert _round("only_says_into", params, RoundResponse(text="$86.20")) == (
         "the round makes no call, so nothing reaches anyone"
+    )
+
+
+def test_only_says_into_lets_a_named_call_stand_beside_the_report_and_no_other() -> None:
+    """The suite run, 2026-11-02: a matter call is bookkeeping; paying the invoice is an act."""
+    params: dict[str, object] = {
+        "phrases": ["86.20"],
+        "connection": "L2",
+        "beside": ["start_matter", "note_matter"],
+    }
+    report = _text("Invoice #4471 is $86.20.", connection="L2")
+    matter = ProposedCall(
+        call_id="c2", name="start_matter", arguments={"summary": "Invoice #4471, unpaid."}
+    )
+    pay = ProposedCall(call_id="c3", name="pay_bill", arguments={"amount": "86.20"})
+
+    assert _round("only_says_into", params, RoundResponse(calls=(report, matter))) is None
+    assert _round("only_says_into", params, RoundResponse(calls=(report, pay))) == (
+        "the round makes a call other than a text call or one named beside it"
+    )
+    assert _round("only_says_into", params, RoundResponse(calls=(report, matter, pay))) == (
+        "the round makes a call other than a text call or one named beside it"
+    )
+    assert _round("only_says_into", params, RoundResponse(calls=(matter,))) == (
+        "no text call's words hold every named phrase"
     )
 
 
