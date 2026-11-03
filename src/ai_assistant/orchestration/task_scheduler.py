@@ -303,8 +303,8 @@ SPAWN: Final = _declared(
                 "minLength": 1,
                 "maxLength": 4000,
                 "description": (
-                    "What the task's work is to do, in your own words. Never name a place in "
-                    "it: its connections say where."
+                    "What the task's work is to do, in your own words. Never say in it where to "
+                    "speak: its connections say that."
                 ),
             },
             AT_ARGUMENT: {
