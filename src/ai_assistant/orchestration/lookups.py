@@ -479,7 +479,10 @@ one, someone else's withheld, so its result carries no outside text."""
 SEARCH_CONNECTIONS: Final = _declared(
     SEARCH_CONNECTIONS_CAPABILITY,
     (
-        "Search the system's connections for a query, beyond those Connections shows.\n"
+        "Find connections that Connections doesn't show, by name or by what they are, such as an "
+        "older conversation with someone.\n"
+        "\n"
+        "Don't use it to find what was said: for what was said, or where, use search_episodes.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
@@ -493,7 +496,7 @@ SEARCH_CONNECTIONS: Final = _declared(
             "type": "string",
             "minLength": 1,
             "maxLength": QUERY_MAX_CHARS,
-            "description": "What to search for, such as a name, a platform or what was said there.",
+            "description": "What to search for, such as a name or a platform.",
         },
         PAGE_ARGUMENT: _page("Which page to show. Left out: 1, the first."),
     },

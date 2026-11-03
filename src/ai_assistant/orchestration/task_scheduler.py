@@ -275,9 +275,10 @@ SPAWN: Final = _declared(
         "Spawn only work that runs later or separately. Give at most one of at, delay_minutes, "
         "after and rule; with none, it falls due now. The task's work carries no one's authority: "
         "it can't stop running work, and it needs approval to set a rule or change a task it "
-        "didn't spawn, so promise only what it can do. Its work can speak only in the connections "
-        "it suggests. Write a local time with no UTC offset, and give a zone, only where one was "
-        "named. Say a task back from its read_back, never from your own reckoning of the time.\n"
+        "didn't spawn. Its work can speak only in the connections it suggests. Write a local time "
+        "with no UTC offset, and give a zone, only where one was named. Say a task back from its "
+        "read_back alone, never from your own reckoning of the time, and never promise its work "
+        "more than it can do: it can't stop running work.\n"
         "\n"
         "A task you were shown by its T label is replaced by one spawn naming it in replaces; "
         "find any other with list_tasks first. “Snooze 10 minutes” or “again tomorrow”, after a "
@@ -302,8 +303,8 @@ SPAWN: Final = _declared(
                 "minLength": 1,
                 "maxLength": 4000,
                 "description": (
-                    "What the task's work is to do, in your own words. Say what to do, not "
-                    "where: its connections say where."
+                    "What the task's work is to do, in your own words. Never name a place in "
+                    "it: its connections say where."
                 ),
             },
             AT_ARGUMENT: {
@@ -379,8 +380,10 @@ SPAWN: Final = _declared(
                 "items": {"type": "string", "minLength": 1},
                 "description": (
                     "The connections its work may speak in, by L label. The messaging line, "
-                    "where one is connected, is always open to it too. Left out: none; from a "
-                    "task's work, its own task's."
+                    "where one is connected, is always open to it too. A spawn naming replaces "
+                    "keeps the replaced task's connections and ignores these: to change where a "
+                    "task speaks, cancel it and spawn a new one. Left out: none; from a task's "
+                    "work, its own task's."
                 ),
             },
             REPLACES_ARGUMENT: {
@@ -413,7 +416,7 @@ CANCEL_TASK: Final = _declared(
         "It stops nothing already running. Find a task you weren't shown by its T label with "
         "list_tasks first. Skipping a one-off task is its cancel: “done” or “I already took it” "
         "before the task's message is that skip, and after its message is no call. Cancel exactly "
-        "what was asked, and keep the rest.\n"
+        "what was asked, and keep the rest; where it is unclear what the words cover, ask which.\n"
         "\n"
         "outcome: done | not done | unknown | refused\n"
         "because: why, with not done, unknown or refused\n"
