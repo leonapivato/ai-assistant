@@ -2522,12 +2522,23 @@ def _only_says_into(reply: Reply, params: Mapping[str, object]) -> Judgement:
 
     For a case whose origin takes no text message, such as a connected source's: a text
     call into it is refused whole, so it reaches no one, and a check that did not name
-    where the message goes would pass it.
+    where the message goes would pass it. Beside the text calls, a call to one of the
+    capabilities named in ``beside`` may stand, such as a matter call keeping the system's
+    own record; any other call fails it, as in :func:`_only_says`.
     """
-    said = _only_says(reply, params)
-    if said is not None or reply.round is None:
-        return said
-    if any(one.arguments.get("connection") != params["connection"] for one in reply.round.calls):
+    if reply.round is None:
+        return "the response reads as no round"
+    calls = reply.round.calls
+    if not calls:
+        return "the round makes no call, so nothing reaches anyone"
+    beside = frozenset(cast("list[str]", params["beside"]))
+    if any(one.name != _TEXT_CALL and one.name not in beside for one in calls):
+        return "the round makes a call other than a text call or one named beside it"
+    phrases = [one.casefold() for one in cast("list[str]", params["phrases"])]
+    if not any(all(one in words.casefold() for one in phrases) for words in _said(reply.round)):
+        return "no text call's words hold every named phrase"
+    texts = [one for one in calls if one.name == _TEXT_CALL]
+    if any(one.arguments.get("connection") != params["connection"] for one in texts):
         return "a text call goes into another connection than the one named"
     return None
 
@@ -2897,9 +2908,9 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
         ),
         CodeCheck(
             "only_says_into",
-            "only_says, every text call into the named connection",
+            "only_says, every text call into the named connection, a named call beside it",
             frozenset({PLANNING}),
-            {"phrases": "strings", "connection": "string"},
+            {"phrases": "strings", "connection": "string", "beside": "strings"},
             _only_says_into,
         ),
         CodeCheck(
