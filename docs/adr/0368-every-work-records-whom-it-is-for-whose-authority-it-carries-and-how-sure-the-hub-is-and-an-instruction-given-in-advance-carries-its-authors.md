@@ -48,8 +48,9 @@
   [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md)
   (§4:3, in what is offered alone) and
   [ADR-0364](0364-tools-describe-themselves-in-four-parts-every-result-opens-with-its-outcome-and-connections-replace-the-place-list.md)
-  (§3:2's *every connection the system has* and §3:7, each in what is shown alone), as §10
-  records.
+  (§3:2's *every connection the system has* and §3:7, each in what is shown alone; §9:4's *Their
+  inputs carry no person's authority* and §11:1, for a task's work once built; §14:4's last test, in
+  part), as §10 records.
 
 ## Context
 
@@ -272,12 +273,12 @@ ADR-0367 §11's grant for one call, and §8:6 says where it appears to Sam's wor
 The owner asked: "why should instructions given in advance be treated differently than
 instrucitions given right now?"
 
-> **Normative.** A task carries the authority the work that set it carried, at that work's level:
-> its author's, or, where that work had several senders, each of theirs, checked as §7:3 rules.
-> Where that work carried none, the task carries none.
+> **Normative.** A task carries the authority of its author, at the level of the work that set it.
+> Its author is the person whose authority that work carried (ADR-0350 §3:7), and where that work
+> carried none, the task carries none.
 
-> **Normative.** Each call a task's work makes is checked against its author's lines, or each
-> author's, as they stand when the call is checked, never as they stood when the task was set.
+> **Normative.** Each call a task's work makes is checked against its author's lines as they stand
+> when the call is checked, never as they stood when the task was set.
 
 > **Normative.** A task records who set it and the level of the work that set it, and no list of
 > the actions or calls it may make.
@@ -294,13 +295,14 @@ instrucitions given right now?"
 
 > **Normative.** A standing rule is a task in every clause of this section.
 
-Spawn is offered only to a person's work (ADR-0350 §3:4, read by §9:5), so no work for a group
-sets a task. An author is the person ADR-0350 §3:7 records, and a task set by a work with several
-senders has each of them as an author. "No per-task list of allowed actions" and the end at
+Spawn is offered only to a person's work (ADR-0350 §3:4, read by §9:5), so a task carries one
+person's authority or none, never a group's or several senders'. "No per-task list of allowed actions" and the end at
 removal are the owner's two recorded points ("yes record both"). The level a task records
 is its setting work's, and a later lowering of a link (ADR-0366 §5:5) does not change it. No
 approval given in the work that set a task carries over to its work (ADR-0350 §3:9's third
-sentence, ADR-0321 §4:1).
+sentence, ADR-0321 §4:1). ADR-0340 gave, among its reasons for letting a rule go on any task the
+person set, that a scheduled task carries no authority; once §6 is built, what keeps such a rule
+safe is that each of its calls is checked against its author's lines when it runs (§6:2).
 
 ### 7. The person and level the check runs for
 
@@ -313,9 +315,11 @@ ADR-0367 §4:1 reads them from this decision.
 > grants to anyone apply (ADR-0367 §5:2).
 
 > **Normative.** For a work with several senders, the check runs for each sender at the work's
-> level. A call is not done where the check would not do it for any one of them; otherwise it
-> needs a yes where it needs one for any of them, each such yes being the one ADR-0367 §5:3 and
-> §5:6 name for that sender; and it is done only where it is allowed for every one.
+> level, and a call is done only where the check allows it for every one of them.
+
+> **Normative.** Where a call in a work that is not a person's (§9:5) needs a yes, it still needs
+> one (ADR-0367 §5:3, §5:6), but such a work asks for none until a further decision rules how it
+> asks and from whom, so the call is not done, saying why.
 
 > **Normative.** A work that carries no authority holds no grant: the check allows none of its
 > calls, save a message ADR-0367 §4:7 keeps outside the check, a call run under a ticket, which
@@ -327,8 +331,8 @@ ADR-0367 §4:1 reads them from this decision.
 | An unidentified sender's message | A member of anyone alone | None |
 | Several senders | Each sender; done only where done for every one (§7:3) | The lowest of its senders' inputs' (§4:1) |
 | One sender by several connections | That person, with the grants whose conditions hold on every connection (§4:2) | The lowest of its inputs' (§4:1) |
-| A task's work, or a standing rule's | Its author, or each of its authors, with their lines as they stand (§6:2) | The level the task records |
-| A work that carries none: a signal no rule covers, a forward or relayed input, an approval's outcome, upkeep | No one: no grant applies (§7:4) | None |
+| A task's work, or a standing rule's | Its author, with their lines as they stand (§6:2) | The level the task records |
+| A work that carries none: a signal no rule covers, a forward or relayed input, an approval's outcome, upkeep | No one: no grant applies (§7:5) | None |
 
 A call run under a ticket is checked for the person whose tap approved it, at the level that tap
 came by, whatever the work carries (ADR-0367 §5:5).
@@ -385,7 +389,8 @@ own input came from is one it could use, since a reply into it is outside the ch
 
 > **Normative.** Where an earlier decision reads whether an activation is a person's (ADR-0338
 > §2:2), as ADR-0338 §2:3, ADR-0350 §3:4, ADR-0356 §4:5 and ADR-0361 §2:5 do, it reads whether the
-> work is for a person and its senders, where it has any, are identified.
+> work is for a person, has no unidentified sender, and carries the authority of no more than one
+> person.
 
 > **Normative.** A user assertion, as ADR-0099 §4:1 reads ADR-0092 §4's, is the assertion of the
 > person an input's author is established as, in an input that is that person's own (ADR-0351
@@ -401,7 +406,8 @@ own input came from is one it could use, since a reply into it is outside the ch
 
 §9:5 keeps today's reach: an unidentified sender's work was no person's, and it stays one that is
 given no person block, is offered no spawn and calls no `request_approval`, though it is now for
-someone. Which beliefs a person's assertion reaches is where a record lands, lane 5's.
+someone. A work for a group, or carrying several people's authority, is none of these either until
+a further decision says how such a work asks and what it may set up (§7:4). Which beliefs a person's assertion reaches is where a record lands, lane 5's.
 
 ### 10. Relationship to earlier decisions
 
@@ -419,13 +425,15 @@ Superseded:
 | ADR-0323 §4:5's *only whether the input carries the user's authority* | Authorizing reads whose authority the work carries and its level (§7). Its second sentence, that no rule of authorizing names a channel, stands |
 | ADR-0323 §4:6, the line's input and the user's authority | In the addition alone: an input whose messages are several identified senders', none a forward, carries what every one of them holds (§4:4) |
 | ADR-0338 §2:2, the owner's or no person's | Whole: who a work is for is §2:1, set as §3 and §4:6 rule. Its three cases are §3's first, third and fourth rows, and the owner is whoever the connection belongs to until another person is admitted |
-| ADR-0350 §3:7, a task's author | In the addition alone: the author records the person it names, or each of a setting work's several senders, and the level of the work that set the task (§6:1, §6:3) |
+| ADR-0350 §3:7, a task's author | In the addition alone: the author records the person it names and the level of the work that set the task (§6:1, §6:3) |
 | ADR-0350 §3:9's first two sentences, a task carries no authority | A task carries its author's authority (§6:1). Its third sentence, that no approval carries over, stands |
 | ADR-0350 §6:2's *and it carries no authority (§3:9)* | Its work carries its task's author's authority (§6:1) |
 | ADR-0351 §6:1, the user's authority | In the addition alone: restated for several people with a level (§3:2); its conditions stand |
 | ADR-0351 §6:4, a Task Scheduler input carries no authority | Whole: a task's work carries its author's authority, from its task's record and not from its input's parties (§6:1) |
 | ADR-0356 §4:3, every capability on every round | In what is offered alone: only what the work's authority could use, fixed for the work (§8:1). The one fixed order stands |
 | ADR-0364 §3:2's *every connection the system has*, and §3:7 | In what is shown alone: only connections the work's authority could use (§8:2) |
+| ADR-0364 §9:4's *Their inputs carry no person's authority*, and §11:1 | For a task's work, once §6 is built: it carries its author's authority, and `spawn_task`'s description says so. §9:4's limit on where such a work sends stands, and §11:1 stands until then, describing what code enforces |
+| ADR-0364 §14:4's *the offered tools stay identical across two works* | For two works whose authority could use the same capabilities (§8:1) |
 
 Taken, with nothing superseded:
 
@@ -451,6 +459,7 @@ Read through and standing, each as written:
 | ADR-0349 §4:6 and §4:8; ADR-0350 §4:4; ADR-0362 §3:5 | Read by §9:1. A task's work now carries its author's authority, so it is offered the stop call and may cancel or replace its author's tasks, once built |
 | ADR-0350 §3:4, §3:5 and §6:4; ADR-0361 §2:5, §2:6 and §6:1 | Read by §9:5 and §3's table |
 | ADR-0356 §4:4 to §4:7 | A capability still offered is still refused on its condition, and offering still grants nothing |
+| ADR-0357 §9:1 and ADR-0364 §9:2 | The set they name is ADR-0356 §4:3's, as §8:1 now filters it; a schema is the same in every work that is offered it |
 | ADR-0366 §9:7 and §9:8 | §8:3 filters the People section and decides nothing of its contents or shapes |
 | ADR-0367 §5:5 and §10 | A ticket's call is the tapper's, whatever the work carries (§7) |
 
@@ -466,8 +475,8 @@ as a triad.
   the true or false `users_authority`. The level's enumeration is ADR-0366 §11's.
 - **An input's level:** on `RecordedChannelTrigger` beside its author, and on each
   `RecordedInputMessage` (§2:6).
-- **A task's author:** `ScheduledTask` records the person or people its author names, the level of
-  the work that set it and what §6:4 needs of where it was set.
+- **A task's author:** `ScheduledTask` records the person its author names, the level of the work
+  that set it and what §6:4 needs of where it was set.
 - **The check's inputs:** what ADR-0367 §16 has the authorizer read, beside the line a call rests
   on: the person or people and the level of §7, read from the work.
 - **Filtering:** the capability set offered per work (§8:1), and the Connections section's and
@@ -488,7 +497,8 @@ Each is left, by ADR-0365 §6's cut or by the owner:
 - **Lane 7:** outside content, including how text read from a source bears on a work's level or
   authority, and sender against source.
 - **A further decision:** the machinery of the grant for one call (ADR-0367 §11:5); the shapes for
-  resolving mentions (ADR-0366 §9:8); a standing rule and how it covers a signal; a decision that
+  resolving mentions (ADR-0366 §9:8); how a work that is not a person's asks for a yes, and from
+  whom (§7:4); a standing rule and how it covers a signal; a decision that
   lets a second sender's input join a work under ADR-0349; a place recorded as someone's of its own
   (§4:6); how a mail channel establishes a sender (§9:8).
 - **The next prompt review:** whether and how a model is shown the three facts; the People
@@ -519,11 +529,11 @@ Each is this decision's, not an owner ruling:
   its connection's person or group until a later decision records a place as someone's.
 - **§4's note** that ADR-0349's conditions stand, so no second sender's input joins a work until a
   further decision widens them.
-- **§6:1's** author as ADR-0350 §3:7 records it, and a task set by a work with several senders
-  carrying each of theirs; **§6:4**, that a task meets a connection condition
+- **§6:1's** author as ADR-0350 §3:7 records it; **§6:4**, that a task meets a connection condition
   where its setting work did; **§6:6**, that removal ends a task as a cancel does and how it meets
   ADR-0367 §7:11; and that a task's recorded level is not lowered after it is set.
-- **§7:3**, how the check combines several senders' outcomes; **§7:4**, that a work carrying none
+- **§7:3**, how the check combines several senders' outcomes; **§7:4**, that a work that is not a
+  person's asks for no yes until a further decision rules how; **§7:5**, that a work carrying none
   holds no grant under ADR-0367 §4:2, with its three exceptions.
 - **§8:1's** filtered set fixed for the work at its first round, and the meaning of "could use".
   **§8:6**, that a grant for one call appears only through filtering.
