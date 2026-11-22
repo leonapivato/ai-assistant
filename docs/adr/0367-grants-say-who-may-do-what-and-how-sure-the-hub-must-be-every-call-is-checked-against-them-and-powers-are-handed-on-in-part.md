@@ -47,9 +47,13 @@
   [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md)
   (§4:1, in the addition alone),
   [ADR-0345](0345-a-memory-records-who-holds-it-when-it-lapses-what-it-is-for-and-whom-it-is-about-and-its-producer-places-it-among-what-is-stored.md)
-  (§2:7's *the owner's act*) and
+  (§2:7's *the owner's act*),
+  [ADR-0356](0356-the-system-briefs-planning-in-one-continuing-exchange-plannings-text-is-its-notes-and-an-episode-is-shown-by-its-short-view.md)
+  (§7:7, in the addition alone),
   [ADR-0361](0361-approvals-are-cards-the-person-taps-and-a-yes-is-a-one-time-ticket-for-the-exact-call.md)
-  (§2:6, §4:2, §4:6, §4:8, §4:9, §5:3 and §6:1, in the scopes §15 names), as §15 records.
+  (§2:6, §4:2, §4:6, §4:8, §4:9, §5:3 and §6:1, in the scopes §15 names) and
+  [ADR-0364](0364-tools-describe-themselves-in-four-parts-every-result-opens-with-its-outcome-and-connections-replace-the-place-list.md)
+  (§9:3, in the addition alone), as §15 records.
 
 ## Context
 
@@ -220,8 +224,10 @@ lane 6's standing approvals and lane 7's vouch are each a grant in the owner's r
 > names nothing there, so ADR-0021 §5's floor still sends to approval a disclosing call that
 > only a default grant allows.
 
-> **Normative.** The round's own message, which ADR-0306 §4:7 checks by its place alone, is
-> not a call §4:1 checks.
+> **Normative.** A message call is a call like any other and passes the check, save one into a
+> place one of the work's own inputs came from, which stays checked by its place alone (ADR-0306
+> §4:7, ADR-0356 §7:7). A text into any other connection (ADR-0364 §9:3) passes the check as
+> well.
 
 A person's own domain is theirs without a grant from anyone (ADR-0365 §3:1), and a tool's
 default grant covers its thing's person. Its bar still applies there: the owner's email, at
@@ -316,8 +322,9 @@ that use. What records belong to whom is lane 5's.
 > **Normative.** A link may be undone by the person it identifies, or by a person holding the
 > power to make it.
 
-> **Normative.** Removing a person ends every line and power they hold. The lines they set
-> stand, each changeable by whoever holds the power over its thing.
+> **Normative.** Removing a person ends every line and power they hold, and with them, under
+> §7:4, every grant and power they gave. The limits they set stand, each changeable by whoever
+> holds the power over its thing, and the record of every line is kept (§3:5).
 
 > **Normative.** A claimed source holder becomes the same as an established one (ADR-0345
 > §2:7) by the act of a person holding the power to make that link, in place of the owner's.
@@ -410,7 +417,8 @@ shown.
 > grant in that person's profile, to anyone, with a bar of normal, which they may change as any
 > line on their own things.
 
-The round's own message stays outside the check (§4:7), and what a message may carry is lane 6's.
+A reply into a place the work's own input came from stays outside the check (§4:7), and what a
+message may carry is lane 6's.
 
 ### 13. Group labels
 
@@ -442,15 +450,17 @@ undone the separation ADR-0097 §7 exists for.
 ### 15. Relationship to earlier decisions
 
 > **Normative.** This numbered draft records its replacements on the status lines of
-> ADR-0306, ADR-0345 and ADR-0361 and in a dated header note on each, atomically with this ADR
-> under ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect on
-> this ADR's ratification.
+> ADR-0306, ADR-0345, ADR-0356, ADR-0361 and ADR-0364 and in a dated header note on each,
+> atomically with this ADR under ADR-0070 and ADR-0082, preserving their ratified bodies. The
+> replacements take effect on this ADR's ratification.
 
 Superseded:
 
 | Clause | Becomes |
 | --- | --- |
 | ADR-0306 §4:1, the checks a call passes | In the addition alone: the check, first, once built (§4:5). Its other checks and its order stand |
+| ADR-0356 §7:7, a `text` call "checked by its place alone" | In the addition alone: a text into a place none of the work's own inputs came from also passes the check (§4:7) |
+| ADR-0364 §9:3, a text into any connection the work was shown | In the addition alone: into a place none of the work's own inputs came from, it also passes the check (§4:7) |
 | ADR-0345 §2:7, "becomes the same only by the owner's act linking the two" | By the act of a person holding the power to link (§7:12) |
 | ADR-0361 §2:6, the request's person "is the person the asking activation is for" | In the addition alone: a request may be for the person a thing belongs to (§5:6, §6:3) or for a group's answerers (§10:1) |
 | ADR-0361 §4:2 and §4:6, the card in the line's chat and the panel | In the addition alone: a card for a person other than the owner is posted and shown to that person, on surfaces that reach them |
@@ -476,7 +486,7 @@ Read through and standing, each as written:
 | --- | --- |
 | ADR-0021 §3's purity of `decide`, and §5's floor and monotonicity | The check reads the store, not the policy (§16); a grant is an input the policy is handed, and §4:6 satisfies the floor rather than relaxing it |
 | ADR-0097 §1, §7, §8 and §9; ADR-0102; ADR-0133 | Source grants, as §14 keeps them |
-| ADR-0306 §4:2, §4:4 and §4:7 | Standing grants count in the policy (§4:6); the stand-in is never lifted by a grant (§4:5); the round's own message stays outside the check (§4:7) |
+| ADR-0306 §4:2, §4:4 and §4:7 | Standing grants count in the policy (§4:6); the stand-in is never lifted by a grant (§4:5); a message into a place the work's own input came from stays checked by its place alone (§4:7) |
 | ADR-0361 §5:1 to §5:7 | A ticket runs as ruled, checked as §5:5 says |
 | ADR-0345 §2:5 and ADR-0338 §2:1 | Each stands until a person other than the owner is linked or admitted, which waits on §1:4 |
 | ADR-0217 §1 and `PlacementReach` | A record's reach is lane 5's; "anyone" denotes the same set as `ANYONE` (§2:3) |
@@ -549,8 +559,9 @@ Each is this decision's, not an owner ruling:
   call on their authority; lines live in `permissions/`, which ADR-0021 §3's precondition asks
   to be said; and a model sees outcomes only.
 - **§4:5 to §4:7**: the check runs first and never lifts the policy's deny or the stand-in; a
-  person's grant sources `authorised_by` and a default grant does not; the round's own message
-  stays outside the check.
+  person's grant sources `authorised_by` and a default grant does not; a message call passes the
+  check save one into a place the work's own input came from, which keeps the owner's "a work can
+  always answer its own sender" (2026-11-21).
 - **§5:2's "weak or above"** for established; **§5:4 and §5:5**, the tap's level; **§5:6**, whose
   yes a grant with approval needs.
 - **§6:1**, that a reader's source also belongs to someone, and **§6:4**, the manager's exception.
