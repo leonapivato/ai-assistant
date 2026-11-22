@@ -29,20 +29,21 @@
   new context section given from the system for the related users, no?" (2026-11-19; §9). On
   what the People section holds and how labels are given out: "It can change per person too,
   so I guess the specifics dont need to be flushed out right now. Well do that when we revist
-  the prompts" (2026-11-19; §8:4, §9:7). On labels, after asking "what is the label for?":
+  the prompts" (2026-11-19; §8:5, §9:7). On labels, after asking "what is the label for?":
   "Yes, per work" (2026-11-22; §8). On person records: "I agree with all of them except for
-  the domain one" (2026-11-21; §2, §7:6); on the domain point, "its just in scenarios where
+  the domain one" (2026-11-21; §2, §7:7); on the domain point, "its just in scenarios where
   both users know the person, but the person only sits in 1 domain, just because only one
   user has mentioned them, it can get confusing" and "I think the important thing is pre-set
   rules. So each individual has their own rules on what is shared and with who? what do you
   think" (2026-11-21); and on identity apart from each domain's view, "Yes, adopt it"
   (2026-11-22; §7). The coordinator assigned 0366 and ratifies it, under the owner's
   delegation, once its reviews are green.
-- **Contract-surface decision; a decision only.** No Protocol, no type, no field and no code
-  changes. It decides what a person is to the hub and how the hub tells who it is dealing
-  with, which bounds the `core` types the later lanes and the build make, so it takes the
-  adversarial and the architecture review. §11 names the contract changes building it would
-  need; it makes none, and it dispatches no implementation (§1:2).
+- **Contract-surface decision; a decision only.** This document changes no Protocol, type,
+  field or code. It decides what a person is to the hub and how the hub tells who it is
+  dealing with, which bounds the `core` types the later lanes and the build make, so it takes
+  the adversarial and the architecture review. Building it is a breaking change under golden
+  rule 5, through the `core` changes §11 names; some of them wait on a further decision
+  (§9:8), and none is made here. It dispatches no implementation (§1:2).
 - **Partially supersedes**
   [ADR-0364](0364-tools-describe-themselves-in-four-parts-every-result-opens-with-its-outcome-and-connections-replace-the-place-list.md)
   (§4:1, in its second sentence), as §10 records.
@@ -255,8 +256,12 @@ under §5:5. How a grant bears on an account that is its person's own only is la
 > and is never part of the identity.
 
 > **Normative.** Two views attach to one identity where both hold the same account
-> identifier. Code attaches them, silently, and never on a name, a relation or any other
-> fact; no model attaches them.
+> identifier and no record the hub holds marks that identifier as used by more than one
+> person. Code attaches them, silently, and never on a name, a relation or any other fact;
+> no model attaches them.
+
+> **Normative.** A match that would join two identities each of which has a link, or is one
+> the hub admits, is never attached silently. It is a merge, under §7:5 and §7:7.
 
 > **Normative.** Attaching two views shows neither domain anything of the other's view.
 
@@ -272,7 +277,13 @@ under §5:5. How a grant bears on an account that is its person's own only is la
 > **Normative.** A merge can be undone. Undoing it restores the two identities, with the
 > account identifiers, links and views each held before.
 
-What a person may see of another domain, and so who may confirm a merge, is lane 5's. The
+> **Normative.** The person whose domain holds a view that code attached may detach it, which
+> leaves that view on an identity of its own.
+
+An account identifier several people share, such as a household's landline or a business's
+address, is what §7:2's second condition keeps from joining two people, and §7:9 undoes a
+wrong attachment the hub had no record to prevent. What a person may see of another domain,
+and so who may confirm a merge, is lane 5's. The
 owner's worry, "both users know the person, but the person only sits in 1 domain, just
 because only one user has mentioned them", is what the split answers: each domain has its own
 view, and the identity behind them is one.
@@ -285,9 +296,13 @@ A label is how a model points at one exact person in a form code can check.
 > holds for one work, the hub maps it to the stored identifier, and a call naming a person's
 > label the work was not shown is refused as ADR-0307 §5:3 rules.
 
-> **Normative.** Code swaps a person's label for the stored identifier when anything is
-> written, and back for a label when a later work is shown it. Nothing stored names a person
-> by label.
+> **Normative.** Code swaps a person's label for the stored identifier in anything a work
+> writes, save the record of the work's own exchange as handed in (ADR-0356 §13:6), which keeps
+> its labels beside the identifiers they name (ADR-0307 §5:7).
+
+> **Normative.** A later work shown anything an earlier work wrote, that work's exchange
+> included, is shown each person by the later work's own label, through the stored
+> identifier.
 
 > **Normative.** Only the stored identifier is stable. No person's label is the same in
 > every work by rule, and no decision relies on one being so.
@@ -324,10 +339,19 @@ prompts". `G` labels for groups are lane 3's.
 > **Normative.** Planning is given a People section in its briefing, built by code. What it
 > holds, beyond naming the people the work relates to, is not decided here.
 
+> **Normative.** No lane builds §9:1 to §9:7 before a further decision settles what
+> understanding and planning are shown of the candidates, how understanding's reply carries a
+> resolution and what the people look-up's call is, and amends ADR-0353 §2:1, §3:6, §9:1 and
+> §9:2 and the decisions on planning's briefing and tools as it needs. Until it merges,
+> understanding's input and reply stay as ADR-0353 rules.
+
 The owner's words: "I think understanding should still attempt first though, then planner
 doesnt have to waste rounds when its easy". Candidates come only from what the work may read,
 which is lane 4's and lane 5's to rule; this decision widens no read. Whose words may teach
-the hub a name, a relation or a correction is lane 7's.
+the hub a name, a relation or a correction is lane 7's. ADR-0353 has understanding's input be
+its sections "and nothing else" (§2:1) and its reply "exactly the six keys" (§9:1), and the
+owner left "what is put in front of a model and what it fetches" to the next prompt review, so
+§9:8 leaves the shapes to a further decision rather than superseding those clauses here.
 
 ### 10. Relationship to earlier decisions
 
@@ -379,10 +403,12 @@ further decision where its shape is not settled here. A new Protocol ships as a 
 - **A view** (§7:1), which waits on lane 5's domain and sharing types.
 - **Understanding's resolution:** `ProposedActivationUnderstanding` and
   `ActivationUnderstanding` gain a resolution per mention (§9:1), retained with the episode
-  as the understanding is.
-- **Planning:** a people look-up tool (§9:5) and a People section in the briefing (§9:7); the
-  label book stops minting the owner's label first, and `LabelKind.PERSON`'s documentation
-  stops calling `P1` stable (§8).
+  as the understanding is, and understanding's input gains its candidates. Both wait on §9:8's
+  further decision, which amends ADR-0353's reply and input.
+- **Planning:** a people look-up tool (§9:5) and a People section in the briefing (§9:7),
+  each waiting on §9:8's further decision; and, needing none, the label book stops minting
+  the owner's label first, and `LabelKind.PERSON`'s documentation stops calling `P1` stable
+  (§8).
 
 ### 12. What this decision leaves to others
 
@@ -400,7 +426,7 @@ Each is left, by ADR-0365 §6's cut or by the owner:
 - **Lane 7:** whose words teach the hub a name, relation or correction, and whether outside
   content takes a level on §5:1's scale.
 - **The next prompt review:** which label a person gets, and what the People section holds
-  (§8:4, §9:7).
+  (§8:5, §9:7).
 - **Left out by the owner:** sureness that fades with time; voice and who is present in a
   room, with speaker identification staying with the voice work (#691); two equal owners.
 
@@ -426,12 +452,16 @@ Each is this decision's, not an owner ruling:
   rule §5:4 is, is the build's.
 - **§5:6**, that an input arriving by no link is at none.
 - **§6:1's "while the hub holds any record of that use"**, as how code knows of a use.
-- **§7:3**, that attaching shows neither domain the other's view, and **§7:7's** content of
-  an undo.
-- **§8:1**, returning a person's label to ADR-0307 §5's rules for every label.
+- **§7:2's second condition and §7:3**, that an identifier on record as shared joins no one
+  and that a match between two linked or admitted identities is a merge; **§7:4**, that
+  attaching shows neither domain the other's view; **§7:8's** content of an undo; and
+  **§7:9**, detaching a view.
+- **§8:1**, returning a person's label to ADR-0307 §5's rules for every label, and **§8:2's**
+  exception for the exchange recorded as handed in.
 - **§9:2's list** as the starting sources, from the proposal; **§9:3**, that code maps
   understanding's pick and a pick off the list is unknown; **§9:7**, that a People section
-  exists while its contents wait for the prompt review.
+  exists while its contents wait for the prompt review; and **§9:8**, leaving the shapes of
+  understanding's input and reply, the People section and the look-up to a further decision.
 - **§10:1**, keeping the subject axis as it stands.
 - **When code creates an identity for someone mentioned** (§2:4) is the build's.
 
