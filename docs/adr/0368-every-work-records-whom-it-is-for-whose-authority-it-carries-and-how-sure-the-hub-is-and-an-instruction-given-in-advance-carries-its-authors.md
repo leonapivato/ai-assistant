@@ -1,6 +1,6 @@
 # 368. Every work records whom it is for, whose authority it carries and how sure the hub is, and an instruction given in advance carries its author's
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-22
 - Scope: lane 4 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
