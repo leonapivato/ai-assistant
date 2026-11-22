@@ -230,7 +230,7 @@ the instruction no?"
 > **Normative.** Every work carries a **mark**: the set of people who may see everything its
 > models have been shown so far, which is each input it holds, its task's instruction where it
 > has one, the history it was shown, what was put in front of it and what it fetched. Nothing a
-> model was shown is exempt, its instruction included.
+> model was shown is exempt, its instruction, the stimulus or its task's, included.
 
 > **Normative.** The mark starts as the work's floor, and each thing a model of the work is shown
 > meets it, taken when it is shown. Nothing widens it, a yes included.
@@ -242,7 +242,9 @@ the instruction no?"
 > instruction, the mark its task records; and for an approval's outcome, the mark its request
 > records.
 
-> **Normative.** Nothing counts toward the mark under this decision but what §4:3 names.
+> **Normative.** Nothing counts toward the mark under this decision but what §4:3 names and the
+> text code ships or the owner sets for every work alike, such as a model's instructions
+> (ADR-0334) and the tools' descriptions, which counts as seen by anyone.
 
 > **Normative.** Code keeps the mark, from what the work's episode records its models were shown.
 > No model sets or changes it.
@@ -289,8 +291,9 @@ what words, is the next prompt review's.
 
 > **Normative.** That person's yes makes the send their own act of passing on (ADR-0365 §3:3,
 > ADR-0369 §11:1): the call under its ticket is checked for them as ADR-0367 §5:5 rules and passes
-> the mark, and the yes covers every card that call needs. It widens neither the mark nor any
-> record's reach.
+> the mark, and the yes covers a further card that call needs only where that card shows nothing
+> beyond what the person's own card showed, the same exact call and the same `why`. It widens
+> neither the mark nor any record's reach.
 
 > **Normative.** Where a work is not a person's (ADR-0368 §9:5), a send beyond its mark is not
 > done, saying why, until the further decision ADR-0368 §7:4 waits on rules how such a work asks
@@ -536,14 +539,15 @@ Each is this decision's, not an owner ruling:
   ceiling for a fetch.
 - **§4:2's "taken when it is shown"**, so a rule removed later does not widen what was already seen
   (ADR-0369 §8); **§4:3**, who may see an input, a window's message and a task's instruction;
-  **§4:4**, that nothing else counts; **§4:6**, the mark a task and a request record, and
+  **§4:4**, that the text shipped or set for every work alike, a model's instructions included,
+  counts as seen by anyone, and nothing else counts; **§4:6**, the mark a task and a request record, and
   **§4:7**, what one written before records.
 - **§5's words** for a send, including a call whose effect a place's audience perceives and a card;
   that a write into the hub's own stores is not a send.
 - **§5:3**: the yes comes from whom the work is for, which is the sender for a sender's work and,
   for a work with no sender, whoever its connection belongs to; **§5:4**, that where that
-  person is outside the mark the send is not done; **§5:5's** last clauses, that the yes covers every
-  card its call needs and widens nothing.
+  person is outside the mark the send is not done; **§5:5's** last clauses, that the yes covers a
+  further card its call needs only where that card shows nothing it did not, and widens nothing.
 - **§5:8**, that the mark's yes is asked before a grant's, and **§5:9**, that a card is a send.
 - **§6:1**, each standing approval's shape; **§6:3**, that only its person makes one, by their own
   act, and no work does; **§6:4**, what it never covers.
