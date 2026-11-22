@@ -1,6 +1,6 @@
 # 324. A pull is the assistant asking a channel's sensor, and the calendar and the weather come back as pulls
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0370 (§4:6, in what the offer reads: the work's ceiling, in place of the pass's audience posture)
 - Date: 2026-10-17
 - Scope: batch [#3113](https://github.com/leonapivato/ai-assistant/issues/3113), lane L2, and [#2890](https://github.com/leonapivato/ai-assistant/issues/2890): the rule for a pull, and the calendar and weather channels declared whole, with only their pulls built. It answers [#2593](https://github.com/leonapivato/ai-assistant/issues/2593)'s "which read capabilities survive" for these two capabilities alone, and decides the coverage half of [#2685](https://github.com/leonapivato/ai-assistant/issues/2685).
 - Dependency: the phases as ADR-0306 to ADR-0309 decide them, the grant uses as ADR-0318 leaves them, and the forecast seam as ADR-0260 leaves it, all Accepted and on `main` at `abf4e206`.
@@ -12,6 +12,7 @@
   [ADR-0177](0177-the-browsers-control-surface-is-thirty-operations-and-a-credential-is-entered-only-on-a-loopback-origin.md) (§6:2's members, in the addition alone);
   [ADR-0294](0294-readers-no-longer-ingest-into-memory-and-what-they-wrote-stays.md) (§4:3's and §4:6's subsets, in the addition alone);
   [ADR-0318](0318-the-old-paths-vocabulary-leaves-the-episode-record-the-decision-row-and-the-grant-uses.md) (§6:2's *`NOTIFY` alone*, in the addition alone).
+- Partially superseded: 2026-11-22 by [ADR-0370](0370-every-work-carries-a-mark-of-who-may-see-all-it-has-seen-which-starts-at-its-places-audience-and-only-shrinks-and-a-send-reaching-anyone-outside-it-needs-a-yes.md) — §4:6, in what the offer reads: the calendar pull is a fetch, so the audience its offer reads is the work's ceiling, its senders, or for a work with no sender its floor, and not the audience of the place its stimulus arrived in (ADR-0370 §3:4). Every other clause stands. This replacement takes effect on ratification of ADR-0370. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
