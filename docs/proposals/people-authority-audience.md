@@ -127,6 +127,12 @@ for any account that identifies someone.
   the same group chat or the same room. The work then holds only what every
   sender holds, area by area, and the lowest sureness. A message from another
   person in a different place starts its own work.
+- The same person may add to a work from a second place, as they can today.
+  No new rule is needed, and least privilege decides each part. The work takes
+  the lowest sureness of the connections its inputs came by. It holds only the
+  grants that apply on every one of them. Its mark shrinks to the people in
+  both places' audiences, which always includes the sender. The owner's words:
+  "this just takes on the rules we currently have, about least privilage".
 - There is no acting on another person's behalf. "Remind Sam" is the sender
   messaging Sam on the sender's own authority.
 - A request that depends on another person's answer is a grant to that person.
@@ -341,8 +347,6 @@ in the presets. Look-ups at none; a reminder or a note in the person's own
 domain at weak; a message to another hub person at normal; a call that leaves
 the hub at normal or with approval each time; changing grants, vouching and
 linking an account at normal or above.
-
-Not covered: the same person writing to one work from a second place.
 
 Deferred by the owner to the next prompt review: what is put in front of a
 model and what it fetches, the contents of the People section, the wording when
