@@ -41,7 +41,7 @@
   or code. It decides what reading another's text does to a work and what every call is then
   checked at, which bounds the `core` types the build makes, so it takes the adversarial and the
   architecture review. Building it is a breaking change under golden rule 5, through the `core`
-  changes §13 names; some wait on a further decision (§4:6), and none is made here. It dispatches
+  changes §13 names; some wait on a further decision (§3:6, §4:6), and none is made here. It dispatches
   no implementation (§1:2).
 - **Partially supersedes**
   [ADR-0181](0181-an-egress-call-records-whether-it-was-planned-over-external-content.md)
@@ -49,9 +49,7 @@
   §10:1 retires the stand-in),
   [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md)
   (§4:1's stand-in and §4:4, whole, once §10:1 retires it; §4:6, in what reaches a rule of
-  authorizing; §5:14 and §5:16, in the addition alone),
-  [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md)
-  (§6:6's second sentence and §9:2, each in the addition alone) and
+  authorizing) and
   [ADR-0368](0368-every-work-records-whom-it-is-for-whose-authority-it-carries-and-how-sure-the-hub-is-and-an-instruction-given-in-advance-carries-its-authors.md)
   (§6:1, §6:3 and §7:1, each in the addition alone), as §12 records.
 
@@ -143,9 +141,6 @@ their own grants what a work at that level may do.
 > checked as it is today, the outside-content stand-in (ADR-0306 §4:4) included for every work,
 > and nothing in this decision changes what the running hub reads, shows, allows or asks.
 
-> **Normative.** No direct read §3:2 or §3:3 allows is built before §6:2 is. Until then a
-> source's text reaches planning only as ADR-0306 §5:14 to §5:16 and ADR-0307 §9:2 route it.
-
 > **Normative.** This decision admits no one. Before a person other than the owner is admitted,
 > §2:5 is built; nothing else of this decision is among what ADR-0365 §1:3's provision needs.
 
@@ -153,9 +148,8 @@ ADR-0367 §1's note keeps the stand-in for every work until this decision lands,
 for all of it but §2:5. Without §2:5, an admitted person's own text, read by a work that does not
 act for them, would count as "the person's own": planning would be shown it raw, and neither the
 digest nor the stand-in would reach it. That is a work acting on another person's words its
-sender has not seen (§8:3). ADR-0367 §1:4 names necessary conditions, and §1:5 adds one beside
-them, under ADR-0365 §1:3. §1:4 is there because a direct read is not among the grounds of
-ADR-0306 §4:5, so built alone it would escape the stand-in.
+sender has not seen (§8:3). ADR-0367 §1:4 names necessary conditions, and §1:4 adds one beside
+them, under ADR-0365 §1:3.
 
 ### 2. A stranger's voice: sender and source
 
@@ -213,6 +207,12 @@ shown them withheld (ADR-0356 §3:6) or, if at all, at none.
 > can establish, as ADR-0366 §5:2 has a channel's kind declare it. Where it declares none, or
 > declares nothing, a source read through it is sorted under §3:4, whatever vouch covers it.
 
+> **Normative.** No lane builds a direct read §3:2 or §3:3 allows before §6:2 is built and a
+> further decision says how such a read reaches planning and amends the clauses that let outside
+> text reach planning only as a digest's evidence, among them ADR-0306 §5:14 and §5:16, ADR-0307
+> §6:6 and §9:2, ADR-0308 §3:3 and §4:1, ADR-0324 §2:3, ADR-0329 §4:2 and ADR-0356 §5:4. Until
+> it merges they stand, and none is amended here.
+
 A forecast's temperature and an appointment's start are typed values; an invite's title and a
 web page are not. ADR-0306 set aside a result's shape as what decides digesting, because "shape
 mislabels your own free-text notes and an invite's outside title"; §3:2 is about one value's type,
@@ -220,7 +220,11 @@ not a result's shape, and leaves an invite's title where ADR-0306 put it. A sour
 under §3:3 is held at the level its route establishes, so the owner's vouched mailbox, at weak,
 holds a work at weak as an email from the owner would (ADR-0366 §5). The owner's "verifying a
 source before readng it" is §3:3; their "seperate content verifing call" is a model's check, which
-§4:4 rules on.
+§4:4 rules on. §3:6 holds the direct reads back twice over: before the check reads levels, a
+direct read would escape the stand-in, which counts only an outside trigger, digested evidence or
+a marked record (ADR-0306 §4:5); and the clauses that keep raw outside text from planning are
+spread across the decisions on planning's briefing, whose shapes a further decision owns, as
+ADR-0366 §9:8 leaves the shapes of resolving mentions to one.
 
 ### 4. Separate work, and what its findings carry
 
@@ -246,7 +250,8 @@ source before readng it" is §3:3; their "seperate content verifing call" is a m
 > **Normative.** No lane builds §4:2, the fixed shapes of §4:3 or §6:4's replacement before a
 > further decision decides a spawn limited to look-ups, what it is handed, how its findings
 > return to the work that asked and in what shapes, how code checks a shape, and how a passage a
-> work holds is replaced; and amends ADR-0349 and ADR-0350 as it needs. Neither is amended here.
+> work holds is replaced; and amends ADR-0349 and ADR-0350 as it needs, and ADR-0356 §5:2's
+> append-only exchange for a replacement. None of them is amended here.
 
 The digest is the one-round form of separate work the corpus already has: a model call with no
 tools over the raw text, whose evidence alone reaches planning (ADR-0307 §9:2, ADR-0308 §5).
@@ -309,16 +314,18 @@ the level the tap came by, whatever the work held (ADR-0367 §5:5): the person s
 ### 7. Seen by a person
 
 > **Normative.** Text a work delivered into a place whose audience includes a person (ADR-0370
-> §2:1), followed by a later message from that person in that place, lowers nothing in a work
-> that acts for that person; in a work that acts for several people, only where each of them has
-> so seen it.
+> §2:1), followed by a later message from that person in that place, counts toward §6:1, in a
+> work that acts for that person, at the higher of its own level and the level of that later
+> message (ADR-0368 §2:6); in a work that acts for several people, at the lowest of what it counts
+> at for each of them.
 
 > **Normative.** Code decides that text was seen so from the records of the delivery and of the
 > later message, with no model.
 
 Research then runs as people expect: look around, report, and act on the reply. The person has
 read what the work said and spoken again, so what is acted on next is what they were shown, not
-what a stranger wrote.
+what a stranger wrote. The reply is only as sure as its own level: a reply by email, at weak,
+lifts the report no higher than weak, since an email reply can be faked (ADR-0366 §5).
 
 ### 8. What a work may do once its level drops
 
@@ -445,7 +452,7 @@ its own bar (ADR-0367 §5:1). Neither clause needs a change.
 ### 12. Relationship to earlier decisions
 
 > **Normative.** This numbered draft records its replacements on the status lines of ADR-0181,
-> ADR-0306, ADR-0307 and ADR-0368 and in a dated header note on each, atomically with this ADR
+> ADR-0306 and ADR-0368 and in a dated header note on each, atomically with this ADR
 > under ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect on
 > this ADR's ratification.
 
@@ -457,8 +464,6 @@ Superseded:
 | ADR-0306 §4:1, the stand-in among the checks | Once §10:1 retires it, the stand-in leaves the order. The other checks and their order stand |
 | ADR-0306 §4:4, the stand-in | Whole, once §10:1 retires it |
 | ADR-0306 §4:6, the fact reaching the policy | In what reaches a rule of authorizing: once §10:1, the fact reaches none, and the check reads the level of the work's context (§6:2) |
-| ADR-0306 §5:14 and §5:16, outside text routed to a digest | In the addition alone, once built (§1:4): a typed value and a source §3:3 lets a work read directly go to planning |
-| ADR-0307 §6:6's second sentence and §9:2, planning and raw outside content | In the addition alone, once built (§1:4): save a typed value and a source §3:3 lets it read directly; and, once built, a spawn's findings (§4:2) |
 | ADR-0368 §6:1 and §6:3, the level a task records | In the addition alone: the level its instruction carries (§5:4), never above the setting work's sureness |
 | ADR-0368 §7:1 and its table's level, what the check runs at | In the addition alone: the level of the work's context (§6:2), never above its sureness |
 
@@ -480,7 +485,8 @@ Read through and standing, each as written:
 | --- | --- |
 | ADR-0306 §4:5; ADR-0303 §3; ADR-0307 §4:3; ADR-0308 §5:3 and §5:4; ADR-0349 §6:13; ADR-0351 §5:13; ADR-0356 §3:7 and §3:8 | Each says when an activation has read outside content or marks what rests on it. They stand as records and as what is shown, and once §10:1 they decide no call (§10:2). ADR-0349 §6:13's last sentence holds while the stand-in does |
 | ADR-0306 §4:7 | The message into its input's place stays outside the grant check and meets no level (§8:2) |
-| ADR-0307 §9:2, save its addition; ADR-0308 §4 and §5:1 | Planning still reads no raw outside text; the digest is the present separate work (§4:5), its evidence at weak |
+| ADR-0306 §5:14 to §5:16; ADR-0307 §6:6 and §9:2; ADR-0308 §3:3, §4 and §5:1; ADR-0324 §2:3; ADR-0329 §4:2; ADR-0356 §5:4 | Outside text still reaches planning only as a digest's evidence; the digest is the present separate work (§4:5), its evidence at weak. §3:6's further decision amends them for the direct reads |
+| ADR-0356 §5:2 | The exchange stays append-only; §6:4's replacement waits on §4:6's further decision, which amends it as it needs |
 | ADR-0351 §6:2 and §6:5; ADR-0356 §3:6 | §2:6: forwarded or relayed words are a source's, carry none, and give no authority; a later work is shown them withheld |
 | ADR-0345 §2 | A support's holder is a fact apart from a text's level (§2) |
 | ADR-0366 §5:8 | A text's level says how sure the hub is that what it holds is its people's own, which is about whom something comes from |
@@ -505,6 +511,7 @@ decision §4:6 names. A new Protocol ships as a triad.
 - **Sorting:** a tool's declaration naming which of its result's values are typed, beside ADR-0306
   §2's result property (§3:2); each kind of connection's declared most (§3:5), beside ADR-0366
   §11's; and code's verification of a source by domain, signature, file owner or account (§9:3).
+  Each waits on §3:6's further decision for how a direct read reaches planning.
 - **Vouches:** a kind of ADR-0367 §16's line, with §9:5's default line and §9:7's profile setting.
 - **Seen by a person:** a record linking delivered text to a later message from its person in that
   place (§7).
@@ -512,7 +519,8 @@ decision §4:6 names. A new Protocol ships as a triad.
 
 ### 14. What this decision leaves to others
 
-- **A further decision:** the spawn limited to look-ups, what it is handed, its findings and their
+- **A further decision:** how a direct read reaches planning, amending the clauses §3:6 names;
+  the spawn limited to look-ups, what it is handed, its findings and their
   shapes, how code checks a shape, and replacing a passage (§4:6), amending ADR-0349 and ADR-0350;
   whether the memory gate (ADR-0106 §6:1) reads levels in place of the activation-wide fact, which
   #2856's second question needs; how a standing rule's work reads an outside signal's text
@@ -534,13 +542,14 @@ decision §4:6 names. A new Protocol ships as a triad.
 
 Each is this decision's, not an owner ruling:
 
-- **§1:3 to §1:5**: nothing changes until the check reads levels; no direct read before it does;
-  and §2:5 built before a second person is admitted, as the one part of this decision that
-  provision needs.
+- **§1:3 and §1:4**: nothing changes until the check reads levels, and §2:5 is built before a
+  second person is admitted, as the one part of this decision that provision needs.
 - **§2:2**: a source bears on the mark only as ADR-0370 §4:3 already counts. **§2:5**, whose
   text is a person's own when there are several people. **§2:6**:
   forwarded or relayed words carry none, and ADR-0351 §6:2 and §6:5 stand rather than giving
   such an input its sender's authority at a lower level.
+- **§3:6**: the direct reads wait on the check reading levels and on a further decision that
+  amends the routing clauses, rather than this decision superseding each of them.
 - **§3:2's** typed value as a value whose type holds no free text, named in the tool's
   declaration. **§3:5**: each kind of connection declares its most, and a route at none is not
   read directly even when vouched, since it verifies nothing.
@@ -551,7 +560,8 @@ Each is this decision's, not an owner ruling:
   **§5:4**, a task's level as its instruction's.
 - **§6:1's** term, the level of a work's context, kept apart from ADR-0368 §2:3's sureness so that
   sureness is not redefined; and a source's text shown with no rule letting it at none.
-- **§7:1's** narrowing of "seen by a person" to the people a later work acts for, each of them.
+- **§7:1's** narrowing of "seen by a person" to the people a later work acts for, each of them,
+  and its cap at the level the person's later message came by.
 - **§8:1** as the replacement of the stand-in by the check alone.
 - **§9:2**: a person's vouch covers works carrying their authority and a group's covers works for
   the group; **§9:5's** default as a line its person may change; **§9:6's** reading of "for a
@@ -562,7 +572,8 @@ Each is this decision's, not an owner ruling:
   taught by a write at its context's level. **§11:2**: the approval for a widening is the
   shortfall card, and no other.
 - **Which header records**: none on ADR-0349 or ADR-0350, whose amendment the spawn's further
-  decision makes, so ADR-0349 §6:13 is read through rather than superseded.
+  decision makes, so ADR-0349 §6:13 is read through rather than superseded; and §4:6 naming
+  ADR-0356 §5:2 among what that decision amends, for a replacement.
 
 ## Consequences
 
@@ -580,7 +591,7 @@ Each is this decision's, not an owner ruling:
 - Until the spawn's further decision lands, the digest is the only separate work, so findings are
   open and a work that read anything unvouched holds weak.
 - Nothing changes in the running hub until the owner's planning dispatches the build (§1:3), and
-  no second person is admitted before §2:5 is built (§1:5).
+  no second person is admitted before §2:5 is built (§1:4).
 - **Revisit** if cards from works at weak become a habit people tap through, or once the spawn's
   fixed shapes show which questions they can answer.
 
