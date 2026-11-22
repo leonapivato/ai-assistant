@@ -1,6 +1,6 @@
 # 368. Every work records whom it is for, whose authority it carries and how sure the hub is, and an instruction given in advance carries its author's
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0370 (§6:3, in the addition alone: a task also records the mark its setting work carried)
 - Date: 2026-11-22
 - Scope: lane 4 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
@@ -53,6 +53,7 @@
   (§3:2's *every connection the system has* and §3:7, each in what is shown alone; §9:4's *Their
   inputs carry no person's authority* and §11:1, for a task's work once built; §14:4's last test, in
   part), as §10 records.
+- Partially superseded: 2026-11-22 by [ADR-0370](0370-every-work-carries-a-mark-of-who-may-see-all-it-has-seen-which-starts-at-its-places-audience-and-only-shrinks-and-a-send-reaching-anyone-outside-it-needs-a-yes.md) — §6:3, in the addition alone: a task also records the mark the work that set it carried when it set the task (ADR-0370 §4:6). It still records no list of actions or calls, and every other clause stands. This replacement takes effect on ratification of ADR-0370. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
