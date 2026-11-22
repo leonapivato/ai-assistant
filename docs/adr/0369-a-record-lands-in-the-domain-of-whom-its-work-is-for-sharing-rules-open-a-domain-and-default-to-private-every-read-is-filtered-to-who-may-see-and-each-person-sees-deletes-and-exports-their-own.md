@@ -1,6 +1,6 @@
 # 369. A record lands in the domain of whom its work is for, sharing rules open a domain and default to private, every read is filtered to who may see, and each person sees, deletes and exports their own
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-22
 - Scope: lane 5 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
