@@ -405,7 +405,8 @@ available to it."
 
 > **Normative.** A work reads no more than whom it is for may see: for a person, what §6 lets them
 > see; for a group, the records of its domain, and a record of another domain that a line lets the
-> group see and whose reach takes in each of its members; for no one, what anyone may see.
+> group see and whose reach takes in each of its members; for no one, the records of the hub's
+> shared things, and what anyone may see.
 
 > **Normative.** A work reads no more than each of its senders may see, and a work with an
 > unidentified sender, no more than anyone may see (ADR-0368 §3:4, §4:4).
@@ -441,8 +442,10 @@ go of the prompts." The owner on a model keeping a secret: "I thought the idea i
 tell because its filtered out of the context, not because we rely on it?" A model asked about
 something withheld answers as it would about anything it does not know; how that is worded is the
 next prompt review's. ADR-0368 §8 filters the tool list and the Connections section to a work's
-authority; this section filters records. A work with no sender at all reads what whom it is for may
-see, and lane 6 narrows it by place.
+authority; this section filters records. A work for no one reads the hub's shared things, where
+its records land (§2:1), as the owner's ruling has every work read its own domain and what sharing
+rules open to it. A work with no sender at all reads what whom it is for may see, and lane 6
+narrows it by place.
 
 ### 11. Passing on
 
@@ -660,12 +663,14 @@ Each is this decision's, not an owner ruling:
   carried through every derivation and fold.
 - **§9:1** reads the day a member joined as the moment they joined, and **§9:4** dates a record
   made from the group's records by the earliest of them.
-- **§10:1's** reading for a group and for no one; **§10:3**, a task's author; **§10:4**, what anyone
-  may see; **§10:5's** list beyond the four ruled reads; **§10:7**, a look-up through an account.
+- **§10:1's** reading for a group, its reading for no one being the ruling's; **§10:3**, a task's
+  author; **§10:4**, what anyone may see; **§10:5's** list beyond the four ruled reads; **§10:7**, a
+  look-up through an account.
 - **§11:2**, that no code writes into or opens another domain by itself.
 - **§12:2's** "seeing and exporting what §6:1 lets them see of it"; **§12:3's** "where the powers
-  stated name it", from ADR-0365 §4:3; **§12:4**; **§12:7's** period, from the coordinator's brief,
-  with nothing deleted before it ends; **§12:8's** "save to make their export".
+  stated name it", from ADR-0365 §4:3; **§12:4**; **§12:7**: the period was in the question the
+  owner answered ("4. yeah"), and that nothing is deleted before it ends, and that its length is the
+  owner's to set, are this decision's; **§12:8's** "save to make their export".
 - **§13's** entries, and that no one deletes one; that a person's own works are not logged.
 - **§14:1 to §14:3**, and **§14:4's** reading of ADR-0099 §4:2.
 
