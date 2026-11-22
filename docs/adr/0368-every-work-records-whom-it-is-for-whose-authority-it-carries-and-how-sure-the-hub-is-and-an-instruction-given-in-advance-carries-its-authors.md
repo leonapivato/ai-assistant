@@ -26,9 +26,11 @@
   another persons behalf shouldnt be a thing. In the case you showed, its just you asking to remind
   Sam, with a specific message, thats on your behalf" (2026-11-19; §5). On instructions given in
   advance: "why should instructions given in advance be treated differently than instrucitions
-  given right now?", then, to the two recorded points, "yes record both" (2026-11-19; §6). On what
-  a work is shown: "yes, it should be filtered" (2026-11-19; §8). The coordinator assigned 0368 and
-  ratifies it, under the owner's delegation, once its reviews are green.
+  given right now?", then, to the coordinator's "Shall I record question 5 as this single rule, and
+  the account rule from before (an account is only as sure as it is exclusive) alongside it?", "yes
+  record both" (2026-11-19; §6). On what a work is shown: "yes, it should be filtered" (2026-11-19;
+  §8). The coordinator assigned 0368 and ratifies it, under the owner's delegation, once its reviews
+  are green.
 - **Contract-surface decision; a decision only.** This document changes no Protocol, type, field
   or code. It decides what every work carries and what ADR-0367's check reads of it, which bounds
   the `core` types the build makes, so it takes the adversarial and the architecture review.
@@ -296,9 +298,12 @@ instrucitions given right now?"
 > **Normative.** A standing rule is a task in every clause of this section.
 
 Spawn is offered only to a person's work (ADR-0350 §3:4, read by §9:5), so a task carries one
-person's authority or none, never a group's or several senders'. "No per-task list of allowed actions" and the end at
-removal are the owner's two recorded points ("yes record both"). The level a task records
-is its setting work's, and a later lowering of a link (ADR-0366 §5:5) does not change it. No
+person's authority or none, never a group's or several senders'. That a task records no list of
+actions, that a standing rule is the same thing with a different trigger, and that a task ends when
+cancelled, at its end date or when its author is removed were each part of the single rule the
+coordinator put to the owner, which the owner had recorded ("yes record both": that rule, and the
+rule ADR-0366 §6 carries, that an account is only as sure as it is exclusive). The level a task
+records is its setting work's, and a later lowering of a link (ADR-0366 §5:5) does not change it. No
 approval given in the work that set a task carries over to its work (ADR-0350 §3:9's third
 sentence, ADR-0321 §4:1). ADR-0340 gave, among its reasons for letting a rule go on any task the
 person set, that a scheduled task carries no authority; once §6 is built, what keeps such a rule
@@ -504,8 +509,7 @@ Each is left, by ADR-0365 §6's cut or by the owner:
 - **The next prompt review:** whether and how a model is shown the three facts; the People
   section's contents and labels.
 - **Left out by the owner:** two equal owners; sureness that fades with time; voice and who is
-  present in a room ("Several people present: a sureness question, revisited when voice is
-  built").
+  present in a room, revisited when voice is built.
 
 > **Normative.** This decision may not be cited to settle any matter the list above leaves to
 > another.
@@ -567,8 +571,8 @@ Each is this decision's, not an owner ruling:
 
 - **An instruction given in advance carries no authority**, as ADR-0350 §3:9 ruled. Set aside by the
   owner: every recurring task then asks on each run, which trains people to tap yes.
-- **A task carries a list of the actions it may take.** Set aside by the owner ("yes record both"):
-  the task records who set it and how sure the hub was, and the check reads that person's lines when
+- **A task carries a list of the actions it may take.** Set aside in the rule the owner had
+  recorded ("yes record both", §6): the task records who set it and how sure the hub was, and the check reads that person's lines when
   each call is made.
 - **A second sender may join a work from any place.** Set aside by the owner: "Yes, shared place
   only". A message from another person in a different place starts its own work.
