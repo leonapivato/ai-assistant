@@ -40,8 +40,9 @@
 - **Partially supersedes**
   [ADR-0217](0217-a-record-carries-who-may-receive-it-and-a-model-may-only-narrow-it.md)
   (§1:2, in `OWNER`'s denotation, and §1:9, in `OWNER` keeping it; §1:4's table, §3:1's second
-  item, §3:3, §3:6, §3:7 and §3:9, in the addition alone; §2:5's *no new site* half, in the
-  addition alone; §3:1's first item and §3:14, in who makes the act), as §15 records.
+  item and §3:3, in the addition alone; §3:6, §3:7 and §3:9, in which sides supply a setter and an
+  instant; §2:5's *no new site* half, in the addition alone; §3:1's first item and §3:14, in who
+  makes the act), as §15 records.
 
 ## Context
 
@@ -266,20 +267,24 @@ This is the one rule lanes 6 and 7 build on, and it is numbered here and nowhere
 > **Normative.** A person may see a record exactly where it is in their own domain, or, for the
 > owner, in the hub's shared things; or where they are in its reach (§7) and one of these holds:
 >
-> - it is in the domain of a group they are a member of, §9 opens it to them, and no limit covering
->   them, on the record or its kind, holds, since a limit holds against a membership;
+> - it is in the domain of a group they are a member of, §9 opens it to them, and no limit
+>   covering them bears on it;
 > - a line lets them, or a group they are in, see its kind or its account; where it was made from
 >   other records of its own domain, a line lets them see each kind or account §7:6 records for
->   it, in the form recorded; and no limit covering them, on the record, its kind or its account,
->   holds over those lines under ADR-0367 §7:6;
+>   it, in the form recorded; and no limit covering them bears on it that holds over those lines
+>   under ADR-0367 §7:6;
 > - a line on the record itself lets them, or a group they are in, see it, and no limit covering
->   them holds over that line under ADR-0367 §7:6;
+>   them bears on it that holds over that line under ADR-0367 §7:6;
 > - they are its group domain's manager (§12:2), or the manager of its domain's managed person and
 >   the powers stated when that person was added name seeing their domain (§12:3).
+>
+> A limit bears on a record where it is on the record, on its kind or its account, or on a kind or
+> account §7:6 records for it.
 
 > **Normative.** A person may see a record's reduced form where they may not see the record and
-> §6:1 would let them with every line it reads letting them see the reduced form in place of the
-> record.
+> §6:1 would let them if the lines it reads on the record itself, or on its kind or its account,
+> let them see its reduced form in place of the record. The lines §6:1 reads for the kinds and
+> accounts §7:6 records are read as it reads them, in the forms recorded.
 
 > **Normative.** Code decides who may see a record from its domain, its reach and the lines as they
 > stand when it is read, and no model decides it or takes part.
@@ -333,10 +338,10 @@ person, and to name people for a record made from another domain's records.
 > **Normative.** Every record a work or a producer writes carries a reach, whatever its kind, as
 > ADR-0217 §1:1 has every memory carry one. A record that carries none is read as reach `ANYONE`.
 
-> **Normative.** Where a meet's reach is carried by none of the sides that narrowed it, its setter
-> is `DERIVED` if any of those sides carries `DERIVED`, and otherwise the strongest of their setters
-> in ADR-0217 §3:16's order; and its instant follows ADR-0217 §3:9's rule over those of them that
-> carry that setter.
+> **Normative.** The setter of a meet's result is the strongest, in ADR-0217 §3:16's order, among
+> the eligible sides whose reach is not `ANYONE`, or among all of them where every side's reach is
+> `ANYONE`; and its instant follows ADR-0217 §3:9's rule over those of them that carry that setter.
+> On `ANYONE` and `OWNER` alone this is ADR-0217 §3:6, §3:7 and §3:9 as written.
 
 `OWNER` keeps the set it denotes today, since today every record is the owner's. What it means in
 another person's domain changes: a model's proposed narrowing of a record in Sam's domain
@@ -544,7 +549,7 @@ Superseded:
 | ADR-0217 §1:2, `OWNER` "denoting the set whose one member is the owner", and §1:9, in `OWNER` keeping that denotation | `OWNER` denotes the people of its record's own domain (§7:1), the same set today. `ANYONE`'s denotation, and the rest of both clauses, stand |
 | ADR-0217 §1:4's table, `DERIVED` with "`OWNER` only" | In the addition alone: `DERIVED` may also carry a reach naming people or groups, or naming no one (§7:2, §7:3, §7:5) |
 | ADR-0217 §3:1's second item and §3:3, the derivation and the ratchet over "every record it was supplied" | In the addition alone: the derivation also meets the people who could see each record read of another domain, and of its own domain where a line on it narrowed it, as `DERIVED` (§7:5) |
-| ADR-0217 §3:6, §3:7 and §3:9, a setter and an instant taken from the sides that carry the surviving reach | In the addition alone: where no side carries the meet's reach, `DERIVED` if a side that narrowed it carries it, and otherwise the strongest of their setters, with §3:9's instant over those carrying it (§7:10) |
+| ADR-0217 §3:6, §3:7 and §3:9, a setter and an instant taken from the sides that carry the surviving reach | In which sides supply them: every eligible side whose reach is not `ANYONE`, so a meet no side carries has a setter and an instant and folds in any order. On the two shipped reaches the rule is unchanged (§7:10) |
 | ADR-0217 §2:5's *no new site* half | In the addition alone: the reach is also read by §10's filter where records leave the stores (§7:8) |
 | ADR-0217 §3:1's first item and §3:14, the owner's explicit act | In who makes it: for a record outside the owner's domain and the hub's shared things, whoever holds the data rights over its domain (§7:7) |
 
@@ -641,7 +646,8 @@ Each is this decision's, not an owner ruling:
   grants, with narrowing at a bar of none, which ADR-0367 §5:2 makes weak for a named person, and
   for a record the work may read; **§5:4**, that no widening passes the reach.
 - **§6:1's** shape: the own-domain case, the reach as a condition on every other, a limit holding
-  against a membership, and a manager's sight; **§6:2**, reduced forms.
+  against a membership, the limits that bear on a record through its sources' kinds, and a
+  manager's sight; **§6:2**, reduced forms, which reduce only the record and never its sources.
 - **§7**: `OWNER` read as the record's domain; people and groups as denotations; the meet; §7:5's
   contributions; and **§7:6**, that a record made from its own domain's records follows that
   domain's rules on its sources' kinds as they stand. That is this decision's reading of the
@@ -649,7 +655,8 @@ Each is this decision's, not an owner ruling:
   written: what is fixed when it is written is which sources bind, by people for another domain's
   records and by kind for its own. **§7:7**, whose act ADR-0217's owner's act is in another domain.
   **§7:9**, a reach on every record a work writes, so that the rule reaches messages and pages as
-  well as memories. **§7:10**, the setter and instant of a meet no side carries. §7:6's kinds are
+  well as memories. **§7:10**, the setter and instant of a meet taken over every side that narrowed
+  it, so that folds stay order-free. §7:6's kinds are
   carried through every derivation and fold.
 - **§9:1** reads the day a member joined as the moment they joined, and **§9:4** dates a record
   made from the group's records by the earliest of them.
