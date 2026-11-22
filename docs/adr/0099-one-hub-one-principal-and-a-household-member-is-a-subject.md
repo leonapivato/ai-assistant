@@ -1,6 +1,6 @@
 # 99. One hub, one principal: a household member is a subject in the owner's model, not an account on the owner's hub
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0365 (§1:1 and §3:1, whole; §1:2, restated for several principals)
 - Date: 2026-08-04
 - **Note (2026-08-04): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
@@ -126,6 +126,7 @@
   that class of episode rather than needing to check it. What it does raise is the
   value of the subject-scoped delete and export §5 defers, which is filed rather than
   ruled. Appended per ADR-0070 §1: no text below is rewritten. Refs #1210, #1162.
+- Partially superseded: 2026-11-22 by [ADR-0365](0365-one-hub-serves-several-people-each-is-the-top-of-their-own-domain-and-separate-households-keep-separate-hubs.md) — §1:1 and §3:1, whole: a hub has exactly one owner and may admit other people, each a principal, and separate households keep separate hubs (ADR-0365 §1:1, §2:1). §1:2, restated for several principals: every belief is held on behalf of someone the hub admits, a belief in a person's domain on that person's (ADR-0365 §4:4). §2:1, §4:1 and §4:2 stand, and §2:1 applies to ADR-0365 as well (ADR-0365 §7:1). This replacement takes effect on ratification of ADR-0365. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
