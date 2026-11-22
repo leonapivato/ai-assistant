@@ -1,6 +1,6 @@
 # 366. A person is one identity the hub links accounts to, code decides who sent an input and how sure it is, and a person's label holds for one work
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-22
 - Scope: lane 2 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
