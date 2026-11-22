@@ -5,8 +5,8 @@ it is dealing with, what each of them may do and see, and what reading someone
 else's text does to the work that read it?
 
 This is the record of three design walks the owner ran with the coordinator on
-2026-11-19 and 2026-11-21. Each ruling below was made in chat; the points the
-owner has not ruled are listed under "What it leaves open".
+2026-11-19, 2026-11-21 and 2026-11-22. Each ruling below was made in chat; the
+points the owner has not ruled are listed under "What it leaves open".
 
 ## The baseline
 
@@ -27,7 +27,7 @@ The decisions whose clauses this would touch:
 | ADR-0350 §3 | "A scheduled task carries no authority, whoever set it." | A task's work carries its author's authority, checked at each call. |
 | ADR-0345 §2 | The owner is the one person a holder names "until a decision on identified people adds others". | This is that decision. |
 | ADR-0338 §2 | "Code resolves the person an activation is for from its recorded trigger." | Kept, and widened: a person, a group or no one; and two more facts beside it. |
-| ADR-0364 §4 | "`P1` is the owner, a stable label … the same in every work." | Open: labels may become handles for one work only. |
+| ADR-0364 §4 | "`P1` is the owner, a stable label … the same in every work." | A label is a handle for one work. Only the stored identifier is stable. |
 | ADR-0361 §7 | "No audience check is added for a join from another place, for a message into a taken input's place, or for a card." | The audience check below. |
 | ADR-0217 §1, §2 | A record's reach is one of two sets, anyone or the owner. | Reach names people and groups. |
 | ADR-0306 §4 | "An activation has read outside content when its record says so", and a call leaving the hub then needs the user. | Replaced by a level carried on text, and by where raw text may be read at all. |
@@ -101,6 +101,9 @@ Each kind of connection declares the most it can give. A grant names the least
 it accepts. A shortfall is not a refusal: it becomes an approval card on a
 stronger connection of the same person, using the cards of ADR-0361.
 
+No tool is outside this check. Every tool has a default grant that names its
+bar, and what differs between tools is only where the bar sits.
+
 An account is only as sure as it is exclusive. An account anyone else may send
 through cannot establish its person, so "the person's own only" is the default
 for any account that identifies someone.
@@ -120,10 +123,22 @@ for any account that identifies someone.
   standing rule a person set up can act on it.
 - The system's own upkeep is for no one and may only do what the code allows
   that job inside the system.
-- An input from a second sender may join a work. The work then holds only what
-  every sender holds, area by area, and the lowest sureness.
+- An input from a second sender may join a work, and only in a shared place:
+  the same group chat or the same room. The work then holds only what every
+  sender holds, area by area, and the lowest sureness. A message from another
+  person in a different place starts its own work.
 - There is no acting on another person's behalf. "Remind Sam" is the sender
   messaging Sam on the sender's own authority.
+- A request that depends on another person's answer is a grant to that person.
+  "Ask Sam if he's free Friday, and add it to the calendar if so": the
+  sender's work asks Sam and gives him a grant for that one call, usable once,
+  with an end date. Sam's own work reads whatever Sam writes and makes the call
+  itself, as Sam. Code tells the giver when the grant is used or runs out.
+  Whether such a call goes straight through or becomes a card to the giver is
+  the giver's profile setting. The owner's words: "What if the errand
+  essentially allows Sams activation to add to the calender or not in the
+  specific block. Or at least send a card to me, but from sams perspective
+  thats enough."
 - A shared approval card goes to those who hold the power to answer it. The
   first tap wins, and a yes gives no more than the tapper holds.
 
@@ -142,10 +157,26 @@ the connections and the People section are filtered to what the work's
 authority could use. A resolution only picks a target; the grant check runs on
 whoever is actually named in the call.
 
+A label is how a model points at one exact person in a form code can check. It
+is a handle for one work: code gives the labels out when the work is built,
+swaps them for stored identifiers when anything is written, and swaps them back
+when a later work is shown it. A call naming a label the work was not shown is
+refused. Only the stored identifier is stable, so the numbering reveals nothing
+about people the work may not see.
+
 **Person records.** A record for someone merely mentioned is created
 automatically and carries no account and no grants. Linking an account later
-keeps the identifier. Two records are merged on a person's yes, or by code
-when both carry the same account identifier.
+keeps the identifier.
+
+Who someone is and what is known about them are kept apart. An **identity** is
+one record per real person for the whole hub: an identifier and the account
+identifiers that prove it, such as a phone number. It holds nothing readable
+and belongs to no one. A **view** is what one domain knows about that person,
+the name used, the relation and the facts, and it follows that domain's sharing
+rules. Two views attach to one identity only when both hold the same account
+identifier, which code does silently and never on a name. Otherwise they stay
+two identities until a person who may see both confirms a merge, and the system
+suggests a merge only from what that person can already see.
 
 ## Part 2: audience and privacy
 
@@ -208,8 +239,9 @@ Two standing approvals keep cards from becoming a habit, each a grant the
 person chose: "always, for this task and this place", and a switch per person
 and place.
 
-Messaging a hub person in their own chat needs no grant by default, and each
-person can change that in their profile. Which place a signal lands in is set
+Messaging a hub person in their own chat is an ordinary default grant in the
+recipient's profile, with a bar of normal, and each person can change it. Which
+place a signal lands in is set
 by a rule on its connection, so a doorbell ring can be the house's business
 while a conversation at the door is public.
 
@@ -222,17 +254,19 @@ is absent from it.
 
 ## Part 3: outside content
 
-Outside text is one more voice in the work, and it holds no grants. The rule
-for a second sender already says what follows: the work holds only what every
-voice in it holds. No separate mark is needed.
+Outside text is a stranger's voice. It holds no grants, and nothing it says is
+an instruction. No separate mark is needed for it.
+
+A **sender** is someone the work acts for. A **source** is someone whose text
+the work reads. A source never adds or removes grants. It only sets the work's
+level, by the route its text came in.
 
 **Code sorts every read before it happens.**
 
 | The source is | How it is read | Level |
 | --- | --- | --- |
 | Typed data: a forecast, a time, a status | Directly | Clean |
-| A hub person's linked account | Directly | That person's voice, at that link's sureness |
-| A source the sender has vouched for, verified by code | Directly | What that kind of connection can establish |
+| A source every sender of the work has vouched for, verified by code | Directly | What that kind of connection can establish |
 | Anything else | In separate work that cannot cause effects | Its findings: clean if their shape was fixed beforehand, weak if open |
 
 - **The separate work is a spawn limited to look-ups.** It may explore freely
@@ -251,10 +285,29 @@ voice in it holds. No separate mark is needed.
 - **A model's check softens a drop and never undoes it.** An open summary or a
   content check brings the level to weak, not to clean, and stacking them
   changes nothing.
-- **A work can always answer its own sender** inside the mark.
-- **Vouching for a source is a grant** in the person's own domain. The default
-  is only their own writing. Adding a source needs their authority at normal
-  sureness, so a weak work can never vouch for what it just read.
+- **A work can always answer its own sender** in the place the request
+  arrived, inside the mark. Anything else is a call like any other: a work at
+  weak that messages another hub person falls short of the bar and gets a card
+  to its sender showing the exact text.
+- **A work never acts on another person's words its sender has not seen.**
+  Another hub person's writing is a source, not a sender. Where a request
+  depends on their answer, their own work acts under a grant (Part 1), or the
+  request comes back as a card.
+
+**Vouching for a source is a grant** in the person's own domain.
+
+- Only what code can verify can be vouched for: a web address by its domain,
+  an email sender by its signature, the person's own files, a hub person's
+  linked account. A display name or a claimed sender never can be.
+- Like any grant it can have an end date, be limited to one task, and be
+  removed, which stops future reads only.
+- The default is only the person's own writing. A preset may add to it.
+- Adding a source is a widening. It needs the person's authority at normal
+  sureness, so a work at weak can never vouch for what it just read.
+- A work with several senders reads directly only what every one of them
+  vouches for. For a group's domain, its manager vouches.
+- A vouch covers the whole source, including what it passes along, such as a
+  site's readers' comments. That is the voucher's accepted risk.
 
 Each person decides what weak may do through the grants they already have. A
 summarised web page and a possibly faked email then mean the same thing: the
@@ -275,17 +328,21 @@ later works, tasks and matters (#2798), and the interim rule in the authorizer.
 | Privacy | Filter what a work reads | Read everything and filter what is said: relies on a model keeping a secret it was shown |
 | The instruction and the mark | It counts | Exempting it: saves one tap per task and leaves private detail in an instruction unchecked |
 | Raw outside text | Read only in work that cannot act | Read it and carry on with reduced authority: whatever that work then writes carries the stranger forward |
+| A person's label | A handle for one work | One fixed number per person: gaps in the numbering show how many people a work may not see |
+| The same person known to two people | One identity, a view per domain | A record per domain never joined: sharing then shows the person twice. One shared record with visibility per field: whoever wrote first sets the name |
+| A request that waits on someone's answer | A one-use grant to the person asked | The asker's work waiting for the answer and reading it: it needs a record tying answer to question, cannot hold a mixed or conditional reply, and lets another person's words steer a work with the asker's authority |
+| Another hub person's text | A source | A voice whose grants the work is cut down to: "put it in my calendar if Sam says yes" then fails, since Sam cannot write that calendar |
+| What a vouch covers | The whole source | Only the source's own words: code cannot tell an article from its comments on most sites |
 
 ## What it leaves open
 
-Suggested by the coordinator and not ruled:
+Suggested by the coordinator and not ruled: where each kind of tool's bar sits
+in the presets. Look-ups at none; a reminder or a note in the person's own
+domain at weak; a message to another hub person at normal; a call that leaves
+the hub at normal or with approval each time; changing grants, vouching and
+linking an account at normal or above.
 
-- Another sender's input joins a work only in a shared place.
-- Labels are handles for one work; the stored identifier is the stable thing.
-- One hub-wide identity per real person, with a view per domain, joined only on
-  a matching account identifier.
-- After a read at weak, a message to anyone but the sender needs a card.
-- The details of vouching beyond "paired with source verification".
+Not covered: the same person writing to one work from a second place.
 
 Deferred by the owner to the next prompt review: what is put in front of a
 model and what it fetches, the contents of the People section, the wording when
@@ -298,6 +355,11 @@ who is present in a room, and sureness that fades with time.
 What the spawn needs and does not have today: a spawn limited to look-ups, and
 findings that return to the asking work in a declared shape. That belongs with
 ADR-0349's operations between activations.
+
+What a grant for one call needs and does not have today: a grant that names an
+exact call and is spent on use, and a notice to its giver when it is used or
+runs out. ADR-0361's ticket has the first shape, for one exact call run once,
+but it is not something one person hands to another.
 
 ## How it could be decided
 
