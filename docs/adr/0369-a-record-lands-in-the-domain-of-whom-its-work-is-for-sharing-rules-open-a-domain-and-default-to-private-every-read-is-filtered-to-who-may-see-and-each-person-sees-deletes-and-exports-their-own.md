@@ -163,8 +163,8 @@ provision, not the whole of it, and lane 6 remains among ADR-0367 §1:4's condit
 > sharing rules, as a person does over their own domain.
 
 The owner's ruling keeps ADR-0099's framing, as ADR-0365 §4 restates it: a fact about another
-person "still belongs to whoever learned it", and the person it is about has no say. §2:4 is ADR-0099 §2:1's
-separation of principal from subject, with the holder beside them: in Ana's domain, Sam's "the
+person "still belongs to whoever learned it", and the person it is about has no say. §2:4 is
+ADR-0099 §2:1's separation of principal from subject, with the holder beside them: in Ana's domain, Sam's "the
 wall is blue" is Ana's record, held by Sam and about the wall. §2:6 is what ADR-0368 §9 left this
 lane, "Which beliefs a person's assertion reaches": only those of the domain its work writes
 into. ADR-0099 §4:1 and ADR-0345 §3 stand inside each domain. A write changes nothing of another
@@ -254,8 +254,8 @@ asked as well for approval where the work had read outside content. That half is
 to a named person applies only where they are identified, at weak or above (ADR-0367 §5:2), so a
 narrowing is made at every level at which a sender is that person, and a sender claimed or unknown
 narrows nothing. Where every other bar sits is not ruled (ADR-0367 §17), and this decision sets
-none. A person may make or remove any of these lines by their own act
-on a surface, as any line (ADR-0367 §3:5). Under ADR-0367 §7:6 a widening of one record does not
+none. A person may make or remove any of these lines by their own act on a surface, as any line
+(ADR-0367 §3:5). Under ADR-0367 §7:6 a widening of one record does not
 hold against a limit its person set on the record's kind: they lift that limit, or pass the record
 on by their own act (§11).
 
@@ -293,8 +293,9 @@ A memory's reach (ADR-0217 §1:2) stays the record's own cap on who may see it. 
 needs to say "no one beyond this record's domain", which `OWNER` said while the owner was the only
 person, and to name people for a record made from another domain's records.
 
-> **Normative.** `OWNER` denotes the people of its record's own domain: its person; a group's
-> members, as §9 opens the group's domain to each; or, for the hub's shared things, the owner.
+> **Normative.** `OWNER` denotes the people of its record's own domain: its person, or a group's
+> members as §9 opens the group's domain to each, or, for the hub's shared things, the owner; and
+> whoever holds the data rights over it (§12:2, §12:3).
 
 > **Normative.** A reach may also name people and groups, each group denoting its members when the
 > record is read. `ANYONE` keeps its denotation, every person, the set "anyone" denotes (ADR-0367
@@ -310,7 +311,7 @@ person, and to name people for a record made from another domain's records.
 > **Normative.** No meet is rounded up to a wider reach (ADR-0217 §1:10).
 
 > **Normative.** A record a work or a producer writes from what it read takes, as its reach, the
-> meet of: the reach of each memory it read (ADR-0217 §3:3, §3:5); the people who could see, in the
+> meet of: the reach of each record it read (ADR-0217 §3:3, §3:5); the people who could see, in the
 > form it was read, each record it read of another domain; and the people who could see each
 > record it read of its own domain that a line on that record narrowed. Each is taken when the
 > record is written, and the narrowing the last two supply is written with setter `DERIVED`.
@@ -340,9 +341,9 @@ ADR-0217 §3:3 and §3:5's ratchet, which §7:5 widens from memories to everythi
 domain, the people who could see them are fixed when the record is written: what another person's
 work learned stays theirs, and no copy is seen more widely than its source could be at the time.
 For records of its own domain, §7:6 fixes when it is written which of the domain's kinds bind the
-record, and §6:1 reads the domain's rules on them as they stand. A private calendar therefore cannot reach the flat
-through a memory made from it, and a record made before its person shared anything can still be
-shared once they share its sources. `DERIVED` is not lifted by any act (ADR-0217 §3:13), so a
+record, and §6:1 reads the domain's rules on them as they stand. A private calendar therefore
+cannot reach the flat through a memory made from it, and a record made before its person shared
+anything can still be shared once they share its sources. `DERIVED` is not lifted by any act (ADR-0217 §3:13), so a
 narrowing taken from another person's record is never undone by the person who learned it.
 
 ADR-0217 §2's rule for what an output channel may carry stands as written, with the reach as this
