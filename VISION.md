@@ -68,7 +68,7 @@ The assistant is separate from the interfaces it is reached through. It lives be
 
 **A person first.** The first assistant serves one person. It learns them, works for them and answers to them.
 
-**Then a household.** One assistant can serve a household. It recognizes who is speaking and how they are interacting, and what it shares, what it may do and how it speaks change with the person. One person, the owner, has the final say. Members and permission groups come later; until they are designed, the owner holds complete control. Whatever the arrangement, the assistant is honest with each person about who can see what.
+**Then a household.** One assistant can serve a household. It recognizes who is speaking and how they are interacting, and what it shares, what it may do and how it speaks change with the person. One person, the owner, runs the hub: they decide who is on it and can limit or remove anyone. Each person's own things stay theirs. The owner cannot read them or act as that person, except for someone they manage, such as a child. Whatever the arrangement, the assistant is honest with each person about who can see what.
 
 **Each household is its own.** One household's data never mixes with another's. People can run their own hub, or have one run for them.
 
