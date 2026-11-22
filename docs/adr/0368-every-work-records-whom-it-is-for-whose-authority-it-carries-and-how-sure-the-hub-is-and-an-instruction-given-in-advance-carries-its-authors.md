@@ -1,6 +1,6 @@
 # 368. Every work records whom it is for, whose authority it carries and how sure the hub is, and an instruction given in advance carries its author's
 
-- Status: Partially superseded by ADR-0370 (§6:3, in the addition alone: a task also records the mark its setting work carried)
+- Status: Partially superseded by ADR-0370 (§6:3, in the addition alone: a task also records the mark its setting work carried) and ADR-0371 (§6:1, §6:3 and §7:1, each in the addition alone: the check runs at, and a task records, the level of the work's context)
 - Date: 2026-11-22
 - Scope: lane 4 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
@@ -54,6 +54,7 @@
   inputs carry no person's authority* and §11:1, for a task's work once built; §14:4's last test, in
   part), as §10 records.
 - Partially superseded: 2026-11-22 by [ADR-0370](0370-every-work-carries-a-mark-of-who-may-see-all-it-has-seen-which-starts-at-its-places-audience-and-only-shrinks-and-a-send-reaching-anyone-outside-it-needs-a-yes.md) — §6:3, in the addition alone: a task also records the mark the work that set it carried when it set the task (ADR-0370 §4:6). It still records no list of actions or calls, and every other clause stands. This replacement takes effect on ratification of ADR-0370. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-11-22 by [ADR-0371](0371-outside-text-holds-no-grants-code-sorts-every-read-by-its-source-raw-text-is-read-only-in-work-that-cannot-act-and-text-carries-its-level.md) — §7:1 and its table's level, in the addition alone: the check runs at the level of the work's context, the lowest of its sureness and what it holds now, never above its sureness (ADR-0371 §6:1, §6:2). §6:1 and §6:3, in the addition alone: the level a task records for the work that set it is the level its instruction carries when written (ADR-0371 §5:4). §2:3's sureness and every other clause stand. This replacement takes effect on ratification of ADR-0371. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
