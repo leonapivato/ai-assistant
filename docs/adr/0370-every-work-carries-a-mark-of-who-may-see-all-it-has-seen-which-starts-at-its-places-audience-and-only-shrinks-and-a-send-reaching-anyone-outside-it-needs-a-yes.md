@@ -1,6 +1,6 @@
 # 370. Every work carries a mark of who may see all it has seen, which starts at its place's audience and only shrinks, and a send reaching anyone outside it needs a yes
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-22
 - Scope: lane 6 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
