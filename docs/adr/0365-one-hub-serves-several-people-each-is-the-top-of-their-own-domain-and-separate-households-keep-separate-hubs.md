@@ -1,6 +1,6 @@
 # 365. One hub serves several people, each is the top of their own domain, and separate households keep separate hubs
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-22
 - Scope: lane 1 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
