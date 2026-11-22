@@ -65,8 +65,9 @@ later decisions.
 > family. A hub deals with one person alone as well as with a family, roommates, friends, people
 > who work in the home or come to the door, and people it cannot identify.
 
-> **Normative.** Until the later decisions §6 names have merged and been built, the owner stays the
-> only person a hub admits, and no lane admits another on the strength of this decision alone.
+> **Normative.** This decision alone admits no one. The owner stays the only person a hub admits
+> until a later decision §6 names provides for admitting another and that provision is built, and no
+> lane admits another person on the strength of this decision alone.
 
 This decision lifts a bar and sets principles. It obliges no code.
 
@@ -89,8 +90,8 @@ Each later decision cites these and builds the mechanism.
 > beyond their domain, and each grant is as narrow as its need.
 
 > **Normative.** Permission comes from whoever a thing belongs to, and limits come from above.
-> Someone above a person may narrow or take away what that person holds, and never grants in that
-> person's place.
+> Someone above a person may narrow or take away what that person holds and, save over a managed
+> person under §4:3, never grants in that person's place.
 
 > **Normative.** Sharing is like telling someone. What a person has been shown, they know, and they
 > may pass it on by their own act. The system never passes anything on by itself.
@@ -166,6 +167,14 @@ speaker identification stays with the voice work (#691), outside this batch. Bys
 federation do not fire. ADR-0099 §7's `VISION.md` amendment was owed with §3:1's federation, and
 `VISION.md` → "Each household is its own" already says what §2 decides.
 
+`VISION.md` → "Then a household" says: "One person, the owner, has the final say. Members and
+permission groups come later; until they are designed, the owner holds complete control." §1:3
+keeps that true until a later decision provides for admitting another person and it is built. After
+that, the owner's final say is §4:2's: to admit, limit and remove a person, and over a managed person
+the powers stated under §4:3. It is not power inside another person's domain, which is what the
+owner ruled on 2026-11-19. Whether that sentence of `VISION.md` is reworded is the owner's call, and
+this decision does not touch the file.
+
 > **Normative.** ADR-0099 §2:1 applies to this decision as it applies to ADR-0099 §1: that a person
 > is a principal here may never be cited to argue that a belief is about them, to refuse a subject
 > axis, or to narrow what a later decision may model about a third party.
@@ -175,11 +184,12 @@ federation do not fire. ADR-0099 §7's `VISION.md` amendment was owed with §3:1
 > ratified body. The replacements take effect on this ADR's ratification.
 
 Read through and not superseded. Each stands as written, and none reads more widely, because §1:3
-keeps the owner the only person a hub admits until the later decisions are built:
+keeps the owner the only person a hub admits until a later decision provides for admitting another
+and that provision is built:
 
 | Decision | Why it stands |
 | --- | --- |
-| ADR-0124 §5's device clauses, and the decisions that cite ADR-0099 §1's single principal as their ground (ADR-0131, ADR-0199 §7, ADR-0296) | Each still describes a hub with one admitted person. The later decision that admits a second records what changes in them |
+| ADR-0124 §5's device clauses, and the decisions that cite ADR-0099 §1's single principal as their ground (ADR-0131, ADR-0199 §7, ADR-0296) | Each still describes a hub with one admitted person. The later decision that provides for admitting a second records what changes in them |
 | ADR-0097 §12, **Who granted** | Its condition is "the first multi-user deployment", which §1:3 defers. Lane 3 |
 | ADR-0345 §2:1 | Its condition is "a decision on identified people", which this is not. Lane 2 |
 | ADR-0058's revisit condition, quoted in ADR-0099 §1 | ADR-0058 is superseded whole by ADR-0319, so the condition no longer binds |
@@ -188,8 +198,11 @@ keeps the owner the only person a hub admits until the later decisions are built
 
 Each is this decision's, not an owner ruling:
 
-- **§1:3's wording** as a bar on lanes, from the coordinator's brief that the hub runs as it does
-  today until the later decisions are built.
+- **§1:3's wording** as a bar on lanes: this decision alone admits no one, and the hub runs as it
+  does today until a later decision provides for admitting another person and that is built. It
+  comes from the coordinator's brief, narrowed so that a staged build needs no amendment.
+- **§3:2's exception for a managed person**: the owner ruled the managed person the exception to
+  the domains rule (§4:3), and applying that exception to §3:2 as well is this decision's.
 - **§2:2**, that "never mixes" means no hub reads or writes another household's store, and §2's
   note that a household is whoever one owner admits.
 - **§3:1's "outside their own domain"**: least privilege was ruled before domains, and a person's
@@ -199,6 +212,8 @@ Each is this decision's, not an owner ruling:
 - **§5:2's second sentence**, that no surface overstates the protection, from `VISION.md`'s "the
   assistant is honest with each person about who can see what".
 - **§7:1**, applying ADR-0099 §2:1 to this decision.
+- **§7's reading of `VISION.md`'s "final say"**: after the later decisions are built, it is §4:2's
+  powers and not power inside another person's domain.
 - **Which lane takes** ADR-0099 §4's readings, ADR-0097 §12 and who counts as independent or
   managed (§6). The cut into lanes is the coordinator's (#3629).
 
@@ -208,7 +223,8 @@ Each is this decision's, not an owner ruling:
   decisions' work, each citing §3 and §4 by clause.
 - The owner's power over other people is bounded from the start: admit, limit, remove, and no more,
   except over a managed person by stated powers.
-- Nothing changes in the running hub until those decisions merge and are built (§1:3).
+- Nothing changes in the running hub until a later decision provides for admitting another person
+  and that provision is built (§1:3).
 - A person's domain is only as safe from the owner as the software and its log. A person who needs
   more needs per-person encryption or a hub of their own, and §5:2 makes the hub say so.
 - **Revisit** if a deployment arrives where the owner should not run the machine, such as a hosted
