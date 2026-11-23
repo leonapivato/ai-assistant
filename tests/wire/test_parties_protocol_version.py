@@ -18,7 +18,6 @@ import json
 from datetime import UTC, datetime
 from typing import Final
 
-from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.types import (
     ActivationUnderstanding,
     ChannelContext,
@@ -38,6 +37,7 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import line_input
 from ai_assistant.wire import envelope
 from ai_assistant.wire.codec import encode_projection, project
 
@@ -77,8 +77,8 @@ def _entry_for(version: int) -> str:
 
 
 def _episode() -> EpisodicMemory:
-    parties, messages = declared_input(
-        _LINE,
+    # The owner's linked account sent both: their note, and the forward (ADR-0351 §3:2).
+    parties, messages = line_input(
         (
             RecordedInputMessage(text="Is this right?", sent_at=_AT, position=1),
             RecordedInputMessage(

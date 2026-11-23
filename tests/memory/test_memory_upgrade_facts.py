@@ -15,9 +15,10 @@ one this build writes carries them: a build at 23 would fail on the read, which 
 the label moves (ADR-0326 §2:3, §5:3). The head opens a copy and must upgrade it in
 place: never refuse it (§5:1), drop nothing (§4:4), and carry each episode with **what
 the channel-type rule said of it** (#3642: "A work from before the upgrade still reads
-whole. Its three facts are filled in from what was recorded then"), which is held here
-against that rule as it still runs (``work_facts.todays_path``). The previous release,
-which serves 12 to 23, refuses the upgraded file (§5:3).
+whole. Its three facts are filled in from what was recorded then"), and every reader
+reads each old work as that rule did: whose work it is and whose authority it carries
+(``work_facts.persons_work``, ``work_facts.persons_authority``, ADR-0368 §9:1, §9:5).
+The previous release, which serves 12 to 23, refuses the upgraded file (§5:3).
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ from ai_assistant.memory._episode_format import (
 )
 from ai_assistant.memory._facts_upgrade import facts_episode
 from ai_assistant.models import HashingEmbedder
-from ai_assistant.orchestration.work_facts import disagreements, todays_path
+from ai_assistant.orchestration.work_facts import persons_authority, persons_work
 from ai_assistant.testing import FakeTraceSink
 
 pytestmark = pytest.mark.integration
@@ -233,15 +234,30 @@ async def test_every_record_reopens_whole_with_what_the_rule_said_of_it(legacy: 
     assert isinstance(said, Memory)
 
 
-async def test_the_facts_carried_are_what_todays_path_says(legacy: Path) -> None:
-    """#3642: the facts an old work is given are what the rule still running says of it,
-    so the readers can move to the facts without an old work reading otherwise."""
+async def test_every_old_work_reads_as_the_channel_type_rule_read_it(legacy: Path) -> None:
+    """#3642: the readers read an old work's facts, never its channel type, and each old
+    work reads as the rule that decided it then: the owner's own message is the owner's
+    work carrying their authority; a forward, an event, a task's occurrence and an
+    approval's outcome the owner's work carrying none."""
     exported = await _exported(legacy)
 
-    for record_id in _REWRITTEN:
-        record = _processing(exported[record_id])
-        assert record.facts is not None
-        assert disagreements(record.facts, todays_path(record.trigger)) == (), record_id
+    read = {
+        record_id: (
+            persons_work(_processing(exported[record_id]).facts_now),
+            persons_authority(_processing(exported[record_id]).facts_now),
+        )
+        for record_id in _REWRITTEN
+    }
+    owners = (OWNER_PERSON_ID, OWNER_PERSON_ID)
+    for_the_owner = (OWNER_PERSON_ID, None)
+    assert read == {
+        "mem-chat": owners,
+        "mem-line": for_the_owner,
+        "mem-event": for_the_owner,
+        "mem-task": for_the_owner,
+        "mem-approval": for_the_owner,
+        _OPEN: owners,
+    }
 
 
 async def test_every_other_row_is_kept_and_the_rest_byte_for_byte(legacy: Path) -> None:

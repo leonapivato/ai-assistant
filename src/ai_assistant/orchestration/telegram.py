@@ -306,8 +306,9 @@ TELEGRAM: Final = ChannelKind(
     ),
     push_filter=None,
     authors=(
-        "the configured account, not forwarding, is the user, established; every other "
-        "author is claimed"
+        "each message's sender is the person the link its Telegram account holds names, "
+        "at that link's level, and no identified person where no link does; a forward's "
+        "original sender is claimed"
     ),
     places="each private chat with the bot, keyed by its chat id",
     window=WindowSource.EPISODES,
@@ -551,10 +552,11 @@ def _recorded(
 ) -> tuple[RecordedInputMessage, ...]:
     """Each message as an episode records it: dated, a forward with its sender (§5:4).
 
-    Each carries the party the line's kind declares for it (ADR-0351 §2:6, §3:1): the
-    owner's for a message the configured account wrote, and a forward's original
-    sender, claimed, for a forward (§2:7), so an absorption or a take that brings these
-    messages brings their parties.
+    Each carries the party the line's kind declares for it (ADR-0351 §2:6, §3:1): its
+    sender's words for a message its sender wrote, the person the link its Telegram
+    account holds names, or unknown where no identified person is (§3:2), and a forward's
+    original sender, claimed, for a forward (§2:7), so an absorption or a take that brings
+    these messages brings their parties.
     """
     return tuple(
         RecordedInputMessage(
@@ -562,7 +564,7 @@ def _recorded(
             sent_at=one.sent_at,
             position=one.message_id,
             forwarded_from=_sender(one),
-            party=message_party(TELEGRAM_CHANNEL_TYPE, _sender(one)),
+            party=message_party(TELEGRAM_CHANNEL_TYPE, _sender(one), senders.get(one.message_id)),
             sender=senders.get(one.message_id),
         )
         for one in messages

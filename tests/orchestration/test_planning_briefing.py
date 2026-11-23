@@ -20,6 +20,7 @@ from typing import Any, Final
 
 import pytest
 from exchange_support import section, tag, tags
+from identity_support import recorded_facts
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -208,7 +209,8 @@ def _episode(  # noqa: PLR0913 — one knob per part a short view shows
         activation_id=activation,
         started_at=at,
         ended_at=at + timedelta(minutes=1),
-        trigger=_trigger(text, channel=channel, at=at),
+        trigger=(trigger := _trigger(text, channel=channel, at=at)),
+        facts=recorded_facts(trigger),
         status=ProcessingStatus.COMPLETED,
         reason=ProcessingReason.RETURNED,
         understanding=(_understood("Leo asks for a table at Luigi's on Friday."),),
@@ -1363,17 +1365,16 @@ async def test_a_scheduled_tasks_work_is_the_persons_last_stimulus() -> None:
     record = _episode("reminded", channel=TELEGRAM, at=NOW - timedelta(minutes=30))
     processing = record.processing_record
     assert processing is not None
+    trigger = _trigger(
+        "Remind Leo to call his mother.",
+        channel=scheduled,
+        parties=None,
+        at=NOW - timedelta(minutes=30),
+    )
     ran = record.model_copy(
         update={
             "processing_record": processing.model_copy(
-                update={
-                    "trigger": _trigger(
-                        "Remind Leo to call his mother.",
-                        channel=scheduled,
-                        parties=None,
-                        at=NOW - timedelta(minutes=30),
-                    )
-                }
+                update={"trigger": trigger, "facts": recorded_facts(trigger)}
             )
         }
     )

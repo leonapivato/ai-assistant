@@ -27,7 +27,6 @@ from ai_assistant.orchestration.channel_kinds import (
     Audience,
     WindowSource,
     place_of,
-    users_place,
 )
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.telegram import (
@@ -35,6 +34,7 @@ from ai_assistant.orchestration.telegram import (
     TELEGRAM_DESCRIPTION,
     line_channel,
 )
+from ai_assistant.testing.parties import OWNER_SENDER
 
 _AT: Final = datetime(2026, 10, 28, 9, tzinfo=UTC)
 
@@ -42,26 +42,6 @@ _AT: Final = datetime(2026, 10, 28, 9, tzinfo=UTC)
 def test_a_place_is_its_channel_type_then_its_instance() -> None:
     assert place_of(conversation_channel("c-1")) == "conversation:c-1"
     assert place_of(line_channel("conn-1", 42)) == "telegram:conn-1/42"
-
-
-@pytest.mark.parametrize(
-    ("place", "users"),
-    [
-        ("conversation:c-1", True),
-        ("telegram:conn-1/42", True),
-        ("informational_event:mail-1", False),
-        ("place:chat", False),
-        ("conversation:", False),
-        ("conversation", False),
-        ("", False),
-        (None, False),
-    ],
-)
-def test_a_users_place_is_one_whose_kind_establishes_the_user(
-    place: str | None, users: bool
-) -> None:
-    """§4:8: one of the user's conversations, or the line's chat."""
-    assert users_place(place) is users
 
 
 def test_the_telegram_kind_declares_what_its_table_states() -> None:
@@ -74,14 +54,14 @@ def test_the_telegram_kind_declares_what_its_table_states() -> None:
     assert TELEGRAM.push_filter is None
     assert TELEGRAM.description == TELEGRAM_DESCRIPTION
     assert "plain text" in TELEGRAM.description
-    assert TELEGRAM.establishes_the_user
+    assert TELEGRAM.sent_by_a_person
     assert TELEGRAM.approval_giver is ApprovalGiver.USER_THROUGH_TELEGRAM
 
 
 def test_the_kind_reads_its_parties_per_input_from_cores_register() -> None:
     """ADR-0351 §3:1: the line's message is the owner's, a forward its sender's, claimed."""
     line = line_channel("conn-1", 42)
-    typed = RecordedInputMessage(text="hi", sent_at=_AT)
+    typed = RecordedInputMessage(text="hi", sent_at=_AT, sender=OWNER_SENDER)
     forwarded = RecordedInputMessage(
         text="see you", sent_at=_AT, forwarded_from=ClaimedAuthor(name="Sam", account_id=7)
     )
@@ -93,8 +73,8 @@ def test_the_kind_reads_its_parties_per_input_from_cores_register() -> None:
         TELEGRAM.input_parties(conversation_channel("c-1"), (typed,))
 
 
-def test_a_kind_that_establishes_nobody_gives_no_approval() -> None:
-    with pytest.raises(ValueError, match="establishes the user"):
+def test_a_kind_no_person_sends_on_gives_no_approval() -> None:
+    with pytest.raises(ValueError, match="a person sends on"):
         dataclasses.replace(TELEGRAM, channel_type="informational_event")
 
 

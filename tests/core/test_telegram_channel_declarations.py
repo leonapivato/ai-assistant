@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import (
     declared_input,
-    establishes_the_user,
+    sent_by_a_person,
     snapshot,
 )
 from ai_assistant.core.types import (
@@ -37,7 +37,7 @@ from ai_assistant.core.types import (
     parties_are_outside,
     parties_are_persons_own,
 )
-from ai_assistant.testing.parties import OWNERS_WORDS, line_input
+from ai_assistant.testing.parties import OWNER_SENDER, OWNERS_WORDS, line_input
 
 LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="conn-0001/424242")
 AT: Final = datetime(2026, 10, 17, 9, 0, tzinfo=UTC)
@@ -50,9 +50,9 @@ _FORWARDED: Final = RecordedInputMessage(
 
 
 def test_the_lines_parties_are_declared_per_input() -> None:
-    """§4:11, ADR-0351 §3:1: the owner's for an input taking in no forward, and outside
-    for one that does."""
-    typed, _ = declared_input(LINE, (_TYPED,))
+    """§4:11, ADR-0351 §3:1, §3:2: its sender's words for an input taking in no forward,
+    the owner's where the owner's link sent it, and outside for one that does."""
+    typed, _ = declared_input(LINE, (_TYPED.model_copy(update={"sender": OWNER_SENDER}),))
     forwarded, _ = declared_input(LINE, (_FORWARDED,))
     assert typed == OWNERS_WORDS
     assert parties_are_persons_own(typed)
@@ -70,12 +70,12 @@ def test_a_kind_taking_in_no_forward_declares_no_party_for_one(
         declared_input(target, (_FORWARDED,))
 
 
-def test_the_kinds_that_establish_the_user_are_the_chat_and_the_line() -> None:
-    """§4:8: one of the user's conversations, or the line's chat, and nothing else."""
-    assert establishes_the_user("conversation")
-    assert establishes_the_user("telegram")
-    assert not establishes_the_user("informational_event")
-    assert not establishes_the_user("email")
+def test_the_kinds_a_person_sends_on_are_the_chat_and_the_line() -> None:
+    """ADR-0366 §4:1: a person sends on the hub chat and the line by an account; no other."""
+    assert sent_by_a_person("conversation")
+    assert sent_by_a_person("telegram")
+    assert not sent_by_a_person("informational_event")
+    assert not sent_by_a_person("email")
 
 
 @pytest.mark.parametrize("reply", [None, WholeTextReply()], ids=["no-reply", "whole-text"])

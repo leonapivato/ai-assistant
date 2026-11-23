@@ -3164,9 +3164,8 @@ def _mixes_person_and_assistant(parties: Sequence[SupportHolder]) -> bool:
 # input beside its author, and on each message where the input records messages (ADR-0368
 # §2:6). **The three facts** are code's too, recorded on every work when it starts and
 # again when an input joins it, from its recorded inputs and never from what they say
-# (ADR-0368 §2:1 to §2:4). Nothing here reads them yet: who a work is for and whether it
-# carries the user's authority are still read as they were (§1:3), and each fact is
-# recorded beside that reading.
+# (ADR-0368 §2:1 to §2:4). They decide: who a work is for and whose authority it carries
+# are read from them (§9:1, §9:5), and from nothing a channel type says.
 
 
 class Sureness(StrEnum):
@@ -4185,8 +4184,8 @@ class ApprovalGiver(StrEnum):
     """Who gave an approval: §4:6's *who* (ADR-0321 §4:6).
 
     The user, through the channel the yes came on (ADR-0323 §4:9). Closed, **added to
-    and never renamed**: a later kind of approval, or a later channel whose kind
-    establishes the user, adds a member rather than reshaping this one.
+    and never renamed**: a later kind of approval, or a later channel a person sends
+    on, adds a member rather than reshaping this one.
     """
 
     USER_THROUGH_HUB_CHAT = "user_through_hub_chat"
@@ -4989,8 +4988,9 @@ class LabelKind(StrEnum):
     activation the Task Scheduler started goes into (ADR-0350 §5:13). A channel heading
     takes no label. Since ADR-0364 §3:3 it names any connection planning is shown."""
     PERSON = "person"
-    """A person, ``P1`` the owner, a stable label over ADR-0345 §2:5's identifier, the
-    same in every work (ADR-0364 §4:1)."""
+    """A person, a label over their stored identifier that holds for one work, as every
+    other kind does (ADR-0366 §8:1): only the identifier is stable, and no person's label
+    is the same in every work by rule (§8:4), the owner's included."""
 
 
 #: Each kind's label prefix (ADR-0307 §5:1, ADR-0321 §4:2, ADR-0350 §12:2, ADR-0364 §4:1):

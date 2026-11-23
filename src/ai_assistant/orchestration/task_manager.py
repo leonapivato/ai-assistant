@@ -87,7 +87,6 @@ from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.matters import in_progress
 from ai_assistant.orchestration.outside_content import holds_outside
-from ai_assistant.orchestration.person_block import activation_person
 from ai_assistant.orchestration.person_calls import NotDone
 from ai_assistant.orchestration.task_rules import (
     PersonZones,
@@ -132,6 +131,7 @@ from ai_assistant.orchestration.task_scheduler import (
     shown_occurrence,
     when_text,
 )
+from ai_assistant.orchestration.work_facts import persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -912,7 +912,8 @@ class TaskManager:
             processing = record.processing_record
             if processing is None or processing.is_open:
                 continue
-            if activation_person(processing.trigger) != person:
+            # ADR-0368 §9:5: the episode is the person's where its facts make it theirs.
+            if persons_work(processing.facts_now) != person:
                 continue
             if supply is not None and not admitted_to_understanding(supply, (record,)):
                 continue
@@ -1068,7 +1069,7 @@ class TaskManager:
             effect,
             match=match,
             deliberate_repeat=deliberate_repeat,
-            replace_any=spawner.users_authority,
+            replace_any=spawner.carries_the_persons,
             chain_limit=self._limits.chain_limit,
             pending_limit=self._limits.pending_limit,
         )
@@ -1138,7 +1139,7 @@ class TaskManager:
         spawner = Spawner(
             activation_id=command,
             person=replaced.person,
-            users_authority=True,
+            authority=replaced.person,
             set_in=replaced.set_in,
         )
         written = await self.spawn(
@@ -1304,7 +1305,7 @@ class ScheduledTaskCalls:
         cancelled = await self._manager.cancel(
             task_id,
             person=spawner.person,
-            spawned_by=None if spawner.users_authority else spawner.activation_id,
+            spawned_by=None if spawner.carries_the_persons else spawner.activation_id,
         )
         if cancelled.reason is not None or cancelled.task is None:
             reason = TaskRefusal.UNKNOWN_TASK if cancelled.reason is None else cancelled.reason
@@ -1418,7 +1419,7 @@ def _caller(call: ToolCall) -> Spawner | None:
     approval = call.decision.approval
     if spawner is None or approval is None or not isinstance(approval.how, TapOnCard):
         return spawner
-    return replace(spawner, users_authority=True)
+    return replace(spawner, authority=spawner.person)
 
 
 def _suggested(

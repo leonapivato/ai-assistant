@@ -145,9 +145,9 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.matters import EntryInput
-from ai_assistant.orchestration.person_block import activation_person
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import activation_of
+from ai_assistant.orchestration.work_facts import persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -977,6 +977,7 @@ class UnderstandingStage:
         zone: ZoneInfo | None = None,
         own_zone: bool = False,
         received_at: datetime | None = None,
+        person_id: str | None = None,
     ) -> ActivationUnderstanding:
         """Read one input against its context, and record what it was understood to mean.
 
@@ -1022,6 +1023,9 @@ class UnderstandingStage:
             own_zone: Whether ``zone`` is the person's own rather than the hub's.
             received_at: When the stimulus reached the system, for its framing sentence
                 and the person's last stimulus; ``now`` where none is handed.
+            person_id: The person whose work it is, as its three facts read
+                (ADR-0368 §9:5), where no person block names them; ``None`` where it is
+                no person's, or where no trigger is handed.
 
         Returns:
             The recorded understanding.
@@ -1040,7 +1044,7 @@ class UnderstandingStage:
             excerpt_chars=self._excerpt_chars,
             zone=zone or _UTC,
             own_zone=own_zone,
-            naming=_naming(person, trigger, parties),
+            naming=_naming(person, trigger, parties, person_id=person_id),
             channel=channel,
             now=moment,
             received_at=received_at or moment,
@@ -1200,18 +1204,22 @@ def _naming(
     person: PersonBlock | None,
     trigger: RecordedChannelTrigger | None,
     parties: Sequence[SupportHolder] | None,
+    *,
+    person_id: str | None,
 ) -> _Naming:
-    """Who the stimulus is for, from its person block, else its trigger (ADR-0338 §2:2).
+    """Who the stimulus is for, from its person block, else its work's facts (ADR-0338 §2:2).
 
-    With neither, the owner where the words are the person's own (ADR-0351 §3:2).
+    Its facts are read by the caller (ADR-0368 §9:5) and handed in as ``person_id``. With
+    no trigger handed, the one person its parties name, where they name one person
+    alone (ADR-0351 §3:2): the parties are set from who sent it, never from its channel.
     """
     if person is not None:
         return _Naming(person_id=person.person_id, name=person.profile.value(ProfileField.NAME))
     if trigger is not None:
-        return _Naming(person_id=activation_person(trigger), name=None)
-    return _Naming(
-        person_id=OWNER_PERSON_ID if parties_are_persons_own(parties) else None, name=None
-    )
+        return _Naming(person_id=person_id, name=None)
+    named = {one.identifier for one in parties or () if one.kind is HolderKind.PERSON}
+    alone = parties_are_persons_own(parties) and len(named) == 1
+    return _Naming(person_id=named.pop() if alone else None, name=None)
 
 
 # --- the renderer (ADR-0353 §2-§8) -------------------------------------------------------
@@ -1655,9 +1663,10 @@ class _Renderer:
         for record in (*placed.episodes, *recalled):
             if not isinstance(record, EpisodicMemory) or record.processing_record is None:
                 continue
-            trigger = record.processing_record.trigger
-            if activation_person(trigger) == person:
-                found.append((record.occurred_at, _origin_where(trigger.channel)))
+            processing = record.processing_record
+            # ADR-0368 §9:5: an episode is the person's where its facts make it theirs.
+            if persons_work(processing.facts_now) == person:
+                found.append((record.occurred_at, _origin_where(processing.trigger.channel)))
         found.extend(
             (entry.arrived_at, _origin_where(entry.channel))
             for entry in running

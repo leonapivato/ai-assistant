@@ -31,12 +31,16 @@ from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.reply_shapes import read_reply, reply_shape_version
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    Account,
     ChannelIdentity,
     ChannelInput,
     ChatDevice,
     ControllerStage,
     DeviceAccess,
     EpisodicMemory,
+    LinkAct,
+    LinkActHow,
     MessageAuthor,
     ProposedCall,
     ReplyExchange,
@@ -90,6 +94,9 @@ _UNDERSTOOD: Final = json.dumps({"understanding": MEANING})
 
 #: The device every conversation is written from: the owner's own.
 PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+
+#: The account the hub chat's reader reads :data:`PHONE`'s messages by.
+_PHONE_ACCOUNT: Final = Account(kind="conversation", identifier=PHONE.device_id)
 
 #: An informational event channel, which declares its input ``outside`` (ADR-0284 §2:2).
 SENSOR: Final = ChannelIdentity(channel_type="informational_event", instance_id="sensor")
@@ -183,7 +190,16 @@ class Phased:
         return self.engine._conversations.activation_writer
 
     async def start_conversation(self) -> str:
-        """Name :data:`PHONE` as the owner's device and start a conversation on it."""
+        """Name :data:`PHONE` as the owner's device and start a conversation on it.
+
+        The device is linked to the owner as the hub links a device the owner admits
+        (ADR-0373 §6:2), so what it writes is the owner's (ADR-0366 §4:1, ADR-0368 §9).
+        """
+        identities = self.engine._identities
+        assert identities is not None, "the composition root wires the identity store"
+        if await identities.find_link(_PHONE_ACCOUNT) is None:
+            act = LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID)
+            await identities.link(OWNER_PERSON_ID, _PHONE_ACCOUNT, act=act)
         await self.engine.set_my_devices([PHONE])
         return (await self.engine.start_conversation()).id
 

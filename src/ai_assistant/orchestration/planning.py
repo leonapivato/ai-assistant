@@ -251,7 +251,7 @@ from ai_assistant.orchestration.message_tools import (
     TEXT_CAPABILITY,
     platform_name,
 )
-from ai_assistant.orchestration.person_block import activation_person, person_zone
+from ai_assistant.orchestration.person_block import person_zone
 from ai_assistant.orchestration.person_calls import (
     PERSON_MODEL_CAPABILITIES,
     PIN_CAPABILITY,
@@ -274,6 +274,7 @@ from ai_assistant.orchestration.story_calls import (
     TIDY_STORY_CAPABILITY,
 )
 from ai_assistant.orchestration.task_scheduler import StartingEntry, place_description
+from ai_assistant.orchestration.work_facts import persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Sequence
@@ -2542,8 +2543,9 @@ class _Request:
         self._own_zone = own_zone
         self._notes_bound = notes_bound
         person = inputs.person
-        # ADR-0364 §4:1: ``P1`` is the owner, the same in every work, so it is minted first.
-        book.label(LabelKind.PERSON, OWNER_PERSON_ID)
+        # ADR-0366 §8:4: no person's label is the same in every work by rule, so none is
+        # minted ahead of the rest: each person takes the next ``P`` label where the
+        # briefing first names them (§8:5 rules nothing of the order).
         self._naming = _Naming(
             person_id=inputs.person_id if person is None else person.person_id,
             name=None if person is None else person.profile.value(ProfileField.NAME),
@@ -3074,8 +3076,10 @@ class _Request:
         for record in (*inputs.episodes, *inputs.recalled):
             if not isinstance(record, EpisodicMemory) or record.processing_record is None:
                 continue
-            trigger = record.processing_record.trigger
-            if activation_person(trigger) == person and _authored_by_them(trigger):
+            processing = record.processing_record
+            trigger = processing.trigger
+            # ADR-0368 §9:5: an episode is the person's where its facts make it theirs.
+            if persons_work(processing.facts_now) == person and _authored_by_them(trigger):
                 found.append((record.occurred_at, _origin_where(trigger.channel)))
         found.extend(
             (entry.arrived_at, _origin_where(entry.channel))

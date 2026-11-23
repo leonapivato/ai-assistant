@@ -5,8 +5,8 @@ directions, whether it is pulled or pushes, which events are input, its push fil
 how it establishes authors, its places, its window, what counts as sent, its
 description, its requirements and its audience. Until the Telegram line no kind was
 declared in code: the hub chat's description is stated where the phases show it, and
-what admission needs of every type — the parties of its input, and whether it establishes the
-user as an author — is :mod:`ai_assistant.core.channel_validation`'s register.
+what admission needs of every type — the parties of its input, and whether a person sends
+on it by an account — is :mod:`ai_assistant.core.channel_validation`'s register.
 
 **This module is the shape the first kind declared in code takes** (ADR-0323 §9:1,
 ADR-0324's "the shape the first kind declared in code takes"): one frozen
@@ -14,15 +14,13 @@ ADR-0324's "the shape the first kind declared in code takes"): one frozen
 rather than prose. A kind declared here states what it is; the module that builds its
 spoke reads the rows it acts on (its description, its window, its writer's rules), and
 the rows admission reads stay in ``core``'s register, which :meth:`ChannelKind.
-establishes_the_user` and :meth:`ChannelKind.input_parties` read rather than restate,
+sent_by_a_person` and :meth:`ChannelKind.input_parties` read rather than restate,
 so the two can never disagree. A pulled kind's declaration needs of this only its
 description (ADR-0324), and the shape takes it with no spoke at all.
 
 **Places** (ADR-0306 §6, ADR-0292 §10:8). A message's effect record names the place it
 went into as ``<channel type>:<instance id>`` — ``conversation:<id>`` for the hub chat,
-as it always was. :func:`place_of` spells it, and :func:`users_place` reads from a
-recorded place whether its kind establishes the user there, which is what authorizing
-reads of a question's place (ADR-0323 §4:8) without naming a channel (§4:5).
+as it always was. :func:`place_of` spells it, and :func:`place_channel` reads it back.
 
 **No place waits** (ADR-0349 §8:1). No kind declares that its places run one activation
 at a time, or that an input waits for running work: every input on every place starts
@@ -63,8 +61,8 @@ from ai_assistant.core.channel_validation import (
     APPROVALS,
     TASK_SCHEDULER,
     declared_input,
-    establishes_the_user,
     origin_kind,
+    sent_by_a_person,
 )
 from ai_assistant.core.types import ChannelIdentity
 
@@ -94,7 +92,6 @@ __all__ = [
     "place_channel",
     "place_of",
     "takes_text",
-    "users_place",
 ]
 
 #: What separates a place's channel type from its instance id.
@@ -161,8 +158,8 @@ class ChannelKind:
         reach: Whether it pushes, is pulled, or both (§6:5).
         input: Which of its medium's events are input (§6:9).
         push_filter: Its push filter, or ``None`` where it has none (§6:11).
-        authors: How it establishes authors (§5:4), in words; whether it establishes the
-            user at all is ``core``'s register, read by :meth:`establishes_the_user`.
+        authors: How it establishes authors (§5:4), in words; whether a person sends on it
+            by an account at all is ``core``'s register, read by :meth:`sent_by_a_person`.
         places: What its places are and what keys them (§2:1, §10:8).
         window: Where its place window comes from (§10:1-§10:2).
         window_items: How many items its window holds, where it has one.
@@ -173,7 +170,7 @@ class ChannelKind:
         message_limit: The spoke's limit on one message, where it has one, in the
             measure its medium counts (§8).
         audience: Who its places reach (§9).
-        approval_giver: Who a yes on its places is, where its kind establishes the user
+        approval_giver: Who a yes on its places is, where a person sends on it
             (ADR-0321 §4:6, ADR-0323 §4:9); ``None`` where no yes on it approves.
     """
 
@@ -195,14 +192,14 @@ class ChannelKind:
     approval_giver: ApprovalGiver | None
 
     def __post_init__(self) -> None:
-        """A kind that establishes nobody gives no approval, and a window holds an item.
+        """A kind no person sends on gives no approval, and a window holds an item.
 
         Raises:
             ValueError: If the kind names an approval giver though ``core``'s register
-                says it establishes nobody, or its window's size is not positive.
+                says no person sends on it, or its window's size is not positive.
         """
-        if self.approval_giver is not None and not self.establishes_the_user:
-            msg = "only a kind that establishes the user as an author gives an approval"
+        if self.approval_giver is not None and not self.sent_by_a_person:
+            msg = "only a kind a person sends on gives an approval"
             raise ValueError(msg)
         if (self.window is WindowSource.NONE) != (self.window_items is None):
             msg = "a kind with a window says how many items it holds, and one without none"
@@ -212,9 +209,9 @@ class ChannelKind:
             raise ValueError(msg)
 
     @property
-    def establishes_the_user(self) -> bool:
-        """Whether the kind establishes the user as an author in its places (§5:4)."""
-        return establishes_the_user(self.channel_type)
+    def sent_by_a_person(self) -> bool:
+        """Whether a person sends on the kind by an account (ADR-0366 §4:1)."""
+        return sent_by_a_person(self.channel_type)
 
     @property
     def origin(self) -> OriginKind | None:
@@ -282,20 +279,6 @@ def place_of(channel: ChannelIdentity) -> str:
     hub chat, and the line's chat, by the line's instance, for Telegram.
     """
     return f"{channel.channel_type}{_PLACE_SEPARATOR}{channel.instance_id}"
-
-
-def users_place(place: str | None) -> bool:
-    """Whether a recorded place is one whose kind establishes the user as an author there.
-
-    ADR-0323 §4:8's *shown to you*: one of the user's conversations, or the line's chat.
-    Read from the place as its effect record names it (:func:`place_of`), so no rule
-    reading it names a channel (§4:5). A place with no channel type, or none at all, is
-    nobody's.
-    """
-    if not place:
-        return False
-    channel_type, separator, instance = place.partition(_PLACE_SEPARATOR)
-    return bool(separator and instance) and establishes_the_user(channel_type)
 
 
 # --- what a connection is (ADR-0364 §3:3) ---------------------------------------------

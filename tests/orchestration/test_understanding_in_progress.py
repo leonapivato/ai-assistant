@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from identity_support import owners_trigger
 from understanding_support import Rendered, TextAsStructured
 
 from ai_assistant.core.reply_shapes import read_reply
@@ -118,6 +119,10 @@ async def _understand(
         joined=joined,
         running=running,
         running_more=more,
+        # The owner's input by their linked account, and so the owner's work (ADR-0368
+        # §9:5): what the engine hands the stage.
+        trigger=owners_trigger(_HERE, "book Riverside"),
+        person_id=OWNER_PERSON_ID,
     )
 
 

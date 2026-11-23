@@ -4,7 +4,7 @@ No dispatch, collaborators, configuration, or authority lives here. Both local
 and wire entry points apply the same closed set of representable combinations,
 and read the same declaration of whose words each channel type's input carries, its
 **parties** (ADR-0351 §3:1, in place of ADR-0284 §2:2's origin), and of which channel
-types establish the user as an author in their places (ADR-0292 §5:4, ADR-0323 §4:8).
+types a person sends on by an account, whose link names the sender (ADR-0366 §4:1).
 
 **No conversational combination is on the surface.** A typed message is written
 into a conversation as an act in the medium (ADR-0293 §11), and spoken
@@ -12,30 +12,35 @@ conversation retired at the cutover (ADR-0313 §3:2), so ``receive`` admits an
 event alone (§4:1).
 
 **Nor is the Telegram line's** (ADR-0323 §2:2, §4:1). Its input is admitted by its
-reader in the hub alone, which establishes the user by comparing the sender id
-Telegram reports against the setting (§4:3): a ``telegram`` input handed to
-``receive`` would carry the user's authority on nobody's establishment, so the
-dispatch table refuses it as it refuses every type it does not list.
+reader in the hub alone, which finds each message's sender from the link the Telegram
+account that sent it holds (ADR-0366 §4:1): a ``telegram`` input handed to ``receive``
+would name a sender no reader found, so the dispatch table refuses it as it refuses
+every type it does not list.
 
 **Nor is the Task Scheduler's** (ADR-0350 §2:7, §7). It is a built-in channel whose
 sensor pushes each scheduled task's occurrence in the hub alone; the register declares
 its parties per input, the assistant's statement naming the task's instruction, with
-unknown added for a task carrying the outside-content mark (ADR-0351 §3:6), and it
-establishes no author as the user in its place.
+unknown added for a task carrying the outside-content mark (ADR-0351 §3:6), and no
+person sends on it.
 
 **Nor is the Approvals channel's** (ADR-0361 §3:1, §3:6). It is a built-in channel whose
-sensor pushes each approval request answered or expired in the hub alone; it establishes
-no author as the user in its place, and the register declares its inputs' parties empty:
+sensor pushes each approval request answered or expired in the hub alone; no person
+sends on it, and the register declares its inputs' parties empty:
 an approval's input carries no one's words (ADR-0351 §2:4, ADR-0361 §6:1).
 
 **The parties each kind declares** (ADR-0351 §3's table), per input, set by code at
-admission from the declaration and the record the sensor brings (§2:8): the hub chat's
-input, and each message it takes in, carry the owner's words; the line's carry the
-owner's, a forward's its original sender's, claimed (§2:7), and an input of several
-messages the distinct parties of its messages (§2:6); an informational event's carries
-its connected source's, established, named by the channel's identity (§3:5); and the
-Task Scheduler's the assistant's statement (§3:6). The one person a party names is the
-owner (§3:2). A kind not built, a mail channel or a spoke that tells who is talking,
+admission from the declaration and the record the sensor brings (§2:8). A message a
+person sends by an account, on the hub chat or the line, carries its sender's words:
+the owner's where a link establishes the owner as its sender, and unknown otherwise,
+the one person a party names being the owner (§3:2, as ADR-0366 §4:1 and ADR-0368 §9:4
+decide the sender; ADR-0351 §3's row for a speaker no kind establishes). A forward
+carries its original sender's, claimed (§2:7), and an input of several messages the
+distinct parties of its messages (§2:6);
+an informational event's carries its connected source's, established, named by the
+channel's identity (§3:5); and the Task Scheduler's the assistant's statement (§3:6).
+No channel type decides whose words a message is: a kind declares only whether a person
+sends on it by an account (:func:`sent_by_a_person`), and the sender its reader found
+names the party. A kind not built, a mail channel or a spoke that tells who is talking,
 declares nothing here until it is, and a channel type with no declaration is refused.
 
 **What understanding is told of an origin** (ADR-0353 §6:3, §7:5). Beside the parties,
@@ -49,8 +54,8 @@ it rather than restating it. A kind with no row is rendered with the fallback AD
 
 **The most sureness each kind can give** (ADR-0366 §5:2), declared beside how it
 establishes authors, and a link's level read from it (§5:3, :func:`link_level`). Who sent
-an input and at what level is recorded from it beside the declarations above
-(ADR-0368 §2:6), and the declarations above still decide (§1:3).
+an input and at what level is its reader's finding from the link its account holds
+(ADR-0368 §2:6), and decides (ADR-0366 §4:1): no channel type here says who sent one.
 """
 
 from __future__ import annotations
@@ -66,6 +71,7 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ClaimedAuthor,
+    InputSender,
     NewConversation,
     RecordedInputMessage,
     ReplyCapability,
@@ -85,24 +91,27 @@ if TYPE_CHECKING:
 _REPLY = TypeAdapter[ReplyCapability | None](ReplyCapability | None)
 
 #: ADR-0350 §2:1, §2:8: the channel type of the **Task Scheduler**, the built-in channel
-#: whose one place, the schedule, holds the scheduled tasks every spawn writes. Its kind
-#: establishes no author as the user in its place (§2:7), so it is absent from
-#: :data:`_ESTABLISHES_THE_USER`, and nothing a caller hands ``receive`` is one: its
-#: sensor pushes each occurrence in the hub alone (§7).
+#: whose one place, the schedule, holds the scheduled tasks every spawn writes. No person
+#: sends on it (§2:7), so it is absent from :data:`_SENT_BY_A_PERSON`, and nothing a
+#: caller hands ``receive`` is one: its sensor pushes each occurrence in the hub alone
+#: (§7).
 TASK_SCHEDULER: Final = "task_scheduler"
 
 #: ADR-0361 §3:1, §3:6: the channel type of **Approvals**, the built-in channel whose one
-#: place, the approvals, holds the approval requests ``request_approval`` writes. Its kind
-#: establishes no author as the user (§3:6), so it is absent from
-#: :data:`_ESTABLISHES_THE_USER`, and its inputs' parties are empty (ADR-0351 §2:4): an
+#: place, the approvals, holds the approval requests ``request_approval`` writes. No
+#: person sends on it (§3:6), so it is absent from :data:`_SENT_BY_A_PERSON`, and its
+#: inputs' parties are empty (ADR-0351 §2:4): an
 #: approval's input is structured and carries no one's words (§6:1-§6:2). Nothing a caller
 #: hands ``receive`` is one: its sensor pushes each outcome in the hub alone (§3:4).
 APPROVALS: Final = "approvals"
 
-#: ADR-0351 §3:1, §3:2: the channel types whose every message its sender wrote carries
-#: the owner's words, the one person a party names until a decision on identified
-#: people: the hub chat and the line. A kind absent from it declares no person's words.
-_THE_OWNERS_WORDS: Final = frozenset({"conversation", "telegram"})
+#: ADR-0366 §4:1, ADR-0351 §3:1: the channel types a person sends on by an account, whose
+#: every message its sender wrote carries its sender's words, as its reader found the
+#: sender from the link the account holds: the hub chat, whose accounts are the devices
+#: it is written from, and the line, whose account is the Telegram account that sent the
+#: message. Membership says that a person may send there, never who: a kind absent from
+#: it declares no person's words.
+_SENT_BY_A_PERSON: Final = frozenset({"conversation", "telegram"})
 
 #: ADR-0351 §2:7, §3:1 (ADR-0323 §4:11): the channel types that take forwards in, each
 #: forward's party its original sender, claimed. A kind absent from it takes in none.
@@ -111,12 +120,6 @@ _TAKES_FORWARDS: Final = frozenset({"telegram"})
 #: ADR-0351 §3:5: the channel types whose input is a connected source's report, its
 #: party that source, established, named by the channel's identity.
 _A_SOURCES_REPORT: Final = frozenset({"informational_event"})
-
-#: ADR-0292 §5:4, ADR-0323 §4:8: the channel types whose kind establishes the user as
-#: an author in their places — one of the user's conversations, or the line's chat. A
-#: question's message is *shown to you* only in such a place (ADR-0321 §4:4), and a
-#: type absent from it establishes nobody.
-_ESTABLISHES_THE_USER: Final = frozenset({"conversation", "telegram"})
 
 #: ADR-0366 §5:2: the most sureness each kind can give, declared beside how it
 #: establishes authors. The hub chat's accounts are the devices it is written from, each
@@ -197,39 +200,73 @@ def _kind(target: ChannelTarget) -> str:
     return "conversation" if isinstance(target, NewConversation) else target.channel_type
 
 
-def message_party(channel_type: str, forwarded_from: ClaimedAuthor | None) -> SupportHolder:
+def sender_party(sender: InputSender | None) -> SupportHolder:
+    """The party of a message a person wrote and sent, from who sent it (ADR-0351 §3:2).
+
+    The owner, where a link establishes the owner as its sender (ADR-0366 §4:1,
+    ADR-0368 §9:4); unknown otherwise, as for a speaker no kind establishes (ADR-0351
+    §3's table): an account no link ties, a link lowered to none, the links unread off
+    the hub's own machine (ADR-0374 §2:2), or a message whose reader found no sender. A
+    kind establishes a person as a party only where it establishes that person as an
+    author, and until a decision on identified people adds others, the one person a
+    party names is the owner (§3:2): an identity a link names that no decision admits
+    (ADR-0366 §1:3) is no party's person, so its words are held as nobody identified's.
+    No channel type stands in for any of it.
+
+    Args:
+        sender: Who sent the message, as its reader found it, or ``None`` where it found
+            none.
+
+    Returns:
+        The message's party.
+    """
+    if sender is not None and sender.identified and sender.person == OWNER_PERSON_ID:
+        return SupportHolder.person(OWNER_PERSON_ID)
+    return SupportHolder.unknown()
+
+
+def message_party(
+    channel_type: str, forwarded_from: ClaimedAuthor | None, sender: InputSender | None
+) -> SupportHolder:
     """The party a kind declares for one message its input takes in (ADR-0351 §2:6, §3:1).
 
-    A message its sender wrote, on a kind that carries the owner's words, is the
-    owner's (§3:2); a forward, on a kind that takes forwards in, is its original
-    sender's, claimed, or unknown where the medium names none (§2:7). Set from who sent
-    the message, never from what it says (§2:9).
+    A message its sender wrote, on a kind a person sends on by an account, is its
+    sender's words (:func:`sender_party`, §3:2); a forward, on a kind that takes forwards
+    in, is its original sender's, claimed, or unknown where the medium names none
+    (§2:7). Set from who sent the message, never from what it says (§2:9), and never
+    from the channel type alone.
 
     Args:
         channel_type: The channel type the message came in on.
         forwarded_from: The forward's original sender, or ``None`` for a message its
             sender wrote.
+        sender: Who sent it, as its reader found it from the account it arrived by, or
+            ``None`` where it found none.
 
     Returns:
         The message's party.
 
     Raises:
         ValueError: If the kind declares no party for such a message: it takes in no
-            forward, or records no person's messages. Admission refuses it.
+            forward, or no person sends on it. Admission refuses it.
     """
     if forwarded_from is not None:
         if channel_type not in _TAKES_FORWARDS:
             msg = "the channel type takes in no forward (ADR-0351 §3:1)"
             raise ValueError(msg)
         return forward_party(forwarded_from)
-    if channel_type not in _THE_OWNERS_WORDS:
+    if channel_type not in _SENT_BY_A_PERSON:
         msg = "the channel type declares no party for a message it takes in (ADR-0351 §3:1)"
         raise ValueError(msg)
-    return SupportHolder.person(OWNER_PERSON_ID)
+    return sender_party(sender)
 
 
 def _parties(
-    target: ChannelTarget, carried: Sequence[SupportHolder], *, carries_outside_mark: bool
+    target: ChannelTarget,
+    carried: Sequence[SupportHolder],
+    senders: Sequence[InputSender],
+    *,
+    carries_outside_mark: bool,
 ) -> tuple[SupportHolder, ...]:
     """The parties ``target``'s kind declares for one input, its messages' ``carried``."""
     kind = _kind(target)
@@ -239,8 +276,10 @@ def _parties(
     if carried:
         # §2:6: an input of messages carries exactly their distinct parties.
         return canonical_parties(carried)
-    if kind in _THE_OWNERS_WORDS:
-        return (SupportHolder.person(OWNER_PERSON_ID),)
+    if kind in _SENT_BY_A_PERSON:
+        # §3:2: its senders' words, each as :func:`sender_party` names it, and unknown
+        # where its reader found no sender at all.
+        return canonical_parties(sender_party(one) for one in senders or (None,))
     if kind in _A_SOURCES_REPORT and isinstance(target, ChannelIdentity):
         # §3:5: the connected source instance it came from, established.
         identity = f"{target.channel_type}:{target.instance_id}"
@@ -262,25 +301,29 @@ def declared_input(
     target: ChannelTarget,
     messages: Sequence[RecordedInputMessage] = (),
     *,
+    senders: Sequence[InputSender] = (),
     carries_outside_mark: bool = False,
 ) -> tuple[tuple[SupportHolder, ...], tuple[RecordedInputMessage, ...]]:
     """The parties a kind declares for one input, and its messages each with its party.
 
     ADR-0351 §3:1, which admission records on the trigger and fixes on the episode
-    (§2:8). Each message is given the party :func:`message_party` declares for it,
-    whatever party it arrived with, and the input's parties are its messages' distinct
-    parties (§2:6), or, for an input that records none, the one set its kind declares:
-    the owner on the hub chat and the line, the source an informational event names,
-    or the assistant's statement on the Task Scheduler, with unknown added for a task
-    carrying the outside-content mark (§3:6); and none on Approvals, whose input carries
-    no one's words (ADR-0361 §3:6). Admission never records ``None`` (§2:5). Each
-    message keeps the sender it arrived with, which its reader found from the account it
-    came by (ADR-0368 §2:6): no kind declares one.
+    (§2:8). Each message is given the party :func:`message_party` declares for it from
+    the sender it arrived with, whatever party it arrived with, and the input's parties
+    are its messages' distinct parties (§2:6), or, for an input that records none, the
+    set its kind declares: on the hub chat, its ``senders``' words (:func:`sender_party`),
+    unknown where none is named; the source an informational event names; the
+    assistant's statement on the Task Scheduler, with unknown added for a task carrying
+    the outside-content mark (§3:6); and none on Approvals, whose input carries no one's
+    words (ADR-0361 §3:6). Admission never records ``None`` (§2:5). Each message keeps
+    the sender it arrived with, which its reader found from the account it came by
+    (ADR-0368 §2:6): no kind declares one.
 
     Args:
         target: The admitted input's target.
         messages: The messages it took in, as its sensor recorded them; none for a
             channel that records none.
+        senders: Who sent an input that records no messages, as its reader found them
+            from the accounts it arrived by; none for an input no person sent.
         carries_outside_mark: Whether the input carries the outside-content mark, as an
             occurrence of a scheduled task carrying it does (ADR-0350 §3:8).
 
@@ -298,29 +341,32 @@ def declared_input(
             sent_at=one.sent_at,
             position=one.position,
             forwarded_from=one.forwarded_from,
-            party=message_party(kind, one.forwarded_from),
+            party=message_party(kind, one.forwarded_from, one.sender),
             sender=one.sender,
         )
         for one in messages
     )
     carried = [one.party for one in stamped if one.party is not None]
-    return _parties(target, carried, carries_outside_mark=carries_outside_mark), stamped
+    return (
+        _parties(target, carried, senders, carries_outside_mark=carries_outside_mark),
+        stamped,
+    )
 
 
-def establishes_the_user(channel_type: str) -> bool:
-    """Whether a channel type's kind establishes the user as an author in its places.
+def sent_by_a_person(channel_type: str) -> bool:
+    """Whether a person sends on a channel type's kind by an account (ADR-0366 §4:1).
 
-    ADR-0292 §5:4 as ADR-0323 §4:8 reads it: one of the user's conversations, or the
-    line's chat. What authorizing reads of a question's place, so no rule of its names
-    a channel (§4:5).
+    The hub chat and the line: their input's sender is the person the link its account
+    holds names, as its reader finds it. It says that a person may have sent an input
+    there, never who did, which is the link's alone.
 
     Args:
-        channel_type: The channel type.
+        channel_type: The channel type; the hub chat's is ``conversation``.
 
     Returns:
         ``True`` exactly for a type whose kind declares it.
     """
-    return channel_type in _ESTABLISHES_THE_USER
+    return channel_type in _SENT_BY_A_PERSON
 
 
 def most_sureness(channel_type: str) -> Sureness:

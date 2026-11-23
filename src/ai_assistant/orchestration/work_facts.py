@@ -1,14 +1,11 @@
-"""Who sent an input, and a work's three facts, recorded beside today's path.
+"""Who sent an input, and a work's three facts, which decide.
 
 ADR-0366 §4:1 and §5:6 have code decide who sent an input from the account it arrived
 by, at that link's level; ADR-0368 §2 has code record three facts on every work when it
 starts and again when an input joins it: whom it is for, whose authority it carries and
-its level. This module is where both are decided, and **nothing reads them yet**
-(ADR-0368 §1:3): who a work is for and whether it carries the user's authority are still
-read from the channel type, by
-:func:`~ai_assistant.orchestration.person_block.activation_person` and the true or false
-``users_authority``, and each recording here is compared with that reading and logged,
-so a running hub shows where the two disagree before any reader moves to the facts.
+its level. This module is where both are decided, and **every reader reads them**
+(ADR-0368 §9:1, §9:5): no code decides a sender, whom a work is for or whose authority it
+carries from the channel type an input came by.
 
 **Who sent an input** (:func:`sender_of`). The account each kind's input arrives by is
 its reader's to name: the hub chat's is the device a message was written from
@@ -25,18 +22,16 @@ hub's own machine, the hub chat's device ``hub`` (:data:`HUB_MACHINE`, §3:1), w
 the owner's at the hub chat's declared most with no lowering read (§3:2, §4:2). Either
 is marked ``links_unread`` (§5:1), and each read that got no answer is logged as
 ``input_sender_unread`` with the reader and the reason alone (§5:4). Where the links can
-be read nothing changes (§3:3, §4:1). Off the hub's own machine a fault is a
-disagreement with today's path by design, so the comparison below says when the links
-could not be read for any input the facts were recorded from.
+be read nothing changes (§3:3, §4:1).
 
 **The three facts when a work starts** (:func:`started`), by ADR-0368 §3's table, for the
 rows today's inputs produce:
 
 - **A message** (its trigger records senders). For its sender where exactly one sender
   is identified (§3:1); for whoever the connection it came by belongs to otherwise
-  (§3:3, §4:6). It carries its senders' authority (§3:2, §3:4) where its parties are the
-  senders' own words (ADR-0351 §6:1), as a forward's are not (§6:2), and none otherwise.
-  Its level is the lowest of its senders' (§4:1).
+  (§3:3, §4:6). It carries its senders' authority (§3:2, §3:4) where it is their own
+  words (ADR-0351 §6:1), as a forward is not (§6:2), and none otherwise. Its level is
+  the lowest of its senders' (§4:1).
 - **An input no person sent** (no senders): an event a connected source pushes, a task's
   occurrence or an approval's outcome. For whoever its connection or its record names,
   carrying no authority, at none (§3:5, the fourth and fifth rows). A task's work carries
@@ -45,8 +40,8 @@ rows today's inputs produce:
 
 **Every connection belongs to the owner** until milestone 2 records whose each is
 (ADR-0367 §6:1, #3642), and every task and approval request is the owner's (ADR-0350
-§6:4, ADR-0361 §6:1, as ``activation_person`` reads them), so each "whoever it belongs
-to" above is the owner, read in one place (:func:`_its_owner`).
+§6:4, ADR-0361 §6:1), so each "whoever it belongs to" above is the owner, read in one
+place (:func:`_its_owner`).
 
 **When an input joins** (:func:`joined`), the facts are recorded again (§2:4). A join
 never adds to the authority and never raises the level (§2:5): the level becomes the
@@ -56,16 +51,35 @@ becomes none where it differs. ADR-0368 §4:2 to §4:6's rules for several sende
 built: ADR-0349 §7:5 still joins only inputs of one author, established alike, with one
 authority, so whom the work is for does not move.
 
+**What the readers read** (ADR-0368 §9). Whether a work is a person's, and whose
+(:func:`persons_work`, §9:5): it is for a person, has no unidentified sender, and carries
+the authority of no more than one person. Whose authority it carries
+(:func:`persons_authority`, §9:1): the one identified person whose authority it carries,
+now or in advance. Two inputs carry the same authority where they carry the same
+people's (§9:2, :func:`authority_persons`). A work with no facts, because deciding them
+failed, is no person's and carries no one's authority: **recording fails closed**.
+
+**Only a person the hub admits** (ADR-0365 §1:3, ADR-0366 §1:3, ADR-0368 §1:4). The owner
+is the one person a hub admits until a later decision provides for another, and nothing
+the later milestones build to check a person's calls stands yet (ADR-0367). So both
+readers answer for the owner alone: a work for, or carrying the authority of, any other
+identity a link names is read as no person's, carrying no one's authority, whatever its
+facts record. Nothing a real hub links names another identity (ADR-0366 §3:3); this
+holds where a test's store does.
+
 **A relay mark changes no fact.** Understanding marks an input relayed (ADR-0351 §5:6),
 and a relayed input carries no authority (§6:5); but no model sets or changes a fact
 (ADR-0368 §2:4), so the facts are recorded from the inputs alone and the relay mark,
-which the episode keeps (ADR-0351 §5:9), is read beside them, as ``users_authority`` is
-read beside it today.
+which the episode keeps (ADR-0351 §5:9), is read beside them: :func:`persons_authority`
+takes it.
+
+**One line per recording** (:func:`log_facts`): ``work_facts_recorded``, with what was
+decided as codes and levels alone, never a person's identifier or an input's words, which
+is what a running hub shows of the switch.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -73,9 +87,9 @@ import structlog
 from ai_assistant.core.channel_validation import (
     APPROVALS,
     TASK_SCHEDULER,
-    establishes_the_user,
     link_level,
     most_sureness,
+    sent_by_a_person,
 )
 from ai_assistant.core.errors import IdentityStoreError
 from ai_assistant.core.types import (
@@ -84,6 +98,7 @@ from ai_assistant.core.types import (
     Account,
     AuthorityKind,
     ChannelIdentity,
+    HolderKind,
     InputSender,
     Sureness,
     WorkAuthority,
@@ -91,16 +106,19 @@ from ai_assistant.core.types import (
     WorkFor,
     WorkForKind,
     canonical_parties,
-    parties_are_persons_own,
     senders_level,
 )
-from ai_assistant.orchestration.person_block import activation_person
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable, Mapping, Sequence
 
     from ai_assistant.core.protocols import IdentityStore
-    from ai_assistant.core.types import JoinedInput, RecordedChannelTrigger, SupportHolder
+    from ai_assistant.core.types import (
+        JoinedInput,
+        RecordedChannelTrigger,
+        RecordedInputMessage,
+        SupportHolder,
+    )
 
 __all__ = [
     "CHAT_ACCOUNT_KIND",
@@ -108,19 +126,19 @@ __all__ = [
     "LINE_ACCOUNT_KIND",
     "LINKS_UNREAD",
     "NO_LINK",
-    "TodaysPath",
+    "authority_persons",
     "chat_account",
-    "disagreements",
     "joined",
     "line_account",
     "links_unread",
     "log_facts",
+    "persons_authority",
+    "persons_work",
     "record_joined",
     "record_started",
     "sender_of",
     "senders_of",
     "started",
-    "todays_path",
     "unread",
     "unrecorded",
 ]
@@ -151,8 +169,14 @@ HUB_MACHINE: Final = Account(kind=CHAT_ACCOUNT_KIND, identifier=HUB_DEVICE_ID)
 #: event a connected source pushes (§3:5), a task's occurrence and an approval's outcome.
 _SENT_BY_NO_PERSON: Final = frozenset({"informational_event", TASK_SCHEDULER, APPROVALS})
 
-#: The kinds whose input a person sends, by an account: the hub chat and the line.
-_SENT_BY_A_PERSON: Final = frozenset({CHAT_ACCOUNT_KIND, LINE_ACCOUNT_KIND})
+#: The people the hub admits: the owner alone, until a later decision provides for
+#: another and it is built (ADR-0365 §1:3, ADR-0366 §1:3, ADR-0368 §1:4). The readers
+#: answer for them alone (:func:`persons_work`, :func:`persons_authority`).
+_ADMITTED: Final = frozenset({OWNER_PERSON_ID})
+
+#: The parties of a message its sender wrote: a person a link establishes, or unknown
+#: for a sender no link does (ADR-0351 §3:2). A forward's is an outside source, claimed.
+_SENDERS_WORDS: Final = frozenset({HolderKind.PERSON, HolderKind.UNKNOWN})
 
 
 def chat_account(device_id: str | None) -> Account | None:
@@ -192,8 +216,8 @@ async def sender_of(
     or :data:`NO_LINK` where none does, or where the input names no account. Where no
     identity store is wired, or it cannot be read, the links cannot be read for it
     (ADR-0374 §2:1): the fault is logged under a fixed event name, and the input is
-    recorded as :func:`unread` says. Nothing reads the sender yet (ADR-0368 §1:3), so no
-    answer the hub gives moves on it.
+    recorded as :func:`unread` says. A defect in the read is such a fault too: it is
+    never read as a link, and never stops the input.
 
     Args:
         identities: The identity store, or ``None`` where none is wired.
@@ -211,7 +235,7 @@ async def sender_of(
         link = await identities.find_link(account)
     except IdentityStoreError:
         return unread(account, stage=stage, reason="identity_store")
-    except Exception:  # nothing reads a sender yet, so no fault stops an input
+    except Exception:  # ADR-0374 §2:1: any failed read is a fault, never a link
         return unread(account, stage=stage, reason="defect")
     if link is None:
         return NO_LINK
@@ -265,7 +289,7 @@ async def senders_of[K: Hashable](
 
 
 def _kind(trigger: RecordedChannelTrigger) -> str:
-    """The channel type a trigger's input came in on, as ``activation_person`` reads it."""
+    """The channel type a trigger's input came in on; a new conversation is the hub chat's."""
     if trigger.channel is not None:
         return trigger.channel.channel_type
     if isinstance(trigger.target, ChannelIdentity):
@@ -283,11 +307,28 @@ def _its_owner() -> WorkFor:
     return WorkFor.for_person(OWNER_PERSON_ID)
 
 
+def _own_words(
+    parties: Sequence[SupportHolder] | None, messages: Iterable[RecordedInputMessage]
+) -> bool:
+    """Whether an input is its senders' own words (ADR-0351 §6:1, §6:2).
+
+    Its parties are known and not empty, each is a person or the unknown an unidentified
+    sender's words take (ADR-0351 §3:2), and none of its messages is a forward, whose
+    words are its original sender's, claimed, however the medium named them (§2:7).
+    """
+    return (
+        bool(parties)
+        and parties is not None
+        and all(one.kind in _SENDERS_WORDS for one in parties)
+        and not any(one.forwarded_from is not None for one in messages)
+    )
+
+
 def _authority(senders: Sequence[InputSender], *, own: bool) -> WorkAuthority:
     """The authority an input from ``senders`` carries (ADR-0368 §3:2, §3:4).
 
-    Its senders', each identified one by id and whether one is unidentified, where its
-    parties are the senders' own words; none otherwise, as for a forward.
+    Its senders', each identified one by id and whether one is unidentified, where it is
+    their own words; none otherwise, as for a forward.
     """
     if not own:
         return WorkAuthority.none()
@@ -321,11 +362,12 @@ def started(trigger: RecordedChannelTrigger) -> WorkFacts:
     if level is not None:
         return WorkFacts(
             for_whom=_whom(senders),
-            authority=_authority(senders, own=parties_are_persons_own(trigger.parties)),
+            authority=_authority(senders, own=_own_words(trigger.parties, trigger.messages)),
             level=level,
         )
     kind = _kind(trigger)
-    whom = _its_owner() if kind in _SENT_BY_NO_PERSON | _SENT_BY_A_PERSON else WorkFor.no_one()
+    has_a_row = kind in _SENT_BY_NO_PERSON or sent_by_a_person(kind)
+    whom = _its_owner() if has_a_row else WorkFor.no_one()
     return WorkFacts(for_whom=whom, authority=WorkAuthority.none(), level=Sureness.NONE)
 
 
@@ -356,79 +398,78 @@ def joined(facts: WorkFacts, input: JoinedInput) -> WorkFacts:  # noqa: A002 —
     level = senders_level(senders)
     if level is None:
         return facts
-    own = parties_are_persons_own(_parties(one.party for one in input.messages))
+    own = _own_words(_parties(one.party for one in input.messages), input.messages)
     incoming = _authority(senders, own=own)
     authority = facts.authority if incoming == facts.authority else WorkAuthority.none()
     return WorkFacts(for_whom=facts.for_whom, authority=authority, level=min(facts.level, level))
 
 
-@dataclass(frozen=True, slots=True)
-class TodaysPath:
-    """What the channel-type rules say of a work, which still decide (ADR-0368 §1:3).
+def persons_work(facts: WorkFacts | None) -> str | None:
+    """The person whose work it is, where it is a person's (ADR-0368 §9:5).
 
-    Attributes:
-        person: The person it is for, as ``activation_person`` reads it.
-        users_authority: Whether its input carries the user's authority, before any relay
-            mark, as ``InputStanding`` reads it (ADR-0292 §5:5, ADR-0351 §6:1).
-        established: Whether its place's kind establishes the user as its author
-            (ADR-0292 §5:4).
-    """
-
-    person: str | None
-    users_authority: bool
-    established: bool
-
-
-def todays_path(trigger: RecordedChannelTrigger) -> TodaysPath:
-    """What today's path says of the work ``trigger`` started.
+    It is for a person, has no unidentified sender, and carries the authority of no more
+    than one person: what ADR-0338 §2:3, ADR-0350 §3:4, ADR-0356 §4:5 and ADR-0361 §2:5
+    read as an activation being a person's, as the person block, spawn's offer, the
+    approval request and every reader of the person a work is for do. A work with no
+    facts is no person's, and so is one for a person the hub does not admit
+    (:data:`_ADMITTED`).
 
     Args:
-        trigger: The work's recorded trigger.
+        facts: The work's facts as they stand, or ``None`` where none were recorded.
 
     Returns:
-        Today's reading.
+        The person's id, or ``None`` where it is no person's.
     """
-    established = establishes_the_user(_kind(trigger))
-    return TodaysPath(
-        person=activation_person(trigger),
-        users_authority=established and parties_are_persons_own(trigger.parties),
-        established=established,
-    )
-
-
-def disagreements(facts: WorkFacts, today: TodaysPath) -> tuple[str, ...]:
-    """Where ``facts`` say other than today's path, by fact: ``for``, ``authority``, ``level``.
-
-    - **for**: the person the facts say the work is for, where it is a person's, against
-      the person today's path says.
-    - **authority**: whether the facts carry the owner's authority alone, their senders'
-      now, against whether today's path says the input carries the user's.
-    - **level**: whether the facts' level is above none, against whether today's path
-      establishes the user as the author (ADR-0368 §9:4).
-
-    Args:
-        facts: The facts recorded.
-        today: What today's path says of the same work.
-
-    Returns:
-        The facts that disagree, in that order; empty where they all agree.
-    """
+    if facts is None:
+        return None
     whom = facts.for_whom
-    person = whom.id if whom.kind is WorkForKind.PERSON else None
     authority = facts.authority
-    owners = (
-        authority.kind is AuthorityKind.SENDERS
-        and authority.persons == (OWNER_PERSON_ID,)
-        and not authority.unidentified
-    )
-    differs: list[str] = []
-    if person != today.person:
-        differs.append("for")
-    if owners != today.users_authority:
-        differs.append("authority")
-    if (facts.level > Sureness.NONE) != today.established:
-        differs.append("level")
-    return tuple(differs)
+    if whom.kind is not WorkForKind.PERSON or whom.id not in _ADMITTED:
+        return None
+    if authority.unidentified or len(authority.persons) > 1:
+        return None
+    return whom.id
+
+
+def authority_persons(facts: WorkFacts | None) -> tuple[str, ...]:
+    """The identified people whose authority a work carries, now or in advance (§9:1, §9:2).
+
+    By id, in order; none where it carries an unidentified sender's beside them, no one's,
+    or has no facts. Two inputs carry the same authority where this is the same for both
+    (§9:2), whatever their levels.
+
+    Args:
+        facts: The facts, or ``None`` where none were recorded.
+
+    Returns:
+        The people.
+    """
+    if facts is None or facts.authority.unidentified:
+        return ()
+    return facts.authority.persons
+
+
+def persons_authority(facts: WorkFacts | None, *, relayed: bool = False) -> str | None:
+    """The person whose authority a work carries, where it carries one's (ADR-0368 §9:1).
+
+    What every earlier decision's "the input carries the user's authority" reads: the
+    work carries the authority of one identified person, now or in advance, and no
+    unidentified sender's beside it (§2:2), and no input it holds is relayed (ADR-0351
+    §6:5), which no fact records (§2:4) and the caller hands in. Where it names the user,
+    it names this person. A person the hub does not admit carries none here
+    (:data:`_ADMITTED`).
+
+    Args:
+        facts: The work's facts as they stand, or ``None`` where none were recorded.
+        relayed: Whether any input the work holds is relayed.
+
+    Returns:
+        The person's id, or ``None`` where the work carries no person's authority.
+    """
+    persons = authority_persons(facts)
+    if relayed or len(persons) != 1 or persons[0] not in _ADMITTED:
+        return None
+    return persons[0]
 
 
 def links_unread(senders: Iterable[InputSender]) -> bool:
@@ -438,83 +479,65 @@ def links_unread(senders: Iterable[InputSender]) -> bool:
 
 def log_facts(
     facts: WorkFacts,
-    trigger: RecordedChannelTrigger,
     *,
     activation_id: str | None,
     at: str,
     unread: bool = False,
 ) -> None:
-    """Log the facts recorded on a work, and where they disagree with today's path.
+    """Log what was decided of a work: one ``work_facts_recorded`` entry.
 
-    One ``work_facts_recorded`` entry each time the facts are recorded: when the work
-    starts (``at="start"``) and when an input joins it (``at="join"``). ``agrees`` is
-    whether every fact says what today's path says, and ``differs`` names those that do
-    not, which is what the first deploy reads on the owner's hub (#3642). It carries
-    codes and levels alone, never a person's id or an input's words (ADR-0275 §8), and
-    changes no answer. Whose authority the facts carry is logged as ``whose`` and
-    today's reading of it as ``today_users``: a key naming "auth" is masked by the log's
-    redaction (``core.logging``), which would hide the one value the comparison is for.
-    The facts' level is logged as ``facts_level``: the configured chain's
-    ``add_log_level`` owns ``level``, and would write the log level over it, as it owns
-    ``event`` and ``timestamp`` its neighbours do.
-
-    ``links_unread`` is whether the links could not be read for any input the facts were
-    recorded from (ADR-0374 §5:1). Where it is set, a disagreement is the fault's and not
-    a link's: off the hub's own machine such an input is an unidentified sender's at none
-    (§2:2), which today's path, reading the channel type, never says of the owner's own
-    places, so ``authority`` and ``level`` differ by design; on it the owner's at the hub
-    chat's most (§3:2), which agrees.
+    Each time the facts are recorded: when the work starts (``at="start"``) and when an
+    input joins it (``at="join"``). It says whom the work is for (``for_whom``, a kind),
+    whose authority it carries (``whose``, a kind, and ``unidentified``, whether an
+    unidentified sender's is among it), its level (``facts_level``), whether the links
+    could not be read for any input they were recorded from (``links_unread``, ADR-0374
+    §5:1), and what the readers then read of it: whether it is a person's work
+    (``persons_work``, ADR-0368 §9:5) and whether it carries a person's authority before
+    any relay mark (``carries_a_persons``, §9:1). It carries codes, levels and truth
+    values alone, never a person's id or an input's words (ADR-0275 §8), and changes no
+    answer. Whose authority is logged as ``whose`` and its reading as
+    ``carries_a_persons``: a key naming "auth" is masked by the log's redaction
+    (``core.logging``). The level is logged as ``facts_level``: the configured chain's
+    ``add_log_level`` owns ``level``, as it owns ``event`` and ``timestamp``.
 
     Args:
         facts: The facts recorded.
-        trigger: The work's recorded trigger, which today's path reads.
         activation_id: The work's activation.
         at: When they were recorded: ``start`` or ``join``.
         unread: Whether the links could not be read for any input they were recorded
             from.
     """
-    today = todays_path(trigger)
-    differs = disagreements(facts, today)
     _log.info(
         "work_facts_recorded",
         activation_id=activation_id,
         at=at,
-        agrees=not differs,
-        differs=differs,
         links_unread=unread,
         for_whom=facts.for_whom.kind.value,
         whose=facts.authority.kind.value,
         unidentified=facts.authority.unidentified,
         facts_level=facts.level.value,
-        today_person=today.person is not None,
-        today_users=today.users_authority,
-        today_established=today.established,
+        persons_work=persons_work(facts) is not None,
+        carries_a_persons=persons_authority(facts) is not None,
     )
 
 
-def _logged(
-    facts: WorkFacts,
-    trigger: RecordedChannelTrigger,
-    *,
-    activation_id: str | None,
-    at: str,
-    unread: bool,
-) -> None:
+def _logged(facts: WorkFacts, *, activation_id: str | None, at: str, unread: bool) -> None:
     """:func:`log_facts`, whose own fault is logged and never undoes the recording."""
     try:
-        log_facts(facts, trigger, activation_id=activation_id, at=at, unread=unread)
-    except Exception:  # the comparison is read beside the facts, never in their place
+        log_facts(facts, activation_id=activation_id, at=at, unread=unread)
+    except Exception:  # the log is read beside the facts, never in their place
         _log.warning("work_facts_unlogged", at=at, reason="defect")
 
 
 def record_started(
     trigger: RecordedChannelTrigger, *, activation_id: str | None
 ) -> WorkFacts | None:
-    """The facts a work starts with, logged beside today's path; ``None`` on a defect.
+    """The facts a work starts with, logged; ``None`` on a defect.
 
-    Nothing reads the facts yet (ADR-0368 §1:3), so recording them never stops an
-    admission: a fault in deciding them is logged under a fixed event name and the work
-    records none; a fault in logging them is logged apart and keeps them.
+    Recording them never stops an admission, and **fails closed**: a fault in deciding
+    them is logged under a fixed event name and the work records none, which every
+    reader reads as no person's work carrying no one's authority (:func:`persons_work`,
+    :func:`persons_authority`); a fault in logging them is logged apart and keeps them.
 
     Args:
         trigger: The work's recorded trigger.
@@ -525,11 +548,11 @@ def record_started(
     """
     try:
         facts = started(trigger)
-    except Exception:  # nothing reads the facts yet, so no fault stops a work
+    except Exception:  # fails closed: no facts are no person's and carry no authority
         _log.warning("work_facts_unrecorded", at="start", reason="defect")
         return None
     unread = links_unread(trigger.senders)
-    _logged(facts, trigger, activation_id=activation_id, at="start", unread=unread)
+    _logged(facts, activation_id=activation_id, at="start", unread=unread)
     return facts
 
 
@@ -552,6 +575,11 @@ def unrecorded(inputs: Sequence[JoinedInput]) -> tuple[JoinedInput, ...]:
     )
 
 
+def _closed(facts: WorkFacts) -> WorkFacts:
+    """``facts`` with no authority, at none: what a join records where deciding failed."""
+    return WorkFacts(for_whom=facts.for_whom, authority=WorkAuthority.none(), level=Sureness.NONE)
+
+
 def record_joined(
     facts: WorkFacts,
     inputs: Sequence[JoinedInput],
@@ -562,23 +590,25 @@ def record_joined(
 ) -> tuple[JoinedInput, ...]:
     """``inputs``, each carrying the work's facts as they stand once it joined.
 
-    ADR-0368 §2:4, each recording logged beside today's path. Whatever facts an input
-    arrives with, another work's, are replaced or taken off (:func:`unrecorded`). Nothing
-    reads the facts yet (§1:3), so recording them never stops a join: on a fault in
-    deciding them, logged under a fixed event name, the inputs join recording none; a
-    fault in logging them is logged apart and keeps them.
+    ADR-0368 §2:4, each recording logged. Whatever facts an input arrives with, another
+    work's, are replaced (:func:`unrecorded`). Recording them never stops a join, and
+    **fails closed**: on a fault in deciding them, logged under a fixed event name, each
+    input records the work's facts with no authority, at none, so the work reads as
+    carrying no one's authority from then on (§2:5); a fault in logging them is logged
+    apart and keeps them.
 
     Args:
         facts: The work's facts before the first of them joined.
         inputs: The inputs joining, in order.
-        trigger: The work's recorded trigger, which today's path reads.
+        trigger: The work's recorded trigger, read only for whether the links could not
+            be read for it (ADR-0374 §5:1).
         activation_id: The work's activation.
         earlier: The inputs that joined the work before these, which the facts were
             recorded from too: read only for whether the links could not be read for
-            any of them (ADR-0374 §5:1).
+            any of them.
 
     Returns:
-        The inputs, each with this work's ``facts``, or with none.
+        The inputs, each with this work's ``facts``.
     """
     try:
         recorded: list[tuple[JoinedInput, WorkFacts, bool]] = []
@@ -587,9 +617,10 @@ def record_joined(
             facts = joined(facts, one)
             unread = unread or links_unread(one.senders)
             recorded.append((one.model_copy(update={"facts": facts}), facts, unread))
-    except Exception:  # nothing reads the facts yet, so no fault stops a join
+    except Exception:  # fails closed: the work carries no one's authority from here
         _log.warning("work_facts_unrecorded", at="join", reason="defect")
-        return unrecorded(inputs)
+        closed = _closed(facts)
+        return tuple(one.model_copy(update={"facts": closed}) for one in inputs)
     for _, held, faulted in recorded:
-        _logged(held, trigger, activation_id=activation_id, at="join", unread=faulted)
+        _logged(held, activation_id=activation_id, at="join", unread=faulted)
     return tuple(one for one, _, _ in recorded)

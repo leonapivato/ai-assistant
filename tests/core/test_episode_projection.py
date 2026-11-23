@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from ai_assistant.core.channel_validation import (
     TASK_SCHEDULER,
     declared_input,
-    establishes_the_user,
+    sent_by_a_person,
 )
 from ai_assistant.core.episode_encoding import episode_content, project_episode
 from ai_assistant.core.types import (
@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.testing.parties import (
     ASSISTANTS_WORDS,
+    OWNER_SENDER,
     OWNERS_WORDS,
     UNIDENTIFIED_WORDS,
 )
@@ -196,7 +197,7 @@ def test_a_recorded_trigger_round_trips_its_parties(parties: tuple[SupportHolder
 def test_each_channel_type_declares_its_inputs_parties(
     target: ChannelIdentity | NewConversation, parties: tuple[SupportHolder, ...] | None
 ) -> None:
-    declared, _ = declared_input(target)
+    declared, _ = declared_input(target, senders=(OWNER_SENDER,) if parties else ())
     if parties is None:
         # ADR-0351 §3:5: an event's party is its connected source, established.
         assert parties_are_outside(declared)
@@ -219,7 +220,7 @@ def test_the_task_scheduler_declares_its_parties_per_input() -> None:
     assert parties_are_assistants(plain)
     assert parties_are_outside(marked)
     assert SupportHolder.unknown() in marked
-    assert not establishes_the_user(TASK_SCHEDULER)
+    assert not sent_by_a_person(TASK_SCHEDULER)
 
 
 def test_a_mark_is_declared_by_the_task_scheduler_alone() -> None:

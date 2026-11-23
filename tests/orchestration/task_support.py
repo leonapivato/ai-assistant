@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.task_manager import TaskManagerLimits, TaskSchedulerSeams
 from ai_assistant.orchestration.task_scheduler import SCHEDULE, SPAWN_CAPABILITY
+from ai_assistant.orchestration.work_facts import started
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import PlanStore
@@ -163,7 +164,13 @@ def schedule_episode(
     return base.model_copy(
         update={
             "processing_record": record.model_copy(
-                update={"trigger": trigger, "status": status, "reason": reason}
+                update={
+                    "trigger": trigger,
+                    "status": status,
+                    "reason": reason,
+                    # ADR-0368 §3: a task's work, for its person, carrying none.
+                    "facts": started(trigger),
+                }
             )
         }
     )

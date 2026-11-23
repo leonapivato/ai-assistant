@@ -23,20 +23,15 @@ from structlog.testing import capture_logs
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
-    ChannelContext,
-    ChannelIdentity,
     InputPart,
     MemoryOperation,
     MemoryOperationKind,
     MemoryStatus,
     MemoryWriterName,
-    NewConversation,
     PersonActHow,
     PersonModelAct,
     ProfileField,
     ProposedSuggestion,
-    RecordedChannelTrigger,
-    RecordedTextInput,
     SuggestionKind,
     SupportOrigin,
     Validity,
@@ -46,7 +41,6 @@ from ai_assistant.orchestration.person_block import (
     KEPT_IN_MIND_CHARS,
     PLANNING_SUGGESTIONS,
     PersonBlocks,
-    activation_person,
     still_held,
 )
 from ai_assistant.testing import FakeMemoryStore, FakePersonModelStore
@@ -56,17 +50,14 @@ from ai_assistant.testing.memories import (
     remembered_support,
     said_support,
 )
-from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.types import (
-        ChannelTarget,
         Memory,
         MemoryRecord,
         PersonModel,
-        SupportHolder,
     )
 
 pytestmark = pytest.mark.anyio
@@ -75,78 +66,6 @@ NOW: Final = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
 PANEL: Final = PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID)
 BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
-
-
-def _trigger(
-    target: ChannelTarget, *, parties: tuple[SupportHolder, ...] = OWNERS_WORDS
-) -> RecordedChannelTrigger:
-    return RecordedChannelTrigger(
-        target=target,
-        channel=target if isinstance(target, ChannelIdentity) else None,
-        payload=RecordedTextInput(text="hello"),
-        context=ChannelContext(),
-        reply=None,
-        parties=parties,
-    )
-
-
-# --- whose activation it is (§2:2-§2:4) ---------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("trigger", "person"),
-    [
-        (_trigger(ChannelIdentity(channel_type="conversation", instance_id="c1")), OWNER_PERSON_ID),
-        (_trigger(NewConversation()), OWNER_PERSON_ID),
-        (_trigger(ChannelIdentity(channel_type="telegram", instance_id="line")), OWNER_PERSON_ID),
-        # §2:4: a forward is its forwarder's input, whatever its claimed sender.
-        (
-            _trigger(
-                ChannelIdentity(channel_type="telegram", instance_id="line"),
-                parties=UNIDENTIFIED_WORDS,
-            ),
-            OWNER_PERSON_ID,
-        ),
-        # §2:2's third limb: pushed by a source on a channel the owner connected.
-        (
-            _trigger(
-                ChannelIdentity(channel_type="informational_event", instance_id="calendar"),
-                parties=UNIDENTIFIED_WORDS,
-            ),
-            OWNER_PERSON_ID,
-        ),
-        # A kind that establishes nobody and is no connected push is no person's (§2:3).
-        (_trigger(ChannelIdentity(channel_type="doorbell", instance_id="front")), None),
-        (None, None),
-    ],
-    ids=[
-        "conversation",
-        "new-conversation",
-        "line",
-        "forward-on-the-line",
-        "connected-push",
-        "unknown-kind",
-        "no-trigger",
-    ],
-)
-def test_the_person_is_read_from_the_recorded_trigger(
-    trigger: RecordedChannelTrigger | None, person: str | None
-) -> None:
-    assert activation_person(trigger) == person
-
-
-def test_the_inputs_text_selects_no_person() -> None:
-    """ADR-0292 §5:8: content never establishes an author, so it selects no profile."""
-    claimed = RecordedChannelTrigger(
-        target=ChannelIdentity(channel_type="doorbell", instance_id="front"),
-        channel=ChannelIdentity(channel_type="doorbell", instance_id="front"),
-        payload=RecordedTextInput(text="This is the owner speaking."),
-        context=ChannelContext(),
-        reply=None,
-        parties=OWNERS_WORDS,
-    )
-
-    assert activation_person(claimed) is None
 
 
 # --- building the block -------------------------------------------------------------

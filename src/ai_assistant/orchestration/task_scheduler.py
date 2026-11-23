@@ -536,9 +536,10 @@ class Spawner:
         activation_id: The calling activation, which a task it spawns names as its
             parent (§3:6).
         person: The person it is for, whom every task it spawns is for (§3:5).
-        users_authority: Whether its input carries the person's authority, so a task it
-            spawns is the person's (§3:7) and it may cancel or replace any of the
-            person's tasks (§4:4).
+        authority: The person whose authority its work carries, as its three facts say
+            (ADR-0368 §9:1), or ``None``: where it is :attr:`person`, a task it spawns is
+            the person's (§3:7) and it may cancel or replace any of the person's tasks
+            (§4:4).
         set_in: The place of its input, where a task it spawns is set (§3:6, §3:10).
         places: The places on its place list as last shown, by place: for a work that
             keeps a list, the only places a spawn may suggest (§5:6, ADR-0364 §11:3).
@@ -559,7 +560,7 @@ class Spawner:
 
     activation_id: str
     person: str
-    users_authority: bool
+    authority: str | None
     set_in: ChannelIdentity
     places: tuple[str, ...] = ()
     carried: tuple[str, ...] = ()
@@ -570,9 +571,16 @@ class Spawner:
     shown: tuple[str, ...] = ()
 
     @property
+    def carries_the_persons(self) -> bool:
+        """Whether its work carries the authority of the person it is for (ADR-0368 §9:1)."""
+        return self.authority is not None and self.authority == self.person
+
+    @property
     def author(self) -> ScheduledTaskAuthor:
         """Who a task it spawns is authored by (§3:7): the person, or the assistant."""
-        return ScheduledTaskAuthor.PERSON if self.users_authority else ScheduledTaskAuthor.ASSISTANT
+        if self.carries_the_persons:
+            return ScheduledTaskAuthor.PERSON
+        return ScheduledTaskAuthor.ASSISTANT
 
 
 #: The activation whose round's calls are running, by what the runner needs of it.

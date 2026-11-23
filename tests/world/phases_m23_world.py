@@ -65,6 +65,7 @@ from structured_support import structured
 from understanding_support import TextAsStructured
 
 from ai_assistant.core.types import (
+    Account,
     ChatDevice,
     DeviceAccess,
     ProposedCall,
@@ -107,6 +108,7 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeConversationStore,
+    FakeIdentityStore,
     FakeModelProvider,
     FakePlanStore,
     FakeSourceGrantStore,
@@ -425,6 +427,11 @@ def build_phases_world(
         ),
         phases=phases,
         now=lambda: NOW,
+        # ADR-0366 §4:1: the owner's phone is linked to them, as a hub links an admitted
+        # device, so what it writes is the owner's (ADR-0368 §9:1).
+        identities=FakeIdentityStore(
+            configured=[Account(kind="conversation", identifier=PHONE.device_id)]
+        ),
     )
     return PhasesWorld(
         engine=engine,

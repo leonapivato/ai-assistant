@@ -4,15 +4,16 @@ ADR-0349 §5-§7, the engine's half: who an input is from, what understanding's
 in-progress section shows, the waits, and the takeover stage's one step.
 
 **Who an input is from** (§7:5's third condition). :class:`InputStanding` is who handed
-an input in, as its place's kind establishes it, whether it carries the user's authority
-(ADR-0292 §5:5, ADR-0351 §6:1), and whose words it carries, its parties (ADR-0351 §2:1).
-Two activations are of one standing where both authors are established as one person,
-both carry the same authority, and both are outside, or both the person's own, or both
-the assistant's: ADR-0351 §8:5's class, read over every input each holds with its relay
-mark (:meth:`InputStanding.meets`). An input whose parties are ``None`` or empty meets
-none. A forward on the line has the user as its author, established, who forwarded it
+an input in, as the links its accounts hold identify its senders (ADR-0366 §4:1), whose
+authority it carries, as its work's facts record it (ADR-0368 §9:1, §9:2), and whose
+words it carries, its parties (ADR-0351 §2:1). Two activations are of one standing where
+both authors are identified as one person (§9:3), both carry the same people's authority,
+and both are outside, or both the person's own, or both the assistant's: ADR-0351 §8:5's
+class, read over every input each holds with its relay mark (:meth:`InputStanding.meets`).
+An input whose parties are ``None`` or empty meets none, and so does one with an
+unidentified sender. A forward on the line has its forwarder as its author, identified
 (ADR-0351 §4:2), and its original sender as its party, claimed, so it meets another
-forward, whoever sent that, and never the user's own words.
+forward of the same forwarder, whoever sent that, and never the forwarder's own words.
 
 **The relay mark** (ADR-0351 §5:6-§5:14). A running activation's inputs are read with
 their relay marks: its trigger's by its latest understanding version, and each joined
@@ -24,9 +25,10 @@ every input a relay mark could bring into the waiting activation's class. An
 absorption and a take record ``relayed`` on each joined input they append, where that
 input is relayed in the activation it comes from (§5:14).
 
-**The person an activation is for** (§5:3). An activation whose input's author its place
-establishes is that person's; one the Task Scheduler started is the person's its task is
-for (:func:`person_of`). Every other activation is no person's, and shares nothing.
+**The person an activation is for** (§5:3). An activation whose input's author is
+identified, or that the Task Scheduler or an approval started, is the person's its facts
+make it (ADR-0368 §9:5, :func:`person_of`). Every other activation is no person's, and
+shares nothing.
 
 **The in-progress section** (§5:2-§5:10). :func:`in_progress` lists every activation
 running for the viewer's person, on any place, the Task Scheduler's included, whose stop
@@ -70,10 +72,9 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
-from ai_assistant.core.channel_validation import APPROVALS, TASK_SCHEDULER, establishes_the_user
+from ai_assistant.core.channel_validation import APPROVALS, TASK_SCHEDULER, sent_by_a_person
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
-    OWNER_PERSON_ID,
     CapabilityEffect,
     ChannelIdentity,
     EpisodicMemory,
@@ -86,7 +87,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.defects import is_defect, log_defect
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.outside_content import holds_outside, joined_parties, relayed_by
-from ai_assistant.orchestration.person_block import activation_person
+from ai_assistant.orchestration.work_facts import authority_persons, persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -97,8 +98,10 @@ if TYPE_CHECKING:
         ActivationEffect,
         ActivationStop,
         ActivationUnderstanding,
+        InputSender,
         PeerView,
         ToolDefinition,
+        WorkFacts,
     )
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.disclosure import TurnSupply
@@ -112,7 +115,6 @@ __all__ = [
     "PEER_BRIEF_CHARS",
     "PEER_VIEW_CHARS",
     "STOP_ACTIVATION_CAPABILITY",
-    "THE_USER",
     "Answered",
     "Became",
     "EntryInput",
@@ -133,11 +135,6 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
-
-#: The one person a place's kind establishes as an author today: the hub's user, on the
-#: hub chat and on the line from the configured account (ADR-0323 §4:1). The household
-#: design names more (ADR-0349 §11).
-THE_USER: Final = "user"
 
 #: Planning's calls on running work (ADR-0349 §4:6, §7:20), whose declarations and
 #: runner are :mod:`~ai_assistant.orchestration.matter_calls`'s; named here, where planning
@@ -196,67 +193,75 @@ def _class_of(parties: Sequence[SupportHolder] | None, *, relayed: bool) -> _Cla
 
 @dataclass(frozen=True, slots=True)
 class InputStanding:
-    """Who handed an input in, as its place establishes it, and whose words it is (§7:5).
+    """Who handed an input in, whose authority it carries, and whose words it is (§7:5).
 
     Its authority and its class are read with the relay mark of every input its
     activation holds (ADR-0351 §5:7, §6:5, §8:5), which :meth:`meets` is handed: the
-    standing itself is what the place and the parties give, and changes with no reply.
+    standing itself is what the links, the facts and the parties give, and changes with
+    no reply.
 
     Attributes:
-        author: The person the place's kind establishes as the input's author, or
-            ``None`` where it establishes none: an event's, or an input on a place whose
-            kind establishes no author.
-        users_authority: Whether the input carries the user's authority as its author and
-            its parties give it, before any relay mark (ADR-0292 §5:5, ADR-0351 §6:1).
+        author: The person every sender of the input is identified as, where they are one
+            identified person (ADR-0366 §4:1, ADR-0368 §9:4), or ``None``: an input with
+            an unidentified sender, of several people, or that no person sent.
+        authority: The identified people whose authority its work carries, before any
+            relay mark (ADR-0368 §9:1, §9:2); none where it carries no one's, or an
+            unidentified sender's beside theirs.
         parties: Whose words the trigger's input carries (ADR-0351 §2:1), or ``None``
             where they are unknown.
     """
 
     author: str | None
-    users_authority: bool
+    authority: tuple[str, ...]
     parties: tuple[SupportHolder, ...] | None
 
     def meets(self, other: InputStanding, *, relayed: bool, other_relayed: bool) -> bool:
         """§7:5's third condition: one author, established alike, one authority, one class.
 
         Each side is read with ``relayed``, whether any input its activation holds is
-        relayed (ADR-0351 §5:7, §8:5). An author not established meets nothing, and nor
-        does an input whose parties are ``None`` or empty.
+        relayed (ADR-0351 §5:7, §8:5): a relayed input carries no one's authority
+        (§6:5). Two authors are established alike where both are identified (ADR-0368
+        §9:3), and carry the same authority where it is the same people's (§9:2). An
+        author not identified meets nothing, and nor does an input whose parties are
+        ``None`` or empty.
         """
         mine = _class_of(self.parties, relayed=relayed)
         return (
             self.author is not None
             and self.author == other.author
-            and (self.users_authority and not relayed)
-            == (other.users_authority and not other_relayed)
+            and (() if relayed else self.authority) == (() if other_relayed else other.authority)
             and mine is not None
             and mine is _class_of(other.parties, relayed=other_relayed)
         )
 
 
 def input_standing(
-    *, parties: tuple[SupportHolder, ...] | None, established: bool
+    *,
+    parties: tuple[SupportHolder, ...] | None,
+    senders: Sequence[InputSender],
+    facts: WorkFacts | None,
 ) -> InputStanding:
-    """The standing of an input whose authors its place's kind either establishes or not.
+    """The standing of an input, from who sent it and its work's facts.
 
-    Today's kinds that establish an author establish one person, the user
-    (:data:`THE_USER`): an input whose every message they establish as handed in by the
-    user is the user's to hand in, and carries the user's authority where its parties are
-    the user alone (ADR-0351 §6:1, ADR-0323 §4:7, as ADR-0321 §3:3 reads it for every
-    channel). A forward on the line is handed in by the user, and its parties are its
-    sender's, claimed, so it carries none (ADR-0351 §4:2, §6:2).
+    Its author is the one person its senders are identified as, where every sender is
+    identified and they are one person (ADR-0366 §4:1, ADR-0368 §9:4); none otherwise.
+    Its authority is the people whose authority its work's facts record (ADR-0368 §9:1,
+    §9:2): a forward's work carries none, so a forward's standing carries none (ADR-0351
+    §4:2, §6:2). Nothing here reads the channel type the input came by.
 
     Args:
         parties: Whose words the trigger's input carries, as admission recorded them.
-        established: Whether the place's kind establishes the user as having handed in
-            every message of the input.
+        senders: Who sent its messages, as its reader found them.
+        facts: Its work's facts as they stand, or ``None`` where none were recorded.
 
     Returns:
         The input's standing.
     """
+    people = {one.person for one in senders if one.identified}
+    alone = bool(senders) and all(one.identified for one in senders) and len(people) == 1
     return InputStanding(
-        author=THE_USER if established else None,
-        users_authority=established and parties_are_persons_own(parties),
+        author=people.pop() if alone else None,
+        authority=authority_persons(facts),
         parties=parties,
     )
 
@@ -314,16 +319,17 @@ def is_pure_read(tool: ToolDefinition) -> bool:
 def person_of(state: ActivationState) -> str | None:
     """The person ``state``'s activation is for, where it is one's to share (§5:3).
 
-    One whose input's author its place establishes is that person's; one the Task
-    Scheduler started is the person's its task is for, as ADR-0350 records it; and an
-    approval's is its request's person's (ADR-0361 §6:1). Any other is no person's.
+    One whose input's author is identified is the person's its facts make it (ADR-0368
+    §9:5); one the Task Scheduler started is the person's its task is for, as ADR-0350
+    records it; and an approval's is its request's person's (ADR-0361 §6:1), each as its
+    facts record it. Any other is no person's: one with no author, an event's included.
     """
     standing = state.standing
     established = standing is not None and standing.author is not None
     kind = None if state.place is None else state.place.channel_type
     if not established and kind not in _FOR_A_RECORDS_PERSON:
         return None
-    return activation_person(state.trigger)
+    return persons_work(state.work_facts)
 
 
 def _viewer_person(state: ActivationState) -> str | None:
@@ -331,7 +337,7 @@ def _viewer_person(state: ActivationState) -> str | None:
     standing = state.standing
     if standing is None or standing.author is None:
         return None
-    return activation_person(state.trigger)
+    return persons_work(state.work_facts)
 
 
 def _running(state: ActivationState) -> bool:
@@ -339,13 +345,15 @@ def _running(state: ActivationState) -> bool:
     return not state.ended and not state.stopped
 
 
-def _held_person(place: ChannelIdentity) -> str | None:
-    """The person an input held on ``place`` may be from: its kind's established author.
+def _may_be_persons(place: ChannelIdentity) -> bool:
+    """Whether an input held on ``place`` may be any person's: a person sends there.
 
-    Today's kinds that establish an author establish the owner (ADR-0338 §2:2), as
-    :func:`~ai_assistant.orchestration.person_block.activation_person` reads them.
+    Who sent a held input is not read until its reader admits it (ADR-0366 §4:1), so
+    every input held on a place a person sends on by an account may be the waiting
+    work's person's, and is waited for as theirs until its activation shows otherwise.
+    It decides no sender, and only makes a wait longer.
     """
-    return OWNER_PERSON_ID if establishes_the_user(place.channel_type) else None
+    return sent_by_a_person(place.channel_type)
 
 
 def _same_matter(one: ActivationState, other: ActivationState, *, waiting: bool = False) -> bool:
@@ -373,17 +381,12 @@ def _may_share(one: ActivationState, other: ActivationState) -> bool:
     """Whether ``one`` is, or may yet show itself to be, of ``other``'s standing (§7:5).
 
     It is where its standing meets ``other``'s under any reading of its relay marks; and
-    it may yet be where its pass has not set its standing, on a place whose kind
-    establishes an author.
+    it may yet be where its pass has not set its standing, on a place a person sends on.
     """
     if one.standing is not None:
         return _same_matter(one, other, waiting=True)
     place = one.place
-    return (
-        other.standing is not None
-        and place is not None
-        and establishes_the_user(place.channel_type)
-    )
+    return other.standing is not None and place is not None and _may_be_persons(place)
 
 
 def _waited_out(one: ActivationState, other: ActivationState) -> bool:
@@ -417,8 +420,8 @@ class HeldInput:
     A reader takes it from :meth:`Matters.hold` when the start wait begins, says which
     activation it admitted it as (:meth:`admitted`), and lets it go (:meth:`release`)
     once that activation has ended, or once nothing was taken in. Every message of a
-    place whose kind establishes the user may be the user's own, so a held input is
-    waited for as that person's until its activation shows otherwise.
+    place a person sends on may be any person's, the waiting work's included, so a held
+    input is waited for as that person's until its activation shows otherwise.
 
     It counts the notices of the messages it holds (:meth:`noticed`). A message noticed
     while the reader read what waits may be missing from what it took in, and then
@@ -944,9 +947,9 @@ class Matters:
 
         Each activation started after it, running for the same person with its standing,
         on any place, before it has committed and after (ADR-0361 §7:2: an offer can now
-        come from any place). One admitted on a place whose kind establishes its author,
-        whose pass has not yet set its standing, may be such an activation, so it is
-        waited for until its standing shows it is not (:func:`_waited_out`).
+        come from any place). One admitted on a place a person sends on, whose pass has
+        not yet set its standing, may be such an activation, so it is waited for until its
+        standing shows it is not (:func:`_waited_out`).
         """
         return [
             one
@@ -990,7 +993,7 @@ class Matters:
             if not one.released
             and one.activation_id != state.activation_id
             and one.activation_id not in running
-            and _held_person(one.place) == person
+            and _may_be_persons(one.place)
         ]
 
     def _held_out(self, held: HeldInput, seen: int, state: ActivationState) -> bool:

@@ -223,16 +223,16 @@ class ActivationState:
     merge_covered: int = field(default=0, init=False)
     #: The order the engine admitted it in, by which "started before" is read (§7:5).
     order: int = field(default=0, init=False)
-    #: ADR-0349 §7:5: who wrote the trigger's input, as its place establishes it, and what
-    #: it carries; set when the pass begins. ``None`` until then, and on an activation
-    #: whose kind establishes no author: it shares nothing (§5:3-§5:5).
+    #: ADR-0349 §7:5: who wrote the trigger's input, as the links identify its senders,
+    #: and what it carries; set when the pass begins. ``None`` until then, and on an
+    #: activation no person sent: it shares nothing (§5:3-§5:5).
     standing: InputStanding | None = None
     #: ADR-0368 §2: the three facts — whom it is for, whose authority it carries and its
     #: level — as :func:`admit_channel` recorded them from its trigger when it started,
     #: never by a model (§2:4), and written on the episode's record. Each input that
     #: joins records them again on its own entry (:meth:`take_inputs`), so they stand as
-    #: :attr:`work_facts` reads them. ``None`` for a state built without them. Nothing
-    #: reads them yet (§1:3).
+    #: :attr:`work_facts` reads them. ``None`` for a state built without them, or where
+    #: deciding them failed: no reader reads such a work as any person's (§9:1, §9:5).
     started_facts: WorkFacts | None = None
     #: The trigger's messages, each kept apart and dated, as the pass took them in: what
     #: an absorption or a take brings (ADR-0349 §7:7, §7:21). The line records the same
@@ -673,7 +673,8 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     The trigger's ``parties`` are what the channel's kind declares of its input
     (ADR-0351 §3:1), read from the one declaration beside the dispatch table and fixed
     on the episode here (§2:8), and each of its ``messages`` carries the party the kind
-    declares for it: the owner's for one the sender wrote, a forward's original sender,
+    declares for it: its sender's words for one the sender wrote, the person its link
+    names or unknown where none is identified (§3:2), and a forward's original sender,
     claimed, for a forward (§2:6, §2:7). ``declared_input`` refuses a channel type that
     declares none; the dispatch table has already refused every such type by the time
     this runs.
@@ -689,13 +690,15 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
 
     **Who sent it** (ADR-0368 §2:6): the trigger records its senders, its reader's finding
     from the accounts it arrived by: those its ``messages`` each record, and ``senders``,
-    for an input whose trigger records no messages, as the hub chat's does; none for an
-    input no person sent. **The three facts** it starts with are recorded from the
-    trigger here (§2:4), and logged beside what today's path says of it
-    (:func:`~ai_assistant.orchestration.work_facts.log_facts`), which still decides.
+    for an input whose trigger records no messages, as the hub chat's does, whose parties
+    are read from them; none for an input no person sent. **The three facts** it starts
+    with are recorded from the trigger here (§2:4), and logged
+    (:func:`~ai_assistant.orchestration.work_facts.log_facts`): every reader reads them
+    (ADR-0368 §9:1, §9:5), and a work whose facts could not be decided records none,
+    which no reader reads as any person's.
     """
     parties, recorded = declared_input(
-        input.target, messages, carries_outside_mark=carries_outside_mark
+        input.target, messages, senders=senders, carries_outside_mark=carries_outside_mark
     )
     on_its_channel = (
         isinstance(input.target, ChannelIdentity) and input.target.channel_type != "conversation"

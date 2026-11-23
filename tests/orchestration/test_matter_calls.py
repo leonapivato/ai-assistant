@@ -27,6 +27,7 @@ from test_matters import _running, _understood
 
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActionRequest,
     ActivationStop,
     PermissionDecision,
@@ -102,7 +103,7 @@ def _caller(
 ) -> MatterCaller:
     return MatterCaller(
         state=state,
-        users_authority=authority,
+        authority=OWNER_PERSON_ID if authority else None,
         owner_records=True,
         running=running,
         waiting=waiting,
@@ -281,7 +282,7 @@ async def test_an_episode_shown_among_the_concurrent_stimuli_is_read_as_running(
     _, calls, _, _ = _wired([older, asker])
     caller = MatterCaller(
         state=asker,
-        users_authority=True,
+        authority=OWNER_PERSON_ID,
         owner_records=True,
         running=frozenset(),
         concurrent=frozenset({_A}),

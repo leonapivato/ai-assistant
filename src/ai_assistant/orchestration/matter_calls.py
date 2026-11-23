@@ -263,7 +263,8 @@ class MatterCaller:
 
     Attributes:
         state: The calling activation's state.
-        users_authority: Whether its input carries the user's authority (§4:6).
+        authority: The person whose authority its work carries, as its three facts say
+            (§4:6, ADR-0368 §9:1); ``None`` where it carries no person's.
         owner_records: Whether a record placed for the owner alone may be shown to it,
             which decides a peer view's notes and evidence.
         running: Each activation it was shown as running: in a list pull's running
@@ -286,7 +287,7 @@ class MatterCaller:
     """
 
     state: ActivationState
-    users_authority: bool
+    authority: str | None
     owner_records: bool
     running: frozenset[str]
     waiting: frozenset[str] | None = None
@@ -402,7 +403,7 @@ class MatterCalls:
         self, caller: MatterCaller, decision: str, named: str | None
     ) -> NotDone | None:
         """§4:8-§4:9: why a stop call is refused whole, stopping nothing, or ``None``."""
-        if not caller.users_authority:
+        if caller.authority is None:
             _log.info("matter_call_not_done", stage="acting", reason="no_authority")
             return NotDone(reason=_NO_AUTHORITY)
         if named is None:

@@ -28,6 +28,8 @@ from ai_assistant.core.types import (
     NewMessage,
     ProposedCall,
     RoundResponse,
+    Sureness,
+    WorkAuthority,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 
@@ -193,7 +195,7 @@ async def test_a_tasks_work_may_reply_into_the_origin_of_an_input_it_took() -> N
     from ai_assistant.orchestration.conversations import conversation_channel  # noqa: PLC0415
     from ai_assistant.orchestration.matters import Became, Named  # noqa: PLC0415
     from ai_assistant.orchestration.task_scheduler import SCHEDULE  # noqa: PLC0415
-    from ai_assistant.testing.parties import OWNERS_WORDS  # noqa: PLC0415
+    from ai_assistant.testing.parties import OWNERS_FACTS, OWNERS_WORDS  # noqa: PLC0415
 
     harness = phases_harness(task_scheduler=seams())
     await harness.engine.start()
@@ -209,6 +211,10 @@ async def test_a_tasks_work_may_reply_into_the_origin_of_an_input_it_took() -> N
                 context=ChannelContext(),
                 reply=WholeTextReply(),
                 parties=OWNERS_WORDS,
+            ),
+            # ADR-0368 §3: a task's work, for its person, carrying none.
+            work_facts=OWNERS_FACTS.model_copy(
+                update={"authority": WorkAuthority.none(), "level": Sureness.NONE}
             ),
             took=[Named("act-newer", None, Became.TAKEN)],
             joined=[

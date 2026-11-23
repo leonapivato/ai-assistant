@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     InputPart,
+    InputSender,
     JoinedInput,
     MemorySource,
     MemorySupport,
@@ -47,10 +48,12 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportHolder,
     SupportOrigin,
+    Sureness,
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
     canonical_parties,
+    canonical_senders,
     input_support_origin,
     parties_are_assistants,
     parties_are_outside,
@@ -59,6 +62,7 @@ from ai_assistant.core.types import (
     stamped_support,
 )
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.parties import OWNER_SENDER
 
 _AT: Final = datetime(2026, 10, 27, 9, 0, tzinfo=UTC)
 _OWNER: Final = SupportHolder.person(OWNER_PERSON_ID)
@@ -75,7 +79,9 @@ _ID: Final = "activation:held"
 
 
 def _note(position: int = 1) -> RecordedInputMessage:
-    return RecordedInputMessage(text="Is this right?", sent_at=_AT, position=position)
+    return RecordedInputMessage(
+        text="Is this right?", sent_at=_AT, position=position, sender=OWNER_SENDER
+    )
 
 
 def _forward(account: int | None = 77) -> RecordedInputMessage:
@@ -84,6 +90,7 @@ def _forward(account: int | None = 77) -> RecordedInputMessage:
         sent_at=_AT,
         position=2,
         forwarded_from=ClaimedAuthor(name="Sam", account_id=account),
+        sender=OWNER_SENDER,
     )
 
 
@@ -110,7 +117,12 @@ def _episode(
     none means understanding was omitted. ``parties`` stands in for what admission
     declares, for a record only the upgrade or a refusal case builds.
     """
-    declared, recorded = declared_input(target, messages, carries_outside_mark=marked)
+    # A hub chat input records no messages, so its senders are its own: the owner's.
+    chat = isinstance(target, NewConversation) or target.channel_type == "conversation"
+    senders = (OWNER_SENDER,) if chat and not messages else ()
+    declared, recorded = declared_input(
+        target, messages, senders=senders, carries_outside_mark=marked
+    )
     versions = tuple(_understood(n, relayed=one) for n, one in enumerate(relayed, start=1))
     return EpisodicMemory(
         id=_ID,
@@ -129,6 +141,9 @@ def _episode(
                 reply=WholeTextReply(),
                 parties=declared if parties is None else parties,
                 messages=recorded if parties is None else messages,
+                senders=canonical_senders(
+                    (*senders, *(one.sender for one in messages if one.sender is not None))
+                ),
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
@@ -176,7 +191,8 @@ def test_a_forward_is_its_senders_claimed_words_and_your_note_beside_it_yours() 
     assert parties == (_OWNER, _SAM)
     _, (unnamed,) = declared_input(_LINE, (_forward(None),))
     assert unnamed.party == _UNKNOWN
-    assert message_party("telegram", None) == _OWNER
+    assert message_party("telegram", None, OWNER_SENDER) == _OWNER
+    assert message_party("telegram", None, None) == _UNKNOWN
 
 
 def test_a_support_on_your_note_is_yours_and_on_the_forward_its_senders() -> None:
@@ -245,12 +261,23 @@ def test_an_informational_events_party_is_its_source_established() -> None:
     assert _stamped(episode, None) == (SupportOrigin.OUTSIDE_INPUT, source)
 
 
-def test_the_hub_chat_and_a_new_conversation_are_the_owners_words() -> None:
-    """§3:1, §3:2: the one person a party names is the owner."""
-    assert declared_input(_CHAT)[0] == (_OWNER,)
-    assert declared_input(NewConversation())[0] == (_OWNER,)
+def test_the_hub_chat_and_a_new_conversation_are_their_senders_words() -> None:
+    """§3:1, §3:2: the person a link identifies as the sender, and unknown where none is
+    identified: the channel type names no one (ADR-0366 §4:1)."""
+    assert declared_input(_CHAT, senders=(OWNER_SENDER,))[0] == (_OWNER,)
+    assert declared_input(NewConversation(), senders=(OWNER_SENDER,))[0] == (_OWNER,)
     _, (held,) = declared_input(_CHAT, (_note(),))
     assert held.party == _OWNER
+    unlinked = InputSender(person=None, level=Sureness.NONE)
+    lowered = InputSender(person=OWNER_PERSON_ID, level=Sureness.NONE)
+    for unidentified in ((unlinked,), (lowered,), ()):
+        assert declared_input(_CHAT, senders=unidentified)[0] == (_UNKNOWN,)
+    both = declared_input(_CHAT, senders=(OWNER_SENDER, unlinked))[0]
+    assert both == (_OWNER, _UNKNOWN)
+    # §3:2: until a decision adds others, the one person a party names is the owner, so
+    # an identity a link names that no decision admits is no party's person.
+    sam = InputSender(person="person:sam", level=Sureness.NORMAL)
+    assert declared_input(_CHAT, senders=(sam,))[0] == (_UNKNOWN,)
 
 
 @pytest.mark.parametrize(
@@ -278,7 +305,7 @@ def test_a_kind_that_declares_nothing_for_an_input_is_refused_at_admission(
 def test_the_trigger_carries_no_origin_and_its_class_is_read_from_its_parties() -> None:
     """§8:1, §8:2: the origin is gone; outside, the person's own and the assistant's are
     read from the parties the same declaration gives, stored nowhere."""
-    assert parties_are_persons_own(declared_input(_CHAT)[0])
+    assert parties_are_persons_own(declared_input(_CHAT, senders=(OWNER_SENDER,))[0])
     assert parties_are_outside(declared_input(_LINE, (_forward(),))[0])
     assert parties_are_outside(declared_input(_EVENTS)[0])
     assert parties_are_assistants(declared_input(_SCHEDULE)[0])
@@ -329,7 +356,7 @@ def test_the_parties_are_exactly_the_messages_parties(
             context=ChannelContext(),
             reply=WholeTextReply(),
             parties=parties,
-            messages=messages,
+            messages=tuple(one.model_copy(update={"sender": None}) for one in messages),
         )
 
 

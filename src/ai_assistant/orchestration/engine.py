@@ -272,7 +272,7 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
-from ai_assistant.orchestration.person_block import activation_person, person_zone, still_held
+from ai_assistant.orchestration.person_block import person_zone, still_held
 from ai_assistant.orchestration.person_calls import recorded_wording
 from ai_assistant.orchestration.phase_path import PlaceTarget, Scheduling, failing_stage
 from ai_assistant.orchestration.planning import (
@@ -333,7 +333,12 @@ from ai_assistant.orchestration.understanding import (
     fetch_held,
     place_window_links,
 )
-from ai_assistant.orchestration.work_facts import chat_account, line_account, senders_of
+from ai_assistant.orchestration.work_facts import (
+    chat_account,
+    line_account,
+    persons_work,
+    senders_of,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -2083,9 +2088,10 @@ class Engine:
             identities: The identity store (ADR-0366 §11), the same one the hub's start
                 opened and follows the owner's accounts into. The hub chat's and the
                 line's readers read who sent each message from it, by the account it
-                arrived by (§4:1), and record it with the three facts beside today's
-                path, which still decides (ADR-0368 §1:3, §2). ``None`` records every
-                message as arriving by no link.
+                arrived by (§4:1), and record it with the three facts, which decide
+                whose work each is and whose authority it carries (ADR-0368 §2, §9).
+                ``None`` is a store that cannot be read: every message is read as
+                ADR-0374 rules for links that cannot be read.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -6487,7 +6493,7 @@ class Engine:
         assert reader is not None  # noqa: S101 — only the reader calls this
         place = ChannelIdentity(channel_type="conversation", instance_id=taken.conversation_id)
         # ADR-0366 §4:1, ADR-0368 §2:6: who sent each message, by the device it was
-        # written from, recorded with the input beside today's path (§1:3).
+        # written from, which decides whose work it is (ADR-0368 §9).
         taken = replace(
             taken,
             senders=await senders_of(
@@ -6616,7 +6622,7 @@ class Engine:
         assert reader is not None  # noqa: S101 — only the line's reader calls this
         assert writer is not None  # noqa: S101 — wired with the reader
         # ADR-0366 §4:1, ADR-0368 §2:6: who sent each message, by the Telegram account
-        # that sent it, recorded on each beside today's path (§1:3).
+        # that sent it, which decides whose work it is (ADR-0368 §9).
         taken = replace(
             taken,
             senders=await senders_of(
@@ -6696,12 +6702,14 @@ class Engine:
         trigger = None if state is None else state.trigger
         if state is not None and trigger is not None:
             # ADR-0349 §5:3, §7:5: who handed the input in, which the in-progress
-            # section, an absorption and an offer read: the line's kind establishes the
-            # user as the author of every message it takes in, a forward's included, who
-            # forwarded it, and a forward's party is its original sender, claimed
-            # (ADR-0351 §4:2, §2:7), so its parties carry no authority (§6:1).
+            # section, an absorption and an offer read: each message's sender, by the
+            # link its Telegram account holds, a forward's included, who forwarded it,
+            # and a forward's party is its original sender, claimed (ADR-0351 §4:2,
+            # §2:7), so its work carries no authority (ADR-0368 §3:2).
             state.input_messages = taken.recorded
-            state.standing = input_standing(parties=trigger.parties, established=True)
+            state.standing = input_standing(
+                parties=trigger.parties, senders=trigger.senders, facts=state.work_facts
+            )
         resolved = ResolvedChannelInput(
             channel=taken.channel,
             text=taken.text,
@@ -6771,22 +6779,26 @@ class Engine:
         trigger = None if state is None else state.trigger
         if state is not None and trigger is not None:
             # ADR-0349 §5:3, §7:5: who wrote the input, which the in-progress section,
-            # an absorption and an offer read: every message the reader takes in is the
-            # user's (ADR-0293 §6:1), and carries the owner's words, as the hub chat's
-            # kind declares (ADR-0351 §3:1).
+            # an absorption and an offer read: each message's sender, by the link the
+            # device it was written from holds (ADR-0366 §4:1), and its sender's words
+            # (ADR-0351 §3:2).
             state.input_messages = tuple(
                 RecordedInputMessage(
                     text=one.text,
                     sent_at=one.written_at,
                     position=one.position,
-                    party=message_party("conversation", None),
-                    sender=taken.senders.get(one.position),
+                    party=message_party(
+                        "conversation", None, sender := taken.senders.get(one.position)
+                    ),
+                    sender=sender,
                 )
                 for one in taken.messages
             )
+            users = all(one.author is MessageAuthor.USER for one in taken.messages)
             state.standing = input_standing(
                 parties=trigger.parties,
-                established=all(one.author is MessageAuthor.USER for one in taken.messages),
+                senders=trigger.senders if users else (),
+                facts=state.work_facts,
             )
         working = _TurnPass(
             utterance=taken.text,
@@ -7152,7 +7164,10 @@ class Engine:
         except PlanningError:
             _log.warning("approval_tickets_unread", stage="planning", reason="store_failed")
             return ()
-        person = activation_person(state.trigger)
+        # ADR-0368 §9:5: the tickets of the person whose work it is (ADR-0361 §5:3).
+        person = persons_work(state.work_facts)
+        if person is None:
+            return ()
         now = self._now()
         return tuple(
             ticket
@@ -7414,7 +7429,8 @@ class Engine:
         activation does (ADR-0350 §6:7).
         """
         lists = self._place_lists
-        person = None if state is None else activation_person(state.trigger)
+        # ADR-0368 §9:5: an approval's work is a person's, its request's person's.
+        person = None if state is None else persons_work(state.work_facts)
         if lists is None or person is None:
             return None
 
@@ -7561,7 +7577,8 @@ class Engine:
         where no Task Scheduler is wired.
         """
         lists = self._place_lists
-        person = None if state is None else activation_person(state.trigger)
+        # ADR-0368 §9:5, ADR-0350 §3:4: spawn is offered only to a person's work.
+        person = None if state is None else persons_work(state.work_facts)
         if lists is None or person is None or set_in.channel_type not in SPAWNING_KINDS:
             return None
         suggested = None if task is None else [place_of(one) for one in task.places]
@@ -8580,6 +8597,8 @@ class Engine:
                     zone=self._task_zones.default if own is None else own,
                     own_zone=own is not None,
                     received_at=None if state is None else state.started_at,
+                    # ADR-0368 §9:5: whose work it is, from its facts.
+                    person_id=None if state is None else persons_work(state.work_facts),
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the
@@ -8624,8 +8643,9 @@ class Engine:
             return None
         if not state.person_block_assembled:
             state.person_block_assembled = True
+            # ADR-0368 §9:5, ADR-0338 §2:3: a block only for a person's work.
             state.person_block = await self._person_blocks.assemble(
-                activation_person(state.trigger), supply=working.supply
+                persons_work(state.work_facts), supply=working.supply
             )
         elif state.person_block is not None:
             # §7:10, for an understanding run again on joined input as for a planning

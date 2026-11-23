@@ -84,9 +84,10 @@ from ai_assistant.core.types import (
     ToolResult,
 )
 from ai_assistant.orchestration.activation_state import active_state
-from ai_assistant.orchestration.person_block import PinRefusal, activation_person
+from ai_assistant.orchestration.person_block import PinRefusal
 from ai_assistant.orchestration.renames import current_name
 from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.work_facts import persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -431,7 +432,8 @@ class PersonModelCalls:
         holds it.
         """
         state = active_state()
-        person = None if state is None else activation_person(state.trigger)
+        # ADR-0368 §9:5: the work is a person's, read from its facts.
+        person = None if state is None else persons_work(state.work_facts)
         if person is None:
             return _not_done(_NO_PERSON, "no_person")
         capability = str(call.request.tool.capability)

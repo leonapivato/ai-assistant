@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from identity_support import owners_trigger
 from structlog.testing import capture_logs
 from understanding_support import Rendered, TextAsStructured
 
@@ -19,6 +20,7 @@ from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import ModelError, UnderstandingError
 from ai_assistant.core.prompts import PromptDeclaration, PromptOrigin, PromptTemplate
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationUnderstanding,
     ChannelContext,
@@ -65,7 +67,7 @@ from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, default_pro
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import remembered_support
-from ai_assistant.testing.parties import UNIDENTIFIED_WORDS
+from ai_assistant.testing.parties import OWNER_SENDER, UNIDENTIFIED_WORDS, line_input
 
 #: Understanding's shipped template, as the composition root hands it the stage.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
@@ -123,7 +125,9 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
                 payload=RecordedTextInput(text=text),
                 context=ChannelContext() if context is None else context,
                 reply=None if event else WholeTextReply(),
-                parties=declared_input(channel)[0] if parties is None else parties,
+                parties=declared_input(channel, senders=(OWNER_SENDER,))[0]
+                if parties is None
+                else parties,
             ),
             status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
             reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
@@ -191,6 +195,10 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
         now=lambda: AT,
         deadline=deadline,
         relayed=relayed,
+        # The owner's input by their linked account, and so the owner's work (ADR-0368
+        # §9:5): what the engine hands the stage.
+        trigger=owners_trigger(channel, text),
+        person_id=OWNER_PERSON_ID,
     )
 
 
@@ -875,12 +883,12 @@ async def test_a_line_input_taking_in_a_forward_is_attributed_message_by_message
     """ADR-0351 §2:6, §5:5: each message by its own party, and a relay mark on an input
     already outside changes nothing (§5:7): the owner's note stays theirs."""
     forward = ClaimedAuthor(name="A stranger", account_id=9)
-    parties, messages = declared_input(
-        _LINE,
+    # The owner sent both, by their linked account: the forward, and the note (§4:2).
+    parties, messages = line_input(
         (
             RecordedInputMessage(text="Pay me", sent_at=AT, position=1, forwarded_from=forward),
             RecordedInputMessage(text="Real?", sent_at=AT, position=2),
-        ),
+        )
     )
     trigger = RecordedChannelTrigger(
         target=_LINE,
