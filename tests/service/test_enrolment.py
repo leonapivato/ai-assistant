@@ -407,3 +407,24 @@ def test_the_devices_the_owner_admitted_leave_out_the_hubs_own_machine(
     assert not registry.admits(_PHONE)
     assert not registry.admits(_HUB)
     assert not registry.admits("hub")
+
+
+def test_an_admission_runs_unbroken_across_a_rotation_and_overlapping_acts(
+    store: EnrolmentStore,
+) -> None:
+    """When the device's current admission began: a rotation meets the enrolment it
+    replaces, and a registration overlapping an enrolment carries the admission on."""
+    t = [_MOMENT + timedelta(minutes=minute) for minute in range(6)]
+    store.register(_PHONE, gateway=_LAPTOP, now=t[0])
+    store.enrol(_PHONE, verifier="v", now=t[1])
+    store.revoke_registration(_PHONE, gateway=_LAPTOP, now=t[2])
+    store.enrol(_PHONE, verifier="w", now=t[3])  # a rotation, at the instant it revokes
+
+    assert store.admitted_since(_PHONE) == t[0]
+
+    store.revoke(_PHONE, now=t[4])
+    assert store.admitted_since(_PHONE) is None
+
+    store.restore_registration(_PHONE, gateway=_LAPTOP, now=t[5])
+    assert store.admitted_since(_PHONE) == t[5]
+    assert store.admitted_since(_LAPTOP) is None
