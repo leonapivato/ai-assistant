@@ -105,6 +105,7 @@ __all__ = [
     "senders_of",
     "started",
     "todays_path",
+    "unrecorded",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -415,28 +416,58 @@ def log_facts(
     )
 
 
+def _logged(
+    facts: WorkFacts, trigger: RecordedChannelTrigger, *, activation_id: str | None, at: str
+) -> None:
+    """:func:`log_facts`, whose own fault is logged and never undoes the recording."""
+    try:
+        log_facts(facts, trigger, activation_id=activation_id, at=at)
+    except Exception:  # the comparison is read beside the facts, never in their place
+        _log.warning("work_facts_unlogged", at=at, reason="defect")
+
+
 def record_started(
     trigger: RecordedChannelTrigger, *, activation_id: str | None
 ) -> WorkFacts | None:
     """The facts a work starts with, logged beside today's path; ``None`` on a defect.
 
     Nothing reads the facts yet (ADR-0368 §1:3), so recording them never stops an
-    admission: a fault is logged under a fixed event name and the work records none.
+    admission: a fault in deciding them is logged under a fixed event name and the work
+    records none; a fault in logging them is logged apart and keeps them.
 
     Args:
         trigger: The work's recorded trigger.
         activation_id: The work's activation.
 
     Returns:
-        The facts, or ``None`` where they could not be recorded.
+        The facts, or ``None`` where they could not be decided.
     """
     try:
         facts = started(trigger)
-        log_facts(facts, trigger, activation_id=activation_id, at="start")
     except Exception:  # nothing reads the facts yet, so no fault stops a work
         _log.warning("work_facts_unrecorded", at="start", reason="defect")
         return None
+    _logged(facts, trigger, activation_id=activation_id, at="start")
     return facts
+
+
+def unrecorded(inputs: Sequence[JoinedInput]) -> tuple[JoinedInput, ...]:
+    """``inputs`` with no facts: what another work recorded on them is not this work's.
+
+    An absorption or a take brings the other activation's joined inputs, each carrying
+    the facts *that* work recorded (ADR-0349 §7:7, §7:21). They are taken off before the
+    inputs join, so the work that takes them in never reads another work's facts as its
+    own, which could raise its level (ADR-0368 §2:5).
+
+    Args:
+        inputs: The inputs joining.
+
+    Returns:
+        Each, its ``facts`` ``None``.
+    """
+    return tuple(
+        one if one.facts is None else one.model_copy(update={"facts": None}) for one in inputs
+    )
 
 
 def record_joined(
@@ -448,9 +479,11 @@ def record_joined(
 ) -> tuple[JoinedInput, ...]:
     """``inputs``, each carrying the work's facts as they stand once it joined.
 
-    ADR-0368 §2:4, each recording logged beside today's path. Nothing reads the facts
-    yet (§1:3), so recording them never stops a join: on a fault, logged under a fixed
-    event name, the inputs are appended as they came, recording none.
+    ADR-0368 §2:4, each recording logged beside today's path. Whatever facts an input
+    arrives with, another work's, are replaced or taken off (:func:`unrecorded`). Nothing
+    reads the facts yet (§1:3), so recording them never stops a join: on a fault in
+    deciding them, logged under a fixed event name, the inputs join recording none; a
+    fault in logging them is logged apart and keeps them.
 
     Args:
         facts: The work's facts before the first of them joined.
@@ -459,15 +492,16 @@ def record_joined(
         activation_id: The work's activation.
 
     Returns:
-        The inputs, each with its ``facts``.
+        The inputs, each with this work's ``facts``, or with none.
     """
     try:
-        stamped: list[JoinedInput] = []
+        recorded: list[tuple[JoinedInput, WorkFacts]] = []
         for one in inputs:
             facts = joined(facts, one)
-            stamped.append(one.model_copy(update={"facts": facts}))
-            log_facts(facts, trigger, activation_id=activation_id, at="join")
+            recorded.append((one.model_copy(update={"facts": facts}), facts))
     except Exception:  # nothing reads the facts yet, so no fault stops a join
         _log.warning("work_facts_unrecorded", at="join", reason="defect")
-        return tuple(inputs)
-    return tuple(stamped)
+        return unrecorded(inputs)
+    for _, held in recorded:
+        _logged(held, trigger, activation_id=activation_id, at="join")
+    return tuple(one for one, _ in recorded)
