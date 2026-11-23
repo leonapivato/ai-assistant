@@ -70,6 +70,7 @@ from ai_assistant.core.types import (
     ApprovalTap,
     ApprovalWriteAnswer,
     Attestation,
+    AuthorityKind,
     CandidateDecline,
     ChannelContext,
     ChannelIdentity,
@@ -91,6 +92,7 @@ from ai_assistant.core.types import (
     GrantScope,
     Idempotency,
     InputPart,
+    InputSender,
     JoinedInput,
     LinkAct,
     LinkActHow,
@@ -173,6 +175,9 @@ from ai_assistant.core.types import (
     TraceOutcome,
     UnderstandingOmission,
     UnderstandingProducer,
+    WorkAuthority,
+    WorkFacts,
+    WorkFor,
     rests_on_recorded_external_content,
     stamped_support,
 )
@@ -448,6 +453,17 @@ def _provenance(moment: Moment, source: MemorySource = MemorySource.OBSERVED) ->
 #: The channel the activation episode was on, so its channel number is read back.
 _CHANNEL: Final = ChannelIdentity(channel_type="conversation", instance_id="upgrade-chat")
 
+#: Who sent the owner's messages the check records: the owner, by a linked account at the
+#: hub chat's most (ADR-0366 §4:1, §5:2).
+_SENDER: Final = InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL)
+
+#: The three facts of an owner's message's work (ADR-0368 §2, §3:1, §3:2).
+_OWNERS_FACTS: Final = WorkFacts(
+    for_whom=WorkFor.for_person(OWNER_PERSON_ID),
+    authority=WorkAuthority(kind=AuthorityKind.SENDERS, persons=(OWNER_PERSON_ID,)),
+    level=Sureness.NORMAL,
+)
+
 
 def _activation_episode(moment: Moment) -> EpisodicMemory:
     """An ended activation's episode, with its processing record (ADR-0275)."""
@@ -469,11 +485,15 @@ def _activation_episode(moment: Moment) -> EpisodicMemory:
                 context=ChannelContext(),
                 reply=None,
                 parties=(SupportHolder.person(OWNER_PERSON_ID),),
+                # ADR-0368 §2:6: who sent it, so a later build reads a sender back.
+                senders=(_SENDER,),
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,
             stages=ended_pass(ended),
+            # ADR-0368 §2:1 to §2:3: the three facts, so a later build reads them back.
+            facts=_OWNERS_FACTS,
         ),
     )
 
