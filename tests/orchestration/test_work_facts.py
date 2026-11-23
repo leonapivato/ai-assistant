@@ -147,7 +147,8 @@ def _facts(state: ActivationState) -> WorkFacts:
 
 def _reads(state: ActivationState) -> tuple[str | None, str | None]:
     """Whose work every reader reads it as, and whose authority (ADR-0368 §9:5, §9:1)."""
-    return persons_work(state.work_facts), persons_authority(state.work_facts)
+    senders = state.held_senders
+    return persons_work(state.work_facts, senders), persons_authority(state.work_facts, senders)
 
 
 #: The owner's work, carrying the owner's authority: what an owner's own message was
@@ -539,15 +540,51 @@ def test_the_readers_read_a_persons_work_and_authority_from_the_facts(
     more than one person's authority; §9:1: the one identified person whose authority it
     carries. Both answer for a person the hub admits alone (ADR-0365 §1:3, ADR-0368 §1:4),
     and a work with no facts is no person's, carrying none: recording fails closed."""
-    assert persons_work(facts) == work
-    assert persons_authority(facts) == authority
+    # The facts decide here: every sender the work holds is identified, the owner.
+    senders = (_OWNER,)
+    assert persons_work(facts, senders) == work
+    assert persons_authority(facts, senders) == authority
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        NO_LINK,
+        InputSender(person=OWNER_PERSON_ID, level=Sureness.NONE),
+        LINKS_UNREAD,
+    ],
+    ids=["unlinked", "lowered-to-none", "links-unread"],
+)
+async def test_a_forward_an_unidentified_sender_sent_is_no_persons_work(
+    sender: InputSender,
+) -> None:
+    """ADR-0368 §9:5: a person's work has no unidentified sender, read apart from its
+    authority. A forward carries no authority (ADR-0351 §6:2), so its facts' authority
+    says nothing of who sent it; an unidentified sender's forward is still no person's
+    work, and no reader gives it the owner's block, spawn or approvals. The positive
+    control: the owner's own forward is the owner's work, carrying none."""
+    forward = ClaimedAuthor(name="Sam", account_id=777)
+
+    def sent_by(one: InputSender) -> ActivationState:
+        message = RecordedInputMessage(
+            text="see this", sent_at=_AT, position=7, forwarded_from=forward, sender=one
+        )
+        return _admitted(_LINE, "see this", messages=(message,))
+
+    state = sent_by(sender)
+    assert _facts(state).authority == WorkAuthority.none()
+    assert _reads(state) == _NO_ONES
+    assert _reads(sent_by(_OWNER)) == _FOR_THE_OWNER
+    owners = await _chat(_PHONE)
+    owners.take_inputs((_joining(sender, forwarded=True),), merged=("act-other",))
+    assert _reads(owners) == _NO_ONES, "a forward of theirs joining makes it no one's"
 
 
 def test_a_relay_mark_takes_the_authority_away_and_leaves_the_work() -> None:
     """ADR-0351 §6:5, ADR-0368 §2:4: no fact records the mark; the reader takes it."""
     owners = _work(_OWNERS_WORK, _OWNERS_AUTHORITY)
-    assert persons_authority(owners, relayed=True) is None
-    assert persons_work(owners) == OWNER_PERSON_ID
+    assert persons_authority(owners, (_OWNER,), relayed=True) is None
+    assert persons_work(owners, (_OWNER,)) == OWNER_PERSON_ID
 
 
 def test_two_inputs_carry_the_same_authority_whatever_their_levels() -> None:

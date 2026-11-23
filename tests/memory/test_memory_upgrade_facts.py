@@ -56,7 +56,11 @@ from ai_assistant.memory._episode_format import (
 )
 from ai_assistant.memory._facts_upgrade import facts_episode
 from ai_assistant.models import HashingEmbedder
-from ai_assistant.orchestration.work_facts import persons_authority, persons_work
+from ai_assistant.orchestration.work_facts import (
+    held_senders,
+    persons_authority,
+    persons_work,
+)
 from ai_assistant.testing import FakeTraceSink
 
 pytestmark = pytest.mark.integration
@@ -241,13 +245,14 @@ async def test_every_old_work_reads_as_the_channel_type_rule_read_it(legacy: Pat
     approval's outcome the owner's work carrying none."""
     exported = await _exported(legacy)
 
-    read = {
-        record_id: (
-            persons_work(_processing(exported[record_id]).facts_now),
-            persons_authority(_processing(exported[record_id]).facts_now),
+    read: dict[str, tuple[str | None, str | None]] = {}
+    for record_id in _REWRITTEN:
+        record = _processing(exported[record_id])
+        senders = held_senders(record.trigger, record.joined)
+        read[record_id] = (
+            persons_work(record.facts_now, senders),
+            persons_authority(record.facts_now, senders),
         )
-        for record_id in _REWRITTEN
-    }
     owners = (OWNER_PERSON_ID, OWNER_PERSON_ID)
     for_the_owner = (OWNER_PERSON_ID, None)
     assert read == {

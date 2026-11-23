@@ -51,7 +51,7 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportOrigin,
 )
-from ai_assistant.orchestration.work_facts import persons_work
+from ai_assistant.orchestration.work_facts import held_senders, persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -106,7 +106,11 @@ async def person_of(store: PersonModelStore, episode: EpisodicMemory) -> PersonF
             retried, so no step decides without the fields it is owed (§9:3).
     """
     processing = episode.processing_record
-    person_id = None if processing is None else persons_work(processing.facts_now)
+    person_id = (
+        None
+        if processing is None
+        else persons_work(processing.facts_now, held_senders(processing.trigger, processing.joined))
+    )
     if person_id is None:
         return None
     model = await store.read(person_id)

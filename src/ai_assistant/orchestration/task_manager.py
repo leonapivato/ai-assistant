@@ -131,7 +131,7 @@ from ai_assistant.orchestration.task_scheduler import (
     shown_occurrence,
     when_text,
 )
-from ai_assistant.orchestration.work_facts import persons_work
+from ai_assistant.orchestration.work_facts import held_senders, persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -913,7 +913,12 @@ class TaskManager:
             if processing is None or processing.is_open:
                 continue
             # ADR-0368 §9:5: the episode is the person's where its facts make it theirs.
-            if persons_work(processing.facts_now) != person:
+            if (
+                persons_work(
+                    processing.facts_now, held_senders(processing.trigger, processing.joined)
+                )
+                != person
+            ):
                 continue
             if supply is not None and not admitted_to_understanding(supply, (record,)):
                 continue
