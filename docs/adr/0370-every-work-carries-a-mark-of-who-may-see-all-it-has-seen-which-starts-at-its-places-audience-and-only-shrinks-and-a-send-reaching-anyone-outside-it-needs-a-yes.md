@@ -1,6 +1,6 @@
 # 370. Every work carries a mark of who may see all it has seen, which starts at its place's audience and only shrinks, and a send reaching anyone outside it needs a yes
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0372 (§3:1, in a message's and a signal's floor; §3:2 and §3:4, for the first pass and in reading the cut; §4:1, §4:2 and §4:5, each in the addition alone; §4:3, in who may see a message: a place's start level, audience labels and the re-run by story)
 - Date: 2026-11-22
 - Scope: lane 6 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
@@ -56,6 +56,7 @@
   (§9:3, in its last sentence) and
   [ADR-0368](0368-every-work-records-whom-it-is-for-whose-authority-it-carries-and-how-sure-the-hub-is-and-an-instruction-given-in-advance-carries-its-authors.md)
   (§6:3, in the addition alone), as §11 records.
+- Partially superseded: 2026-11-22 by [ADR-0372](0372-a-place-has-a-start-level-that-what-is-said-there-carries-and-a-work-re-runs-once-without-what-is-narrower-than-its-story.md) — §3:1, in a message's and an input no person sent's floor: the audience label it carries, its place's start level when said (ADR-0372 §5:1). §3:2 and §3:4, for the first pass of understanding, which they do not bound, and after it in reading the work's cut where they read its floor (ADR-0372 §6:1, §6:5). §4:1, §4:2 and §4:5, each in the addition alone: a first pass that was re-run counts toward no mark (ADR-0372 §6:8). §4:3, in who may see a message, an input no person sent and a window's message: those inside the audience label it carries (ADR-0372 §5:2). Every other clause stands. This replacement takes effect on ratification of ADR-0372. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
