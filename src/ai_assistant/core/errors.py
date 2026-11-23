@@ -1947,6 +1947,19 @@ class PersonModelStoreError(AssistantError):
     """
 
 
+class IdentityStoreError(AssistantError):
+    """The identity store could not read or write its records (ADR-0366 §2, §3, §11).
+
+    Its own class because an identity and its links are none of the things the existing
+    errors name, and not the person model's (§2:6): a caller deciding who sent an input
+    can catch a fault of this store without catching another store's.
+
+    **It is raised only for a store fault**, never for a refused write: every refusal is
+    a :class:`~ai_assistant.core.types.LinkWrite` carrying a closed reason, and a
+    malformed *argument* is a ``ValueError``.
+    """
+
+
 class PersonModelOffError(AssistantError):
     """The person model is not switched on on this hub (ADR-0338 §8:1, §11:2).
 

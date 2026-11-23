@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Final, cast
 from pydantic import BaseModel
 
 from ai_assistant.app.composition import (
+    IDENTITIES_FILENAME,
     PERSON_MODEL_FILENAME,
     PROFILE_FIELD_CHARS,
     telegram_intake_path,
@@ -56,6 +57,7 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     OWNER_PERSON_ID,
+    Account,
     ActionRequest,
     ActivationEffect,
     ActivationUnderstanding,
@@ -90,6 +92,8 @@ from ai_assistant.core.types import (
     Idempotency,
     InputPart,
     JoinedInput,
+    LinkAct,
+    LinkActHow,
     Memory,
     MemoryMark,
     MemoryOperation,
@@ -156,6 +160,7 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportHolder,
     SupportOrigin,
+    Sureness,
     TaskRuleKind,
     TaskSpawn,
     TaskWriteAnswer,
@@ -174,6 +179,7 @@ from ai_assistant.core.types import (
 from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.memory import (
     DefaultNotificationPolicy,
+    SqliteIdentityStore,
     SqliteMemoryStore,
     SqliteNotificationOutbox,
     SqliteNotificationStore,
@@ -2111,6 +2117,42 @@ async def _read_person_model(directory: Path) -> Records:
         store.close()
 
 
+# --- identities.db --------------------------------------------------------------------
+
+
+def _identities(directory: Path) -> SqliteIdentityStore:
+    # Opened with no configured account: the composition that opened the directory
+    # first has already linked the ones the check's settings name.
+    return SqliteIdentityStore(path=directory / IDENTITIES_FILENAME)
+
+
+async def _write_identities(directory: Path, moment: Moment) -> None:
+    del moment  # the store stamps its own instants
+    store = _identities(directory)
+    try:
+        made = await store.link(
+            OWNER_PERSON_ID,
+            Account(kind="conversation", identifier="laptop.tailnet.example"),
+            act=LinkAct(how=LinkActHow.OWN_ACT, by=OWNER_PERSON_ID),
+        )
+        if made.record_id is not None:
+            withdrawn = await store.lower(made.record_id, Sureness.NONE, by=OWNER_PERSON_ID)
+            if withdrawn.record_id is not None:
+                await store.withdraw_lowering(withdrawn.record_id, by=OWNER_PERSON_ID)
+            await store.lower(made.record_id, Sureness.WEAK, by=OWNER_PERSON_ID)
+    finally:
+        store.close()
+
+
+async def _read_identities(directory: Path) -> Records:
+    store = _identities(directory)
+    try:
+        exported = await store.export()
+        return {f"identity/{identity.id}": to_json(identity) for identity in exported.identities}
+    finally:
+        store.close()
+
+
 # --- devices.db -----------------------------------------------------------------------
 
 
@@ -2195,6 +2237,7 @@ STORES: Final[tuple[Store, ...]] = (
     Store("telegram", ("telegram-*.db",), _write_telegram, _read_telegram),
     Store("bookings", ("bookings.db",), _write_bookings, _read_bookings),
     Store("person_model", (PERSON_MODEL_FILENAME,), _write_person_model, _read_person_model),
+    Store("identities", (IDENTITIES_FILENAME,), _write_identities, _read_identities),
     Store("devices", (ENROLMENTS_FILENAME,), _write_devices, _read_devices),
 )
 

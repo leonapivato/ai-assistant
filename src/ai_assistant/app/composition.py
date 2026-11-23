@@ -35,7 +35,9 @@ from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.prompts import PROMPT_OVERRIDE_DIRECTORY, PromptOrigin, PromptTemplate
 from ai_assistant.core.types import (
     DELIVERY_RESERVE_BYTES,
+    HUB_DEVICE_ID,
     OWNER_PERSON_ID,
+    Account,
     CanonicalDestination,
     DestinationProtocol,
     LabelBounds,
@@ -47,6 +49,7 @@ from ai_assistant.memory import (
     DefaultNotificationPolicy,
     MemoryIngestor,
     ModelBackedReconciler,
+    SqliteIdentityStore,
     SqliteMemoryStore,
     SqliteNotificationOutbox,
     SqliteNotificationStore,
@@ -141,7 +144,12 @@ from ai_assistant.orchestration.story_tidy_up import (
     StoryTidyUp,
 )
 from ai_assistant.orchestration.task_manager import TaskManagerLimits, TaskSchedulerSeams
-from ai_assistant.orchestration.telegram import TelegramCards, TelegramLineSeams, line_channel
+from ai_assistant.orchestration.telegram import (
+    TELEGRAM_CHANNEL_TYPE,
+    TelegramCards,
+    TelegramLineSeams,
+    line_channel,
+)
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
     RecentEpisodes,
@@ -616,6 +624,15 @@ PERSON_MODEL_FILENAME: Final = "person_model.db"
 #: person-model store, which validates every write against it.
 PROFILE_FIELD_CHARS: Final = 200
 
+#: The identity store's file under the data directory (ADR-0366 §11): the hub's
+#: identities and the accounts linked to them, opened on every hub, whatever the
+#: person-model switch says, since an identity is not a person model (§2:6).
+IDENTITIES_FILENAME: Final = "identities.db"
+
+#: The hub chat's channel type (ADR-0292), whose accounts are the devices it is written
+#: from (ADR-0293 §4:1).
+_HUB_CHAT: Final = "conversation"
+
 
 @dataclass(frozen=True, slots=True)
 class Composition:
@@ -683,6 +700,42 @@ def seeded_time_zone(settings: Settings) -> str | None:
         The zone to seed, or ``None``.
     """
     return settings.timezone if "timezone" in settings.model_fields_set else None
+
+
+def configured_accounts(settings: Settings) -> tuple[Account, ...]:
+    """The owner's accounts this hub's configuration names, to be linked at start.
+
+    #3642's "already linked": each is tied to the owner's identity by the owner's
+    ``configured`` act when the identity store opens, wherever no link holds it yet
+    (ADR-0366 §3:3). Read from what this hub knows when it starts, with no store open:
+
+    * **the hub's own machine**, :data:`~ai_assistant.core.types.HUB_DEVICE_ID`, which
+      writes the hub chat as the owner from every adapter on it (ADR-0298 §3:1);
+    * **the web door's hosted device**, ``Settings.gateway_hosted_device``, which every
+      browser of the hosted owner writes the hub chat as (ADR-0327 §10), where this
+      hub's configuration names it;
+    * **the line's account**, ``Settings.telegram_user_id``, the owner's own Telegram
+      account (ADR-0323 §3), where the line is configured.
+
+    A device enrolled at the hub, or named by a gateway whose configuration this hub
+    does not share, is not here: who has been admitted is the device record's, which
+    this layer cannot read before the hub starts.
+
+    Args:
+        settings: The loaded settings.
+
+    Returns:
+        The accounts, each once, in that order.
+    """
+    accounts = [Account(kind=_HUB_CHAT, identifier=HUB_DEVICE_ID)]
+    # Never ``hub``: the setting refuses the hub's own machine (ADR-0327 §10:3).
+    if settings.gateway_hosted_device is not None:
+        accounts.append(Account(kind=_HUB_CHAT, identifier=settings.gateway_hosted_device))
+    if settings.telegram_connection is not None and settings.telegram_user_id is not None:
+        accounts.append(
+            Account(kind=TELEGRAM_CHANNEL_TYPE, identifier=str(settings.telegram_user_id))
+        )
+    return tuple(accounts)
 
 
 def _policy_for_zone(zone: ZoneInfo) -> NotificationPolicy:
@@ -1262,6 +1315,18 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         )
         if person_model is not None:
             opened.append(person_model.close)
+        # **ADR-0366 §11's identity store, on its own file, on every hub.** It holds the
+        # owner's identity (§2:5) and links the owner's configured accounts to it as it
+        # opens, so they are present as links from the first start after the upgrade
+        # (#3642). Nothing reads it yet: who sent an input is still decided by each
+        # kind's declarations, until the lane that switches it. It reads no other store
+        # and no store reads it.
+        identities = SqliteIdentityStore(
+            path=directory / IDENTITIES_FILENAME,
+            configured=configured_accounts(settings),
+            now=_utcnow,
+        )
+        opened.append(identities.close)
         # **The sole reader of ADR-0194 §1's four spend settings, and of the fifth
         # this mechanism depends on** (ADR-0194 §5, §11). The store takes explicit
         # values and never a `Settings` read, so this is the one place the two
@@ -2367,6 +2432,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # other store and none reads it, and the façade has drained every
                 # activation that reads it through the person block before this runs.
                 *([_as_async(person_model.close)] if person_model is not None else []),
+                # And the identity store: no store reads it and it reads none, and
+                # nothing in the façade reads it yet.
+                _as_async(identities.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
                 # The grant store joins the same ordered shutdown as the other
