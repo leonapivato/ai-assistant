@@ -33,6 +33,7 @@ import json
 import os
 import signal
 import socket
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -48,14 +49,23 @@ from ai_assistant.core.errors import (
     IncompatibleStateError,
     TraceStoreError,
 )
-from ai_assistant.core.types import EvaluationTrace, TraceKind
+from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    Account,
+    EvaluationTrace,
+    LinkAct,
+    LinkActHow,
+    TraceKind,
+)
 from ai_assistant.orchestration.engine import DrainPhase, PurgeReport
 from ai_assistant.service import hub
 from ai_assistant.service.admin import ADMIN_FRAME_BYTES, ADMIN_TIMEOUT
 from ai_assistant.service.configuration import SEAM_STARTUP
+from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, EnrolmentStore
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
+from ai_assistant.service.links import HUB_CHAT
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
-from ai_assistant.testing import FakeTraceSink
+from ai_assistant.testing import FakeIdentityStore, FakeTraceSink
 from ai_assistant.wire import HubEngineClient
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, socket_path
 from ai_assistant.wire.framing import read_frame, write_frame
@@ -2036,3 +2046,92 @@ async def test_a_revocation_at_the_control_socket_reaches_the_engines_removal(
     assert code == EXIT_OK
     assert reply["ok"] is True
     assert engine.removed == ["nPHONE22CNTRL"]
+
+
+# --- ADR-0373 §6: the devices the owner admitted, followed as links -------------------
+
+
+async def _until_linked(identities: FakeIdentityStore, device: str, *, standing: bool) -> None:
+    """Wait, within a bound that fails the test, for a device's link to stand or not."""
+    deadline = asyncio.get_running_loop().time() + 30
+    account = Account(kind=HUB_CHAT, identifier=device)
+    while ((await identities.find_link(account)) is not None) != standing:
+        assert asyncio.get_running_loop().time() < deadline, (device, standing)
+        await asyncio.sleep(0.02)
+
+
+async def test_the_hub_links_the_devices_the_owner_admitted_and_follows_each_act(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, engine: FakeEngine
+) -> None:
+    """A device admitted before the hub starts is linked before any door accepts; a
+    browser device a gateway on this machine names is linked as it is registered; and
+    the owner's revocation at the control socket ends its link (ADR-0373 §6:2, §6:3)."""
+    identities = FakeIdentityStore(configured=(Account(kind=HUB_CHAT, identifier="hub"),))
+
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
+        return Composition(
+            engine=cast("Engine", engine),
+            trace_sink=FakeTraceSink(),
+            conflict_search_limit=102,
+            identities=identities,
+        )
+
+    monkeypatch.setattr(hub, "build_composition", _build)
+    monkeypatch.setattr(hub, "ensure_model_credentials", lambda settings: None)
+    settings.data_dir.mkdir(mode=0o700)
+    record = EnrolmentStore(settings.data_dir / ENROLMENTS_FILENAME)
+    record.register("nTABLET4CNTRL", gateway="hub", now=datetime(2026, 11, 23, tzinfo=UTC))
+    record.close()
+    tablet = Account(kind=HUB_CHAT, identifier="nTABLET4CNTRL")
+
+    control = settings.data_dir / ADMIN_SOCKET_FILENAME
+    serving = asyncio.create_task(hub.serve(settings))
+    try:
+        await _act_once_serving(control, {"act": "list"})
+        followed = await identities.find_link(tablet)
+        client = HubEngineClient(socket_path(settings.data_dir), read_timeout=ADMIN_TIMEOUT)
+        with acting_for("nPHONE22CNTRL"), pytest.raises(DeviceRefusedError):
+            await client.beliefs()
+        await _until_linked(identities, "nPHONE22CNTRL", standing=True)
+        reply = await _act_once_serving(control, {"act": "revoke", "identity": "nPHONE22CNTRL"})
+        await _until_linked(identities, "nPHONE22CNTRL", standing=False)
+    finally:
+        os.kill(os.getpid(), signal.SIGTERM)
+        code = await serving
+
+    assert code == EXIT_OK
+    assert reply["ok"] is True
+    assert followed is not None
+    assert followed.act == LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID)
+    owner = await identities.identity(OWNER_PERSON_ID)
+    assert owner is not None
+    assert [(one.account.identifier, one.standing) for one in owner.links] == [
+        ("hub", True),
+        ("nTABLET4CNTRL", True),
+        ("nPHONE22CNTRL", False),
+    ]
+
+
+async def test_the_device_record_follows_no_links_without_an_identity_store(
+    tmp_path: Path,
+) -> None:
+    """A composition that hands no identity store, as a test's stand-in, follows nothing."""
+    from ai_assistant.service.transport import (  # noqa: PLC0415 - one call site
+        ConnectionBudget,
+        DeliverySlots,
+    )
+
+    built = []
+    for identities in (None, FakeIdentityStore()):
+        devices = await hub._build_devices(
+            cast("Engine", FakeEngine()),
+            Settings(data_dir=tmp_path),
+            data_dir=tmp_path,
+            budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
+            delivery=DeliverySlots(max_delivery_connections=4),
+            identities=identities,
+        )
+        devices.store.close()
+        built.append(devices.links is not None)
+
+    assert built == [False, True]

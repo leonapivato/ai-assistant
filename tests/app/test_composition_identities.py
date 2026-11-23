@@ -19,10 +19,11 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
-from ai_assistant.app import build_engine
+from ai_assistant.app import build_composition, build_engine
 from ai_assistant.app.composition import IDENTITIES_FILENAME, configured_accounts
 from ai_assistant.core.channel_validation import most_sureness
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.errors import IdentityStoreError
 from ai_assistant.core.types import (
     HUB_DEVICE_ID,
     OWNER_PERSON_ID,
@@ -137,3 +138,22 @@ async def test_a_setting_cleared_ends_the_link_it_named(tmp_path: Path) -> None:
         (_HUB, True),
         (_TELEGRAM, False),
     ]
+
+
+async def test_the_composition_hands_the_store_it_opened_and_closes_it_with_the_engine(
+    tmp_path: Path,
+) -> None:
+    """``service`` follows the devices the owner admitted into the same store, which this
+    layer may not read (ADR-0373 §6:2): it gets the one this build opened and followed
+    the configuration into, and the engine's ordered shutdown closes it."""
+    composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert isinstance(composed.identities, SqliteIdentityStore)
+        held = await composed.identities.find_link(_HUB)
+    finally:
+        await composed.engine.aclose()
+
+    assert held is not None
+    assert held.act == _CONFIGURED
+    with pytest.raises(IdentityStoreError):
+        await composed.identities.find_link(_HUB)

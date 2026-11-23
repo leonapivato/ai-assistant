@@ -342,3 +342,68 @@ def test_the_live_read_carries_no_verifier_and_no_revoked_row(store: EnrolmentSt
     assert all(enrolment.is_live for enrolment in live)
     assert not any("verifier" in str(field) for field in live[0].__slots__)
     assert _PHONE in store.known_identities()
+
+
+# --- the acts that change admission, told to whoever follows them (ADR-0373 §6) --------
+
+
+def test_each_act_that_can_change_admission_is_told_once_it_has_taken_effect(
+    registry: DeviceRegistry,
+) -> None:
+    """Called after the record and the live view have moved, as the act's last step, so
+    a follower reading the live view then reads the act's outcome."""
+    told: list[tuple[str, bool]] = []
+    registry.when_admission_acted(lambda device: told.append((device, registry.admits(device))))
+    later = _MOMENT + timedelta(minutes=1)
+
+    registry.enrol(_LAPTOP, now=_MOMENT)
+    registry.accept_naming(_LAPTOP, _PHONE, now=_MOMENT)
+    registry.accept_naming(_LAPTOP, _PHONE, now=later)  # a later naming changes nothing
+    registry.revoke_registration(_PHONE, gateway=_LAPTOP, now=later)
+    registry.restore_registration(_PHONE, gateway=_LAPTOP, now=later)
+    registry.revoke_device(_PHONE, now=later)
+    registry.revoke(_LAPTOP, now=later)
+
+    assert told == [
+        (_LAPTOP, True),
+        (_PHONE, True),
+        (_PHONE, False),
+        (_PHONE, True),
+        (_PHONE, False),
+        (_LAPTOP, False),
+    ]
+
+
+def test_a_follower_that_fails_does_not_reach_the_act(registry: DeviceRegistry) -> None:
+    """ADR-0124 §8's one instant is the record's: what follows it cannot undo an act the
+    record holds, so its fault is logged and the act returns as it always did."""
+
+    def _fails(device: str) -> None:
+        raise RuntimeError(device)
+
+    registry.when_admission_acted(_fails)
+    minted = registry.enrol(_LAPTOP, now=_MOMENT)
+
+    assert registry.verify(_LAPTOP, minted.credential).enrolment_id is not None
+    assert registry.revoke(_LAPTOP, now=_MOMENT + timedelta(minutes=1))
+
+
+def test_the_devices_the_owner_admitted_leave_out_the_hubs_own_machine(
+    store: EnrolmentStore,
+) -> None:
+    """A live enrolment or registration admits a device; ``hub`` and the hub's own overlay
+    identity, which a record written before ADR-0298 may hold enrolled, are the hub's own
+    machine and never one of the owner's devices (ADR-0298 §3:1, §3:3)."""
+    store.enrol(_HUB, verifier="v", now=_MOMENT)
+    store.enrol(_LAPTOP, verifier="v", now=_MOMENT)
+    store.enrol(_PHONE, verifier="v", now=_MOMENT)
+    store.revoke(_PHONE, now=_MOMENT + timedelta(minutes=1))
+    store.register("browser-1", gateway=_LAPTOP, now=_MOMENT)
+    registry = DeviceRegistry(store, hub_identity=_HUB)
+
+    assert registry.admitted_devices() == frozenset({_LAPTOP, "browser-1"})
+    assert registry.admits(_LAPTOP)
+    assert registry.admits("browser-1")
+    assert not registry.admits(_PHONE)
+    assert not registry.admits(_HUB)
+    assert not registry.admits("hub")
