@@ -236,7 +236,13 @@ class DeviceLinks:
                 _log.info("device_linked", device=device, link_id=written.record_id)
             return
         held = await self._identities.find_link(account)
-        if held is None or held.act.how is not LinkActHow.DEVICE:
+        # Only the owner's ``device`` link is the record's to end: a ``configured`` one is
+        # the configuration's (L1), and every device link this records is the owner's.
+        if (
+            held is None
+            or held.act.how is not LinkActHow.DEVICE
+            or held.person_id != OWNER_PERSON_ID
+        ):
             return
         written = await self._identities.end_link(held.id)
         if written.kind is LinkWriteKind.WRITTEN:
