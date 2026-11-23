@@ -447,3 +447,44 @@ async def test_each_recording_is_logged_with_where_it_disagrees() -> None:
         "today_established": True,
     }
     assert not any(OWNER_PERSON_ID in str(one) for one in entries)
+
+
+# --- recording never stops a work -----------------------------------------------------------
+
+
+async def test_a_defect_in_the_lookup_or_the_recording_stops_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing reads a sender or a fact yet (ADR-0368 §1:3): a defect in finding one or
+    in recording them is logged, and the input is admitted and joins as before."""
+    import ai_assistant.orchestration.work_facts as module  # noqa: PLC0415 — patched here
+
+    class _Defective:
+        async def find_link(self, account: Account) -> Link | None:
+            raise RuntimeError("a defect")
+
+    with capture_logs() as logs:
+        found = await sender_of(
+            cast("IdentityStore", _Defective()), chat_account(_PHONE), stage="chat_reader"
+        )
+    assert found == NO_LINK
+    assert [one["reason"] for one in logs] == ["defect"]
+
+    def _raises(*_: object, **__: object) -> WorkFacts:
+        raise RuntimeError("a defect")
+
+    state = await _chat(_PHONE)
+    joining = _joining(_OWNER)
+    monkeypatch.setattr(module, "started", _raises)
+    monkeypatch.setattr(module, "joined", _raises)
+    with capture_logs() as logs:
+        broken = await _chat(_PHONE)
+        state.take_inputs((joining,), merged=("act-other",))
+    assert broken.started_facts is None
+    assert broken.trigger.senders == (_OWNER,)
+    assert [one.facts for one in state.joined] == [None]
+    assert state.work_facts == state.started_facts
+    assert [(one["event"], one["at"]) for one in logs] == [
+        ("work_facts_unrecorded", "start"),
+        ("work_facts_unrecorded", "join"),
+    ]

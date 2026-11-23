@@ -42,7 +42,7 @@ from ai_assistant.orchestration.controller import (
     DEFAULT_STAGE_RECORD_LIMIT,
     StageRecord,
 )
-from ai_assistant.orchestration.work_facts import joined, log_facts, started
+from ai_assistant.orchestration.work_facts import record_joined, record_started
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -360,12 +360,7 @@ class ActivationState:
         """
         facts = self.work_facts
         if facts is not None:
-            stamped = []
-            for one in inputs:
-                facts = joined(facts, one)
-                stamped.append(one.model_copy(update={"facts": facts}))
-                log_facts(facts, self.trigger, activation_id=self.activation_id, at="join")
-            inputs = stamped
+            inputs = record_joined(facts, inputs, self.trigger, activation_id=self.activation_id)
         self.joined = (*self.joined, *inputs)
         self.merge_covered += len(inputs)
         self.merged = (*self.merged, *(one for one in merged if one not in self.merged))
@@ -728,8 +723,7 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
         stage_limit=stage_limit,
         clock=clock,
     )
-    state.started_facts = started(state.trigger)
-    log_facts(state.started_facts, state.trigger, activation_id=activation_id, at="start")
+    state.started_facts = record_started(state.trigger, activation_id=activation_id)
     return state
 
 

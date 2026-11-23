@@ -99,6 +99,8 @@ __all__ = [
     "joined",
     "line_account",
     "log_facts",
+    "record_joined",
+    "record_started",
     "sender_of",
     "senders_of",
     "started",
@@ -177,8 +179,11 @@ async def sender_of(
         return NO_LINK
     try:
         link = await identities.find_link(account)
-    except IdentityStoreError, ValueError:
+    except IdentityStoreError:
         _log.warning("input_sender_unread", stage=stage, reason="identity_store")
+        return NO_LINK
+    except Exception:  # nothing reads a sender yet, so no fault stops an input
+        _log.warning("input_sender_unread", stage=stage, reason="defect")
         return NO_LINK
     if link is None:
         return NO_LINK
@@ -408,3 +413,61 @@ def log_facts(
         today_users=today.users_authority,
         today_established=today.established,
     )
+
+
+def record_started(
+    trigger: RecordedChannelTrigger, *, activation_id: str | None
+) -> WorkFacts | None:
+    """The facts a work starts with, logged beside today's path; ``None`` on a defect.
+
+    Nothing reads the facts yet (ADR-0368 §1:3), so recording them never stops an
+    admission: a fault is logged under a fixed event name and the work records none.
+
+    Args:
+        trigger: The work's recorded trigger.
+        activation_id: The work's activation.
+
+    Returns:
+        The facts, or ``None`` where they could not be recorded.
+    """
+    try:
+        facts = started(trigger)
+        log_facts(facts, trigger, activation_id=activation_id, at="start")
+    except Exception:  # nothing reads the facts yet, so no fault stops a work
+        _log.warning("work_facts_unrecorded", at="start", reason="defect")
+        return None
+    return facts
+
+
+def record_joined(
+    facts: WorkFacts,
+    inputs: Sequence[JoinedInput],
+    trigger: RecordedChannelTrigger,
+    *,
+    activation_id: str | None,
+) -> tuple[JoinedInput, ...]:
+    """``inputs``, each carrying the work's facts as they stand once it joined.
+
+    ADR-0368 §2:4, each recording logged beside today's path. Nothing reads the facts
+    yet (§1:3), so recording them never stops a join: on a fault, logged under a fixed
+    event name, the inputs are appended as they came, recording none.
+
+    Args:
+        facts: The work's facts before the first of them joined.
+        inputs: The inputs joining, in order.
+        trigger: The work's recorded trigger, which today's path reads.
+        activation_id: The work's activation.
+
+    Returns:
+        The inputs, each with its ``facts``.
+    """
+    try:
+        stamped: list[JoinedInput] = []
+        for one in inputs:
+            facts = joined(facts, one)
+            stamped.append(one.model_copy(update={"facts": facts}))
+            log_facts(facts, trigger, activation_id=activation_id, at="join")
+    except Exception:  # nothing reads the facts yet, so no fault stops a join
+        _log.warning("work_facts_unrecorded", at="join", reason="defect")
+        return tuple(inputs)
+    return tuple(stamped)
