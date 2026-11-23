@@ -1,6 +1,6 @@
 # 374. When the links cannot be read a message is an unidentified sender's, save one written on the hub's own machine, which is the owner's
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-23
 - Scope: lane L3b of milestone 20, "The hub knows who is speaking" (acceptance
   [#3642](https://github.com/leonapivato/ai-assistant/issues/3642), lanes
