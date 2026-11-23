@@ -54,6 +54,13 @@ class TestFakeIdentityStoreContract(IdentityStoreContract):
     """Runs FakeIdentityStore through the shared IdentityStore suite."""
 
     @pytest.fixture
+    def store(self) -> IdentityStore:
+        # Built here rather than through ``factory``: the triad check evaluates the
+        # subject fixture with nothing but ``self``, so it sees the fake itself
+        # (tests/core/test_protocol_triad.py, ``_fixture_value``).
+        return FakeIdentityStore(now=ticking())
+
+    @pytest.fixture
     def factory(self) -> IdentityStoreFactory:
         def build(
             *, configured: Sequence[Account] = (), now: Callable[[], datetime] | None = None
