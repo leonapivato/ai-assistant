@@ -336,18 +336,20 @@ class SqliteIdentityStore:
             msg = f"failed to open the identity store at {self._path!r}: {exc}"
             raise IdentityStoreError(msg) from exc
         try:
-            # Restricted before the first write: SQLite copies the file's mode onto
-            # every journal it creates (ADR-0004 §4).
-            self._restrict_permissions()
+            try:
+                # Restricted before the first write: SQLite copies the file's mode onto
+                # every journal it creates (ADR-0004 §4).
+                self._restrict_permissions()
+            except OSError as exc:
+                msg = f"failed to open the identity store at {self._path!r}: {exc}"
+                raise IdentityStoreError(msg) from exc
+            # Outside the file's own translation: an exception the injected clock raises
+            # itself propagates unwrapped (ADR-0026 §2), after the step rolls back.
             with self._transaction("prepare the identity store", conn=conn) as held:
                 self._prepare(held)
                 self._follow_configured(held)
-        except OSError as exc:
-            conn.close()  # never leak the connection when opening fails
-            msg = f"failed to open the identity store at {self._path!r}: {exc}"
-            raise IdentityStoreError(msg) from exc
         except BaseException:
-            conn.close()
+            conn.close()  # never leak the connection when opening fails
             raise
         return conn
 
@@ -536,14 +538,16 @@ class SqliteIdentityStore:
         return link_id
 
     @staticmethod
-    def _lowerings_of(conn: sqlite3.Connection, link_ids: Sequence[str]) -> list[Any]:
-        """Every lowering of the links named, in the order made."""
-        if not link_ids:
-            return []
-        marks = ", ".join("?" for _ in link_ids)
+    def _lowerings_where(conn: sqlite3.Connection, where: str, value: str) -> list[Any]:
+        """Every lowering of the links ``where`` selects, in the order made.
+
+        A subquery rather than one bound parameter per link, so a person's link history,
+        ended links included, is read whole however long it grows.
+        """
         rows: list[Any] = conn.execute(
-            f"SELECT {_LOWERING_COLUMNS} FROM lowerings WHERE link_id IN ({marks}) ORDER BY seq",  # noqa: S608 — only constants and placeholders are interpolated
-            tuple(link_ids),
+            f"SELECT {_LOWERING_COLUMNS} FROM lowerings "  # noqa: S608 — only constants are interpolated
+            f"WHERE link_id IN (SELECT id FROM links WHERE {where} = ?) ORDER BY seq",
+            (value,),
         ).fetchall()
         return rows
 
@@ -570,7 +574,7 @@ class SqliteIdentityStore:
                 f"SELECT {_LINK_COLUMNS} FROM links WHERE person_id = ? ORDER BY seq",  # noqa: S608 — only constants are interpolated
                 (person_id,),
             ).fetchall()
-            lowerings = self._lowerings_of(conn, [one[0] for one in links])
+            lowerings = self._lowerings_where(conn, "person_id", person_id)
         return _identity_from(row, [_link_from(one, lowerings) for one in links])
 
     async def find_link(self, account: Account) -> Link | None:
@@ -588,7 +592,11 @@ class SqliteIdentityStore:
             row = self._held_link_row(conn, account)
             if row is None:
                 return None
-            lowerings = self._lowerings_of(conn, [row[0]])
+            # A link whose identity is not held is no record any write made: never an
+            # identification (§4:1), and the export refuses it as corrupt too.
+            if not self._holds(conn, row[1]):
+                raise _corrupt("link")
+            lowerings = self._lowerings_where(conn, "id", row[0])
         return _link_from(row, lowerings)
 
     async def export(self) -> IdentityExport:
