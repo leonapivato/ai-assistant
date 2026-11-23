@@ -608,8 +608,11 @@ class EnrolmentStore:
             "SELECT registered_at, revoked_at FROM registrations WHERE device_id = ?",
             (device, device),
         ).fetchall()
+        # By start alone: two spans can start at one instant, and an open end is ``None``,
+        # which does not compare with an instant.
         spans = sorted(
-            (_instant(row[0]), None if row[1] is None else _instant(row[1])) for row in rows
+            ((_instant(row[0]), None if row[1] is None else _instant(row[1])) for row in rows),
+            key=lambda span: span[0],
         )
         began: datetime | None = None
         until: datetime | None = None

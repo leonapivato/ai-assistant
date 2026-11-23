@@ -428,3 +428,14 @@ def test_an_admission_runs_unbroken_across_a_rotation_and_overlapping_acts(
     store.restore_registration(_PHONE, gateway=_LAPTOP, now=t[5])
     assert store.admitted_since(_PHONE) == t[5]
     assert store.admitted_since(_LAPTOP) is None
+
+
+def test_admissions_that_start_at_one_instant_are_read_whatever_their_ends(
+    store: EnrolmentStore,
+) -> None:
+    """Two spans starting together, one revoked and one open: ordered by start alone."""
+    store.register(_PHONE, gateway=_LAPTOP, now=_MOMENT)
+    store.enrol(_PHONE, verifier="v", now=_MOMENT)
+    store.revoke_registration(_PHONE, gateway=_LAPTOP, now=_MOMENT + timedelta(minutes=1))
+
+    assert store.admitted_since(_PHONE) == _MOMENT

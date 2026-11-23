@@ -58,6 +58,7 @@ the configuration's ``hub`` link.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections import deque
 from typing import TYPE_CHECKING, Final
 
@@ -74,6 +75,7 @@ from ai_assistant.core.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Collection
+    from datetime import datetime
 
     from ai_assistant.core.protocols import IdentityStore
     from ai_assistant.core.types import Link
@@ -125,9 +127,10 @@ class DeviceLinks:
         self._configured = frozenset(configured)
         # One write at a time, so the start's following and the acts never interleave.
         self._writing = asyncio.Lock()
-        # Each act's device and whether the record admitted it once the act took effect,
-        # in the order the acts were made, replayed in that order by one worker.
-        self._acts: deque[tuple[str, bool]] = deque()
+        # Each act's device and the admission it left the device in — when that unbroken
+        # admission began, or ``None`` where it left the device unadmitted — in the order
+        # the acts were made, replayed in that order by one worker.
+        self._acts: deque[tuple[str, datetime | None]] = deque()
         self._worker: asyncio.Task[None] | None = None
         self._closed = False
         registry.when_admission_acted(self._acted)
@@ -199,13 +202,23 @@ class DeviceLinks:
         self._unwritten("the hub stopped first; its next start follows the record")
 
     def _acted(self, device: str) -> None:
-        """Note one act on ``device`` and what the record says after it. Never raises.
+        """Note one act on ``device`` and the admission it left. Never raises.
 
         The record is read here, in the act's own step, so each act is replayed as it
         left the record: a revocation and a restore made back to back end the old link
         and make a new one, as two acts do (ADR-0366 §3), however late the writes run.
         """
-        self._acts.append((device, self._registry.admits(device)))
+        try:
+            since = self._registry.admitted_since(device)
+        except sqlite3.Error as exc:
+            _log.warning(
+                "device_link_unwritten",
+                device=device,
+                reason=f"the device record could not be read ({exc}); its next start follows it",
+                error_class=type(exc).__name__,
+            )
+            return
+        self._acts.append((device, since))
         try:
             loop = None if self._closed else asyncio.get_running_loop()
         except RuntimeError:
@@ -237,10 +250,10 @@ class DeviceLinks:
         """Write each act's link in the order the acts were made."""
         async with self._writing:
             while self._acts:
-                device, admitted = self._acts.popleft()
+                device, since = self._acts.popleft()
                 try:
-                    await self._settle(device, admitted=admitted)
-                except (IdentityStoreError, ValueError) as exc:
+                    await self._settle(device, since=since)
+                except (IdentityStoreError, ValueError, sqlite3.Error) as exc:
                     _log.warning(
                         "device_link_unwritten",
                         device=device,
@@ -248,13 +261,23 @@ class DeviceLinks:
                         error_class=type(exc).__name__,
                     )
 
-    async def _settle(self, device: str, *, admitted: bool) -> None:
+    async def _settle(self, device: str, *, since: datetime | None) -> None:
         """Link ``device`` where the act left it admitted; end its link where not.
+
+        **A link is written only while the admission it stands on still holds.** Where
+        the admission the act left (begun at ``since``) is no longer the device's
+        current one, a later act has ended or replaced it, and that act's own replay
+        settles the device, so nothing is written here. That is what makes a link's
+        ``made_at`` name its admission: every link was made while its admission held,
+        so one made before the device's current admission began stood on an earlier
+        one, which has ended (:meth:`_outlived`).
 
         A standing ``device`` link recorded from an admission that has since ended — its
         revocation's write failed, and the device was admitted again — is ended before
         the device is linked anew, so the new admission never stands on the old link.
         """
+        if since is not None and self._registry.admitted_since(device) != since:
+            return
         account = _account(device)
         held = await self._identities.find_link(account)
         # Only the owner's ``device`` link is the record's to end: a ``configured`` one is
@@ -264,18 +287,19 @@ class DeviceLinks:
             and held.act.how is LinkActHow.DEVICE
             and held.person_id == OWNER_PERSON_ID
         )
-        if held is not None and own and (not admitted or self._outlived(held)):
+        if held is not None and own and (since is None or held.made_at < since):
             await self._end(held.id, account)
-        if admitted:
+        if since is not None:
             await self._link(device)
 
     def _outlived(self, held: Link) -> bool:
         """Whether a ``device`` link was recorded before its device's current admission.
 
-        Such a link stood on an admission the owner has since revoked, so its act no
-        longer stands (ADR-0373 §6:3), whatever admits the device now: a later act
-        naming the account makes a new link (ADR-0366 §3). Read from the record, which
-        keeps every revocation, so a start repairs a revocation whose write failed.
+        Every link is made while its admission holds (:meth:`_settle`), so such a link
+        stood on an admission the owner has since revoked, and its act no longer stands
+        (ADR-0373 §6:3), whatever admits the device now: a later act naming the account
+        makes a new link (ADR-0366 §3). Read from the record, which keeps every
+        revocation, so a start repairs a revocation whose write failed.
         """
         since = self._registry.admitted_since(held.account.identifier)
         return since is not None and held.made_at < since

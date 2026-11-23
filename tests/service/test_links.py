@@ -636,3 +636,48 @@ async def test_a_device_admitted_without_a_break_keeps_its_link_at_start(
 
     (held,) = await _links_of(identities, _PHONE)
     assert held.standing
+
+
+async def test_a_late_replay_writes_no_link_for_an_admission_already_ended(
+    store: EnrolmentStore,
+    registry: DeviceRegistry,
+    links: DeviceLinks,
+    identities: FakeIdentityStore,
+) -> None:
+    """Named, revoked and restored before any write ran, with the store failing once on
+    the way: only the restore's admission is linked, so no link stands on the revoked
+    one, and the next start finds nothing to change."""
+    registry.accept_naming(_LAPTOP, _PHONE, now=_MOMENT)
+    registry.revoke_registration(_PHONE, gateway=_LAPTOP, now=_LATER)
+    registry.restore_registration(_PHONE, gateway=_LAPTOP, now=_LATER + timedelta(minutes=1))
+    identities.fail_next()
+    await links.settled()
+
+    (held,) = await _links_of(identities, _PHONE)
+    assert held.standing
+
+    restarted = DeviceLinks(identities, DeviceRegistry(store, hub_identity=_HUB))
+    try:
+        await restarted.follow()
+    finally:
+        await restarted.aclose()
+    assert await _links_of(identities, _PHONE) == [held]
+
+
+async def test_tied_admissions_one_revoked_do_not_stop_the_start(
+    store: EnrolmentStore, identities: FakeIdentityStore
+) -> None:
+    """A registration and an enrolment made at one instant, the registration later
+    revoked: the admission runs on unbroken, and the start keeps the link."""
+    store.register(_PHONE, gateway=_LAPTOP, now=_MOMENT)
+    store.enrol(_PHONE, verifier="v", now=_MOMENT)
+    linked = await identities.link(OWNER_PERSON_ID, _account(_PHONE), act=_DEVICE)
+    store.revoke_registration(_PHONE, gateway=_LAPTOP, now=_LATER)
+    links = DeviceLinks(identities, DeviceRegistry(store, hub_identity=_HUB))
+    try:
+        await links.follow()
+    finally:
+        await links.aclose()
+
+    (held,) = await _links_of(identities, _PHONE)
+    assert (held.id, held.standing) == (linked.record_id, True)
