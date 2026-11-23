@@ -59,6 +59,7 @@ from ai_assistant.testing.grants import (
     revocation_of,
     source_grant,
 )
+from ai_assistant.testing.identities import FakeIdentityStore
 from ai_assistant.testing.invoker import (
     APPEND_FAILED,
     CLAIM,
@@ -236,6 +237,7 @@ __all__ = [
     "FakeForecaster",
     "FakeIdentifierSpace",
     "FakeIdentifiers",
+    "FakeIdentityStore",
     "FakeInvocationCompleter",
     "FakeInvocationLedger",
     "FakeMemoryPolicy",

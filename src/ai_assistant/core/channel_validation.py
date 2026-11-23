@@ -46,11 +46,16 @@ to send one, the preposition its origin takes, and what its content is called
 which no ``ChannelKind`` declares in code, declares it here too, and a declared kind reads
 it rather than restating it. A kind with no row is rendered with the fallback ADR-0353
 §6:3 and §7:5 give it.
+
+**The most sureness each kind can give** (ADR-0366 §5:2), declared beside how it
+establishes authors, and a link's level read from it (§5:3, :func:`link_level`). Nothing
+reads either yet: who sent an input is still decided by the declarations above.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from pydantic import TypeAdapter, ValidationError
@@ -65,15 +70,16 @@ from ai_assistant.core.types import (
     ReplyCapability,
     StatementPart,
     SupportHolder,
+    Sureness,
     TextChannelPayload,
     canonical_parties,
     forward_party,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.types import ChannelTarget
+    from ai_assistant.core.types import ChannelTarget, Link
 
 _REPLY = TypeAdapter[ReplyCapability | None](ReplyCapability | None)
 
@@ -110,6 +116,17 @@ _A_SOURCES_REPORT: Final = frozenset({"informational_event"})
 #: question's message is *shown to you* only in such a place (ADR-0321 §4:4), and a
 #: type absent from it establishes nobody.
 _ESTABLISHES_THE_USER: Final = frozenset({"conversation", "telegram"})
+
+#: ADR-0366 §5:2: the most sureness each kind can give, declared beside how it
+#: establishes authors. The hub chat's accounts are the devices it is written from, each
+#: admitted by the owner and behind its own login, and the line's is a messaging account
+#: behind Telegram's: both give normal (§5's table). No kind gives weak or strong yet:
+#: no mail kind is declared until a decision rules how that channel establishes a sender
+#: (ADR-0368 §9:8), and strong waits on combining signals (ADR-0366 §5:4). A kind absent
+#: from it gives none.
+_MOST_SURENESS: Final[Mapping[str, Sureness]] = MappingProxyType(
+    {"conversation": Sureness.NORMAL, "telegram": Sureness.NORMAL}
+)
 
 
 def snapshot(
@@ -300,6 +317,33 @@ def establishes_the_user(channel_type: str) -> bool:
         ``True`` exactly for a type whose kind declares it.
     """
     return channel_type in _ESTABLISHES_THE_USER
+
+
+def most_sureness(channel_type: str) -> Sureness:
+    """The most sureness a kind can give, as it declares it (ADR-0366 §5:2).
+
+    Args:
+        channel_type: The channel type; the hub chat's is ``conversation``.
+
+    Returns:
+        The kind's declared most, or ``none`` for a kind that declares none.
+    """
+    return _MOST_SURENESS.get(channel_type, Sureness.NONE)
+
+
+def link_level(link: Link) -> Sureness:
+    """A link's level: its kind's declared most, or its lowest standing lowering.
+
+    Whichever is lower (ADR-0366 §5:3, §5:5): nothing raises a link above its kind's
+    most, and a link of a kind that declares none is at none.
+
+    Args:
+        link: The link, with its lowerings.
+
+    Returns:
+        The level.
+    """
+    return link.level(most_sureness(link.account.kind))
 
 
 @dataclass(frozen=True, slots=True)

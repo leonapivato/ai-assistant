@@ -55,6 +55,7 @@ from ai_assistant.core.errors import (
     AssistantError,
     AuditError,
     ConversationStoreError,
+    IdentityStoreError,
     MemoryStoreError,
     NotificationOutboxError,
     NotificationStoreError,
@@ -111,6 +112,7 @@ from ai_assistant.memory import (
 from ai_assistant.memory import traces as memory_traces
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import StoreHealthReader
+from ai_assistant.memory.identity_store import SqliteIdentityStore
 from ai_assistant.memory.person_model_store import SqlitePersonModelStore
 from ai_assistant.orchestration import (
     ConnectionOperations,
@@ -175,6 +177,7 @@ from ai_assistant.testing import (
     FakeConversationStore,
     FakeEmbedder,
     FakeFetcher,
+    FakeIdentityStore,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -855,6 +858,17 @@ async def _sqlite_person_model_store(now: Clock) -> None:
             store.close()
 
 
+async def _fake_identity_store(now: Clock) -> None:
+    """Building the store stamps the owner's identity (ADR-0366 §2:5)."""
+    FakeIdentityStore(now=now)
+
+
+async def _sqlite_identity_store(now: Clock) -> None:
+    """Creating the store stamps the owner's identity (ADR-0366 §2:5)."""
+    with tempfile.TemporaryDirectory() as directory:
+        SqliteIdentityStore(path=Path(directory) / "identities.db", now=now).close()
+
+
 async def _sqlite_story_store(now: Clock) -> None:
     """A create stamps the story and its log lines from the store's own clock."""
     with tempfile.TemporaryDirectory() as directory:
@@ -983,6 +997,8 @@ SEAMS = [
     Seam("FakeStoryStore", _fake_story_store, StoryStoreError),
     Seam("FakePersonModelStore", _fake_person_model_store, PersonModelStoreError),
     Seam("SqlitePersonModelStore", _sqlite_person_model_store, PersonModelStoreError),
+    Seam("FakeIdentityStore", _fake_identity_store, IdentityStoreError),
+    Seam("SqliteIdentityStore", _sqlite_identity_store, IdentityStoreError),
     Seam("SqliteStoryStore", _sqlite_story_store, StoryStoreError),
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
     Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),

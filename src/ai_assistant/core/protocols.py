@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from ai_assistant.core.types import (
+        Account,
         ActionRequest,
         ActivationEffect,
         ActivationEffectClaim,
@@ -171,6 +172,11 @@ if TYPE_CHECKING:
         GrantScope,
         HeldNotification,
         Identifier,
+        Identity,
+        IdentityExport,
+        Link,
+        LinkAct,
+        LinkWrite,
         Memory,
         MemoryChange,
         MemoryDecision,
@@ -255,6 +261,7 @@ if TYPE_CHECKING:
         StoryView,
         StoryViewPage,
         StructuredReply,
+        Sureness,
         TaskSpawn,
         TelegramButton,
         TelegramCallRecord,
@@ -14391,5 +14398,173 @@ class PersonModelStore(Protocol):
 
         Raises:
             PersonModelStoreError: If the store cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
+class IdentityStore(Protocol):
+    """The hub's identities and the accounts linked to them (ADR-0366 §2, §3, §5:5).
+
+    **What it holds**: each identity, a stable identifier holding no name, relation or
+    other fact about its person and belonging to no one's domain (§2:1, §2:2); each
+    link, tying one account (a kind and an account identifier) to one identity, with
+    the act that made it (§3:1); and each lowering of a link's level, with who made it
+    and whether it was withdrawn (§5:5). Nothing here is a person model (§2:6), a view
+    (§7) or a grant, and nothing here decides who sent an input: that is code reading a
+    link (§4:1), which no caller does yet.
+
+    **One identity, the owner's**, created when the store is first created and named by
+    :data:`~ai_assistant.core.types.OWNER_PERSON_ID` (§2:5). No member adds another
+    before a later decision provides for one (§2:4, §1:3), so every link is the owner's
+    act tying an account to the owner's identity, which is §3:3. Every member is keyed by
+    an identity's id all the same, and one naming an identity the store does not hold is
+    refused ``unknown_person``.
+
+    **An account is tied to one identity at most**: linking an account already linked to
+    the identity named changes nothing, and linking one linked to another is refused
+    ``already_linked``. Who may undo a link is lane 3's (§3), so no member removes one.
+
+    **The owner's configured accounts**, which every implementation takes when it is
+    built or opened, are linked to the owner's identity by a ``configured`` act of the
+    owner's wherever no link holds them yet, in the step that opens the store: the
+    owner's existing accounts are present as links without the owner doing anything
+    (#3642). A configured account a link already holds is left as it is, and an account
+    no longer configured stays linked: no code undoes a link (§3:2).
+
+    **A link's level** is its kind's declared most or the lowest lowering that stands on
+    it, whichever is lower (§5:3): :func:`~ai_assistant.core.channel_validation.link_level`
+    reads it from a :class:`~ai_assistant.core.types.Link`. The store records lowerings
+    and judges who may make and withdraw one; it holds no declaration of a kind.
+
+    **Each member that writes does so in one atomic step**, observing the store,
+    deciding and writing against every other member, across processes as well as
+    coroutines; a refused write writes nothing. **Every read returns a detached
+    snapshot**: the exchanged types are frozen pydantic models.
+
+    Every member raises :class:`~ai_assistant.core.errors.IdentityStoreError` for a store
+    fault. A malformed argument is a ``ValueError``, raised before anything is read; a
+    model argument is validated again whole, since ``model_copy`` and
+    ``model_construct`` skip validation. Cancelling any member is governed by this
+    module's cancellation clause (ADR-0060). Every argument is immutable, so input
+    observation (ADR-0065) asks nothing further of it.
+
+    A store under ADR-0326 in the hub's data directory, whose export carries every
+    record it holds (ADR-0004 §6).
+
+    **A BREAKING contract change under golden rule 5**, named by ADR-0366 §11 and made
+    under it, landing with its conformance suite, its canonical fake in
+    :mod:`ai_assistant.testing` and its store (``CONTRIBUTING.md`` → "Adding a
+    Protocol", ADR-0137 §2).
+    """
+
+    async def identity(self, person_id: str) -> Identity | None:
+        """Read one identity, with every link tied to it and every lowering of each.
+
+        How a person's links are listed (#3642): in the order made, each with its
+        lowerings in the order made, withdrawn ones included.
+
+        Args:
+            person_id: The identity, by id.
+
+        Returns:
+            The identity, or ``None`` where the store holds none of that id.
+
+        Raises:
+            ValueError: If ``person_id`` is not a non-blank ``str``.
+            IdentityStoreError: If the store cannot be read, or a stored row is corrupt.
+        """
+        ...
+
+    async def find_link(self, account: Account) -> Link | None:
+        """Find the link ``account`` is tied to, where one is (ADR-0366 §4:1).
+
+        The account is matched exactly: its kind and its identifier, each as given.
+
+        Args:
+            account: The account.
+
+        Returns:
+            Its link, with its lowerings; ``None`` where no link ties it.
+
+        Raises:
+            ValueError: If ``account`` is not a valid ``Account``.
+            IdentityStoreError: If the store cannot be read, or a stored row is corrupt.
+        """
+        ...
+
+    async def link(self, person_id: str, account: Account, *, act: LinkAct) -> LinkWrite:
+        """Tie ``account`` to the identity ``person_id`` names, by ``act`` (ADR-0366 §3:1).
+
+        The link is made at the store's clock's reading, with no lowering.
+
+        Args:
+            person_id: The identity to tie it to.
+            account: The account.
+            act: Who made it, and how: the person whose own act it is (§3:1).
+
+        Returns:
+            ``written`` with the new link's id; ``unchanged`` with the link's id where
+            the account is already tied to that identity; or ``refused`` with
+            ``unknown_person`` where the store holds no identity ``person_id`` or
+            ``act.by`` names, or ``already_linked`` where another identity holds it.
+
+        Raises:
+            ValueError: If ``person_id`` is not a non-blank ``str``, or ``account`` or
+                ``act`` is not a valid one of its type.
+            IdentityStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def lower(self, link_id: str, level: Sureness, *, by: str) -> LinkWrite:
+        """Lower a link's level to ``level``, by ``by``'s act (ADR-0366 §5:5).
+
+        The lowering stands until its maker withdraws it. A level at or above the link's
+        kind's most is recorded as made and lowers nothing while it stands (§5:3).
+
+        Args:
+            link_id: The link.
+            level: The level it lowers the link to.
+            by: The person making it: the owner, or the person the link identifies.
+
+        Returns:
+            ``written`` with the lowering's id; or ``refused`` with ``unknown_record``
+            where no link is held under ``link_id``, ``unknown_person`` where the store
+            holds no identity ``by``, or ``not_allowed`` where ``by`` is neither the
+            owner nor the person the link identifies.
+
+        Raises:
+            ValueError: If ``link_id`` or ``by`` is not a non-blank ``str``, or
+                ``level`` is not a ``Sureness``.
+            IdentityStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def withdraw_lowering(self, lowering_id: str, *, by: str) -> LinkWrite:
+        """Withdraw a lowering, by its maker alone (ADR-0366 §5:5).
+
+        It is kept, withdrawn at the store's clock's reading, and stands no more.
+
+        Args:
+            lowering_id: The lowering.
+            by: The person withdrawing it.
+
+        Returns:
+            ``written``; ``unchanged`` where it is already withdrawn; or ``refused``
+            with ``unknown_record`` where no lowering is held under ``lowering_id``,
+            ``unknown_person`` where the store holds no identity ``by``, or
+            ``not_allowed`` where ``by`` is not who made it.
+
+        Raises:
+            ValueError: If ``lowering_id`` or ``by`` is not a non-blank ``str``.
+            IdentityStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def export(self) -> IdentityExport:
+        """Return every record the store holds, from one consistent reading (ADR-0004 §6).
+
+        Raises:
+            IdentityStoreError: If the store cannot be read, or a stored row is corrupt.
         """
         ...

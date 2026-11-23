@@ -1193,6 +1193,9 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             "connections.db",
             "conversations.db",
             "grants.db",
+            # ADR-0366 §11's identity store: the owner's identity and the accounts
+            # linked to it, opened on every hub whatever the person-model switch says.
+            "identities.db",
             "memory.db",
             "notifications.db",
             # ADR-0131 §3's delivery outbox, the ninth. Tier 1 for the notification

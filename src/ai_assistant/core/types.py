@@ -24772,6 +24772,294 @@ class PersonModelWrite(BaseModel):
         return self
 
 
+# --- identities, links and sureness (ADR-0366 §2, §3, §5, §11) ----------------------
+#
+# Who a person is to the hub: an **identity**, a stable identifier that holds no fact
+# about its person and belongs to no one's domain (§2:1, §2:2), and the accounts
+# **linked** to it (§3). Each link is at a level of **sureness** (§5): its kind's declared
+# most, which ``core.channel_validation`` holds beside the kind's other declarations
+# (§5:2), or the lowest lowering standing on it, whichever is lower (§5:3, §5:5). Every
+# record here is the identity store's alone, behind ``IdentityStore``, and every id and
+# account identifier is held **verbatim**, as :data:`NonBlankEncodableText`: a record
+# that normalised the account it was handed could tie another account than the one
+# named. An identity is not a person in ADR-0338 §2:1's sense (§2:6): nothing here is the
+# person model's, and nothing here adds a person to it.
+
+
+class Sureness(StrEnum):
+    """How sure the hub is of who something comes from (ADR-0366 §5:1).
+
+    Four levels, closed, and **ordered** from least to most in the order declared:
+    ``none``, ``weak``, ``normal``, ``strong``. Two levels compare by that order with
+    ``<``, ``<=``, ``>`` and ``>=``, so ``min`` gives the lowest of several, as a link's
+    level (§5:3) and a work's (ADR-0368 §4:1) are read; never by their values'
+    alphabetical order. A level compares only with a level: comparing one with anything
+    else is a ``TypeError``.
+
+    What a level permits, and what a shortfall does, are not here (§5:8).
+    """
+
+    NONE = "none"
+    """Claimed or unknown: nothing establishes who sent it, such as "it's the cleaner"
+    from an account linked to no one."""
+    WEAK = "weak"
+    """Established by a linked account, or other means, whose sender can be faked or that
+    is commonly broken into, such as email or SMS."""
+    NORMAL = "normal"
+    """Established by a linked account, or other means, behind its own login, such as a
+    messaging account or an enrolled phone."""
+    STRONG = "strong"
+    """Several independent signals at once, or a fresh check, such as a home device with
+    voice and face, or a fingerprint just now."""
+
+    @property
+    def rank(self) -> int:
+        """The level's place in the order, from ``0`` for ``none`` to ``3`` for ``strong``."""
+        return _SURENESS_ORDER.index(self)
+
+    def _ranks(self, other: object) -> tuple[int, int]:
+        if not isinstance(other, Sureness):
+            msg = f"a level compares only with a level, not {describe_untrusted(other)}"
+            raise TypeError(msg)
+        return self.rank, other.rank
+
+    def __lt__(self, other: object) -> bool:
+        """Whether this level is below ``other``."""
+        mine, theirs = self._ranks(other)
+        return mine < theirs
+
+    def __le__(self, other: object) -> bool:
+        """Whether this level is at most ``other``."""
+        mine, theirs = self._ranks(other)
+        return mine <= theirs
+
+    def __gt__(self, other: object) -> bool:
+        """Whether this level is above ``other``."""
+        mine, theirs = self._ranks(other)
+        return mine > theirs
+
+    def __ge__(self, other: object) -> bool:
+        """Whether this level is at least ``other``."""
+        mine, theirs = self._ranks(other)
+        return mine >= theirs
+
+
+#: The four levels, least to most (ADR-0366 §5:1): :attr:`Sureness.rank`'s order.
+_SURENESS_ORDER: Final[tuple[Sureness, ...]] = tuple(Sureness)
+
+
+class Account(BaseModel):
+    """An account as the hub knows it: its kind and its account identifier (ADR-0366 §3).
+
+    The kind is a channel type, as ADR-0292 uses the word: ``conversation`` for the hub
+    chat, whose accounts are the devices it is written from, and ``telegram`` for the
+    line, whose accounts are Telegram user ids. The identifier is the hard identifier
+    the account is known by on that kind, held verbatim, and an account is one kind and
+    one identifier together: the same identifier on two kinds is two accounts.
+
+    Attributes:
+        kind: The channel type the account sends by.
+        identifier: The account identifier on that kind.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: NonBlankEncodableText
+    identifier: NonBlankEncodableText
+
+
+class LinkActHow(StrEnum):
+    """How a link was made (ADR-0366 §3:1). Closed, **added to and never renamed**."""
+
+    CONFIGURED = "configured"
+    """Carried when the hub starts from the owner's own configuration of it: an account
+    a setting the owner set names, or the hub's own machine, which writes the hub chat
+    as the owner (#3642, "already linked")."""
+    OWN_ACT = "own_act"
+    """By the person's own act on a surface of the hub (§3:1)."""
+
+
+class LinkAct(BaseModel):
+    """Who made a link, and how (ADR-0366 §3:1).
+
+    Attributes:
+        how: How it was made.
+        by: The person whose act made it, by their identity's id.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    how: LinkActHow
+    by: NonBlankEncodableText
+
+
+class Lowering(BaseModel):
+    """A lowering of one link's level (ADR-0366 §5:5).
+
+    It stands from when it is made until whoever made it withdraws it, and is kept,
+    withdrawn, afterwards.
+
+    Attributes:
+        id: Its id.
+        level: The level it lowers the link to: the link is at this level or below while
+            it stands (§5:3).
+        by: The person who made it, by their identity's id: the owner, or the person the
+            link identifies.
+        made_at: When it was made.
+        withdrawn_at: When its maker withdrew it, or ``None`` while it stands.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: NonBlankEncodableText
+    level: Sureness
+    by: NonBlankEncodableText
+    made_at: UtcInstant
+    withdrawn_at: UtcInstant | None = None
+
+    @property
+    def standing(self) -> bool:
+        """Whether it stands: made and not withdrawn."""
+        return self.withdrawn_at is None
+
+
+class Link(BaseModel):
+    """One account tied to one identity (ADR-0366 §3), and its lowerings (§5:5).
+
+    What arrives by the account is from the person the identity is (§4:1). Its level is
+    :meth:`level`, read with the kind's declared most, which
+    :func:`ai_assistant.core.channel_validation.link_level` supplies.
+
+    Attributes:
+        id: Its id.
+        person_id: The identity it ties the account to.
+        account: The account.
+        act: Who made it, and how.
+        made_at: When it was made.
+        lowerings: Every lowering made on it, withdrawn ones included, in the order made.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: NonBlankEncodableText
+    person_id: NonBlankEncodableText
+    account: Account
+    act: LinkAct
+    made_at: UtcInstant
+    lowerings: tuple[Lowering, ...] = ()
+
+    @property
+    def standing_lowerings(self) -> tuple[Lowering, ...]:
+        """The lowerings that stand, in the order made."""
+        return tuple(one for one in self.lowerings if one.standing)
+
+    def level(self, most: Sureness) -> Sureness:
+        """The link's level: ``most``, or the lowest standing lowering, whichever is lower.
+
+        ADR-0366 §5:3. Nothing raises it above ``most``: a lowering to a level at or above
+        it leaves the link at ``most``.
+
+        Args:
+            most: The most the link's kind declares (§5:2).
+
+        Returns:
+            The level.
+        """
+        return min((most, *(one.level for one in self.standing_lowerings)))
+
+
+class Identity(BaseModel):
+    """One person, to the hub: a stable identifier and the accounts linked to it.
+
+    ADR-0366 §2:1. It holds no name, relation or other fact about its person and belongs
+    to no one's domain (§2:2); its identifier never changes and is never reused (§2:3).
+    The owner's is :data:`OWNER_PERSON_ID` (§2:5).
+
+    Attributes:
+        id: The identity's stable identifier.
+        created_at: When the store created it.
+        links: Every link tied to it, in the order made.
+
+    Raises:
+        ValueError: If a link ties its account to another identity.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: NonBlankEncodableText
+    created_at: UtcInstant
+    links: tuple[Link, ...] = ()
+
+    @model_validator(mode="after")
+    def _its_links_are_its_own(self) -> Self:
+        if any(one.person_id != self.id for one in self.links):
+            msg = "an identity holds only the links tied to it"
+            raise ValueError(msg)
+        return self
+
+
+class IdentityExport(BaseModel):
+    """Every record the identity store holds, for its export (ADR-0004 §6).
+
+    Attributes:
+        identities: Every identity, in the order created, each with every link and every
+            lowering, withdrawn ones included.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    identities: tuple[Identity, ...] = ()
+
+
+class LinkWriteKind(StrEnum):
+    """What a write to the identity store did. Closed, added to, never renamed."""
+
+    WRITTEN = "written"
+    """It wrote, in one step."""
+    UNCHANGED = "unchanged"
+    """It changed nothing, as the contract says such a write does: an account already
+    linked to the identity named, or a lowering already withdrawn."""
+    REFUSED = "refused"
+    """It was refused, and nothing was written."""
+
+
+class LinkRefusal(StrEnum):
+    """Why a write to the identity store was refused. Closed, added to, never renamed.
+
+    A refused write writes nothing; a refusal is an outcome, never an
+    :class:`~ai_assistant.core.errors.IdentityStoreError`, which is reserved for a store
+    that could not read or write.
+    """
+
+    UNKNOWN_PERSON = "unknown_person"
+    """The store holds no identity of that id: the one a link would tie to, or the
+    person's whose act it is."""
+    UNKNOWN_RECORD = "unknown_record"
+    """The link or the lowering named is not held."""
+    ALREADY_LINKED = "already_linked"
+    """The account is linked to another identity: an account is tied to one at most."""
+    NOT_ALLOWED = "not_allowed"
+    """The person acting may not make this change: a lowering by someone who is neither
+    the owner nor the person the link identifies, or a withdrawal by someone other than
+    the lowering's maker (ADR-0366 §5:5)."""
+
+
+class LinkWrite(BaseModel):
+    """What a write to the identity store did.
+
+    Attributes:
+        kind: What it did.
+        record_id: The link or lowering it wrote or found, where it names one.
+        refusal: Why it was refused; set exactly where ``kind`` is ``refused``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: LinkWriteKind
+    record_id: NonBlankEncodableText | None = None
+    refusal: LinkRefusal | None = None
+
+    @model_validator(mode="after")
+    def _refused_with_a_reason(self) -> Self:
+        if (self.kind is LinkWriteKind.REFUSED) != (self.refusal is not None):
+            msg = "a write names its refusal exactly when it was refused"
+            raise ValueError(msg)
+        return self
+
+
 # --- the person model as the panels read and edit it (ADR-0338 §8:1-§8:3) ----------
 #
 # What ``AssistantEngine``'s person-model members carry: a read of one person's model
