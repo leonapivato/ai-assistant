@@ -55,6 +55,9 @@
   Building it is a breaking change under golden rule 5, through the `core` changes §10 names, none
   of which is made here. It dispatches no implementation (§1:2).
 - **Partially supersedes**
+  [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md)
+  (§3:3's admitted differences and §3:8's *no field is added for a stage's result*, each in the
+  addition alone: the re-run's recall),
   [ADR-0308](0308-recall-runs-again-on-what-understanding-found-and-outside-content-reaches-planning-only-as-a-digests-evidence.md)
   (§2:8 and §2:10, each in the addition alone),
   [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md)
@@ -188,8 +191,8 @@ widens who may see what is said. The act is named here; a surface for it is the 
 > audience label the meet of the people who may see each record it was written from, for the mark
 > (ADR-0370 §4:3, as §5:2 reads it), taken when it is written.
 
-> **Normative.** An audience label is fixed when its block is said or written, each group it names
-> denoting its members then, and nothing widens it.
+> **Normative.** An audience label is set when its block is said or written, each group it names
+> denoting its members then. After that it only narrows (§3:6), and nothing widens it.
 
 > **Normative.** A model of a work may narrow the audience label of a block of the domain its
 > work's records land in, or of a record its work writes, at its own discretion or on a person's
@@ -232,12 +235,14 @@ text may still ask for a yes on its own, as ADR-0361 §2:3 lets planning narrow 
 > **Normative.** What is said in a place, by a person or by a work, may be seen by whoever was in
 > that place's audience when it was said. Someone who joins later gets only what came after.
 
-> **Normative.** A person may also see a record of another domain where they were inside the
-> audience label it carries (§3) when it was said or written.
+> **Normative.** A person may also see a record of another domain where they are inside the
+> audience label it carries (§3) as it stands, a group it names counting only those who were its
+> members when the record was said or written and still are.
 
 > **Normative.** §4:1 and §4:2 are cases of ADR-0369 §6:1, beside its others. Each holds only
 > where the person is in the record's reach and no limit covering them bears on the record, as
-> ADR-0369 §6:1 reads a limit, and ADR-0369 §3:4's default is private save as they provide.
+> ADR-0369 §6:1 reads a limit. Neither opens a record of a group's domain to someone who has left
+> that group (ADR-0369 §9:3), and ADR-0369 §3:4's default is private save as they provide.
 
 > **Normative.** A record that carries no audience label, such as one a connection brought in or
 > one written before labels could be recorded, opens to no one through §4:2.
@@ -246,9 +251,9 @@ text may still ask for a yes on its own, as ADR-0361 §2:3 lets planning narrow 
 > to each person the hub admits. What a work with an unidentified sender reads stays ADR-0369
 > §10:2's and §10:4's.
 
-> **Normative.** Code decides §4:1 and §4:2 from the record's label and the place's audience as they
-> were when it was said or written, as ADR-0369 §6:3 has it decide the rest, and no model decides it
-> or takes part.
+> **Normative.** Code decides §4:1 from the place's audience as it was when the thing was said, and
+> §4:2 from the record's audience label as it stands and each named group's members as §4:2 counts
+> them, as ADR-0369 §6:3 has it decide the rest, and no model decides it or takes part.
 
 §4:1 is the owner's ruling on #3636, carried whole, and §4:2 is what the start level's one label
 needs of it: "like the episodic memory, that goes into short-term memory, that goes into other
@@ -259,7 +264,9 @@ and no line opens it. So this decision answers #3636 by adding both as cases of 
 the addition alone. Each keeps §6:1's reach and its limits, so a record's reach still caps it
 (ADR-0369 §5:4), and a person's limit still takes away (ADR-0365 §3:2). A later joiner gets what
 came after because a label's groups and a place's audience are read as they were when the thing was
-said (§3:5), as ADR-0369 §9 has a member see a group's records from when they joined. What a work
+said (§3:5), as ADR-0369 §9 has a member see a group's records from when they joined; and a
+label's narrowing acts on every later read (§3:7), so a model's narrowing in scenario 8 keeps the
+detail from other people's works. What a work
 is shown of it stays bounded by ADR-0369 §10, and then by the work's cut (§6:5). Whether a read
 through §4 is entered in a person's access log is left (§11); ADR-0369 §13:1 is unchanged.
 
@@ -310,8 +317,8 @@ has a narrower audience and continues as normal".
 
 > **Normative.** A story's **audience** is the meet of the audience labels of its activation
 > members' episodes and the audiences of its story members, each as it stands. A story with no
-> members narrows nothing, and an episode written before its label could be recorded is read as
-> carrying whom its work was for.
+> members narrows nothing, nor does an activation member whose episode is gone (ADR-0289 §4:7), and
+> an episode written before its label could be recorded is read as carrying whom its work was for.
 
 > **Normative.** A block is **below the cut** where the people who may see it for the mark (§5:2)
 > do not take in everyone in the cut. Where the first pass was shown any block below the cut, the
@@ -328,18 +335,20 @@ has a narrower audience and continues as normal".
 > with that input's floor and makes nothing re-run.
 
 > **Normative.** Nothing crosses from a first pass that was re-run to the second but the cut, which
-> code takes from the first pass's links. No model, of the work or of a later work, is shown
-> anything that first pass wrote, and every later stage reads the second pass's understanding, the
-> story-links decision included.
+> code takes from the first pass's links. No model of the work is shown anything that first pass
+> found or wrote, and every later stage reads the second pass's understanding, the story-links
+> decision included.
 
 > **Normative.** Where a work re-ran, nothing its first pass was shown counts toward its mark: the
 > mark starts at its floor and meets what the second pass and every later stage are shown, and code
 > keeps it from what the work's episode records those passes were shown.
 
-> **Normative.** A work's episode records a first pass that was re-run, its understanding as a
-> version of its own (ADR-0276 §7:3), marked as replaced by the re-run, and that part of the
-> episode carries as its own audience label the meet of the people who may see each block the first
-> pass was shown.
+> **Normative.** A work's episode records a first pass that was re-run, its recall's finds and its
+> understanding as a version of its own (ADR-0276 §7:3), beside the second pass's and marked as
+> replaced by the re-run. Each part the first pass produced is placed for the people who may see
+> every block that pass was shown (ADR-0369 §7:2), so ADR-0358 §10:5 leaves it out for anyone
+> else, and a later work is shown it only as a part of a look-up (ADR-0358 §10:3), which its mark
+> then meets (ADR-0370 §4:3).
 
 > **Normative.** A fetch after the re-run is a fetch: what it returns meets the mark when it is
 > shown, and nothing re-runs. A story's audience falls through it only by what the work then writes
@@ -362,9 +371,11 @@ guess it can fetch for it". A new matter, linked to nothing, re-runs at its floo
 
 A first pass's sight could only bend which story it links. The second pass is shown nothing below
 the cut, and the cut is never wider than the floor, so a wrong link costs a fetch or a card, never
-a send of what was left out. The first pass's understanding is kept in the episode for the record,
-with its own label (§6:9), and shown to no model (§6:7); ADR-0369 §7:5 reads it as written from
-what the first pass read. The cost is one more run of recall and of understanding when the re-run
+a send of what was left out. The episode keeps the first pass for the record, as ADR-0286 §3:1 has
+every stage's result kept, but placed so that only those who could see all it saw are shown it
+(§6:9); the short view shows the latest understanding (ADR-0356 §9:1), so it is never put in front
+of a later work, and a look-up that shows it narrows that work's mark as any fetch does. A story
+member whose episode was forgotten narrows nothing, since nothing of it can be shown. The cost is one more run of recall and of understanding when the re-run
 fires. A work with no sender never re-runs: it is shown nothing narrower than its floor (ADR-0370
 §3:3), so nothing it holds can be below a cut no wider than that floor.
 
@@ -417,10 +428,10 @@ start level or the re-run changes, with the clause that settles each.
 
 ### 9. Relationship to earlier decisions
 
-> **Normative.** This numbered draft records its replacements on the status lines of ADR-0308,
-> ADR-0332, ADR-0369 and ADR-0370 and in a dated header note on each, atomically with this ADR
-> under ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect on
-> this ADR's ratification.
+> **Normative.** This numbered draft records its replacements on the status lines of ADR-0286,
+> ADR-0308, ADR-0332, ADR-0369 and ADR-0370 and in a dated header note on each, atomically with
+> this ADR under ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take
+> effect on this ADR's ratification.
 
 Superseded:
 
@@ -436,6 +447,7 @@ Superseded:
 | ADR-0369 §6:3, code decides from the domain, the reach and the lines | In the addition alone: and from the label and the audience when said (§4:6) |
 | ADR-0308 §2:10, recall at most twice; ADR-0308 §2:8, nothing recall finds re-runs understanding | In the addition alone: the re-run's one further run (§7:2) |
 | ADR-0332 §3:9, understanding at most once for each input | In the addition alone: the re-run's one further run (§7:2) |
+| ADR-0286 §3:3's admitted differences and §3:8, no field for a stage's result | In the addition alone: the record keeps the re-run's recall beside the first pass's (§6:9) |
 
 Read through and standing, each as written:
 
@@ -448,6 +460,8 @@ Read through and standing, each as written:
 | ADR-0217 §2:4, §2:5 and §3:15 | The re-run applies no placement and replaces no withheld record; a model only narrows |
 | ADR-0289, ADR-0300 §6:7 and §6:12, ADR-0303 §7:1 | Stories, links and the window's links are read as they are; a story's audience is computed from its members (§6:3), and no story carries one |
 | ADR-0276 §7:3 and ADR-0332 §3:10 to §3:12 | The second pass records a new understanding version; joins and planning follow it |
+| ADR-0286 §3:1 and ADR-0358 §10:3 to §10:5 | Every stage's result is kept, the first pass's included; a look-up shows every version and leaves out a part placed for someone else (§6:9) |
+| ADR-0289 §4:5 and §4:7 | A member whose episode is gone stays a member and narrows nothing (§6:3) |
 | ADR-0280 §4:6, as ADR-0308 and ADR-0332 scope it | The guard stands, with the one further run §7:2 admits |
 | ADR-0361 §2:3 | A work may ask for a yes on a send that needs none |
 | ADR-0371 | The authority side, ADR-0371 §6 included, is not amended (§6) |
@@ -464,8 +478,10 @@ lane the owner's planning dispatches, under this decision once merged.
   (§3:5), and a model's narrowing of one (§3:6).
 - **The filter:** §4's two cases in ADR-0369 §10's filter, reading the place's audience as it was
   when a thing was said (§4:1), which needs who was in a place's audience over time.
-- **The cut and the passes:** the cut on the activation's state; the first pass's understanding
-  version marked as replaced, with its own label, on the episode (§6:9); a member of
+- **The cut and the passes:** the cut on the activation's state; on the episode, a field for the
+  re-run's recall beside the first pass's, the first pass's parts marked as replaced and each
+  placed for the people who may see all that pass was shown (§6:9), which needs a placement on an
+  understanding version and on a recall's record; a member of
   `ControllerRule` for the re-run (§7:1); and the counts of ADR-0308 §2:10 and ADR-0332 §3:9 admitting
   its run (§7:2).
 - **A story's audience:** computed at read from its members' episodes (§6:3), from the mark
@@ -502,7 +518,9 @@ Each is this decision's, not an owner ruling:
   level; **§3:3 and §3:4**, the label of every other record a work or a producer writes; **§3:5**,
   that a label is fixed when said, its groups read then; **§3:6**, that a model narrows only a block
   of the domain its work writes into, to any set inside the label; **§3:8**, which acts widen.
-- **§4:2 to §4:6**: the label as a case of ADR-0369 §6:1 under its reach and its limits; that a
+- **§4:2 to §4:6**: the label read as it stands, its groups counting those who were members then
+  and still are; that neither case reopens a group's domain to someone who left it; the label as a
+  case of ADR-0369 §6:1 under its reach and its limits; that a
   record with no label opens to no one through it; that anyone means each person the hub admits, and
   an unidentified sender reads as ADR-0369 §10 has it; and that code decides it. **§4:1** is the
   owner's ruling on #3636; that it is a case of §6:1 beside the others, under its reach and limits,
@@ -514,8 +532,9 @@ Each is this decision's, not an owner ruling:
   audience as the meet of its members' labels, a story with no members narrowing nothing, several
   links met, and an old episode read as its work's person (§6:2, §6:3); that the later rounds are
   bounded by the cut (§6:5); that a join re-runs nothing (§6:6); that only the cut crosses, and
-  the mark counts from the second pass (§6:7, §6:8); what the episode keeps of the first pass
-  (§6:9); a fetch after the re-run (§6:10); and the grounds (§6:11).
+  the mark counts from the second pass (§6:7, §6:8); that the episode keeps the first pass placed
+  for those who could see all it saw, with room for the re-run's recall (§6:9); that a forgotten
+  member narrows nothing (§6:3); a fetch after the re-run (§6:10); and the grounds (§6:11).
 - **§7**: where the re-run sits among the phases, and the further runs it needs.
 
 ## Consequences
