@@ -176,7 +176,9 @@ if TYPE_CHECKING:
         IdentityExport,
         Link,
         LinkAct,
+        LinkedAccount,
         LinkWrite,
+        LowerLinkResult,
         Memory,
         MemoryChange,
         MemoryDecision,
@@ -288,6 +290,7 @@ if TYPE_CHECKING:
         UserMessage,
         UtcInstant,
         WalkPosition,
+        WithdrawLoweringResult,
     )
 
 
@@ -10256,6 +10259,101 @@ class AssistantEngine(Protocol):
                 neither Approve nor Deny. Refused locally.
             PlanningError: If the plan store cannot be read or written; nothing is
                 then answered.
+        """
+        ...
+
+    # --- the owner's linked accounts (ADR-0373 §2 to §5) -------------------
+    #
+    # Three members, and no other for links and levels (§2:1): one lists every link to
+    # the owner's identity, one lowers a link, one withdraws a lowering. **No member makes
+    # or undoes a link** (§6:1). Each sits in the route table's command row, so a request
+    # from a device without the command role is refused before dispatch (§4:2), and a
+    # call to either write is the owner's own act: the store records the owner as the
+    # maker of every lowering (§4:3). **No level, lowering or link gates a call**: the
+    # row alone admits one (§4:5), so the hub's own machine on the local socket reaches
+    # ``linked_accounts`` and ``withdraw_lowering`` whatever level any link stands at
+    # (§5:1). No tool, capability, plan step, work, model, task or upkeep calls one, and
+    # no model-authored value becomes an argument to one (§4:1); in this milestone only
+    # the ``assistant`` command line calls them (§4:6).
+    #
+    # **A link to the owner's identity is a standing one.** A link whose act no longer
+    # stands ties nothing (ADR-0373 §6:3), so it is neither listed nor named: lowering it
+    # is ``unknown_link``, and a lowering on it stands on no link, so withdrawing that
+    # lowering is ``not_standing``. Links and lowerings are named by the store's ids
+    # alone (§2:8), each refused blank with ``ValueError`` before any I/O and stripped as
+    # every identifier on this surface is (clause 2): an id the store mints carries no
+    # surrounding whitespace. A refused or repeated act is an outcome, never an error
+    # (§2:7). A store that cannot be read or written raises
+    # :class:`~ai_assistant.core.errors.IdentityStoreError`. **A hub with no identity
+    # store holds no link**: it lists none, and names none.
+
+    async def linked_accounts(self) -> tuple[LinkedAccount, ...]:
+        """List every link to the owner's identity, with its level (ADR-0373 §2:2, §3).
+
+        One entry per standing link, in no contractual order: its id, the identity it
+        ties to, the account it holds, its kind's declared most as the running build
+        declares it, each lowering standing on it, and the level that results, which
+        the hub computes (§3:2). Only standing lowerings are shown (§3:4), and no entry
+        carries a secret (§3:3). **Not paged, and never truncated**: a listing that does
+        not fit the contract limit is refused whole, as ``connected_accounts`` is
+        (ADR-0139 §2).
+
+        Returns:
+            The entries; empty where the owner has no link.
+
+        Raises:
+            IdentityStoreError: If the identity store cannot be read.
+        """
+        ...
+
+    async def lower_link(self, link_id: Identifier, *, level: Sureness) -> LowerLinkResult:
+        """Lower one of the owner's links to ``level``, by the owner's act (ADR-0373 §2:3).
+
+        The outcome is decided in this order, writing nothing in the first three
+        (§2:4): ``refused`` with ``unknown_link`` where no link to the owner's identity
+        has that id; ``unchanged``, with the lowering that stands and the link's entry,
+        where a lowering the owner made at that level already stands on it, so a
+        repeated call makes no second; ``refused`` with ``not_a_lowering`` where
+        ``level`` is not below the link's kind's declared most (ADR-0366 §5:2, §5:3);
+        and otherwise ``lowered``, with the lowering it recorded, made by the owner
+        (§4:3), and the link's entry as it stands after the act. A lowering stands until
+        it is withdrawn, whatever a later build declares as its kind's most (§2:5), and
+        bears only on inputs that arrive by the link after it (§2:9).
+
+        Args:
+            link_id: The link, by the id :meth:`linked_accounts` shows.
+            level: The level to lower it to, one of the four (ADR-0366 §5:1). No
+                default.
+
+        Returns:
+            What it did.
+
+        Raises:
+            ValueError: If ``link_id`` is blank or unwritable, or ``level`` is not one of
+                the four. Refused locally.
+            IdentityStoreError: If the identity store cannot be read or written.
+        """
+        ...
+
+    async def withdraw_lowering(self, lowering_id: Identifier) -> WithdrawLoweringResult:
+        """Withdraw a lowering standing on one of the owner's links (ADR-0373 §2:6).
+
+        Ends the lowering and returns ``withdrawn`` with the link's entry as it stands
+        after the act. Where no standing lowering has that id, because none was made or
+        it was already withdrawn, it writes nothing and returns ``not_standing``, which
+        is not an error. Every lowering is the owner's (§4:3), so this meets ADR-0366
+        §5:5's rule that only a lowering's maker withdraws it with no check of its own
+        (§4:4).
+
+        Args:
+            lowering_id: The lowering, by the id :meth:`linked_accounts` shows.
+
+        Returns:
+            What it did.
+
+        Raises:
+            ValueError: If ``lowering_id`` is blank or unwritable. Refused locally.
+            IdentityStoreError: If the identity store cannot be read or written.
         """
         ...
 

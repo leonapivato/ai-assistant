@@ -67,6 +67,7 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
+from linked_accounts_contract import CONFIGURED, LINKS_LIMIT, LinkedAccountsSubject
 from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
 from person_model_contract import (
     PERSON_BUDGET,
@@ -119,6 +120,7 @@ from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.testing import (
     FakeAssistantEngine,
+    FakeIdentityStore,
     FakeMemoryStore,
     FakePlanStore,
 )
@@ -181,6 +183,15 @@ def _pending() -> PendingCandidatesSubject:
     built.episode_memory = memory
     built.plan_store = plans
     return PendingCandidatesSubject(engine=built, memory=memory, plans=plans)
+
+
+def _linked(*, store: bool = True) -> LinkedAccountsSubject:
+    """A fake at the listing's bound over an identity store holding the owner's two."""
+    identities = FakeIdentityStore(configured=CONFIGURED)
+    built = FakeAssistantEngine(max_payload_bytes=LINKS_LIMIT)
+    if store:
+        built.identities = identities
+    return LinkedAccountsSubject(engine=built, identities=identities)
 
 
 def _approvals() -> ApprovalsPanelSubject:
@@ -256,6 +267,16 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def approvals_subject(self) -> ApprovalsPanelSubject:
         """The canonical fake over injected stores, clocked at the panel's instant."""
         return _approvals()
+
+    @pytest.fixture
+    def linked_accounts_subject(self) -> LinkedAccountsSubject:
+        """The canonical fake handed an identity store."""
+        return _linked()
+
+    @pytest.fixture
+    def linked_accounts_storeless(self) -> AssistantEngine:
+        """The canonical fake with no identity store, as it is built."""
+        return _linked(store=False).engine
 
     @pytest.fixture
     def engine(self) -> AssistantEngine:

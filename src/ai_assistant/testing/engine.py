@@ -136,8 +136,10 @@ from ai_assistant.core.types import (
     story_move_members,
     story_note_ids,
     story_note_text,
+    sureness_level,
     user_message,
 )
+from ai_assistant.orchestration import linked_accounts as owners_links
 from ai_assistant.orchestration import person_panel
 from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
@@ -214,7 +216,7 @@ from ai_assistant.testing.stories import FakeStoryStore
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 
-    from ai_assistant.core.protocols import AuditTrail, SourceReadTrail, SpendLedger
+    from ai_assistant.core.protocols import AuditTrail, IdentityStore, SourceReadTrail, SpendLedger
     from ai_assistant.core.types import (
         ApprovalChoice,
         ApprovalPanel,
@@ -229,6 +231,8 @@ if TYPE_CHECKING:
         EncodableText,
         HeldNotification,
         Identifier,
+        LinkedAccount,
+        LowerLinkResult,
         MessageReceipt,
         NonBlankEncodableText,
         NotificationPreferences,
@@ -247,8 +251,10 @@ if TYPE_CHECKING:
         StoryStanding,
         StorySummaryView,
         StoryView,
+        Sureness,
         TranscriptPage,
         UserMessage,
+        WithdrawLoweringResult,
     )
     from ai_assistant.orchestration.approval_calls import CardFacts
     from ai_assistant.orchestration.person_block import PersonBlocks
@@ -387,6 +393,11 @@ class FakeAssistantEngine:
         #: :class:`~ai_assistant.testing.FakePersonModelStore` and
         #: :attr:`episode_memory`, where the memories its pins point at are held.
         self.person_blocks: PersonBlocks | None = None
+        #: The identity store the three members for links and levels answer from
+        #: (ADR-0373 §2), as the engine's ``identities`` is: ``None``, the default, is a
+        #: hub that holds no link, which lists none and names none. A consumer gives it
+        #: a :class:`~ai_assistant.testing.FakeIdentityStore`.
+        self.identities: IdentityStore | None = None
         #: The placement each held belief carries (ADR-0217 §1), by record id. Held
         #: **beside** the beliefs rather than on them, because
         #: :class:`~ai_assistant.core.types.Belief` carries no placement: ADR-0217 §7
@@ -1184,6 +1195,38 @@ class FakeAssistantEngine:
 
     async def _approval_facts(self, requests: Sequence[ApprovalRequest]) -> dict[str, CardFacts]:
         return await episode_card_facts(self.episode_memory, requests)
+
+    # --- the owner's linked accounts (ADR-0373 §2 to §5) ----------------------
+    #
+    # The engine's own answers (:mod:`~ai_assistant.orchestration.linked_accounts`), over
+    # :attr:`identities`, so the suite compares two implementations of the surface rather
+    # than two of the store. Arguments are validated first, then measured.
+
+    async def linked_accounts(self) -> tuple[LinkedAccount, ...]:
+        """Every link to the owner's identity, with its level, never truncated (§2:2)."""
+        self.calls.append(("linked_accounts", {}))
+        return self._checked(await owners_links.linked_accounts(self.identities), "linked_accounts")
+
+    async def lower_link(self, link_id: Identifier, *, level: Sureness) -> LowerLinkResult:
+        """Lower one of the owner's links, by the owner's act (ADR-0373 §2:3, §2:4)."""
+        named = identifier(link_id, name="link_id")
+        lowered = sureness_level(level)
+        check_arguments(
+            "lower_link", max_bytes=self._max_payload_bytes, link_id=named, level=lowered
+        )
+        self.calls.append(("lower_link", {"link_id": named, "level": lowered}))
+        return self._checked(
+            await owners_links.lower_link(self.identities, named, lowered), "lower_link"
+        )
+
+    async def withdraw_lowering(self, lowering_id: Identifier) -> WithdrawLoweringResult:
+        """Withdraw a lowering on one of the owner's links (ADR-0373 §2:6)."""
+        named = identifier(lowering_id, name="lowering_id")
+        check_arguments("withdraw_lowering", max_bytes=self._max_payload_bytes, lowering_id=named)
+        self.calls.append(("withdraw_lowering", {"lowering_id": named}))
+        return self._checked(
+            await owners_links.withdraw_lowering(self.identities, named), "withdraw_lowering"
+        )
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) ------------
     #

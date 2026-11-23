@@ -83,6 +83,7 @@ from ai_assistant.core.types import (
     story_move_members,
     story_note_ids,
     story_note_text,
+    sureness_level,
     user_message,
 )
 from ai_assistant.wire import envelope as env
@@ -139,6 +140,8 @@ if TYPE_CHECKING:
         GrantScope,
         HeldNotification,
         Identifier,
+        LinkedAccount,
+        LowerLinkResult,
         MemoryKind,
         MessageReceipt,
         NonBlankEncodableText,
@@ -169,8 +172,10 @@ if TYPE_CHECKING:
         StoryStanding,
         StorySummaryView,
         StoryView,
+        Sureness,
         TranscriptPage,
         UserMessage,
+        WithdrawLoweringResult,
     )
 
 #: The free-form name the connect frame carries, for the hub's logs (ADR-0084 §2).
@@ -712,6 +717,60 @@ class HubClient:
         chosen = approval_choice(choice)
         return await self._call(  # type: ignore[no-any-return]
             "tap_approval", request_id=named, choice=chosen
+        )
+
+    # --- the owner's linked accounts (ADR-0373 §2 to §5) -------------------
+    #
+    # The client relays and decides nothing: which links stand, each one's level, and
+    # every outcome are the hub's (§3:2). Each id is refused blank or unwritable here and
+    # stripped, and a level that is not one of the four refused, before the socket is
+    # opened (ADR-0085 §9, ADR-0373 §2:7). Each sits in the route table's command row,
+    # so a device without the command role is refused by the hub before dispatch (§4:2).
+
+    async def linked_accounts(self) -> tuple[LinkedAccount, ...]:
+        """Every link to the owner's identity, with its level (ADR-0373 §2:2, §3).
+
+        Returns:
+            The entries, as the hub listed them, never truncated.
+        """
+        return await self._call("linked_accounts")  # type: ignore[no-any-return]
+
+    async def lower_link(self, link_id: Identifier, *, level: Sureness) -> LowerLinkResult:
+        """Lower one of the owner's links, by the owner's act (ADR-0373 §2:3, §2:4).
+
+        Args:
+            link_id: The link, by the id :meth:`linked_accounts` shows.
+            level: The level to lower it to.
+
+        Returns:
+            What the hub did.
+
+        Raises:
+            ValueError: If ``link_id`` is not an identifier, or ``level`` is not one of
+                the four, refused here before anything is sent.
+        """
+        named = identifier(link_id, name="link_id")
+        lowered = sureness_level(level)
+        return await self._call(  # type: ignore[no-any-return]
+            "lower_link", link_id=named, level=lowered
+        )
+
+    async def withdraw_lowering(self, lowering_id: Identifier) -> WithdrawLoweringResult:
+        """Withdraw a lowering on one of the owner's links (ADR-0373 §2:6).
+
+        Args:
+            lowering_id: The lowering, by the id :meth:`linked_accounts` shows.
+
+        Returns:
+            What the hub did.
+
+        Raises:
+            ValueError: If ``lowering_id`` is not an identifier, refused here before
+                anything is sent.
+        """
+        named = identifier(lowering_id, name="lowering_id")
+        return await self._call(  # type: ignore[no-any-return]
+            "withdraw_lowering", lowering_id=named
         )
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------

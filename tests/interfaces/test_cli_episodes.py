@@ -553,15 +553,15 @@ def test_cli_human_detail_carries_the_understanding_section(
 
 
 def _stage_section(record: EpisodicMemory) -> list[str]:
-    """The human detail's stage lines, between the header's last line and the disclaimer."""
+    """The human detail's stage lines, after the work's facts and before the disclaimer."""
     buffer = StringIO()
     episode_inspection.render_detail(
         Console(file=buffer, force_terminal=False, width=200), record, stories=()
     )
     lines = buffer.getvalue().splitlines()
-    start = next(n for n, line in enumerate(lines) if line.startswith("Stories:"))
+    start = next(n for n, line in enumerate(lines) if line.startswith("Stages"))
     end = lines.index("Processing status does not report goal achievement or audio playback.")
-    return lines[start + 1 : end]
+    return lines[start:end]
 
 
 def _staged(record: EpisodicMemory, **fields: object) -> EpisodicMemory:
@@ -943,6 +943,9 @@ def test_detail_labels_an_open_episodes_end_fields_in_progress_not_unavailable()
         f"Reason: {episode_inspection.IN_PROGRESS}",
         "Response: none yet",
         "Stories: none",
+        "Facts: none recorded yet",
+        "Inputs:",
+        "  The one it started from: sender none recorded yet",
         "Stages: none recorded yet",
     ]
     assert "Recall: none recorded yet" in lines
