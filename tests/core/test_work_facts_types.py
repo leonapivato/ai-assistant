@@ -121,6 +121,58 @@ def test_a_joined_input_records_its_messages_senders() -> None:
         JoinedInput(joined_at=_AT, channel=_LINE, messages=(_message(), _message(sender=None)))
 
 
+# --- when the links could not be read (ADR-0374 §5, §7) ---------------------------------
+
+_UNREAD: Final = InputSender(person=None, level=Sureness.NONE, links_unread=True)
+_OWNER_UNREAD: Final = InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL, links_unread=True)
+
+
+def test_a_sender_recorded_before_the_mark_reads_as_one_whose_links_were_read() -> None:
+    """ADR-0374 §7: the field defaults to unmarked, so a stored sender without it reads
+    as one a read of the links found; the mark is a strict boolean."""
+    assert not _OWNER.links_unread
+    assert InputSender.model_validate({"person": None, "level": "none"}) == _NO_LINK
+    stored = InputSender.model_validate_json(_OWNER_UNREAD.model_dump_json())
+    assert stored == _OWNER_UNREAD
+    with pytest.raises(ValidationError):
+        InputSender.model_validate({"person": None, "level": "none", "links_unread": "yes"})
+
+
+def test_a_fault_makes_no_one_but_the_owner_anyone() -> None:
+    """ADR-0374 §1:2, §2:2, §3:2: a sender set because the links could not be read is no
+    identified person, or the owner on the hub's own machine; never anyone else."""
+    assert not _UNREAD.identified
+    assert _OWNER_UNREAD.identified
+    with pytest.raises(ValidationError, match="no one, or the owner"):
+        InputSender(person=_SAM, level=Sureness.NORMAL, links_unread=True)
+    with pytest.raises(ValidationError, match="at none"):
+        InputSender(person=None, level=Sureness.WEAK, links_unread=True)
+
+
+def test_the_combined_sender_is_marked_where_any_is() -> None:
+    """ADR-0374 §5:2: combined per person, marked where any entry naming it is, at the
+    lowest level, as before."""
+    weak = InputSender(person=OWNER_PERSON_ID, level=Sureness.WEAK)
+    assert canonical_senders([_OWNER_UNREAD, weak, _NO_LINK, _UNREAD]) == (
+        InputSender(person=OWNER_PERSON_ID, level=Sureness.WEAK, links_unread=True),
+        _UNREAD,
+    )
+    assert canonical_senders([_OWNER, _NO_LINK]) == (_OWNER, _NO_LINK)
+
+
+def test_the_mark_is_held_alike_on_a_trigger_its_messages_and_a_join() -> None:
+    """ADR-0374 §5:1, §5:2 beside ADR-0368 §2:6: a trigger's senders are its messages'
+    combined with the mark, and a join's the same; a trigger dropping the mark is refused."""
+    messages = (_message(sender=_OWNER), _message("again", sender=_OWNER_UNREAD))
+    assert _trigger(messages=messages, senders=(_OWNER_UNREAD,)).senders == (_OWNER_UNREAD,)
+    with pytest.raises(ValidationError, match="exactly its messages"):
+        _trigger(messages=messages, senders=(_OWNER,))
+    joined = JoinedInput(joined_at=_AT, channel=_LINE, messages=messages)
+    assert joined.senders == (_OWNER_UNREAD,)
+    with pytest.raises(ValidationError, match="each person once"):
+        _trigger(senders=(_OWNER, _OWNER_UNREAD))
+
+
 # --- the three facts --------------------------------------------------------------------
 
 

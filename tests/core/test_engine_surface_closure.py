@@ -1966,6 +1966,11 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     carried before, and no type a frame already carried changes. A hub at 129 answers
     the three as unknown (ADR-0124 §9:2).
 
+    **131 is ADR-0374 §5:1, on a wire-carried core type alone.** ``InputSender`` gains
+    ``links_unread``, whether it was set because the links could not be read, wherever a
+    sender is on the processing record the episode carries. A peer at 130 refuses it as
+    extra (ADR-0124 §9:2). **The method set does not move and stays at 74.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1974,7 +1979,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (74, 130), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (74, 131), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

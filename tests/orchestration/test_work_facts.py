@@ -43,6 +43,8 @@ from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.approvals import THE_APPROVALS
 from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.orchestration.work_facts import (
+    HUB_MACHINE,
+    LINKS_UNREAD,
     NO_LINK,
     chat_account,
     disagreements,
@@ -157,7 +159,7 @@ async def test_an_account_no_link_ties_sends_as_no_one_at_none() -> None:
     assert await sender_of(store, chat_account(_STRANGER), stage="t") == NO_LINK
     assert await sender_of(store, line_account(1), stage="t") == NO_LINK
     assert await sender_of(store, None, stage="t") == NO_LINK
-    assert await sender_of(None, chat_account(_PHONE), stage="t") == NO_LINK
+    assert await sender_of(None, None, stage="t") == NO_LINK
     assert chat_account(None) is None
     assert line_account(None) is None
 
@@ -177,8 +179,10 @@ async def test_a_lowering_lowers_the_sender_and_an_ended_link_ties_nothing() -> 
     assert await sender_of(store, line_account(_TELEGRAM_ID), stage="t") == NO_LINK
 
 
-async def test_a_store_that_cannot_be_read_finds_no_link_and_says_so() -> None:
-    """A fault is logged under a fixed event name, and the input arrives by no link."""
+async def test_a_store_that_cannot_be_read_reads_no_link_and_says_so() -> None:
+    """ADR-0374 §2:1 to §2:3, §5:1, §5:4: a fault is logged under a fixed event name with
+    the reader and the reason alone, and the message is an unidentified sender's, at none,
+    marked: never read as a link."""
 
     class _Broken:
         async def find_link(self, account: Account) -> Link | None:
@@ -187,14 +191,22 @@ async def test_a_store_that_cannot_be_read_finds_no_link_and_says_so() -> None:
     broken = cast("IdentityStore", _Broken())
     with capture_logs() as logs:
         found = await sender_of(broken, chat_account(_PHONE), stage="chat_reader")
-    assert found == NO_LINK
+        on_the_line = await sender_of(broken, line_account(_TELEGRAM_ID), stage="telegram_reader")
+    assert found == on_the_line == LINKS_UNREAD
+    assert found == InputSender(person=None, level=Sureness.NONE, links_unread=True)
     assert logs == [
         {
             "event": "input_sender_unread",
-            "stage": "chat_reader",
+            "reader": "chat_reader",
             "reason": "identity_store",
             "log_level": "warning",
-        }
+        },
+        {
+            "event": "input_sender_unread",
+            "reader": "telegram_reader",
+            "reason": "identity_store",
+            "log_level": "warning",
+        },
     ]
 
 
@@ -441,7 +453,8 @@ async def test_each_recording_is_logged_with_where_it_disagrees() -> None:
         "for_whom": "person",
         "whose": "senders",
         "unidentified": False,
-        "level": "normal",
+        "facts_level": "normal",
+        "links_unread": False,
         "today_person": True,
         "today_users": True,
         "today_established": True,
@@ -467,7 +480,7 @@ async def test_a_defect_in_the_lookup_or_the_recording_stops_nothing(
         found = await sender_of(
             cast("IdentityStore", _Defective()), chat_account(_PHONE), stage="chat_reader"
         )
-    assert found == NO_LINK
+    assert found == LINKS_UNREAD
     assert [one["reason"] for one in logs] == ["defect"]
 
     def _raises(*_: object, **__: object) -> WorkFacts:
@@ -537,3 +550,200 @@ async def test_another_works_facts_never_join_as_this_ones(
     failed.take_inputs((brought,), merged=("act-other",))
     assert [one.facts for one in failed.joined] == [None]
     assert failed.work_facts == failed.started_facts
+
+
+# --- when the links cannot be read (ADR-0374) ---------------------------------------------------
+
+
+class _Unreadable:
+    """An identity store whose every read fails, as a store fault does (ADR-0374 §2:1)."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def find_link(self, account: Account) -> Link | None:
+        raise self.error
+
+
+#: The owner on the hub's own machine while the links cannot be read (ADR-0374 §3:2).
+_OWNER_UNREAD: Final = InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL, links_unread=True)
+
+
+@pytest.mark.parametrize(
+    "identities",
+    [
+        None,
+        cast("IdentityStore", _Unreadable(IdentityStoreError("unreadable"))),
+        cast("IdentityStore", _Unreadable(RuntimeError("a defect"))),
+    ],
+    ids=["unwired", "identity_store", "defect"],
+)
+async def test_the_hubs_own_machine_is_the_owner_at_the_chats_most_marked(
+    identities: IdentityStore | None,
+) -> None:
+    """ADR-0374 §3:1, §3:2, §5:1: while the links cannot be read, the hub chat's device
+    ``hub`` is the owner's at the hub chat's declared most, marked; every other device and
+    the line are an unidentified sender's at none, marked. Each read is logged once, with
+    the reader and the reason, and no account's or person's identifier."""
+    with capture_logs() as logs:
+        hub = await sender_of(identities, chat_account("hub"), stage="chat_reader")
+        phone = await sender_of(identities, chat_account(_PHONE), stage="chat_reader")
+        line = await sender_of(identities, line_account(_TELEGRAM_ID), stage="telegram_reader")
+    assert chat_account("hub") == HUB_MACHINE
+    assert hub == _OWNER_UNREAD
+    assert hub.identified
+    assert phone == line == LINKS_UNREAD
+    assert not phone.identified
+    assert {one["event"] for one in logs} == {"input_sender_unread"}
+    assert len(logs) == 3
+    assert {tuple(sorted(one)) for one in logs} == {("event", "log_level", "reader", "reason")}
+    assert not any(word in str(one) for one in logs for word in ("hub'", _PHONE, str(_TELEGRAM_ID)))
+
+
+async def test_no_other_kind_or_device_is_the_hubs_own_machine() -> None:
+    """ADR-0374 §3:1: only the hub chat's device ``hub``; a Telegram account whose id
+    reads ``hub``, or a device named like it, is not that machine."""
+    broken = cast("IdentityStore", _Unreadable(IdentityStoreError("unreadable")))
+    for account in (
+        Account(kind="telegram", identifier="hub"),
+        chat_account("hub-laptop"),
+        chat_account("HUB"),
+    ):
+        assert await sender_of(broken, account, stage="t") == LINKS_UNREAD, account
+
+
+async def test_a_message_naming_no_account_is_no_fault() -> None:
+    """ADR-0374 §2:1: a message that names no account arrived by no link, whether or not
+    a store is wired, and is not marked; nothing is logged."""
+    broken = cast("IdentityStore", _Unreadable(IdentityStoreError("unreadable")))
+    with capture_logs() as logs:
+        assert await sender_of(None, None, stage="t") == NO_LINK
+        assert await sender_of(broken, None, stage="t") == NO_LINK
+    assert not NO_LINK.links_unread
+    assert logs == []
+
+
+async def test_a_lowering_on_the_hubs_link_stands_only_while_the_links_can_be_read() -> None:
+    """ADR-0374 §3:3, §4:1, §4:2: the hub's own machine's link, lowered, lowers its
+    messages while the store reads; during a fault no lowering is read, and the hub
+    chat's most stands; once the store reads again, the lowering applies again."""
+    store = FakeIdentityStore(configured=[HUB_MACHINE], now=lambda: _AT)
+    link = await store.find_link(HUB_MACHINE)
+    assert link is not None
+    await store.lower(link.id, Sureness.NONE, by=OWNER_PERSON_ID)
+    lowered = InputSender(person=OWNER_PERSON_ID, level=Sureness.NONE)
+
+    assert await sender_of(store, HUB_MACHINE, stage="t") == lowered
+    store.fail_next()
+    assert await sender_of(store, HUB_MACHINE, stage="t") == _OWNER_UNREAD
+    assert await sender_of(store, HUB_MACHINE, stage="t") == lowered
+
+
+async def test_where_the_links_can_be_read_nothing_is_marked() -> None:
+    """ADR-0374 §3:3: a read that answers is a link's or no link's, never marked."""
+    store = FakeIdentityStore(configured=[HUB_MACHINE], now=lambda: _AT)
+    for account in (HUB_MACHINE, chat_account(_STRANGER), line_account(1)):
+        found = await sender_of(store, account, stage="t")
+        assert not found.links_unread, account
+    assert await sender_of(store, HUB_MACHINE, stage="t") == _OWNER
+
+
+async def test_the_mark_combines_on_a_trigger_as_on_its_messages() -> None:
+    """ADR-0374 §5:2: an input's sender records the fault where any of its messages'
+    does, so the trigger's senders stay exactly its messages' (ADR-0368 §2:6)."""
+    messages = (
+        RecordedInputMessage(text="one", sent_at=_AT, position=1, sender=_OWNER),
+        RecordedInputMessage(text="two", sent_at=_AT, position=2, sender=_OWNER_UNREAD),
+        RecordedInputMessage(text="three", sent_at=_AT, position=3, sender=NO_LINK),
+        RecordedInputMessage(text="four", sent_at=_AT, position=4, sender=LINKS_UNREAD),
+    )
+    state = _admitted(_LINE, "one two three four", messages=messages)
+    assert state.trigger.senders == (_OWNER_UNREAD, LINKS_UNREAD)
+    chat = _admitted(NewConversation(), senders=(_OWNER, NO_LINK, _OWNER_UNREAD))
+    assert chat.trigger.senders == (_OWNER_UNREAD, NO_LINK)
+    joining = JoinedInput(joined_at=_AT, channel=_LINE, messages=messages)
+    assert joining.senders == state.trigger.senders
+
+
+async def test_the_comparison_says_when_the_links_could_not_be_read() -> None:
+    """ADR-0374 §5:1 beside ADR-0368 §1:3: off the hub's own machine a fault disagrees
+    with today's path by design, on authority and level, and the log says the links
+    could not be read; on it, the owner at the chat's most agrees, and says so too."""
+    with capture_logs() as logs:
+        off = _admitted(NewConversation(), senders=(LINKS_UNREAD,))
+        on = _admitted(NewConversation(), senders=(_OWNER_UNREAD,))
+        line = _admitted(
+            _LINE,
+            messages=(RecordedInputMessage(text="hi", sent_at=_AT, sender=LINKS_UNREAD),),
+        )
+        read = _admitted(NewConversation(), senders=(_OWNER,))
+    assert _facts(off) == WorkFacts(
+        for_whom=_OWNERS_WORK,
+        authority=WorkAuthority(kind=AuthorityKind.SENDERS, unidentified=True),
+        level=Sureness.NONE,
+    )
+    assert _facts(on) == WorkFacts(
+        for_whom=_OWNERS_WORK, authority=_OWNERS_AUTHORITY, level=Sureness.NORMAL
+    )
+    entries = [one for one in logs if one["event"] == "work_facts_recorded"]
+    assert [(one["differs"], one["links_unread"]) for one in entries] == [
+        (("authority", "level"), True),
+        ((), True),
+        (("authority", "level"), True),
+        ((), False),
+    ]
+    assert _agrees(line) == ("authority", "level")
+    assert _agrees(read) == ()
+
+
+async def test_a_join_logs_a_fault_on_any_input_the_facts_were_recorded_from() -> None:
+    """ADR-0374 §5:1: a join's facts are the lowest of every input's so far, so its
+    entry says the links could not be read where they could not for the trigger, an
+    input that joined before, or the one joining."""
+    clean = _admitted(NewConversation(), senders=(_OWNER,))
+    faulted = _admitted(NewConversation(), senders=(_OWNER_UNREAD,))
+    owners, unread = _joining(_OWNER), _joining(LINKS_UNREAD)
+    with capture_logs() as logs:
+        clean.take_inputs((owners,), merged=("act-a",))
+        clean.take_inputs((unread, owners), merged=("act-b",))
+        clean.take_inputs((owners,), merged=("act-c",))
+        faulted.take_inputs((owners,), merged=("act-d",))
+    joins = [one["links_unread"] for one in logs if one["event"] == "work_facts_recorded"]
+    assert [one["at"] for one in logs if one["event"] == "work_facts_recorded"] == ["join"] * 5
+    assert joins == [False, True, True, True, True]
+
+
+async def test_the_facts_line_keeps_its_level_through_the_configured_chain() -> None:
+    """The line a running hub writes, through the chain ``core.logging`` configures rather
+    than ``capture_logs``, which skips it: the chain's ``add_log_level`` owns ``level``,
+    so the facts' level is ``facts_level`` and reaches the output, and no key of either
+    line is masked by the redaction."""
+    import structlog  # noqa: PLC0415 — the configured chain, read here
+
+    from ai_assistant.core.config import Settings  # noqa: PLC0415 — configured here
+    from ai_assistant.core.logging import REDACTED, configure_logging  # noqa: PLC0415
+
+    configure_logging(Settings())
+    chain = structlog.get_config()["processors"]
+    captured = structlog.testing.LogCapture()
+    # The configured chain, every enricher and the redaction, with the renderer's place
+    # taken by a capture, so each entry is read as the renderer would be handed it.
+    structlog.configure(processors=[*chain[:-1], captured])
+    _admitted(NewConversation(), senders=(LINKS_UNREAD,))
+    await sender_of(None, chat_account(_PHONE), stage="chat_reader")
+
+    facts, unread = (
+        next(one for one in captured.entries if one["event"] == name)
+        for name in ("work_facts_recorded", "input_sender_unread")
+    )
+    assert facts["level"] == "info"
+    assert facts["facts_level"] == "none"
+    assert facts["links_unread"] is True
+    assert facts["differs"] == ("authority", "level")
+    assert facts["whose"] == "senders"
+    assert facts["unidentified"] is True
+    assert REDACTED not in facts.values()
+    assert unread["level"] == "warning"
+    assert unread["reader"] == "chat_reader"
+    assert unread["reason"] == "unwired"
+    assert REDACTED not in unread.values()

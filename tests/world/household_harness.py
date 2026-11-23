@@ -31,7 +31,10 @@ owner's, or left unlinked where the test passes no person:
   account, as ``Settings.telegram_user_id`` names it.
 
 :meth:`Household.lower` and :meth:`Household.withdraw` lower a link and withdraw the
-lowering (ADR-0366 §5:5). Linking an account to someone other than the owner departs
+lowering (ADR-0366 §5:5), and :meth:`Household.fault_next_read` makes the store's next
+read fail, so the links cannot be read for one message (ADR-0374 §2:1). The hub's own
+machine is the device ``hub`` (:data:`~ai_assistant.core.types.HUB_DEVICE_ID`), declared
+like any other. Linking an account to someone other than the owner departs
 from ADR-0366 §3:3, which lets the owner link only their own accounts until a later
 decision says who else may: the harness does it as the fake allows, for the same reason
 it holds a second identity.
@@ -375,6 +378,16 @@ class Household:
         """Withdraw a lowering, by whoever made it; the owner by default."""
         maker = by or self.owner
         _written(await self.identities.withdraw_lowering(lowering_id, by=maker.id))
+
+    def fault_next_read(self) -> None:
+        """Make the identity store's next read fail, as a store fault does (ADR-0374 §2:1).
+
+        Through the fake's own one-shot seam
+        (:meth:`~ai_assistant.testing.FakeIdentityStore.fail_next`): the next member called
+        raises, touching nothing. A message's reader reads each account once, so call it
+        right before the one message whose read is to fail.
+        """
+        self.identities.fail_next()
 
     # --- writing ----------------------------------------------------------------------
 

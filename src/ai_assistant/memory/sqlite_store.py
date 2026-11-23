@@ -88,6 +88,7 @@ from ai_assistant.memory._episode_format import (
     CALLED_RECORD_FORMAT,
     CONTINUING_RECORD_FORMAT,
     EPISODE_RECORD_FORMAT,
+    FACTS_RECORD_FORMAT,
     JOINED_RECORD_FORMAT,
     MEMORIES_RECORD_FORMAT,
     MEMORY_RECORD_FORMAT,
@@ -603,6 +604,7 @@ class SqliteMemoryStore:
             self._upgrade_to_called(conn, existing_format)
             self._upgrade_to_showed(conn, existing_format)
             self._upgrade_to_facts(conn, existing_format)
+            self._upgrade_to_unread(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -1584,7 +1586,7 @@ class SqliteMemoryStore:
             MemoryStoreError: If a stored episode cannot be upgraded. Nothing is
                 written, and the file is left as it was found.
         """
-        if found is None or found >= MEMORY_RECORD_FORMAT:
+        if found is None or found >= FACTS_RECORD_FORMAT:
             return
         chunk = conn.execute(
             "SELECT rowid, data FROM records WHERE kind = ? ORDER BY rowid LIMIT ?",
@@ -1610,6 +1612,29 @@ class SqliteMemoryStore:
                 "ORDER BY rowid LIMIT ?",
                 (MemoryKind.EPISODIC.value, chunk[-1][0], _BACKFILL_CHUNK),
             ).fetchall()
+        conn.execute("UPDATE episode_record_format SET version = ?", (FACTS_RECORD_FORMAT,))
+
+    @staticmethod
+    def _upgrade_to_unread(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0374 §5:1's record, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_facts` has carried a file to 24, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+
+        **The label alone moves.** Each stored sender gains ``links_unread``, which reads
+        ``False`` where it is absent: a sender recorded before the field existed reads as
+        one whose links were read, since nothing read a sender then and the log is the
+        only record of a fault from that time (ADR-0374 §7). So every record a file at 24
+        holds validates unchanged, and none is rewritten (§4:4).
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        if found is None or found >= MEMORY_RECORD_FORMAT:
+            return
         conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
 
     @staticmethod

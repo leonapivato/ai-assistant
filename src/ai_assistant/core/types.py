@@ -3245,24 +3245,44 @@ class InputSender(BaseModel):
     unidentified sender's (#3642). ``person`` keeps whom the link names all the same, so
     the record says what code found.
 
+    **Where the links could not be read** (ADR-0374): the store raised, the read failed
+    in any other way, or no store is wired (§2:1). No fault is read as a link, so such a
+    sender is no identified person, at none (§2:2), save one written on the hub's own
+    machine, which is the owner's at the hub chat's declared most (§3:2). Either is
+    marked ``links_unread`` (§5:1), so an inspected work says the links could not be
+    read for it; a sender recorded before the mark existed reads as one whose links were
+    read (§7).
+
     Attributes:
         person: The identity a standing link ties the account to, by its id; ``None``
             where no link does.
         level: That link's level; none where there is no link.
+        links_unread: Whether it was set because the links could not be read
+            (ADR-0374 §5:1); ``False`` for a sender a read of the links found.
 
     Raises:
-        ValueError: If a sender with no person is at a level above none.
+        ValueError: If a sender with no person is at a level above none, or one set
+            because the links could not be read names anyone but the owner.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     person: NonBlankEncodableText | None
     level: Sureness
+    links_unread: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def _no_link_is_at_none(self) -> Self:
         # ADR-0366 §5:6: an input that arrived by no link is at none.
         if self.person is None and self.level is not Sureness.NONE:
             msg = "a sender no link ties to a person is at none (ADR-0366 §5:6)"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_fault_admits_no_one(self) -> Self:
+        # ADR-0374 §1:2, §2:2, §3:2: a fault makes no one but the owner anyone at all.
+        if self.links_unread and self.person not in {None, OWNER_PERSON_ID}:
+            msg = "a sender set because the links could not be read is no one, or the owner"
             raise ValueError(msg)
         return self
 
@@ -3277,7 +3297,8 @@ def canonical_senders(senders: Iterable[InputSender]) -> tuple[InputSender, ...]
 
     One entry per person, and one for no person, each at the lowest level among the
     entries naming it (ADR-0368 §4:1 reads a work's level as the lowest of its inputs'),
-    in one order: people by id, then no person.
+    and marked ``links_unread`` where any of them is (ADR-0374 §5:2), in one order:
+    people by id, then no person.
 
     Args:
         senders: The senders of an input's messages, or of several inputs.
@@ -3286,11 +3307,16 @@ def canonical_senders(senders: Iterable[InputSender]) -> tuple[InputSender, ...]
         The distinct senders, in the canonical order.
     """
     lowest: dict[str | None, Sureness] = {}
+    unread: dict[str | None, bool] = {}
     for one in senders:
         held = lowest.get(one.person)
         lowest[one.person] = one.level if held is None else min(held, one.level)
+        unread[one.person] = unread.get(one.person, False) or one.links_unread
     order = sorted(lowest, key=lambda person: (person is None, person or ""))
-    return tuple(InputSender(person=person, level=lowest[person]) for person in order)
+    return tuple(
+        InputSender(person=person, level=lowest[person], links_unread=unread[person])
+        for person in order
+    )
 
 
 def senders_level(senders: Iterable[InputSender]) -> Sureness | None:
