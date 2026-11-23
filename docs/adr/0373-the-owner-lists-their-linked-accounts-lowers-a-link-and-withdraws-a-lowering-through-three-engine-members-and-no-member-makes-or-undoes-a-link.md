@@ -1,6 +1,6 @@
 # 373. The owner lists their linked accounts, lowers a link and withdraws a lowering through three engine members, and no member makes or undoes a link
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-23
 - Scope: the contract lane of milestone 20, "The hub knows who is speaking" (acceptance
   [#3642](https://github.com/leonapivato/ai-assistant/issues/3642), lanes
