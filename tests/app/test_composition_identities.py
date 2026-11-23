@@ -157,3 +157,16 @@ async def test_the_composition_hands_the_store_it_opened_and_closes_it_with_the_
     assert held.act == _CONFIGURED
     with pytest.raises(IdentityStoreError):
         await composed.identities.find_link(_HUB)
+
+
+async def test_the_engine_is_handed_the_same_store(tmp_path: Path) -> None:
+    """ADR-0368 §2:6, golden rule 1: the readers find who sent each message through the
+    one store the hub's start opened and ``service`` follows the devices into, handed to
+    the engine by injection, never a second one."""
+    composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        handed = composed.engine._identities
+    finally:
+        await composed.engine.aclose()
+
+    assert handed is composed.identities
