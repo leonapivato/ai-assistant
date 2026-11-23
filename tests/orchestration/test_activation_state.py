@@ -209,7 +209,8 @@ def test_invalid_identity_degrades_metadata_without_refusing_admission(identifie
     assert state.activation_id is None
     assert state.started_at == _AT
     assert state.degraded_report().state == "degraded"
-    assert logs == [
+    # ADR-0368 §2:4: the facts' own entry, held by their own tests, is not the degradation's.
+    assert [one for one in logs if one["event"] != "work_facts_recorded"] == [
         {
             "event": "activation_capture_degraded",
             "stage": "admission",

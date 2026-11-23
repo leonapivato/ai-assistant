@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
         DiagnosticSink,
+        IdentityStore,
         SourceReadTrail,
         StoryStore,
     )
@@ -346,6 +347,10 @@ class Harness:
         task_scheduler: TaskSchedulerSeams | None = None,
         # ADR-0361's Approvals channel. `None` is every other case's deployment.
         approvals: ApprovalsSeams | None = None,
+        # ADR-0366 §11's identity store, which the readers read who sent each message
+        # from (ADR-0368 §2:6). `None` is every other case's deployment: every message
+        # is recorded as arriving by no link, beside today's path, which still decides.
+        identities: IdentityStore | None = None,
     ) -> None:
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
         # half a pipeline. Defaulted to the canonical fakes, and kept on the harness so
@@ -475,6 +480,7 @@ class Harness:
             chat_start_wait=chat_start_wait,
             task_scheduler=task_scheduler,
             approvals=approvals,
+            identities=identities,
         )
 
 

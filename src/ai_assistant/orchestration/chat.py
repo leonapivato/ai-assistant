@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -85,7 +85,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
     from ai_assistant.core.protocols import ConversationStore
-    from ai_assistant.core.types import ChannelIdentity, MessageReceipt
+    from ai_assistant.core.types import ChannelIdentity, InputSender, MessageReceipt
     from ai_assistant.orchestration.matters import HeldInput
 
 __all__ = [
@@ -158,12 +158,16 @@ class ChatInput:
             were marked taken in by (§6:6).
         messages: The user's messages taken in, ascending: the input.
         window: The conversation's recent transcript, brought in with the input.
+        senders: Who sent each message, by its position, as the engine found it from
+            the device it was written from before admitting the input (ADR-0366 §4:1,
+            ADR-0368 §2:6); empty until then.
     """
 
     conversation_id: str
     activation_id: str
     messages: tuple[TranscriptMessage, ...]
     window: TranscriptWindow
+    senders: Mapping[int, InputSender] = field(default_factory=dict)
 
     @property
     def text(self) -> str:

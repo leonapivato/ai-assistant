@@ -3152,6 +3152,298 @@ def _mixes_person_and_assistant(parties: Sequence[SupportHolder]) -> bool:
     )
 
 
+# --- who sent an input, and the three facts on a work (ADR-0366 §4, §5; ADR-0368 §2) ---
+#
+# Declared here, ahead of the recorded input and the episode record, which carry them.
+# :class:`Sureness` moved up from the identity block below for that reason alone:
+# relocating a type is not redefining it (ADR-0084 §4), and nothing in it changed.
+#
+# **Who sent an input** is code's, from the account it arrived by: the person a standing
+# link ties that account to, and no identified person where no link does (ADR-0366 §4:1),
+# at that link's level, and at none where there is no link (§5:6). It is recorded on the
+# input beside its author, and on each message where the input records messages (ADR-0368
+# §2:6). **The three facts** are code's too, recorded on every work when it starts and
+# again when an input joins it, from its recorded inputs and never from what they say
+# (ADR-0368 §2:1 to §2:4). Nothing here reads them yet: who a work is for and whether it
+# carries the user's authority are still read as they were (§1:3), and each fact is
+# recorded beside that reading.
+
+
+class Sureness(StrEnum):
+    """How sure the hub is of who something comes from (ADR-0366 §5:1).
+
+    Four levels, closed, and **ordered** from least to most in the order declared:
+    ``none``, ``weak``, ``normal``, ``strong``. Two levels compare by that order with
+    ``<``, ``<=``, ``>`` and ``>=``, so ``min`` gives the lowest of several, as a link's
+    level (§5:3) and a work's (ADR-0368 §4:1) are read; never by their values'
+    alphabetical order. A level compares only with a level: comparing one with anything
+    else is a ``TypeError``.
+
+    What a level permits, and what a shortfall does, are not here (§5:8).
+    """
+
+    NONE = "none"
+    """Claimed or unknown: nothing establishes who sent it, such as "it's the cleaner"
+    from an account linked to no one."""
+    WEAK = "weak"
+    """Established by a linked account, or other means, whose sender can be faked or that
+    is commonly broken into, such as email or SMS."""
+    NORMAL = "normal"
+    """Established by a linked account, or other means, behind its own login, such as a
+    messaging account or an enrolled phone."""
+    STRONG = "strong"
+    """Several independent signals at once, or a fresh check, such as a home device with
+    voice and face, or a fingerprint just now."""
+
+    @property
+    def rank(self) -> int:
+        """The level's place in the order, from ``0`` for ``none`` to ``3`` for ``strong``."""
+        return _SURENESS_ORDER.index(self)
+
+    def _ranks(self, other: object) -> tuple[int, int]:
+        if not isinstance(other, Sureness):
+            msg = f"a level compares only with a level, not {describe_untrusted(other)}"
+            raise TypeError(msg)
+        return self.rank, other.rank
+
+    def __lt__(self, other: object) -> bool:
+        """Whether this level is below ``other``."""
+        mine, theirs = self._ranks(other)
+        return mine < theirs
+
+    def __le__(self, other: object) -> bool:
+        """Whether this level is at most ``other``."""
+        mine, theirs = self._ranks(other)
+        return mine <= theirs
+
+    def __gt__(self, other: object) -> bool:
+        """Whether this level is above ``other``."""
+        mine, theirs = self._ranks(other)
+        return mine > theirs
+
+    def __ge__(self, other: object) -> bool:
+        """Whether this level is at least ``other``."""
+        mine, theirs = self._ranks(other)
+        return mine >= theirs
+
+
+#: The four levels, least to most (ADR-0366 §5:1): :attr:`Sureness.rank`'s order.
+_SURENESS_ORDER: Final[tuple[Sureness, ...]] = tuple(Sureness)
+
+
+class InputSender(BaseModel):
+    """Who sent an input or one of its messages, as code found it (ADR-0366 §4:1, §5:6).
+
+    Set from the account the input arrived by, never from anything it says (§4:2): the
+    person whose identity a standing link ties that account to, at that link's level
+    (§5:3, :func:`~ai_assistant.core.channel_validation.link_level`); or, where no link
+    ties it, no identified person, at none.
+
+    **Identified** is ADR-0368's word (§9:4): a sender established as a person, at weak or
+    above. A sender at none is unidentified whatever ``person`` says: an account linked to
+    no one, or a link the owner lowered to none, whose messages then count as an
+    unidentified sender's (#3642). ``person`` keeps whom the link names all the same, so
+    the record says what code found.
+
+    Attributes:
+        person: The identity a standing link ties the account to, by its id; ``None``
+            where no link does.
+        level: That link's level; none where there is no link.
+
+    Raises:
+        ValueError: If a sender with no person is at a level above none.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    person: NonBlankEncodableText | None
+    level: Sureness
+
+    @model_validator(mode="after")
+    def _no_link_is_at_none(self) -> Self:
+        # ADR-0366 §5:6: an input that arrived by no link is at none.
+        if self.person is None and self.level is not Sureness.NONE:
+            msg = "a sender no link ties to a person is at none (ADR-0366 §5:6)"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def identified(self) -> bool:
+        """Whether the sender is established as a person: at weak or above (ADR-0368 §9:4)."""
+        return self.person is not None and self.level > Sureness.NONE
+
+
+def canonical_senders(senders: Iterable[InputSender]) -> tuple[InputSender, ...]:
+    """The distinct senders of ``senders``, each once, at the lowest level it came at.
+
+    One entry per person, and one for no person, each at the lowest level among the
+    entries naming it (ADR-0368 §4:1 reads a work's level as the lowest of its inputs'),
+    in one order: people by id, then no person.
+
+    Args:
+        senders: The senders of an input's messages, or of several inputs.
+
+    Returns:
+        The distinct senders, in the canonical order.
+    """
+    lowest: dict[str | None, Sureness] = {}
+    for one in senders:
+        held = lowest.get(one.person)
+        lowest[one.person] = one.level if held is None else min(held, one.level)
+    order = sorted(lowest, key=lambda person: (person is None, person or ""))
+    return tuple(InputSender(person=person, level=lowest[person]) for person in order)
+
+
+def senders_level(senders: Iterable[InputSender]) -> Sureness | None:
+    """The lowest level among ``senders`` (ADR-0368 §4:1); ``None`` where there is none."""
+    levels = [one.level for one in senders]
+    return min(levels) if levels else None
+
+
+class WorkForKind(StrEnum):
+    """Whom a work is for (ADR-0368 §2:1). Closed, **added to and never renamed**."""
+
+    PERSON = "person"
+    """One person, by their identity's id."""
+    GROUP = "group"
+    """One group, by its id. No group exists yet: expressible, and recorded by no work."""
+    NO_ONE = "no_one"
+    """No one: the system's own upkeep, or a pass no channel admitted (§3's last row)."""
+
+
+class WorkFor(BaseModel):
+    """Whom a work is for: one person, one group, or no one (ADR-0368 §2:1).
+
+    Attributes:
+        kind: Whether it is for a person, a group or no one.
+        id: The person's or the group's id; ``None`` for no one.
+
+    Raises:
+        ValueError: If ``id`` is set for no one, or missing for a person or a group.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: WorkForKind
+    id: NonBlankEncodableText | None = None
+
+    @model_validator(mode="after")
+    def _an_id_names_whom(self) -> Self:
+        if (self.id is None) != (self.kind is WorkForKind.NO_ONE):
+            msg = "a work for a person or a group names its id, and one for no one names none"
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def for_person(cls, person_id: str) -> WorkFor:
+        """For one person, by their identity's id."""
+        return cls(kind=WorkForKind.PERSON, id=person_id)
+
+    @classmethod
+    def no_one(cls) -> WorkFor:
+        """For no one."""
+        return cls(kind=WorkForKind.NO_ONE)
+
+
+class AuthorityKind(StrEnum):
+    """Whose authority a work carries (ADR-0368 §2:2). Closed, **added to, never renamed**."""
+
+    SENDERS = "senders"
+    """Its senders' now, each identified or not (§3)."""
+    IN_ADVANCE = "in_advance"
+    """A person's in advance: a task's or a standing rule's author (§6). Expressible, and
+    recorded by no work until §6 is built (milestone 2)."""
+    NONE = "none"
+    """None."""
+
+
+class WorkAuthority(BaseModel):
+    """Whose authority a work carries (ADR-0368 §2:2).
+
+    **Its senders'** names each identified sender whose authority it carries, by their
+    identity's id (§3:2), and whether it carries an unidentified sender's, which is what
+    anyone holds on the connection the input came by (§3:4). **In advance** names the one
+    person whose instruction it carries (§6:1). **None** names no one.
+
+    Attributes:
+        kind: Which of the three it is.
+        persons: The identified senders' ids, distinct and in order, for its senders'; the
+            author's alone, for in advance; none otherwise.
+        unidentified: For its senders', whether one is unidentified; ``False`` otherwise.
+
+    Raises:
+        ValueError: If the fields do not fit the kind, or a person repeats or is out of
+            order.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: AuthorityKind
+    persons: tuple[NonBlankEncodableText, ...] = ()
+    unidentified: bool = False
+
+    @model_validator(mode="after")
+    def _the_fields_fit_the_kind(self) -> Self:
+        if tuple(sorted(set(self.persons))) != self.persons:
+            msg = "a work's authority names each person once, in order"
+            raise ValueError(msg)
+        if self.kind is AuthorityKind.NONE:
+            fits = not self.persons and not self.unidentified
+        elif self.kind is AuthorityKind.IN_ADVANCE:
+            fits = len(self.persons) == 1 and not self.unidentified
+        else:
+            fits = bool(self.persons) or self.unidentified
+        if not fits:
+            msg = "a work's authority names whom its kind names (ADR-0368 §2:2)"
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def none(cls) -> WorkAuthority:
+        """No authority."""
+        return cls(kind=AuthorityKind.NONE)
+
+    @property
+    def carries_a_persons(self) -> bool:
+        """Whether it carries an identified person's authority, now or in advance (§9:1)."""
+        return bool(self.persons)
+
+
+class WorkFacts(BaseModel):
+    """The three facts code records on a work (ADR-0368 §2:1 to §2:3).
+
+    Recorded when the work starts and again when an input joins it, by code alone, from
+    its recorded inputs and the records they name (§2:4); a join never adds to its
+    authority and never raises its level (§2:5).
+
+    Attributes:
+        for_whom: Whom it is for.
+        authority: Whose authority it carries.
+        level: Its sureness.
+
+    Raises:
+        ValueError: If it carries an unidentified sender's authority above none, or only
+            identified senders' at none.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    for_whom: WorkFor
+    authority: WorkAuthority
+    level: Sureness
+
+    @model_validator(mode="after")
+    def _the_level_fits_the_senders(self) -> Self:
+        # ADR-0368 §4:1, §9:4: a work is at the lowest of its senders' levels, an
+        # unidentified sender's is none, and an identified sender's is weak or above.
+        authority = self.authority
+        if authority.kind is not AuthorityKind.SENDERS:
+            return self
+        if authority.unidentified and self.level is not Sureness.NONE:
+            msg = "a work carrying an unidentified sender's authority is at none"
+            raise ValueError(msg)
+        if not authority.unidentified and self.level is Sureness.NONE:
+            msg = "a work carrying only identified senders' authority is above none"
+            raise ValueError(msg)
+        return self
+
+
 #: The bound a medium's own identifier is read below, where a recorded input carries
 #: one: the 64-bit signed ceiling, which bounds it without guessing at any medium's own.
 _MEDIUM_ID_CEILING: Final = 2**63
@@ -3215,6 +3507,10 @@ class RecordedInputMessage(BaseModel):
             declares (ADR-0351 §2:6, §2:8), or ``None`` where they are unknown, which
             only the episode store's upgrade records (§9:3). A forward's is its sender,
             claimed (:func:`forward_party`, §2:7).
+        sender: Who sent it and at what level, as code found it from the account it
+            arrived by (ADR-0366 §4:1, §5:6; ADR-0368 §2:6), or ``None`` where no
+            person sent it, as for an input the hub states. A forward's is who forwarded
+            it, whose account it arrived by; its party is still its original sender.
 
     Raises:
         ValueError: If a forward carries a party other than its sender's (§2:7).
@@ -3227,6 +3523,7 @@ class RecordedInputMessage(BaseModel):
     position: int | None = Field(default=None, strict=True, ge=0, lt=_MEDIUM_ID_CEILING)
     forwarded_from: ClaimedAuthor | None = None
     party: SupportHolder | None = None
+    sender: InputSender | None = None
 
     @model_validator(mode="after")
     def _a_forward_carries_its_senders_words(self) -> Self:
@@ -3263,16 +3560,26 @@ class RecordedChannelTrigger(BaseModel):
     :func:`parties_are_assistants` (§5), never stored apart from them; the input has no
     origin (§8:1).
 
+    **Its senders** are who sent the input, beside its author, each at its level (ADR-0366
+    §4:1, §5:6; ADR-0368 §2:6): one :class:`InputSender` for each person a link tied an
+    account it arrived by to, and one for an account no link ties, each at the lowest
+    level it came at, in :func:`canonical_senders`' order; empty where no person sent
+    it, as for an event a connected source pushes, a task's occurrence or an approval's
+    outcome. Set by code at admission, from the accounts and never from what the input
+    says, and fixed on the episode. Where the trigger records messages, its senders are
+    exactly theirs, and either every message records its sender or none does.
+
     **It checks no combination per channel type** (§3:2). Which payloads, reply
     shapes and options a channel accepts is checked at admission, by
     :mod:`ai_assistant.core.channel_validation`'s one dispatch table; the trigger
     holds only that, where its target is a :class:`ChannelIdentity` and its
-    ``channel`` is set, the two are equal, and the parties' rules above.
+    ``channel`` is set, the two are equal, and the parties' and the senders' rules
+    above.
 
     Raises:
         ValueError: If its channel is not its target, a party repeats, its messages'
-            parties are not its own, or its parties mix a person and the assistant's
-            statement alone.
+            parties are not its own, its parties mix a person and the assistant's
+            statement alone, or its senders are not canonical or not its messages'.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3284,6 +3591,23 @@ class RecordedChannelTrigger(BaseModel):
     reply: ReplyCapability | None
     parties: tuple[SupportHolder, ...] | None
     messages: tuple[RecordedInputMessage, ...] = ()
+    senders: tuple[InputSender, ...] = ()
+
+    @model_validator(mode="after")
+    def _the_senders_are_its_messages(self) -> Self:
+        # ADR-0368 §2:6: the input's senders, each once at its lowest level, and where it
+        # records messages, exactly the messages' senders.
+        if canonical_senders(self.senders) != self.senders:
+            msg = "an input's senders name each person once, at the lowest level, in order"
+            raise ValueError(msg)
+        held = [one.sender for one in self.messages]
+        if any(one is None for one in held) and any(one is not None for one in held):
+            msg = "an input's messages all record their sender, or none does (ADR-0368 §2:6)"
+            raise ValueError(msg)
+        if held and canonical_senders(one for one in held if one is not None) != self.senders:
+            msg = "an input's senders are exactly its messages' senders (ADR-0368 §2:6)"
+            raise ValueError(msg)
+        return self
 
     @field_validator("parties", mode="after")
     @classmethod
@@ -4862,9 +5186,15 @@ class JoinedInput(BaseModel):
     validates unchanged and marks nothing (§9:6). It is set in the step that appends
     the input and never changes after, which the record's extension rule holds.
 
+    ``facts`` are the three facts of the activation it joined, recorded again as they
+    stand once it joined (ADR-0368 §2:4), by the step that appends it: a join never adds
+    to the authority they carry and never raises their level (§2:5). ``None`` where none
+    were recorded, as for an activation built without them. Each message records its
+    sender as a trigger's does (§2:6).
+
     Raises:
         ValueError: If it carries no message, or some of its messages carry a party and
-            others none.
+            others none, or some record their sender and others none.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -4873,6 +5203,12 @@ class JoinedInput(BaseModel):
     messages: tuple[RecordedInputMessage, ...] = Field(min_length=1)
     taken_over_from: Identifier | None = None
     relayed: bool = False
+    facts: WorkFacts | None = None
+
+    @property
+    def senders(self) -> tuple[InputSender, ...]:
+        """Who sent it: its messages' distinct senders, as a trigger's (ADR-0368 §2:6)."""
+        return canonical_senders(one.sender for one in self.messages if one.sender is not None)
 
     @model_validator(mode="after")
     def _every_message_has_a_party_or_none_does(self) -> Self:
@@ -4882,6 +5218,14 @@ class JoinedInput(BaseModel):
         known = {one.party is not None for one in self.messages}
         if len(known) > 1:
             msg = "a joined input's messages all carry a party, or none does (ADR-0351 §2:6)"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _every_message_has_a_sender_or_none_does(self) -> Self:
+        # ADR-0368 §2:6, as a trigger's messages are held.
+        if len({one.sender is not None for one in self.messages}) > 1:
+            msg = "a joined input's messages all record their sender, or none does"
             raise ValueError(msg)
         return self
 
@@ -5144,6 +5488,16 @@ class EpisodeProcessingRecord(BaseModel):
     call (ADR-0356 §8:2). Appended to as the episode is extended, every earlier entry
     unchanged, and empty by default. No other field records what came of a call.
 
+    ``facts`` are the activation's three facts as code recorded them when it started
+    (ADR-0368 §2:1 to §2:4): whom it is for, whose authority it carries and its level,
+    set by the admission write and kept, as every field that write sets is (ADR-0286
+    §3). Each input that joins records the facts again on its own entry in ``joined``
+    (:attr:`JoinedInput.facts`), so the facts as they stand are the last joined input's
+    that records them, or these. ``None`` where none were recorded: a record built
+    without them. A record the episode store's upgrade carried from before them holds
+    what the rule of its day said of it (ADR-0326 §4). ``schema_version`` does not move
+    for it, as ``joined`` was added.
+
     ``schema_version`` is 12 because the record gains ``call_records`` (ADR-0356 §13),
     which a version-11 record does not carry; the episode store's upgrade carries every
     stored record to 12 with ``call_records`` empty (§13:5). Version 11 was the record
@@ -5177,6 +5531,19 @@ class EpisodeProcessingRecord(BaseModel):
     stories_position: int | None = Field(default=None, strict=True, ge=0, lt=2**63)
     taken_over_by: Identifier | None = None
     call_records: tuple[RecordedCall, ...] = ()
+    facts: WorkFacts | None = None
+
+    @property
+    def facts_now(self) -> WorkFacts | None:
+        """The three facts as they stand (ADR-0368 §2:4).
+
+        The last joined input's that records them, or those recorded when the activation
+        started.
+        """
+        for one in reversed(self.joined):
+            if one.facts is not None:
+                return one.facts
+        return self.facts
 
     @property
     def is_open(self) -> bool:
@@ -24786,66 +25153,8 @@ class PersonModelWrite(BaseModel):
 # person model's, and nothing here adds a person to it.
 
 
-class Sureness(StrEnum):
-    """How sure the hub is of who something comes from (ADR-0366 §5:1).
-
-    Four levels, closed, and **ordered** from least to most in the order declared:
-    ``none``, ``weak``, ``normal``, ``strong``. Two levels compare by that order with
-    ``<``, ``<=``, ``>`` and ``>=``, so ``min`` gives the lowest of several, as a link's
-    level (§5:3) and a work's (ADR-0368 §4:1) are read; never by their values'
-    alphabetical order. A level compares only with a level: comparing one with anything
-    else is a ``TypeError``.
-
-    What a level permits, and what a shortfall does, are not here (§5:8).
-    """
-
-    NONE = "none"
-    """Claimed or unknown: nothing establishes who sent it, such as "it's the cleaner"
-    from an account linked to no one."""
-    WEAK = "weak"
-    """Established by a linked account, or other means, whose sender can be faked or that
-    is commonly broken into, such as email or SMS."""
-    NORMAL = "normal"
-    """Established by a linked account, or other means, behind its own login, such as a
-    messaging account or an enrolled phone."""
-    STRONG = "strong"
-    """Several independent signals at once, or a fresh check, such as a home device with
-    voice and face, or a fingerprint just now."""
-
-    @property
-    def rank(self) -> int:
-        """The level's place in the order, from ``0`` for ``none`` to ``3`` for ``strong``."""
-        return _SURENESS_ORDER.index(self)
-
-    def _ranks(self, other: object) -> tuple[int, int]:
-        if not isinstance(other, Sureness):
-            msg = f"a level compares only with a level, not {describe_untrusted(other)}"
-            raise TypeError(msg)
-        return self.rank, other.rank
-
-    def __lt__(self, other: object) -> bool:
-        """Whether this level is below ``other``."""
-        mine, theirs = self._ranks(other)
-        return mine < theirs
-
-    def __le__(self, other: object) -> bool:
-        """Whether this level is at most ``other``."""
-        mine, theirs = self._ranks(other)
-        return mine <= theirs
-
-    def __gt__(self, other: object) -> bool:
-        """Whether this level is above ``other``."""
-        mine, theirs = self._ranks(other)
-        return mine > theirs
-
-    def __ge__(self, other: object) -> bool:
-        """Whether this level is at least ``other``."""
-        mine, theirs = self._ranks(other)
-        return mine >= theirs
-
-
-#: The four levels, least to most (ADR-0366 §5:1): :attr:`Sureness.rank`'s order.
-_SURENESS_ORDER: Final[tuple[Sureness, ...]] = tuple(Sureness)
+# :class:`Sureness`, the four levels (§5:1), is declared above, ahead of the recorded
+# input, which records an input's level beside its sender (ADR-0368 §2:6).
 
 
 class Account(BaseModel):

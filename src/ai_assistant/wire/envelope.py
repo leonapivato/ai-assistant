@@ -2798,7 +2798,15 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``RequestedCall`` gains ``looking_for``, but neither crosses a frame: the round's
 #:     report and the approval request are carried by no engine method. The method set
 #:     does not move.
-PROTOCOL_VERSION: Final[int] = 128
+#: 129: ADR-0124 §9:2 advances the version for ADR-0368 §2's three facts, on this ground:
+#:     ``RecordedChannelTrigger`` gains ``senders`` and ``RecordedInputMessage``
+#:     ``sender``, each an ``InputSender`` carrying the closed ``Sureness``, and
+#:     ``EpisodeProcessingRecord`` and ``JoinedInput`` gain ``facts``, a ``WorkFacts``
+#:     carrying the closed ``WorkForKind`` and ``AuthorityKind``, all on the wire-carried
+#:     ``EpisodicMemory.processing_record``. A peer at 128 refuses the new fields as
+#:     extra (ADR-0124 §9:2). The method set does not move: no ``Protocol`` gains a
+#:     member.
+PROTOCOL_VERSION: Final[int] = 129
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

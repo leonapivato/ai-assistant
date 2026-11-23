@@ -94,7 +94,8 @@ def _with_later_defaults(stored: dict[str, Any]) -> dict[str, Any]:
 
     And as ADR-0351 §9 carries it: its trigger's ``origin`` gives way to its parties,
     the owner's for a hub chat input of the origin ``user`` (§9:2), which is the one
-    activation this file holds.
+    activation this file holds; and as ADR-0368 §2's upgrade carries it, with who sent it
+    and the work's three facts.
     """
     record = stored.get("processing_record")
     if record is None:
@@ -108,12 +109,24 @@ def _with_later_defaults(stored: dict[str, Any]) -> dict[str, Any]:
         "taken_over_by": None,
         "call_records": [],
     }
-    # ADR-0356 §13:5: the chain ends in carrying the record to version 12.
+    # ADR-0356 §13:5: the chain carries the record to version 12, and ADR-0368 §2's
+    # upgrade, last, records what the channel-type rule said of the hub chat's input: the
+    # owner sent it, at normal, and the work is the owner's, carrying their authority.
+    sender = {"person": OWNER_PERSON_ID, "level": "normal"}
+    facts = {
+        "for_whom": {"kind": "person", "id": OWNER_PERSON_ID},
+        "authority": {"kind": "senders", "persons": [OWNER_PERSON_ID], "unidentified": False},
+        "level": "normal",
+    }
     return {
         **stored,
         "processing_record": added
         | record
-        | {"trigger": trigger | {"parties": [owner]}, "schema_version": 12},
+        | {
+            "trigger": trigger | {"parties": [owner], "senders": [sender]},
+            "schema_version": 12,
+            "facts": facts,
+        },
     }
 
 

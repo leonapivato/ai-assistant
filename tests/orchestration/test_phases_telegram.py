@@ -30,12 +30,16 @@ from test_engine import AT as ENGINE_AT
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
+    Account,
     ApprovalGiver,
+    InputSender,
     ProcessingReason,
     ProcessingStatus,
     RecordedInputMessage,
     RoundResponse,
+    Sureness,
     TelegramCallKind,
     TelegramForwardKind,
     TelegramForwardOrigin,
@@ -52,6 +56,7 @@ from ai_assistant.orchestration.telegram import (
     line_channel,
 )
 from ai_assistant.testing import (
+    FakeIdentityStore,
     FakeMemoryStore,
     FakePlanStore,
     FakeTelegramBotClient,
@@ -145,7 +150,9 @@ async def _sent(line: _Line, count: int) -> None:
 async def test_a_message_in_is_answered_in_the_chat_through_the_phases() -> None:
     line = _Line()
     line.fake.hold(text(1, "What's on today?", message_id=40))
-    harness = _harness(line)
+    # ADR-0366 §4:1: the owner's Telegram account, linked from the setting at start.
+    linked = FakeIdentityStore(configured=[Account(kind="telegram", identifier=str(CHAT))])
+    harness = _harness(line, identities=linked)
     await harness.engine.start()
 
     (episode,) = await _settled(harness)
@@ -157,12 +164,19 @@ async def test_a_message_in_is_answered_in_the_chat_through_the_phases() -> None
     trigger = record.trigger
     assert trigger.channel == line_channel(REFERENCE, CHAT)
     assert parties_are_persons_own(trigger.parties)
-    # ADR-0351 §2:6, §3:1: the message carries the owner's words, as the line declares.
+    # ADR-0351 §2:6, §3:1: the message carries the owner's words, as the line declares,
+    # and ADR-0368 §2:6: it records who sent it, from the account it arrived by.
+    owner = InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL)
     assert trigger.messages == (
         RecordedInputMessage(
-            text="What's on today?", sent_at=AT, position=40, party=OWNERS_WORDS[0]
+            text="What's on today?",
+            sent_at=AT,
+            position=40,
+            party=OWNERS_WORDS[0],
+            sender=owner,
         ),
     )
+    assert trigger.senders == (owner,)
     assert trigger.parties == OWNERS_WORDS
     assert input_of(episode) == "What's on today?"
     assert record.status is ProcessingStatus.COMPLETED
