@@ -42,7 +42,7 @@ from ai_assistant.orchestration.controller import (
     DEFAULT_STAGE_RECORD_LIMIT,
     StageRecord,
 )
-from ai_assistant.orchestration.work_facts import record_joined, record_started
+from ai_assistant.orchestration.work_facts import record_joined, record_started, unrecorded
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -356,11 +356,15 @@ class ActivationState:
 
         Each input records the activation's three facts again, as they stand once it
         joined (ADR-0368 §2:4, :func:`~ai_assistant.orchestration.work_facts.joined`),
-        where the activation recorded them when it started.
+        where the activation recorded them when it started; any facts an input arrives
+        with, the work it came from recorded, are never kept as this one's (§2:5).
         """
         facts = self.work_facts
-        if facts is not None:
-            inputs = record_joined(facts, inputs, self.trigger, activation_id=self.activation_id)
+        inputs = (
+            unrecorded(inputs)
+            if facts is None
+            else record_joined(facts, inputs, self.trigger, activation_id=self.activation_id)
+        )
         self.joined = (*self.joined, *inputs)
         self.merge_covered += len(inputs)
         self.merged = (*self.merged, *(one for one in merged if one not in self.merged))

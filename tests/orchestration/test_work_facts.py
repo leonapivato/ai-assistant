@@ -488,3 +488,52 @@ async def test_a_defect_in_the_lookup_or_the_recording_stops_nothing(
         ("work_facts_unrecorded", "start"),
         ("work_facts_unrecorded", "join"),
     ]
+
+
+async def test_another_works_facts_never_join_as_this_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0368 §2:5: an absorption brings the other work's joined inputs, each carrying
+    the facts that work recorded. They are never kept as this work's: replaced by its own,
+    or taken off where it records none or its recording fails, so no join raises its
+    level. A fault in logging the facts keeps them."""
+    import ai_assistant.orchestration.work_facts as module  # noqa: PLC0415 — patched here
+
+    weak = InputSender(person=OWNER_PERSON_ID, level=Sureness.WEAK)
+    donors = _facts(await _chat(_PHONE))
+    brought = _joining(_OWNER).model_copy(update={"facts": donors})
+
+    def recipient() -> ActivationState:
+        state = _admitted(
+            _LINE,
+            messages=(RecordedInputMessage(text="hi", sent_at=_AT, position=1, sender=weak),),
+        )
+        assert _facts(state).level is Sureness.WEAK
+        return state
+
+    held = recipient()
+    held.take_inputs((brought,), merged=("act-other",))
+    assert held.work_facts is not None
+    assert held.work_facts.level is Sureness.WEAK
+
+    unfacted = recipient()
+    unfacted.started_facts = None
+    unfacted.take_inputs((brought,), merged=("act-other",))
+    assert [one.facts for one in unfacted.joined] == [None]
+    assert unfacted.work_facts is None
+
+    def _raises(*_: object, **__: object) -> None:
+        raise RuntimeError("a defect")
+
+    monkeypatch.setattr(module, "log_facts", _raises)
+    unlogged = recipient()
+    with capture_logs() as logs:
+        unlogged.take_inputs((brought,), merged=("act-other",))
+    assert unlogged.work_facts == held.work_facts
+    assert [(one["event"], one["at"]) for one in logs] == [("work_facts_unlogged", "join")]
+
+    monkeypatch.setattr(module, "joined", _raises)
+    failed = recipient()
+    failed.take_inputs((brought,), merged=("act-other",))
+    assert [one.facts for one in failed.joined] == [None]
+    assert failed.work_facts == failed.started_facts
