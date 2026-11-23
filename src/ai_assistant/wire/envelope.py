@@ -2815,7 +2815,14 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     answers the three methods as unknown (ADR-0124 §9:2's method-set limb). No type a
 #:     frame already carried changes. A gateway calls none of the three, but it speaks
 #:     the wire, so it is upgraded with the hub (ADR-0373 §7).
-PROTOCOL_VERSION: Final[int] = 130
+#: 131: ADR-0124 §9:2 advances the version for ADR-0374 §5:1's mark, on this ground:
+#:     ``InputSender`` gains ``links_unread``, whether it was set because the links
+#:     could not be read, carried wherever a sender is, on the wire-carried
+#:     ``EpisodicMemory.processing_record``'s trigger, its messages and each joined
+#:     input's (ADR-0374 §7). A peer at 130 refuses the new field as extra (ADR-0124
+#:     §9:2). 130 was never deployed, but it is a merged release's, so it is advanced
+#:     from and not reused. The method set does not move: no ``Protocol`` gains a member.
+PROTOCOL_VERSION: Final[int] = 131
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

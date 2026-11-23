@@ -363,7 +363,13 @@ class ActivationState:
         inputs = (
             unrecorded(inputs)
             if facts is None
-            else record_joined(facts, inputs, self.trigger, activation_id=self.activation_id)
+            else record_joined(
+                facts,
+                inputs,
+                self.trigger,
+                activation_id=self.activation_id,
+                earlier=self.joined,
+            )
         )
         self.joined = (*self.joined, *inputs)
         self.merge_covered += len(inputs)

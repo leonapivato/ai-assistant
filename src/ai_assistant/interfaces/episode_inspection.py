@@ -339,10 +339,17 @@ def _authority_text(authority: WorkAuthority) -> str:
 
 
 def _senders_text(senders: tuple[InputSender, ...], processing: EpisodeProcessingRecord) -> str:
-    """Who sent an input and at what level, each sender once (ADR-0368 §2:6)."""
+    """Who sent an input and at what level, each sender once (ADR-0368 §2:6).
+
+    Where any of them was set because the links could not be read, it says so for the
+    input (ADR-0374 §5:3).
+    """
     if not senders:
         return f"sender {_none_recorded(processing)}"
-    return "; ".join(_sender_text(one) for one in senders)
+    text = "; ".join(_sender_text(one) for one in senders)
+    if any(one.links_unread for one in senders):
+        text += " (the links could not be read for it)"
+    return text
 
 
 def _sender_text(sender: InputSender) -> str:

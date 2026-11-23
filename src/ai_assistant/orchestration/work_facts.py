@@ -18,6 +18,17 @@ its reader's to name: the hub chat's is the device a message was written from
 at none. No other kind's input is sent by a person: an event a connected source pushes, a
 task's occurrence and an approval's outcome record no sender.
 
+**Where the links cannot be read** (ADR-0374): the store raised, the read failed in any
+other way, or no store is wired (§2:1). No fault is read as a link: the message is an
+unidentified sender's, at none (:data:`LINKS_UNREAD`, §2:2), save one written on the
+hub's own machine, the hub chat's device ``hub`` (:data:`HUB_MACHINE`, §3:1), which is
+the owner's at the hub chat's declared most with no lowering read (§3:2, §4:2). Either
+is marked ``links_unread`` (§5:1), and each read that got no answer is logged as
+``input_sender_unread`` with the reader and the reason alone (§5:4). Where the links can
+be read nothing changes (§3:3, §4:1). Off the hub's own machine a fault is a
+disagreement with today's path by design, so the comparison below says when the links
+could not be read for any input the facts were recorded from.
+
 **The three facts when a work starts** (:func:`started`), by ADR-0368 §3's table, for the
 rows today's inputs produce:
 
@@ -64,9 +75,11 @@ from ai_assistant.core.channel_validation import (
     TASK_SCHEDULER,
     establishes_the_user,
     link_level,
+    most_sureness,
 )
 from ai_assistant.core.errors import IdentityStoreError
 from ai_assistant.core.types import (
+    HUB_DEVICE_ID,
     OWNER_PERSON_ID,
     Account,
     AuthorityKind,
@@ -91,13 +104,16 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CHAT_ACCOUNT_KIND",
+    "HUB_MACHINE",
     "LINE_ACCOUNT_KIND",
+    "LINKS_UNREAD",
     "NO_LINK",
     "TodaysPath",
     "chat_account",
     "disagreements",
     "joined",
     "line_account",
+    "links_unread",
     "log_facts",
     "record_joined",
     "record_started",
@@ -105,6 +121,7 @@ __all__ = [
     "senders_of",
     "started",
     "todays_path",
+    "unread",
     "unrecorded",
 ]
 
@@ -120,6 +137,15 @@ LINE_ACCOUNT_KIND: Final = "telegram"
 #: Who sent an input that arrived by an account no standing link ties: no identified
 #: person, at none (ADR-0366 §4:1, §5:6).
 NO_LINK: Final = InputSender(person=None, level=Sureness.NONE)
+
+#: Who sent a message whose link could not be read: no identified person, at none,
+#: marked (ADR-0374 §2:2, §5:1).
+LINKS_UNREAD: Final = InputSender(person=None, level=Sureness.NONE, links_unread=True)
+
+#: The account a message written on the hub's own machine arrived by: the hub chat's
+#: device ``hub``, a browser on a gateway's loopback listener there included (ADR-0374
+#: §3:1, ADR-0298 §3:1). No other account is: no other kind's, and no other device's.
+HUB_MACHINE: Final = Account(kind=CHAT_ACCOUNT_KIND, identifier=HUB_DEVICE_ID)
 
 #: The kinds whose input no person sends, each with a row of ADR-0368 §3's table: an
 #: event a connected source pushes (§3:5), a task's occurrence and an approval's outcome.
@@ -163,32 +189,59 @@ async def sender_of(
     """Who sent an input that arrived by ``account``, and at what level (ADR-0366 §4:1).
 
     The person a standing link ties the account to, at that link's level (§5:3, §5:6),
-    or :data:`NO_LINK` where none does. Where no identity store is wired, or it cannot be
-    read, no link is found: the fault is logged under a fixed event name, and the input
-    is recorded as arriving by no link. Nothing reads the sender yet (ADR-0368 §1:3), so
-    no answer the hub gives moves on it.
+    or :data:`NO_LINK` where none does, or where the input names no account. Where no
+    identity store is wired, or it cannot be read, the links cannot be read for it
+    (ADR-0374 §2:1): the fault is logged under a fixed event name, and the input is
+    recorded as :func:`unread` says. Nothing reads the sender yet (ADR-0368 §1:3), so no
+    answer the hub gives moves on it.
 
     Args:
         identities: The identity store, or ``None`` where none is wired.
         account: The account the input arrived by, or ``None`` where it names none.
-        stage: The reader asking, named in the log entry of a store that failed.
+        stage: The reader asking, named in the log entry of a read that got no answer.
 
     Returns:
         The sender.
     """
-    if identities is None or account is None:
+    if account is None:
         return NO_LINK
+    if identities is None:
+        return unread(account, stage=stage, reason="unwired")
     try:
         link = await identities.find_link(account)
     except IdentityStoreError:
-        _log.warning("input_sender_unread", stage=stage, reason="identity_store")
-        return NO_LINK
+        return unread(account, stage=stage, reason="identity_store")
     except Exception:  # nothing reads a sender yet, so no fault stops an input
-        _log.warning("input_sender_unread", stage=stage, reason="defect")
-        return NO_LINK
+        return unread(account, stage=stage, reason="defect")
     if link is None:
         return NO_LINK
     return InputSender(person=link.person_id, level=link_level(link))
+
+
+def unread(account: Account, *, stage: str, reason: str) -> InputSender:
+    """Who sent a message that arrived by ``account`` when its link could not be read.
+
+    ADR-0374: no fault is read as a link, and nothing stands in for it (§2:3), so the
+    message is an unidentified sender's, at none (:data:`LINKS_UNREAD`, §2:2), save one
+    written on the hub's own machine (:data:`HUB_MACHINE`, §3:1), which is the owner's at
+    the most the hub chat's kind declares in this build, with no lowering read (§3:2,
+    §4:2). Either is marked (§5:1). The read is logged as ``input_sender_unread`` with
+    the reader and the reason, and with no account's or person's identifier (§5:4).
+
+    Args:
+        account: The account the message arrived by.
+        stage: The reader that asked.
+        reason: Why it got no answer: ``unwired``, ``identity_store`` or ``defect``.
+
+    Returns:
+        The sender, marked.
+    """
+    _log.warning("input_sender_unread", reader=stage, reason=reason)
+    if account == HUB_MACHINE:
+        return InputSender(
+            person=OWNER_PERSON_ID, level=most_sureness(CHAT_ACCOUNT_KIND), links_unread=True
+        )
+    return LINKS_UNREAD
 
 
 async def senders_of[K: Hashable](
@@ -378,8 +431,18 @@ def disagreements(facts: WorkFacts, today: TodaysPath) -> tuple[str, ...]:
     return tuple(differs)
 
 
+def links_unread(senders: Iterable[InputSender]) -> bool:
+    """Whether any of ``senders`` was set because the links could not be read (ADR-0374 §5:1)."""
+    return any(one.links_unread for one in senders)
+
+
 def log_facts(
-    facts: WorkFacts, trigger: RecordedChannelTrigger, *, activation_id: str | None, at: str
+    facts: WorkFacts,
+    trigger: RecordedChannelTrigger,
+    *,
+    activation_id: str | None,
+    at: str,
+    unread: bool = False,
 ) -> None:
     """Log the facts recorded on a work, and where they disagree with today's path.
 
@@ -391,12 +454,24 @@ def log_facts(
     changes no answer. Whose authority the facts carry is logged as ``whose`` and
     today's reading of it as ``today_users``: a key naming "auth" is masked by the log's
     redaction (``core.logging``), which would hide the one value the comparison is for.
+    The facts' level is logged as ``facts_level``: the configured chain's
+    ``add_log_level`` owns ``level``, and would write the log level over it, as it owns
+    ``event`` and ``timestamp`` its neighbours do.
+
+    ``links_unread`` is whether the links could not be read for any input the facts were
+    recorded from (ADR-0374 §5:1). Where it is set, a disagreement is the fault's and not
+    a link's: off the hub's own machine such an input is an unidentified sender's at none
+    (§2:2), which today's path, reading the channel type, never says of the owner's own
+    places, so ``authority`` and ``level`` differ by design; on it the owner's at the hub
+    chat's most (§3:2), which agrees.
 
     Args:
         facts: The facts recorded.
         trigger: The work's recorded trigger, which today's path reads.
         activation_id: The work's activation.
         at: When they were recorded: ``start`` or ``join``.
+        unread: Whether the links could not be read for any input they were recorded
+            from.
     """
     today = todays_path(trigger)
     differs = disagreements(facts, today)
@@ -406,10 +481,11 @@ def log_facts(
         at=at,
         agrees=not differs,
         differs=differs,
+        links_unread=unread,
         for_whom=facts.for_whom.kind.value,
         whose=facts.authority.kind.value,
         unidentified=facts.authority.unidentified,
-        level=facts.level.value,
+        facts_level=facts.level.value,
         today_person=today.person is not None,
         today_users=today.users_authority,
         today_established=today.established,
@@ -417,11 +493,16 @@ def log_facts(
 
 
 def _logged(
-    facts: WorkFacts, trigger: RecordedChannelTrigger, *, activation_id: str | None, at: str
+    facts: WorkFacts,
+    trigger: RecordedChannelTrigger,
+    *,
+    activation_id: str | None,
+    at: str,
+    unread: bool,
 ) -> None:
     """:func:`log_facts`, whose own fault is logged and never undoes the recording."""
     try:
-        log_facts(facts, trigger, activation_id=activation_id, at=at)
+        log_facts(facts, trigger, activation_id=activation_id, at=at, unread=unread)
     except Exception:  # the comparison is read beside the facts, never in their place
         _log.warning("work_facts_unlogged", at=at, reason="defect")
 
@@ -447,7 +528,8 @@ def record_started(
     except Exception:  # nothing reads the facts yet, so no fault stops a work
         _log.warning("work_facts_unrecorded", at="start", reason="defect")
         return None
-    _logged(facts, trigger, activation_id=activation_id, at="start")
+    unread = links_unread(trigger.senders)
+    _logged(facts, trigger, activation_id=activation_id, at="start", unread=unread)
     return facts
 
 
@@ -476,6 +558,7 @@ def record_joined(
     trigger: RecordedChannelTrigger,
     *,
     activation_id: str | None,
+    earlier: Sequence[JoinedInput] = (),
 ) -> tuple[JoinedInput, ...]:
     """``inputs``, each carrying the work's facts as they stand once it joined.
 
@@ -490,18 +573,23 @@ def record_joined(
         inputs: The inputs joining, in order.
         trigger: The work's recorded trigger, which today's path reads.
         activation_id: The work's activation.
+        earlier: The inputs that joined the work before these, which the facts were
+            recorded from too: read only for whether the links could not be read for
+            any of them (ADR-0374 §5:1).
 
     Returns:
         The inputs, each with this work's ``facts``, or with none.
     """
     try:
-        recorded: list[tuple[JoinedInput, WorkFacts]] = []
+        recorded: list[tuple[JoinedInput, WorkFacts, bool]] = []
+        unread = links_unread(trigger.senders) or any(links_unread(one.senders) for one in earlier)
         for one in inputs:
             facts = joined(facts, one)
-            recorded.append((one.model_copy(update={"facts": facts}), facts))
+            unread = unread or links_unread(one.senders)
+            recorded.append((one.model_copy(update={"facts": facts}), facts, unread))
     except Exception:  # nothing reads the facts yet, so no fault stops a join
         _log.warning("work_facts_unrecorded", at="join", reason="defect")
         return unrecorded(inputs)
-    for _, held in recorded:
-        _logged(held, trigger, activation_id=activation_id, at="join")
-    return tuple(one for one, _ in recorded)
+    for _, held, faulted in recorded:
+        _logged(held, trigger, activation_id=activation_id, at="join", unread=faulted)
+    return tuple(one for one, _, _ in recorded)

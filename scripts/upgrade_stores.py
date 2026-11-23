@@ -453,9 +453,10 @@ def _provenance(moment: Moment, source: MemorySource = MemorySource.OBSERVED) ->
 #: The channel the activation episode was on, so its channel number is read back.
 _CHANNEL: Final = ChannelIdentity(channel_type="conversation", instance_id="upgrade-chat")
 
-#: Who sent the owner's messages the check records: the owner, by a linked account at the
-#: hub chat's most (ADR-0366 §4:1, §5:2).
-_SENDER: Final = InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL)
+#: Who sent the owner's messages the check records: the owner, at the hub chat's most
+#: (ADR-0366 §4:1, §5:2), as the hub's own machine is while the links cannot be read, so
+#: marked (ADR-0374 §3:2, §5:1) and a later build reads the mark back.
+_SENDER: Final = InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL, links_unread=True)
 
 #: The three facts of an owner's message's work (ADR-0368 §2, §3:1, §3:2).
 _OWNERS_FACTS: Final = WorkFacts(

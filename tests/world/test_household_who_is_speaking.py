@@ -15,6 +15,7 @@ from household_harness import Household, Person, TelegramAccount
 
 from ai_assistant.core.channel_validation import most_sureness
 from ai_assistant.core.types import (
+    HUB_DEVICE_ID,
     AuthorityKind,
     InputSender,
     Sureness,
@@ -182,3 +183,45 @@ async def test_the_lines_gate_drops_any_account_but_its_own_before_the_hub_reads
     assert work.message_senders == (home.owner.at(Sureness.NORMAL),)
     assert work.replies == (DEFAULT_ROUND_TEXT,)
     assert [body for _, body in home.bot.messages] == [DEFAULT_ROUND_TEXT]
+
+
+async def test_a_store_fault_reads_no_link_save_on_the_hubs_own_machine() -> None:
+    """ADR-0374 §2:2, §3:2, §4:2, §5:1: while the store cannot be read, the owner's
+    enrolled device and the line are an unidentified sender's, at none, marked; the hub's
+    own machine is the owner's at the hub chat's most, marked, a lowering standing on its
+    link not applied. When the store reads again, the lowering applies, and nothing is
+    marked. The facts of a fault off that machine disagree with today's path by design,
+    and the log says the links could not be read."""
+    async with Household() as home:
+        hub = await home.device(home.owner, HUB_DEVICE_ID)
+        phone = await home.device(home.owner, "phone")
+        line = await home.telegram(home.owner)
+        await home.lower(hub, Sureness.WEAK)
+
+        home.fault_next_read()
+        from_phone = await home.say(phone, "first, from the phone")
+        home.fault_next_read()
+        on_the_line = await home.say(line, "second, on the line")
+        home.fault_next_read()
+        on_the_hub = await home.say(hub, "third, on the hub's own machine")
+        read_again = await home.say(hub, "fourth, once the store reads")
+
+    unread = InputSender(person=None, level=Sureness.NONE, links_unread=True)
+    assert from_phone.senders == (unread,)
+    assert on_the_line.senders == on_the_line.message_senders == (unread,)
+    for work in (from_phone, on_the_line):
+        assert work.facts == _unidentified(home.owner)
+        assert work.disagrees == ("authority", "level")
+        assert [one["links_unread"] for one in work.logged] == [True]
+
+    most = most_sureness(CHAT_ACCOUNT_KIND)
+    assert on_the_hub.senders == (InputSender(person=home.owner.id, level=most, links_unread=True),)
+    assert on_the_hub.facts == _theirs(home.owner, most)
+    assert on_the_hub.disagrees == ()
+    assert [one["links_unread"] for one in on_the_hub.logged] == [True]
+
+    assert read_again.senders == (home.owner.at(Sureness.WEAK),)
+    assert read_again.facts == _theirs(home.owner, Sureness.WEAK)
+    assert [one["links_unread"] for one in read_again.logged] == [False]
+    for work in (from_phone, on_the_line, on_the_hub, read_again):
+        assert work.replies == (DEFAULT_ROUND_TEXT,)

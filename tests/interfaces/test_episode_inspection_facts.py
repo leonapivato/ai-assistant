@@ -188,3 +188,26 @@ def test_a_record_text_cannot_pose_as_a_line() -> None:
 
     assert lines[0].startswith('Facts when it started: for person "person:x\\nFacts: forged"')
     assert sum(line.startswith("Facts") for line in lines) == 1
+
+
+def test_an_input_whose_links_could_not_be_read_says_so() -> None:
+    """ADR-0374 §5:3: for each input any of whose senders was set because the links could
+    not be read, the inspected work says so; an input whose links were read says
+    nothing of it."""
+    unread = InputSender(person=None, level=Sureness.NONE, links_unread=True)
+    owner_unread = InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL, links_unread=True)
+    record = _record(
+        senders=(owner_unread,),
+        facts=_STARTED,
+        joined=(_joined(_OWNER_NORMAL, _STARTED), _joined(unread, _STARTED)),
+    )
+
+    lines = _facts(record)
+
+    assert lines[2:] == [
+        '  The one it started from: from "person:owner", at normal '
+        "(the links could not be read for it)",
+        f'  Joined {_AT.isoformat()} by telegram/conn-1/42: from "person:owner", at normal',
+        f"  Joined {_AT.isoformat()} by telegram/conn-1/42: from an unidentified sender, "
+        "at none (the links could not be read for it)",
+    ]

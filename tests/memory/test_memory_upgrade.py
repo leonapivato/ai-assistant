@@ -95,7 +95,7 @@ def _with_later_defaults(stored: dict[str, Any]) -> dict[str, Any]:
     And as ADR-0351 §9 carries it: its trigger's ``origin`` gives way to its parties,
     the owner's for a hub chat input of the origin ``user`` (§9:2), which is the one
     activation this file holds; and as ADR-0368 §2's upgrade carries it, with who sent it
-    and the work's three facts.
+    and the work's three facts, the sender unmarked (ADR-0374 §7).
     """
     record = stored.get("processing_record")
     if record is None:
@@ -111,8 +111,9 @@ def _with_later_defaults(stored: dict[str, Any]) -> dict[str, Any]:
     }
     # ADR-0356 §13:5: the chain carries the record to version 12, and ADR-0368 §2's
     # upgrade, last, records what the channel-type rule said of the hub chat's input: the
-    # owner sent it, at normal, and the work is the owner's, carrying their authority.
-    sender = {"person": OWNER_PERSON_ID, "level": "normal"}
+    # owner sent it, at normal, and the work is the owner's, carrying their authority;
+    # its links read, as ADR-0374 §7 reads every sender recorded before the mark.
+    sender = {"person": OWNER_PERSON_ID, "level": "normal", "links_unread": False}
     facts = {
         "for_whom": {"kind": "person", "id": OWNER_PERSON_ID},
         "authority": {"kind": "senders", "persons": [OWNER_PERSON_ID], "unidentified": False},
