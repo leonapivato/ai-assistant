@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from memory_facts_carry import episode_without_facts
 
 from ai_assistant.core.errors import IncompatibleStateError
 from ai_assistant.core.types import (
@@ -157,14 +158,28 @@ def test_the_fixture_is_what_the_previous_release_wrote() -> None:
 
 
 async def test_the_file_is_upgraded_in_place_by_its_label_alone(legacy: Path) -> None:
-    """ADR-0326 §4:1, §4:4: the label advances and no stored byte of a record moves."""
+    """ADR-0326 §4:1, §4:4: the label advances and no stored byte of a record moves.
+
+    Save what ADR-0368 §2's upgrade, next in the chain, adds to each episode with a
+    processing record, which its own test holds: every row it does not rewrite is byte
+    for byte what it was, and every row it does holds, less the three facts, every field
+    it held, each unchanged, the rewrite writing out the defaults the record reads with.
+    """
     before = _raw_rows(legacy)
 
     exported = await _exported(legacy)
 
     assert _label(legacy) == MEMORY_RECORD_FORMAT
     assert set(exported) == _IDS
-    assert _raw_rows(legacy) == before
+    after = _raw_rows(legacy)
+    assert set(after) == set(before)
+    for record_id, row in before.items():
+        stored = json.loads(row[1])
+        if stored.get("processing_record") is None:
+            assert after[record_id] == row, record_id
+            continue
+        assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
+        _holds(episode_without_facts(json.loads(after[record_id][1])), stored)
 
 
 async def test_every_entry_reads_back_whole_keeping_nothing_of_what_it_showed(

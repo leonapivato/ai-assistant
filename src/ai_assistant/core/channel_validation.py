@@ -48,8 +48,9 @@ it rather than restating it. A kind with no row is rendered with the fallback AD
 §6:3 and §7:5 give it.
 
 **The most sureness each kind can give** (ADR-0366 §5:2), declared beside how it
-establishes authors, and a link's level read from it (§5:3, :func:`link_level`). Nothing
-reads either yet: who sent an input is still decided by the declarations above.
+establishes authors, and a link's level read from it (§5:3, :func:`link_level`). Who sent
+an input and at what level is recorded from it beside the declarations above
+(ADR-0368 §2:6), and the declarations above still decide (§1:3).
 """
 
 from __future__ import annotations
@@ -272,7 +273,9 @@ def declared_input(
     the owner on the hub chat and the line, the source an informational event names,
     or the assistant's statement on the Task Scheduler, with unknown added for a task
     carrying the outside-content mark (§3:6); and none on Approvals, whose input carries
-    no one's words (ADR-0361 §3:6). Admission never records ``None`` (§2:5).
+    no one's words (ADR-0361 §3:6). Admission never records ``None`` (§2:5). Each
+    message keeps the sender it arrived with, which its reader found from the account it
+    came by (ADR-0368 §2:6): no kind declares one.
 
     Args:
         target: The admitted input's target.
@@ -296,6 +299,7 @@ def declared_input(
             position=one.position,
             forwarded_from=one.forwarded_from,
             party=message_party(kind, one.forwarded_from),
+            sender=one.sender,
         )
         for one in messages
     )

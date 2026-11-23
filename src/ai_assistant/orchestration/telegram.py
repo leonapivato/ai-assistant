@@ -179,6 +179,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ApprovalRequest,
         ChannelEpisodePage,
+        InputSender,
         TelegramCallback,
         TelegramMessage,
         TelegramSendOutcome,
@@ -497,12 +498,16 @@ class TelegramInput:
         updates: The updates taken in, ascending: each a text message or a forward
             from the configured account.
         window: The line's episode window, brought in with the input (§10).
+        senders: Who sent each message, by its id, as the engine found it from the
+            Telegram account that sent it before admitting the input (ADR-0366 §4:1,
+            ADR-0368 §2:6); empty until then. A forward's is who forwarded it.
     """
 
     channel: ChannelIdentity
     activation_id: str
     updates: tuple[TelegramUpdate, ...]
     window: TranscriptWindow
+    senders: Mapping[int, InputSender] = field(default_factory=dict)
 
     @property
     def messages(self) -> tuple[TelegramMessage, ...]:
@@ -521,8 +526,11 @@ class TelegramInput:
 
     @property
     def recorded(self) -> tuple[RecordedInputMessage, ...]:
-        """Each message as the trigger records it: dated, a forward with its sender (§5:4)."""
-        return _recorded(self.messages)
+        """Each message as the trigger records it: dated, a forward with its sender (§5:4).
+
+        Each records who sent it where the engine found that (ADR-0368 §2:6).
+        """
+        return _recorded(self.messages, self.senders)
 
     def narrowed(self, update_ids: Sequence[int]) -> TelegramInput:
         """The input as its activation took it in: only the updates ``update_ids`` name."""
@@ -538,7 +546,9 @@ class TelegramInput:
         return replace(self, updates=updates, window=window)
 
 
-def _recorded(messages: Sequence[TelegramMessage]) -> tuple[RecordedInputMessage, ...]:
+def _recorded(
+    messages: Sequence[TelegramMessage], senders: Mapping[int, InputSender]
+) -> tuple[RecordedInputMessage, ...]:
     """Each message as an episode records it: dated, a forward with its sender (§5:4).
 
     Each carries the party the line's kind declares for it (ADR-0351 §2:6, §3:1): the
@@ -553,6 +563,7 @@ def _recorded(messages: Sequence[TelegramMessage]) -> tuple[RecordedInputMessage
             position=one.message_id,
             forwarded_from=_sender(one),
             party=message_party(TELEGRAM_CHANNEL_TYPE, _sender(one)),
+            sender=senders.get(one.message_id),
         )
         for one in messages
     )

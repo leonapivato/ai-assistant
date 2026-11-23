@@ -331,6 +331,7 @@ from ai_assistant.orchestration.understanding import (
     fetch_held,
     place_window_links,
 )
+from ai_assistant.orchestration.work_facts import chat_account, line_account, senders_of
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -340,6 +341,7 @@ if TYPE_CHECKING:
         AuditTrail,
         DiagnosticRetention,
         DiagnosticSink,
+        IdentityStore,
         MemoryStore,
         NotificationPolicy,
         NotificationStore,
@@ -1673,6 +1675,7 @@ class Engine:
         approvals: ApprovalsSeams | None = None,
         account_connections: Sequence[AccountConnection] = (),
         connections_recent: int = DEFAULT_CONNECTIONS_RECENT,
+        identities: IdentityStore | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -2071,6 +2074,12 @@ class Engine:
                 Connections section shows with its state.
             connections_recent: How many of a many-place connection's most recent places
                 Connections shows (ADR-0364 §3:5), the composition root's constant.
+            identities: The identity store (ADR-0366 §11), the same one the hub's start
+                opened and follows the owner's accounts into. The hub chat's and the
+                line's readers read who sent each message from it, by the account it
+                arrived by (§4:1), and record it with the three facts beside today's
+                path, which still decides (ADR-0368 §1:3, §2). ``None`` records every
+                message as arriving by no link.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2312,6 +2321,7 @@ class Engine:
         # ADR-0364 §3:5-§3:6: the account connections and the recent places shown.
         self._account_connections = tuple(account_connections)
         self._connections_recent = connections_recent
+        self._identities = identities
         if self._phases is not None:
             # ADR-0349 §4:6, §6:1, §7:20: planning's stop call, its findings look-up and
             # its answer to an offer, and the waits acting and planning hold (§7:12,
@@ -6470,6 +6480,16 @@ class Engine:
         reader = self._chat_reader
         assert reader is not None  # noqa: S101 — only the reader calls this
         place = ChannelIdentity(channel_type="conversation", instance_id=taken.conversation_id)
+        # ADR-0366 §4:1, ADR-0368 §2:6: who sent each message, by the device it was
+        # written from, recorded with the input beside today's path (§1:3).
+        taken = replace(
+            taken,
+            senders=await senders_of(
+                self._identities,
+                {one.position: chat_account(one.device_id) for one in taken.messages},
+                stage="chat_reader",
+            ),
+        )
         if self._closing:
             return False
         accepted = ChannelInput(target=place, payload=TextChannelPayload(text=taken.text))
@@ -6479,6 +6499,7 @@ class Engine:
             clock=self._now,
             id_factory=lambda: taken.activation_id,
             stage_limit=self._stage_record_limit,
+            senders=tuple(taken.senders.values()),
         )
         marked: list[int] = []
 
@@ -6588,6 +6609,16 @@ class Engine:
         writer = self._telegram_writer
         assert reader is not None  # noqa: S101 — only the line's reader calls this
         assert writer is not None  # noqa: S101 — wired with the reader
+        # ADR-0366 §4:1, ADR-0368 §2:6: who sent each message, by the Telegram account
+        # that sent it, recorded on each beside today's path (§1:3).
+        taken = replace(
+            taken,
+            senders=await senders_of(
+                self._identities,
+                {one.message_id: line_account(one.sender_id) for one in taken.messages},
+                stage="telegram_reader",
+            ),
+        )
         if self._closing:
             return False
         accepted = ChannelInput(target=taken.channel, payload=TextChannelPayload(text=taken.text))
@@ -6743,6 +6774,7 @@ class Engine:
                     sent_at=one.written_at,
                     position=one.position,
                     party=message_party("conversation", None),
+                    sender=taken.senders.get(one.position),
                 )
                 for one in taken.messages
             )

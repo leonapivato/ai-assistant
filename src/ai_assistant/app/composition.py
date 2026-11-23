@@ -2275,6 +2275,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # the hub chat's most recent conversations it shows.
             account_connections=_account_connections(settings),
             connections_recent=CONNECTIONS_RECENT_PLACES,
+            # ADR-0366 §4:1, ADR-0368 §2: the identity store opened above, the **same**
+            # one `service` follows the owner's devices into (`Composition.identities`).
+            # The hub chat's and the line's readers read who sent each message from its
+            # links, and the engine records it with each work's three facts beside the
+            # channel-type rules, which still decide (ADR-0368 §1:3).
+            identities=identities,
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
             observer=observer,

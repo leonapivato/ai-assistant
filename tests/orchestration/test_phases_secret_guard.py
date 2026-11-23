@@ -454,6 +454,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     a merge brought (ADR-0349 §7:7, §7:21), a ``JoinedInput``, is a time, the
     ``ChannelIdentity`` it came from, its ``RecordedInputMessage``s and the identifier of
     the activation it was taken from: the user's words and identifiers, with no carrier.
+    Who sent an input or a message (ADR-0368 §2:6), ``InputSender``, is an identity's id
+    and a closed level; the three facts on a work and on a joined input (§2:1 to §2:3),
+    ``WorkFacts`` with ``WorkFor`` and ``WorkAuthority``, are closed values and identities'
+    ids: identifiers, with no carrier.
     An in-progress entry (ADR-0349 §5:6), ``InProgressEntry``, and its planning-side
     ``RunningShown``, are an identifier, the ``ChannelIdentity`` that caused it, its input
     in brief read through the peer view, a flag and a closed origin, with when it arrived
@@ -557,6 +561,8 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "EvidenceItemPart",
         "HeldResult",
         "InputPart",
+        # ADR-0368 §2: who sent an input, and the three facts, judged above.
+        "InputSender",
         "JoinedInput",
         "KeptInMind",
         "LegacyPart",
@@ -564,6 +570,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "Memory",
         "MemoryOperation",
         "MemorySupport",
+        "WorkAuthority",
+        "WorkFacts",
+        "WorkFor",
         # ADR-0345 §2, §7: a support's holder names an identifier the record carries, and
         # a label is a producer's wording, both judged as the memory's other text is.
         "SituationLabel",

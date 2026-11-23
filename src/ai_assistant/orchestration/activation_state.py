@@ -36,11 +36,13 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     SpeechChannelPayload,
     UnderstandingOmission,
+    canonical_senders,
 )
 from ai_assistant.orchestration.controller import (
     DEFAULT_STAGE_RECORD_LIMIT,
     StageRecord,
 )
+from ai_assistant.orchestration.work_facts import joined, log_facts, started
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -53,6 +55,7 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         ChannelInput,
         EpisodicMemory,
+        InputSender,
         Memory,
         Modality,
         PlanningLabel,
@@ -61,6 +64,7 @@ if TYPE_CHECKING:
         RecordedInputMessage,
         ReplyCapability,
         StageEntry,
+        WorkFacts,
     )
     from ai_assistant.orchestration.matters import InputStanding, Named, Offer
     from ai_assistant.orchestration.person_block import PersonBlock
@@ -223,6 +227,13 @@ class ActivationState:
     #: it carries; set when the pass begins. ``None`` until then, and on an activation
     #: whose kind establishes no author: it shares nothing (§5:3-§5:5).
     standing: InputStanding | None = None
+    #: ADR-0368 §2: the three facts — whom it is for, whose authority it carries and its
+    #: level — as :func:`admit_channel` recorded them from its trigger when it started,
+    #: never by a model (§2:4), and written on the episode's record. Each input that
+    #: joins records them again on its own entry (:meth:`take_inputs`), so they stand as
+    #: :attr:`work_facts` reads them. ``None`` for a state built without them. Nothing
+    #: reads them yet (§1:3).
+    started_facts: WorkFacts | None = None
     #: The trigger's messages, each kept apart and dated, as the pass took them in: what
     #: an absorption or a take brings (ADR-0349 §7:7, §7:21). The line records the same
     #: on its trigger (ADR-0323 §5:4); the hub chat's trigger records none, so its
@@ -342,7 +353,19 @@ class ActivationState:
         understanding version or the offer's meaning that brought it (§7:9), so no
         understanding runs again for it. ``merged`` are the activations whose findings
         planning is shown from here on (§7:10).
+
+        Each input records the activation's three facts again, as they stand once it
+        joined (ADR-0368 §2:4, :func:`~ai_assistant.orchestration.work_facts.joined`),
+        where the activation recorded them when it started.
         """
+        facts = self.work_facts
+        if facts is not None:
+            stamped = []
+            for one in inputs:
+                facts = joined(facts, one)
+                stamped.append(one.model_copy(update={"facts": facts}))
+                log_facts(facts, self.trigger, activation_id=self.activation_id, at="join")
+            inputs = stamped
         self.joined = (*self.joined, *inputs)
         self.merge_covered += len(inputs)
         self.merged = (*self.merged, *(one for one in merged if one not in self.merged))
@@ -486,6 +509,7 @@ class ActivationState:
             stories_position=self.stories_position,
             taken_over_by=self.taken_over_by if reason is ProcessingReason.STOPPED else None,
             call_records=self.call_records,
+            facts=self.started_facts,
         )
 
     @property
@@ -532,7 +556,19 @@ class ActivationState:
             joined=self.joined,
             stories_position=self.stories_position,
             call_records=self.call_records,
+            facts=self.started_facts,
         )
+
+    @property
+    def work_facts(self) -> WorkFacts | None:
+        """The three facts as they stand (ADR-0368 §2:4).
+
+        The last joined input's that records them, or those it started with.
+        """
+        for one in reversed(self.joined):
+            if one.facts is not None:
+                return one.facts
+        return self.started_facts
 
     def _stage_record(
         self, ended_at: datetime, failure: BaseException | None
@@ -616,7 +652,7 @@ def active_state() -> ActivationState | None:
     return None if scope is None else scope.state
 
 
-def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata seams, the stage bound and the messages it took in
+def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata seams, the stage bound, the messages it took in and who sent them
     input: ChannelInput,  # noqa: A002 — channel contract parameter
     reply: ReplyCapability | None,
     *,
@@ -625,6 +661,7 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     stage_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
     messages: Sequence[RecordedInputMessage] = (),
     carries_outside_mark: bool = False,
+    senders: Sequence[InputSender] = (),
 ) -> ActivationState:
     """Allocate capture metadata after channel validation, without making it admission policy.
 
@@ -644,6 +681,13 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     whether the input carries the outside-content mark, as an occurrence of a scheduled
     task carrying it does (ADR-0350 §3:8): its kind declares its parties for that, with
     unknown beside the assistant's statement (ADR-0351 §3:6).
+
+    **Who sent it** (ADR-0368 §2:6): the trigger records its senders, its reader's finding
+    from the accounts it arrived by: those its ``messages`` each record, and ``senders``,
+    for an input whose trigger records no messages, as the hub chat's does; none for an
+    input no person sent. **The three facts** it starts with are recorded from the
+    trigger here (§2:4), and logged beside what today's path says of it
+    (:func:`~ai_assistant.orchestration.work_facts.log_facts`), which still decides.
     """
     parties, recorded = declared_input(
         input.target, messages, carries_outside_mark=carries_outside_mark
@@ -657,7 +701,7 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
         else RecordedTextInput(text=input.payload.text)
     )
     activation_id, started_at = _metadata(clock, id_factory)
-    return ActivationState(
+    state = ActivationState(
         trigger=RecordedChannelTrigger(
             target=input.target,
             channel=(
@@ -670,6 +714,9 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
             reply=reply,
             parties=parties,
             messages=recorded,
+            senders=canonical_senders(
+                (*senders, *(one.sender for one in recorded if one.sender is not None))
+            ),
         ),
         activation_id=activation_id,
         started_at=started_at,
@@ -681,6 +728,9 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
         stage_limit=stage_limit,
         clock=clock,
     )
+    state.started_facts = started(state.trigger)
+    log_facts(state.started_facts, state.trigger, activation_id=activation_id, at="start")
+    return state
 
 
 def canonical_activation_id(minted: object) -> bool:

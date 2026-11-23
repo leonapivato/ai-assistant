@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from memory_facts_carry import without_facts
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 from ai_assistant.core.types import (
@@ -144,7 +145,9 @@ async def test_every_episode_reopens_with_no_call_entry_and_every_other_record_w
         processing = _processing(exported[record_id])
         assert (processing.schema_version, processing.call_records) == (12, ())
         stored = json.loads(before[record_id][1])["processing_record"]
-        dumped = processing.model_dump(mode="json")
+        # ADR-0368 §2's upgrade, last in the chain, adds the three facts, held by its own
+        # test: what is held here is everything else.
+        dumped = without_facts(processing.model_dump(mode="json"))
         assert dumped.pop("schema_version") == 12
         assert dumped.pop("call_records") == []
         assert {key: value for key, value in stored.items() if key != "schema_version"} == dumped

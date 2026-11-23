@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from memory_facts_carry import without_facts
 from memory_parties_carry import calls_carried
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
@@ -240,7 +241,9 @@ async def test_a_rewritten_episode_changes_nothing_but_its_versions(legacy: Path
     for record_id in _REWRITTEN:
         old, new = json.loads(before[record_id][1]), json.loads(after[record_id][1])
         old_processing = old.pop("processing_record")
-        new_processing = new.pop("processing_record")
+        # ADR-0368 §2's upgrade, last in the chain, adds the three facts, held by its own
+        # test: what is held here is everything else.
+        new_processing = without_facts(new.pop("processing_record"))
         assert new == old, record_id
         old_versions = old_processing.pop("understanding")
         new_versions = new_processing.pop("understanding")

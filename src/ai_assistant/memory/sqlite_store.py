@@ -96,12 +96,14 @@ from ai_assistant.memory._episode_format import (
     PINNED_RECORD_FORMAT,
     PLACED_RECORD_FORMAT,
     SCHEDULED_RECORD_FORMAT,
+    SHOWED_RECORD_FORMAT,
     TAKEN_OVER_RECORD_FORMAT,
     UNDERSTOOD_RECORD_FORMAT,
     inspect_existing,
     stored_format,
 )
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
+from ai_assistant.memory._facts_upgrade import facts_episode
 from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._parties_upgrade import parties_episode
 from ai_assistant.memory._placed_upgrade import placed_memory
@@ -600,6 +602,7 @@ class SqliteMemoryStore:
             self._upgrade_to_understood(conn, existing_format)
             self._upgrade_to_called(conn, existing_format)
             self._upgrade_to_showed(conn, existing_format)
+            self._upgrade_to_facts(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -1550,8 +1553,63 @@ class SqliteMemoryStore:
             found: The label the file held when it was opened; ``None`` for a fresh
                 store, which is already written at the new label.
         """
+        if found is None or found >= SHOWED_RECORD_FORMAT:
+            return
+        conn.execute("UPDATE episode_record_format SET version = ?", (SHOWED_RECORD_FORMAT,))
+
+    def _upgrade_to_facts(self, conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0368 §2's episode record, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_showed` has carried a file to 23, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+
+        **Every stored episode with a processing record is rewritten** by
+        :func:`~ai_assistant.memory._facts_upgrade.facts_episode`, with no model: its
+        trigger and each of its messages, and each joined input's messages, gain who sent
+        them, and the record and each joined input gain the three facts, each as the
+        channel-type rule of its day said of it (ADR-0368 §2), so a work stored before
+        reads whole once that rule is gone. Nothing is dropped (§4:4). The rewritten
+        record is decoded whole before it is written, and written as the store writes
+        every record. Its ``revision`` and its vector are kept: the upgrade is no caller's
+        write, and an episode's vector embeds its ``content``, which does not move. An
+        open episode is rewritten as a frozen one is, and every memory is left alone.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+
+        Raises:
+            MemoryStoreError: If a stored episode cannot be upgraded. Nothing is
+                written, and the file is left as it was found.
+        """
         if found is None or found >= MEMORY_RECORD_FORMAT:
             return
+        chunk = conn.execute(
+            "SELECT rowid, data FROM records WHERE kind = ? ORDER BY rowid LIMIT ?",
+            (MemoryKind.EPISODIC.value, _BACKFILL_CHUNK),
+        ).fetchall()
+        while chunk:
+            for rowid, data in chunk:
+                try:
+                    stored = json.loads(data)
+                    carried = isinstance(stored, dict) and facts_episode(stored)
+                except ValueError as exc:
+                    msg = f"an episode stored before ADR-0368 could not be upgraded: {exc}"
+                    raise MemoryStoreError(msg) from exc
+                if not carried:
+                    continue
+                episode = self._decode(json.dumps(stored))
+                conn.execute(
+                    "UPDATE records SET data = ? WHERE rowid = ?",
+                    (episode.model_dump_json(exclude={"revision"}), int(rowid)),
+                )
+            chunk = conn.execute(
+                "SELECT rowid, data FROM records WHERE kind = ? AND rowid > ? "
+                "ORDER BY rowid LIMIT ?",
+                (MemoryKind.EPISODIC.value, chunk[-1][0], _BACKFILL_CHUNK),
+            ).fetchall()
         conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
 
     @staticmethod

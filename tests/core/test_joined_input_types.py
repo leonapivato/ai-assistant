@@ -119,7 +119,8 @@ def _extends(before: EpisodeProcessingRecord, after: EpisodeProcessingRecord) ->
 def test_a_joined_input_carries_exactly_the_decisions_fields() -> None:
     """§7:1: when it joined, the place, its messages, and the activation taken over.
 
-    ADR-0351 §5:14 adds ``relayed``, the relay mark an absorption or a take records.
+    ADR-0351 §5:14 adds ``relayed``, the relay mark an absorption or a take records, and
+    ADR-0368 §2:4 ``facts``, the work's three facts recorded again once it joined.
     """
     assert set(JoinedInput.model_fields) == {
         "joined_at",
@@ -127,9 +128,11 @@ def test_a_joined_input_carries_exactly_the_decisions_fields() -> None:
         "messages",
         "taken_over_from",
         "relayed",
+        "facts",
     }
     assert _joined().taken_over_from is None
     assert not _joined().relayed
+    assert _joined().facts is None
 
 
 def test_a_joined_input_carries_at_least_one_message() -> None:
