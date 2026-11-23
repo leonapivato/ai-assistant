@@ -212,6 +212,23 @@ async def test_an_open_whose_clock_fails_while_linking_leaves_the_file_as_it_was
         again.close()
 
 
+@pytest.mark.parametrize("raised", [OSError("clock provider failed"), RuntimeError("no clock")])
+def test_an_exception_the_clock_raises_itself_propagates_unwrapped(
+    tmp_path: Path, raised: Exception
+) -> None:
+    """ADR-0026 §2: the guard covers the reading, not the invocation."""
+    path = tmp_path / "identities.db"
+
+    def failing() -> datetime:
+        raise raised
+
+    with pytest.raises(type(raised), match=str(raised)):
+        _open(path, configured=(LINE,), now=failing)
+
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+
+
 def test_a_malformed_configured_account_is_refused_before_any_file(tmp_path: Path) -> None:
     path = tmp_path / "identities.db"
 
@@ -369,6 +386,50 @@ async def test_a_corrupt_row_is_the_seams_error(tmp_path: Path, statement: str) 
             await store.export()
     finally:
         store.close()
+
+
+async def test_a_link_whose_identity_is_not_held_is_no_link_found(tmp_path: Path) -> None:
+    """A lookup never identifies anyone by a record no write made: it is the seam's error."""
+    path = tmp_path / "identities.db"
+    store = _open(path)
+    try:
+        written_id(await store.link(OWNER_PERSON_ID, LINE, act=BY_THE_OWNER))
+    finally:
+        store.close()
+    _sql(path, "UPDATE links SET person_id = 'person:gone'")
+
+    again = _open(path)
+    try:
+        with pytest.raises(IdentityStoreError, match="corrupt"):
+            await again.find_link(LINE)
+    finally:
+        again.close()
+
+
+async def test_a_link_history_past_the_bound_parameter_limit_reads_whole(tmp_path: Path) -> None:
+    """Every link an identity ever held is read, however many: no bound per link."""
+    path = tmp_path / "identities.db"
+    _open(path).close()
+    count = 33_000
+    act = LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID).model_dump_json()
+    at = "2026-11-23T09:00:00+00:00"
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        conn.executemany(
+            "INSERT INTO links(id, person_id, kind, account, act, made_at, ended_at) "
+            "VALUES (?, ?, 'conversation', ?, ?, ?, ?)",
+            ((f"link:{n}", OWNER_PERSON_ID, f"device-{n}", act, at, at) for n in range(count)),
+        )
+        conn.commit()
+
+    store = _open(path)
+    try:
+        owner = await store.identity(OWNER_PERSON_ID)
+    finally:
+        store.close()
+
+    assert owner is not None
+    assert len(owner.links) == count
+    assert owner.standing_links == ()
 
 
 @pytest.mark.parametrize(
