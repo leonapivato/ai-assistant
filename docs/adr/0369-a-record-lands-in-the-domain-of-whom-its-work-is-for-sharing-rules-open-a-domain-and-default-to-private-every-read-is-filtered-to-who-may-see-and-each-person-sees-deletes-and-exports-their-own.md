@@ -1,6 +1,6 @@
 # 369. A record lands in the domain of whom its work is for, sharing rules open a domain and default to private, every read is filtered to who may see, and each person sees, deletes and exports their own
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0372 (§3:4, §6:1 and §6:3, each in the addition alone: what is said in a place may be seen by its audience then, and a record by those inside its audience label)
 - Date: 2026-11-22
 - Scope: lane 5 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
@@ -43,6 +43,7 @@
   item and §3:3, in the addition alone; §3:6, §3:7 and §3:9, in which sides supply a setter and an
   instant; §2:5's *no new site* half, in the addition alone; §3:1's first item and §3:14, in who
   makes the act), as §15 records.
+- Partially superseded: 2026-11-22 by [ADR-0372](0372-a-place-has-a-start-level-that-what-is-said-there-carries-and-a-work-re-runs-once-without-what-is-narrower-than-its-story.md) — §6:1, in the addition alone: what is said in a place, by a person or by a work, may be seen by whoever was in that place's audience when it was said, someone who joins later getting only what came after; and a record of another domain by whoever was inside the audience label it carries when it was said or written; each under §6:1's reach and limits (ADR-0372 §4:1 to §4:4). §3:4, in the addition alone: the default is private save as those cases provide (ADR-0372 §4:3). §6:3, in the addition alone: code decides those cases from the label and the audience as they were (ADR-0372 §4:6). Every other clause stands. This replacement takes effect on ratification of ADR-0372. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
