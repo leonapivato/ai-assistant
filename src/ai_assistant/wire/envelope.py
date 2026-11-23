@@ -2806,7 +2806,16 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``EpisodicMemory.processing_record``. A peer at 128 refuses the new fields as
 #:     extra (ADR-0124 §9:2). The method set does not move: no ``Protocol`` gains a
 #:     member.
-PROTOCOL_VERSION: Final[int] = 129
+#: 130: ADR-0373 §7:1 advances the version in the change that adds its three members, on
+#:     the method-set limb: ``AssistantEngine`` gains ``linked_accounts``, ``lower_link``
+#:     and ``withdraw_lowering`` (§2:1), carrying the new ``LinkedAccount``,
+#:     ``StandingLowering``, ``LowerLinkResult`` and ``WithdrawLoweringResult`` with the
+#:     closed ``LowerLinkOutcome``, ``LowerLinkRefusal`` and ``WithdrawLoweringOutcome``,
+#:     and ``Account``, which no frame carried before. A hub at 129
+#:     answers the three methods as unknown (ADR-0124 §9:2's method-set limb). No type a
+#:     frame already carried changes. A gateway calls none of the three, but it speaks
+#:     the wire, so it is upgraded with the hub (ADR-0373 §7).
+PROTOCOL_VERSION: Final[int] = 130
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

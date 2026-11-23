@@ -72,6 +72,7 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
+from linked_accounts_contract import CONFIGURED, LINKS_LIMIT, LinkedAccountsSubject
 from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
 from person_model_contract import (
     PERSON_BUDGET,
@@ -129,6 +130,7 @@ from ai_assistant.testing import (
     FakeConnectionProvisioner,
     FakeConversationStore,
     FakeEgressBinder,
+    FakeIdentityStore,
     FakeMemoryStore,
     FakeNotificationOutbox,
     FakePlanStore,
@@ -334,6 +336,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     plans: FakePlanStore | None = None,
     person_blocks: PersonBlocks | None = None,
     now: Callable[[], datetime] | None = None,
+    identities: FakeIdentityStore | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -484,6 +487,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         chat_reader=chat_reader,
         person_blocks=person_blocks,
         now=(lambda: datetime.now(UTC)) if now is None else now,
+        identities=identities,
         # ADR-0309 §2:6: the phases plan what the chat's reader takes in and every event,
         # as they will on every deployment once the switch lane lands; they are wired
         # only beside the reader, so a subject with it off has none. Over the same
@@ -511,6 +515,17 @@ async def _pending() -> AsyncIterator[PendingCandidatesSubject]:
     await built.start()
     try:
         yield PendingCandidatesSubject(engine=built, memory=memory, plans=plans)
+    finally:
+        await built.aclose()
+
+
+async def _linked(*, store: bool = True) -> AsyncIterator[LinkedAccountsSubject]:
+    """An engine at the listing's bound over an identity store holding the owner's two."""
+    identities = FakeIdentityStore(configured=CONFIGURED)
+    built = _wire(max_payload_bytes=LINKS_LIMIT, identities=identities if store else None)
+    await built.start()
+    try:
+        yield LinkedAccountsSubject(engine=built, identities=identities)
     finally:
         await built.aclose()
 
@@ -621,6 +636,18 @@ class TestEngineContract(AssistantEngineContract):
         """The production engine over injected stores, clocked at the panel's instant."""
         async for subject in _approvals():
             yield subject
+
+    @pytest.fixture
+    async def linked_accounts_subject(self) -> AsyncIterator[LinkedAccountsSubject]:
+        """The production engine handed the identity store, as the root hands it."""
+        async for subject in _linked():
+            yield subject
+
+    @pytest.fixture
+    async def linked_accounts_storeless(self) -> AsyncIterator[AssistantEngine]:
+        """The production engine handed no identity store."""
+        async for subject in _linked(store=False):
+            yield subject.engine
 
     @pytest.fixture
     async def engine(self) -> AsyncIterator[AssistantEngine]:

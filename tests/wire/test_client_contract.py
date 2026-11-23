@@ -90,6 +90,7 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
+from linked_accounts_contract import CONFIGURED, LINKS_LIMIT, LinkedAccountsSubject
 from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
 from person_model_contract import (
     PERSON_BUDGET,
@@ -106,7 +107,12 @@ from ai_assistant.core.types import (
     PlacementSetter,
 )
 from ai_assistant.orchestration.person_block import PersonBlocks
-from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore, FakePlanStore
+from ai_assistant.testing import (
+    FakeAssistantEngine,
+    FakeIdentityStore,
+    FakeMemoryStore,
+    FakePlanStore,
+)
 from ai_assistant.wire import (
     ENVELOPE_RESERVE_BYTES,
     HubEngineClient,
@@ -244,6 +250,21 @@ async def _approvals(tmp_path: Path) -> AsyncIterator[ApprovalsPanelSubject]:
 
 
 @contextlib.asynccontextmanager
+async def _linked(tmp_path: Path, *, store: bool = True) -> AsyncIterator[LinkedAccountsSubject]:
+    """A client of a hub whose fake engine answers from the injected identity store."""
+    identities = FakeIdentityStore(configured=CONFIGURED)
+    backing = FakeAssistantEngine(max_payload_bytes=LINKS_LIMIT)
+    if store:
+        backing.identities = identities
+    async with serving(
+        backing,
+        tmp_path / ("hub.sock" if store else "none.sock"),
+        max_frame_bytes=LINKS_LIMIT + ENVELOPE_RESERVE_BYTES,
+    ) as client:
+        yield LinkedAccountsSubject(engine=client, identities=identities)
+
+
+@contextlib.asynccontextmanager
 async def _person_model(tmp_path: Path, *, wired: bool) -> AsyncIterator[PersonModelSubject]:
     """A client of a hub whose fake engine holds the injected stores; wired or not."""
     people, memory = person_model_stores()
@@ -352,6 +373,18 @@ class TestHubEngineClientContract(AssistantEngineContract):
         """The panel's members over an authenticated local socket."""
         async with _approvals(tmp_path) as subject:
             yield subject
+
+    @pytest.fixture
+    async def linked_accounts_subject(self, tmp_path: Path) -> AsyncIterator[LinkedAccountsSubject]:
+        """The three members over an authenticated local socket, as the hub's machine."""
+        async with _linked(tmp_path) as subject:
+            yield subject
+
+    @pytest.fixture
+    async def linked_accounts_storeless(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """The same, the hub holding no identity store."""
+        async with _linked(tmp_path, store=False) as subject:
+            yield subject.engine
 
     @pytest.fixture
     async def engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:

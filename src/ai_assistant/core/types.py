@@ -25396,6 +25396,186 @@ class LinkWrite(BaseModel):
         return self
 
 
+# --- the owner's linked accounts, as the engine lists and lowers them (ADR-0373) ------
+#
+# What ``AssistantEngine``'s three members for links and levels carry (ADR-0373 §2, §3):
+# one entry per link to the owner's identity, each standing lowering on it as the entry
+# shows it, and what a lowering or a withdrawal did. Each outcome and each reason is a
+# closed set of exactly the members ADR-0373 §2 names (§2:10). A refused or repeated act
+# is an outcome, never an error. Nothing here carries a credential, an enrolment's
+# verifier, a token or any other secret the hub holds (§3:3): an entry carries ids, an
+# account as the hub knows it, and levels.
+
+
+class StandingLowering(BaseModel):
+    """A lowering that stands on a link, as an entry of the listing shows it (ADR-0373 §3:1).
+
+    Attributes:
+        id: The lowering's id, never reused: what ``withdraw_lowering`` names it by.
+        level: The level it lowers the link to.
+        by: Who made it, by their identity's id: the owner, on today's hub (§4:3).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: NonBlankEncodableText
+    level: Sureness
+    by: NonBlankEncodableText
+
+
+class LinkedAccount(BaseModel):
+    """One link to the owner's identity, as ``linked_accounts`` lists it (ADR-0373 §3).
+
+    **What §3:1 names, and no more**: the link's id, the identity it ties to, the account
+    it holds (its kind and its identifier), its kind's declared most as the running
+    build declares it, each lowering standing on it, and the level that results under
+    ADR-0366 §5:3. **The hub computes ``level``** (§3:2): no client computes or
+    recomputes it, so this type takes it as given and checks it against nothing. A kind
+    that declares no most shows none as its most and as its level (§3).
+
+    Attributes:
+        link_id: The link's id, never reused: what ``lower_link`` names it by.
+        person_id: The identity the link ties the account to.
+        account: The account the link holds: its kind and its identifier.
+        most: The most the account's kind declares, as the running build declares it.
+        lowerings: Each lowering standing on the link, in the order made. Only the
+            standing ones (§3:4).
+        level: The link's level: ``most``, or the lowest standing lowering, whichever is
+            lower, as the hub computed it.
+
+    Raises:
+        ValueError: If a lowering is shown twice.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    link_id: NonBlankEncodableText
+    person_id: NonBlankEncodableText
+    account: Account
+    most: Sureness
+    lowerings: tuple[StandingLowering, ...] = ()
+    level: Sureness
+
+    @model_validator(mode="after")
+    def _each_lowering_once(self) -> Self:
+        if len({one.id for one in self.lowerings}) != len(self.lowerings):
+            msg = "an entry shows each standing lowering once"
+            raise ValueError(msg)
+        return self
+
+
+class LowerLinkOutcome(StrEnum):
+    """What ``lower_link`` did (ADR-0373 §2:3, §2:4). Closed: exactly these three."""
+
+    LOWERED = "lowered"
+    """It recorded a lowering, standing on the link, made by the owner."""
+    UNCHANGED = "unchanged"
+    """A lowering the owner made at that level already stood on the link, so nothing was
+    written and no second lowering was made."""
+    REFUSED = "refused"
+    """It was refused, with its reason, and nothing was written."""
+
+
+class LowerLinkRefusal(StrEnum):
+    """Why ``lower_link`` was refused (ADR-0373 §2:4). Closed: exactly these two."""
+
+    UNKNOWN_LINK = "unknown_link"
+    """No link to the owner's identity has that id."""
+    NOT_A_LOWERING = "not_a_lowering"
+    """The level is not below the most the link's kind declares (ADR-0366 §5:2, §5:3)."""
+
+
+class LowerLinkResult(BaseModel):
+    """What ``lower_link`` did, with the lowering and the link as they stand (ADR-0373 §2).
+
+    Attributes:
+        outcome: What it did.
+        lowering: The lowering it recorded, or the one that already stood; set exactly
+            where it was not refused.
+        entry: The link's entry as it stands after the act; set exactly where it was
+            not refused.
+        refusal: Why it was refused; set exactly where it was.
+
+    Raises:
+        ValueError: If the fields do not fit the outcome.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outcome: LowerLinkOutcome
+    lowering: StandingLowering | None = None
+    entry: LinkedAccount | None = None
+    refusal: LowerLinkRefusal | None = None
+
+    @model_validator(mode="after")
+    def _the_fields_fit_the_outcome(self) -> Self:
+        refused = self.outcome is LowerLinkOutcome.REFUSED
+        if refused != (self.refusal is not None):
+            msg = "a lowering names its refusal exactly when it was refused"
+            raise ValueError(msg)
+        if refused != (self.lowering is None) or refused != (self.entry is None):
+            msg = "a lowering carries the lowering and the link's entry exactly when not refused"
+            raise ValueError(msg)
+        return self
+
+
+class WithdrawLoweringOutcome(StrEnum):
+    """What ``withdraw_lowering`` did (ADR-0373 §2:6). Closed: exactly these two."""
+
+    WITHDRAWN = "withdrawn"
+    """It ended the lowering."""
+    NOT_STANDING = "not_standing"
+    """No standing lowering has that id, because none was made or it was already
+    withdrawn, so nothing was written. Not an error."""
+
+
+class WithdrawLoweringResult(BaseModel):
+    """What ``withdraw_lowering`` did, with the link as it stands (ADR-0373 §2:6).
+
+    Attributes:
+        outcome: What it did.
+        entry: The link's entry as it stands after the act; set exactly where the
+            lowering was withdrawn.
+
+    Raises:
+        ValueError: If the entry does not fit the outcome.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outcome: WithdrawLoweringOutcome
+    entry: LinkedAccount | None = None
+
+    @model_validator(mode="after")
+    def _an_entry_exactly_when_withdrawn(self) -> Self:
+        if (self.outcome is WithdrawLoweringOutcome.WITHDRAWN) != (self.entry is not None):
+            msg = "a withdrawal carries the link's entry exactly when it withdrew"
+            raise ValueError(msg)
+        return self
+
+
+def sureness_level(value: object) -> Sureness:
+    """One of the four levels, from ``lower_link``'s ``level`` argument (ADR-0373 §2:7).
+
+    Refused locally, before any I/O, by every implementation of
+    ``AssistantEngine.lower_link``, the wire client included (ADR-0085 §9).
+
+    Args:
+        value: The argument as the caller passed it: a :class:`Sureness`, or its value.
+
+    Returns:
+        The level.
+
+    Raises:
+        ValueError: If it names none of the four (ADR-0366 §5:1).
+    """
+    if isinstance(value, Sureness):
+        return value
+    if isinstance(value, str):
+        try:
+            return Sureness(value)
+        except ValueError:
+            pass
+    msg = "level must be one of none, weak, normal and strong (ADR-0366 §5:1)"
+    raise ValueError(msg)
+
+
 # --- the person model as the panels read and edit it (ADR-0338 §8:1-§8:3) ----------
 #
 # What ``AssistantEngine``'s person-model members carry: a read of one person's model

@@ -80,6 +80,7 @@ from chat_surface_contract import (
     ChatSurfaceSubject,
 )
 from episode_inspection_contract import EpisodeInspectionContract
+from linked_accounts_contract import LinkedAccountsContract
 from pending_candidates_contract import PendingCandidatesContract
 from person_model_contract import PersonModelContract
 from pydantic import SecretStr
@@ -1198,6 +1199,7 @@ class AssistantEngineContract(
     PendingCandidatesContract,
     PersonModelContract,
     ApprovalsPanelContract,
+    LinkedAccountsContract,
     ABC,
 ):
     """What every ``AssistantEngine`` implementation must do."""

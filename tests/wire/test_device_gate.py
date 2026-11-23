@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     HUB_DEVICE_ID,
     HUB_REQUESTING_DEVICE,
     OWNER_PERSON_ID,
+    Account,
     ApprovalChoice,
     ApprovalPanelTapAnswer,
     ApprovalRequestState,
@@ -46,9 +47,16 @@ from ai_assistant.core.types import (
     DeviceAccess,
     DeviceRole,
     RequestingDevice,
+    Sureness,
+    WithdrawLoweringOutcome,
 )
 from ai_assistant.orchestration.person_block import PersonBlocks
-from ai_assistant.testing import FakeAssistantEngine, FakePersonModelStore, FakePlanStore
+from ai_assistant.testing import (
+    FakeAssistantEngine,
+    FakeIdentityStore,
+    FakePersonModelStore,
+    FakePlanStore,
+)
 from ai_assistant.testing.memories import memory
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.client import HubEngineClient
@@ -71,6 +79,9 @@ _FRAME: Final = 1 << 20
 _LIMITS: Final = ConnectionLimits(max_frame_bytes=_FRAME, read_timeout=_PATIENT, build="test")
 _PHONE: Final = RequestingDevice(device_id="phone", roles=frozenset({DeviceRole.COMMANDS}))
 _BARE: Final = RequestingDevice(device_id="bare")
+#: The owner's two configured accounts: the hub chat on the hub's own machine, and the line.
+_HUB_CHAT: Final = Account(kind="conversation", identifier=HUB_DEVICE_ID)
+_LINE: Final = Account(kind="telegram", identifier="424242")
 
 
 @dataclass
@@ -346,6 +357,70 @@ async def test_a_persons_model_is_refused_to_a_device_without_the_command_role(
     assert held is not None
     assert held.pins == ()
     assert [name for name, _ in engine.calls] == ["person_model"]
+
+
+async def test_the_owners_links_are_refused_to_a_device_without_the_command_role(
+    tmp_path: Path,
+) -> None:
+    """ADR-0373 §4:2, through a served connection: refused before dispatch, nothing written.
+
+    A device the owner gave the command role lists the links; one without it is refused
+    the listing, a lowering and a withdrawal, and the store is untouched.
+    """
+    engine = FakeAssistantEngine()
+    identities = FakeIdentityStore(configured=(_LINE,))
+    engine.identities = identities
+    line = await identities.find_link(_LINE)
+    assert line is not None
+    roster = _Roster(devices={"bare": _BARE, "phone": _PHONE})
+    async with _client(engine, roster, tmp_path) as client:
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as listed:
+            await client.linked_accounts()
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as lowered:
+            await client.lower_link(line.id, level=Sureness.NONE)
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as withdrawn:
+            await client.withdraw_lowering("lowering:1")
+        with acting_for("phone"):
+            shown = await client.linked_accounts()
+    for refused in (listed, lowered, withdrawn):
+        assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
+    assert [one.link_id for one in shown] == [line.id]
+    held = await identities.find_link(_LINE)
+    assert held is not None
+    assert held.lowerings == ()
+    assert [name for name, _ in engine.calls] == ["linked_accounts"]
+
+
+async def test_the_hubs_own_machine_withdraws_whatever_level_every_link_stands_at(
+    tmp_path: Path,
+) -> None:
+    """ADR-0373 §5:1: on the local socket, the hub's machine always lists and withdraws.
+
+    Every link the owner has, the hub chat's own included, is lowered to none, and the
+    requests come from the hub's own machine over the local socket under a roster, as
+    the ``assistant`` command line on the hub sends them: each is admitted by the route
+    table's row alone (§4:5), and the lowerings are withdrawn.
+    """
+    engine = FakeAssistantEngine()
+    identities = FakeIdentityStore(configured=(_HUB_CHAT, _LINE))
+    engine.identities = identities
+    roster = _Roster(devices={None: HUB_REQUESTING_DEVICE})
+    async with _client(engine, roster, tmp_path) as client:
+        made = [
+            await client.lower_link(one.link_id, level=Sureness.NONE)
+            for one in await client.linked_accounts()
+        ]
+        lowered = await client.linked_accounts()
+        restored = []
+        for one in made:
+            assert one.lowering is not None
+            restored.append(await client.withdraw_lowering(one.lowering.id))
+        after = await client.linked_accounts()
+    assert {one.account for one in lowered} == {_HUB_CHAT, _LINE}
+    assert {one.level for one in lowered} == {Sureness.NONE}
+    assert {one.outcome for one in restored} == {WithdrawLoweringOutcome.WITHDRAWN}
+    assert {one.level for one in after} == {Sureness.NORMAL}
+    assert {one for one, _ in roster.asked} == {HUB_DEVICE_ID}
 
 
 def test_every_refusal_this_lane_writes_fits_unreduced_at_the_floor() -> None:

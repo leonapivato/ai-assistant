@@ -170,8 +170,10 @@ from ai_assistant.core.types import (
     story_move_members,
     story_note_ids,
     story_note_text,
+    sureness_level,
     user_message,
 )
+from ai_assistant.orchestration import linked_accounts as owners_links
 from ai_assistant.orchestration import person_panel
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import (
@@ -372,6 +374,8 @@ if TYPE_CHECKING:
         GrantScope,
         HeldNotification,
         Identifier,
+        LinkedAccount,
+        LowerLinkResult,
         MessageReceipt,
         NonBlankEncodableText,
         NotificationCandidate,
@@ -401,8 +405,10 @@ if TYPE_CHECKING:
         StoryStanding,
         StorySummaryView,
         StoryView,
+        Sureness,
         TranscriptPage,
         UserMessage,
+        WithdrawLoweringResult,
     )
     from ai_assistant.orchestration.connections import ConnectionOperations
     from ai_assistant.orchestration.conversations import ConversationLifecycle
@@ -7034,6 +7040,64 @@ class Engine:
         if landed:
             self.approvals_changed()
         return tapped
+
+    # --- the owner's linked accounts (ADR-0373 §2 to §5) ---------------------
+    #
+    # Answered by :mod:`~ai_assistant.orchestration.linked_accounts` over the identity
+    # store this engine was handed, as the canonical fake answers them. Each is the
+    # owner's own act, reached only through the command row (§4:2, §4:3), and nothing
+    # in a work calls one (§4:1): the command line is their only caller (§4:6).
+
+    async def linked_accounts(self) -> tuple[LinkedAccount, ...]:
+        """Every link to the owner's identity, with its level (ADR-0373 §2:2, §3).
+
+        Measured whole against the contract limit and never truncated (§2:2).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            IdentityStoreError: If the identity store cannot be read.
+            OversizedValueError: If the listing does not fit the contract limit.
+        """
+        self._reject_if_closing()
+        return await self._tracked(
+            owners_links.linked_accounts(self._identities), "linked_accounts", checked=True
+        )
+
+    async def lower_link(self, link_id: Identifier, *, level: Sureness) -> LowerLinkResult:
+        """Lower one of the owner's links, by the owner's act (ADR-0373 §2:3, §2:4).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``link_id`` is not an identifier, or ``level`` is not one of
+                the four.
+            IdentityStoreError: If the identity store cannot be read or written.
+        """
+        self._reject_if_closing()
+        named = identifier(link_id, name="link_id")
+        lowered = sureness_level(level)
+        check_arguments(
+            "lower_link", max_bytes=self._max_payload_bytes, link_id=named, level=lowered
+        )
+        return await self._tracked(
+            owners_links.lower_link(self._identities, named, lowered), "lower_link", checked=True
+        )
+
+    async def withdraw_lowering(self, lowering_id: Identifier) -> WithdrawLoweringResult:
+        """Withdraw a lowering on one of the owner's links (ADR-0373 §2:6).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``lowering_id`` is not an identifier.
+            IdentityStoreError: If the identity store cannot be read or written.
+        """
+        self._reject_if_closing()
+        named = identifier(lowering_id, name="lowering_id")
+        check_arguments("withdraw_lowering", max_bytes=self._max_payload_bytes, lowering_id=named)
+        return await self._tracked(
+            owners_links.withdraw_lowering(self._identities, named),
+            "withdraw_lowering",
+            checked=True,
+        )
 
     async def _approval_facts(self, requests: Sequence[ApprovalRequest]) -> dict[str, CardFacts]:
         """What each request's card shows beside it, read from the activation that asked.

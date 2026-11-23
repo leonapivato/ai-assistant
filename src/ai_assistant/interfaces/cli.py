@@ -306,6 +306,7 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportHolder,
     SupportOrigin,
+    Sureness,
     TapOnCard,
     ToolOutcome,
     TranscriptMessage,
@@ -317,7 +318,12 @@ from ai_assistant.core.types import (
     story_note_ids,
     story_note_text,
 )
-from ai_assistant.interfaces import episode_inspection, person_inspection, story_inspection
+from ai_assistant.interfaces import (
+    episode_inspection,
+    link_inspection,
+    person_inspection,
+    story_inspection,
+)
 from ai_assistant.interfaces.devices import this_device as _this_device
 from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
 from ai_assistant.interfaces.gateway import exits as gateway_exits
@@ -3299,6 +3305,100 @@ def about_dismiss(suggestion_id: str = _ABOUT_SUGGESTION_ARGUMENT) -> None:
         return _about_written("dismiss", edit)
 
     raise typer.Exit(asyncio.run(_about(write, off_is_ok=False)))
+
+
+# --- your linked accounts (ADR-0373 §2 to §5) ------------------------------------
+#
+# The owner's listing of their linked accounts, a lowering and its withdrawal: in this
+# milestone the command line is the only caller of the three members (§4:6). Each call
+# is the owner's own act, sent with what the owner typed and nothing else (§4:1), and the
+# hub decides every outcome: this adapter renders them (`link_inspection`).
+
+links_app = typer.Typer(
+    name="links",
+    help=(
+        "Your linked accounts: the accounts I know are you, how sure each one makes me "
+        "that a message by it is from you, and the lowerings you made on them."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(links_app, name="links")
+
+
+async def _links(act: Callable[[AssistantEngine], Awaitable[int]]) -> int:
+    """Open the engine and run one linked-accounts act, inside one error boundary."""
+    try:
+        engine = await _open_engine()
+        return await act(engine)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+
+@links_app.command("list")
+def links_list() -> None:
+    """List your linked accounts, each with its level and the lowerings that stand on it.
+
+    The ids shown are the ones 'assistant links lower' and 'assistant links withdraw' take.
+    """
+
+    async def read(engine: AssistantEngine) -> int:
+        link_inspection.render_listing(console, await engine.linked_accounts())
+        return _EXIT_OK
+
+    raise typer.Exit(asyncio.run(_links(read)))
+
+
+#: ``assistant links lower``'s level, required with no default, as ``lower_link`` takes
+#: it (ADR-0373 §2:3): hoisted to module scope for the reason the ``beliefs`` enum
+#: options are (ruff's B008).
+_LINK_LEVEL_OPTION = typer.Option(
+    ...,
+    "--level",
+    help=(
+        "How sure a message by it should make me that it is from you, at most: "
+        "'none' makes it count as from someone I cannot identify."
+    ),
+)
+
+
+@links_app.command("lower")
+def links_lower(
+    link_id: str = typer.Argument(
+        ..., callback=_present_id, help="The link, by the id 'assistant links list' shows."
+    ),
+    level: Sureness = _LINK_LEVEL_OPTION,
+) -> None:
+    """Lower how sure one of your linked accounts makes me, until you withdraw it.
+
+    It bears on messages that arrive by the account from now on, never on one already
+    received. Lowering a link to a level you already lowered it to changes nothing.
+    """
+
+    async def write(engine: AssistantEngine) -> int:
+        result = await engine.lower_link(link_id, level=level)
+        done = link_inspection.render_lowered(console, link_id, result)
+        return _EXIT_OK if done else _EXIT_ERROR
+
+    raise typer.Exit(asyncio.run(_links(write)))
+
+
+@links_app.command("withdraw")
+def links_withdraw(
+    lowering_id: str = typer.Argument(
+        ...,
+        callback=_present_id,
+        help="The lowering, by the id 'assistant links list' shows.",
+    ),
+) -> None:
+    """Withdraw a lowering you made, so the link's level is restored without it."""
+
+    async def write(engine: AssistantEngine) -> int:
+        result = await engine.withdraw_lowering(lowering_id)
+        link_inspection.render_withdrawn(console, lowering_id, result)
+        return _EXIT_OK
+
+    raise typer.Exit(asyncio.run(_links(write)))
 
 
 @app.command()

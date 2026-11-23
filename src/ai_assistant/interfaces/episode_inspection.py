@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 from pydantic import ValidationError
 
-from ai_assistant.core.types import EpisodicMemory
+from ai_assistant.core.types import AuthorityKind, EpisodicMemory, WorkForKind
 from ai_assistant.wire.errors import ProtocolError
 
 if TYPE_CHECKING:
@@ -21,7 +21,11 @@ if TYPE_CHECKING:
         EpisodePage,
         EpisodeProcessingRecord,
         EpisodeSummary,
+        InputSender,
         StoryHeader,
+        WorkAuthority,
+        WorkFacts,
+        WorkFor,
     )
 
 #: The label an open episode carries in place of its absent end fields (ADR-0286 §11).
@@ -201,6 +205,13 @@ def render_detail(
         soft_wrap=True,
     )
     console.print(
+        "\n".join(_facts_lines(processing)),
+        markup=False,
+        emoji=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    console.print(
         "\n".join(_stage_lines(processing)),
         markup=False,
         emoji=False,
@@ -255,6 +266,90 @@ def _stories_label(stories: tuple[StoryHeader, ...] | None) -> str:
 def _quoted(text: str) -> str:
     """Show record text exactly, so a line break in it cannot pose as a rendered line."""
     return json.dumps(text, ensure_ascii=False)
+
+
+def _facts_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
+    """Render the work's three facts and each input's sender (ADR-0368 §2), deriving none.
+
+    Whom the work is for, whose authority it carries and its level, as recorded when it
+    started (#3642, "Inspecting a work shows the three facts"), and again as they stand
+    where an input that joined it recorded them (§2:4); then each input, the trigger and
+    each joined one in order, with who sent it and at what level (§2:6). Each reads
+    ``none recorded`` where the record holds none: a work recorded before the facts were,
+    or one built without them. Today's path still decides who a work is for (ADR-0368
+    §1:3); these are the facts recorded beside it.
+    """
+    if processing is None:
+        return ["Facts: unavailable"]
+    lines: list[str] = []
+    started, now = processing.facts, processing.facts_now
+    if started is None and now is None:
+        lines.append(f"Facts: {_none_recorded(processing)}")
+    else:
+        lines.append(f"Facts when it started: {_work_facts_text(started, processing)}")
+        if now is not started:
+            lines.append(f"Facts as they stand: {_work_facts_text(now, processing)}")
+    lines.append("Inputs:")
+    lines.append(
+        f"  The one it started from: {_senders_text(processing.trigger.senders, processing)}"
+    )
+    lines.extend(
+        f"  Joined {one.joined_at.isoformat()} by {_channel(one.channel)}: "
+        f"{_senders_text(one.senders, processing)}"
+        for one in processing.joined
+    )
+    return lines
+
+
+def _work_facts_text(facts: WorkFacts | None, processing: EpisodeProcessingRecord) -> str:
+    """One recording of the three facts, worded: for whom, whose authority, the level."""
+    if facts is None:
+        return _none_recorded(processing)
+    return (
+        f"for {_for_whom_text(facts.for_whom)}; authority: "
+        f"{_authority_text(facts.authority)}; level: {facts.level.value}"
+    )
+
+
+def _for_whom_text(for_whom: WorkFor) -> str:
+    match for_whom.kind:
+        case WorkForKind.PERSON:
+            return f"person {_quoted(for_whom.id or '')}"
+        case WorkForKind.GROUP:
+            return f"group {_quoted(for_whom.id or '')}"
+        case WorkForKind.NO_ONE:
+            return "no one"
+        case unreachable:
+            assert_never(unreachable)
+
+
+def _authority_text(authority: WorkAuthority) -> str:
+    match authority.kind:
+        case AuthorityKind.SENDERS:
+            whose = [_quoted(one) for one in authority.persons]
+            if authority.unidentified:
+                whose.append("an unidentified sender")
+            return f"its senders' ({', '.join(whose)})"
+        case AuthorityKind.IN_ADVANCE:
+            return f"{_quoted(authority.persons[0])}'s, in advance"
+        case AuthorityKind.NONE:
+            return "none"
+        case unreachable:
+            assert_never(unreachable)
+
+
+def _senders_text(senders: tuple[InputSender, ...], processing: EpisodeProcessingRecord) -> str:
+    """Who sent an input and at what level, each sender once (ADR-0368 §2:6)."""
+    if not senders:
+        return f"sender {_none_recorded(processing)}"
+    return "; ".join(_sender_text(one) for one in senders)
+
+
+def _sender_text(sender: InputSender) -> str:
+    if sender.person is None:
+        return f"from an unidentified sender, at {sender.level.value}"
+    unidentified = "" if sender.identified else ", so unidentified"
+    return f"from {_quoted(sender.person)}, at {sender.level.value}{unidentified}"
 
 
 def _stage_lines(processing: EpisodeProcessingRecord | None) -> list[str]:

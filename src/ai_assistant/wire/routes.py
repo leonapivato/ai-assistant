@@ -114,6 +114,14 @@ class Route(StrEnum):
 #: tap from the hub page is carried out only from a device admitted under ADR-0124,
 #: whose command role is the owner's, and a device without it is refused before
 #: dispatch, changing nothing.
+#:
+#: ADR-0373 §4:2 places ``linked_accounts``, ``lower_link`` and ``withdraw_lowering``,
+#: the owner's listing of their linked accounts, a lowering and its withdrawal, in the
+#: command-or-query row, as §8 records against ADR-0298 §5:1's table, so a request from
+#: a device without the command role is refused before dispatch. **No level, lowering
+#: or link gates them** (§4:5): this row alone admits a call, and the hub's own machine,
+#: which holds every role (ADR-0298 §3:2), reaches them whatever level any link stands
+#: at (ADR-0373 §5:1).
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
@@ -141,6 +149,8 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "grantable_sources",
             "guard",
             "link_story",
+            "linked_accounts",
+            "lower_link",
             "merge_stories",
             "move_story_members",
             "my_devices",
@@ -173,6 +183,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "unguard",
             "unlink_story",
             "unpin_memory",
+            "withdraw_lowering",
         }
     ),
     Route.SETTING_DEVICES: frozenset({"set_my_devices", "set_conversation_devices"}),
