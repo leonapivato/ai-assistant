@@ -2121,8 +2121,8 @@ async def _read_person_model(directory: Path) -> Records:
 
 
 def _identities(directory: Path) -> SqliteIdentityStore:
-    # Opened with no configured account: the composition that opened the directory
-    # first has already linked the ones the check's settings name.
+    # Opened with no configuration, so nothing is followed: the composition that opened
+    # the directory first has already linked the accounts the check's settings name.
     return SqliteIdentityStore(path=directory / IDENTITIES_FILENAME)
 
 
@@ -2133,13 +2133,20 @@ async def _write_identities(directory: Path, moment: Moment) -> None:
         made = await store.link(
             OWNER_PERSON_ID,
             Account(kind="conversation", identifier="laptop.tailnet.example"),
-            act=LinkAct(how=LinkActHow.OWN_ACT, by=OWNER_PERSON_ID),
+            act=LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID),
         )
         if made.record_id is not None:
             withdrawn = await store.lower(made.record_id, Sureness.NONE, by=OWNER_PERSON_ID)
             if withdrawn.record_id is not None:
                 await store.withdraw_lowering(withdrawn.record_id, by=OWNER_PERSON_ID)
             await store.lower(made.record_id, Sureness.WEAK, by=OWNER_PERSON_ID)
+        revoked = await store.link(
+            OWNER_PERSON_ID,
+            Account(kind="conversation", identifier="phone.tailnet.example"),
+            act=LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID),
+        )
+        if revoked.record_id is not None:
+            await store.end_link(revoked.record_id)
     finally:
         store.close()
 

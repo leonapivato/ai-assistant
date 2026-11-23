@@ -24868,14 +24868,21 @@ class Account(BaseModel):
 
 
 class LinkActHow(StrEnum):
-    """How a link was made (ADR-0366 §3:1). Closed, **added to and never renamed**."""
+    """The owner's act a link was recorded from (ADR-0366 §3:1, §11).
+
+    Closed, **added to and never renamed**. A link stands only while the act it was
+    recorded from stands: once that act no longer names the account, the link is ended
+    and nothing arrives by it.
+    """
 
     CONFIGURED = "configured"
-    """Carried when the hub starts from the owner's own configuration of it: an account
-    a setting the owner set names, or the hub's own machine, which writes the hub chat
-    as the owner (#3642, "already linked")."""
-    OWN_ACT = "own_act"
-    """By the person's own act on a surface of the hub (§3:1)."""
+    """The owner's own configuration of the hub, read each time it starts: an account a
+    setting the owner set names, such as the line's Telegram account, or the hub's own
+    machine, which writes the hub chat as the owner (#3642, "already linked"). Followed
+    at every start: a link whose setting no longer names its account is ended."""
+    DEVICE = "device"
+    """The owner's admitting a device the hub chat is written from: its enrolment at the
+    hub, or its registration by a gateway. Ended when that admission is revoked."""
 
 
 class LinkAct(BaseModel):
@@ -24923,17 +24930,21 @@ class Lowering(BaseModel):
 class Link(BaseModel):
     """One account tied to one identity (ADR-0366 §3), and its lowerings (§5:5).
 
-    What arrives by the account is from the person the identity is (§4:1). Its level is
-    :meth:`level`, read with the kind's declared most, which
-    :func:`ai_assistant.core.channel_validation.link_level` supplies.
+    While it stands, what arrives by the account is from the person the identity is
+    (§4:1). It stands only while the act it was recorded from stands; once ended it is
+    kept, with its lowerings, and ties nothing: a later act naming the account again is
+    a new link, with an id of its own. Its level is :meth:`level`, read with the kind's
+    declared most, which :func:`ai_assistant.core.channel_validation.link_level` supplies.
 
     Attributes:
-        id: Its id.
+        id: Its id, never reused.
         person_id: The identity it ties the account to.
         account: The account.
-        act: Who made it, and how.
+        act: The act it was recorded from: whose, and which.
         made_at: When it was made.
         lowerings: Every lowering made on it, withdrawn ones included, in the order made.
+        ended_at: When the act it was recorded from stopped standing, or ``None`` while
+            the link stands.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -24943,6 +24954,12 @@ class Link(BaseModel):
     act: LinkAct
     made_at: UtcInstant
     lowerings: tuple[Lowering, ...] = ()
+    ended_at: UtcInstant | None = None
+
+    @property
+    def standing(self) -> bool:
+        """Whether the link stands: the act it was recorded from still stands."""
+        return self.ended_at is None
 
     @property
     def standing_lowerings(self) -> tuple[Lowering, ...]:
@@ -24974,7 +24991,7 @@ class Identity(BaseModel):
     Attributes:
         id: The identity's stable identifier.
         created_at: When the store created it.
-        links: Every link tied to it, in the order made.
+        links: Every link tied to it, ended ones included, in the order made.
 
     Raises:
         ValueError: If a link ties its account to another identity.
@@ -24991,6 +25008,11 @@ class Identity(BaseModel):
             msg = "an identity holds only the links tied to it"
             raise ValueError(msg)
         return self
+
+    @property
+    def standing_links(self) -> tuple[Link, ...]:
+        """The links that stand, in the order made: the person's linked accounts."""
+        return tuple(one for one in self.links if one.standing)
 
 
 class IdentityExport(BaseModel):
@@ -25012,7 +25034,8 @@ class LinkWriteKind(StrEnum):
     """It wrote, in one step."""
     UNCHANGED = "unchanged"
     """It changed nothing, as the contract says such a write does: an account already
-    linked to the identity named, or a lowering already withdrawn."""
+    linked to the identity named, a lowering already standing by the same maker at the
+    same level, a lowering already withdrawn, or a link already ended."""
     REFUSED = "refused"
     """It was refused, and nothing was written."""
 
@@ -25029,13 +25052,17 @@ class LinkRefusal(StrEnum):
     """The store holds no identity of that id: the one a link would tie to, or the
     person's whose act it is."""
     UNKNOWN_RECORD = "unknown_record"
-    """The link or the lowering named is not held."""
+    """The link or the lowering named is not held, or a link to lower does not stand."""
     ALREADY_LINKED = "already_linked"
-    """The account is linked to another identity: an account is tied to one at most."""
+    """The account is linked to another identity: a standing link ties an account to one
+    at most."""
     NOT_ALLOWED = "not_allowed"
     """The person acting may not make this change: a lowering by someone who is neither
     the owner nor the person the link identifies, or a withdrawal by someone other than
     the lowering's maker (ADR-0366 §5:5)."""
+    NOT_A_LOWERING = "not_a_lowering"
+    """The level is not below the most the link's kind declares, so it would lower
+    nothing (ADR-0366 §5:3)."""
 
 
 class LinkWrite(BaseModel):

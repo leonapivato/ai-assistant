@@ -24,13 +24,13 @@ from typing import TYPE_CHECKING
 import pytest
 from identity_store_contract import (
     BY_THE_OWNER,
-    CONFIGURED,
     LAPTOP,
     LINE,
     PHONE,
     START,
     IdentityStoreContract,
     IdentityStoreFactory,
+    IdentityStoreReopener,
     ticking,
     written_id,
 )
@@ -67,33 +67,56 @@ class TestSqliteIdentityStoreContract(IdentityStoreContract):
     """Runs SqliteIdentityStore through the shared IdentityStore suite."""
 
     @pytest.fixture
-    def factory(self, tmp_path: Path) -> Iterator[IdentityStoreFactory]:
-        opened: list[SqliteIdentityStore] = []
+    def opened(self) -> Iterator[dict[SqliteIdentityStore, tuple[Path, Callable[[], datetime]]]]:
+        held: dict[SqliteIdentityStore, tuple[Path, Callable[[], datetime]]] = {}
+        yield held
+        for store in held:
+            store.close()
 
+    @pytest.fixture
+    def factory(
+        self,
+        tmp_path: Path,
+        opened: dict[SqliteIdentityStore, tuple[Path, Callable[[], datetime]]],
+    ) -> IdentityStoreFactory:
         def build(
             *, configured: Sequence[Account] = (), now: Callable[[], datetime] | None = None
         ) -> IdentityStore:
             path = tmp_path / f"identities-{len(opened)}.db"
-            if now is None:
-                store = SqliteIdentityStore(path=path, configured=configured)
-            else:
-                store = SqliteIdentityStore(path=path, configured=configured, now=now)
-            opened.append(store)
+            clock = now or ticking()
+            store = SqliteIdentityStore(path=path, configured=configured, now=clock)
+            opened[store] = (path, clock)
             return store
 
-        yield build
-        for store in opened:
+        return build
+
+    @pytest.fixture
+    def reopen(
+        self, opened: dict[SqliteIdentityStore, tuple[Path, Callable[[], datetime]]]
+    ) -> IdentityStoreReopener:
+        def again(store: IdentityStore, *, configured: Sequence[Account] = ()) -> IdentityStore:
+            assert isinstance(store, SqliteIdentityStore)
+            path, clock = opened[store]
             store.close()
+            reopened = SqliteIdentityStore(path=path, configured=configured, now=clock)
+            opened[reopened] = (path, clock)
+            return reopened
+
+        return again
 
 
 def _open(
     path: Path | str,
     *,
-    configured: Sequence[Account] = (),
+    configured: Sequence[Account] | None = None,
     now: Callable[[], datetime] | None = None,
     new_id: Callable[[str], str] | None = None,
 ) -> SqliteIdentityStore:
-    """The store at ``path``, on a ticking clock from ``START`` where none is named."""
+    """The store at ``path``, on a ticking clock from ``START`` where none is named.
+
+    With no ``configured``, the opening follows no configuration, as a tool reading the
+    file would open it.
+    """
     if new_id is None:
         return SqliteIdentityStore(path=path, configured=configured, now=now or ticking())
     return SqliteIdentityStore(
@@ -109,37 +132,6 @@ def _sql(path: Path, *statements: str) -> None:
 
 
 # --- the owner and the configured accounts (§2:5, #3642) --------------------------
-
-
-async def test_an_account_configured_later_is_linked_at_the_next_open(tmp_path: Path) -> None:
-    path = tmp_path / "identities.db"
-    _open(path, configured=(PHONE,)).close()
-
-    again = _open(path, configured=(PHONE, LINE))
-    try:
-        owner = await again.identity(OWNER_PERSON_ID)
-    finally:
-        again.close()
-
-    assert owner is not None
-    assert [one.account for one in owner.links] == [PHONE, LINE]
-    assert all(one.act == CONFIGURED for one in owner.links)
-
-
-async def test_an_account_no_longer_configured_stays_linked(tmp_path: Path) -> None:
-    """No code undoes a link (ADR-0366 §3:2): who may undo one is lane 3's."""
-    path = tmp_path / "identities.db"
-    first = _open(path, configured=(PHONE, LINE))
-    try:
-        before = await first.export()
-    finally:
-        first.close()
-
-    again = _open(path, configured=(PHONE,))
-    try:
-        assert await again.export() == before
-    finally:
-        again.close()
 
 
 async def test_a_configured_account_already_linked_keeps_its_link_and_lowerings(
@@ -159,6 +151,21 @@ async def test_a_configured_account_already_linked_keeps_its_link_and_lowerings(
         assert await again.export() == before
     finally:
         again.close()
+
+
+async def test_an_opening_handed_no_configuration_follows_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "identities.db"
+    first = _open(path, configured=(PHONE, LINE))
+    try:
+        before = await first.export()
+    finally:
+        first.close()
+
+    reading = _open(path)
+    try:
+        assert await reading.export() == before
+    finally:
+        reading.close()
 
 
 async def test_the_owner_is_created_once_when_the_store_is_first_created(tmp_path: Path) -> None:
@@ -246,7 +253,7 @@ async def test_everything_survives_a_reopen(tmp_path: Path) -> None:
     finally:
         first.close()
 
-    again = _open(path)
+    again = _open(path, configured=(PHONE,))
     try:
         assert await again.export() == before
         # What the reopened store holds still decides.
@@ -345,7 +352,7 @@ async def test_a_closed_backend_is_the_seams_error() -> None:
         "('link:x', 'person:owner', 'telegram', '1', 'not json', '2026-11-23T09:00:00+00:00')",
         "INSERT INTO links(id, person_id, kind, account, act, made_at) VALUES "
         "('link:x', 'person:gone', 'telegram', '1', "
-        '\'{"how": "own_act", "by": "person:owner"}\', \'2026-11-23T09:00:00+00:00\')',
+        '\'{"how": "device", "by": "person:owner"}\', \'2026-11-23T09:00:00+00:00\')',
         "INSERT INTO lowerings(id, link_id, level, made_by, made_at) VALUES "
         "('lowering:x', 'link:gone', 'none', 'person:owner', '2026-11-23T09:00:00+00:00')",
     ],
@@ -394,7 +401,7 @@ def _with_sam(path: Path) -> tuple[str, str]:
     """A file holding Sam beside the owner, each with one link: what a later lane adds."""
     _open(path).close()
     at = "2026-11-23T09:00:00+00:00"
-    act = LinkAct(how=LinkActHow.OWN_ACT, by=SAM).model_dump_json()
+    act = LinkAct(how=LinkActHow.DEVICE, by=SAM).model_dump_json()
     with contextlib.closing(sqlite3.connect(path)) as conn:
         conn.execute("INSERT INTO identities(id, created_at) VALUES (?, ?)", (SAM, at))
         conn.execute(
@@ -455,7 +462,7 @@ async def test_an_account_linked_to_one_identity_is_not_linked_to_another(
         before = await store.export()
 
         refused = await store.link(
-            OWNER_PERSON_ID, SAMS_PHONE, act=LinkAct(how=LinkActHow.OWN_ACT, by=OWNER_PERSON_ID)
+            OWNER_PERSON_ID, SAMS_PHONE, act=LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID)
         )
 
         assert refused == LinkWrite(kind=LinkWriteKind.REFUSED, refusal=LinkRefusal.ALREADY_LINKED)

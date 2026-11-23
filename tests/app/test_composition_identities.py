@@ -115,3 +115,25 @@ async def test_the_owners_accounts_are_linked_at_start_and_kept_across_starts(
     ]
     assert line is not None
     assert line.person_id == OWNER_PERSON_ID
+
+
+async def test_a_setting_cleared_ends_the_link_it_named(tmp_path: Path) -> None:
+    """A link stands only while the act it was recorded from stands (ADR-0366 §3:1)."""
+    first = build_engine(Settings(embedder=EmbedderKind.HASHING, **_LINE), data_dir=tmp_path)
+    await first.aclose()
+    again = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    await again.aclose()
+
+    store = SqliteIdentityStore(path=tmp_path / IDENTITIES_FILENAME)
+    try:
+        owner = await store.identity(OWNER_PERSON_ID)
+        line = await store.find_link(_TELEGRAM)
+    finally:
+        store.close()
+    assert line is None
+    assert owner is not None
+    assert [one.account for one in owner.standing_links] == [_HUB]
+    assert [(one.account, one.standing) for one in owner.links] == [
+        (_HUB, True),
+        (_TELEGRAM, False),
+    ]

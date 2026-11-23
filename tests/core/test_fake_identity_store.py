@@ -19,6 +19,7 @@ from identity_store_contract import (
     PHONE,
     IdentityStoreContract,
     IdentityStoreFactory,
+    IdentityStoreReopener,
     ticking,
     written_id,
 )
@@ -63,6 +64,15 @@ class TestFakeIdentityStoreContract(IdentityStoreContract):
 
         return build
 
+    @pytest.fixture
+    def reopen(self) -> IdentityStoreReopener:
+        def again(store: IdentityStore, *, configured: Sequence[Account] = ()) -> IdentityStore:
+            assert isinstance(store, FakeIdentityStore)
+            store.reopen(configured=configured)
+            return store
+
+        return again
+
 
 async def test_an_arranged_fault_fails_the_next_member_and_touches_nothing() -> None:
     store = FakeIdentityStore()
@@ -93,9 +103,7 @@ async def _with_sam() -> tuple[FakeIdentityStore, str, str]:
     store = FakeIdentityStore(now=ticking())
     store.hold_identity(SAM)
     owners = written_id(await store.link(OWNER_PERSON_ID, LINE, act=BY_THE_OWNER))
-    sams = written_id(
-        await store.link(SAM, SAMS_PHONE, act=LinkAct(how=LinkActHow.OWN_ACT, by=SAM))
-    )
+    sams = written_id(await store.link(SAM, SAMS_PHONE, act=LinkAct(how=LinkActHow.DEVICE, by=SAM)))
     return store, owners, sams
 
 
@@ -141,7 +149,7 @@ async def test_an_account_linked_to_one_identity_is_not_linked_to_another() -> N
     store, owners, _ = await _with_sam()
     before = await store.export()
 
-    refused = await store.link(SAM, LINE, act=LinkAct(how=LinkActHow.OWN_ACT, by=SAM))
+    refused = await store.link(SAM, LINE, act=LinkAct(how=LinkActHow.DEVICE, by=SAM))
 
     assert refused == LinkWrite(kind=LinkWriteKind.REFUSED, refusal=LinkRefusal.ALREADY_LINKED)
     assert await store.export() == before
@@ -160,6 +168,18 @@ async def test_holding_an_identity_twice_changes_nothing() -> None:
 
     assert await store.export() == before
     assert [one.id for one in before.identities] == [OWNER_PERSON_ID, SAM]
+
+
+async def test_a_reopen_that_fails_part_way_changes_nothing() -> None:
+    """Ending the line's link and linking the phone are one step: a fault undoes both."""
+    store = FakeIdentityStore(configured=(LINE,), now=ticking(), new_id=lambda _kind: "one")
+    before = await store.export()
+
+    with pytest.raises(IdentityStoreError, match="already carries"):
+        store.reopen(configured=(PHONE,))
+
+    assert await store.export() == before
+    assert await store.find_link(LINE) is not None
 
 
 def test_a_malformed_configured_account_is_a_value_error() -> None:
