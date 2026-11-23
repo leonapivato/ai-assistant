@@ -1,6 +1,6 @@
 # 366. A person is one identity the hub links accounts to, code decides who sent an input and how sure it is, and a person's label holds for one work
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0374 (§4:1 and §5:6, each for a message whose link cannot be read)
 - Date: 2026-11-22
 - Scope: lane 2 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
@@ -47,6 +47,7 @@
 - **Partially supersedes**
   [ADR-0364](0364-tools-describe-themselves-in-four-parts-every-result-opens-with-its-outcome-and-connections-replace-the-place-list.md)
   (§4:1, in its second sentence), as §10 records.
+- Partially superseded: 2026-11-23 by [ADR-0374](0374-when-the-links-cannot-be-read-a-message-is-an-unidentified-senders-save-one-written-on-the-hubs-own-machine-which-is-the-owners.md) — §4:1 and §5:6, each for a message whose link the hub cannot read: it is from no identified person, at none, save one written on the hub's own machine, which is the owner's at the hub chat's declared most (ADR-0374 §2:2, §3:2). Every other clause stands. This replacement takes effect on ratification of ADR-0374. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
