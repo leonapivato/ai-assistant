@@ -587,6 +587,39 @@ class EnrolmentStore:
             self._conn.execute(_CLEAR_ROLES_IF_UNADMITTED, {"device": identity})
         return bool(changed)
 
+    def admitted_since(self, device: str) -> datetime | None:
+        """When a device's current, unbroken admission began.
+
+        Its enrolments and registrations each admit it from when they were made until
+        they were revoked; where they overlap or meet — a rotation revokes one enrolment
+        at the instant it makes the next — the admission is unbroken. Read whole from the
+        record, revoked rows included, since a revocation is never erased.
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            When the admission that still holds began, or ``None`` where nothing admits
+            the device now.
+        """
+        rows = self._conn.execute(
+            "SELECT enrolled_at, revoked_at FROM enrolments WHERE overlay_identity = ? "
+            "UNION ALL "
+            "SELECT registered_at, revoked_at FROM registrations WHERE device_id = ?",
+            (device, device),
+        ).fetchall()
+        spans = sorted(
+            (_instant(row[0]), None if row[1] is None else _instant(row[1])) for row in rows
+        )
+        began: datetime | None = None
+        until: datetime | None = None
+        for start, end in spans:
+            if began is None or (until is not None and start > until):
+                began, until = start, end
+            elif until is not None:
+                until = None if end is None else max(until, end)
+        return began if began is not None and until is None else None
+
     # --- the device roster (ADR-0298 §4) ---------------------------------------
 
     def device_kinds(self) -> dict[str, DeviceKind]:
@@ -947,6 +980,20 @@ class DeviceRegistry:
             own machine.
         """
         return device not in self._reserved() and self._is_admitted(device)
+
+    def admitted_since(self, device: str) -> datetime | None:
+        """When the admission :meth:`admits` reads for a device began, unbroken since.
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            The instant, or ``None`` where the record does not admit it as one of the
+            owner's devices.
+        """
+        if not self.admits(device):
+            return None
+        return self._store.admitted_since(device)
 
     def admitted_devices(self) -> frozenset[str]:
         """Every device :meth:`admits`, complete and unbounded, from the live view.

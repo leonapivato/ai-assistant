@@ -46,7 +46,7 @@ _LAPTOP: Final = "nLAPTOP1CNTRL"
 _PHONE: Final = "nPHONE22CNTRL"
 _WATCH: Final = "nWATCH33CNTRL"
 _HOSTED: Final = "browser-hosted"
-_MOMENT: Final = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+_MOMENT: Final = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)  # before any link the fake dates now
 _LATER: Final = _MOMENT + timedelta(minutes=5)
 _DEVICE: Final = LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID)
 _CONFIGURED: Final = LinkAct(how=LinkActHow.CONFIGURED, by=OWNER_PERSON_ID)
@@ -559,3 +559,80 @@ async def test_following_at_start_hands_a_configured_account_back_to_the_configu
         await links.aclose()
 
     assert await _standing(identities) == {HUB_DEVICE_ID: _CONFIGURED, _HOSTED: _CONFIGURED}
+
+
+async def test_a_failed_end_then_a_restore_does_not_keep_the_revoked_admissions_link(
+    registry: DeviceRegistry, links: DeviceLinks, identities: FakeIdentityStore
+) -> None:
+    """The revocation's write failed, so its link still stood when the restore came: the
+    restore ends it, lowering and all, and makes a new one (ADR-0373 §6:3)."""
+    registry.accept_naming(_LAPTOP, _PHONE, now=_MOMENT)
+    await links.settled()
+    (first,) = await _links_of(identities, _PHONE)
+    await identities.lower(first.id, Sureness.WEAK, by=OWNER_PERSON_ID)
+
+    identities.fail_next()
+    # After the link was written, which the fake dates by the wall clock.
+    registry.revoke_registration(_PHONE, gateway=_LAPTOP, now=datetime.now(UTC))
+    await links.settled()
+    registry.restore_registration(
+        _PHONE, gateway=_LAPTOP, now=datetime.now(UTC) + timedelta(seconds=1)
+    )
+    await links.settled()
+
+    ended, made = await _links_of(identities, _PHONE)
+    assert ended.id == first.id
+    assert not ended.standing
+    assert (made.standing, made.lowerings) == (True, ())
+
+
+async def test_the_next_start_ends_a_link_its_device_outlived(
+    store: EnrolmentStore, identities: FakeIdentityStore
+) -> None:
+    """Revoked and admitted again while nothing wrote the links: the start reads the
+    record, which keeps the revocation, and replaces the link the revocation ended."""
+    registry = DeviceRegistry(store, hub_identity=_HUB)
+    links = DeviceLinks(identities, registry)
+    registry.accept_naming(_LAPTOP, _PHONE, now=_MOMENT)
+    await links.settled()
+    await links.aclose()
+    (first,) = await _links_of(identities, _PHONE)
+    # After the link was written, which the fake dates by the wall clock.
+    registry.revoke_registration(_PHONE, gateway=_LAPTOP, now=datetime.now(UTC))
+    registry.restore_registration(
+        _PHONE, gateway=_LAPTOP, now=datetime.now(UTC) + timedelta(seconds=1)
+    )
+
+    restarted = DeviceLinks(identities, DeviceRegistry(store, hub_identity=_HUB))
+    try:
+        await restarted.follow()
+    finally:
+        await restarted.aclose()
+
+    ended, made = await _links_of(identities, _PHONE)
+    assert (ended.id, ended.standing) == (first.id, False)
+    assert made.standing
+
+
+async def test_a_device_admitted_without_a_break_keeps_its_link_at_start(
+    store: EnrolmentStore, identities: FakeIdentityStore
+) -> None:
+    """A rotation, or an enrolment while still registered, breaks nothing: the link made
+    under the first admission stands across starts."""
+    registry = DeviceRegistry(store, hub_identity=_HUB)
+    links = DeviceLinks(identities, registry)
+    registry.accept_naming(_LAPTOP, _PHONE, now=_MOMENT)
+    await links.settled()
+    await links.aclose()
+    registry.enrol(_PHONE, now=_LATER)
+    registry.enrol(_PHONE, now=_LATER + timedelta(minutes=1))
+    registry.revoke_registration(_PHONE, gateway=_LAPTOP, now=_LATER + timedelta(minutes=2))
+
+    restarted = DeviceLinks(identities, DeviceRegistry(store, hub_identity=_HUB))
+    try:
+        await restarted.follow()
+    finally:
+        await restarted.aclose()
+
+    (held,) = await _links_of(identities, _PHONE)
+    assert held.standing

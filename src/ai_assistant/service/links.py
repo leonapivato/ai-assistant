@@ -35,7 +35,12 @@ reply reports it as before. The failure is logged (``device_link_unwritten``) an
 store is left as it was — a device admitted with no link, or a revoked device whose link
 still stands — until the next start's following, which repairs both. Nothing reads the
 links yet (L4 switches the readers), and a revoked device is refused at admission
-whatever its link says, so the residue changes no answer the hub gives.
+whatever its link says, so the residue changes no answer the hub gives. A revoked
+device admitted again before that repair never keeps the old link: a ``device`` link
+made before the device's current, unbroken admission began
+(:meth:`~ai_assistant.service.enrolment.DeviceRegistry.admitted_since`, read from the
+record, which keeps every revocation) stood on an admission that has ended, so it is
+ended and a new one made, at the re-admitting act or at the next start.
 
 **One standing link per account.** The store ties an account to one identity at most
 and answers ``unchanged`` where a standing link already ties it to the owner, whatever
@@ -71,6 +76,7 @@ if TYPE_CHECKING:
     from collections.abc import Collection
 
     from ai_assistant.core.protocols import IdentityStore
+    from ai_assistant.core.types import Link
     from ai_assistant.service.enrolment import DeviceRegistry
 
 __all__ = ["HUB_CHAT", "DeviceLinks"]
@@ -165,7 +171,7 @@ class DeviceLinks:
             for held in owner.standing_links:
                 if (
                     held.act.how is LinkActHow.DEVICE
-                    and held.account not in accounts
+                    and (held.account not in accounts or self._outlived(held))
                     and await self._end(held.id, held.account)
                 ):
                     ended += 1
@@ -243,20 +249,36 @@ class DeviceLinks:
                     )
 
     async def _settle(self, device: str, *, admitted: bool) -> None:
-        """Link ``device`` where the act left it admitted; end its link where not."""
-        if admitted:
-            await self._link(device)
-            return
+        """Link ``device`` where the act left it admitted; end its link where not.
+
+        A standing ``device`` link recorded from an admission that has since ended — its
+        revocation's write failed, and the device was admitted again — is ended before
+        the device is linked anew, so the new admission never stands on the old link.
+        """
         account = _account(device)
         held = await self._identities.find_link(account)
         # Only the owner's ``device`` link is the record's to end: a ``configured`` one is
         # the configuration's (L1), and every device link this records is the owner's.
-        if (
+        own = (
             held is not None
             and held.act.how is LinkActHow.DEVICE
             and held.person_id == OWNER_PERSON_ID
-        ):
+        )
+        if held is not None and own and (not admitted or self._outlived(held)):
             await self._end(held.id, account)
+        if admitted:
+            await self._link(device)
+
+    def _outlived(self, held: Link) -> bool:
+        """Whether a ``device`` link was recorded before its device's current admission.
+
+        Such a link stood on an admission the owner has since revoked, so its act no
+        longer stands (ADR-0373 §6:3), whatever admits the device now: a later act
+        naming the account makes a new link (ADR-0366 §3). Read from the record, which
+        keeps every revocation, so a start repairs a revocation whose write failed.
+        """
+        since = self._registry.admitted_since(held.account.identifier)
+        return since is not None and held.made_at < since
 
     async def _link(self, device: str) -> bool:
         """Tie ``device``'s account to the owner by the ``device`` act.
