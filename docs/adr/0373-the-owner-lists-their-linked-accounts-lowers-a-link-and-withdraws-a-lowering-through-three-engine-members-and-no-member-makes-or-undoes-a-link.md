@@ -99,14 +99,17 @@ The lane #3643 names L3 builds it, after this decision merges and after the stor
 > at that level, standing on that link and made by the owner (§4:3), and returns the outcome
 > `lowered` with the lowering it recorded and the link's entry as it stands after the act.
 
-> **Normative.** `lower_link` writes nothing and returns the outcome `refused`, with the reason
-> `unknown_link`, where no link to the owner's identity has that identifier, and with the reason
-> `not_a_lowering`, where the level is not below the link's kind's declared most (ADR-0366 §5:2,
-> §5:3).
+> **Normative.** `lower_link` decides its outcome in this order, writing nothing in the first
+> three: first, where no link to the owner's identity has that identifier, it returns
+> the outcome `refused` with the reason `unknown_link`; second, where a lowering the owner made at
+> that level already stands on that link, it returns the outcome `unchanged`, with that lowering
+> and the link's entry, so repeating the call makes no second lowering; third, where the level is
+> not below the link's kind's declared most (ADR-0366 §5:2, §5:3), it returns the outcome
+> `refused` with the reason `not_a_lowering`; and otherwise it records the lowering (§2:3).
 
-> **Normative.** Where a lowering the owner made at that level already stands on that link,
-> `lower_link` writes nothing and returns the outcome `unchanged`, with that lowering and the
-> link's entry, so repeating the call makes no second lowering.
+> **Normative.** No change in a kind's declared most ends a lowering: one that a later build's
+> most is at or below still stands, and the listing still shows it (§3:1), until its maker
+> withdraws it.
 
 > **Normative.** `withdraw_lowering` takes a lowering's identifier as its positional subject. It
 > ends that lowering and returns the outcome `withdrawn` with the link's entry as it stands after
@@ -283,7 +286,8 @@ Named so the build is scoped, and made by none of this decision. A new Protocol 
 Each is this decision's, not an owner ruling:
 
 - **§2's shapes:** three members and no more; a lowering below the kind's most only; a repeated
-  lowering unchanged; a withdrawal of nothing not an error; refusals as outcomes.
+  lowering unchanged, ahead of that test; a standing lowering outliving a change in its kind's
+  most (§2:5); a withdrawal of nothing not an error; refusals as outcomes.
 - **§2:8**, stable identifiers for links and lowerings, which the store's build provides.
 - **§2:9**, that an act is prospective.
 - **§3**, what an entry carries, and that the hub computes its level.
