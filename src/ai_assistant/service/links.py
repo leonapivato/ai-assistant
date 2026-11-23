@@ -16,11 +16,12 @@ record's acts are synchronous so that ADR-0124 §8's commit, live-view transitio
 expulsion are one instant. An ``await`` inside them would split it, so the link is
 written just after the act, never as part of it.
 
-**Each write reads the record when it runs, not the event that scheduled it.** One lock
-orders them, and each settles its device to what the live view says at that moment:
-linked where the record admits it, its ``device`` link ended where it does not. So two
-acts in quick succession — an enrolment and its revocation — cannot land in the wrong
-order, since the write that runs last reads the record after the last act.
+**Each act is written as it left the record, in the order the acts were made.** Whether
+the record admits the device is read in the act's own step, and one worker replays the
+acts in order: linked where the act left the device admitted, its ``device`` link ended
+where it did not. So an enrolment and its revocation made back to back cannot land in the
+wrong order, and a revocation and a restore made back to back end the old link and make
+a new one, as two acts do (ADR-0366 §3), however late the writes run.
 
 **At start.** :meth:`DeviceLinks.follow` does for the device record what the identity
 store's opening does for the owner's configuration (L1): every admitted device that no
@@ -40,7 +41,10 @@ whatever its link says, so the residue changes no answer the hub gives.
 and answers ``unchanged`` where a standing link already ties it to the owner, whatever
 act that link came from. So the web door's hosted device, which the owner's
 configuration links (``configured``), gains no second link when a gateway registers it,
-and its ``configured`` link is never ended here: only a ``device`` link is. ``hub`` and
+and its ``configured`` link is never ended here: only a ``device`` link is. Where a
+``device`` link this ends ties an account the configuration names — the hosted device set
+to a device already linked by its admission — the account is linked again by the
+``configured`` act it still stands on, so it is never left unlinked. ``hub`` and
 the hub's own overlay identity are never followed here at all (the registry's
 :meth:`~ai_assistant.service.enrolment.DeviceRegistry.admits`): the hub's own machine is
 the configuration's ``hub`` link.
@@ -49,7 +53,7 @@ the configuration's ``hub`` link.
 from __future__ import annotations
 
 import asyncio
-from functools import partial
+from collections import deque
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -64,6 +68,8 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from ai_assistant.core.protocols import IdentityStore
     from ai_assistant.service.enrolment import DeviceRegistry
 
@@ -78,6 +84,9 @@ HUB_CHAT: Final = "conversation"
 #: The act every device link is recorded from: the owner's admitting the device.
 _DEVICE_ACT: Final = LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID)
 
+#: The act a configured account is linked by, where ending a device link hands it back.
+_CONFIGURED_ACT: Final = LinkAct(how=LinkActHow.CONFIGURED, by=OWNER_PERSON_ID)
+
 
 def _account(device: str) -> Account:
     """The hub chat's account a device writes as."""
@@ -87,18 +96,33 @@ def _account(device: str) -> Account:
 class DeviceLinks:
     """Keeps a ``device`` link standing for exactly the devices the record admits."""
 
-    def __init__(self, identities: IdentityStore, registry: DeviceRegistry) -> None:
+    def __init__(
+        self,
+        identities: IdentityStore,
+        registry: DeviceRegistry,
+        *,
+        configured: Collection[Account] = (),
+    ) -> None:
         """Follow ``registry``'s acts into ``identities`` from now on.
 
         Args:
             identities: The hub's identity store, opened by the composition root.
             registry: The device record's live view; this registers on it.
+            configured: The accounts the owner's configuration names, as the store was
+                opened with (:func:`~ai_assistant.app.composition.configured_accounts`).
+                Where a ``device`` link this ends ties one of them, the account is
+                linked again by the owner's ``configured`` act, as the store's opening
+                would have done had that link not held it.
         """
         self._identities = identities
         self._registry = registry
-        # One write at a time, so each reads the record after every write before it.
+        self._configured = frozenset(configured)
+        # One write at a time, so the start's following and the acts never interleave.
         self._writing = asyncio.Lock()
-        self._pending: set[asyncio.Task[None]] = set()
+        # Each act's device and whether the record admitted it once the act took effect,
+        # in the order the acts were made, replayed in that order by one worker.
+        self._acts: deque[tuple[str, bool]] = deque()
+        self._worker: asyncio.Task[None] | None = None
         self._closed = False
         registry.when_admission_acted(self._acted)
 
@@ -139,111 +163,134 @@ class DeviceLinks:
         ended = 0
         if owner is not None:
             for held in owner.standing_links:
-                if held.act.how is LinkActHow.DEVICE and held.account not in accounts:
-                    written = await self._identities.end_link(held.id)
-                    if written.kind is LinkWriteKind.WRITTEN:
-                        ended += 1
+                if (
+                    held.act.how is LinkActHow.DEVICE
+                    and held.account not in accounts
+                    and await self._end(held.id, held.account)
+                ):
+                    ended += 1
         linked = 0
         for device in sorted(admitted):
-            written = await self._identities.link(
-                OWNER_PERSON_ID, _account(device), act=_DEVICE_ACT
-            )
-            if written.kind is LinkWriteKind.REFUSED:
-                _log.warning(
-                    "device_link_refused",
-                    device=device,
-                    refusal=None if written.refusal is None else written.refusal.value,
-                )
-            elif written.kind is LinkWriteKind.WRITTEN:
+            if await self._link(device):
                 linked += 1
         return linked, ended
 
     async def settled(self) -> None:
         """Wait until every write already scheduled has run."""
-        while running := [task for task in self._pending if not task.done()]:
-            await asyncio.wait(running)
+        while (worker := self._worker) is not None and not worker.done():
+            await asyncio.wait({worker})
 
     async def aclose(self) -> None:
         """Stop following, before the drain closes the identity store.
 
-        A write still pending is cancelled; an act after this writes nothing. Either
+        A write still pending is let go; an act after this writes nothing. Either
         leaves the store as the next start's following repairs, and is logged.
         """
         self._closed = True
-        for task in self._pending:
-            task.cancel()
+        if self._worker is not None:
+            self._worker.cancel()
         await self.settled()
+        self._unwritten("the hub stopped first; its next start follows the record")
 
     def _acted(self, device: str) -> None:
-        """Schedule the link write that follows one act on ``device``. Never raises."""
+        """Note one act on ``device`` and what the record says after it. Never raises.
+
+        The record is read here, in the act's own step, so each act is replayed as it
+        left the record: a revocation and a restore made back to back end the old link
+        and make a new one, as two acts do (ADR-0366 §3), however late the writes run.
+        """
+        self._acts.append((device, self._registry.admits(device)))
         try:
             loop = None if self._closed else asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         if loop is None:
-            _log.warning(
-                "device_link_unwritten",
-                device=device,
-                reason="the hub is not following its devices; its next start does",
-            )
+            self._unwritten("the hub is not following its devices; its next start does")
             return
-        task = loop.create_task(self._settle(device))
-        self._pending.add(task)
-        task.add_done_callback(partial(self._done, device))
+        if self._worker is None or self._worker.done():
+            self._worker = loop.create_task(self._replay())
+            self._worker.add_done_callback(self._done)
 
-    def _done(self, device: str, task: asyncio.Task[None]) -> None:
-        """Forget a finished write, logging a fault nobody was left waiting to see."""
-        self._pending.discard(task)
-        if task.cancelled():
-            _log.warning(
-                "device_link_unwritten",
-                device=device,
-                reason="the hub stopped first; its next start follows the record",
-            )
-        elif (fault := task.exception()) is not None:
+    def _unwritten(self, reason: str) -> None:
+        """Let go of every act not yet written, saying which devices it leaves."""
+        while self._acts:
+            device, _ = self._acts.popleft()
+            _log.warning("device_link_unwritten", device=device, reason=reason)
+
+    def _done(self, worker: asyncio.Task[None]) -> None:
+        """Log a fault the worker met that nobody was left waiting to see."""
+        if not worker.cancelled() and (fault := worker.exception()) is not None:
             _log.error(
                 "device_link_unwritten",
-                device=device,
                 reason=str(fault),
                 error_class=type(fault).__name__,
             )
+            self._unwritten("an earlier write failed; the next start follows the record")
 
-    async def _settle(self, device: str) -> None:
-        """Bring ``device``'s link to what the record says now, logging a failed write."""
+    async def _replay(self) -> None:
+        """Write each act's link in the order the acts were made."""
         async with self._writing:
-            try:
-                await self._settle_holding(device)
-            except (IdentityStoreError, ValueError) as exc:
-                _log.warning(
-                    "device_link_unwritten",
-                    device=device,
-                    reason=str(exc),
-                    error_class=type(exc).__name__,
-                )
+            while self._acts:
+                device, admitted = self._acts.popleft()
+                try:
+                    await self._settle(device, admitted=admitted)
+                except (IdentityStoreError, ValueError) as exc:
+                    _log.warning(
+                        "device_link_unwritten",
+                        device=device,
+                        reason=str(exc),
+                        error_class=type(exc).__name__,
+                    )
 
-    async def _settle_holding(self, device: str) -> None:
-        """Link ``device`` where the record admits it, and end its device link where not."""
-        account = _account(device)
-        if self._registry.admits(device):
-            written = await self._identities.link(OWNER_PERSON_ID, account, act=_DEVICE_ACT)
-            if written.kind is LinkWriteKind.REFUSED:
-                _log.warning(
-                    "device_link_refused",
-                    device=device,
-                    refusal=None if written.refusal is None else written.refusal.value,
-                )
-            elif written.kind is LinkWriteKind.WRITTEN:
-                _log.info("device_linked", device=device, link_id=written.record_id)
+    async def _settle(self, device: str, *, admitted: bool) -> None:
+        """Link ``device`` where the act left it admitted; end its link where not."""
+        if admitted:
+            await self._link(device)
             return
+        account = _account(device)
         held = await self._identities.find_link(account)
         # Only the owner's ``device`` link is the record's to end: a ``configured`` one is
         # the configuration's (L1), and every device link this records is the owner's.
         if (
-            held is None
-            or held.act.how is not LinkActHow.DEVICE
-            or held.person_id != OWNER_PERSON_ID
+            held is not None
+            and held.act.how is LinkActHow.DEVICE
+            and held.person_id == OWNER_PERSON_ID
         ):
-            return
-        written = await self._identities.end_link(held.id)
-        if written.kind is LinkWriteKind.WRITTEN:
-            _log.info("device_link_ended", device=device, link_id=held.id)
+            await self._end(held.id, account)
+
+    async def _link(self, device: str) -> bool:
+        """Tie ``device``'s account to the owner by the ``device`` act.
+
+        Returns:
+            Whether a link was made: ``False`` where one already stood, or the store
+            refused, which is logged.
+        """
+        written = await self._identities.link(OWNER_PERSON_ID, _account(device), act=_DEVICE_ACT)
+        if written.kind is LinkWriteKind.REFUSED:
+            _log.warning(
+                "device_link_refused",
+                device=device,
+                refusal=None if written.refusal is None else written.refusal.value,
+            )
+        elif written.kind is LinkWriteKind.WRITTEN:
+            _log.info("device_linked", device=device, link_id=written.record_id)
+        return written.kind is LinkWriteKind.WRITTEN
+
+    async def _end(self, link_id: str, account: Account) -> bool:
+        """End a ``device`` link, and hand its account back to the configuration's act.
+
+        Where the owner's configuration names the account, as when the web door's hosted
+        device was set to a device already linked by its admission, the account is
+        linked again by the ``configured`` act it still stands on, so ending the device's
+        act leaves it linked as the store's opening links every configured account.
+
+        Returns:
+            Whether the link was ended by this call.
+        """
+        written = await self._identities.end_link(link_id)
+        if written.kind is not LinkWriteKind.WRITTEN:
+            return False
+        _log.info("device_link_ended", device=account.identifier, link_id=link_id)
+        if account in self._configured:
+            await self._identities.link(OWNER_PERSON_ID, account, act=_CONFIGURED_ACT)
+        return True

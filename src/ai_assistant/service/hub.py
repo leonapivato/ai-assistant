@@ -66,6 +66,7 @@ import structlog
 
 from ai_assistant import __version__
 from ai_assistant.app import build_composition, ensure_model_credentials
+from ai_assistant.app.composition import configured_accounts
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.logging import configure_logging
@@ -836,7 +837,7 @@ async def _build_devices(  # noqa: PLR0913 — one parameter per thing the devic
             roster=HubRoster(registry),
             admin=AdminListener(registry, data_dir=data_dir, remove_device=engine.remove_device),
             listener=None,
-            links=None if identities is None else DeviceLinks(identities, registry),
+            links=_links(identities, registry, settings),
         )
     agent = local_agent(settings.hub_overlay_agent_socket)
     try:
@@ -871,8 +872,22 @@ async def _build_devices(  # noqa: PLR0913 — one parameter per thing the devic
             budget=budget,
             delivery=delivery,
         ),
-        links=None if identities is None else DeviceLinks(identities, registry),
+        links=_links(identities, registry, settings),
     )
+
+
+def _links(
+    identities: IdentityStore | None, registry: DeviceRegistry, settings: Settings
+) -> DeviceLinks | None:
+    """What follows the record's acts into the identity store, where there is one.
+
+    Handed the accounts the owner's configuration names, the same the composition root
+    opened the store with, so a device link this ends on one of them hands the account
+    back to the ``configured`` act rather than leaving it unlinked.
+    """
+    if identities is None:
+        return None
+    return DeviceLinks(identities, registry, configured=configured_accounts(settings))
 
 
 async def _shut_down(  # noqa: PLR0913 — one parameter per thing ADR-0083 §4's sequence closes, in the order it closes them
