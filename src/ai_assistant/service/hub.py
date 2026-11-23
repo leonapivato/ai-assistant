@@ -81,6 +81,7 @@ from ai_assistant.service.exits import (
     ClearableRefusalError,
     classify,
 )
+from ai_assistant.service.links import DeviceLinks
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.overlay import (
     OverlayIdentityUnavailableError,
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
+    from ai_assistant.core.protocols import IdentityStore
     from ai_assistant.orchestration.engine import Engine
 
 _log = structlog.get_logger(__name__)
@@ -293,6 +295,9 @@ class _Devices:
             without it would run every request as the hub's own machine.
         admin: The hub-local entry point for the owner's acts (§6).
         listener: The remote door, or ``None`` where it is not configured.
+        links: What follows the record's acts into the identity store as the owner's
+            device links (ADR-0373 §6:2), or ``None`` where the hub was handed no
+            identity store.
     """
 
     store: EnrolmentStore
@@ -300,6 +305,7 @@ class _Devices:
     roster: HubRoster
     admin: AdminListener
     listener: RemoteListener | None
+    links: DeviceLinks | None = None
 
 
 #: What ``ai-assistant-hub --help`` prints, in the shape the rest of the family
@@ -688,8 +694,18 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             # connection at all — ADR-0124 §2's "refused at load time rather than
             # bound", at the latest point this deployment can still refuse.
             devices = await _build_devices(
-                engine, settings, data_dir=data_dir, budget=budget, delivery=delivery
+                engine,
+                settings,
+                data_dir=data_dir,
+                budget=budget,
+                delivery=delivery,
+                identities=composed.identities,
             )
+            # The devices the owner admitted, followed into the identity store before
+            # any door opens, so no act lands while the record is read (ADR-0373 §6).
+            # It cannot refuse the start: admission does not depend on a link.
+            if devices.links is not None:
+                await devices.links.follow()
             remote = devices.listener
             # **Every door binds before any door accepts** (ADR-0083 §14.2). The
             # remote listener, where there is one, and the control socket are bound
@@ -748,13 +764,14 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
     return EXIT_OK
 
 
-async def _build_devices(
+async def _build_devices(  # noqa: PLR0913 — one parameter per thing the device apparatus is built over
     engine: Engine,
     settings: Settings,
     *,
     data_dir: Path,
     budget: ConnectionBudget,
     delivery: DeliverySlots,
+    identities: IdentityStore | None = None,
 ) -> _Devices:
     """Build the device record and its control socket, and the remote listener where configured.
 
@@ -780,6 +797,10 @@ async def _build_devices(
         budget: The hub's shared ceilings (ADR-0124 §7).
         delivery: The hub's one delivery registry (ADR-0131 §3), shared with the
             loopback listener for the same reason the budget is.
+        identities: The identity store the composition root opened, which the
+            record's acts are followed into as device links from the moment the
+            registry is built (:class:`~ai_assistant.service.links.DeviceLinks`), or
+            ``None`` to follow nothing.
 
     Returns:
         The apparatus, with a remote listener only where one is configured.
@@ -815,6 +836,7 @@ async def _build_devices(
             roster=HubRoster(registry),
             admin=AdminListener(registry, data_dir=data_dir, remove_device=engine.remove_device),
             listener=None,
+            links=None if identities is None else DeviceLinks(identities, registry),
         )
     agent = local_agent(settings.hub_overlay_agent_socket)
     try:
@@ -849,6 +871,7 @@ async def _build_devices(
             budget=budget,
             delivery=delivery,
         ),
+        links=None if identities is None else DeviceLinks(identities, registry),
     )
 
 
@@ -914,6 +937,10 @@ async def _shut_down(  # noqa: PLR0913 — one parameter per thing ADR-0083 §4'
                 if devices.listener is not None:
                     await devices.listener.stop_accepting()
                 await devices.admin.stop_accepting()
+                # Before the drain, which closes the identity store: a link write still
+                # pending is let go, and the next start's following repairs it.
+                if devices.links is not None:
+                    await devices.links.aclose()
         with _during(record, _ShutdownStage.STOPPING_THE_SCHEDULER):
             await scheduler.aclose()
         record.scheduler_join_seconds = round(time.monotonic() - began, 3)

@@ -84,6 +84,11 @@ _log = structlog.get_logger(__name__)
 #: and why. The listener registers one (:meth:`DeviceRegistry.when_expelled`).
 type ExpelCallback = Callable[[str, str], None]
 
+#: What the registry calls once an act that can admit a device or end its admission has
+#: taken effect, with the device. The device links register one
+#: (:meth:`DeviceRegistry.when_admission_acted`).
+type AdmissionCallback = Callable[[str], None]
+
 
 class Refusal(StrEnum):
     """Why a device was not admitted (ADR-0124 §7).
@@ -862,6 +867,7 @@ class DeviceRegistry:
         # place an ``await`` could be introduced later without anyone noticing.
         self._known = store.known_identities()
         self._on_expelled: list[ExpelCallback] = []
+        self._on_admission: list[AdmissionCallback] = []
         # The roster's live view, for the same reason: a gateway's naming is decided
         # on every request it relays (ADR-0298 §2:1), so it costs no query either.
         self._max_per_gateway = max_registrations_per_gateway
@@ -907,6 +913,49 @@ class DeviceRegistry:
                 enrolment has just stopped being live.
         """
         self._on_expelled.append(callback)
+
+    def when_admission_acted(self, callback: AdmissionCallback) -> None:
+        """Register what to do once an act that can change a device's admission is done.
+
+        Called after every enrolment, revocation, restored registration and whole-device
+        revocation the owner makes, and after a gateway's first naming registers a
+        machine — once the record has committed and the live view has moved, as the
+        act's last step. **What the callback does is never part of the act**: it is
+        called synchronously and must neither raise nor suspend, so ADR-0124 §8's one
+        instant, and everything the admission path reads, stay exactly as they were.
+        A callback that wants to do asynchronous work schedules it, and reads what the
+        live view says when that work runs (:meth:`admits`).
+
+        Args:
+            callback: Called with the device the act named.
+        """
+        self._on_admission.append(callback)
+
+    def admits(self, device: str) -> bool:
+        """Whether the record admits a device the owner admitted: one of their own devices.
+
+        A live enrolment or a live registration admits it, as :meth:`is_known` reads;
+        ``hub`` and the hub's own overlay identity never are one, being the hub's own
+        machine (ADR-0298 §3:1, §3:3), even where a record written before ADR-0298
+        holds a live enrolment of that identity.
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            Whether a live enrolment or registration admits it, and it is not the hub's
+            own machine.
+        """
+        return device not in self._reserved() and self._is_admitted(device)
+
+    def admitted_devices(self) -> frozenset[str]:
+        """Every device :meth:`admits`, complete and unbounded, from the live view.
+
+        Returns:
+            The devices' ids.
+        """
+        held = set(self._live) | {device for device, _ in self._registered}
+        return frozenset(held - self._reserved())
 
     def live_enrolment_id(self, identity: str) -> int | None:
         """Which enrolment of a device is live right now.
@@ -1000,6 +1049,7 @@ class DeviceRegistry:
             enrolment_id=enrolment.enrolment_id,
             rotated=rotated,
         )
+        self._admission_acted(identity)
         return MintedEnrolment(
             enrolment=enrolment,
             credential=credential,
@@ -1028,6 +1078,7 @@ class DeviceRegistry:
         if revoked:
             self._expel(identity, reason="revoked")
             _log.info("device_revoked", overlay_identity=identity)
+        self._admission_acted(identity)
         return revoked
 
     def enrolments(self, *, limit: int = LISTING_LIMIT) -> tuple[Sequence[Enrolment], int]:
@@ -1103,6 +1154,7 @@ class DeviceRegistry:
             registration_id=registration_id,
             kind=self._kinds[name].value,
         )
+        self._admission_acted(name)
         return NamingVerdict(registered=True)
 
     def roles_of(self, device: str) -> frozenset[DeviceRole]:
@@ -1245,6 +1297,7 @@ class DeviceRegistry:
             registrations=revocation.registrations,
             roles=sorted(role.value for role in revocation.roles),
         )
+        self._admission_acted(device)
         return revocation
 
     def revoke_registration(self, device: str, *, gateway: str, now: datetime) -> bool:
@@ -1274,6 +1327,7 @@ class DeviceRegistry:
         self._settle_roles(device)
         if revoked:
             _log.info("device_registration_revoked", device=device, gateway=gateway)
+        self._admission_acted(device)
         return revoked
 
     def restore_registration(self, device: str, *, gateway: str, now: datetime) -> bool:
@@ -1323,6 +1377,7 @@ class DeviceRegistry:
         self._registered.add(pair)
         self._per_gateway[gateway] += 1
         _log.info("device_registration_restored", device=device, gateway=gateway)
+        self._admission_acted(device)
         return True
 
     def roster(self, *, limit: int = LISTING_LIMIT) -> tuple[Sequence[RosterDevice], int]:
@@ -1454,6 +1509,19 @@ class DeviceRegistry:
         """Close whatever connections a device holds, now that it holds none by right."""
         for callback in self._on_expelled:
             callback(identity, reason)
+
+    def _admission_acted(self, device: str) -> None:
+        """Tell each :meth:`when_admission_acted` callback that an act on a device is done.
+
+        The act has taken effect on the record and the live view before this runs, so a
+        fault in a callback is logged and goes no further: it cannot undo an act the
+        record already holds, and the owner's reply reports the act.
+        """
+        for callback in self._on_admission:
+            try:
+                callback(device)
+            except Exception:
+                _log.exception("device_admission_callback_failed", device=device)
 
 
 def _bounded_identity(identity: str) -> None:

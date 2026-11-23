@@ -208,6 +208,7 @@ if TYPE_CHECKING:
         EgressBinder,
         Embedder,
         Forecaster,
+        IdentityStore,
         MemoryStore,
         NotificationPolicy,
         OutboundTransport,
@@ -658,11 +659,19 @@ class Composition:
         conflict_search_limit: The ``limit`` the ingestor's conflict probe reaches
             ``MemoryStore.search`` with — the ceiling **plus two** (ADR-0079 §1),
             which is the figure §9 requires and the control's own value is not.
+        identities: The identity store this build opened (ADR-0366 §11), the **same
+            object** the build follows the owner's configured accounts with, for
+            ``service`` to follow the devices the owner admitted into: who has been
+            admitted is the device record's, which this layer may not import. Closed
+            by the engine's ordered shutdown, so a holder stops writing to it before
+            ``Engine.aclose``. ``None`` only for a composition built without one, such
+            as a test's stand-in; :func:`build_composition` always hands it.
     """
 
     engine: Engine
     trace_sink: TraceSink
     conflict_search_limit: int
+    identities: IdentityStore | None = None
 
 
 def telegram_intake_path(directory: Path, *, reference: str, chat_id: int) -> Path:
@@ -722,7 +731,8 @@ def configured_accounts(settings: Settings) -> tuple[Account, ...]:
     A device enrolled at the hub, or registered by a gateway, is not here: who has been
     admitted is the device record's, in ``service``, which this layer may not import, and
     the hub chat's devices are the conversation store's, read only asynchronously. Those
-    links are the lane's that reads the device record, recorded with the ``device`` act.
+    links are ``service``'s, which follows the device record into the store this build
+    hands it (:attr:`Composition.identities`), recorded with the ``device`` act.
 
     Args:
         settings: The loaded settings.
@@ -1324,7 +1334,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # the upgrade (#3642), and a configured link whose setting no longer names its
         # account is ended. Nothing reads it yet: who sent an input is still decided by each
         # kind's declarations, until the lane that switches it. It reads no other store
-        # and no store reads it.
+        # and no store reads it. The devices the owner admitted are `service`'s to link,
+        # through the composition this build returns.
         identities = SqliteIdentityStore(
             path=directory / IDENTITIES_FILENAME,
             configured=configured_accounts(settings),
@@ -2557,6 +2568,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             engine=engine,
             trace_sink=traces,
             conflict_search_limit=CONFLICT_LIMIT + _CONFLICT_PROBE_OVERSHOOT,
+            # The identity store opened above, handed on so `service` can link the
+            # devices the owner admitted (ADR-0373 §6:2), which this layer cannot read.
+            identities=identities,
         )
     except BaseException:
         # Close anything already opened before re-raising, so a failed build
