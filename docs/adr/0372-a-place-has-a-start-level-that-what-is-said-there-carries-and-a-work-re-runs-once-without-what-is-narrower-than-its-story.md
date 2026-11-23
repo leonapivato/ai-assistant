@@ -347,8 +347,9 @@ has a narrower audience and continues as normal".
 > understanding as a version of its own (ADR-0276 §7:3), beside the second pass's and marked as
 > replaced by the re-run. Each part the first pass produced is placed for the people who may see
 > every block that pass was shown (ADR-0369 §7:2), so ADR-0358 §10:5 leaves it out for anyone
-> else, and a later work is shown it only as a part of a look-up (ADR-0358 §10:3), which its mark
-> then meets (ADR-0370 §4:3).
+> else. Another work shown it, by a look-up (ADR-0358 §10:3) or by a peer view while the re-run is
+> pending (ADR-0349 §6:7), counts it toward its mark at that placement (ADR-0370 §4:3), and after
+> its own first pass is not shown it in front where it is below its cut (§6:5).
 
 > **Normative.** A fetch after the re-run is a fetch: what it returns meets the mark when it is
 > shown, and nothing re-runs. A story's audience falls through it only by what the work then writes
@@ -373,8 +374,10 @@ A first pass's sight could only bend which story it links. The second pass is sh
 the cut, and the cut is never wider than the floor, so a wrong link costs a fetch or a card, never
 a send of what was left out. The episode keeps the first pass for the record, as ADR-0286 §3:1 has
 every stage's result kept, but placed so that only those who could see all it saw are shown it
-(§6:9); the short view shows the latest understanding (ADR-0356 §9:1), so it is never put in front
-of a later work, and a look-up that shows it narrows that work's mark as any fetch does. A story
+(§6:9). The short view shows the latest understanding (ADR-0356 §9:1), and a peer view shows the
+latest recorded meaning (ADR-0349 §6:7), which is the first pass's until the second pass records
+its own; whichever another work is shown, it counts at its placement, and a look-up that shows the
+first pass narrows that work's mark as any fetch does. A story
 member whose episode was forgotten narrows nothing, since nothing of it can be shown. The cost is one more run of recall and of understanding when the re-run
 fires. A work with no sender never re-runs: it is shown nothing narrower than its floor (ADR-0370
 §3:3), so nothing it holds can be below a cut no wider than that floor.
@@ -462,6 +465,7 @@ Read through and standing, each as written:
 | ADR-0276 §7:3 and ADR-0332 §3:10 to §3:12 | The second pass records a new understanding version; joins and planning follow it |
 | ADR-0286 §3:1 and ADR-0358 §10:3 to §10:5 | Every stage's result is kept, the first pass's included; a look-up shows every version and leaves out a part placed for someone else (§6:9) |
 | ADR-0289 §4:5 and §4:7 | A member whose episode is gone stays a member and narrows nothing (§6:3) |
+| ADR-0349 §6:7 to §6:10 | A peer view shows the latest recorded meaning, the first pass's while a re-run is pending, and whoever is shown it counts it at its placement (§6:9) |
 | ADR-0280 §4:6, as ADR-0308 and ADR-0332 scope it | The guard stands, with the one further run §7:2 admits |
 | ADR-0361 §2:3 | A work may ask for a yes on a send that needs none |
 | ADR-0371 | The authority side, ADR-0371 §6 included, is not amended (§6) |
