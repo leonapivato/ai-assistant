@@ -42,7 +42,12 @@ from ai_assistant.orchestration.controller import (
     DEFAULT_STAGE_RECORD_LIMIT,
     StageRecord,
 )
-from ai_assistant.orchestration.work_facts import record_joined, record_started, unrecorded
+from ai_assistant.orchestration.work_facts import (
+    held_senders,
+    record_joined,
+    record_started,
+    unrecorded,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -563,6 +568,15 @@ class ActivationState:
             call_records=self.call_records,
             facts=self.started_facts,
         )
+
+    @property
+    def held_senders(self) -> tuple[InputSender, ...]:
+        """Every sender of every input it holds: its trigger's, then each joined input's.
+
+        What every reader of its facts reads beside them, for whether it holds an
+        unidentified sender (ADR-0368 §9:1, §9:5).
+        """
+        return held_senders(self.trigger, self.joined)
 
     @property
     def work_facts(self) -> WorkFacts | None:

@@ -23,7 +23,7 @@ from ai_assistant.orchestration.disclosure import UnboundedAudienceSupply
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.planning import NewsShown, PlanningWork
 from ai_assistant.testing.memories import memory
-from ai_assistant.testing.parties import OWNERS_FACTS
+from ai_assistant.testing.parties import OWNER_SENDER, OWNERS_FACTS
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -153,6 +153,7 @@ async def test_a_pin_past_the_slots_budget_is_not_shown_and_still_reached() -> N
             channel=ChannelIdentity(channel_type="conversation", instance_id="chat"), target=None
         ),
         work_facts=OWNERS_FACTS,
+        held_senders=(OWNER_SENDER,),
     )
 
     person = await path._person_now(

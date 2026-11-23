@@ -52,8 +52,9 @@ built: ADR-0349 §7:5 still joins only inputs of one author, established alike, 
 authority, so whom the work is for does not move.
 
 **What the readers read** (ADR-0368 §9). Whether a work is a person's, and whose
-(:func:`persons_work`, §9:5): it is for a person, has no unidentified sender, and carries
-the authority of no more than one person. Whose authority it carries
+(:func:`persons_work`, §9:5): it is for a person, has no unidentified sender among the
+senders its inputs record (:func:`held_senders`), read apart from its authority, and
+carries the authority of no more than one person. Whose authority it carries
 (:func:`persons_authority`, §9:1): the one identified person whose authority it carries,
 now or in advance. Two inputs carry the same authority where they carry the same
 people's (§9:2, :func:`authority_persons`). A work with no facts, because deciding them
@@ -128,6 +129,7 @@ __all__ = [
     "NO_LINK",
     "authority_persons",
     "chat_account",
+    "held_senders",
     "joined",
     "line_account",
     "links_unread",
@@ -404,23 +406,51 @@ def joined(facts: WorkFacts, input: JoinedInput) -> WorkFacts:  # noqa: A002 —
     return WorkFacts(for_whom=facts.for_whom, authority=authority, level=min(facts.level, level))
 
 
-def persons_work(facts: WorkFacts | None) -> str | None:
+def held_senders(
+    trigger: RecordedChannelTrigger, joined: Iterable[JoinedInput]
+) -> tuple[InputSender, ...]:
+    """Every sender of every input a work holds: its trigger's, then each joined input's.
+
+    What a reader hands :func:`persons_work` and :func:`persons_authority` for a stored
+    work, from its episode's record (ADR-0368 §2:6).
+
+    Args:
+        trigger: The work's recorded trigger.
+        joined: The inputs that joined it.
+
+    Returns:
+        The senders, as recorded.
+    """
+    return (*trigger.senders, *(sender for one in joined for sender in one.senders))
+
+
+def _with_an_unidentified(senders: Iterable[InputSender]) -> bool:
+    """Whether any of ``senders`` is unidentified: no person, or at none (ADR-0368 §9:4)."""
+    return any(not one.identified for one in senders)
+
+
+def persons_work(facts: WorkFacts | None, senders: Iterable[InputSender]) -> str | None:
     """The person whose work it is, where it is a person's (ADR-0368 §9:5).
 
     It is for a person, has no unidentified sender, and carries the authority of no more
     than one person: what ADR-0338 §2:3, ADR-0350 §3:4, ADR-0356 §4:5 and ADR-0361 §2:5
     read as an activation being a person's, as the person block, spawn's offer, the
-    approval request and every reader of the person a work is for do. A work with no
-    facts is no person's, and so is one for a person the hub does not admit
+    approval request and every reader of the person a work is for do. Whether it has an
+    unidentified sender is read from the senders its inputs record, apart from whose
+    authority it carries: a forward an unidentified sender sent carries no authority, so
+    its authority says nothing of who sent it, and its work is still no person's. A work
+    with no facts is no person's, and so is one for a person the hub does not admit
     (:data:`_ADMITTED`).
 
     Args:
         facts: The work's facts as they stand, or ``None`` where none were recorded.
+        senders: Every sender of every input the work holds, as recorded
+            (:func:`held_senders`).
 
     Returns:
         The person's id, or ``None`` where it is no person's.
     """
-    if facts is None:
+    if facts is None or _with_an_unidentified(senders):
         return None
     whom = facts.for_whom
     authority = facts.authority
@@ -449,25 +479,31 @@ def authority_persons(facts: WorkFacts | None) -> tuple[str, ...]:
     return facts.authority.persons
 
 
-def persons_authority(facts: WorkFacts | None, *, relayed: bool = False) -> str | None:
+def persons_authority(
+    facts: WorkFacts | None, senders: Iterable[InputSender], *, relayed: bool = False
+) -> str | None:
     """The person whose authority a work carries, where it carries one's (ADR-0368 §9:1).
 
     What every earlier decision's "the input carries the user's authority" reads: the
     work carries the authority of one identified person, now or in advance, and no
-    unidentified sender's beside it (§2:2), and no input it holds is relayed (ADR-0351
-    §6:5), which no fact records (§2:4) and the caller hands in. Where it names the user,
-    it names this person. A person the hub does not admit carries none here
-    (:data:`_ADMITTED`).
+    unidentified sender's beside it (§2:2), no input it holds has an unidentified sender,
+    and no input it holds is relayed (ADR-0351 §6:5), which no fact records (§2:4) and
+    the caller hands in. Where it names the user, it names this person. A person the hub
+    does not admit carries none here (:data:`_ADMITTED`).
 
     Args:
         facts: The work's facts as they stand, or ``None`` where none were recorded.
+        senders: Every sender of every input the work holds, as recorded
+            (:func:`held_senders`).
         relayed: Whether any input the work holds is relayed.
 
     Returns:
         The person's id, or ``None`` where the work carries no person's authority.
     """
     persons = authority_persons(facts)
-    if relayed or len(persons) != 1 or persons[0] not in _ADMITTED:
+    if relayed or _with_an_unidentified(senders):
+        return None
+    if len(persons) != 1 or persons[0] not in _ADMITTED:
         return None
     return persons[0]
 
@@ -479,10 +515,10 @@ def links_unread(senders: Iterable[InputSender]) -> bool:
 
 def log_facts(
     facts: WorkFacts,
+    senders: Sequence[InputSender],
     *,
     activation_id: str | None,
     at: str,
-    unread: bool = False,
 ) -> None:
     """Log what was decided of a work: one ``work_facts_recorded`` entry.
 
@@ -502,29 +538,30 @@ def log_facts(
 
     Args:
         facts: The facts recorded.
+        senders: Every sender of every input they were recorded from.
         activation_id: The work's activation.
         at: When they were recorded: ``start`` or ``join``.
-        unread: Whether the links could not be read for any input they were recorded
-            from.
     """
     _log.info(
         "work_facts_recorded",
         activation_id=activation_id,
         at=at,
-        links_unread=unread,
+        links_unread=links_unread(senders),
         for_whom=facts.for_whom.kind.value,
         whose=facts.authority.kind.value,
         unidentified=facts.authority.unidentified,
         facts_level=facts.level.value,
-        persons_work=persons_work(facts) is not None,
-        carries_a_persons=persons_authority(facts) is not None,
+        persons_work=persons_work(facts, senders) is not None,
+        carries_a_persons=persons_authority(facts, senders) is not None,
     )
 
 
-def _logged(facts: WorkFacts, *, activation_id: str | None, at: str, unread: bool) -> None:
+def _logged(
+    facts: WorkFacts, senders: Sequence[InputSender], *, activation_id: str | None, at: str
+) -> None:
     """:func:`log_facts`, whose own fault is logged and never undoes the recording."""
     try:
-        log_facts(facts, activation_id=activation_id, at=at, unread=unread)
+        log_facts(facts, senders, activation_id=activation_id, at=at)
     except Exception:  # the log is read beside the facts, never in their place
         _log.warning("work_facts_unlogged", at=at, reason="defect")
 
@@ -551,8 +588,7 @@ def record_started(
     except Exception:  # fails closed: no facts are no person's and carry no authority
         _log.warning("work_facts_unrecorded", at="start", reason="defect")
         return None
-    unread = links_unread(trigger.senders)
-    _logged(facts, activation_id=activation_id, at="start", unread=unread)
+    _logged(facts, trigger.senders, activation_id=activation_id, at="start")
     return facts
 
 
@@ -600,27 +636,26 @@ def record_joined(
     Args:
         facts: The work's facts before the first of them joined.
         inputs: The inputs joining, in order.
-        trigger: The work's recorded trigger, read only for whether the links could not
-            be read for it (ADR-0374 §5:1).
+        trigger: The work's recorded trigger, read only for its senders, which the log
+            reads (ADR-0374 §5:1, ADR-0368 §9:5).
         activation_id: The work's activation.
         earlier: The inputs that joined the work before these, which the facts were
-            recorded from too: read only for whether the links could not be read for
-            any of them.
+            recorded from too: read only for their senders, as the trigger is.
 
     Returns:
         The inputs, each with this work's ``facts``.
     """
     try:
-        recorded: list[tuple[JoinedInput, WorkFacts, bool]] = []
-        unread = links_unread(trigger.senders) or any(links_unread(one.senders) for one in earlier)
+        recorded: list[tuple[JoinedInput, WorkFacts, tuple[InputSender, ...]]] = []
+        senders = held_senders(trigger, earlier)
         for one in inputs:
             facts = joined(facts, one)
-            unread = unread or links_unread(one.senders)
-            recorded.append((one.model_copy(update={"facts": facts}), facts, unread))
+            senders = (*senders, *one.senders)
+            recorded.append((one.model_copy(update={"facts": facts}), facts, senders))
     except Exception:  # fails closed: the work carries no one's authority from here
         _log.warning("work_facts_unrecorded", at="join", reason="defect")
         closed = _closed(facts)
         return tuple(one.model_copy(update={"facts": closed}) for one in inputs)
-    for _, held, faulted in recorded:
-        _logged(held, activation_id=activation_id, at="join", unread=faulted)
+    for _, held, so_far in recorded:
+        _logged(held, so_far, activation_id=activation_id, at="join")
     return tuple(one for one, _, _ in recorded)

@@ -147,7 +147,7 @@ from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.matters import EntryInput
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import activation_of
-from ai_assistant.orchestration.work_facts import persons_work
+from ai_assistant.orchestration.work_facts import held_senders, persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -1665,7 +1665,12 @@ class _Renderer:
                 continue
             processing = record.processing_record
             # ADR-0368 §9:5: an episode is the person's where its facts make it theirs.
-            if persons_work(processing.facts_now) == person:
+            if (
+                persons_work(
+                    processing.facts_now, held_senders(processing.trigger, processing.joined)
+                )
+                == person
+            ):
                 found.append((record.occurred_at, _origin_where(processing.trigger.channel)))
         found.extend(
             (entry.arrived_at, _origin_where(entry.channel))

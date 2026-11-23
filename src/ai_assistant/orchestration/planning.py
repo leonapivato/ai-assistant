@@ -274,7 +274,7 @@ from ai_assistant.orchestration.story_calls import (
     TIDY_STORY_CAPABILITY,
 )
 from ai_assistant.orchestration.task_scheduler import StartingEntry, place_description
-from ai_assistant.orchestration.work_facts import persons_work
+from ai_assistant.orchestration.work_facts import held_senders, persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Sequence
@@ -3079,7 +3079,9 @@ class _Request:
             processing = record.processing_record
             trigger = processing.trigger
             # ADR-0368 §9:5: an episode is the person's where its facts make it theirs.
-            if persons_work(processing.facts_now) == person and _authored_by_them(trigger):
+            if persons_work(
+                processing.facts_now, held_senders(processing.trigger, processing.joined)
+            ) == person and _authored_by_them(trigger):
                 found.append((record.occurred_at, _origin_where(trigger.channel)))
         found.extend(
             (entry.arrived_at, _origin_where(entry.channel))

@@ -7165,7 +7165,7 @@ class Engine:
             _log.warning("approval_tickets_unread", stage="planning", reason="store_failed")
             return ()
         # ADR-0368 §9:5: the tickets of the person whose work it is (ADR-0361 §5:3).
-        person = persons_work(state.work_facts)
+        person = persons_work(state.work_facts, state.held_senders)
         if person is None:
             return ()
         now = self._now()
@@ -7430,7 +7430,7 @@ class Engine:
         """
         lists = self._place_lists
         # ADR-0368 §9:5: an approval's work is a person's, its request's person's.
-        person = None if state is None else persons_work(state.work_facts)
+        person = None if state is None else persons_work(state.work_facts, state.held_senders)
         if lists is None or person is None:
             return None
 
@@ -7578,7 +7578,7 @@ class Engine:
         """
         lists = self._place_lists
         # ADR-0368 §9:5, ADR-0350 §3:4: spawn is offered only to a person's work.
-        person = None if state is None else persons_work(state.work_facts)
+        person = None if state is None else persons_work(state.work_facts, state.held_senders)
         if lists is None or person is None or set_in.channel_type not in SPAWNING_KINDS:
             return None
         suggested = None if task is None else [place_of(one) for one in task.places]
@@ -8598,7 +8598,9 @@ class Engine:
                     own_zone=own is not None,
                     received_at=None if state is None else state.started_at,
                     # ADR-0368 §9:5: whose work it is, from its facts.
-                    person_id=None if state is None else persons_work(state.work_facts),
+                    person_id=None
+                    if state is None
+                    else persons_work(state.work_facts, state.held_senders),
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the
@@ -8645,7 +8647,7 @@ class Engine:
             state.person_block_assembled = True
             # ADR-0368 §9:5, ADR-0338 §2:3: a block only for a person's work.
             state.person_block = await self._person_blocks.assemble(
-                persons_work(state.work_facts), supply=working.supply
+                persons_work(state.work_facts, state.held_senders), supply=working.supply
             )
         elif state.person_block is not None:
             # §7:10, for an understanding run again on joined input as for a planning

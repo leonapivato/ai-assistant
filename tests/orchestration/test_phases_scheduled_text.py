@@ -216,6 +216,7 @@ async def test_a_tasks_work_may_reply_into_the_origin_of_an_input_it_took() -> N
             work_facts=OWNERS_FACTS.model_copy(
                 update={"authority": WorkAuthority.none(), "level": Sureness.NONE}
             ),
+            held_senders=(),
             took=[Named("act-newer", None, Became.TAKEN)],
             joined=[
                 JoinedInput(

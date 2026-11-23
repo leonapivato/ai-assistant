@@ -433,7 +433,7 @@ class PersonModelCalls:
         """
         state = active_state()
         # ADR-0368 §9:5: the work is a person's, read from its facts.
-        person = None if state is None else persons_work(state.work_facts)
+        person = None if state is None else persons_work(state.work_facts, state.held_senders)
         if person is None:
             return _not_done(_NO_PERSON, "no_person")
         capability = str(call.request.tool.capability)

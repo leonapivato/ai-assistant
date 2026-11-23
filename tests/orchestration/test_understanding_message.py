@@ -145,6 +145,7 @@ async def _rendered(  # noqa: PLR0913 — one knob per thing the phase hands the
     running: Sequence[InProgressEntry] = (),
     more: int = 0,
     joined: Sequence[JoinedInput] = (),
+    person_id: str | None = OWNER_PERSON_ID,
 ) -> Rendered:
     model = FakeStructuredCompleter(_reply())
     stage = UnderstandingStage(
@@ -170,6 +171,8 @@ async def _rendered(  # noqa: PLR0913 — one knob per thing the phase hands the
         zone=zone,
         own_zone=own_zone,
         received_at=AT,
+        # ADR-0368 §9:5: whose work it is, as the engine reads it from its facts.
+        person_id=person_id,
     )
     return Rendered(model.calls[0].messages[1].content)
 
@@ -265,6 +268,7 @@ _STATES: Final[dict[str, dict[str, Any]]] = {
     "nothing": {},
     "no person": {
         "person": None,
+        "person_id": None,
         "channel": EVENTS,
         "trigger": _trigger(EVENTS, "Motion.", ()),
         "window": SuppliedWindow(ChannelContext()),
@@ -306,6 +310,13 @@ async def test_the_reasons_name_what_each_state_is() -> None:
     assert started.section("Stimulus origin knowledge") == (
         "Nothing is there: this conversation has just started."
     )
+    # ADR-0338 §2:3, ADR-0368 §9:5: a person's work with no block, and no person's work,
+    # each say so, and say it apart.
+    unprofiled = await _rendered(**_STATES["unprofiled person"])
+    nobody = await _rendered(**_STATES["no person"])
+    assert unprofiled.section("Always in mind") != nobody.section("Always in mind")
+    assert "no person's" in nobody.section("Always in mind")
+    assert "no person's" not in unprofiled.section("Always in mind")
 
 
 # --- §3:5: escaping --------------------------------------------------------------------

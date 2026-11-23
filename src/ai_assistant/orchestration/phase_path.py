@@ -2366,7 +2366,9 @@ class PhaseWorking:
         if not self._own_input:
             return None
         state = self._activation
-        return persons_authority(None if state is None else state.work_facts, relayed=self.relayed)
+        if state is None:
+            return None
+        return persons_authority(state.work_facts, state.held_senders, relayed=self.relayed)
 
     @property
     def outside_trigger(self) -> bool:
@@ -4540,7 +4542,8 @@ class PhasePath:
             offered,
             person=person is not None,
             scheduling=working.scheduling is not None and working.scheduling.spawns,
-            persons=state is not None and persons_work(state.work_facts) is not None,
+            persons=state is not None
+            and persons_work(state.work_facts, state.held_senders) is not None,
             running=self._running_calls(state, working, offers=bool(offers)),
             standing=state is not None
             and state.standing is not None
@@ -4578,7 +4581,7 @@ class PhasePath:
             not_here=not_here,
             # ADR-0356 §3:2, ADR-0353 §4, §6, §7: whose stimulus it is, its inputs as
             # recorded, and the running work its concurrent stimuli show.
-            person_id=None if state is None else persons_work(state.work_facts),
+            person_id=None if state is None else persons_work(state.work_facts, state.held_senders),
             # ADR-0364 §3:9: the trigger as the lifecycle resolved it, so a hub chat's
             # stimulus names the conversation it came from by its ``where``.
             trigger=working.trigger if state is None else state.trigger,
@@ -4700,7 +4703,7 @@ class PhasePath:
         blocks = self._person_blocks
         if blocks is None or state is None or state.person_block is None:
             return None
-        person_id = persons_work(state.work_facts)
+        person_id = persons_work(state.work_facts, state.held_senders)
         if person_id is None:
             return None
         try:
@@ -5406,7 +5409,7 @@ class PhasePath:
             call_messages=call_messages,
             places=places,
             gone=gone,
-            person=None if state is None else persons_work(state.work_facts),
+            person=None if state is None else persons_work(state.work_facts, state.held_senders),
             tickets=frozenset(one.request_id for one in await self._held_tickets(state)),
             taken_places=() if places is not None else _taken_places(state, place),
             # ADR-0364 §9:3: a work that keeps no list may send a text into any connection
@@ -5854,7 +5857,7 @@ class PhasePath:
             return None
         state = active_state()
         # ADR-0368 §9:5, ADR-0361 §2:5: only a person's work asks for a yes.
-        person = None if state is None else persons_work(state.work_facts)
+        person = None if state is None else persons_work(state.work_facts, state.held_senders)
         if person is None:
             return None
         requested = {

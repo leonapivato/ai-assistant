@@ -329,7 +329,7 @@ def person_of(state: ActivationState) -> str | None:
     kind = None if state.place is None else state.place.channel_type
     if not established and kind not in _FOR_A_RECORDS_PERSON:
         return None
-    return persons_work(state.work_facts)
+    return persons_work(state.work_facts, state.held_senders)
 
 
 def _viewer_person(state: ActivationState) -> str | None:
@@ -337,7 +337,7 @@ def _viewer_person(state: ActivationState) -> str | None:
     standing = state.standing
     if standing is None or standing.author is None:
         return None
-    return persons_work(state.work_facts)
+    return persons_work(state.work_facts, state.held_senders)
 
 
 def _running(state: ActivationState) -> bool:

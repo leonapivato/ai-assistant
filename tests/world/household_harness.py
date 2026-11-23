@@ -102,6 +102,8 @@ from ai_assistant.core.types import (
     MessageAuthor,
     RequestingDevice,
     Sureness,
+    TelegramForwardKind,
+    TelegramForwardOrigin,
     TextChannelPayload,
     TranscriptMessage,
     UserMessage,
@@ -109,6 +111,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.telegram import TelegramLineSeams, line_channel
 from ai_assistant.orchestration.work_facts import (
     chat_account,
+    held_senders,
     line_account,
     persons_authority,
     persons_work,
@@ -275,7 +278,8 @@ class Work:
         yes, a task's author and its cancel and replace the second.
         """
         facts = self.facts_now
-        return persons_work(facts), persons_authority(facts)
+        senders = held_senders(self.record.trigger, self.record.joined)
+        return persons_work(facts, senders), persons_authority(facts, senders)
 
     @property
     def briefing(self) -> str:
@@ -442,6 +446,27 @@ class Household:
         message = UserMessage(device_id=account.device_id, message_id=f"m-{number}", text=words)
         with serving_device(RequestingDevice(device_id=account.device_id)):
             await self.harness.engine.write_message(conversation, message=message)
+
+    async def forward(self, account: TelegramAccount, words: str) -> Work:
+        """Forward ``words`` on the line from ``account``, as Sam's, and read its work.
+
+        A forward's sender is who forwarded it, by the account it arrived by, and its
+        words are Sam's, claimed (ADR-0351 §2:7, §4:2).
+
+        Raises:
+            AssertionError: If not exactly one work ends for it.
+        """
+        origin = TelegramForwardOrigin(kind=TelegramForwardKind.USER, name="Sam", account_id=5)
+
+        async def forwarded() -> None:
+            number = next(self._ids)
+            self.bot.hold(
+                line_update(
+                    number, words, sender=account.user_id, chat=account.user_id, forward=origin
+                )
+            )
+
+        return await self._one_work(forwarded)
 
     async def say(self, account: HouseholdAccount, words: str) -> Work:
         """Write ``words`` from ``account``, and read what the hub recorded of its work.

@@ -218,6 +218,32 @@ async def test_a_link_lowered_to_none_is_an_unidentified_senders_until_withdrawn
     _as_the_owners(restored, home.owner)
 
 
+@pytest.mark.parametrize("level", [Sureness.NORMAL, Sureness.NONE], ids=["linked", "lowered"])
+async def test_a_forward_is_its_forwarders_work_only_where_the_forwarder_is_identified(
+    level: Sureness,
+) -> None:
+    """ADR-0368 §3:2, §9:5, ADR-0351 §6:2: a forward carries no one's authority, so its
+    facts' authority says nothing of who sent it. The owner's forward, by their linked
+    account, is the owner's work carrying none, shown as theirs, as before. Forwarded by
+    a link lowered to none, it is an unidentified sender's, and no person's work: shown as
+    no person's, with no person block, spawn or approval request."""
+    async with Household() as home:
+        line = await home.telegram(home.owner)
+        if level is Sureness.NONE:
+            await home.lower(line, level)
+        work = await home.forward(line, "Dinner at 8?")
+
+    assert work.message_senders == (home.owner.at(level),)
+    assert work.facts is not None
+    assert work.facts.authority == WorkAuthority.none()
+    if level is Sureness.NONE:
+        assert work.reads == (None, None)
+        assert _NO_PERSONS in work.briefing
+    else:
+        assert work.reads == (home.owner.id, None)
+        assert _A_PERSONS in work.briefing
+
+
 async def test_two_messages_at_different_levels_in_one_work_put_it_at_the_lower() -> None:
     """ADR-0368 §4:1, §4:5: the owner's two messages, from a device at normal and one
     lowered to weak, taken in by one start wait as one work's input: the work is at weak,
