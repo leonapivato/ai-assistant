@@ -12,12 +12,13 @@ as given, since SQLite's text comparison is exact.
 
 **The owner, from the start** (§2:5). The transaction that first creates the file's
 tables also creates the one identity :data:`~ai_assistant.core.types.OWNER_PERSON_ID`.
-**Every open then links the owner's configured accounts** in that same step: each
-account the composition root hands over that no link holds yet is tied to the owner's
-identity by the owner's ``configured`` act, so the owner's existing accounts are present
-as links when the hub starts, without the owner doing anything (#3642). An account a link
-already holds is left as it is, and an account no longer configured stays linked: no
-code undoes a link (§3:2).
+**Every open then follows the owner's configured accounts** in that same step: each
+standing ``configured`` link whose account the composition root no longer hands over is
+ended, since the setting it was recorded from no longer names it, and each account handed
+over that no standing link holds is tied to the owner's identity by the owner's
+``configured`` act. So the owner's existing accounts are present as links when the hub
+starts, without the owner doing anything (#3642), and a setting changed or cleared ends
+the link it named. A link recorded from any other act is left as it is.
 
 **The house style** of the stores beside this one: one owned connection, an
 :class:`asyncio.Lock` around SQL run in a worker thread that the lock outlives
@@ -57,6 +58,7 @@ from uuid import uuid4
 import structlog
 from pydantic import BaseModel, ValidationError
 
+from ai_assistant.core.channel_validation import most_sureness
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import IdentityStoreError
 from ai_assistant.core.types import (
@@ -103,11 +105,13 @@ _SCHEMA: Final = (
     # One row per identity, in the order created. `seq` orders; `id` is the identity's.
     "CREATE TABLE identities(seq INTEGER PRIMARY KEY AUTOINCREMENT, "
     "id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)",
-    # One row per link. An account, its kind and identifier together, is tied to one
-    # identity at most, which the unique pair holds. `act` is the `LinkAct` as JSON.
+    # One row per link, kept when ended. A standing link ties an account, its kind and
+    # identifier together, to one identity at most, which the partial unique index
+    # holds; an ended one ties nothing. `act` is the `LinkAct` as JSON.
     "CREATE TABLE links(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, "
     "person_id TEXT NOT NULL, kind TEXT NOT NULL, account TEXT NOT NULL, "
-    "act TEXT NOT NULL, made_at TEXT NOT NULL, UNIQUE(kind, account))",
+    "act TEXT NOT NULL, made_at TEXT NOT NULL, ended_at TEXT)",
+    "CREATE UNIQUE INDEX links_standing ON links(kind, account) WHERE ended_at IS NULL",
     "CREATE INDEX links_by_person ON links(person_id)",
     # One row per lowering, kept when withdrawn (§5:5).
     "CREATE TABLE lowerings(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, "
@@ -116,7 +120,7 @@ _SCHEMA: Final = (
     "CREATE INDEX lowerings_by_link ON lowerings(link_id)",
 )
 
-_LINK_COLUMNS: Final = "id, person_id, kind, account, act, made_at"
+_LINK_COLUMNS: Final = "id, person_id, kind, account, act, made_at, ended_at"
 _LOWERING_COLUMNS: Final = "id, link_id, level, made_by, made_at, withdrawn_at"
 
 #: The act every configured account is linked by: the owner's own configuration.
@@ -249,6 +253,7 @@ def _link_from(row: Sequence[Any], lowerings: Sequence[Sequence[Any]]) -> Link:
             act=LinkAct.model_validate_json(row[4]),
             made_at=row[5],
             lowerings=made,
+            ended_at=row[6],
         )
     except (ValidationError, TypeError) as exc:
         raise _corrupt("link") from exc
@@ -274,7 +279,7 @@ class SqliteIdentityStore:
         self,
         *,
         path: Path | str,
-        configured: Sequence[Account] = (),
+        configured: Sequence[Account] | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_id: Callable[[str], str] = _random_id,
     ) -> None:
@@ -282,9 +287,13 @@ class SqliteIdentityStore:
 
         Args:
             path: Database file path, or ``":memory:"`` for an ephemeral store.
-            configured: The accounts the owner's configuration names, each linked to the
-                owner's identity by a ``configured`` act of the owner's where no link
-                holds it yet, in the order given, in the step that opens the store.
+            configured: The accounts the owner's configuration names, followed in the
+                step that opens the store: each standing ``configured`` link whose account
+                it does not name is ended, and each account it names that no standing
+                link holds is linked to the owner's identity by a ``configured`` act of
+                the owner's, in the order given. ``None``, for an opening that is not the
+                hub's start, such as a tool reading the file, follows nothing and leaves
+                every link as it is; only the composition root hands the configuration.
             now: The clock every instant the store records is read from.
             new_id: Mints a record's id from its kind (``link`` or ``lowering``). An id
                 a held record already carries is minted again.
@@ -295,8 +304,10 @@ class SqliteIdentityStore:
                 tables under another schema version, or the clock's reading is not an
                 aware instant.
         """
-        self._configured = tuple(
-            _validated(one, Account, name="a configured account") for one in configured
+        self._configured = (
+            None
+            if configured is None
+            else tuple(_validated(one, Account, name="a configured account") for one in configured)
         )
         # ADR-0026 §2: every reading aware and converted to UTC, checked where it is read.
         self._clock = checked_clock(now, owner="SqliteIdentityStore")
@@ -330,7 +341,7 @@ class SqliteIdentityStore:
             self._restrict_permissions()
             with self._transaction("prepare the identity store", conn=conn) as held:
                 self._prepare(held)
-                self._link_configured(held)
+                self._follow_configured(held)
         except OSError as exc:
             conn.close()  # never leak the connection when opening fails
             msg = f"failed to open the identity store at {self._path!r}: {exc}"
@@ -371,25 +382,49 @@ class SqliteIdentityStore:
         )
         _log.info("identity_store_created")
 
-    def _link_configured(self, conn: sqlite3.Connection) -> None:
-        """Tie each configured account no link holds to the owner's identity (#3642).
+    def _follow_configured(self, conn: sqlite3.Connection) -> None:
+        """End the configured links no longer configured; link the accounts newly so.
 
-        Where the owner's identity is not held, as no release leaves a file, nothing is
-        linked: a link ties an account to an identity the store holds.
+        #3642's "already linked", followed at every open: a standing ``configured`` link
+        whose account the configuration no longer names is ended, and each configured
+        account no standing link holds is tied to the owner's identity. Where the
+        owner's identity is not held, as no release leaves a file, nothing is linked: a
+        link ties an account to an identity the store holds. With no configuration handed
+        over, nothing is followed.
         """
-        if not self._configured or not self._holds(conn, OWNER_PERSON_ID):
+        configured = self._configured
+        if configured is None:
             return
         at: datetime | None = None
+        standing = conn.execute(
+            "SELECT id, kind, account, act FROM links WHERE ended_at IS NULL ORDER BY seq"
+        ).fetchall()
+        ended: list[str] = []
+        for row in standing:
+            try:
+                act = LinkAct.model_validate_json(row[3])
+                account = Account(kind=row[1], identifier=row[2])
+            except (ValidationError, TypeError) as exc:
+                raise _corrupt("link") from exc
+            if act.how is LinkActHow.CONFIGURED and account not in configured:
+                ended.append(row[0])
+        if ended:
+            at = self._now()
+            conn.executemany(
+                "UPDATE links SET ended_at = ? WHERE id = ?",
+                [(_instant(at), one) for one in ended],
+            )
         linked = 0
-        for account in self._configured:
-            if self._held_link_row(conn, account) is not None:
-                continue
-            at = at or self._now()
-            self._insert_link(conn, OWNER_PERSON_ID, account, _CONFIGURED, at)
-            linked += 1
-        if linked:
+        if self._holds(conn, OWNER_PERSON_ID):
+            for account in configured:
+                if self._held_link_row(conn, account) is not None:
+                    continue
+                at = at or self._now()
+                self._insert_link(conn, OWNER_PERSON_ID, account, _CONFIGURED, at)
+                linked += 1
+        if linked or ended:
             # No account is logged: which accounts the owner has is the owner's.
-            _log.info("identity_store_linked_configured", linked=linked)
+            _log.info("identity_store_followed_configured", linked=linked, ended=len(ended))
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
@@ -476,7 +511,8 @@ class SqliteIdentityStore:
     @staticmethod
     def _held_link_row(conn: sqlite3.Connection, account: Account) -> Sequence[Any] | None:
         row: Sequence[Any] | None = conn.execute(
-            f"SELECT {_LINK_COLUMNS} FROM links WHERE kind = ? AND account = ?",  # noqa: S608 — only constants are interpolated
+            f"SELECT {_LINK_COLUMNS} FROM links "  # noqa: S608 — only constants are interpolated
+            "WHERE kind = ? AND account = ? AND ended_at IS NULL",
             (account.kind, account.identifier),
         ).fetchone()
         return row
@@ -486,7 +522,8 @@ class SqliteIdentityStore:
     ) -> str:
         link_id = self._mint(conn, "link")
         conn.execute(
-            f"INSERT INTO links({_LINK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",  # noqa: S608 — only constants are interpolated
+            "INSERT INTO links(id, person_id, kind, account, act, made_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 link_id,
                 person_id,
@@ -623,13 +660,24 @@ class SqliteIdentityStore:
 
     def _lower_sync(self, link_id: str, level: Sureness, by: str) -> LinkWrite:
         with self._transaction("lower a link") as conn:
-            row = conn.execute("SELECT person_id FROM links WHERE id = ?", (link_id,)).fetchone()
+            row = conn.execute(
+                "SELECT person_id, kind FROM links WHERE id = ? AND ended_at IS NULL", (link_id,)
+            ).fetchone()
             if row is None:
                 return _refused(LinkRefusal.UNKNOWN_RECORD)
             if not self._holds(conn, by):
                 return _refused(LinkRefusal.UNKNOWN_PERSON)
             if by not in {OWNER_PERSON_ID, row[0]}:
                 return _refused(LinkRefusal.NOT_ALLOWED)
+            same = conn.execute(
+                "SELECT id FROM lowerings WHERE link_id = ? AND made_by = ? AND level = ? "
+                "AND withdrawn_at IS NULL ORDER BY seq LIMIT 1",
+                (link_id, by, level.value),
+            ).fetchone()
+            if same is not None:
+                return LinkWrite(kind=LinkWriteKind.UNCHANGED, record_id=same[0])
+            if level >= most_sureness(row[1]):
+                return _refused(LinkRefusal.NOT_A_LOWERING)
             at = self._now()
             lowering_id = self._mint(conn, "lowering")
             conn.execute(
@@ -638,6 +686,28 @@ class SqliteIdentityStore:
                 (lowering_id, link_id, level.value, by, _instant(at)),
             )
         return LinkWrite(kind=LinkWriteKind.WRITTEN, record_id=lowering_id)
+
+    async def end_link(self, link_id: str) -> LinkWrite:
+        """End a link whose act no longer stands, keeping it, in one step.
+
+        Raises:
+            ValueError: If ``link_id`` is not a non-blank ``str``.
+            IdentityStoreError: If the store cannot be read or written.
+        """
+        held = _checked(link_id, name="link_id")
+        return await self._run(self._end_sync, held)
+
+    def _end_sync(self, link_id: str) -> LinkWrite:
+        with self._transaction("end a link") as conn:
+            row = conn.execute("SELECT ended_at FROM links WHERE id = ?", (link_id,)).fetchone()
+            if row is None:
+                return _refused(LinkRefusal.UNKNOWN_RECORD)
+            if row[0] is not None:
+                return LinkWrite(kind=LinkWriteKind.UNCHANGED, record_id=link_id)
+            conn.execute(
+                "UPDATE links SET ended_at = ? WHERE id = ?", (_instant(self._now()), link_id)
+            )
+        return LinkWrite(kind=LinkWriteKind.WRITTEN, record_id=link_id)
 
     async def withdraw_lowering(self, lowering_id: str, *, by: str) -> LinkWrite:
         """Withdraw a lowering, by its maker alone, in one step.

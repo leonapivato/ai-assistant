@@ -14409,8 +14409,9 @@ class IdentityStore(Protocol):
     **What it holds**: each identity, a stable identifier holding no name, relation or
     other fact about its person and belonging to no one's domain (§2:1, §2:2); each
     link, tying one account (a kind and an account identifier) to one identity, with
-    the act that made it (§3:1); and each lowering of a link's level, with who made it
-    and whether it was withdrawn (§5:5). Nothing here is a person model (§2:6), a view
+    the owner's act it was recorded from (§3:1); and each lowering of a link's level,
+    with who made it and whether it was withdrawn (§5:5). Every link and every lowering
+    has an id of its own, never reused. Nothing here is a person model (§2:6), a view
     (§7) or a grant, and nothing here decides who sent an input: that is code reading a
     link (§4:1), which no caller does yet.
 
@@ -14421,26 +14422,28 @@ class IdentityStore(Protocol):
     an identity's id all the same, and one naming an identity the store does not hold is
     refused ``unknown_person``.
 
-    **An account is tied to one identity at most**: linking an account already linked to
-    the identity named changes nothing, and linking one linked to another is refused
-    ``already_linked``. Who may undo a link is lane 3's (§3), so no member removes one.
+    **A link stands only while the act it was recorded from stands.** An ended link is
+    kept, with its lowerings, and ties nothing: :meth:`find_link` no longer finds it, and
+    a later act naming the account again makes a new link with an id of its own. A
+    standing link ties an account to one identity at most.
 
-    **The owner's configured accounts**, which every implementation takes when it is
-    built or opened, are linked to the owner's identity by a ``configured`` act of the
-    owner's wherever no link holds them yet, in the step that opens the store: the
-    owner's existing accounts are present as links without the owner doing anything
-    (#3642). A configured account a link already holds is left as it is, and an account
-    no longer configured stays linked: no code undoes a link (§3:2).
+    **The owner's configured accounts are followed at every start.** Every implementation
+    takes them when the hub's start builds or opens it and, in the step that opens it, ends
+    each standing ``configured`` link whose account they no longer name, and links to the
+    owner's identity, by a ``configured`` act of the owner's, each one no standing link
+    holds: so the owner's accounts are present as links when the hub starts without the
+    owner doing anything (#3642), and a setting changed or cleared ends the link it
+    named. A link recorded from any other act is left as it is.
 
     **A link's level** is its kind's declared most or the lowest lowering that stands on
     it, whichever is lower (§5:3): :func:`~ai_assistant.core.channel_validation.link_level`
-    reads it from a :class:`~ai_assistant.core.types.Link`. The store records lowerings
-    and judges who may make and withdraw one; it holds no declaration of a kind.
+    reads it from a :class:`~ai_assistant.core.types.Link`. A lowering stands until its
+    maker withdraws it, whatever a later build declares as its kind's most.
 
     **Each member that writes does so in one atomic step**, observing the store,
     deciding and writing against every other member, across processes as well as
-    coroutines; a refused write writes nothing. **Every read returns a detached
-    snapshot**: the exchanged types are frozen pydantic models.
+    coroutines; a refused or unchanged write writes nothing. **Every read returns a
+    detached snapshot**: the exchanged types are frozen pydantic models.
 
     Every member raises :class:`~ai_assistant.core.errors.IdentityStoreError` for a store
     fault. A malformed argument is a ``ValueError``, raised before anything is read; a
@@ -14461,8 +14464,10 @@ class IdentityStore(Protocol):
     async def identity(self, person_id: str) -> Identity | None:
         """Read one identity, with every link tied to it and every lowering of each.
 
-        How a person's links are listed (#3642): in the order made, each with its
-        lowerings in the order made, withdrawn ones included.
+        How a person's links are listed (#3642): in the order made, ended ones included,
+        each with its lowerings in the order made, withdrawn ones included;
+        :attr:`~ai_assistant.core.types.Identity.standing_links` and
+        :attr:`~ai_assistant.core.types.Link.standing_lowerings` read the standing ones.
 
         Args:
             person_id: The identity, by id.
@@ -14477,7 +14482,7 @@ class IdentityStore(Protocol):
         ...
 
     async def find_link(self, account: Account) -> Link | None:
-        """Find the link ``account`` is tied to, where one is (ADR-0366 §4:1).
+        """Find the standing link ``account`` is tied to, where one is (ADR-0366 §4:1).
 
         The account is matched exactly: its kind and its identifier, each as given.
 
@@ -14485,7 +14490,8 @@ class IdentityStore(Protocol):
             account: The account.
 
         Returns:
-            Its link, with its lowerings; ``None`` where no link ties it.
+            Its standing link, with its lowerings; ``None`` where no standing link ties
+            it, an ended one included.
 
         Raises:
             ValueError: If ``account`` is not a valid ``Account``.
@@ -14494,20 +14500,23 @@ class IdentityStore(Protocol):
         ...
 
     async def link(self, person_id: str, account: Account, *, act: LinkAct) -> LinkWrite:
-        """Tie ``account`` to the identity ``person_id`` names, by ``act`` (ADR-0366 §3:1).
+        """Tie ``account`` to the identity ``person_id`` names, from ``act`` (ADR-0366 §3:1).
 
-        The link is made at the store's clock's reading, with no lowering.
+        The caller records a link from an owner's act that names the account as the
+        owner's, at the moment that act is made. The link is made at the store's clock's
+        reading, standing, with no lowering.
 
         Args:
             person_id: The identity to tie it to.
             account: The account.
-            act: Who made it, and how: the person whose own act it is (§3:1).
+            act: The act it is recorded from: whose, and which.
 
         Returns:
-            ``written`` with the new link's id; ``unchanged`` with the link's id where
-            the account is already tied to that identity; or ``refused`` with
+            ``written`` with the new link's id; ``unchanged`` with the standing link's
+            id where the account is already tied to that identity; or ``refused`` with
             ``unknown_person`` where the store holds no identity ``person_id`` or
-            ``act.by`` names, or ``already_linked`` where another identity holds it.
+            ``act.by`` names, or ``already_linked`` where a standing link ties it to
+            another identity.
 
         Raises:
             ValueError: If ``person_id`` is not a non-blank ``str``, or ``account`` or
@@ -14516,11 +14525,33 @@ class IdentityStore(Protocol):
         """
         ...
 
-    async def lower(self, link_id: str, level: Sureness, *, by: str) -> LinkWrite:
-        """Lower a link's level to ``level``, by ``by``'s act (ADR-0366 §5:5).
+    async def end_link(self, link_id: str) -> LinkWrite:
+        """End a link because the act it was recorded from no longer stands.
 
-        The lowering stands until its maker withdraws it. A level at or above the link's
-        kind's most is recorded as made and lowers nothing while it stands (§5:3).
+        Called by whoever follows that act, at the moment it stops standing, such as a
+        device's enrolment revoked; never as a person's act to undo a link, which no
+        decision yet provides (ADR-0366 §3). The link is kept, ended at the store's
+        clock's reading, with its lowerings, and ties nothing from then on.
+
+        Args:
+            link_id: The link.
+
+        Returns:
+            ``written``; ``unchanged`` where it is already ended; or ``refused`` with
+            ``unknown_record`` where no link is held under ``link_id``.
+
+        Raises:
+            ValueError: If ``link_id`` is not a non-blank ``str``.
+            IdentityStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def lower(self, link_id: str, level: Sureness, *, by: str) -> LinkWrite:
+        """Lower a standing link's level to ``level``, by ``by``'s act (ADR-0366 §5:5).
+
+        The lowering stands until its maker withdraws it. The outcome is decided in this
+        order, writing nothing but in the last: ``unknown_record``, ``unknown_person``,
+        ``not_allowed``, ``unchanged``, ``not_a_lowering``, and then ``written``.
 
         Args:
             link_id: The link.
@@ -14528,10 +14559,14 @@ class IdentityStore(Protocol):
             by: The person making it: the owner, or the person the link identifies.
 
         Returns:
-            ``written`` with the lowering's id; or ``refused`` with ``unknown_record``
-            where no link is held under ``link_id``, ``unknown_person`` where the store
-            holds no identity ``by``, or ``not_allowed`` where ``by`` is neither the
-            owner nor the person the link identifies.
+            ``refused`` with ``unknown_record`` where no standing link is held under
+            ``link_id``, ``unknown_person`` where the store holds no identity ``by``,
+            or ``not_allowed`` where ``by`` is neither the owner nor the person the link
+            identifies; ``unchanged`` with that lowering's id where a lowering ``by``
+            made at ``level`` already stands on the link, so a repeated call makes no
+            second; ``refused`` with ``not_a_lowering`` where ``level`` is not below the
+            most the link's kind declares (§5:2); and otherwise ``written`` with the new
+            lowering's id.
 
         Raises:
             ValueError: If ``link_id`` or ``by`` is not a non-blank ``str``, or

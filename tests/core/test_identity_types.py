@@ -34,7 +34,7 @@ from ai_assistant.core.types import (
 )
 
 _AT: Final = datetime(2026, 11, 23, 9, 0, tzinfo=UTC)
-_ACT: Final = LinkAct(how=LinkActHow.OWN_ACT, by=OWNER_PERSON_ID)
+_ACT: Final = LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID)
 
 
 def _lowering(level: Sureness, *, withdrawn: bool = False, number: int = 1) -> Lowering:
@@ -193,11 +193,12 @@ def test_a_write_names_its_refusal_exactly_when_it_was_refused() -> None:
 
 
 def test_the_closed_enumerations_name_what_they_name() -> None:
-    assert [one.value for one in LinkActHow] == ["configured", "own_act"]
+    assert [one.value for one in LinkActHow] == ["configured", "device"]
     assert [one.value for one in LinkWriteKind] == ["written", "unchanged", "refused"]
     assert [one.value for one in LinkRefusal] == [
         "unknown_person",
         "unknown_record",
         "already_linked",
         "not_allowed",
+        "not_a_lowering",
     ]

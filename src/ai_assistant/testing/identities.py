@@ -8,13 +8,15 @@ and follows the contract's every rule, so a consumer's test sees what the store 
 **It holds the owner from the start** (§2:5): built, it holds the one identity
 :data:`~ai_assistant.core.types.OWNER_PERSON_ID`, created at its clock's first reading,
 and links each configured account to it by the owner's ``configured`` act, in the order
-given, as the store does when it opens.
+given, as the store does when it opens. :meth:`FakeIdentityStore.reopen` follows a new
+configuration as the store does when it is opened again: it ends each configured link
+whose account is no longer named, and links each one newly named.
 
 **It mints each record's id once**: an id ``new_id`` mints that a link or a lowering the
 store holds already carries is a store fault, raised before anything changes.
 
-**Two things only a test can ask of it.** :meth:`FakeIdentityStore.fail_next` makes the
-next member called raise :class:`~ai_assistant.core.errors.IdentityStoreError` before it
+**What only a test can ask of it.** :meth:`FakeIdentityStore.fail_next` makes the next
+member called raise :class:`~ai_assistant.core.errors.IdentityStoreError` before it
 reads or writes anything, as a store fault would. :meth:`FakeIdentityStore.hold_identity`
 gives it a second identity, which no member of the contract adds before a later decision
 provides for one (§1:3, §2:4), so that a test can reach the rules that name someone other
@@ -28,10 +30,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from itertools import count
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING, Final, final
 
 from pydantic import BaseModel, ValidationError
 
+from ai_assistant.core.channel_validation import most_sureness
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import IdentityStoreError
 from ai_assistant.core.types import (
@@ -55,6 +58,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 __all__ = ["FakeIdentityStore"]
+
+#: The act every configured account is linked by: the owner's own configuration.
+_CONFIGURED: Final = LinkAct(how=LinkActHow.CONFIGURED, by=OWNER_PERSON_ID)
 
 
 def _utcnow() -> datetime:
@@ -101,6 +107,10 @@ def _level(value: object) -> Sureness:
     return value
 
 
+def _configured(configured: Sequence[Account]) -> tuple[Account, ...]:
+    return tuple(_validated(one, Account, name="a configured account") for one in configured)
+
+
 @final
 class FakeIdentityStore:
     """An in-memory identity store holding the owner (ADR-0366 §2:5, §3, §5:5)."""
@@ -128,7 +138,7 @@ class FakeIdentityStore:
             IdentityStoreError: If a clock reading is not an aware instant, or an id is
                 minted twice, as the store's opening would fail.
         """
-        accounts = [_validated(one, Account, name="a configured account") for one in configured]
+        accounts = _configured(configured)
         # ADR-0026 §2: every reading aware and converted to UTC, checked where it is read.
         self._clock = checked_clock(now, owner="FakeIdentityStore")
         numbers: dict[str, count[int]] = {}
@@ -136,10 +146,7 @@ class FakeIdentityStore:
         self._identities: dict[str, datetime] = {OWNER_PERSON_ID: self._now()}
         self._links: dict[str, Link] = {}
         self._fail = False
-        act = LinkAct(how=LinkActHow.CONFIGURED, by=OWNER_PERSON_ID)
-        for account in accounts:
-            if self._held_link(account) is None:
-                self._add_link(OWNER_PERSON_ID, account, act)
+        self._follow(accounts)
 
     def _now(self) -> datetime:
         """One reading of the clock, taken before the write it dates changes anything.
@@ -174,6 +181,37 @@ class FakeIdentityStore:
         if person not in self._identities:
             self._identities[person] = self._now()
 
+    def reopen(self, *, configured: Sequence[Account] = ()) -> None:
+        """Follow ``configured`` as the store does when it is opened again, in one step.
+
+        Args:
+            configured: The accounts the owner's configuration names now.
+
+        Raises:
+            ValueError: If an entry of ``configured`` is not a valid ``Account``.
+            IdentityStoreError: If a clock reading is not an aware instant, or an id is
+                minted twice; nothing is changed.
+        """
+        accounts = _configured(configured)
+        before = dict(self._links)
+        try:
+            self._follow(accounts)
+        except BaseException:
+            self._links = before
+            raise
+
+    def _follow(self, accounts: tuple[Account, ...]) -> None:
+        """End the configured links ``accounts`` no longer names; link those no link holds."""
+        at: datetime | None = None
+        for link in list(self._links.values()):
+            ended = link.act.how is LinkActHow.CONFIGURED and link.account not in accounts
+            if link.standing and ended:
+                at = at or self._now()
+                self._links[link.id] = link.model_copy(update={"ended_at": at})
+        for account in accounts:
+            if self._standing_link(account) is None:
+                self._add_link(OWNER_PERSON_ID, account, _CONFIGURED)
+
     def _fault(self) -> None:
         if self._fail:
             self._fail = False
@@ -196,8 +234,11 @@ class FakeIdentityStore:
             raise IdentityStoreError(msg)
         return minted
 
-    def _held_link(self, account: Account) -> Link | None:
-        return next((one for one in self._links.values() if one.account == account), None)
+    def _standing_link(self, account: Account) -> Link | None:
+        return next(
+            (one for one in self._links.values() if one.standing and one.account == account),
+            None,
+        )
 
     def _add_link(self, person_id: str, account: Account, act: LinkAct) -> str:
         # Minted and read before anything held changes, so a fault changes nothing.
@@ -226,10 +267,10 @@ class FakeIdentityStore:
         return Identity(id=person, created_at=created, links=links)
 
     async def find_link(self, account: Account) -> Link | None:
-        """Find the link ``account`` is tied to (ADR-0366 §4:1)."""
+        """Find the standing link ``account`` is tied to (ADR-0366 §4:1)."""
         checked = _validated(account, Account, name="account")
         self._fault()
-        return self._held_link(checked)
+        return self._standing_link(checked)
 
     async def export(self) -> IdentityExport:
         """Every record held (ADR-0004 §6)."""
@@ -248,14 +289,14 @@ class FakeIdentityStore:
     # --- writes -----------------------------------------------------------------------
 
     async def link(self, person_id: str, account: Account, *, act: LinkAct) -> LinkWrite:
-        """Tie ``account`` to ``person_id``'s identity by ``act`` (ADR-0366 §3:1)."""
+        """Tie ``account`` to ``person_id``'s identity from ``act`` (ADR-0366 §3:1)."""
         person = _checked(person_id, name="person_id")
         checked = _validated(account, Account, name="account")
         made_by = _validated(act, LinkAct, name="act")
         self._fault()
         if person not in self._identities or made_by.by not in self._identities:
             return _refused(LinkRefusal.UNKNOWN_PERSON)
-        held = self._held_link(checked)
+        held = self._standing_link(checked)
         if held is not None:
             if held.person_id != person:
                 return _refused(LinkRefusal.ALREADY_LINKED)
@@ -264,19 +305,39 @@ class FakeIdentityStore:
             kind=LinkWriteKind.WRITTEN, record_id=self._add_link(person, checked, made_by)
         )
 
+    async def end_link(self, link_id: str) -> LinkWrite:
+        """End a link whose act no longer stands, keeping it (ADR-0366 §3)."""
+        held_id = _checked(link_id, name="link_id")
+        self._fault()
+        link = self._links.get(held_id)
+        if link is None:
+            return _refused(LinkRefusal.UNKNOWN_RECORD)
+        if not link.standing:
+            return LinkWrite(kind=LinkWriteKind.UNCHANGED, record_id=held_id)
+        self._links[held_id] = link.model_copy(update={"ended_at": self._now()})
+        return LinkWrite(kind=LinkWriteKind.WRITTEN, record_id=held_id)
+
     async def lower(self, link_id: str, level: Sureness, *, by: str) -> LinkWrite:
-        """Lower a link's level, by the owner or its person (ADR-0366 §5:5)."""
+        """Lower a standing link's level, by the owner or its person (ADR-0366 §5:5)."""
         held_id = _checked(link_id, name="link_id")
         lowered = _level(level)
         maker = _checked(by, name="by")
         self._fault()
         link = self._links.get(held_id)
-        if link is None:
+        if link is None or not link.standing:
             return _refused(LinkRefusal.UNKNOWN_RECORD)
         if maker not in self._identities:
             return _refused(LinkRefusal.UNKNOWN_PERSON)
         if maker not in {OWNER_PERSON_ID, link.person_id}:
             return _refused(LinkRefusal.NOT_ALLOWED)
+        same = next(
+            (one for one in link.standing_lowerings if (one.by, one.level) == (maker, lowered)),
+            None,
+        )
+        if same is not None:
+            return LinkWrite(kind=LinkWriteKind.UNCHANGED, record_id=same.id)
+        if lowered >= most_sureness(link.account.kind):
+            return _refused(LinkRefusal.NOT_A_LOWERING)
         lowering = Lowering(id=self._mint("lowering"), level=lowered, by=maker, made_at=self._now())
         self._links[held_id] = link.model_copy(update={"lowerings": (*link.lowerings, lowering)})
         return LinkWrite(kind=LinkWriteKind.WRITTEN, record_id=lowering.id)

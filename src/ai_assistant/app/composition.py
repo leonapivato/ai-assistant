@@ -705,9 +705,11 @@ def seeded_time_zone(settings: Settings) -> str | None:
 def configured_accounts(settings: Settings) -> tuple[Account, ...]:
     """The owner's accounts this hub's configuration names, to be linked at start.
 
-    #3642's "already linked": each is tied to the owner's identity by the owner's
-    ``configured`` act when the identity store opens, wherever no link holds it yet
-    (ADR-0366 §3:3). Read from what this hub knows when it starts, with no store open:
+    #3642's "already linked", followed at every start: when the identity store opens,
+    each is tied to the owner's identity by the owner's ``configured`` act wherever no
+    standing link holds it (ADR-0366 §3:3), and each standing ``configured`` link whose
+    account is no longer here is ended, since the setting it was recorded from no longer
+    names it. Read from what this hub knows when it starts, with no store open:
 
     * **the hub's own machine**, :data:`~ai_assistant.core.types.HUB_DEVICE_ID`, which
       writes the hub chat as the owner from every adapter on it (ADR-0298 §3:1);
@@ -717,9 +719,10 @@ def configured_accounts(settings: Settings) -> tuple[Account, ...]:
     * **the line's account**, ``Settings.telegram_user_id``, the owner's own Telegram
       account (ADR-0323 §3), where the line is configured.
 
-    A device enrolled at the hub, or named by a gateway whose configuration this hub
-    does not share, is not here: who has been admitted is the device record's, which
-    this layer cannot read before the hub starts.
+    A device enrolled at the hub, or registered by a gateway, is not here: who has been
+    admitted is the device record's, in ``service``, which this layer may not import, and
+    the hub chat's devices are the conversation store's, read only asynchronously. Those
+    links are the lane's that reads the device record, recorded with the ``device`` act.
 
     Args:
         settings: The loaded settings.
@@ -1316,9 +1319,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         if person_model is not None:
             opened.append(person_model.close)
         # **ADR-0366 §11's identity store, on its own file, on every hub.** It holds the
-        # owner's identity (§2:5) and links the owner's configured accounts to it as it
-        # opens, so they are present as links from the first start after the upgrade
-        # (#3642). Nothing reads it yet: who sent an input is still decided by each
+        # owner's identity (§2:5) and follows the owner's configured accounts as it
+        # opens: each is linked, so they are present as links from the first start after
+        # the upgrade (#3642), and a configured link whose setting no longer names its
+        # account is ended. Nothing reads it yet: who sent an input is still decided by each
         # kind's declarations, until the lane that switches it. It reads no other store
         # and no store reads it.
         identities = SqliteIdentityStore(
