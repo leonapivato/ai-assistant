@@ -41,10 +41,11 @@ no link. Nothing reads
 the sender yet (ADR-0368 §1:3). Once lane L4 of #3643 makes the link decide, that answer would
 make every message of the owner's an unidentified sender's while one small file cannot be read.
 
-**The hub's own machine.** ADR-0298 §3:1 makes it the device `hub`; it holds every role only on
-the local socket with no `acting_for`, or as a caller inside the hub's own process (§3:2), and no
-gateway may name it (§3:3). The hub chat's transcript records the device each of the user's
-messages came from (ADR-0293 §5:2). The identity store links the account (`conversation`, `hub`)
+**The hub's own machine.** ADR-0298 §3:1 makes it the device `hub`, holding every role on the
+local socket with no `acting_for` or as a caller inside the hub's own process (§3:2). A browser on
+a gateway's loopback listener there is the same device, with its roles (ADR-0296 §1:8; ADR-0298
+§2:9, §8:2), and no gateway may name `hub` (ADR-0298 §3:3). The hub chat's transcript records
+the device each of the user's messages came from (ADR-0293 §5:2). The identity store links the account (`conversation`, `hub`)
 to the owner from the hub's configuration at every start (`configured_accounts` in
 `src/ai_assistant/app/composition.py`, under ADR-0373 §6:2), no member undoes a link (ADR-0373
 §6:1), and the owner may lower it like any link (ADR-0366 §5:5, ADR-0373 §2:3). The hub's own
@@ -98,9 +99,10 @@ declaration too, which L4 removes as the deciding rule.
 ### 3. The hub's own machine
 
 > **Normative.** For this decision, a message is written on the hub's own machine where the hub
-> chat's transcript records it as coming from the device `hub` (ADR-0293 §5:2, ADR-0298 §3:1).
-> No other message is: not one a browser on that machine wrote through a gateway, not one from
-> the web door's hosted device, and none of any kind but the hub chat.
+> chat's transcript records it as coming from the device `hub` (ADR-0293 §5:2, ADR-0298 §3:1),
+> one a browser wrote through a gateway's loopback listener on that machine included (ADR-0296
+> §1:8, ADR-0298 §2:9). No other message is: not one from a browser a gateway names on its remote
+> listener, not one from the web door's hosted device, and none of any kind but the hub chat.
 
 > **Normative.** While the links cannot be read for it, a message written on the hub's own
 > machine is from the owner's identity (ADR-0366 §2:5), its author established as the owner, at
@@ -118,8 +120,9 @@ the wire server set for the request that wrote the message, never an argument th
 (ADR-0298 §2:1, §2:2), and no gateway may name `hub` (§3:3). So it is decided by code from the
 account the message arrived by, as ADR-0366 §4:1 has it, and the person it names is the one the
 configured link names whenever the store can be read: the exception supplies what the fault hides,
-from the hub's configuration rather than the store. Only the owner reaches the local socket
-(ADR-0084 §1), and a request there already holds every role (ADR-0298 §3:2). On a hosted hub, what
+from the hub's configuration rather than the store. Whoever writes from that machine, at the
+command line or in a browser on a gateway's loopback listener, already holds every role there
+(ADR-0296 §1:8, §1:9; ADR-0298 §3:2, §8:2). On a hosted hub, what
 keeps the operator who holds the box from acting as its person stays the operator's terms
 (ADR-0327 §13); the configured link already makes the hub's own machine the owner's there.
 
@@ -133,8 +136,8 @@ keeps the operator who holds the box from acting as its person stays the operato
 > own machine: §3:2's level stands, and nothing a lowering set is remembered from an earlier read.
 
 A lowering of that link restrains no one the exception lets in: whoever writes on the hub's own
-machine holds every role at the engine surface (ADR-0298 §3:2) and can withdraw any lowering from
-there (ADR-0373 §5:1), which no lowering changes (ADR-0373 §4:5). It is the owner's choice of how
+machine holds every role there (ADR-0298 §3:2, §8:2), and its command line withdraws any lowering
+whatever any level is (ADR-0373 §4:5, §5:1). It is the owner's choice of how
 the hub reads that machine's chat, honoured whenever the store can be read, and the command line
 is the way back from a lowering to none.
 
@@ -177,7 +180,9 @@ Named so the build is scoped, and made by none of this decision.
 - **`InputSender`** (`core/types.py`) gains one field: whether the sender was set because the
   links could not be read (§5:1), kept by `canonical_senders` as §5:2 rules. It is stored with the
   episode and carried wherever `InputSender` is on the wire, so it is a stored and a wire-carried
-  shape change, under ADR-0326 and ADR-0124 §9:2. No Protocol changes.
+  shape change, under ADR-0326 and ADR-0124 §9:2. A sender recorded before the field exists
+  reads as one whose links were read: nothing read a sender then (ADR-0368 §1:3), and the log is
+  the only record of a fault from that time. No Protocol changes.
 
 ### 8. What this decision leaves to others
 
@@ -197,7 +202,8 @@ Each is this decision's, not an owner ruling:
 - **§2:1**, what "cannot be read" covers: any failed read and an unwired store, but not an account
   no link holds or a message naming no account.
 - **§2:3's last limb**, that no link read before stands in for one, so no last answer is kept.
-- **§3:1**, the hub's own machine as the device `hub` on the hub chat alone.
+- **§3:1**, the hub's own machine as the device `hub` on the hub chat alone, a browser on a
+  gateway's loopback listener there included, as ADR-0298 §2:9 names it.
 - **§3:2's level**, the hub chat's declared most, the level its link has with no lowering.
 - **§3:3**, that the exception holds only while the links cannot be read. The owner's words were
   "always counts as you", put to them about a fault; while the store can be read the link already
