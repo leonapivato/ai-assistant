@@ -1,6 +1,6 @@
 # 372. A place has a start level that what is said there carries, and a work re-runs once without what is narrower than its story
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-22
 - Scope: an amending decision on
   [ADR-0370](0370-every-work-carries-a-mark-of-who-may-see-all-it-has-seen-which-starts-at-its-places-audience-and-only-shrinks-and-a-send-reaching-anyone-outside-it-needs-a-yes.md)
