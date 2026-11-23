@@ -5,13 +5,13 @@ and the memory store, with no model call. This module decides *what* the block h
 understanding and planning each render it into their own data (§7:6), so neither phase
 module reads a store for it.
 
-**Whose activation it is** (§2:2-§2:4) is read from the recorded trigger and never from
-its content (ADR-0292 §5:8): the owner's where its place's kind establishes the user as
-its author (ADR-0292 §5:4, the line's forwards included, since a forward is its
-forwarder's input), or where it was pushed by a source on a channel the owner connected
-(ADR-0292 §6:3); no person's otherwise. A reminder or timer the user set is the owner's
-too (§2:2), and no kind of one stands on this tree yet, so the register names none: the
-kind that brings one adds it here.
+**Whose activation it is** (§2:2-§2:4) is read from the work's three facts, never from
+its content (ADR-0292 §5:8) nor from the channel type it came by: a person's where it is
+for that person, has no unidentified sender and carries the authority of no more than
+one person (ADR-0368 §9:5, :func:`~ai_assistant.orchestration.work_facts.persons_work`),
+which the caller reads and hands :meth:`PersonBlocks.assemble`; no person's otherwise,
+and then no block is assembled (§2:3). A forward is its forwarder's input, so its work
+is its forwarder's (§2:4).
 
 **What the block holds** (§6, §7:1, §7:9). The person's five fields; the kept-in-mind
 slot — their pinned memories, oldest pin first, then the memories marked as how they
@@ -54,11 +54,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 
-from ai_assistant.core.channel_validation import APPROVALS, TASK_SCHEDULER, establishes_the_user
 from ai_assistant.core.errors import MemoryStoreError, PersonModelStoreError
 from ai_assistant.core.types import (
-    OWNER_PERSON_ID,
-    ChannelIdentity,
     Memory,
     MemoryStatus,
     PersonModelWriteKind,
@@ -80,7 +77,6 @@ if TYPE_CHECKING:
         Pin,
         Profile,
         ProfileField,
-        RecordedChannelTrigger,
         StyleMark,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
@@ -95,7 +91,6 @@ __all__ = [
     "Pinned",
     "ShownSuggestion",
     "Unpinned",
-    "activation_person",
     "person_zone",
     "still_held",
 ]
@@ -110,50 +105,6 @@ KEPT_IN_MIND_CHARS: Final = 1600
 #: ADR-0338 §7:3's count: how many pending suggestions planning is shown at most, newest
 #: first. A composition-root constant, handed to :class:`PersonBlocks`.
 PLANNING_SUGGESTIONS: Final = 5
-
-#: The channel kinds whose input is pushed by a source on a channel the owner connected
-#: (ADR-0338 §2:2's third limb, ADR-0292 §6:3): an informational event, which a source
-#: pushes on a channel that exists because it is built in or the user connected it.
-_PUSHED_BY_A_CONNECTED_SOURCE: Final = frozenset({"informational_event"})
-
-#: ADR-0350 §6:4, the addition to ADR-0338 §2:2: an activation the Task Scheduler starts is
-#: for the person its task is for, and a task is for the person its spawner was (§3:5).
-#: Every activation that is a person's is the owner's (the hub serves one person), so a
-#: task's activation is the owner's; a household's people would need the trigger to name
-#: its task's person (ADR-0350 §14, #691). An approval's activation is for its request's
-#: person (ADR-0361 §6:1), today the owner, by the same reading.
-_FOR_ITS_TASKS_PERSON: Final = frozenset({TASK_SCHEDULER, APPROVALS})
-
-
-def activation_person(trigger: RecordedChannelTrigger | None) -> str | None:
-    """The person an activation is for, from its recorded trigger (ADR-0338 §2:2-§2:4).
-
-    Args:
-        trigger: The activation's recorded trigger, or ``None`` for a pass no channel
-            admitted.
-
-    Returns:
-        :data:`~ai_assistant.core.types.OWNER_PERSON_ID` where the activation is the
-        owner's, and ``None`` where it is no person's.
-    """
-    if trigger is None:
-        return None
-    channel = trigger.channel
-    target = trigger.target
-    if channel is not None:
-        kind = channel.channel_type
-    elif isinstance(target, ChannelIdentity):
-        kind = target.channel_type
-    else:
-        # A new conversation: a ``conversation`` channel not yet allocated (ADR-0284 §2:2).
-        kind = "conversation"
-    if (
-        establishes_the_user(kind)
-        or kind in _PUSHED_BY_A_CONNECTED_SOURCE
-        or kind in _FOR_ITS_TASKS_PERSON
-    ):
-        return OWNER_PERSON_ID
-    return None
 
 
 def person_zone(profile: Profile | None, *, stage: str) -> ZoneInfo | None:
@@ -465,7 +416,8 @@ class PersonBlocks:
         """The block for ``person_id``, or ``None`` where there is none to give.
 
         Args:
-            person_id: The activation's person, as :func:`activation_person` read it;
+            person_id: The activation's person, as
+                :func:`~ai_assistant.orchestration.work_facts.persons_work` read it;
                 ``None`` for an activation that is no person's, which is given no block
                 (§2:3).
             supply: The pass's audience posture, whose predicate the slot's memories

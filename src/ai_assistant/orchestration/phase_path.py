@@ -310,7 +310,6 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
     parties_are_outside,
-    parties_are_persons_own,
 )
 from ai_assistant.orchestration.acting import (
     REFUSED_BEFORE_IT_RAN,
@@ -394,7 +393,7 @@ from ai_assistant.orchestration.message_tools import (
     text_arguments,
 )
 from ai_assistant.orchestration.outside_content import joined_parties, rests_on_outside_content
-from ai_assistant.orchestration.person_block import activation_person, still_held
+from ai_assistant.orchestration.person_block import still_held
 from ai_assistant.orchestration.person_calls import (
     PERSON_MODEL_CALLS,
     PERSON_MODEL_CAPABILITIES,
@@ -461,6 +460,7 @@ from ai_assistant.orchestration.task_scheduler import (
     spawning,
 )
 from ai_assistant.orchestration.understanding import WrittenBy, fetch_held
+from ai_assistant.orchestration.work_facts import persons_authority, persons_work
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -2037,7 +2037,8 @@ class PhaseWorking:
         owner_records: bool,
         round_limit: int,
         labels: Sequence[PlanningLabel] = (),
-        users_authority: bool = False,
+        own_input: bool = False,
+        activation: ActivationState | None = None,
         target: PlaceTarget | None = None,
     ) -> None:
         """Start an activation's working set, before its first round.
@@ -2053,14 +2054,13 @@ class PhaseWorking:
                 this pass (ADR-0307 §6:4).
             round_limit: The most rounds the activation runs (ADR-0307 §8:4).
             labels: The labels the episode already records.
-            users_authority: Whether the input carries the user's authority (ADR-0321
-                §3:3, ADR-0292 §5:5), read as ADR-0323 §4:7 restates it for every
-                channel and ADR-0351 §6:1 completes it: only an input whose author its
-                channel's kind establishes as the user, sent as an instruction, whose
-                parties are the user alone, does — the user's message in the hub chat,
-                or on the Telegram line from their own account, not forwarding.
-                ``False``, the default, wherever it cannot be established. A relay mark
-                takes it away for the rest of the activation (ADR-0351 §6:5).
+            own_input: Whether every message the input took in is its sender's own,
+                written by a person and none a forward (ADR-0321 §3:3, ADR-0323 §4:6):
+                where it is not, the input carries no one's authority whatever its work's
+                facts say. ``False``, the default, for an input no person sent.
+            activation: The activation's state, whose three facts, as they stand, say
+                whose authority the work carries (ADR-0368 §9:1, :attr:`authority`);
+                ``None`` where there is none, and then it carries no one's.
             target: The place a message is written into and its writer, where it is
                 not one of the hub chat's conversations, as the Telegram line's chat
                 (ADR-0323 §6:1). Never given beside ``conversation_id``.
@@ -2080,7 +2080,8 @@ class PhaseWorking:
         self.conversation_id = conversation_id
         self.trigger = trigger
         self.owner_records = owner_records
-        self._users_authority = users_authority
+        self._own_input = own_input
+        self._activation = activation
         # ADR-0351 §5:9, §5:14: whether the latest understanding version marks the
         # trigger's input relayed, and whether an input an absorption or a take appended
         # is; each, once set, holds for the rest of the activation.
@@ -2351,14 +2352,21 @@ class PhaseWorking:
         return self.trigger_relayed or self.joined_relayed
 
     @property
-    def users_authority(self) -> bool:
-        """Whether the input carries the user's authority (ADR-0351 §6:1, §6:5, §8:5).
+    def authority(self) -> str | None:
+        """The person whose authority the work carries, where it carries one's.
 
-        What its author and its parties give it, and only while no input the activation
-        holds is relayed: an activation holding a relayed input acts with no authority
-        from the version, or the append, that brings the relay mark.
+        ADR-0368 §9:1: what every earlier decision's "the input carries the user's
+        authority" reads (ADR-0292 §5:5, ADR-0351 §6:1, §6:5, §8:5), read from the work's
+        three facts as they stand, never from the channel type it came by: the one
+        identified person whose authority it carries, and only while every message it
+        took in is its sender's own and no input the activation holds is relayed, so an
+        activation holding a relayed input acts with no authority from the version, or
+        the append, that brings the relay mark. ``None`` where it carries no person's.
         """
-        return self._users_authority and not self.relayed
+        if not self._own_input:
+            return None
+        state = self._activation
+        return persons_authority(None if state is None else state.work_facts, relayed=self.relayed)
 
     @property
     def outside_trigger(self) -> bool:
@@ -4004,10 +4012,9 @@ class PhasePath:
         """Start one conversation turn's working set, before its first stage.
 
         A turn is the hub chat's: the chat's reader brings its input in. Its input
-        carries the user's authority (ADR-0321 §3:3, ADR-0292 §5:5) only where the
-        trigger's parties are the user alone (ADR-0351 §6:1) and every message taken in
-        is the user's, the author a conversation establishes; anything not established
-        is not the user's.
+        carries a person's authority (ADR-0321 §3:3, ADR-0292 §5:5) only where its work's
+        facts carry that person's (ADR-0368 §9:1), by the links its devices hold, and
+        every message taken in is a person's (:attr:`PhaseWorking.authority`).
         A yes it carries is given when its latest message was written (§4:6).
 
         Args:
@@ -4032,12 +4039,8 @@ class PhasePath:
             owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
-            users_authority=(
-                trigger is not None
-                and parties_are_persons_own(trigger.parties)
-                and bool(taken)
-                and all(one.author is MessageAuthor.USER for one in taken)
-            ),
+            own_input=bool(taken) and all(one.author is MessageAuthor.USER for one in taken),
+            activation=active_state(),
         )
         # ADR-0358 §9:2: the chat's window is read from its transcript, so its older
         # history is the transcript before the oldest recent message the window showed.
@@ -4061,15 +4064,15 @@ class PhasePath:
     ) -> PhaseWorking:
         """Start one activation's working set for a line's chat, before its first stage.
 
-        A line is a place other than the hub chat's conversations whose kind
-        establishes the user, as the Telegram line's chat (ADR-0323 §2): its reader
+        A line is a place other than the hub chat's conversations that a person sends
+        on, as the Telegram line's chat (ADR-0323 §2): its reader
         brings the input in with the window its kind declares (§10), and its messages
         go into the input's place through ``target``'s writer alone (§6:1). Its input
-        carries the user's authority (ADR-0321 §3:3 as ADR-0323 §4:7 restates it) only
-        where the trigger's parties are the user alone (ADR-0351 §6:1, §6:3) and **every
-        message taken in is the user's, established, and none is a forward** (§4:6): a
-        forward's party is its original sender, claimed (ADR-0351 §2:7), and an input
-        taking one in is an outside trigger (§5:3).
+        carries a person's authority (ADR-0321 §3:3 as ADR-0323 §4:7 restates it) only
+        where its work's facts carry that person's (ADR-0368 §9:1), by the link the
+        Telegram account holds, and **every message taken in is a person's and none is a
+        forward** (§4:6): a forward's party is its original sender, claimed (ADR-0351
+        §2:7), and an input taking one in is an outside trigger (§5:3).
 
         Args:
             activation_id: The activation.
@@ -4094,15 +4097,12 @@ class PhasePath:
             owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
-            users_authority=(
-                trigger is not None
-                and parties_are_persons_own(trigger.parties)
-                and bool(taken)
-                and all(
-                    one.author is MessageAuthor.USER and one.position not in window.forwarded
-                    for one in taken
-                )
+            own_input=bool(taken)
+            and all(
+                one.author is MessageAuthor.USER and one.position not in window.forwarded
+                for one in taken
             ),
+            activation=active_state(),
             target=target,
         )
         # ADR-0358 §9:2, ADR-0323 §10:1: a line's window is its recent episodes on the
@@ -4155,7 +4155,6 @@ class PhasePath:
             owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
-            users_authority=False,
         )
 
     def begin_task(
@@ -4196,7 +4195,6 @@ class PhasePath:
             owner_records=True,
             round_limit=self._round_limit,
             labels=labels,
-            users_authority=False,
         )
 
     def begin_approval(
@@ -4235,7 +4233,6 @@ class PhasePath:
             owner_records=True,
             round_limit=self._round_limit,
             labels=labels,
-            users_authority=False,
         )
 
     async def written(
@@ -4543,7 +4540,7 @@ class PhasePath:
             offered,
             person=person is not None,
             scheduling=working.scheduling is not None and working.scheduling.spawns,
-            persons=state is not None and activation_person(state.trigger) is not None,
+            persons=state is not None and persons_work(state.work_facts) is not None,
             running=self._running_calls(state, working, offers=bool(offers)),
             standing=state is not None
             and state.standing is not None
@@ -4581,7 +4578,7 @@ class PhasePath:
             not_here=not_here,
             # ADR-0356 §3:2, ADR-0353 §4, §6, §7: whose stimulus it is, its inputs as
             # recorded, and the running work its concurrent stimuli show.
-            person_id=None if state is None else activation_person(state.trigger),
+            person_id=None if state is None else persons_work(state.work_facts),
             # ADR-0364 §3:9: the trigger as the lifecycle resolved it, so a hub chat's
             # stimulus names the conversation it came from by its ``where``.
             trigger=working.trigger if state is None else state.trigger,
@@ -4703,7 +4700,7 @@ class PhasePath:
         blocks = self._person_blocks
         if blocks is None or state is None or state.person_block is None:
             return None
-        person_id = activation_person(state.trigger)
+        person_id = persons_work(state.work_facts)
         if person_id is None:
             return None
         try:
@@ -4915,7 +4912,7 @@ class PhasePath:
             # work, a scheduled task's included, which answers it as any offer.
             return frozenset({ANSWER_OFFER_CAPABILITY}) if offers else frozenset()
         names = {LOOK_UP_ACTIVATION_CAPABILITY}
-        if working.users_authority:
+        if working.authority is not None:
             names.add(STOP_ACTIVATION_CAPABILITY)
         if offers:
             names.add(ANSWER_OFFER_CAPABILITY)
@@ -5409,7 +5406,7 @@ class PhasePath:
             call_messages=call_messages,
             places=places,
             gone=gone,
-            person=None if state is None else activation_person(state.trigger),
+            person=None if state is None else persons_work(state.work_facts),
             tickets=frozenset(one.request_id for one in await self._held_tickets(state)),
             taken_places=() if places is not None else _taken_places(state, place),
             # ADR-0364 §9:3: a work that keeps no list may send a text into any connection
@@ -5793,7 +5790,7 @@ class PhasePath:
         latest = working.latest
         return MatterCaller(
             state=state,
-            users_authority=working.users_authority,
+            authority=working.authority,
             owner_records=working.owner_records,
             running=working.running_shown(),
             waiting=frozenset(state.waits_on) if latest.waiting else None,
@@ -5856,7 +5853,8 @@ class PhasePath:
         if self._approval_calls is None:
             return None
         state = active_state()
-        person = None if state is None else activation_person(state.trigger)
+        # ADR-0368 §9:5, ADR-0361 §2:5: only a person's work asks for a yes.
+        person = None if state is None else persons_work(state.work_facts)
         if person is None:
             return None
         requested = {
@@ -5929,7 +5927,7 @@ class PhasePath:
         return Spawner(
             activation_id=working.activation_id,
             person=scheduling.person,
-            users_authority=working.users_authority,
+            authority=working.authority,
             set_in=scheduling.set_in,
             places=tuple(one.place for one in scheduling.places),
             carried=() if task is None else tuple(place_of(one) for one in task.places),

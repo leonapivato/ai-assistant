@@ -257,7 +257,7 @@ def test_the_kind_is_declared_as_the_task_schedulers_is() -> None:
     assert APPROVALS_KIND.window.value == "none"
     assert APPROVALS_KIND.approval_giver is None
     assert APPROVALS_KIND.audience.value == "private"
-    assert not APPROVALS_KIND.establishes_the_user
+    assert not APPROVALS_KIND.sent_by_a_person
     assert APPROVALS_KIND.input_parties(THE_APPROVALS) == ((), ())
 
 

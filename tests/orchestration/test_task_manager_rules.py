@@ -125,7 +125,7 @@ def _spawner(**changes: object) -> Spawner:
     held: dict[str, object] = {
         "activation_id": activation(),
         "person": OWNER_PERSON_ID,
-        "users_authority": True,
+        "authority": OWNER_PERSON_ID,
         "set_in": CHAT,
         "places": (CHAT_PLACE,),
     }
@@ -374,9 +374,7 @@ async def test_a_rule_from_an_activation_without_the_persons_authority_is_refuse
     world = await _world()
 
     reason = _refused(
-        await _spawn(
-            world, _spawner(users_authority=False), rule={"repeats": "daily", "time": "20:00"}
-        )
+        await _spawn(world, _spawner(authority=None), rule={"repeats": "daily", "time": "20:00"})
     )
 
     assert "only a task the person asked for may repeat" in reason
@@ -606,7 +604,7 @@ async def _assistants_task(world: _World, *, when: DueAt | DueAfterTasks) -> Sch
 async def test_a_task_the_assistant_set_renders_in_the_persons_zone_everywhere() -> None:
     """§6:1, §10:4: its spawn's result, the list pull and the Task Manager's queries."""
     world = await _world()
-    spawned = _spawned(await _spawn(world, _spawner(users_authority=False), at="2026-10-24T08:00"))
+    spawned = _spawned(await _spawn(world, _spawner(authority=None), at="2026-10-24T08:00"))
     task = await _assistants_task(world, when=DueAt(at=datetime(2026, 10, 24, 12, 0, tzinfo=UTC)))
 
     with spawning(_spawner()):

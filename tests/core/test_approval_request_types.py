@@ -16,7 +16,7 @@ from typing import Any, Final
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.channel_validation import APPROVALS, declared_input, establishes_the_user
+from ai_assistant.core.channel_validation import APPROVALS, declared_input, sent_by_a_person
 from ai_assistant.core.types import (
     TAP_GIVERS,
     ActivationEffect,
@@ -421,7 +421,7 @@ def test_the_approvals_input_carries_no_ones_words_and_establishes_no_one() -> N
     parties, messages = declared_input(_APPROVALS)
 
     assert (parties, messages) == ((), ())
-    assert not establishes_the_user(APPROVALS)
+    assert not sent_by_a_person(APPROVALS)
     with pytest.raises(ValueError, match="mark"):
         declared_input(_APPROVALS, carries_outside_mark=True)
 

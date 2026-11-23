@@ -4,11 +4,12 @@ The observer holds the person-model store by injection (§9:8), beside what ADR-
 §15:1 names, and only where the composition root wires one: where
 ``Settings.person_model`` is off, it holds none, and nothing here runs (§11:2).
 
-**Whose episode it is** (§2:5) is read from the leaving episode's recorded trigger, by the
-rule understanding's and planning's person block reads an activation's by
-(:func:`~ai_assistant.orchestration.person_block.activation_person`), never from its
-content. An episode that is no person's is given no fields, and nothing is written to the
-person model for it.
+**Whose episode it is** (§2:5) is read from the leaving episode's three facts as they
+stand, by the rule understanding's and planning's person block reads an activation's by
+(ADR-0368 §9:5, :func:`~ai_assistant.orchestration.work_facts.persons_work`), never from
+its content nor from the channel type it came by; an episode from before the facts were
+recorded carries those its upgrade gave it. An episode that is no person's is given no
+fields, and nothing is written to the person model for it.
 
 **What both steps are given** (§7:4, §9:1): that person's five fields and nothing else of
 the person model, each as the person set it or as not set (§3:9), rendered by code into
@@ -50,7 +51,7 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportOrigin,
 )
-from ai_assistant.orchestration.person_block import activation_person
+from ai_assistant.orchestration.work_facts import persons_work
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -97,15 +98,15 @@ async def person_of(store: PersonModelStore, episode: EpisodicMemory) -> PersonF
         episode: The leaving episode, as stored.
 
     Returns:
-        The person's fields; ``None`` where the episode's recorded trigger makes it no
-        person's (§2:5), or the store holds no such person.
+        The person's fields; ``None`` where the episode's facts make it no person's
+        (§2:5), or the store holds no such person.
 
     Raises:
         PersonModelStoreError: If the store cannot be read: the attempt fails and is
             retried, so no step decides without the fields it is owed (§9:3).
     """
     processing = episode.processing_record
-    person_id = activation_person(None if processing is None else processing.trigger)
+    person_id = None if processing is None else persons_work(processing.facts_now)
     if person_id is None:
         return None
     model = await store.read(person_id)

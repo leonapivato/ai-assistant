@@ -47,11 +47,15 @@ and waits for the work it started; :meth:`Household.say_together` writes several
 one start wait (ADR-0332 §5:1), so they are one input of one work (ADR-0368 §4:5);
 :meth:`Household.post` writes one and waits for nothing.
 
-**What the hub recorded** is a :class:`Work`: the frozen episode, its trigger's senders,
-the sender each line message records, the facts the work started with and stands at,
-and the ``work_facts_recorded`` log entries that compare them with today's path
-(:func:`~ai_assistant.orchestration.work_facts.log_facts`), which still decides whom a
-work is for until the readers switch (ADR-0368 §1:3).
+**What the hub recorded, and what it did** is a :class:`Work`: the frozen episode, its
+trigger's senders, the sender each line message records, the facts the work started
+with and stands at, what every reader reads of them (:attr:`Work.reads`: whose work it is
+and whose authority it carries, ADR-0368 §9:1, §9:5), the ``work_facts_recorded`` log
+entries (:func:`~ai_assistant.orchestration.work_facts.log_facts`), the planning rounds
+the work ran, as the planner was asked them (:attr:`Work.rounds`: what each was shown,
+and what each call it proposed came back with), and the replies it wrote. A case hands
+:class:`Household` a ``planner`` to propose calls of its own; by default each work's first
+round sends one reply and its second ends it.
 
 **To add a scenario:** declare the people and accounts it names, say what each says,
 and assert on the :class:`Work` that comes back. **To add a kind of account:** a
@@ -79,7 +83,8 @@ from datetime import timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final, Self
 
-from phases_support import frozen, input_of, phases_harness, processing, until
+from channel_receiver_contract import event_input
+from phases_support import event, frozen, input_of, phases_harness, processing, replies, until
 from structlog.testing import capture_logs
 from telegram_support import CASE_START_WAIT, REFERENCE, YieldingTelegram
 from telegram_support import text as line_update
@@ -97,16 +102,24 @@ from ai_assistant.core.types import (
     MessageAuthor,
     RequestingDevice,
     Sureness,
+    TextChannelPayload,
     TranscriptMessage,
     UserMessage,
 )
 from ai_assistant.orchestration.telegram import TelegramLineSeams, line_channel
-from ai_assistant.orchestration.work_facts import chat_account, line_account
+from ai_assistant.orchestration.work_facts import (
+    chat_account,
+    line_account,
+    persons_authority,
+    persons_work,
+)
 from ai_assistant.testing import (
     FakeIdentityStore,
     FakeTelegramBotClient,
     FakeTelegramIntakeRecord,
+    FakeToolCallingCompleter,
 )
+from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
@@ -120,6 +133,7 @@ if TYPE_CHECKING:
         LinkWrite,
         WorkFacts,
     )
+    from ai_assistant.testing.tool_calling import RoundCall, RoundReply
 
 __all__ = [
     "LINE_CHAT",
@@ -209,14 +223,17 @@ class Work:
 
     Attributes:
         episode: The work's frozen episode.
-        logged: Each ``work_facts_recorded`` log entry the work wrote, in order: the
-            facts beside what today's path says of the same work.
+        logged: Each ``work_facts_recorded`` log entry the work wrote, in order: what was
+            decided of it.
         replies: What the work wrote back where the message came from, in order.
+        rounds: Each planning round the work ran, as the planner was asked it: what it
+            was shown, and the calls the rounds before it proposed, with their results.
     """
 
     episode: EpisodicMemory
     logged: tuple[MutableMapping[str, Any], ...]
     replies: tuple[str, ...]
+    rounds: tuple[RoundCall, ...] = ()
 
     @property
     def record(self) -> EpisodeProcessingRecord:
@@ -249,10 +266,21 @@ class Work:
         return self.record.facts_now
 
     @property
-    def disagrees(self) -> tuple[str, ...]:
-        """Which facts today's path says otherwise, when the work started."""
-        (entry,) = [one for one in self.logged if one["at"] == "start"]
-        return tuple(entry["differs"])
+    def reads(self) -> tuple[str | None, str | None]:
+        """What every reader reads of the work's facts as they stand (ADR-0368 §9).
+
+        Whose work it is, where it is a person's (§9:5), and whose authority it carries,
+        where it carries a person's (§9:1): the person block, spawn's offer, an approval
+        request's person and the person's running work read the first; the stop call, a
+        yes, a task's author and its cancel and replace the second.
+        """
+        facts = self.facts_now
+        return persons_work(facts), persons_authority(facts)
+
+    @property
+    def briefing(self) -> str:
+        """What the work's first planning round was shown (ADR-0356 §3)."""
+        return self.rounds[0].exchange.briefing
 
 
 class Household:
@@ -268,9 +296,15 @@ class Household:
         harness: The engine and the fakes behind it.
     """
 
-    def __init__(self) -> None:
-        """Build the household: the owner alone, no account linked, the line wired."""
+    def __init__(self, planner: RoundReply | None = None) -> None:
+        """Build the household: the owner alone, no account linked, the line wired.
+
+        Args:
+            planner: What planning proposes in each round; by default one reply in a
+                work's first round and nothing in its second.
+        """
         self.identities = FakeIdentityStore()
+        self.planner = FakeToolCallingCompleter(response=planner or replies(DEFAULT_ROUND_TEXT))
         self.owner = Person(OWNER_PERSON_ID)
         self.bot = FakeTelegramBotClient(chat_id=LINE_CHAT, first_message_id=700)
         line = TelegramLineSeams(
@@ -282,7 +316,9 @@ class Household:
             send_bound=timedelta(seconds=1),
             start_wait=CASE_START_WAIT,
         )
-        self.harness: Harness = phases_harness(identities=self.identities, telegram=line)
+        self.harness: Harness = phases_harness(
+            self.planner, identities=self.identities, telegram=line
+        )
         self._devices: list[ChatDevice] = []
         self._conversation: str | None = None
         self._ids = count(1)
@@ -433,6 +469,21 @@ class Household:
 
         return await self._one_work(written)
 
+    async def report(self, words: str) -> Work:
+        """A connected source pushes ``words`` as an informational event: no person sent it.
+
+        Raises:
+            AssertionError: If not exactly one work ends for it.
+        """
+
+        async def pushed() -> None:
+            await event(
+                self.harness,
+                event_input().model_copy(update={"payload": TextChannelPayload(text=words)}),
+            )
+
+        return await self._one_work(pushed)
+
     # --- reading back -----------------------------------------------------------------
 
     async def works(self) -> list[Work]:
@@ -441,6 +492,7 @@ class Household:
 
     async def _one_work(self, write: Callable[[], Any]) -> Work:
         before = {one.id for one in await frozen(self.harness)}
+        planned_before = len(self.planner.calls)
         sent_before = len(self.bot.messages)
         written_before = len(await self._replies())
         with capture_logs() as logs:
@@ -458,7 +510,12 @@ class Household:
             if one["event"] == _FACTS_LOGGED
             and one["activation_id"] == processing(episode).activation_id
         )
-        return Work(episode=episode, logged=entries, replies=replies)
+        return Work(
+            episode=episode,
+            logged=entries,
+            replies=replies,
+            rounds=tuple(self.planner.calls[planned_before:]),
+        )
 
     async def _settled(self, before: set[str]) -> EpisodicMemory:
         found: list[EpisodicMemory] = []

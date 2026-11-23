@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
+from identity_support import owners_trigger, recorded_facts
 from understanding_support import Rendered
 
 from ai_assistant.core.channel_validation import origin_kind
@@ -164,7 +165,8 @@ async def _rendered(  # noqa: PLR0913 — one knob per thing the phase hands the
         running=running,
         running_more=more,
         person=person,
-        trigger=trigger,
+        # The owner's input by their linked account, where a case hands none.
+        trigger=owners_trigger(channel, text) if trigger is None else trigger,
         zone=zone,
         own_zone=own_zone,
         received_at=AT,
@@ -205,14 +207,17 @@ def _episode(  # noqa: PLR0913 — one knob per field a case varies
             activation_id=episode_id.removeprefix("activation:"),
             started_at=at,
             ended_at=at,
-            trigger=RecordedChannelTrigger(
-                target=channel,
-                channel=channel,
-                payload=RecordedTextInput(text=text),
-                context=ChannelContext(),
-                reply=WholeTextReply(),
-                parties=parties,
+            trigger=(
+                trigger := RecordedChannelTrigger(
+                    target=channel,
+                    channel=channel,
+                    payload=RecordedTextInput(text=text),
+                    context=ChannelContext(),
+                    reply=WholeTextReply(),
+                    parties=parties,
+                )
             ),
+            facts=recorded_facts(trigger),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
             understanding=understood,

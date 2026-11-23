@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
 import pytest
+from identity_support import owners_identities
 from pydantic import SecretStr
 from story_support import episode as story_episode
 
@@ -348,9 +349,11 @@ class Harness:
         # ADR-0361's Approvals channel. `None` is every other case's deployment.
         approvals: ApprovalsSeams | None = None,
         # ADR-0366 §11's identity store, which the readers read who sent each message
-        # from (ADR-0368 §2:6). `None` is every other case's deployment: every message
-        # is recorded as arriving by no link, beside today's path, which still decides.
-        identities: IdentityStore | None = None,
+        # from (ADR-0368 §2:6), and which decides whose work each is (§9:1, §9:5). The
+        # default links the owner's devices and line account (`identity_support`), as a
+        # hub links them; `None` is an engine with none wired, whose every message is
+        # read as ADR-0374 rules for links that cannot be read.
+        identities: IdentityStore | None | _Default = _DEFAULT,
     ) -> None:
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
         # half a pipeline. Defaulted to the canonical fakes, and kept on the harness so
@@ -480,7 +483,7 @@ class Harness:
             chat_start_wait=chat_start_wait,
             task_scheduler=task_scheduler,
             approvals=approvals,
-            identities=identities,
+            identities=owners_identities() if isinstance(identities, _Default) else identities,
         )
 
 

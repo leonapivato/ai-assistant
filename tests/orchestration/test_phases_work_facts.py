@@ -2,10 +2,10 @@
 
 ADR-0368 §2: the hub chat's reader finds who sent each message from the device it was
 written from, through the identity store the engine is handed (ADR-0366 §4:1), and the
-episode keeps it on the trigger with the three facts the work started with. Beside them
-today's path still decides (§1:3): a message from a device no link ties is answered as
-every message is, and its facts say an unidentified sender's, which the log names as a
-disagreement. The line's own case is ``test_phases_telegram``'s first.
+episode keeps it on the trigger with the three facts the work started with, which decide
+(§9:1, §9:5): a message from a device no link ties is still answered in its own place, as
+a reply needs no one's authority, and is no person's work, carrying no one's authority,
+which the log says. The line's own case is ``test_phases_telegram``'s first.
 """
 
 from __future__ import annotations
@@ -75,12 +75,12 @@ async def test_a_message_from_a_linked_device_records_the_owner_and_their_facts(
         level=Sureness.NORMAL,
     )
     (entry,) = [one for one in logs if one["event"] == "work_facts_recorded"]
-    assert (entry["at"], entry["agrees"]) == ("start", True)
+    assert (entry["at"], entry["persons_work"], entry["carries_a_persons"]) == ("start", True, True)
 
 
 async def test_a_message_from_a_device_no_link_ties_is_still_answered() -> None:
-    """ADR-0368 §1:3: today's path still decides, so the message is answered; its facts
-    say an unidentified sender's, and the log names the disagreement."""
+    """ADR-0368 §3:3, §3:4, §9:5: an unidentified sender's work is no person's and carries
+    no one's authority, and a reply into its own place is still made; the log says so."""
     harness = phases_harness(identities=FakeIdentityStore())
     conversation = await open_conversation(harness)
     with capture_logs() as logs:
@@ -96,4 +96,4 @@ async def test_a_message_from_a_device_no_link_ties_is_still_answered() -> None:
     assert record.facts is not None
     assert record.facts.authority == WorkAuthority(kind=AuthorityKind.SENDERS, unidentified=True)
     (entry,) = [one for one in logs if one["event"] == "work_facts_recorded"]
-    assert (entry["agrees"], entry["differs"]) == (False, ("authority", "level"))
+    assert (entry["persons_work"], entry["carries_a_persons"]) == (False, False)

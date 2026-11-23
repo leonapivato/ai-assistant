@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.parties import (
+    OWNERS_FACTS,
     OWNERS_WORDS,
 )
 
@@ -88,6 +89,8 @@ def conversation_episode(
                 reply=WholeTextReply(),
                 parties=OWNERS_WORDS,
             ),
+            # ADR-0368 §2: the owner's own message's work, as admission records it.
+            facts=OWNERS_FACTS,
             status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
             reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,

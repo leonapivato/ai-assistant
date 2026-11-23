@@ -55,6 +55,7 @@ from ai_assistant.orchestration.conversations import (
     episodes_on_place,
 )
 from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakeStoryStore
+from ai_assistant.testing.parties import OWNER_SENDER
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -173,6 +174,7 @@ class Wiring:
             WholeTextReply(),
             clock=lambda: _AT,
             id_factory=lambda: _UUID,
+            senders=(OWNER_SENDER,),
         )
         if captured:
             assert conversation is not None

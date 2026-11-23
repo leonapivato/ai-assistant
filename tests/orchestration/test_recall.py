@@ -54,7 +54,12 @@ from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.memories import memory_in_band
-from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, UNIDENTIFIED_WORDS
+from ai_assistant.testing.parties import (
+    ASSISTANTS_WORDS,
+    OWNER_SENDER,
+    OWNERS_WORDS,
+    UNIDENTIFIED_WORDS,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -136,7 +141,9 @@ def _text_trigger(
         payload=RecordedTextInput(text=text),
         context=ChannelContext(),
         reply=None if event else WholeTextReply(),
-        parties=declared_input(channel)[0] if parties == "admitted" else parties,
+        parties=declared_input(channel, senders=(OWNER_SENDER,))[0]
+        if parties == "admitted"
+        else parties,
     )
 
 

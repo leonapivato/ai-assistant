@@ -23,9 +23,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 from exchange_support import Tag, reported, section, tag
+from identity_support import admitted
 from phases_support import chat_turn, phases_harness, processing, stopped
 from telegram_support import SETTLE, text
-from test_matters import _matters, _running, _version
+from test_matters import _matters, _owners, _running, _version
 from test_phases_matters import _Planner
 from test_phases_telegram import _Line, _settled
 from test_phases_yes_path import _from, _Hub, _window
@@ -34,6 +35,7 @@ from understanding_support import rendered, understanding_stage
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
+    ChannelIdentity,
     EpisodicMemory,
     InputPart,
     MemorySupport,
@@ -55,7 +57,6 @@ from ai_assistant.orchestration.matters import (
     TakeAnswer,
     held_inputs,
     in_progress,
-    input_standing,
 )
 from ai_assistant.orchestration.outside_content import from_outside
 from ai_assistant.testing import FakeModelProvider, FakeToolCallingCompleter
@@ -82,14 +83,10 @@ _IDS: Final = (
 )
 
 #: The owner's own words, handed in by the owner (ADR-0351 §6:1).
-_TYPED: Final = input_standing(parties=OWNERS_WORDS, established=True)
+_TYPED: Final = _owners(OWNERS_WORDS)
 #: Forwards on the line from two different senders, each handed in by the owner (§4:2).
-_FROM_SAM: Final = input_standing(
-    parties=(SupportHolder.source("telegram:sam", claimed=True),), established=True
-)
-_FROM_ANA: Final = input_standing(
-    parties=(SupportHolder.source("telegram:ana", claimed=True),), established=True
-)
+_FROM_SAM: Final = _owners((SupportHolder.source("telegram:sam", claimed=True),))
+_FROM_ANA: Final = _owners((SupportHolder.source("telegram:ana", claimed=True),))
 
 #: What a pasted email's text holds, which the routed understanding marks relayed.
 _PASTED: Final = "From: the school office"
@@ -199,7 +196,7 @@ async def test_an_unmarked_typed_message_keeps_its_authority_its_standing_and_it
     origin = input_support_origin(record, None)
     assert origin is SupportOrigin.USER_MESSAGE
     assert _support(episode, origin).holder == SupportHolder.person(OWNER_PERSON_ID)
-    assert _TYPED.users_authority
+    assert _TYPED.authority == (OWNER_PERSON_ID,)
     assert _TYPED.meets(_TYPED, relayed=False, other_relayed=False)
 
 
@@ -207,18 +204,23 @@ def _begun(trigger: RecordedChannelTrigger) -> PhaseWorking:
     """A hub chat turn's working set, begun on one message the owner typed."""
     hub = _Hub()
     path = hub.phases(hub.harness)
-    return path.begin(
-        activation_id="a-2",
-        window=_window(_from(MessageAuthor.USER)),
-        conversation_id="c-1",
-        trigger=trigger,
-        owner_records=True,
-    )
+    with admitted():
+        return path.begin(
+            activation_id="a-2",
+            window=_window(_from(MessageAuthor.USER)),
+            conversation_id="c-1",
+            trigger=trigger,
+            owner_records=True,
+        )
 
 
 def _read(working: PhaseWorking) -> tuple[bool, bool, bool]:
-    """Its authority, whether its trigger is outside, and whether it has read outside."""
-    return working.users_authority, working.outside_trigger, working.read_outside_content
+    """Whether it carries a person's authority, its trigger is outside, it has read outside."""
+    return (
+        working.authority is not None,
+        working.outside_trigger,
+        working.read_outside_content,
+    )
 
 
 def test_a_yes_in_a_relayed_paste_approves_nothing() -> None:
@@ -255,13 +257,16 @@ def test_a_reminder_coming_due_carries_no_authority() -> None:
     """§6:4: a Task Scheduler input's parties are the assistant's statement alone."""
     hub = _Hub()
     path = hub.phases(hub.harness)
-    working = path.begin_task(
-        activation_id="a-3", trigger=_recorded_trigger(ASSISTANTS_WORDS), lineage=()
-    )
+    with admitted(
+        ChannelIdentity(channel_type="task_scheduler", instance_id="schedule"), senders=()
+    ):
+        working = path.begin_task(
+            activation_id="a-3", trigger=_recorded_trigger(ASSISTANTS_WORDS), lineage=()
+        )
 
     assert _read(working) == (False, False, False), "the assistant's, not outside (§5:2)"
     assert not _TYPED.meets(
-        input_standing(parties=ASSISTANTS_WORDS, established=True),
+        _owners(ASSISTANTS_WORDS),
         relayed=False,
         other_relayed=False,
     )
@@ -425,7 +430,7 @@ def test_a_typed_message_absorbs_no_forwards_activation_and_is_absorbed_by_none(
 
 def test_an_input_whose_parties_are_unknown_absorbs_nothing_and_is_absorbed_by_nothing() -> None:
     """§8:5: ``None`` parties meet the condition with no input."""
-    unknown = input_standing(parties=None, established=True)
+    unknown = _owners(None)
     for older_standing, newer_standing in (
         (unknown, _TYPED),
         (_TYPED, unknown),

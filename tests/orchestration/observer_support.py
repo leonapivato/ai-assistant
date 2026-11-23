@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+from identity_support import recorded_facts
 from pydantic import BaseModel
 from structured_support import structured
 
@@ -135,6 +136,19 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
     """
     frozen = not open_
     owner = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    trigger = RecordedChannelTrigger(
+        target=channel,
+        channel=channel,
+        payload=RecordedTextInput(text=text),
+        context=ChannelContext(),
+        reply=WholeTextReply(),
+        # ADR-0351 §2:6: an input of messages carries their parties, each as the line
+        # declares it; one with none, the owner's unless named.
+        parties=line_input(messages)[0]
+        if messages
+        else (OWNERS_WORDS if parties is None else parties),
+        messages=line_input(messages)[1],
+    )
     record = EpisodicMemory(
         id=address(activation_id),
         content="",
@@ -151,19 +165,10 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
             activation_id=activation_id,
             started_at=at,
             ended_at=(ended or at) if frozen else None,
-            trigger=RecordedChannelTrigger(
-                target=channel,
-                channel=channel,
-                payload=RecordedTextInput(text=text),
-                context=ChannelContext(),
-                reply=WholeTextReply(),
-                # ADR-0351 §2:6: an input of messages carries their parties, each as the
-                # line declares it; one with none, the owner's unless named.
-                parties=line_input(messages)[0]
-                if messages
-                else (OWNERS_WORDS if parties is None else parties),
-                messages=line_input(messages)[1],
-            ),
+            trigger=trigger,
+            # ADR-0368 §2: as admission records them, as every episode the hub holds
+            # carries them.
+            facts=recorded_facts(trigger),
             status=ProcessingStatus.COMPLETED if frozen else None,
             reason=ProcessingReason.RETURNED if frozen else None,
             understanding=understanding,

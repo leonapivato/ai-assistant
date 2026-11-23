@@ -142,7 +142,7 @@ def _spawner(parent: str, **changes: object) -> Spawner:
     held: dict[str, object] = {
         "activation_id": parent,
         "person": OWNER_PERSON_ID,
-        "users_authority": True,
+        "authority": OWNER_PERSON_ID,
         "set_in": CHAT,
         "places": (f"conversation:{CHAT.instance_id}",),
     }
@@ -610,7 +610,7 @@ async def test_a_cancel_without_the_persons_authority_names_only_its_own_spawn()
     world = _World()
     task = await write_task(world.plans, activation(), when=DueAt(at=AT + timedelta(hours=1)))
 
-    with spawning(_spawner(activation(), users_authority=False)):
+    with spawning(_spawner(activation(), authority=None)):
         refused = await world.calls.run(_call(CANCEL_TASK, {"task": task.id}))
     with spawning(_spawner(activation())):
         done = await world.calls.run(_call(CANCEL_TASK, {"task": task.id}))
@@ -1020,7 +1020,7 @@ async def test_a_spawn_under_a_ticket_is_the_persons_though_its_input_carries_no
     world = _World()
     request = await _ticket(world, SPAWN)
     other = await write_task(world.plans, activation(), when=DueAt(at=AT + timedelta(hours=1)))
-    spawner = _spawner(activation(), users_authority=False)
+    spawner = _spawner(activation(), authority=None)
 
     spawned = await _spawn_under(world, request, spawner, delay_minutes=30, replaces=other.id)
 
@@ -1053,7 +1053,7 @@ async def test_a_cancel_under_a_ticket_reaches_a_task_its_work_did_not_spawn() -
     world = _World()
     task = await write_task(world.plans, activation(), when=DueAt(at=AT + timedelta(hours=1)))
     request = await _ticket(world, CANCEL_TASK, {"task": task.id})
-    spawner = _spawner(activation(), users_authority=False)
+    spawner = _spawner(activation(), authority=None)
 
     with spawning(spawner):
         refused = await world.calls.run(_call(CANCEL_TASK, {"task": task.id}))

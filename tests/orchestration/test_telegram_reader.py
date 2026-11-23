@@ -19,6 +19,7 @@ recent episodes (§10).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING
@@ -57,6 +58,7 @@ from ai_assistant.core.types import (
     RecordedDelivery,
     RecordedInputMessage,
     RequestedCall,
+    SupportHolder,
     TelegramCallKind,
     TelegramCallOutcome,
     TelegramFailure,
@@ -96,7 +98,7 @@ from ai_assistant.testing import (
     FakeTelegramBotClient,
     FakeTelegramIntakeRecord,
 )
-from ai_assistant.testing.parties import OWNERS_WORDS
+from ai_assistant.testing.parties import OWNER_SENDER, OWNERS_WORDS
 from ai_assistant.testing.telegram import GET_UPDATES, SEND_MESSAGE
 
 if TYPE_CHECKING:
@@ -267,10 +269,21 @@ async def test_a_text_from_the_owner_is_one_input_taken_in_and_then_confirmed() 
     (taken,) = line.inputs
     assert taken.text == "What's on tomorrow?"
     assert taken.channel == line.seams.channel
-    # ADR-0351 §2:6, §3:1: the message carries the owner's words, as the line declares.
+    # ADR-0351 §2:6, §3:1, §3:2: the message carries its sender's words, as the line
+    # declares, once the engine found its sender from the link its account holds; before
+    # that, no one's identified.
     assert taken.recorded == (
         RecordedInputMessage(
-            text="What's on tomorrow?", sent_at=AT, position=55, party=OWNERS_WORDS[0]
+            text="What's on tomorrow?", sent_at=AT, position=55, party=SupportHolder.unknown()
+        ),
+    )
+    assert replace(taken, senders={55: OWNER_SENDER}).recorded == (
+        RecordedInputMessage(
+            text="What's on tomorrow?",
+            sent_at=AT,
+            position=55,
+            party=OWNERS_WORDS[0],
+            sender=OWNER_SENDER,
         ),
     )
     assert line.marked == [(10,)], "taken in by its activation as it was admitted"

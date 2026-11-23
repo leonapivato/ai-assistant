@@ -60,6 +60,7 @@ from ai_assistant.orchestration.activation_state import (
     canonical_activation_id,
     terminal_status,
 )
+from ai_assistant.testing.parties import OWNER_SENDER
 
 _AT = datetime(2026, 9, 20, tzinfo=UTC)
 _ID = "60f3c223-6a54-4b06-aab8-4fc397c3d43b"
@@ -85,15 +86,21 @@ def test_admission_records_the_parties_each_kind_declares() -> None:
     owner = SupportHolder.person(OWNER_PERSON_ID)
     sam = SupportHolder.source("77", claimed=True)
     line = ChannelIdentity(channel_type="telegram", instance_id="conn-1/42")
-    # A party the sensor brings is replaced by the one the kind declares (§2:8).
+    # A party the sensor brings is replaced by the one the kind declares from who sent
+    # it, the owner by their linked account (§2:8, §3:2).
     note = RecordedInputMessage(
-        text="Is this right?", sent_at=_AT, position=1, party=SupportHolder.person("sam")
+        text="Is this right?",
+        sent_at=_AT,
+        position=1,
+        party=SupportHolder.person("sam"),
+        sender=OWNER_SENDER,
     )
     forward = RecordedInputMessage(
         text="Ana moved to Porto.",
         sent_at=_AT,
         position=2,
         forwarded_from=ClaimedAuthor(name="Sam", account_id=77),
+        sender=OWNER_SENDER,
     )
 
     def admitted(target: ChannelTarget, **extra: object) -> RecordedChannelTrigger:
@@ -108,7 +115,8 @@ def test_admission_records_the_parties_each_kind_declares() -> None:
     taken = admitted(line, messages=(note, forward))
     assert taken.parties == (owner, sam)
     assert [one.party for one in taken.messages] == [owner, sam]
-    assert admitted(NewConversation()).parties == (owner,)
+    assert admitted(NewConversation(), senders=(OWNER_SENDER,)).parties == (owner,)
+    assert admitted(NewConversation()).parties == (SupportHolder.unknown(),)
     schedule = ChannelIdentity(channel_type="task_scheduler", instance_id="schedule")
     statement = SupportHolder.statement(StatementPart.SCHEDULED_INSTRUCTION)
     assert admitted(schedule).parties == (statement,)

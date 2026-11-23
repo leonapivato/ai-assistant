@@ -17,9 +17,11 @@ import pytest
 from test_engine import tool
 from test_engine_phases import _BOOK
 
+from ai_assistant.core.channel_validation import sent_by_a_person
 from ai_assistant.core.config import Settings
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActivationStop,
     ActivationUnderstanding,
     CapabilityEffect,
@@ -41,6 +43,8 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
+    WorkAuthority,
+    parties_are_persons_own,
 )
 from ai_assistant.orchestration.activation_state import (
     ActivationState,
@@ -60,7 +64,6 @@ from ai_assistant.orchestration.matter_calls import (
 from ai_assistant.orchestration.matters import (
     DEFAULT_HELD_INPUT_LIMIT,
     DEFAULT_IN_PROGRESS_LIMIT,
-    THE_USER,
     Answered,
     Became,
     InputStanding,
@@ -76,8 +79,28 @@ from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.story_calls import STORY_CALLS
 from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore
-from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, UNIDENTIFIED_WORDS
+from ai_assistant.testing.parties import (
+    ASSISTANTS_WORDS,
+    OWNER_SENDER,
+    OWNERS_FACTS,
+    OWNERS_WORDS,
+    UNIDENTIFIED_WORDS,
+)
 from ai_assistant.tools.web_search import WEB_SEARCH
+
+
+def _owners(parties: tuple[SupportHolder, ...] | None) -> InputStanding:
+    """The standing of an input the owner's linked account sent (ADR-0366 §4:1).
+
+    Its work carries the owner's authority where its words are the owner's own, as its
+    facts record it (ADR-0368 §3:2), and none otherwise, as a forward's work.
+    """
+    own = parties_are_persons_own(parties)
+    facts = (
+        OWNERS_FACTS if own else OWNERS_FACTS.model_copy(update={"authority": WorkAuthority.none()})
+    )
+    return input_standing(parties=parties, senders=(OWNER_SENDER,), facts=facts)
+
 
 _AT: Final = datetime(2026, 10, 21, 9, tzinfo=UTC)
 _IDS: Final = (
@@ -86,14 +109,12 @@ _IDS: Final = (
     "2dab0a2a-4c7e-4e77-9c8e-8c4e3b2d2f33",
     "3ebc1b3b-5d8f-4f88-8d9f-9d5f4c3e3a44",
 )
-_USERS: Final = input_standing(parties=OWNERS_WORDS, established=True)
-#: A forward on the line: handed in by the user, its words its sender's, claimed
+_USERS: Final = _owners(OWNERS_WORDS)
+#: A forward on the line: handed in by the owner, its words its sender's, claimed
 #: (ADR-0351 §4:2, §2:7).
-_FORWARD: Final = input_standing(
-    parties=(SupportHolder.source("telegram:sam", claimed=True),), established=True
-)
-#: An input whose author its place does not establish, as an event's.
-_UNESTABLISHED: Final = input_standing(parties=UNIDENTIFIED_WORDS, established=False)
+_FORWARD: Final = _owners((SupportHolder.source("telegram:sam", claimed=True),))
+#: An input no identified person sent, as an event's or an unlinked account's.
+_UNESTABLISHED: Final = input_standing(parties=UNIDENTIFIED_WORDS, senders=(), facts=None)
 _SUPPLY: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 
 
@@ -126,12 +147,17 @@ def _running(  # noqa: PLR0913 — the place, the id, and one knob per fact a ca
     episode: bool = True,
     channel: ChannelIdentity | None = None,
 ) -> ActivationState:
-    """An admitted activation on ``place`` whose pass has begun, its episode written."""
+    """An admitted activation on ``place`` whose pass has begun, its episode written.
+
+    Sent by the owner's linked account where a person sends on its kind (ADR-0366 §4:1).
+    """
+    target = channel or _place(place)
     state = admit_channel(
-        ChannelInput(target=channel or _place(place), payload=TextChannelPayload(text=text)),
+        ChannelInput(target=target, payload=TextChannelPayload(text=text)),
         WholeTextReply(),
         clock=lambda: _AT,
         id_factory=lambda: activation_id,
+        senders=(OWNER_SENDER,) if sent_by_a_person(target.channel_type) else (),
     )
     state.standing = standing
     state.input_messages = (_said(text),)
@@ -202,27 +228,26 @@ def _meet(one: InputStanding, other: InputStanding, *, relayed: bool = False) ->
 def test_only_the_same_established_author_with_the_same_authority_and_class_meet() -> None:
     """§7:5's third condition, as ADR-0351 §8:5 reads it: one class, not one origin."""
     assert _meet(_USERS, _USERS)
-    assert _FORWARD.author == THE_USER
-    assert not _FORWARD.users_authority
+    assert _FORWARD.author == OWNER_PERSON_ID
+    assert _FORWARD.authority == ()
     assert _meet(_FORWARD, _FORWARD)
     assert not _meet(_FORWARD, _USERS)
     assert not _meet(_USERS, _FORWARD)
     assert _UNESTABLISHED.author is None
     assert not _meet(_UNESTABLISHED, _UNESTABLISHED)
-    assert not _meet(_USERS, InputStanding(THE_USER, users_authority=False, parties=OWNERS_WORDS))
+    assert not _meet(_USERS, InputStanding(OWNER_PERSON_ID, authority=(), parties=OWNERS_WORDS))
     assert not _meet(
-        _USERS, InputStanding(THE_USER, users_authority=True, parties=UNIDENTIFIED_WORDS)
+        _USERS,
+        InputStanding(OWNER_PERSON_ID, authority=(OWNER_PERSON_ID,), parties=UNIDENTIFIED_WORDS),
     )
     assert not _meet(
-        _USERS, InputStanding("someone else", users_authority=True, parties=OWNERS_WORDS)
+        _USERS, InputStanding("someone else", authority=("someone else",), parties=OWNERS_WORDS)
     )
 
 
 def test_forwards_from_different_senders_meet_and_their_parties_need_not_be_equal() -> None:
     """ADR-0351 §8:5: both outside, both carrying no authority, the same author."""
-    other = input_standing(
-        parties=(SupportHolder.source("telegram:ana", claimed=True),), established=True
-    )
+    other = _owners((SupportHolder.source("telegram:ana", claimed=True),))
     assert _meet(_FORWARD, other)
 
 
@@ -238,10 +263,10 @@ def test_a_relay_mark_moves_the_users_own_input_into_the_outside_class() -> None
 
 def test_an_input_whose_parties_are_unknown_or_empty_meets_nothing() -> None:
     """ADR-0351 §8:5: ``None`` or empty parties meet the condition with no input."""
-    unknown = input_standing(parties=None, established=True)
-    empty = input_standing(parties=(), established=True)
+    unknown = _owners(None)
+    empty = _owners(())
     for one in (unknown, empty):
-        assert not one.users_authority
+        assert one.authority == ()
         assert not _meet(one, one)
         assert not _meet(one, _USERS)
         assert not _meet(one, _FORWARD)
@@ -498,7 +523,7 @@ def test_nothing_newer_older_stopped_or_of_another_standing_is_absorbed() -> Non
         "b",
         _IDS[1],
         order=2,
-        standing=InputStanding(THE_USER, users_authority=False, parties=OWNERS_WORDS),
+        standing=InputStanding(OWNER_PERSON_ID, authority=(), parties=OWNERS_WORDS),
     )
     matters = _matters([taker, newer, stopped, other])
     decided, absorbed = matters.merge(taker, _understood(taker, _IDS[3], _IDS[0], _IDS[1]), at=_AT)

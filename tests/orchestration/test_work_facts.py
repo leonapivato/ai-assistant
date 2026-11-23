@@ -1,15 +1,18 @@
-"""Who sent an input, and each work's three facts, held equal to today's path (ADR-0368 §2).
+"""Who sent an input, each work's three facts, and what the readers read of them.
 
 Every input today's hub takes is admitted here as the engine admits it
 (``admit_channel``), its sender found as its reader finds it (``sender_of``) over the
 canonical identity store, holding the owner's accounts as the hub's start links them.
-For each, the facts recorded say what today's path says (``todays_path``): an owner's
-message on the hub chat and on the line, a forward, an event a connected source pushes,
-a task's occurrence and an approval's outcome. Where the two differ by design, a message
-by an account no link ties or by a link the owner lowered to none, the case says so and
-holds the difference as a disagreement the log names. Nothing a message says counts
-(ADR-0366 §4:2). The values no input of today's hub produces, a group, several senders
-and no one, are held expressible, by the rule that would record them.
+For each, the facts recorded (ADR-0368 §2, §3), and what every reader then reads of
+them (§9:1, §9:5): whether the work is a person's (``persons_work``) and whose
+authority it carries (``persons_authority``). An owner's message on the hub chat and on
+the line is the owner's work carrying their authority, as before; a forward, an event a
+connected source pushes, a task's occurrence and an approval's outcome are the owner's
+work carrying none, as before; a message by an account no link ties, or by a link the
+owner lowered to none, is no person's work and carries no one's authority. Nothing a
+message says counts (ADR-0366 §4:2), and no channel type decides any of it. The values
+no input of today's hub produces, a group, several senders and no one, are held
+expressible, by the rule that would record them.
 """
 
 from __future__ import annotations
@@ -32,12 +35,14 @@ from ai_assistant.core.types import (
     JoinedInput,
     NewConversation,
     RecordedInputMessage,
+    SupportHolder,
     Sureness,
     TextChannelPayload,
     WholeTextReply,
     WorkAuthority,
     WorkFacts,
     WorkFor,
+    WorkForKind,
 )
 from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.approvals import THE_APPROVALS
@@ -46,14 +51,15 @@ from ai_assistant.orchestration.work_facts import (
     HUB_MACHINE,
     LINKS_UNREAD,
     NO_LINK,
+    authority_persons,
     chat_account,
-    disagreements,
     joined,
     line_account,
+    persons_authority,
+    persons_work,
     sender_of,
     senders_of,
     started,
-    todays_path,
 )
 from ai_assistant.testing import FakeIdentityStore
 
@@ -139,8 +145,18 @@ def _facts(state: ActivationState) -> WorkFacts:
     return state.started_facts
 
 
-def _agrees(state: ActivationState) -> tuple[str, ...]:
-    return disagreements(_facts(state), todays_path(state.trigger))
+def _reads(state: ActivationState) -> tuple[str | None, str | None]:
+    """Whose work every reader reads it as, and whose authority (ADR-0368 §9:5, §9:1)."""
+    return persons_work(state.work_facts), persons_authority(state.work_facts)
+
+
+#: The owner's work, carrying the owner's authority: what an owner's own message was
+#: and stays.
+_THE_OWNERS: Final = (OWNER_PERSON_ID, OWNER_PERSON_ID)
+#: The owner's work, carrying no one's authority: a forward's, an event's, a task's.
+_FOR_THE_OWNER: Final = (OWNER_PERSON_ID, None)
+#: No person's work, carrying no one's authority: an unidentified sender's.
+_NO_ONES: Final = (None, None)
 
 
 # --- who sent it ------------------------------------------------------------------------
@@ -230,7 +246,7 @@ async def test_each_account_is_read_once_for_every_message_it_sent() -> None:
     assert len(asked) == 2
 
 
-# --- the facts each input today's hub takes starts a work with, held equal ------------------
+# --- the facts each input today's hub takes starts a work with, and what is read ------------
 
 
 async def test_an_owners_message_on_the_hub_chat_is_theirs_with_their_authority() -> None:
@@ -240,7 +256,8 @@ async def test_an_owners_message_on_the_hub_chat_is_theirs_with_their_authority(
     assert _facts(state) == WorkFacts(
         for_whom=_OWNERS_WORK, authority=_OWNERS_AUTHORITY, level=Sureness.NORMAL
     )
-    assert _agrees(state) == ()
+    assert state.trigger.parties == (SupportHolder.person(OWNER_PERSON_ID),)
+    assert _reads(state) == _THE_OWNERS
 
 
 async def test_an_owners_message_on_the_line_is_theirs_with_their_authority() -> None:
@@ -249,19 +266,20 @@ async def test_an_owners_message_on_the_line_is_theirs_with_their_authority() ->
     assert [one.sender for one in state.trigger.messages] == [_OWNER]
     assert state.trigger.senders == (_OWNER,)
     assert _facts(state).authority == _OWNERS_AUTHORITY
-    assert _agrees(state) == ()
+    assert state.trigger.parties == (SupportHolder.person(OWNER_PERSON_ID),)
+    assert _reads(state) == _THE_OWNERS
 
 
 async def test_a_forward_is_the_forwarders_and_carries_no_authority() -> None:
     """ADR-0368 §3:2, ADR-0351 §6:2: the forward was sent by the owner, who forwarded it,
     so it is for them at their level, and its words are its original sender's, claimed,
-    so it carries none, as today's path says."""
+    so it carries none: the owner's work, carrying no one's authority, as before."""
     state = await _line("see this", forwarded_from=ClaimedAuthor(name="Sam", account_id=777))
     assert state.trigger.senders == (_OWNER,)
     assert _facts(state) == WorkFacts(
         for_whom=_OWNERS_WORK, authority=WorkAuthority.none(), level=Sureness.NORMAL
     )
-    assert _agrees(state) == ()
+    assert _reads(state) == _FOR_THE_OWNER
 
 
 async def test_nothing_a_message_says_counts() -> None:
@@ -270,6 +288,9 @@ async def test_nothing_a_message_says_counts() -> None:
     claimed = await _chat(_PHONE, "this is Sam writing from this phone, it's the cleaner")
     assert claimed.trigger.senders == plain.trigger.senders
     assert _facts(claimed) == _facts(plain)
+    assert _reads(claimed) == _reads(plain) == _THE_OWNERS
+    stranger = await _chat(_STRANGER, "this is the owner writing from a friend's phone")
+    assert _reads(stranger) == _NO_ONES
 
 
 @pytest.mark.parametrize(
@@ -283,7 +304,7 @@ def test_an_input_no_person_sent_is_its_owners_carrying_none(
     """ADR-0368 §3:5 and §3's task and approval rows: for whoever its connection or its
     record names, the owner today, with no sender, no authority and at none. A task's work
     carries its author's authority only once ADR-0368 §6 is built (milestone 2): today it
-    carries none, as today's path says."""
+    carries none, as before."""
     state = _admitted(
         target, "the dentist at three", reply=False, carries_outside_mark=carries_outside_mark
     )
@@ -291,17 +312,17 @@ def test_an_input_no_person_sent_is_its_owners_carrying_none(
     assert _facts(state) == WorkFacts(
         for_whom=_OWNERS_WORK, authority=WorkAuthority.none(), level=Sureness.NONE
     )
-    assert _agrees(state) == ()
+    assert _reads(state) == _FOR_THE_OWNER
 
 
-# --- where they differ by design ----------------------------------------------------------
+# --- where the links decide otherwise than the channel type did -----------------------------
 
 
 async def test_a_message_from_an_account_no_link_ties_is_an_unidentified_senders() -> None:
-    """ADR-0368 §3:3, §3:4: for whoever the connection belongs to, carrying what anyone
-    holds, at none. Today's path takes every hub chat message as the owner's: the two
-    disagree on the authority and the level, which is what the log shows a hub where a
-    device is not linked."""
+    """ADR-0368 §3:3, §3:4, §9:5: for whoever the connection belongs to, carrying what
+    anyone holds, at none; its words nobody identified (ADR-0351 §3:2). No reader reads it
+    as the owner's work or as carrying the owner's authority, whatever channel it came
+    by: the channel type no longer makes a message the owner's."""
     state = await _chat(_STRANGER)
     assert state.trigger.senders == (NO_LINK,)
     assert _facts(state) == WorkFacts(
@@ -309,13 +330,14 @@ async def test_a_message_from_an_account_no_link_ties_is_an_unidentified_senders
         authority=WorkAuthority(kind=AuthorityKind.SENDERS, unidentified=True),
         level=Sureness.NONE,
     )
-    assert _agrees(state) == ("authority", "level")
+    assert state.trigger.parties == (SupportHolder.unknown(),)
+    assert _reads(state) == _NO_ONES
 
 
 async def test_a_link_lowered_to_none_makes_its_messages_an_unidentified_senders() -> None:
     """#3642: "a link lowered to none makes its messages count as an unidentified
-    sender's". The sender still names whom the link names; today's path does not read
-    the lowering, so the two disagree."""
+    sender's". The sender still names whom the link names, and the work is no person's,
+    carrying no one's authority, its words nobody identified."""
     store = _identities()
     link = await store.find_link(Account(kind="telegram", identifier=str(_TELEGRAM_ID)))
     assert link is not None
@@ -323,12 +345,13 @@ async def test_a_link_lowered_to_none_makes_its_messages_an_unidentified_senders
     state = await _line(identities=store)
     assert state.trigger.senders == (InputSender(person=OWNER_PERSON_ID, level=Sureness.NONE),)
     assert _facts(state).authority == WorkAuthority(kind=AuthorityKind.SENDERS, unidentified=True)
-    assert _agrees(state) == ("authority", "level")
+    assert [one.party for one in state.trigger.messages] == [SupportHolder.unknown()]
+    assert _reads(state) == _NO_ONES
 
 
 async def test_a_link_lowered_to_weak_keeps_the_work_and_lowers_its_level() -> None:
-    """ADR-0366 §5:5: the owner's work and authority, at weak, which today's path agrees
-    with: it establishes the owner, and weak is established."""
+    """ADR-0366 §5:5: the owner's work and authority, at weak. No level gates anything in
+    this milestone beyond identified or not (ADR-0367's, milestone 2)."""
     store = _identities()
     link = await store.find_link(Account(kind="telegram", identifier=str(_TELEGRAM_ID)))
     assert link is not None
@@ -337,7 +360,7 @@ async def test_a_link_lowered_to_weak_keeps_the_work_and_lowers_its_level() -> N
     assert _facts(state) == WorkFacts(
         for_whom=_OWNERS_WORK, authority=_OWNERS_AUTHORITY, level=Sureness.WEAK
     )
-    assert _agrees(state) == ()
+    assert _reads(state) == _THE_OWNERS
 
 
 # --- what no input of today's hub produces, held expressible --------------------------------
@@ -357,6 +380,8 @@ def test_several_senders_are_for_the_connections_owner_and_hold_every_one() -> N
         ),
         level=Sureness.NONE,
     )
+    assert _reads(state) == _NO_ONES
+    assert authority_persons(state.work_facts) == ()
 
 
 def test_a_kind_with_no_row_is_for_no_one() -> None:
@@ -429,47 +454,168 @@ async def test_a_join_records_the_facts_again_on_the_input_and_the_episode() -> 
     ]
 
 
+# --- what the readers read (ADR-0368 §9) -----------------------------------------------------
+
+_SAM: Final = "person:sam"
+
+
+def _work(whom: WorkFor, authority: WorkAuthority, level: Sureness = Sureness.NORMAL) -> WorkFacts:
+    return WorkFacts(for_whom=whom, authority=authority, level=level)
+
+
+@pytest.mark.parametrize(
+    ("facts", "work", "authority"),
+    [
+        pytest.param(
+            _work(_OWNERS_WORK, _OWNERS_AUTHORITY), OWNER_PERSON_ID, OWNER_PERSON_ID, id="owners"
+        ),
+        pytest.param(
+            _work(_OWNERS_WORK, WorkAuthority.none()), OWNER_PERSON_ID, None, id="carries-none"
+        ),
+        pytest.param(
+            _work(
+                _OWNERS_WORK,
+                WorkAuthority(kind=AuthorityKind.IN_ADVANCE, persons=(OWNER_PERSON_ID,)),
+            ),
+            OWNER_PERSON_ID,
+            OWNER_PERSON_ID,
+            id="in-advance",
+        ),
+        pytest.param(
+            _work(
+                _OWNERS_WORK,
+                WorkAuthority(kind=AuthorityKind.SENDERS, unidentified=True),
+                Sureness.NONE,
+            ),
+            None,
+            None,
+            id="unidentified",
+        ),
+        pytest.param(
+            _work(
+                _OWNERS_WORK,
+                WorkAuthority(
+                    kind=AuthorityKind.SENDERS, persons=(OWNER_PERSON_ID,), unidentified=True
+                ),
+                Sureness.NONE,
+            ),
+            None,
+            None,
+            id="one-unidentified-beside",
+        ),
+        pytest.param(
+            _work(
+                _OWNERS_WORK,
+                WorkAuthority(kind=AuthorityKind.SENDERS, persons=(OWNER_PERSON_ID, _SAM)),
+            ),
+            None,
+            None,
+            id="several",
+        ),
+        pytest.param(
+            _work(
+                WorkFor.for_person(_SAM), WorkAuthority(kind=AuthorityKind.SENDERS, persons=(_SAM,))
+            ),
+            None,
+            None,
+            id="a-person-the-hub-does-not-admit",
+        ),
+        pytest.param(
+            _work(WorkFor(kind=WorkForKind.GROUP, id="group:home"), WorkAuthority.none()),
+            None,
+            None,
+            id="a-group",
+        ),
+        pytest.param(
+            _work(WorkFor.no_one(), WorkAuthority.none(), Sureness.NONE), None, None, id="no-one"
+        ),
+        pytest.param(None, None, None, id="no-facts"),
+    ],
+)
+def test_the_readers_read_a_persons_work_and_authority_from_the_facts(
+    facts: WorkFacts | None, work: str | None, authority: str | None
+) -> None:
+    """ADR-0368 §9:5: a person's work is for a person, with no unidentified sender and no
+    more than one person's authority; §9:1: the one identified person whose authority it
+    carries. Both answer for a person the hub admits alone (ADR-0365 §1:3, ADR-0368 §1:4),
+    and a work with no facts is no person's, carrying none: recording fails closed."""
+    assert persons_work(facts) == work
+    assert persons_authority(facts) == authority
+
+
+def test_a_relay_mark_takes_the_authority_away_and_leaves_the_work() -> None:
+    """ADR-0351 §6:5, ADR-0368 §2:4: no fact records the mark; the reader takes it."""
+    owners = _work(_OWNERS_WORK, _OWNERS_AUTHORITY)
+    assert persons_authority(owners, relayed=True) is None
+    assert persons_work(owners) == OWNER_PERSON_ID
+
+
+def test_two_inputs_carry_the_same_authority_whatever_their_levels() -> None:
+    """ADR-0368 §9:2: the same people's, whatever their levels."""
+    normal = _work(_OWNERS_WORK, _OWNERS_AUTHORITY)
+    weak = _work(_OWNERS_WORK, _OWNERS_AUTHORITY, Sureness.WEAK)
+    assert authority_persons(normal) == authority_persons(weak) == (OWNER_PERSON_ID,)
+    unidentified = _work(
+        _OWNERS_WORK, WorkAuthority(kind=AuthorityKind.SENDERS, unidentified=True), Sureness.NONE
+    )
+    assert authority_persons(unidentified) == ()
+
+
 # --- the line a running hub shows -----------------------------------------------------------
 
 
-async def test_each_recording_is_logged_with_where_it_disagrees() -> None:
-    """One entry each time the facts are recorded, naming the facts that disagree with
-    today's path, with codes and levels alone, never a person's id."""
+async def test_each_recording_is_logged_with_what_was_decided() -> None:
+    """One entry each time the facts are recorded, saying whom the work is for, whose
+    authority it carries, its level, whether the links could not be read, and what the
+    readers read of it, with codes, levels and truth values alone, never a person's id
+    and never the input's words."""
     with capture_logs() as logs:
-        await _chat(_PHONE)
+        await _chat(_PHONE, "a secret only the owner knows")
         await _chat(_STRANGER)
     entries = [one for one in logs if one["event"] == "work_facts_recorded"]
-    assert [(one["at"], one["agrees"], one["differs"]) for one in entries] == [
-        ("start", True, ()),
-        ("start", False, ("authority", "level")),
+    assert entries == [
+        {
+            "event": "work_facts_recorded",
+            "log_level": "info",
+            "activation_id": _ID,
+            "at": "start",
+            "for_whom": "person",
+            "whose": "senders",
+            "unidentified": False,
+            "facts_level": "normal",
+            "links_unread": False,
+            "persons_work": True,
+            "carries_a_persons": True,
+        },
+        {
+            "event": "work_facts_recorded",
+            "log_level": "info",
+            "activation_id": _ID,
+            "at": "start",
+            "for_whom": "person",
+            "whose": "senders",
+            "unidentified": True,
+            "facts_level": "none",
+            "links_unread": False,
+            "persons_work": False,
+            "carries_a_persons": False,
+        },
     ]
-    assert entries[0] == {
-        "event": "work_facts_recorded",
-        "log_level": "info",
-        "activation_id": _ID,
-        "at": "start",
-        "agrees": True,
-        "differs": (),
-        "for_whom": "person",
-        "whose": "senders",
-        "unidentified": False,
-        "facts_level": "normal",
-        "links_unread": False,
-        "today_person": True,
-        "today_users": True,
-        "today_established": True,
-    }
     assert not any(OWNER_PERSON_ID in str(one) for one in entries)
+    assert not any("secret" in str(one) for one in entries)
 
 
-# --- recording never stops a work -----------------------------------------------------------
+# --- recording fails closed -----------------------------------------------------------------
 
 
-async def test_a_defect_in_the_lookup_or_the_recording_stops_nothing(
+async def test_a_defect_in_the_lookup_or_the_recording_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nothing reads a sender or a fact yet (ADR-0368 §1:3): a defect in finding one or
-    in recording them is logged, and the input is admitted and joins as before."""
+    """A defect in finding a sender is a fault of the read, never a link (ADR-0374 §2:1);
+    a defect in deciding the facts is logged and stops no input, and the work then reads
+    as no person's carrying no one's authority: a work records none, and a join records
+    the work's facts with no authority, at none, so no reader reads more than was
+    decided."""
     import ai_assistant.orchestration.work_facts as module  # noqa: PLC0415 — patched here
 
     class _Defective:
@@ -495,8 +641,11 @@ async def test_a_defect_in_the_lookup_or_the_recording_stops_nothing(
         state.take_inputs((joining,), merged=("act-other",))
     assert broken.started_facts is None
     assert broken.trigger.senders == (_OWNER,)
-    assert [one.facts for one in state.joined] == [None]
-    assert state.work_facts == state.started_facts
+    assert _reads(broken) == _NO_ONES
+    closed = WorkFacts(for_whom=_OWNERS_WORK, authority=WorkAuthority.none(), level=Sureness.NONE)
+    assert [one.facts for one in state.joined] == [closed]
+    assert state.work_facts == closed
+    assert _reads(state) == _FOR_THE_OWNER
     assert [(one["event"], one["at"]) for one in logs] == [
         ("work_facts_unrecorded", "start"),
         ("work_facts_unrecorded", "join"),
@@ -508,8 +657,8 @@ async def test_another_works_facts_never_join_as_this_ones(
 ) -> None:
     """ADR-0368 §2:5: an absorption brings the other work's joined inputs, each carrying
     the facts that work recorded. They are never kept as this work's: replaced by its own,
-    or taken off where it records none or its recording fails, so no join raises its
-    level. A fault in logging the facts keeps them."""
+    or taken off where it records none, or closed where its recording fails, so no join
+    raises its level. A fault in logging the facts keeps them."""
     import ai_assistant.orchestration.work_facts as module  # noqa: PLC0415 — patched here
 
     weak = InputSender(person=OWNER_PERSON_ID, level=Sureness.WEAK)
@@ -548,8 +697,9 @@ async def test_another_works_facts_never_join_as_this_ones(
     monkeypatch.setattr(module, "joined", _raises)
     failed = recipient()
     failed.take_inputs((brought,), merged=("act-other",))
-    assert [one.facts for one in failed.joined] == [None]
-    assert failed.work_facts == failed.started_facts
+    assert failed.work_facts == WorkFacts(
+        for_whom=_OWNERS_WORK, authority=WorkAuthority.none(), level=Sureness.NONE
+    )
 
 
 # --- when the links cannot be read (ADR-0374) ---------------------------------------------------
@@ -665,10 +815,11 @@ async def test_the_mark_combines_on_a_trigger_as_on_its_messages() -> None:
     assert joining.senders == state.trigger.senders
 
 
-async def test_the_comparison_says_when_the_links_could_not_be_read() -> None:
-    """ADR-0374 §5:1 beside ADR-0368 §1:3: off the hub's own machine a fault disagrees
-    with today's path by design, on authority and level, and the log says the links
-    could not be read; on it, the owner at the chat's most agrees, and says so too."""
+async def test_a_fault_off_the_hubs_machine_is_no_ones_and_on_it_the_owners() -> None:
+    """ADR-0374 §2:2, §3:2, §5:1: off the hub's own machine a message whose links could
+    not be read is no person's work carrying no one's authority; on it, the owner's work
+    carrying their authority; the log says the links could not be read for either. A
+    fault is never read as a link: the line during a fault is no one's too."""
     with capture_logs() as logs:
         off = _admitted(NewConversation(), senders=(LINKS_UNREAD,))
         on = _admitted(NewConversation(), senders=(_OWNER_UNREAD,))
@@ -686,14 +837,14 @@ async def test_the_comparison_says_when_the_links_could_not_be_read() -> None:
         for_whom=_OWNERS_WORK, authority=_OWNERS_AUTHORITY, level=Sureness.NORMAL
     )
     entries = [one for one in logs if one["event"] == "work_facts_recorded"]
-    assert [(one["differs"], one["links_unread"]) for one in entries] == [
-        (("authority", "level"), True),
-        ((), True),
-        (("authority", "level"), True),
-        ((), False),
+    assert [(one["persons_work"], one["links_unread"]) for one in entries] == [
+        (False, True),
+        (True, True),
+        (False, True),
+        (True, False),
     ]
-    assert _agrees(line) == ("authority", "level")
-    assert _agrees(read) == ()
+    assert _reads(off) == _reads(line) == _NO_ONES
+    assert _reads(on) == _reads(read) == _THE_OWNERS
 
 
 async def test_a_join_logs_a_fault_on_any_input_the_facts_were_recorded_from() -> None:
@@ -739,7 +890,8 @@ async def test_the_facts_line_keeps_its_level_through_the_configured_chain() -> 
     assert facts["level"] == "info"
     assert facts["facts_level"] == "none"
     assert facts["links_unread"] is True
-    assert facts["differs"] == ("authority", "level")
+    assert facts["persons_work"] is False
+    assert facts["carries_a_persons"] is False
     assert facts["whose"] == "senders"
     assert facts["unidentified"] is True
     assert REDACTED not in facts.values()

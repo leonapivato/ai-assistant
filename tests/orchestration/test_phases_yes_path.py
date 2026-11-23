@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from exchange_support import says, shown_text
+from identity_support import admitted
 from phases_support import chat_turn, frozen, processing, until, written
 from story_support import CONVERSATION
 from structured_support import structured
@@ -32,6 +33,7 @@ from understanding_support import TextAsStructured, recall_stage
 
 from ai_assistant.core.errors import ClassifiedToolError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     AskedCall,
     CapabilityEffect,
     CapabilityResult,
@@ -41,11 +43,11 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     Idempotency,
+    InputSender,
     MessageAuthor,
     PermissionOutcome,
     PermissionRuling,
     ProposedCall,
-    RecordedChannelTrigger,
     Reversibility,
     RiskLevel,
     RoundResponse,
@@ -53,6 +55,7 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     SupportHolder,
+    Sureness,
     TelegramForwardKind,
     TelegramForwardOrigin,
     TelegramQuotedMessage,
@@ -77,6 +80,7 @@ from ai_assistant.orchestration.phase_path import (
     Fitted,
     PhasePath,
     PhaseTools,
+    PhaseWorking,
     PlaceTarget,
     place_window,
 )
@@ -104,7 +108,7 @@ from ai_assistant.testing import (
     FakeWebSearcher,
     default_prompt,
 )
-from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
+from ai_assistant.testing.parties import OWNER_SENDER, OWNERS_WORDS
 
 #: Understanding's shipped template, as the composition root hands it the stage.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
@@ -621,46 +625,57 @@ def _from(author: MessageAuthor, position: int = 1) -> TranscriptMessage:
     )
 
 
+#: An account the owner lowered to weak, and one no link ties (ADR-0366 §5:5, §4:1).
+_AT_WEAK: Final = InputSender(person=OWNER_PERSON_ID, level=Sureness.WEAK)
+_UNLINKED: Final = InputSender(person=None, level=Sureness.NONE)
+
+
 @pytest.mark.parametrize(
-    ("trigger", "taken", "expected"),
+    ("senders", "taken", "expected"),
     [
+        pytest.param((OWNER_SENDER,), (MessageAuthor.USER,), True, id="the-owners-message"),
+        pytest.param((_AT_WEAK,), (MessageAuthor.USER,), True, id="a-link-lowered-to-weak"),
+        pytest.param((_UNLINKED,), (MessageAuthor.USER,), False, id="an-unidentified-sender"),
         pytest.param(
-            _recorded_trigger(OWNERS_WORDS), (MessageAuthor.USER,), True, id="the-users-message"
+            (OWNER_SENDER, _UNLINKED), (MessageAuthor.USER,), False, id="one-unidentified-beside"
         ),
+        pytest.param(None, (MessageAuthor.USER,), False, id="no-activation"),
+        pytest.param((OWNER_SENDER,), (), False, id="nothing-taken-in"),
         pytest.param(
-            _recorded_trigger(UNIDENTIFIED_WORDS),
-            (MessageAuthor.USER,),
-            False,
-            id="outside-parties",
-        ),
-        pytest.param(_recorded_trigger(None), (MessageAuthor.USER,), False, id="parties-unknown"),
-        pytest.param(None, (MessageAuthor.USER,), False, id="no-trigger-recorded"),
-        pytest.param(_recorded_trigger(OWNERS_WORDS), (), False, id="nothing-taken-in"),
-        pytest.param(
-            _recorded_trigger(OWNERS_WORDS),
+            (OWNER_SENDER,),
             (MessageAuthor.USER, MessageAuthor.ASSISTANT),
             False,
             id="a-message-not-the-users",
         ),
     ],
 )
-def test_only_the_users_own_chat_message_carries_their_authority(
-    trigger: RecordedChannelTrigger | None, taken: tuple[MessageAuthor, ...], expected: bool
+def test_only_an_identified_persons_own_chat_message_carries_their_authority(
+    senders: tuple[InputSender, ...] | None, taken: tuple[MessageAuthor, ...], expected: bool
 ) -> None:
-    """§3:3, ADR-0292 §5:5: anything that cannot be established is not the user's."""
+    """§3:3, ADR-0368 §9:1: the work's facts, by the links, say whose authority it carries.
+
+    No level gates anything here beyond identified or not (ADR-0367's, milestone 2).
+    """
     hub = _Hub()
     path = hub.phases(hub.harness)
     messages = tuple(_from(author, position) for position, author in enumerate(taken, 1))
 
-    working = path.begin(
-        activation_id="a-2",
-        window=_window(*messages),
-        conversation_id=CONVERSATION.instance_id,
-        trigger=trigger,
-        owner_records=True,
-    )
+    def begun() -> PhaseWorking:
+        return path.begin(
+            activation_id="a-2",
+            window=_window(*messages),
+            conversation_id=CONVERSATION.instance_id,
+            trigger=_recorded_trigger(OWNERS_WORDS),
+            owner_records=True,
+        )
 
-    assert working.users_authority is expected
+    if senders is None:
+        working = begun()
+    else:
+        with admitted(senders=senders):
+            working = begun()
+
+    assert (working.authority == OWNER_PERSON_ID) is expected
 
 
 class _NoWrites:
@@ -689,18 +704,17 @@ def _said_on_the_line(position: int, author: MessageAuthor = MessageAuthor.USER)
 
 
 @pytest.mark.parametrize(
-    ("parties", "forwarded", "expected"),
+    ("senders", "forwarded", "expected"),
     [
-        pytest.param(OWNERS_WORDS, (), True, id="the-owners-own-messages"),
-        pytest.param(_FORWARDED, (2,), False, id="a-forward-among-them"),
-        pytest.param(OWNERS_WORDS, (2,), False, id="a-forward-whatever-the-parties"),
-        pytest.param(_FORWARDED, (), False, id="outside-parties"),
+        pytest.param((OWNER_SENDER,), (), True, id="the-owners-own-messages"),
+        pytest.param((OWNER_SENDER,), (2,), False, id="a-forward-among-them"),
+        pytest.param((_UNLINKED,), (), False, id="an-unidentified-sender"),
     ],
 )
-def test_on_the_line_only_the_owners_own_messages_none_forwarded_carry_authority(
-    parties: tuple[SupportHolder, ...], forwarded: tuple[int, ...], expected: bool
+def test_on_the_line_only_an_identified_persons_own_messages_none_forwarded_carry_authority(
+    senders: tuple[InputSender, ...], forwarded: tuple[int, ...], expected: bool
 ) -> None:
-    """ADR-0323 §4:6: every message taken in is the user's, established, none a forward."""
+    """ADR-0323 §4:6, ADR-0368 §9:1: every message a person's own, none a forward."""
     hub = _Hub()
     path = hub.phases(hub.harness)
     taken = (_said_on_the_line(1), _said_on_the_line(2))
@@ -711,16 +725,17 @@ def test_on_the_line_only_the_owners_own_messages_none_forwarded_carry_authority
         forwarded={one: ClaimedAuthor(name="Sam") for one in forwarded},
     )
 
-    working = path.begin_line(
-        activation_id="a-2",
-        window=window,
-        target=PlaceTarget(channel=_LINE, writer=_NoWrites()),
-        description="the line",
-        trigger=_recorded_trigger(parties),
-        owner_records=True,
-    )
+    with admitted(_LINE, senders=senders):
+        working = path.begin_line(
+            activation_id="a-2",
+            window=window,
+            target=PlaceTarget(channel=_LINE, writer=_NoWrites()),
+            description="the line",
+            trigger=_recorded_trigger(OWNERS_WORDS),
+            owner_records=True,
+        )
 
-    assert working.users_authority is expected
+    assert (working.authority == OWNER_PERSON_ID) is expected
     assert working.conversation_id is None
     assert working.target is not None
     assert working.target.place == f"telegram:{_LINE.instance_id}"
@@ -780,11 +795,13 @@ def test_a_forward_in_the_lines_window_is_someone_elses_whose_text_planning_neve
 
 def test_an_event_never_carries_the_users_authority() -> None:
     hub = _Hub()
-    working = hub.phases(hub.harness).begin_event(
-        activation_id="a-2", trigger=_recorded_trigger(OWNERS_WORDS), owner_records=True
-    )
+    events = ChannelIdentity(channel_type="informational_event", instance_id="mail")
+    with admitted(events, senders=()):
+        working = hub.phases(hub.harness).begin_event(
+            activation_id="a-2", trigger=_recorded_trigger(OWNERS_WORDS), owner_records=True
+        )
 
-    assert working.users_authority is False
+    assert working.authority is None
     assert working.conversation_id is None
 
 

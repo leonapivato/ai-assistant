@@ -15,9 +15,9 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import (
-    establishes_the_user,
     link_level,
     most_sureness,
+    sent_by_a_person,
 )
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -120,9 +120,9 @@ def test_a_kind_that_declares_no_most_gives_none(kind: str) -> None:
 @pytest.mark.parametrize(
     "kind", ["conversation", "telegram", "email", "informational_event", "task_scheduler"]
 )
-def test_a_kind_gives_more_than_none_exactly_where_it_establishes_the_user(kind: str) -> None:
-    """ADR-0368 §9:4: an author established under ADR-0292 §5:3 is at weak or above."""
-    assert (most_sureness(kind) > Sureness.NONE) is establishes_the_user(kind)
+def test_a_kind_gives_more_than_none_exactly_where_a_person_sends_on_it(kind: str) -> None:
+    """ADR-0368 §9:4: only a kind a person sends on by an account gives weak or above."""
+    assert (most_sureness(kind) > Sureness.NONE) is sent_by_a_person(kind)
 
 
 def test_no_kind_gives_strong_yet() -> None:

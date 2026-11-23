@@ -658,9 +658,9 @@ async def test_what_understanding_names_is_labelled_on_first_show() -> None:
     assert [one.name for one in tags(sent)] == ["understanding"]
     assert sent.split("\n")[-1] == "- Belongs to: S1, E1."
     # Where it belongs is named first, so a cited item named there too keeps that label.
-    # ADR-0364 §4:1: P1, the owner, is minted first, in every work.
+    # ADR-0366 §8:4: no person's label is minted ahead of the rest by rule, so a work that
+    # names no one labels no one.
     assert [(one.label, one.kind, one.id) for one in planned.labels] == [
-        ("P1", LabelKind.PERSON, "person:owner"),
         ("S1", LabelKind.STORY, "story:dinner"),
         ("E1", LabelKind.EPISODE, "activation:old"),
         ("M1", LabelKind.MEMORY, "mem-1"),
@@ -1226,9 +1226,11 @@ async def test_an_episode_stored_at_any_address_takes_a_label(episode_id: str) -
     stage, completer, _ = _stage()
     planned = await stage.plan(_inputs(episodes=(_episode(episode_id),)))
     assert labels(section(_sent(completer), "## Short-term memory"), "episode") == ["E1"]
+    # ADR-0366 §8:4: the owner is labelled where the briefing first names them, here
+    # after the episode, and by no rule first.
     assert planned.labels == (
-        PlanningLabel(label="P1", kind=LabelKind.PERSON, id="person:owner"),
         PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=episode_id),
+        PlanningLabel(label="P1", kind=LabelKind.PERSON, id="person:owner"),
     )
 
 
@@ -1555,10 +1557,10 @@ async def test_a_found_episode_is_shown_by_its_records_with_its_stories_labels()
     ]
     # Its matters are labelled as its container is opened, before its own label.
     assert [(one.label, one.kind, one.id) for one in planned.labels] == [
-        ("P1", LabelKind.PERSON, "person:owner"),
         ("S1", LabelKind.STORY, "story-1"),
         ("S2", LabelKind.STORY, "story-2"),
         ("E1", LabelKind.EPISODE, "activation:found"),
+        ("P1", LabelKind.PERSON, "person:owner"),
     ]
 
 
@@ -2103,10 +2105,7 @@ async def test_a_referent_with_a_blank_id_is_still_labelled() -> None:
     stage, completer, _ = _stage()
     planned = await stage.plan(_inputs(understanding=understanding))
     assert _cites(completer) == "E1"
-    assert planned.labels == (
-        PlanningLabel(label="P1", kind=LabelKind.PERSON, id="person:owner"),
-        PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=""),
-    )
+    assert planned.labels == (PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=""),)
 
 
 # --- a saved call whose capability is not offered on this pass (ADR-0260 §3:2) -------
