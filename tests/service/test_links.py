@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     LinkAct,
     LinkActHow,
     LinkWriteKind,
+    Sureness,
 )
 from ai_assistant.service.enrolment import (
     ENROLMENTS_FILENAME,
@@ -494,3 +495,67 @@ async def test_a_refused_link_is_logged_and_changes_nothing(
     assert held.person_id == "person:other"
     (logged,) = [entry for entry in captured if entry["event"] == "device_link_refused"]
     assert logged["refusal"] == "already_linked"
+
+
+async def test_a_revocation_and_a_restore_back_to_back_end_the_old_link_and_make_a_new_one(
+    registry: DeviceRegistry, links: DeviceLinks, identities: FakeIdentityStore
+) -> None:
+    """Two acts, however close: the link the revoked registration stood on ends with it,
+    lowerings and all, and the restore makes a new link (ADR-0366 §3, ADR-0373 §6:3)."""
+    registry.accept_naming(_LAPTOP, _PHONE, now=_MOMENT)
+    await links.settled()
+    (first,) = await _links_of(identities, _PHONE)
+    await identities.lower(first.id, Sureness.WEAK, by=OWNER_PERSON_ID)
+
+    registry.revoke_registration(_PHONE, gateway=_LAPTOP, now=_LATER)
+    registry.restore_registration(_PHONE, gateway=_LAPTOP, now=_LATER)
+    await links.settled()
+
+    ended, made = await _links_of(identities, _PHONE)
+    assert ended.id == first.id
+    assert not ended.standing
+    assert made.standing
+    assert made.lowerings == ()
+
+
+async def test_ending_a_device_link_hands_a_configured_account_back_to_the_configuration(
+    registry: DeviceRegistry,
+) -> None:
+    """The hosted device set to a device its admission already linked: L1's opening finds
+    the account held and links nothing, so when the admission ends, the account is
+    linked again by the ``configured`` act it still stands on, never left unlinked."""
+    identities = FakeIdentityStore(configured=(_account(HUB_DEVICE_ID),))
+    registry.accept_naming(_LAPTOP, _HOSTED, now=_MOMENT)
+    await identities.link(OWNER_PERSON_ID, _account(_HOSTED), act=_DEVICE)
+    links = DeviceLinks(
+        identities, registry, configured=(_account(HUB_DEVICE_ID), _account(_HOSTED))
+    )
+    try:
+        registry.revoke_registration(_HOSTED, gateway=_LAPTOP, now=_LATER)
+        await links.settled()
+    finally:
+        await links.aclose()
+
+    ended, configured = await _links_of(identities, _HOSTED)
+    assert (ended.act, ended.standing) == (_DEVICE, False)
+    assert (configured.act, configured.standing) == (_CONFIGURED, True)
+
+
+async def test_following_at_start_hands_a_configured_account_back_to_the_configuration(
+    store: EnrolmentStore,
+) -> None:
+    """A revoked device whose link write failed, then named as the hosted device: the
+    start ends its ``device`` link and links the account by the ``configured`` act."""
+    identities = FakeIdentityStore(configured=(_account(HUB_DEVICE_ID),))
+    await identities.link(OWNER_PERSON_ID, _account(_HOSTED), act=_DEVICE)
+    links = DeviceLinks(
+        identities,
+        DeviceRegistry(store, hub_identity=_HUB),
+        configured=(_account(HUB_DEVICE_ID), _account(_HOSTED)),
+    )
+    try:
+        await links.follow()
+    finally:
+        await links.aclose()
+
+    assert await _standing(identities) == {HUB_DEVICE_ID: _CONFIGURED, _HOSTED: _CONFIGURED}
