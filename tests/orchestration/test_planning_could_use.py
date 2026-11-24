@@ -14,7 +14,13 @@ from dataclasses import replace
 from exchange_support import section, tags
 from test_tool_descriptions_build import _connections, _inputs, _stage
 
-from ai_assistant.core.types import ChannelIdentity, ProposedCall, RoundResponse
+from ai_assistant.core.types import (
+    OWN_CHAT_CONNECTION,
+    ChannelIdentity,
+    ProposedCall,
+    RoundResponse,
+)
+from ai_assistant.orchestration.could_use import CouldUse
 from ai_assistant.orchestration.task_scheduler import ListedPlace
 
 _SEARCH = ProposedCall(
@@ -72,5 +78,8 @@ async def test_a_place_the_work_may_not_be_shown_is_left_out_of_connections() ->
 
     assert any("Telegram" in one for one in await shown())
     assert not any(
-        "Telegram" in one for one in await shown(shows=lambda place: place != "telegram:line")
+        "Telegram" in one
+        for one in await shown(
+            shows=CouldUse(connections=frozenset({OWN_CHAT_CONNECTION}), own=frozenset()).shows
+        )
     )

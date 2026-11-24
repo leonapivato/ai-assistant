@@ -313,11 +313,10 @@ def test_a_work_of_several_senders_could_use_only_what_every_one_of_them_could()
     assert _capabilities(authority) == {"send_text"}
 
 
-def test_a_connection_no_call_is_made_on_is_left_as_it_is_shown() -> None:
-    """A connection on which no declared capability makes a call offers nothing the check
-    could refuse, so it is not filtered, at none as for the owner: an event's place, or the
-    schedule where no Task Scheduler call is declared. One calls are made on, all refused
-    at none, is not shown unless an input of the work came from it."""
+def test_a_connection_no_call_is_made_on_is_shown_only_as_an_inputs_own() -> None:
+    """ADR-0368 §8:2: shown only on positive evidence. On an event's place, or on the
+    schedule where no Task Scheduler call is declared, no call is made, so neither is one
+    the work could use, the owner's included; its own input's place always is."""
     kind = connection_kind("informational_event:door")
     assert kind is not None
     event = ConnectionShown(place="informational_event:door", kind=kind)
@@ -332,26 +331,41 @@ def test_a_connection_no_call_is_made_on_is_left_as_it_is_shown() -> None:
             whose={},
         )
 
+    owners = could(_owner(Sureness.NORMAL))
+    assert not owners.shows("informational_event:door")
+    assert not owners.shows(SCHEDULE_CONNECTION)
+    assert not owners.shows(_SEARCH)
+    assert owners.shows(_LINE)
     at_none = could(_no_ones(CheckedFor.anyone()))
-    assert at_none.shows("informational_event:door")
-    assert at_none.shows(SCHEDULE_CONNECTION)
-    assert at_none.shows(_SEARCH)
     assert at_none.shows(_HERE)
     assert not at_none.shows(_OTHER)
     assert not at_none.shows(_LINE)
-    assert could(_owner(Sureness.NORMAL)).shows(_LINE)
+
+
+def test_a_place_the_hub_no_longer_lists_is_weighed_as_the_listed_ones_are() -> None:
+    """A place an item names by ``where``, absent from the connections the hub lists, is
+    shown only where a call into it could run: a blanket limit on ``send_text`` hides it."""
+    gone = "telegram:previous-line"
+
+    def shows(authority: WorkAuthority) -> bool:
+        return connections_it_could_use(
+            authority, _HAD, declarations=_DECLARED, accounts=_ACCOUNTS, own=(), whose={}
+        ).shows(gone)
+
+    assert shows(_owner(Sureness.NORMAL))
+    assert not shows(_owner(Sureness.NORMAL, _line(PermissionLineKind.LIMIT, "send_text")))
+    assert not shows(_no_ones(CheckedFor.anyone()))
+    assert not CouldUse(connections=frozenset(), own=frozenset()).shows(gone)
 
 
 def test_a_conversation_is_shown_as_the_systems_own_chat_is() -> None:
     """ADR-0376 §2:4: every conversation is the one connection, the system's own chat."""
-    could = CouldUse(
-        connections=frozenset(), own=frozenset(), refused=frozenset({OWN_CHAT_CONNECTION})
-    )
+    could = CouldUse(connections=frozenset({OWN_CHAT_CONNECTION}), own=frozenset())
 
     assert connection_key(_OTHER) == OWN_CHAT_CONNECTION
     assert connection_key(SCHEDULE_CONNECTION) == SCHEDULE_CONNECTION
-    assert not could.shows("conversation:any")
-    assert could.shows(_LINE)
+    assert could.shows("conversation:any")
+    assert not could.shows(_LINE)
 
 
 def test_a_record_is_read_only_where_an_outcome_needs_its_things_yes() -> None:
@@ -431,11 +445,7 @@ async def test_a_connections_search_finds_only_what_the_work_could_use() -> None
     second = await store.start()
     search = ConnectionSearch(conversations=store, scan=10, page_size=5)
     own_place = f"conversation:{first.id}"
-    at_none = CouldUse(
-        connections=frozenset(),
-        own=frozenset({own_place}),
-        refused=frozenset({OWN_CHAT_CONNECTION}),
-    )
+    at_none = CouldUse(connections=frozenset(), own=frozenset({own_place}))
     owners = CouldUse(connections=frozenset({OWN_CHAT_CONNECTION}), own=frozenset())
 
     narrowed = await search.search("text messages", 1, shows=at_none.shows)

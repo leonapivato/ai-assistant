@@ -287,3 +287,43 @@ async def test_a_write_that_never_returns_is_cut_short_by_the_events_own_deadlin
     assert {"event": "thing_record_unwritten", "stage": "receive", "reason": "deadline"} in [
         {key: one[key] for key in ("event", "stage", "reason") if key in one} for one in logs
     ]
+
+
+class _Gated:
+    """A store whose write waits on ``release`` and notes when it has begun."""
+
+    def __init__(self) -> None:
+        self.held = FakeThingRecordStore()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def whose(self, key: ThingKey) -> ThingRecord | None:
+        return await self.held.whose(key)
+
+    async def record_whose(self, key: ThingKey, *, person: str) -> ThingRecording:
+        self.entered.set()
+        await self.release.wait()
+        return await self.held.record_whose(key, person=person)
+
+    async def export(self) -> tuple[ThingRecord, ...]:
+        return await self.held.export()
+
+
+async def test_shutdown_drains_a_write_in_flight_before_it_closes() -> None:
+    """ADR-0042 §2: the write is tracked work, so ``aclose`` waits for it to finish."""
+    things = _Gated()
+    harness = phases_harness(things=things)
+    receiving = asyncio.create_task(
+        harness.engine.receive(event_input(), reply=None, timeout=timedelta(seconds=10))
+    )
+    await asyncio.wait_for(things.entered.wait(), timeout=5)
+
+    closing = asyncio.create_task(harness.engine.aclose())
+    await asyncio.sleep(0.05)
+    assert not closing.done()
+    things.release.set()
+    await asyncio.wait_for(closing, timeout=5)
+
+    assert await things.whose(_EVENT_PLACE) is not None
+    receiving.cancel()
+    await asyncio.gather(receiving, return_exceptions=True)

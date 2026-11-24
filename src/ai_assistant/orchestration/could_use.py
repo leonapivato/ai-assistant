@@ -356,26 +356,37 @@ def capabilities_it_could_use(
 class CouldUse:
     """The connections a work's authority could use, read for the section and the search.
 
-    A place is shown where one of the work's own inputs came from it, or where it is in a
-    connection the work could use. A connection on which no call of any declared capability
-    is made at all, such as an event's place, offers nothing the check could refuse: it is
-    left as it is shown without a filter, an item naming it by ``where`` included.
+    A place is shown only on positive evidence (ADR-0368 §8:2): one of the work's own
+    inputs came from it, or it is in a connection the work could use. A place outside the
+    connections weighed, such as one an item names by ``where`` that the hub no longer
+    lists, is weighed when it is asked about by the same rules: a place that takes a text
+    message by ``send_text`` into it, which no record bears on, since a message is never
+    asked about; any other is one no call of the work is made on, and is not shown.
 
     Attributes:
         connections: Each connection it could use, keyed by :func:`connection_key`.
         own: Each place one of its own inputs came from, which it could use whatever the
             check would make of a call into it (ADR-0367 §4:7).
-        refused: Each connection, by key, on which calls are made but none of the work's
-            could run: those it may not be shown.
+        weighed: Each connection, by key, already weighed into ``connections``.
+        authority: What the work's calls are checked against, for a place not weighed;
+            ``None`` weighs none, so only ``connections`` and ``own`` are shown.
     """
 
     connections: frozenset[str]
     own: frozenset[str]
-    refused: frozenset[str] = frozenset()
+    weighed: frozenset[str] = frozenset()
+    authority: WorkAuthority | None = None
 
     def shows(self, place: str) -> bool:
         """Whether the place may be shown to the work."""
-        return place in self.own or connection_key(place) not in self.refused
+        if place in self.own:
+            return True
+        key = connection_key(place)
+        if key in self.connections:
+            return True
+        if key in self.weighed or self.authority is None or not takes_text(place):
+            return False
+        return could_allow(self.authority, TEXT_CALL, thing=key)
 
 
 def _acting_in(
@@ -453,7 +464,8 @@ def connections_it_could_use(  # noqa: PLR0913 — the authority, what the hub h
     return CouldUse(
         connections=frozenset(usable),
         own=frozenset(own),
-        refused=frozenset(acted_on) - usable,
+        weighed=frozenset(acted_on),
+        authority=authority,
     )
 
 
