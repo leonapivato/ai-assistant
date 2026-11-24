@@ -52,9 +52,10 @@ from ai_assistant.core.types import (
     ScheduledTaskAuthor,
     Sureness,
 )
+from ai_assistant.orchestration.channel_kinds import ACCOUNT_KINDS, CONNECTION_KINDS
 from ai_assistant.orchestration.permission_check import CheckSubject
-from ai_assistant.orchestration.phase_path import PhaseWorking, Scheduling
-from ai_assistant.orchestration.planning import PlaceWindow
+from ai_assistant.orchestration.phase_path import PhaseWorking, Scheduling, had_connections
+from ai_assistant.orchestration.planning import ConnectionShown, PlaceWindow
 from ai_assistant.testing import FakeIdentityStore, FakePermissionLineStore
 from ai_assistant.testing.tool_calling import FakeToolCallingCompleter
 
@@ -283,3 +284,19 @@ def test_a_condition_naming_a_connection_the_hub_no_longer_has_is_met_for_no_wor
     assert working.check_subject() == CheckSubject(runs=author, met="telegram:line")
     assert working.check_subject({"telegram:line"}).met == "telegram:line"
     assert working.check_subject({OWN_CHAT_CONNECTION}) == CheckSubject(runs=author, met=None)
+
+
+def test_the_hub_has_its_own_chat_though_no_conversation_is_listed() -> None:
+    """ADR-0376 §2:4, ADR-0381 §2:1: the system's own chat is one connection whatever
+    conversations it holds, so a task set there meets its condition after the last
+    conversation is deleted; every other listed connection is had as listed."""
+    assert had_connections(()) == {OWN_CHAT_CONNECTION}
+    listed = (
+        ConnectionShown(place="conversation:c-1", kind=CONNECTION_KINDS["conversation"]),
+        ConnectionShown(
+            place="telegram:line", kind=CONNECTION_KINDS["telegram"], state="disconnected"
+        ),
+        ConnectionShown(place="task_scheduler:schedule", kind=CONNECTION_KINDS["task_scheduler"]),
+        ConnectionShown(place="account:conn-a", kind=ACCOUNT_KINDS["email"], account="email"),
+    )
+    assert had_connections(listed) == {OWN_CHAT_CONNECTION, "telegram:line", "account:conn-a"}

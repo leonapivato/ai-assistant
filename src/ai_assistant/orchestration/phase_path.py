@@ -266,6 +266,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
+    OWN_CHAT_CONNECTION,
     RECALLED_ITEMS_MAX,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEffect,
@@ -554,6 +555,7 @@ __all__ = [
     "call_outcomes",
     "digested_evidence",
     "failing_stage",
+    "had_connections",
     "is_defect",
     "log_defect",
     "place_name",
@@ -1945,6 +1947,35 @@ class TicketsHeld(Protocol):
 #: The channel types whose places take a message from the assistant: the hub chat's
 #: conversations and the line's chat (ADR-0350 §5:11).
 _TAKES_A_MESSAGE: Final = frozenset({"conversation", "telegram"})
+
+
+def had_connections(shown: Iterable[ConnectionShown]) -> frozenset[str]:
+    """The connections the hub has, as a line names them (ADR-0376 §2:4, §2:8).
+
+    The system's own chat always: it is one connection whatever conversations it holds,
+    none included (ADR-0381 §2:1), so it is had though a work's Connections section lists
+    none of its conversations. Beside it, each connection the section lists, which is
+    every other the hub has: the line's chat where the line is configured, connected or
+    not, and each account the composition root registered, whatever its state (ADR-0364
+    §3:2-§3:6). Read from that section as built, before anything filters what a work is
+    offered: a filter of what a work may use (ADR-0368 §8) is not what the hub has.
+
+    Args:
+        shown: The work's Connections section, as built for the round.
+
+    Returns:
+        Each connection, as a line names it.
+    """
+    return frozenset(
+        {
+            OWN_CHAT_CONNECTION,
+            *(
+                connection
+                for one in shown
+                if (connection := place_connection(one.place)) is not None
+            ),
+        }
+    )
 
 
 def _input_places(state: ActivationState | None) -> tuple[str, ...]:
@@ -5554,13 +5585,7 @@ class PhasePath:
             person=None if state is None else persons_work(state.work_facts, state.held_senders),
             tickets=frozenset(one.request_id for one in await self._held_tickets(state)),
             check_for=working.check_subject(
-                None
-                if self._connections is None
-                else {
-                    connection
-                    for one in working.connections
-                    if (connection := place_connection(one.place)) is not None
-                }
+                None if self._connections is None else had_connections(working.connections)
             ),
             input_places=_input_places(state),
             check_sink=latest.checks,
