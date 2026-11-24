@@ -29,6 +29,20 @@ everything after that section is the author's recommendation.
 - Five optimizations are in: an image format of our own, a cache on the watch,
   instant navigation on a press, layers that the watch can move, and a
   black-background style.
+- Ruled 2026-11-24, in answer to four questions put with options:
+  - **A press.** The watch's link sits at weak: an enrolled device of the
+    owner's, held by someone. A press answers a card whose call needs weak.
+    For a card that needs more, the watch asks for a PIN, and the PIN counts
+    for that one approval only (the owner's words: "weak, but if a approval
+    comes for something higher, it only requires the pin for that specific
+    approval").
+  - **Admission.** The existing device rule, unchanged: the owner enrols the
+    watch, and the secret and the hub's identity are written to it over USB
+    when it is flashed. It presents the secret on every connect, over TLS.
+  - **Route.** The watch gateway listens on the public internet on the hosted
+    box, over TLS, and admits only an enrolled watch.
+  - **Channel.** The watch has a channel of its own for its screen, microphone
+    and speaker, as its own place. Its audience is the owner alone.
 
 ## Baseline
 
@@ -366,14 +380,19 @@ at 320 x 192 (Espressif); about 32 frames a second pushed to a similar
 
 ## What this leaves open
 
-1. **What a press proves.** It shows someone holds the watch, not that the owner
-   is wearing it. Until that is settled the watch should not approve anything.
-2. **Admission.** How the watch is enrolled and proves which device it is
-   (ADR-0292 §4 keeps ADR-0124's admission in front of every device).
-3. **The route from campus.** The hub is reachable only on the tailnet, and the
-   chip has no Tailscale client.
-4. **Channels.** Which channel the watch's microphone, speaker and screen attach
-   to, and who the audience of a wrist screen is (ADR-0292 §2 and §9).
+1. **The PIN.** The ruling is a PIN per approval. Its shape is mine and not
+   ruled: the hub checks the digits, not the watch; it raises that one answer
+   to normal and never to strong; the answer records that a PIN raised it;
+   five wrong tries lock raising until the owner clears it elsewhere.
+   ADR-0377 §2 reads a tap's level from the link it arrived by, so a raise for
+   one tap needs a decision of its own before it is built.
+2. **Admission.** Ruled. Left to its decision: where the secret sits in the
+   watch's flash, and what a lost watch costs (ADR-0124's expelling a device).
+3. **The public door.** Ruled. It is a new edge: ADR-0124 keeps the remote
+   listener on the overlay, so this needs its own decision, as the web door
+   did (ADR-0327). The first connection is tried at home on the LAN.
+4. **Channels.** Ruled. Not yet checked clause by clause against ADR-0292 §2
+   and §9; that is owed when this becomes a decision.
 5. **`core` surface.** Whether the watch is the second spoke that fires
    ADR-0094 §10, and what that owes.
 6. **Where the gateway and the renderer live** in the tree, and which renderer
