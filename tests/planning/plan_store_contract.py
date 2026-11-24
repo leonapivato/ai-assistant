@@ -29,6 +29,7 @@ import pytest
 
 from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
+    OWN_CHAT_CONNECTION,
     ActivationEffect,
     ActivationEffectClaim,
     ApprovalCard,
@@ -75,6 +76,7 @@ from ai_assistant.core.types import (
     ScheduledTask,
     ScheduledTaskAuthor,
     ScheduledTaskWrite,
+    Sureness,
     TaskRefusal,
     TaskRuleKind,
     TaskSpawn,
@@ -516,16 +518,24 @@ def _spawn(  # noqa: PLR0913 — every part a case below varies
     outside: bool = False,
     author: ScheduledTaskAuthor = ScheduledTaskAuthor.ASSISTANT,
     first_due_at: datetime | None = None,
+    level: Sureness | None = None,
+    connection: str | None = None,
 ) -> TaskSpawn:
     """A spawn as the actuator states it (ADR-0350 §3:6), due now unless told otherwise.
 
     A rule's spawn carries the instant of its first occurrence, as its caller computed
-    it (ADR-0340 §9:1).
+    it (ADR-0340 §9:1). Who set it is the person it is for, at normal, where its author
+    is the person, and no one, at none, where it is the assistant (ADR-0368 §6:1),
+    unless ``level`` says otherwise; ``connection`` is where it was set (§6:4).
     """
+    persons = author is ScheduledTaskAuthor.PERSON
     return TaskSpawn(
         id=task_id,
         person=person,
         author=author,
+        author_person=person if persons else None,
+        setting_level=level or (Sureness.NORMAL if persons else Sureness.NONE),
+        setting_connection=connection,
         when=when or DueNow(),
         places=places,
         instruction=f"do the step {task_id}",
@@ -1489,7 +1499,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 29
+        assert export.schema_version == 30
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -2118,7 +2128,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 29
+        assert export.schema_version == 30
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -2365,7 +2375,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 29
+        assert export.schema_version == 30
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -2637,6 +2647,55 @@ class PlanStoreContract:
         assert replacement.places == (_LINE,)
         assert replacement.chain_length == 2
         assert [one.id for one in await store.activation_effects(["act-9"])] == ["spawn-t2"]
+
+    async def test_a_task_records_who_set_it_as_its_spawn_states(self, store: PlanStore) -> None:
+        """ADR-0368 §6:1, §6:3, §6:4: written as given, read back and exported whole."""
+        written = await _written(
+            store,
+            "t1",
+            author=ScheduledTaskAuthor.PERSON,
+            level=Sureness.WEAK,
+            connection="telegram:line",
+        )
+        assistants = await _written(store, "t2")
+
+        assert (written.author_person, written.setting_level, written.setting_connection) == (
+            _PERSON,
+            Sureness.WEAK,
+            "telegram:line",
+        )
+        assert (
+            assistants.author_person,
+            assistants.setting_level,
+            assistants.setting_connection,
+        ) == (None, Sureness.NONE, None)
+        assert await store.scheduled_tasks(["t1", "t2"]) == (written, assistants)
+        assert (await store.export()).scheduled_tasks == (written, assistants)
+
+    async def test_a_replace_records_who_set_the_replacement_not_the_replaced(
+        self, store: PlanStore
+    ) -> None:
+        """§9:4 takes the replaced task's parent, places and chain alone (ADR-0368 §6:1).
+
+        The work that set the new task is the one that replaced it, so the new task
+        records its author's person, level and connection, as it records its author.
+        """
+        await _written(
+            store,
+            "t1",
+            author=ScheduledTaskAuthor.PERSON,
+            level=Sureness.STRONG,
+            connection=OWN_CHAT_CONNECTION,
+        )
+
+        replacement = await _written(store, "t2", spawner="act-9", replace_any=True, replaces="t1")
+
+        assert replacement.author is ScheduledTaskAuthor.ASSISTANT
+        assert (
+            replacement.author_person,
+            replacement.setting_level,
+            replacement.setting_connection,
+        ) == (None, Sureness.NONE, None)
 
     async def test_a_replace_counts_the_pending_limit_after_its_cancel(
         self, store: PlanStore
@@ -3107,7 +3166,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 29
+        assert exported.schema_version == 30
         assert [one.id for one in exported.scheduled_tasks] == ["t2", "t1"]
         assert removed == 4
         cleared = await store.export()
@@ -3507,7 +3566,7 @@ class PlanStoreContract:
         exported = await store.export()
         await store.clear()
 
-        assert exported.schema_version == 29
+        assert exported.schema_version == 30
         assert exported.scheduled_tasks == (held,)
         assert len(exported.scheduled_tasks[0].occurrences) == 4
         assert (await store.export()).scheduled_tasks == ()
@@ -4249,7 +4308,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 29
+        assert exported.schema_version == 30
         assert exported.approval_requests == held
         # Two requests and their two effect records.
         assert removed == 4

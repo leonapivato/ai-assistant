@@ -560,6 +560,12 @@ class Spawner:
         shown: Each connection it was shown, by what its ``L`` label names, which a
             spawn from a work keeping no list may suggest where it takes a text message
             (ADR-0364 §11:3).
+        level: Its work's level, as its three facts say (ADR-0368 §2:3): the level a
+            task it spawns records where it carries :attr:`authority` (§6:1, §6:3).
+            None, the default, where nothing recorded one.
+        connection: The one connection a grant's condition naming a connection is met
+            for in its work, as a line names it (ADR-0368 §4:2, §6:4), which a task it
+            spawns records; ``None``, the default, where no one connection is.
     """
 
     activation_id: str
@@ -573,6 +579,8 @@ class Spawner:
     sees_running: bool = False
     keeps_list: bool = False
     shown: tuple[str, ...] = ()
+    level: Sureness = Sureness.NONE
+    connection: str | None = None
 
     @property
     def carries_the_persons(self) -> bool:
@@ -585,6 +593,24 @@ class Spawner:
         if self.carries_the_persons:
             return ScheduledTaskAuthor.PERSON
         return ScheduledTaskAuthor.ASSISTANT
+
+    @property
+    def author_person(self) -> str | None:
+        """The person a task it spawns records its author names (ADR-0368 §6:1).
+
+        The one whose authority its work carries, where that makes its author the person;
+        ``None`` where its author is the assistant.
+        """
+        return self.authority if self.carries_the_persons else None
+
+    @property
+    def setting_level(self) -> Sureness:
+        """The level a task it spawns records of the work that set it (ADR-0368 §6:1).
+
+        Its work's, where the task's author is the person; none where the work carried no
+        one's authority.
+        """
+        return self.level if self.carries_the_persons else Sureness.NONE
 
 
 #: The activation whose round's calls are running, by what the runner needs of it.

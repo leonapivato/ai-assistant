@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from task_setters import decoded, unset
 
 from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
@@ -186,8 +187,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "19"
-    assert export.schema_version == 29
+    assert _label(legacy) == "20"
+    assert export.schema_version == 30
     assert export.stopped_activations == ("act-before-stopped",)
     effects = {one.id: one for one in export.activation_effects}
     assert list(effects) == _EFFECTS
@@ -201,13 +202,14 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     assert tasks["t-before-pending"].occurrences[0].due_at == _WROTE_AT + timedelta(days=2)
     assert tasks["t-before-pushed"].occurrences[0].state is OccurrenceState.DONE
     assert export.approval_requests == ()
-    # The step moves the label and adds the one empty table, and rewrites no row.
+    # The steps move the label and add the one empty table, and rewrite no row but to
+    # add who set each task (ADR-0368 §6:3).
     after = _dump(legacy)
     assert set(after) == {*_TABLES_BEFORE, "approval_requests"}
     assert after["approval_requests"] == []
-    assert {table: after[table] for table in before if table != "meta"} == {
-        table: rows for table, rows in before.items() if table != "meta"
-    }
+    carried = {table for table in before if table not in {"meta", "scheduled_tasks"}}
+    assert {table: after[table] for table in carried} == {table: before[table] for table in carried}
+    assert unset(after["scheduled_tasks"]) == decoded(before["scheduled_tasks"])
 
 
 async def test_the_upgraded_file_holds_a_request_and_keeps_what_it_carried(
@@ -253,7 +255,7 @@ async def test_the_upgraded_file_holds_a_request_and_keeps_what_it_carried(
         assert [one.id for one in spent] == ["effect-before-part"]
     finally:
         reopened.close()
-    assert _label(legacy) == "19"
+    assert _label(legacy) == "20"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

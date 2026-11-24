@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from task_setters import decoded, unset
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
@@ -37,6 +38,7 @@ from ai_assistant.core.types import (
     OccurrenceState,
     RulePush,
     ScheduledTaskAuthor,
+    Sureness,
     TaskRuleKind,
     TaskSpawn,
     TaskWriteAnswer,
@@ -127,8 +129,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "19"
-    assert export.schema_version == 29
+    assert _label(legacy) == "20"
+    assert export.schema_version == 30
     assert export.stopped_activations == ("act-before-stopped",)
     effects = {one.id: one for one in export.activation_effects}
     assert effects["spawn-pending"].outcome is ToolOutcome.SUCCEEDED
@@ -152,12 +154,15 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     assert tasks["t-waiting"].when == DueAfterTasks(tasks=("t-pending",))
     assert tasks["t-waiting"].occurrences[0].due_at is None
     assert [one.state for one in tasks["t-cancelled"].occurrences] == [OccurrenceState.CANCELLED]
-    # The steps move the label and retire the cascade table, and rewrite no row.
+    # The steps move the label and retire the cascade table, and rewrite no row but to
+    # add who set each task (ADR-0368 §6:3).
     after = _dump(legacy)
     assert set(after) == _TABLES_AFTER
-    assert {table: after[table] for table in _TABLES_AFTER if table != "meta"} == {
-        table: before.get(table, []) for table in _TABLES_AFTER if table != "meta"
+    rows = {table for table in _TABLES_AFTER if table not in {"meta", "scheduled_tasks"}}
+    assert {table: after[table] for table in rows} == {
+        table: before.get(table, []) for table in rows
     }
+    assert unset(after["scheduled_tasks"]) == decoded(before["scheduled_tasks"])
 
 
 async def test_the_upgraded_file_holds_a_rule_and_keeps_what_it_carried(legacy: Path) -> None:
@@ -167,6 +172,9 @@ async def test_the_upgraded_file_holds_a_rule_and_keeps_what_it_carried(legacy: 
         id="t-rule",
         person="person:owner",
         author=ScheduledTaskAuthor.PERSON,
+        author_person="person:owner",
+        setting_level=Sureness.NORMAL,
+        setting_connection=None,
         when=DueOnRule(repeats=TaskRuleKind.WEEKDAYS, time_of_day=time(7)),
         instruction="the bins",
         set_in=ChannelIdentity(channel_type="conversation", instance_id="c-1"),
@@ -207,7 +215,7 @@ async def test_the_upgraded_file_holds_a_rule_and_keeps_what_it_carried(legacy: 
         assert [one.id for one in carried] == ["t-done", "t-step"]
     finally:
         reopened.close()
-    assert _label(legacy) == "19"
+    assert _label(legacy) == "20"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

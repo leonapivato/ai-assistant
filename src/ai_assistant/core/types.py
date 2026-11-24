@@ -11574,6 +11574,69 @@ class ObservationRecord(BaseModel):
 # holds them, because a task, the spawn's effect claim and the stop that refuses it are
 # decided in one step (§3:3). What ran is kept in episodes, never here (§7:9).
 
+# A connection as a line names it is declared here, ahead of the scheduled task, which
+# records one (ADR-0368 §6:4), rather than beside the permission lines that also name
+# it: a forward reference would leave every model holding a task incomplete until a
+# ``model_rebuild``, the import-order side effect the comment above :data:`Identifier`
+# rules out.
+
+#: The system's own chat, named as **one** connection (ADR-0376 §2:4): its channel type
+#: alone, with no conversation, since a line never names one of its conversations.
+OWN_CHAT_CONNECTION: Final = "conversation"
+
+#: The channel types of the schedule and the approvals, which no line names (ADR-0376
+#: §2:4). ``core.channel_validation`` declares them as ``TASK_SCHEDULER`` and ``APPROVALS``;
+#: it imports this module, so they are spelled again here and a test holds the two equal.
+_NAMED_BY_NO_LINE: Final = frozenset({"task_scheduler", "approvals"})
+
+#: What separates a connection's kind from its name, as an ``L`` label's place spells it.
+_CONNECTION_SEPARATOR: Final = ":"
+
+
+def _line_connection(value: str) -> str:
+    """Refuse what is not a connection a line may name, returning it **unchanged**.
+
+    A line names a connection by what an ``L`` label names (ADR-0376 §2:4, ADR-0364 §3:3),
+    spelled as the system already spells it, so a line's connection and a call's compare as
+    text: a place as ``<channel type>:<instance id>``, as an effect record names it (such as
+    ``telegram:line``); an account connection as ``account:`` and its reference; and the
+    system's own chat as :data:`OWN_CHAT_CONNECTION` alone. Held verbatim, never
+    normalised: a value whose kind or name carries surrounding whitespace is refused rather
+    than stripped, since a stripped spelling would name a connection the caller did not.
+
+    Whether the hub has the connection named is not the type's to say (ADR-0376 §4:5).
+
+    Raises:
+        ValueError: If it is none of those spellings, names one of the system's own chat's
+            conversations, or names the schedule or the approvals.
+    """
+    if value == OWN_CHAT_CONNECTION:
+        return value
+    kind, separator, name = value.partition(_CONNECTION_SEPARATOR)
+    if not separator or not kind.strip() or not name.strip():
+        msg = "a line names a connection as <kind>:<name>, or the system's own chat as one"
+        raise ValueError(msg)
+    if kind != kind.strip() or name != name.strip():
+        msg = "a connection a line names carries no surrounding whitespace"
+        raise ValueError(msg)
+    if kind == OWN_CHAT_CONNECTION:
+        msg = "a line names the system's own chat as one connection, never by a conversation"
+        raise ValueError(msg)
+    if kind in _NAMED_BY_NO_LINE:
+        msg = "no line names the schedule or the approvals"
+        raise ValueError(msg)
+    return value
+
+
+type LineConnection = Annotated[NonBlankEncodableText, AfterValidator(_line_connection)]
+"""A connection as a line names it, as its thing or its condition (ADR-0376 §2:4).
+
+One place, as ``<channel type>:<instance id>``; one account connection, as ``account:`` and
+its reference (ADR-0151 §3); or the system's own chat, as :data:`OWN_CHAT_CONNECTION`. Stable
+for as long as what it names is, and compared as given.
+"""
+
+
 #: The bound, in characters, on what a scheduled task carries: the creator's instruction,
 #: "bounded in size" (ADR-0350 §3:6). Planning writes it, so it is short; the bound is the
 #: ceiling a hand-built or runaway instruction meets, well above any reminder or step.
@@ -11905,6 +11968,19 @@ class ScheduledTask(BaseModel):
     and its occurrences, numbered from one. **It carries no authority**, whoever set it
     (§3:9).
 
+    **Who set it, and how sure** (ADR-0368 §6:1, §6:3, §6:4, as §11 names the record):
+    ``author_person`` is the person its author names, the one whose authority the work
+    that set it carried, exactly where ``author`` is the person, and ``None`` where it is
+    the assistant; ``setting_level`` is the level of that work, and none where it
+    carried no one's authority; and ``setting_connection`` is the one connection a
+    grant's condition naming a connection was met for in that work (§6:4): the one every
+    one of its senders' inputs came by (§4:2), as a line names a connection
+    (:data:`LineConnection`), or, for a task's work, the one its own task records; and
+    ``None`` where no one connection was. Each is written from the setting work's
+    recorded facts when the task is set, and a task stored before them reads as the plan
+    store's upgrade wrote them. Nothing reads them yet: what they record is what the
+    check of a task's calls will read.
+
     A task with no rule is one-off, holding one occurrence: due now or at an instant,
     it falls due when its when says, and waiting on named tasks, once they have all
     ended. **A task with a rule holds more than one occurrence over its life**
@@ -11919,16 +11995,20 @@ class ScheduledTask(BaseModel):
     Raises:
         ValueError: If its occurrences are not numbered from one in order, it has no
             rule and holds more than one, it suggests a place twice, it waits on
-            itself, an occurrence's due instant disagrees with its when, or it holds a
-            rule that its author is not the person's, an occurrence with no instant or
-            out of order, or an occurrence never pushed and still pending that is not
-            its last.
+            itself, an occurrence's due instant disagrees with its when, it records its
+            author's person where its author is not the person or none where it is, it
+            records a level above none with no person, or it holds a rule that its
+            author is not the person's, an occurrence with no instant or out of order,
+            or an occurrence never pushed and still pending that is not its last.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     id: Identifier
     person: NonBlankEncodableText
     author: ScheduledTaskAuthor
+    author_person: NonBlankEncodableText | None
+    setting_level: Sureness
+    setting_connection: LineConnection | None
     when: TaskWhen
     places: tuple[ChannelIdentity, ...] = ()
     instruction: NonBlankEncodableText = Field(max_length=SCHEDULED_TASK_INSTRUCTION_MAX_CHARS)
@@ -12004,9 +12084,32 @@ def _scheduled_task_fault(task: ScheduledTask) -> str | None:
         ),
     )
     found = next((fault for broken, fault in clauses if broken), None)
+    if found is None:
+        found = _setter_fault(task.author, task.author_person, task.setting_level)
     if found is None and isinstance(when, DueOnRule):
         return _rule_task_fault(task)
     return found
+
+
+def _setter_fault(
+    author: ScheduledTaskAuthor, author_person: str | None, setting_level: Sureness
+) -> str | None:
+    """Which of a task's rules for who set it ``author_person`` and the rest break, if any.
+
+    ADR-0368 §6:1: the person its author names is the one whose authority the setting
+    work carried, which is what makes its author the person (ADR-0350 §3:7); and where
+    that work carried none, the task carries none, at none. A person at none is allowed:
+    it is what a task records where the level its setting work carried for that person
+    was not recorded, and at none it holds only what anyone holds.
+    """
+    if (author is ScheduledTaskAuthor.PERSON) != (author_person is not None):
+        return (
+            "a task records its author's person exactly where its author is the person "
+            "(ADR-0368 §6:1, ADR-0350 §3:7)"
+        )
+    if author_person is None and setting_level is not Sureness.NONE:
+        return "a task whose setting work carried no one's authority is at none (ADR-0368 §6:1)"
+    return None
 
 
 def _rule_task_fault(task: ScheduledTask) -> str | None:
@@ -12057,15 +12160,24 @@ class TaskSpawn(BaseModel):
     other when: the plan store computes no instant. Whether the spawn's author may set a
     rule is the store's to refuse, as not done (§4:1, §9:2), so it is not refused here.
 
+    ``author_person``, ``setting_level`` and ``setting_connection`` are who set the task
+    and how sure, as :class:`ScheduledTask` records them (ADR-0368 §6:1, §6:3, §6:4),
+    stated from the spawning work's recorded facts. The store writes them as given, a
+    replace's included: the work that set the new task is the replacing one.
+
     Raises:
-        ValueError: If it suggests a place twice, waits on itself, replaces itself, or
-            carries a first instant where its when is not a rule, or none where it is.
+        ValueError: If it suggests a place twice, waits on itself, replaces itself,
+            carries a first instant where its when is not a rule, or none where it is,
+            or states who set it as :class:`ScheduledTask` refuses.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     id: Identifier
     person: NonBlankEncodableText
     author: ScheduledTaskAuthor
+    author_person: NonBlankEncodableText | None
+    setting_level: Sureness
+    setting_connection: LineConnection | None
     when: TaskWhen
     places: tuple[ChannelIdentity, ...] = ()
     instruction: NonBlankEncodableText = Field(max_length=SCHEDULED_TASK_INSTRUCTION_MAX_CHARS)
@@ -12092,6 +12204,9 @@ class TaskSpawn(BaseModel):
         if self.replaces == self.id:
             msg = "a spawn replaces another task, never the one it writes (ADR-0350 §9:4)"
             raise ValueError(msg)
+        fault = _setter_fault(self.author, self.author_person, self.setting_level)
+        if fault is not None:
+            raise ValueError(fault)
         return self
 
 
@@ -12299,7 +12414,15 @@ class ScheduledDue(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 29 because a request's call gained ``looking_for``**
+    **``schema_version`` is 30 because a scheduled task gained who set it and how sure**
+    (ADR-0368 §6:1, §6:3, §6:4): ``author_person``, ``setting_level`` and
+    ``setting_connection``, which every task carries, the plan store's upgrade writing them
+    on each task stored before them. No member is added, since they ride inside
+    ``scheduled_tasks``, but a reader of 29 refuses them as extra, so the label moves. The
+    closure rule is extended by nothing: they name a person, a level and a connection,
+    none of which is a record the document carries.
+
+    **It was 29 because a request's call gained ``looking_for``**
     (ADR-0364 §10:6): planning's *looking for*, kept beside the deliberate-repeat mark for
     the digest when the ticket's call runs. No member is added, since it rides inside
     ``approval_requests``, and a dump leaves it out where it is unset, but a reader of 28
@@ -12408,12 +12531,12 @@ class PlanExport(BaseModel):
     # Its approval requests hold the person's call arguments (ADR-0145 §8).
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
-    schema_version: Literal[29] = Field(
-        default=29,
+    schema_version: Literal[30] = Field(
+        default=30,
         description=(
-            "Shape of this export, pinned to exactly 29 (ADR-0039 §10, ADR-0364 §10:6): an "
+            "Shape of this export, pinned to exactly 30 (ADR-0039 §10, ADR-0368 §6:3): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[29]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[30]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -25670,62 +25793,6 @@ ANYONE_GROUP_ID: Final = "group:anyone"
 #: Who a line may name in this milestone: the owner's identity or anyone, and nothing else
 #: until a decision for milestone 5 adds groups and other people (ADR-0376 §2:1).
 LINE_WHO: Final = frozenset({OWNER_PERSON_ID, ANYONE_GROUP_ID})
-
-#: The system's own chat, named as **one** connection (ADR-0376 §2:4): its channel type
-#: alone, with no conversation, since a line never names one of its conversations.
-OWN_CHAT_CONNECTION: Final = "conversation"
-
-#: The channel types of the schedule and the approvals, which no line names (ADR-0376
-#: §2:4). ``core.channel_validation`` declares them as ``TASK_SCHEDULER`` and ``APPROVALS``;
-#: it imports this module, so they are spelled again here and a test holds the two equal.
-_NAMED_BY_NO_LINE: Final = frozenset({"task_scheduler", "approvals"})
-
-#: What separates a connection's kind from its name, as an ``L`` label's place spells it.
-_CONNECTION_SEPARATOR: Final = ":"
-
-
-def _line_connection(value: str) -> str:
-    """Refuse what is not a connection a line may name, returning it **unchanged**.
-
-    A line names a connection by what an ``L`` label names (ADR-0376 §2:4, ADR-0364 §3:3),
-    spelled as the system already spells it, so a line's connection and a call's compare as
-    text: a place as ``<channel type>:<instance id>``, as an effect record names it (such as
-    ``telegram:line``); an account connection as ``account:`` and its reference; and the
-    system's own chat as :data:`OWN_CHAT_CONNECTION` alone. Held verbatim, never
-    normalised: a value whose kind or name carries surrounding whitespace is refused rather
-    than stripped, since a stripped spelling would name a connection the caller did not.
-
-    Whether the hub has the connection named is not the type's to say (ADR-0376 §4:5).
-
-    Raises:
-        ValueError: If it is none of those spellings, names one of the system's own chat's
-            conversations, or names the schedule or the approvals.
-    """
-    if value == OWN_CHAT_CONNECTION:
-        return value
-    kind, separator, name = value.partition(_CONNECTION_SEPARATOR)
-    if not separator or not kind.strip() or not name.strip():
-        msg = "a line names a connection as <kind>:<name>, or the system's own chat as one"
-        raise ValueError(msg)
-    if kind != kind.strip() or name != name.strip():
-        msg = "a connection a line names carries no surrounding whitespace"
-        raise ValueError(msg)
-    if kind == OWN_CHAT_CONNECTION:
-        msg = "a line names the system's own chat as one connection, never by a conversation"
-        raise ValueError(msg)
-    if kind in _NAMED_BY_NO_LINE:
-        msg = "no line names the schedule or the approvals"
-        raise ValueError(msg)
-    return value
-
-
-type LineConnection = Annotated[NonBlankEncodableText, AfterValidator(_line_connection)]
-"""A connection as a line names it, as its thing or its condition (ADR-0376 §2:4).
-
-One place, as ``<channel type>:<instance id>``; one account connection, as ``account:`` and
-its reference (ADR-0151 §3); or the system's own chat, as :data:`OWN_CHAT_CONNECTION`. Stable
-for as long as what it names is, and compared as given.
-"""
 
 
 def _line_who(value: str) -> str:

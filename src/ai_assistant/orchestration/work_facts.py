@@ -74,6 +74,11 @@ and a relayed input carries no authority (§6:5); but no model sets or changes a
 which the episode keeps (ADR-0351 §5:9), is read beside them: :func:`persons_authority`
 takes it.
 
+**Where a condition naming a connection is met** (:func:`met_connection`, ADR-0368
+§4:2, §6:4): the one connection every one of a work's senders' inputs came by, and in a
+task's work the one its task records. A task records it of the work that set it (§6:3);
+nothing reads it yet, and it is no fact of the work (§2:4).
+
 **One line per recording** (:func:`log_facts`): ``work_facts_recorded``, with what was
 decided as codes and levels alone, never a person's identifier or an input's words, which
 is what a running hub shows of the switch.
@@ -84,6 +89,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 import structlog
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.channel_validation import (
     APPROVALS,
@@ -95,12 +101,14 @@ from ai_assistant.core.channel_validation import (
 from ai_assistant.core.errors import IdentityStoreError
 from ai_assistant.core.types import (
     HUB_DEVICE_ID,
+    OWN_CHAT_CONNECTION,
     OWNER_PERSON_ID,
     Account,
     AuthorityKind,
     ChannelIdentity,
     HolderKind,
     InputSender,
+    LineConnection,
     Sureness,
     WorkAuthority,
     WorkFacts,
@@ -109,15 +117,18 @@ from ai_assistant.core.types import (
     canonical_parties,
     senders_level,
 )
+from ai_assistant.orchestration.channel_kinds import place_of
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable, Mapping, Sequence
 
     from ai_assistant.core.protocols import IdentityStore
     from ai_assistant.core.types import (
+        ChannelTarget,
         JoinedInput,
         RecordedChannelTrigger,
         RecordedInputMessage,
+        ScheduledTask,
         SupportHolder,
     )
 
@@ -134,6 +145,7 @@ __all__ = [
     "line_account",
     "links_unread",
     "log_facts",
+    "met_connection",
     "persons_authority",
     "persons_work",
     "record_joined",
@@ -175,6 +187,10 @@ _SENT_BY_NO_PERSON: Final = frozenset({"informational_event", TASK_SCHEDULER, AP
 #: another and it is built (ADR-0365 §1:3, ADR-0366 §1:3, ADR-0368 §1:4). The readers
 #: answer for them alone (:func:`persons_work`, :func:`persons_authority`).
 _ADMITTED: Final = frozenset({OWNER_PERSON_ID})
+
+#: A connection as a line names it (ADR-0376 §2:4), which a place's spelling is checked
+#: against before a task records it.
+_LINE_CONNECTION: Final = TypeAdapter[str](LineConnection)
 
 #: The parties of a message its sender wrote: a person a link establishes, or unknown
 #: for a sender no link does (ADR-0351 §3:2). A forward's is an outside source, claimed.
@@ -506,6 +522,58 @@ def persons_authority(
     if len(persons) != 1 or persons[0] not in _ADMITTED:
         return None
     return persons[0]
+
+
+def _connection(target: ChannelTarget) -> str:
+    """The connection an input came by, as a line names it (ADR-0376 §2:4).
+
+    The system's own chat is one connection, whichever conversation; any other place is
+    named as an effect record names it, ``<channel type>:<instance id>``.
+    """
+    if not isinstance(target, ChannelIdentity) or target.channel_type == CHAT_ACCOUNT_KIND:
+        return OWN_CHAT_CONNECTION
+    return place_of(target)
+
+
+def met_connection(
+    trigger: RecordedChannelTrigger | None,
+    joined: Iterable[JoinedInput],
+    *,
+    task: ScheduledTask | None = None,
+) -> str | None:
+    """The one connection a grant's condition naming a connection is met for in a work.
+
+    ADR-0368 §4:2: a condition naming a connection is met where every one of the work's
+    senders' inputs came by it, so it is met for the one connection they all came by,
+    and for none where they came by several or the work has no sender. §6:4: in a task's
+    work, it is met where it was met in the work that set the task, which the task records
+    (``setting_connection``), and the work's senders' inputs, where it holds any, came by
+    that one too. What a task records of where it was set is this, read of the work that
+    set it (§6:3); nothing here decides a fact of the work (§2:4).
+
+    Args:
+        trigger: The work's recorded trigger, or ``None`` where no channel admitted it.
+        joined: The inputs that joined it.
+        task: The task whose occurrence started it, where it is a task's work.
+
+    Returns:
+        The connection, as a line names it; ``None`` where no one connection is met.
+    """
+    connections: set[str] = set()
+    if trigger is not None and trigger.senders:
+        connections.add(_connection(trigger.channel or trigger.target))
+    connections.update(_connection(one.channel) for one in joined if one.senders)
+    if task is not None:
+        if task.setting_connection is None:
+            return None
+        connections.add(task.setting_connection)
+    if len(connections) != 1:
+        return None
+    (only,) = connections
+    try:
+        return _LINE_CONNECTION.validate_python(only)
+    except ValidationError:  # a place no line can name meets no condition
+        return None
 
 
 def links_unread(senders: Iterable[InputSender]) -> bool:

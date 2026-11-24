@@ -255,7 +255,7 @@ def test_the_plan_stores_cascade_carry_is_what_its_upgrade_does(
 
     carried = plans.carries[4](base)
 
-    assert plans.shape == 5
+    assert plans.shape == 6
     assert carried == head
     assert upgrade_check.compare_records("plans", carried, head) == []
     assert upgrade_check.compare_records("plans", base, head) != []
@@ -837,6 +837,60 @@ def test_the_memory_stores_carry_from_shape_6_is_what_its_upgrade_does(tmp_path:
 
 
 @pytest.mark.integration
+def test_the_plan_stores_setter_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """ADR-0368 §6:3: the carry from shape 5 says what the head's upgrade past 19 reads back.
+
+    Taken over the file the previous release wrote with tasks of both authors in it
+    (``tests/planning/legacy``). The base's read-back is each record as that release
+    exported it, which is the stored blob; carried to shape 6, every task gains who set
+    it, the person's at normal and the assistant's at none, and every record of it is
+    read back by this build after the upgrade, the carry's values held to what the head
+    actually reads.
+    """
+    import shutil  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "planning" / "legacy"
+    shutil.copyfile(legacy / "plans-before-task-author.db", tmp_path / "plans.db")
+    with sqlite3.connect(tmp_path / "plans.db") as conn:
+        base: Records = {
+            "stopped": [
+                str(one)
+                for (one,) in conn.execute(
+                    "SELECT activation_id FROM stopped_activations ORDER BY activation_id"
+                )
+            ],
+            **{
+                f"effect/{effect_id}": json.loads(data)
+                for effect_id, data in conn.execute("SELECT id, data FROM activation_effects")
+            },
+            "observations": [],
+            **{
+                f"task/{task_id}": json.loads(data)
+                for task_id, data in conn.execute("SELECT id, data FROM scheduled_tasks")
+            },
+        }
+    (plans,) = [one for one in STORES if one.name == "plans"]
+
+    carried = plans.carries[5](base)
+    head = asyncio.run(plans.read(tmp_path))
+
+    assert plans.shape == 6
+    assert upgrade_check.compare_records("plans", carried, head) == []
+    # The head may read back more than the base did, so the carry is what holds it to
+    # these values: carried to another level, the head reads back other than it says.
+    persons = carried["task/t-person-at"]
+    assert isinstance(persons, dict)
+    weak = {**carried, "task/t-person-at": {**persons, "setting_level": "weak"}}
+    assert upgrade_check.compare_records("plans", weak, head) != []
+    setters = {
+        key: (value["author_person"], value["setting_level"], value["setting_connection"])
+        for key, value in carried.items()
+        if key.startswith("task/") and isinstance(value, dict)
+    }
+    assert set(setters.values()) == {(None, "none", None), ("person:owner", "normal", None)}
+
+
+@pytest.mark.integration
 def test_the_plan_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
     """ADR-0329 §16:10: the carry from shape 1 says what the head's upgrade reads back.
 
@@ -868,7 +922,7 @@ def test_the_plan_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
     carried = plans.carries[2](plans.carries[1](base))
     head = asyncio.run(plans.read(tmp_path))
 
-    assert plans.shape == 5
+    assert plans.shape == 6
     assert carried["observations"] == []
     assert upgrade_check.compare_records("plans", carried, head) == []
 

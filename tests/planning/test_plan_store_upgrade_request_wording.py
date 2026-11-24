@@ -20,6 +20,9 @@ request validates unchanged: the upgrade is the empty one ADR-0326 §4's note na
 the label stays ``19``. The head opens a copy, writes nothing to open it, and reads every
 record back as it was, each request serialising to the bytes the file holds. The opened
 file then holds a pin's request carrying its wording, which outlives a reopen.
+
+This build's open moves the label on to ``20`` (ADR-0368 §6:3), a step that rewrites
+a scheduled task's row alone, and the file holds none, so nothing else moves.
 """
 
 from __future__ import annotations
@@ -158,8 +161,11 @@ def test_the_fixture_is_the_previous_releases_file() -> None:
     assert all('"wording"' not in data for data in _stored_requests(_FIXTURE))
 
 
-async def test_the_head_opens_it_writing_nothing_and_keeps_its_label(legacy: Path) -> None:
-    """ADR-0326 §4's note: the upgrade is empty, the label stays and no row moves."""
+async def test_the_head_opens_it_moving_its_label_alone(legacy: Path) -> None:
+    """ADR-0326 §4's note: the wording's upgrade is empty, and no row moves.
+
+    The one change is the label, which the step past 19 moves (ADR-0368 §6:3).
+    """
     before = _dump(legacy)
 
     store = _open(legacy)
@@ -168,8 +174,8 @@ async def test_the_head_opens_it_writing_nothing_and_keeps_its_label(legacy: Pat
     finally:
         store.close()
 
-    assert _label(legacy) == "19"
-    assert _dump(legacy) == before
+    assert _label(legacy) == "20"
+    assert {**_dump(legacy), "meta": before["meta"]} == before
 
 
 async def test_every_request_reads_back_as_the_previous_release_wrote_it(legacy: Path) -> None:
@@ -246,5 +252,5 @@ async def test_the_opened_file_holds_a_worded_request_across_a_reopen(legacy: Pa
     assert [one.id for one in export.approval_requests] == [*_REQUESTS, "q-after-pin"]
     assert export.approval_requests[-1] == request
     assert export.approval_requests[-1].call.wording == "Robin takes green tea."
-    assert export.schema_version == 29
-    assert _label(legacy) == "19"
+    assert export.schema_version == 30
+    assert _label(legacy) == "20"

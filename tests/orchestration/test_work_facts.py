@@ -25,16 +25,21 @@ from structlog.testing import capture_logs
 
 from ai_assistant.core.errors import IdentityStoreError
 from ai_assistant.core.types import (
+    OWN_CHAT_CONNECTION,
     OWNER_PERSON_ID,
     Account,
     AuthorityKind,
     ChannelIdentity,
     ChannelInput,
     ClaimedAuthor,
+    DueNow,
     InputSender,
     JoinedInput,
     NewConversation,
     RecordedInputMessage,
+    ScheduledOccurrence,
+    ScheduledTask,
+    ScheduledTaskAuthor,
     SupportHolder,
     Sureness,
     TextChannelPayload,
@@ -46,6 +51,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.approvals import THE_APPROVALS
+from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.orchestration.work_facts import (
     HUB_MACHINE,
@@ -55,6 +61,7 @@ from ai_assistant.orchestration.work_facts import (
     chat_account,
     joined,
     line_account,
+    met_connection,
     persons_authority,
     persons_work,
     sender_of,
@@ -396,6 +403,86 @@ def test_a_kind_with_no_row_is_for_no_one() -> None:
     assert started(other) == WorkFacts(
         for_whom=WorkFor.no_one(), authority=WorkAuthority.none(), level=Sureness.NONE
     )
+
+
+# --- where a condition naming a connection is met (ADR-0368 §4:2, §6:4) ---------------------
+
+
+def _task(connection: str | None) -> ScheduledTask:
+    """A task the owner set, recording where its setting work met a connection."""
+    return ScheduledTask(
+        id="t-1",
+        person=OWNER_PERSON_ID,
+        author=ScheduledTaskAuthor.PERSON,
+        author_person=OWNER_PERSON_ID,
+        setting_level=Sureness.NORMAL,
+        setting_connection=connection,
+        when=DueNow(),
+        instruction="water the plants",
+        parent="act-0",
+        set_in=_CHAT,
+        set_at=_AT,
+        chain_length=1,
+        occurrences=(ScheduledOccurrence(number=1, due_at=_AT),),
+    )
+
+
+async def test_a_work_meets_the_one_connection_its_senders_inputs_came_by() -> None:
+    """§4:2: the system's own chat as one connection, and the line's place as an effect
+    record names it; a sender at none counts as a sender, and an input no one sent meets
+    none."""
+    chat = await _chat(_PHONE)
+    stranger = await _chat(_STRANGER)
+    line = await _line()
+    event = _admitted(_EVENT, reply=False)
+
+    assert met_connection(chat.trigger, chat.joined) == OWN_CHAT_CONNECTION
+    assert met_connection(stranger.trigger, ()) == OWN_CHAT_CONNECTION
+    assert met_connection(_admitted(_CHAT, senders=(_OWNER,)).trigger, ()) == "conversation"
+    assert met_connection(line.trigger, line.joined) == f"telegram:conn-1:{_TELEGRAM_ID}"
+    assert met_connection(event.trigger, ()) is None
+    assert met_connection(None, ()) is None
+
+
+async def test_a_work_whose_senders_came_by_two_connections_meets_none() -> None:
+    """§4:2: a join from another connection meets neither; one from the same keeps it,
+    and an input no one sent that joins changes nothing."""
+    line = await _line()
+    from_the_line = _joining(_OWNER)
+    from_the_chat = from_the_line.model_copy(update={"channel": _CHAT})
+    no_one = JoinedInput(
+        joined_at=_AT,
+        channel=_EVENT,
+        messages=(RecordedInputMessage(text="a doorbell", sent_at=_AT),),
+    )
+
+    assert met_connection(line.trigger, (from_the_line, no_one)) == place_of(_LINE)
+    assert met_connection(line.trigger, (from_the_line, from_the_chat)) is None
+    assert (
+        met_connection(_admitted(_EVENT, reply=False).trigger, (from_the_chat,)) == "conversation"
+    )
+
+
+def test_a_tasks_work_meets_the_connection_its_task_records() -> None:
+    """§6:4: met where it was met in the work that set the task, and a sender's input that
+    joined it from another connection meets none."""
+    occurrence = _admitted(SCHEDULE, reply=False)
+
+    assert met_connection(occurrence.trigger, (), task=_task("telegram:line")) == "telegram:line"
+    assert met_connection(occurrence.trigger, (), task=_task(None)) is None
+    from_the_chat = _joining(_OWNER).model_copy(update={"channel": _CHAT})
+    assert met_connection(occurrence.trigger, (from_the_chat,), task=_task("telegram:line")) is None
+    assert (
+        met_connection(occurrence.trigger, (from_the_chat,), task=_task(OWN_CHAT_CONNECTION))
+        == OWN_CHAT_CONNECTION
+    )
+
+
+def test_a_place_no_line_can_name_meets_no_condition() -> None:
+    """ADR-0376 §2:4: the schedule and the approvals are named by no line."""
+    schedule = _admitted(SCHEDULE, senders=(_OWNER,), reply=False)
+
+    assert met_connection(schedule.trigger, ()) is None
 
 
 # --- an input joining a work ----------------------------------------------------------------

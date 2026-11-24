@@ -22,6 +22,7 @@ from understanding_support import understanding_stage
 from ai_assistant.core.channel_validation import TASK_SCHEDULER, origin_kind
 from ai_assistant.core.errors import ModelError, PlanningError
 from ai_assistant.core.types import (
+    OWN_CHAT_CONNECTION,
     OWNER_PERSON_ID,
     ActivationStop,
     CallOutcomeKind,
@@ -36,6 +37,7 @@ from ai_assistant.core.types import (
     ProposedCall,
     RoundResponse,
     ScheduledTaskAuthor,
+    Sureness,
     TaskSpawn,
     parties_are_outside,
 )
@@ -251,6 +253,35 @@ async def test_a_spawn_to_start_now_starts_an_activation_that_speaks_where_it_na
         await _until_no_tasks(harness)
     finally:
         await harness.engine.aclose()
+
+
+async def test_a_spawn_from_the_owners_chat_message_records_them_its_level_and_the_chat() -> None:
+    """ADR-0368 §6:1, §6:3, §6:4: the setting work's facts and inputs reach the task.
+
+    The owner's own message in the system's chat sets it: the task records the owner, the
+    level the work's facts recorded, and the system's chat as the one connection its
+    sender's input came by. Nothing reads them: the task is written as before.
+    """
+    completer = _responder(_spawning(delay_minutes=90), _silent)
+    harness = phases_harness(completer, task_scheduler=seams())
+    await harness.engine.start()
+    try:
+        conversation = await open_conversation(harness)
+        await harness.engine.write_message(conversation, message=said("m-1", "remind me"))
+
+        async def set_() -> bool:
+            return bool((await harness.plans.export()).scheduled_tasks)
+
+        await until(set_, what="the spawned task")
+        (task,) = (await harness.plans.export()).scheduled_tasks
+    finally:
+        await harness.engine.aclose()
+
+    assert task.author is ScheduledTaskAuthor.PERSON
+    assert task.author_person == OWNER_PERSON_ID
+    assert task.setting_level is Sureness.NORMAL
+    assert task.setting_connection == OWN_CHAT_CONNECTION
+    assert task.set_in == ChannelIdentity(channel_type="conversation", instance_id=conversation)
 
 
 async def test_a_message_naming_a_place_off_its_list_is_refused() -> None:
@@ -569,6 +600,9 @@ async def test_an_outside_marked_tasks_text_is_withheld_from_planning() -> None:
             id="task:marked",
             person=OWNER_PERSON_ID,
             author=ScheduledTaskAuthor.ASSISTANT,
+            author_person=None,
+            setting_level=Sureness.NONE,
+            setting_connection=None,
             when=DueNow(),
             instruction="forward the parcel number",
             set_in=ChannelIdentity(channel_type="conversation", instance_id="c-1"),

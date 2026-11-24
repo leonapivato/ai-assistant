@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     ENDED_OCCURRENCE_STATES,
+    OWN_CHAT_CONNECTION,
     SCHEDULED_TASK_INSTRUCTION_MAX_CHARS,
     ChannelIdentity,
     DueAfterTasks,
@@ -31,6 +32,7 @@ from ai_assistant.core.types import (
     ScheduledTaskAuthor,
     ScheduledTaskCancel,
     ScheduledTaskWrite,
+    Sureness,
     TaskRefusal,
     TaskSpawn,
     TaskWriteAnswer,
@@ -40,6 +42,17 @@ from ai_assistant.core.types import (
 _AT = datetime(2026, 10, 25, 8, tzinfo=UTC)
 _HUB_CHAT = ChannelIdentity(channel_type="conversation", instance_id="c-1")
 _LINE = ChannelIdentity(channel_type="telegram", instance_id="line")
+
+
+def _set_by(author: object) -> dict[str, Any]:
+    """Who set a task of ``author`` (ADR-0368 §6:1): the person at normal, or no one at none."""
+    if author is ScheduledTaskAuthor.PERSON:
+        return {
+            "author_person": "person:owner",
+            "setting_level": Sureness.NORMAL,
+            "setting_connection": None,
+        }
+    return {"author_person": None, "setting_level": Sureness.NONE, "setting_connection": None}
 
 
 def _task(**fields: Any) -> ScheduledTask:
@@ -56,6 +69,7 @@ def _task(**fields: Any) -> ScheduledTask:
             "set_at": _AT,
             "chain_length": 1,
             "occurrences": (ScheduledOccurrence(number=1, due_at=_AT),),
+            **_set_by(fields.get("author", ScheduledTaskAuthor.PERSON)),
             **fields,
         }
     )
@@ -180,6 +194,70 @@ def test_a_task_whose_parts_disagree_is_refused(fields: dict[str, Any], fault: s
         _task(**fields)
 
 
+# --- who set it (ADR-0368 §6:1, §6:3, §6:4) --------------------------------------------
+
+
+def test_a_task_records_who_set_it_and_round_trips() -> None:
+    """§6:1, §6:3, §6:4: the person its author names, the level, and the connection."""
+    task = _task(setting_level=Sureness.WEAK, setting_connection="telegram:line")
+
+    assert (task.author_person, task.setting_level, task.setting_connection) == (
+        "person:owner",
+        Sureness.WEAK,
+        "telegram:line",
+    )
+    assert ScheduledTask.model_validate_json(task.model_dump_json()) == task
+
+
+def test_a_task_the_person_set_may_record_the_person_at_none() -> None:
+    """A level its setting work carried for the person that was not recorded is none."""
+    assert _task(setting_level=Sureness.NONE).setting_level is Sureness.NONE
+
+
+@pytest.mark.parametrize(
+    ("fields", "fault"),
+    [
+        ({"author_person": None}, "exactly where its author is the person"),
+        (
+            {"author": ScheduledTaskAuthor.ASSISTANT, "author_person": "person:owner"},
+            "exactly where its author is the person",
+        ),
+        (
+            {"author": ScheduledTaskAuthor.ASSISTANT, "setting_level": Sureness.WEAK},
+            "carried no one's authority is at none",
+        ),
+    ],
+)
+def test_a_task_whose_setter_disagrees_with_its_author_is_refused(
+    fields: dict[str, Any], fault: str
+) -> None:
+    """§6:1: the person exactly where the author is the person; none where there is none."""
+    with pytest.raises(ValidationError, match=fault):
+        _task(**fields)
+    author = fields.get("author", ScheduledTaskAuthor.PERSON)
+    with pytest.raises(ValidationError, match=fault):
+        _spawn(**{"author": author, **_set_by(author), **fields})
+
+
+@pytest.mark.parametrize(
+    "connection", ["conversation:c-1", "task_scheduler:schedule", "approvals:a", "line", ""]
+)
+def test_a_task_records_a_connection_only_as_a_line_names_one(connection: str) -> None:
+    """§6:4, ADR-0376 §2:4: the system's own chat as one, and never the schedule."""
+    with pytest.raises(ValidationError):
+        _task(setting_connection=connection)
+    assert _task(setting_connection=OWN_CHAT_CONNECTION).setting_connection == "conversation"
+
+
+@pytest.mark.parametrize("missing", ["author_person", "setting_level", "setting_connection"])
+def test_a_task_stored_before_it_recorded_who_set_it_does_not_validate(missing: str) -> None:
+    """Each field is required: a task from before them reads only as the upgrade wrote it."""
+    held = _task().model_dump(mode="json")
+    del held[missing]
+    with pytest.raises(ValidationError, match=missing):
+        ScheduledTask.model_validate(held)
+
+
 def test_a_wait_names_each_task_once_and_at_least_one() -> None:
     """§5:4: a hub event naming tasks names some, and none twice."""
     with pytest.raises(ValidationError):
@@ -201,6 +279,7 @@ def _spawn(**fields: Any) -> TaskSpawn:
             "instruction": "check back",
             "set_in": _HUB_CHAT,
             "set_at": _AT,
+            **_set_by(fields.get("author", ScheduledTaskAuthor.ASSISTANT)),
             **fields,
         }
     )

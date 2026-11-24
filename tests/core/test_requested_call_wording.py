@@ -160,11 +160,11 @@ def test_the_wording_is_shown_never_sent_and_no_part_of_the_calls_sameness() -> 
 def test_an_export_holding_a_worded_request_round_trips_at_the_current_label() -> None:
     """ADR-0039 §10: a reader of 27 would refuse the wording as extra, so the label moved.
 
-    It is 29 since ADR-0364 §10:6 gave a request's call ``looking_for``.
+    It is 30 since ADR-0368 §6:3 gave a scheduled task who set it.
     """
     export = PlanExport(exported_at=_AT, approval_requests=(_request(_call(wording=_WORDING)),))
 
-    assert export.schema_version == 29
+    assert export.schema_version == 30
     assert PlanExport.model_validate_json(export.model_dump_json()) == export
     with pytest.raises(ValidationError):
         PlanExport.model_validate({**export.model_dump(mode="json"), "schema_version": 27})

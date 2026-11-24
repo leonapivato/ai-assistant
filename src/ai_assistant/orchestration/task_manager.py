@@ -72,6 +72,7 @@ from ai_assistant.core.types import (
     OccurrenceState,
     RuleDay,
     ScheduledTaskAuthor,
+    Sureness,
     TapOnCard,
     TaskRefusal,
     TaskRuleKind,
@@ -1060,6 +1061,9 @@ class TaskManager:
             id=self._new_task_id(),
             person=spawner.person,
             author=spawner.author,
+            author_person=spawner.author_person,
+            setting_level=spawner.setting_level,
+            setting_connection=spawner.connection,
             when=when,
             places=places,
             instruction=instruction,
@@ -1141,11 +1145,16 @@ class TaskManager:
                 raise PlanningError(msg)
         command = str(uuid.uuid4())
         effect = _command_effect(command, self._now())
+        # The command is the person's act and no work's (§10:5), so no work's facts say
+        # how sure it is or where it came from: the new task keeps what the replaced one
+        # records of both, none for a task the assistant set (ADR-0368 §6:1, §6:4).
         spawner = Spawner(
             activation_id=command,
             person=replaced.person,
             authority=replaced.person,
             set_in=replaced.set_in,
+            level=replaced.setting_level,
+            connection=replaced.setting_connection,
         )
         written = await self.spawn(
             spawner,
@@ -1424,7 +1433,10 @@ def _caller(call: ToolCall) -> Spawner | None:
     approval = call.decision.approval
     if spawner is None or approval is None or not isinstance(approval.how, TapOnCard):
         return spawner
-    return replace(spawner, authority=spawner.person)
+    # ADR-0367 §5:5: a ticket's call is the tapper's, at the level the tap came by, which
+    # no record holds yet (ADR-0377), so a task it spawns records the person at none and
+    # no connection: it holds no more than anyone holds until that level is recorded.
+    return replace(spawner, authority=spawner.person, level=Sureness.NONE, connection=None)
 
 
 def _suggested(
