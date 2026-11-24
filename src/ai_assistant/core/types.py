@@ -26428,15 +26428,18 @@ class RemoveLineOutcome(StrEnum):
 
 
 class RemoveLineResult(BaseModel):
-    """What ``remove_line`` did, with the line it removed (ADR-0376 §4:6).
+    """What ``remove_line`` did, with the line as it stood (ADR-0376 §4:6).
+
+    The store keeps the removed line with its removal recorded (§4:8); what the member
+    returns is the line as it stood before the act, standing, its parts, identifier and
+    maker unchanged.
 
     Attributes:
         outcome: What it did.
-        line: The line it removed, as the store now keeps it: its parts, identifier and
-            maker as it stood, and its removal recorded; set exactly where it removed one.
+        line: The line it removed, as it stood; set exactly where it removed one.
 
     Raises:
-        ValueError: If the line does not fit the outcome.
+        ValueError: If the line does not fit the outcome, or does not stand.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -26449,8 +26452,8 @@ class RemoveLineResult(BaseModel):
         if removed != (self.line is not None):
             msg = "a removal carries its line exactly when it removed one"
             raise ValueError(msg)
-        if self.line is not None and self.line.standing:
-            msg = "a removal carries the line with its removal recorded"
+        if self.line is not None and not self.line.standing:
+            msg = "a removal carries the line as it stood (ADR-0376 §4:6)"
             raise ValueError(msg)
         return self
 

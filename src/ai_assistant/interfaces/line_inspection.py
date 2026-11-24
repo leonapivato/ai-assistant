@@ -9,8 +9,11 @@ in this milestone (§6:6).
 **Every value the engine supplies is escaped** by
 :func:`~ai_assistant.interfaces.story_inspection.escaped` and printed with markup off, so
 a capability or a connection carrying a line break, an ANSI escape or a Rich tag cannot
-pose as a line this adapter wrote. Ids, capabilities and connections are quoted as a
-shell takes them, so each can be pasted into the command that acts on it.
+pose as a line this adapter wrote. Ids, capabilities and connections are written as a
+shell word (:func:`word`): a value the terminal can show as it is is quoted so a POSIX
+shell reads it back unchanged, with nothing expanded, so it can be pasted into the command
+that acts on it; one carrying a control or format character is shown escaped, and quoted
+so pasting it expands nothing either, though it no longer names the same value.
 
 **A line does not yet decide any call** (ADR-0367 §4:5): the check reads the lines and
 its outcome is recorded beside today's rules, which still decide. :data:`NOT_YET_DECIDING`
@@ -20,6 +23,7 @@ check on removes it.
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING, Final, assert_never
 
 from ai_assistant.core.types import (
@@ -31,7 +35,7 @@ from ai_assistant.core.types import (
     PermissionLineKind,
     RemoveLineOutcome,
 )
-from ai_assistant.interfaces.story_inspection import quoted
+from ai_assistant.interfaces.story_inspection import escaped
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -77,12 +81,23 @@ def _print(console: Console, text: str) -> None:
     console.print(text, markup=False, emoji=False, highlight=False, soft_wrap=True)
 
 
-def who_named(word: str) -> str:
+def word(value: str) -> str:
+    """An engine-supplied value as one shell word, safe on the terminal and to paste.
+
+    A value the terminal shows as it is (:meth:`str.isprintable`) is quoted by
+    :func:`shlex.quote`, so a POSIX shell reads it back as the same value and expands
+    nothing in it; any other is :func:`escaped` first, so no control or format character
+    reaches the terminal, and then quoted, so pasting it expands nothing.
+    """
+    return shlex.quote(value if value.isprintable() else escaped(value))
+
+
+def who_named(typed: str) -> str:
     """The who a command sends for what the owner typed: ``me``, ``anyone``, or as typed.
 
     Anything but the two words is sent as typed, and the hub refuses it (§4:5).
     """
-    return WHO_WORDS.get(word, word)
+    return WHO_WORDS.get(typed, typed)
 
 
 def _who(who: str) -> str:
@@ -90,7 +105,7 @@ def _who(who: str) -> str:
         return "you"
     if who == ANYONE_GROUP_ID:
         return "anyone"
-    return quoted(who)
+    return word(who)
 
 
 def how_text(how: GrantHow, bar: Sureness) -> str:
@@ -107,15 +122,13 @@ def how_text(how: GrantHow, bar: Sureness) -> str:
 
 def _parts(line: PermissionLineEntry | PermissionLine) -> list[str]:
     """A line's who, action, thing, how and bar, and condition, each where it has one."""
-    lines = [f"  Who: {_who(line.who)}", f"  Action: {quoted(line.action)}"]
+    lines = [f"  Who: {_who(line.who)}", f"  Action: {word(line.action)}"]
     if line.thing is not None:
-        lines.append(f"  On: {quoted(line.thing)}")
+        lines.append(f"  On: {word(line.thing)}")
     if line.how is not None and line.bar is not None:
         lines.append(f"  How: {how_text(line.how, line.bar)}")
     if line.condition is not None:
-        lines.append(
-            f"  Only when every message the work acts on came by: {quoted(line.condition)}"
-        )
+        lines.append(f"  Only when every message the work acts on came by: {word(line.condition)}")
     return lines
 
 
@@ -132,9 +145,9 @@ def _kind(kind: PermissionLineKind) -> str:
 def entry_lines(entry: PermissionLineEntry) -> list[str]:
     """One line that stands as the listing shows it (ADR-0376 §5:1), and no more."""
     if entry.line_id is not None and entry.made_by is not None:
-        head = f"{_kind(entry.kind)} {quoted(entry.line_id)}, made by {_who(entry.made_by)}"
+        head = f"{_kind(entry.kind)} {word(entry.line_id)}, made by {_who(entry.made_by)}"
     else:
-        head = f"Default grant of tool {quoted(str(entry.tool_id))}"
+        head = f"Default grant of tool {word(str(entry.tool_id))}"
     return [
         head,
         *_parts(entry),
@@ -143,7 +156,7 @@ def entry_lines(entry: PermissionLineEntry) -> list[str]:
 
 def line_lines(line: PermissionLine) -> list[str]:
     """One made line as a making or a removal names it."""
-    head = f"{_kind(line.kind)} {quoted(line.id)}, made by {_who(line.made_by)}"
+    head = f"{_kind(line.kind)} {word(line.id)}, made by {_who(line.made_by)}"
     return [
         head,
         *_parts(line),
@@ -218,7 +231,7 @@ def removed_text(line_id: str, result: RemoveLineResult) -> str:
         case RemoveLineOutcome.REMOVED:
             return "Removed. The line no longer stands, and is kept as removed."
         case RemoveLineOutcome.NOT_STANDING:
-            return f"No line you made with the id {quoted(line_id)} stands, so nothing was changed."
+            return f"No line you made with the id {word(line_id)} stands, so nothing was changed."
         case unreachable:
             assert_never(unreachable)
 

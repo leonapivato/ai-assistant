@@ -54,6 +54,7 @@ from ai_assistant.core.types import (
     MakeLineOutcome,
     MakeLineRefusal,
     MakeLineResult,
+    PermissionLine,
     PermissionLineEntry,
     PermissionLineKind,
     RemoveLineOutcome,
@@ -71,7 +72,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import PermissionLineStore
     from ai_assistant.core.types import (
         GrantHow,
-        PermissionLine,
         Sureness,
         ThingKey,
         ToolDefinition,
@@ -330,8 +330,8 @@ async def remove_line(store: PermissionLineStore | None, line_id: str) -> Remove
         line_id: The line, by its identifier.
 
     Returns:
-        ``removed`` with the line as the store now keeps it, or ``not_standing`` where no
-        standing made line has that identifier.
+        ``removed`` with the line as it stood, the store keeping it with its removal
+        recorded; or ``not_standing`` where no standing made line has that identifier.
 
     Raises:
         PermissionLineStoreError: If the store cannot be read or written.
@@ -341,4 +341,13 @@ async def remove_line(store: PermissionLineStore | None, line_id: str) -> Remove
     removal = await store.record_removal(line_id, by=OWNER_PERSON_ID)
     if removal.kind is LineRemovalKind.NOT_STANDING:
         return RemoveLineResult(outcome=RemoveLineOutcome.NOT_STANDING)
-    return RemoveLineResult(outcome=RemoveLineOutcome.REMOVED, line=removal.line)
+    kept = removal.line
+    if kept is None:
+        msg = "the line store answered removed with no line"
+        raise PermissionLineStoreError(msg)
+    # The line as it stood (§4:6): the record the store keeps, less its removal, which is
+    # all a removal changes of it (§4:8).
+    stood = PermissionLine.model_validate(
+        {**kept.model_dump(), "removed_by": None, "removed_at": None}
+    )
+    return RemoveLineResult(outcome=RemoveLineOutcome.REMOVED, line=stood)

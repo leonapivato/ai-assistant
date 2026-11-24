@@ -10487,8 +10487,8 @@ class AssistantEngine(Protocol):
     async def remove_line(self, line_id: Identifier) -> RemoveLineResult:
         """Remove a made line, by the owner's act (ADR-0376 §4:6).
 
-        Records the removal, by the owner (§6:3), and returns ``removed`` with the line,
-        kept by the store with its removal recorded (§4:8). Where no standing made line
+        Records the removal, by the owner (§6:3), and returns ``removed`` with the line as
+        it stood; the store keeps it with its removal recorded (§4:8). Where no standing made line
         has that identifier, because none was made or it was already removed, it writes
         nothing and returns ``not_standing``, which is not an error. A default line has no
         identifier, so none is removed here (§3:3, §3:4).

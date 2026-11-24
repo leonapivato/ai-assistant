@@ -146,17 +146,18 @@ def test_a_making_names_a_line_that_stands() -> None:
         MakeLineResult(outcome=MakeLineOutcome.MADE, line=removed)
 
 
-def test_a_removal_carries_the_removed_line_exactly_where_it_removed_one() -> None:
+def test_a_removal_carries_the_line_as_it_stood_exactly_where_it_removed_one() -> None:
+    """§4:6: the line as it stood, standing; the store keeps its removal (§4:8)."""
     removed = PermissionLine.model_validate(
         {**_LINE.model_dump(), "removed_by": OWNER_PERSON_ID, "removed_at": _AT}
     )
 
-    assert RemoveLineResult(outcome=RemoveLineOutcome.REMOVED, line=removed).line == removed
+    assert RemoveLineResult(outcome=RemoveLineOutcome.REMOVED, line=_LINE).line == _LINE
     assert RemoveLineResult(outcome=RemoveLineOutcome.NOT_STANDING).line is None
     for bad in (
         {"outcome": RemoveLineOutcome.REMOVED},
-        {"outcome": RemoveLineOutcome.REMOVED, "line": _LINE},
-        {"outcome": RemoveLineOutcome.NOT_STANDING, "line": removed},
+        {"outcome": RemoveLineOutcome.REMOVED, "line": removed},
+        {"outcome": RemoveLineOutcome.NOT_STANDING, "line": _LINE},
     ):
         with pytest.raises(ValidationError):
             RemoveLineResult(**bad)
