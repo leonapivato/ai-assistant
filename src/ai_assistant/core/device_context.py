@@ -5,7 +5,9 @@ wire server decides it before dispatching a request and sets it here for the
 request's duration — for a streamed request, the whole stream (§2:2) — and the
 engine reads it here, so no ``AssistantEngine`` method gains a device argument.
 Where nothing has set it, as for a caller inside the hub's own process, the
-requesting device is the hub's own machine (§2:5).
+requesting device is the hub's own machine (§2:5). It carries the request's
+**connecting device** as well (ADR-0378 §10), so the device a request came through
+reaches the engine by the same value and the same single setter.
 
 **The outbound name** (ADR-0298 §1:5) is the browser device a gateway relays a call
 for. The gateway sets it around one ``AssistantEngine`` call — for a streamed call,

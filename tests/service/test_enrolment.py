@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
+from ai_assistant.core.types import DeviceRole
 from ai_assistant.service.enrolment import (
     ENROLMENTS_FILENAME,
     LISTING_LIMIT,
@@ -347,26 +348,38 @@ def test_the_live_read_carries_no_verifier_and_no_revoked_row(store: EnrolmentSt
 # --- the acts that change admission, told to whoever follows them (ADR-0373 §6) --------
 
 
-def test_each_act_that_can_change_admission_is_told_once_it_has_taken_effect(
+def test_each_act_that_can_change_a_link_is_told_once_it_has_taken_effect(
     registry: DeviceRegistry,
 ) -> None:
     """Called after the record and the live view have moved, as the act's last step, so
-    a follower reading the live view then reads the act's outcome."""
+    a follower reading the live view then reads the act's outcome. A naming registers a
+    browser device that no act of the owner's links yet (ADR-0378 §5:1); the role the
+    owner gives it is what links it (§5:2), and taking its last role unlinks it."""
     told: list[tuple[str, bool]] = []
-    registry.when_admission_acted(lambda device: told.append((device, registry.admits(device))))
+    registry.when_admission_acted(lambda device: told.append((device, registry.linkable(device))))
     later = _MOMENT + timedelta(minutes=1)
 
     registry.enrol(_LAPTOP, now=_MOMENT)
+    registry.mark_gateway(_LAPTOP, now=_MOMENT)  # not an act on a link: nobody is told
     registry.accept_naming(_LAPTOP, _PHONE, now=_MOMENT)
     registry.accept_naming(_LAPTOP, _PHONE, now=later)  # a later naming changes nothing
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)  # held already: changes nothing
+    registry.withdraw(_PHONE, DeviceRole.COMMANDS)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
     registry.revoke_registration(_PHONE, gateway=_LAPTOP, now=later)
     registry.restore_registration(_PHONE, gateway=_LAPTOP, now=later)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
     registry.revoke_device(_PHONE, now=later)
     registry.revoke(_LAPTOP, now=later)
 
     assert told == [
         (_LAPTOP, True),
+        (_PHONE, False),
         (_PHONE, True),
+        (_PHONE, False),
+        (_PHONE, True),
+        (_PHONE, False),
         (_PHONE, False),
         (_PHONE, True),
         (_PHONE, False),
@@ -388,25 +401,35 @@ def test_a_follower_that_fails_does_not_reach_the_act(registry: DeviceRegistry) 
     assert registry.revoke(_LAPTOP, now=_MOMENT + timedelta(minutes=1))
 
 
-def test_the_devices_the_owner_admitted_leave_out_the_hubs_own_machine(
+def test_the_devices_the_owners_acts_link_leave_out_the_hubs_own_machine(
     store: EnrolmentStore,
 ) -> None:
-    """A live enrolment or registration admits a device; ``hub`` and the hub's own overlay
-    identity, which a record written before ADR-0298 may hold enrolled, are the hub's own
-    machine and never one of the owner's devices (ADR-0298 §3:1, §3:3)."""
+    """A live enrolment links a hub device; a browser device is linked by a role the
+    owner gave it while it holds a live registration (ADR-0378 §5:2), never by its
+    registration alone (§5:1); and a machine ever enrolled is a hub device, linked by its
+    enrolment alone (§3:3). ``hub`` and the hub's own overlay identity, which a record
+    written before ADR-0298 may hold enrolled, are the hub's own machine and never one
+    of the owner's devices (ADR-0298 §3:1, §3:3)."""
     store.enrol(_HUB, verifier="v", now=_MOMENT)
     store.enrol(_LAPTOP, verifier="v", now=_MOMENT)
+    store.register(_PHONE, gateway=_LAPTOP, now=_MOMENT)
+    store.assign_role(_PHONE, DeviceRole.COMMANDS)
     store.enrol(_PHONE, verifier="v", now=_MOMENT)
     store.revoke(_PHONE, now=_MOMENT + timedelta(minutes=1))
     store.register("browser-1", gateway=_LAPTOP, now=_MOMENT)
+    store.assign_role("browser-1", DeviceRole.SPOKES)
+    store.register("browser-2", gateway=_LAPTOP, now=_MOMENT)
     registry = DeviceRegistry(store, hub_identity=_HUB)
 
-    assert registry.admitted_devices() == frozenset({_LAPTOP, "browser-1"})
-    assert registry.admits(_LAPTOP)
-    assert registry.admits("browser-1")
-    assert not registry.admits(_PHONE)
-    assert not registry.admits(_HUB)
-    assert not registry.admits("hub")
+    assert registry.linkable_devices() == frozenset({_LAPTOP, "browser-1"})
+    assert registry.linkable(_LAPTOP)
+    assert registry.linkable("browser-1")
+    assert not registry.linkable("browser-2")  # registered, and given no role
+    assert not registry.linkable(_PHONE)  # a hub device whose enrolment was revoked
+    assert not registry.linkable(_HUB)
+    assert not registry.linkable("hub")
+    assert registry.linkable_since("browser-1") == _MOMENT
+    assert registry.linkable_since("browser-2") is None
 
 
 def test_an_admission_runs_unbroken_across_a_rotation_and_overlapping_acts(
@@ -439,3 +462,18 @@ def test_admissions_that_start_at_one_instant_are_read_whatever_their_ends(
     store.revoke_registration(_PHONE, gateway=_LAPTOP, now=_MOMENT + timedelta(minutes=1))
 
     assert store.admitted_since(_PHONE) == _MOMENT
+
+
+def test_a_hub_device_is_linked_since_its_enrolment_whatever_it_was_registered_as(
+    store: EnrolmentStore,
+) -> None:
+    """A machine enrolled after a gateway registered it stands linked by its enrolment
+    (ADR-0373 §6:2), so its link dates from that enrolment and not from the registration
+    no naming may use any more (ADR-0378 §3:3)."""
+    store.register(_PHONE, gateway=_LAPTOP, now=_MOMENT)
+    store.enrol(_PHONE, verifier="v", now=_MOMENT + timedelta(minutes=5))
+    registry = DeviceRegistry(store, hub_identity=_HUB)
+
+    assert store.enrolled_since(_PHONE) == _MOMENT + timedelta(minutes=5)
+    assert store.registered_since(_PHONE) == _MOMENT
+    assert registry.linkable_since(_PHONE) == _MOMENT + timedelta(minutes=5)

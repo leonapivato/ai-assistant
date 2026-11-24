@@ -54,6 +54,21 @@ device with neither clears its roles in the same transaction, which is how §4's
 device re-admitted after revocation, by re-enrolment or by a restored registration,
 holds no role until the user gives it one" holds without the re-admitting act having
 to remember it.
+
+**Who may name a device, and which devices a naming reaches** (ADR-0378 §2, §3). A
+request carries ``acting_for`` only from ``hub`` or from an enrolled hub device the
+owner has **marked as a gateway** at the hub. The mark is recorded against the
+enrolment it was given under, so it ends with that enrolment: revoking the device, or
+enrolling it again, leaves it unmarked until the owner marks it again (§2:3). The
+mark is no role (§2:6): nothing here reads it but :meth:`DeviceRegistry.accept_naming`.
+And a naming reaches only a browser device: a name the record has ever held as a hub
+device, its enrolment live or revoked, is refused, as are ``hub`` and the hub's own
+overlay identity (§3:1). Every refused naming registers nothing (§3:2) and is logged
+under ``device_naming_refused`` (§3:5).
+
+**A record from before the mark marks no device** (ADR-0378 §8:2): its table is
+created empty on the first open, as every table here is, and nothing infers a mark
+from the registrations a device already holds.
 """
 
 from __future__ import annotations
@@ -132,7 +147,8 @@ class DeviceKind(StrEnum):
     a machine a gateway names, and that is not already a device, is a browser
     device, admitted by that gateway. A machine is one device however it is admitted
     (ADR-0296 §1:4), so a browser device later enrolled becomes a hub device and
-    keeps its id, its roles and its registrations.
+    keeps its id, its roles and its registrations — and from then on no naming
+    reaches it, those registrations included (ADR-0378 §3:3).
     """
 
     HUB = "hub_device"
@@ -159,9 +175,16 @@ MAX_REGISTRATIONS_PER_GATEWAY: Final[int] = 32
 class NamingRefusal(StrEnum):
     """Why the hub does not accept a gateway's name for a browser device (ADR-0298 §6:2).
 
-    All three are the first of §6's reasons — "the device named is not accepted under
-    that gateway" — told apart so the owner can see which.
+    Every one is the first of §6's reasons — "the device named is not accepted under
+    that gateway" (ADR-0378 §8:1) — told apart so the owner can see which.
     """
+
+    #: The connecting device is neither ``hub`` nor an enrolled hub device the owner
+    #: marked as a gateway, so it may name no device (ADR-0378 §2:1).
+    NOT_GATEWAY = "not_gateway"
+    #: The name is a hub device, whose enrolment is live or revoked: a naming reaches
+    #: only a browser device (ADR-0378 §3:1, §3:3).
+    HUB_DEVICE = "hub_device"
 
     #: The owner revoked this machine's registration under this gateway; it stays
     #: revoked until the owner restores it (§4:9).
@@ -246,6 +269,15 @@ CREATE TABLE IF NOT EXISTS registrations (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_live_registration_per_gateway
     ON registrations (device_id, gateway) WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS gateway_marks (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    enrolment_id  INTEGER NOT NULL REFERENCES enrolments (id),
+    marked_at     TEXT    NOT NULL,
+    ended_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_mark_per_enrolment
+    ON gateway_marks (enrolment_id) WHERE ended_at IS NULL;
 """
 
 #: The roster's migration from a record written before it existed: every machine the
@@ -256,6 +288,15 @@ _BACKFILL: Final = """
 INSERT OR IGNORE INTO devices (device_id, kind, first_known_at)
     SELECT overlay_identity, 'hub_device', MIN(enrolled_at)
     FROM enrolments GROUP BY overlay_identity;
+"""
+
+#: Ends every gateway mark whose enrolment is no longer live (ADR-0378 §2:3), as one
+#: statement each act that can end an enrolment runs inside its own transaction, so the
+#: record never holds a standing mark on a revoked enrolment.
+_END_MARKS_OF_ENDED_ENROLMENTS: Final = """
+UPDATE gateway_marks SET ended_at = :now
+    WHERE ended_at IS NULL
+    AND enrolment_id NOT IN (SELECT id FROM enrolments WHERE revoked_at IS NULL)
 """
 
 #: A device's roles, cleared where nothing admits it any more — the invariant the
@@ -553,6 +594,9 @@ class EnrolmentStore:
                 "ON CONFLICT (device_id) DO UPDATE SET kind = excluded.kind",
                 (identity, DeviceKind.HUB.value, stamp),
             )
+            # A rotation revoked the enrolment a mark was given under, so the device
+            # enrolled again is no gateway until the owner marks it again (ADR-0378 §2:3).
+            self._conn.execute(_END_MARKS_OF_ENDED_ENROLMENTS, {"now": stamp})
         enrolment_id = cursor.lastrowid
         assert enrolment_id is not None  # noqa: S101 - a fresh AUTOINCREMENT row always has one
         return (
@@ -577,13 +621,15 @@ class EnrolmentStore:
             none, which is not an error — the owner asked for a state that already
             holds.
         """
+        stamp = _stamp(now)
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
             changed = self._conn.execute(
                 "UPDATE enrolments SET revoked_at = ? "
                 "WHERE overlay_identity = ? AND revoked_at IS NULL",
-                (_stamp(now), identity),
+                (stamp, identity),
             ).rowcount
+            self._conn.execute(_END_MARKS_OF_ENDED_ENROLMENTS, {"now": stamp})
             self._conn.execute(_CLEAR_ROLES_IF_UNADMITTED, {"device": identity})
         return bool(changed)
 
@@ -608,20 +654,102 @@ class EnrolmentStore:
             "SELECT registered_at, revoked_at FROM registrations WHERE device_id = ?",
             (device, device),
         ).fetchall()
-        # By start alone: two spans can start at one instant, and an open end is ``None``,
-        # which does not compare with an instant.
-        spans = sorted(
-            ((_instant(row[0]), None if row[1] is None else _instant(row[1])) for row in rows),
-            key=lambda span: span[0],
-        )
-        began: datetime | None = None
-        until: datetime | None = None
-        for start, end in spans:
-            if began is None or (until is not None and start > until):
-                began, until = start, end
-            elif until is not None:
-                until = None if end is None else max(until, end)
-        return began if began is not None and until is None else None
+        return _unbroken_since(rows)
+
+    def enrolled_since(self, device: str) -> datetime | None:
+        """When a device's current, unbroken run of live enrolments began.
+
+        :meth:`admitted_since` over its enrolments alone: what a hub device's link
+        stands on (ADR-0373 §6:2), whatever registrations it held as a browser device
+        before it was enrolled (ADR-0378 §3:3).
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            When it began, or ``None`` where the device holds no live enrolment.
+        """
+        rows = self._conn.execute(
+            "SELECT enrolled_at, revoked_at FROM enrolments WHERE overlay_identity = ?",
+            (device,),
+        ).fetchall()
+        return _unbroken_since(rows)
+
+    def registered_since(self, device: str) -> datetime | None:
+        """When a device's current, unbroken run of live registrations began.
+
+        :meth:`admitted_since` over its registrations alone: what a browser device's
+        link stands on, beside the roster role the owner gave it (ADR-0378 §5:2).
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            When it began, or ``None`` where the device holds no live registration.
+        """
+        rows = self._conn.execute(
+            "SELECT registered_at, revoked_at FROM registrations WHERE device_id = ?",
+            (device,),
+        ).fetchall()
+        return _unbroken_since(rows)
+
+    # --- the gateway mark (ADR-0378 §2) ----------------------------------------
+
+    def live_marks(self) -> dict[str, tuple[int, datetime]]:
+        """Every standing gateway mark: one given under an enrolment still live.
+
+        Returns:
+            Each marked device's overlay identity, mapped to the enrolment its mark
+            was given under and when the owner gave it.
+        """
+        rows = self._conn.execute(
+            "SELECT e.overlay_identity, m.enrolment_id, m.marked_at FROM gateway_marks m "
+            "JOIN enrolments e ON e.id = m.enrolment_id "
+            "WHERE m.ended_at IS NULL AND e.revoked_at IS NULL"
+        ).fetchall()
+        return {
+            row["overlay_identity"]: (row["enrolment_id"], _instant(row["marked_at"]))
+            for row in rows
+        }
+
+    def mark_gateway(self, enrolment_id: int, *, now: datetime) -> bool:
+        """Mark the device a live enrolment admits as a gateway (ADR-0378 §2:2).
+
+        Args:
+            enrolment_id: The live enrolment the mark is given under; the caller has
+                established that it is live. The mark ends with it (§2:3).
+            now: The instant to record.
+
+        Returns:
+            Whether a mark was given; ``False`` where one already stands.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            changed = self._conn.execute(
+                "INSERT INTO gateway_marks (enrolment_id, marked_at, ended_at) "
+                "SELECT ?, ?, NULL WHERE NOT EXISTS ("
+                "SELECT 1 FROM gateway_marks WHERE enrolment_id = ? AND ended_at IS NULL)",
+                (enrolment_id, _stamp(now), enrolment_id),
+            ).rowcount
+        return bool(changed)
+
+    def withdraw_gateway_mark(self, enrolment_id: int, *, now: datetime) -> bool:
+        """Withdraw the mark given under an enrolment, keeping its record (ADR-0378 §2:4).
+
+        Args:
+            enrolment_id: The enrolment the mark was given under.
+            now: The instant to record.
+
+        Returns:
+            Whether a standing mark was withdrawn.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            changed = self._conn.execute(
+                "UPDATE gateway_marks SET ended_at = ? WHERE enrolment_id = ? AND ended_at IS NULL",
+                (_stamp(now), enrolment_id),
+            ).rowcount
+        return bool(changed)
 
     # --- the device roster (ADR-0298 §4) ---------------------------------------
 
@@ -757,6 +885,7 @@ class EnrolmentStore:
                 "WHERE overlay_identity = ? AND revoked_at IS NULL",
                 (stamp, device),
             ).rowcount
+            self._conn.execute(_END_MARKS_OF_ENDED_ENROLMENTS, {"now": stamp})
             registrations = self._conn.execute(
                 "UPDATE registrations SET revoked_at = ? "
                 "WHERE device_id = ? AND revoked_at IS NULL",
@@ -911,6 +1040,9 @@ class DeviceRegistry:
         self._roles = store.device_roles()
         self._registered, self._withdrawn = store.registration_pairs()
         self._per_gateway = Counter(gateway for _, gateway in self._registered)
+        # The standing gateway marks (ADR-0378 §2): each marked device, the enrolment
+        # its mark was given under, and when.
+        self._marks = store.live_marks()
         # Devices an owner's revocation is removing from "my devices" and their
         # conversations right now (:meth:`withheld`). In memory only: a revocation in
         # flight when the hub stops has revoked nothing yet, so nothing outlives it.
@@ -930,6 +1062,23 @@ class DeviceRegistry:
                     "'ai-assistant-device revoke <identity>'"
                 ),
             )
+        for gateway in sorted(set(self._live) & set(self._per_gateway)):
+            if self._per_gateway[gateway] and not self.is_gateway(gateway):
+                # A roster from before ADR-0378 marks no device (§8:2), and nothing marks
+                # one on the owner's behalf (§2:2): an enrolled device holding live
+                # registrations names none of them until the owner marks it, so the owner
+                # is told, at every start, which and what to run.
+                _log.warning(
+                    "device_gateway_unmarked",
+                    device=gateway,
+                    registrations=self._per_gateway[gateway],
+                    detail=(
+                        "this enrolled device holds live registrations of browser devices "
+                        "but is not marked as a gateway, so every naming it sends is "
+                        "refused; mark it with 'ai-assistant-device mark-gateway <device>' "
+                        "if it is a gateway of yours"
+                    ),
+                )
 
     @property
     def hub_identity(self) -> str | None:
@@ -951,61 +1100,76 @@ class DeviceRegistry:
         self._on_expelled.append(callback)
 
     def when_admission_acted(self, callback: AdmissionCallback) -> None:
-        """Register what to do once an act that can change a device's admission is done.
+        """Register what to do once an act that can change whether a device is linked is done.
 
         Called after every enrolment, revocation, restored registration and whole-device
-        revocation the owner makes, and after a gateway's first naming registers a
-        machine — once the record has committed and the live view has moved, as the
-        act's last step. **What the callback does is never part of the act**: it is
-        called synchronously and must neither raise nor suspend, so ADR-0124 §8's one
-        instant, and everything the admission path reads, stay exactly as they were.
-        A callback that wants to do asynchronous work schedules it, and reads what the
-        live view says when that work runs (:meth:`admits`).
+        revocation the owner makes, after every role given or taken (a browser device's
+        link stands on its role, ADR-0378 §5:2), and after a gateway's first naming
+        registers a machine — once the record has committed and the live view has
+        moved, as the act's last step. **What the callback does is never part of the
+        act**: it is called synchronously and must neither raise nor suspend, so
+        ADR-0124 §8's one instant, and everything the admission path reads, stay
+        exactly as they were. A callback that wants to do asynchronous work schedules
+        it, and reads what the live view says when that work runs (:meth:`linkable`).
 
         Args:
             callback: Called with the device the act named.
         """
         self._on_admission.append(callback)
 
-    def admits(self, device: str) -> bool:
-        """Whether the record admits a device the owner admitted: one of their own devices.
+    def linkable(self, device: str) -> bool:
+        """Whether one of the owner's acts at the hub stands that links a device to them.
 
-        A live enrolment or a live registration admits it, as :meth:`is_known` reads;
-        ``hub`` and the hub's own overlay identity never are one, being the hub's own
-        machine (ADR-0298 §3:1, §3:3), even where a record written before ADR-0298
-        holds a live enrolment of that identity.
-
-        Args:
-            device: The device's id.
-
-        Returns:
-            Whether a live enrolment or registration admits it, and it is not the hub's
-            own machine.
-        """
-        return device not in self._reserved() and self._is_admitted(device)
-
-    def admitted_since(self, device: str) -> datetime | None:
-        """When the admission :meth:`admits` reads for a device began, unbroken since.
+        ADR-0373 §6:2 and ADR-0378 §5:2: a **hub device** is linked by its enrolment,
+        while that enrolment is live; a **browser device** by the owner's act that gave
+        it a roster role, while it holds one and has a live registration. No naming or
+        registration links anything (§5:1), so a browser device a gateway registered and
+        the owner gave no role is no linked device, and a machine ever enrolled is a hub
+        device whatever registrations it held before (§3:3). ``hub`` and the hub's own
+        overlay identity never are one, being the hub's own machine (ADR-0298 §3:1, §3:3),
+        even where a record written before ADR-0298 holds a live enrolment of that
+        identity.
 
         Args:
             device: The device's id.
 
         Returns:
-            The instant, or ``None`` where the record does not admit it as one of the
-            owner's devices.
+            Whether such an act stands for it.
         """
-        if not self.admits(device):
+        if device in self._reserved():
+            return False
+        if self._is_hub_device(device):
+            return device in self._live
+        return bool(self._roles.get(device)) and self._is_registered(device)
+
+    def linkable_since(self, device: str) -> datetime | None:
+        """When what links a device (:meth:`linkable`) began to hold, unbroken since.
+
+        A hub device's run of live enrolments; a browser device's run of live
+        registrations. A role carries no instant in the record, so a role taken and
+        given again inside one run of registrations reads as that run: each of those
+        acts ends or makes the link as it happens (:meth:`when_admission_acted`).
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            The instant, or ``None`` where the device is not :meth:`linkable`.
+        """
+        if not self.linkable(device):
             return None
-        return self._store.admitted_since(device)
+        if self._is_hub_device(device):
+            return self._store.enrolled_since(device)
+        return self._store.registered_since(device)
 
-    def admitted_devices(self) -> frozenset[str]:
-        """Every device :meth:`admits`, complete and unbounded, from the live view.
+    def linkable_devices(self) -> frozenset[str]:
+        """Every device :meth:`linkable`, complete and unbounded, from the live view.
 
         Returns:
             The devices' ids.
         """
         held = set(self._live) | {device for device, _ in self._registered}
-        return frozenset(held - self._reserved())
+        return frozenset(device for device in held if self.linkable(device))
 
     def live_enrolment_id(self, identity: str) -> int | None:
         """Which enrolment of a device is live right now.
@@ -1091,6 +1255,10 @@ class DeviceRegistry:
         self._live[identity] = (enrolment.enrolment_id, verifier)
         self._known.add(identity)
         self._kinds[identity] = DeviceKind.HUB
+        # A rotation ended the mark with the enrolment it was given under (ADR-0378
+        # §2:3), and a machine enrolled now is one no naming reaches (§3:3), so every
+        # change stream a gateway holds for it ends at its next write (§3:4).
+        self._marks.pop(identity, None)
         if rotated:
             self._expel(identity, reason="rotated")
         _log.info(
@@ -1124,6 +1292,7 @@ class DeviceRegistry:
         """
         revoked = self._store.revoke(identity, now=now)
         self._live.pop(identity, None)
+        self._marks.pop(identity, None)
         self._settle_roles(identity)
         if revoked:
             self._expel(identity, reason="revoked")
@@ -1150,10 +1319,17 @@ class DeviceRegistry:
         ADR-0298 §4:2: "the first request on which a gateway names a machine
         registers it under that gateway", so this is both the check and, the first
         time, the registration — and the registration stands whatever the request
-        it rode on is then refused for (§6:1). The hub refuses the name only for a
-        registration the owner revoked under that gateway (§4:9), for ``hub`` and
-        the hub's own overlay identity (§3:3), and beyond the gateway's bound
-        (§4:7).
+        it rode on is then refused for (§6:1).
+
+        **Who may name, then what may be named** (ADR-0378 §2:1, §3:1). The hub
+        refuses the name where the connecting device is neither ``hub`` nor an
+        enrolled hub device the owner marked as a gateway; where the name is ``hub``
+        or the hub's own overlay identity (ADR-0298 §3:3); where it is a machine the
+        record has ever held as a hub device, live or revoked; for a registration the
+        owner revoked under that gateway (§4:9); and beyond the gateway's bound
+        (§4:7). A refused naming registers nothing (ADR-0378 §3:2) and is logged
+        under ``device_naming_refused`` with the connecting device, the name and the
+        refusal (§3:5).
 
         Synchronous, like :meth:`verify`, and answered from the live view: the first
         naming writes one transaction, and every later one reads nothing.
@@ -1177,22 +1353,29 @@ class DeviceRegistry:
                 — a name the wire decoder refuses first, refused here too so the
                 record cannot hold one it could not report.
         """
-        if name in self._reserved():
-            return NamingVerdict(refusal=NamingRefusal.RESERVED)
         pair = (name, gateway)
-        if pair in self._registered:
+        refusal: NamingRefusal | None = None
+        if not self.is_gateway(gateway):
+            refusal = NamingRefusal.NOT_GATEWAY
+        elif name in self._reserved():
+            refusal = NamingRefusal.RESERVED
+        elif self._is_hub_device(name):
+            refusal = NamingRefusal.HUB_DEVICE
+        elif pair in self._registered:
             return NamingVerdict()
-        if pair in self._withdrawn:
-            return NamingVerdict(refusal=NamingRefusal.REVOKED)
-        if self._per_gateway[gateway] >= self._max_per_gateway:
+        elif pair in self._withdrawn:
+            refusal = NamingRefusal.REVOKED
+        elif self._per_gateway[gateway] >= self._max_per_gateway:
+            refusal = NamingRefusal.BOUND
+        if refusal is not None:
             _log.warning(
-                "device_registration_refused",
+                "device_naming_refused",
+                connecting=gateway,
                 device=name,
-                gateway=gateway,
-                reason=NamingRefusal.BOUND.value,
-                bound=self._max_per_gateway,
+                reason=refusal.value,
+                **({"bound": self._max_per_gateway} if refusal is NamingRefusal.BOUND else {}),
             )
-            return NamingVerdict(refusal=NamingRefusal.BOUND)
+            return NamingVerdict(refusal=refusal)
         registration_id = self._store.register(name, gateway=gateway, now=now)
         self._registered.add(pair)
         self._per_gateway[gateway] += 1
@@ -1206,6 +1389,117 @@ class DeviceRegistry:
         )
         self._admission_acted(name)
         return NamingVerdict(registered=True)
+
+    # --- the gateway mark (ADR-0378 §2) ----------------------------------------
+
+    def is_gateway(self, device: str) -> bool:
+        """Whether a connecting device may name another device (ADR-0378 §2:1).
+
+        Args:
+            device: The connecting device.
+
+        Returns:
+            ``True`` for :data:`HUB_DEVICE`, which names without a mark, and for an
+            enrolled hub device whose live enrolment the owner marked; ``False``
+            otherwise, the hub's own overlay identity included.
+        """
+        if device == HUB_DEVICE:
+            return True
+        mark = self._marks.get(device)
+        live = self._live.get(device)
+        return (
+            mark is not None
+            and live is not None
+            and mark[0] == live[0]
+            and device not in self._reserved()
+        )
+
+    def mark_gateway(self, device: str, *, now: datetime) -> bool:
+        """Mark an enrolled hub device as a gateway, as the owner's act at the hub (§2:2).
+
+        Only a device whose enrolment is live can be marked (§2:3), and the mark is
+        given under that enrolment, so revoking it, or enrolling the device again,
+        ends the mark. The mark is no role (§2:6): it changes nothing but which
+        namings the hub accepts from the device.
+
+        Args:
+            device: The device.
+            now: The instant to record.
+
+        Returns:
+            Whether it was marked; ``False`` where its mark already stands.
+
+        Raises:
+            RosterActError: For ``hub``, which names without a mark; for the hub's own
+                overlay identity; and for a device with no live enrolment here.
+        """
+        if device == HUB_DEVICE:
+            msg = (
+                f"{HUB_DEVICE} needs no mark: a gateway on the hub's own machine names "
+                f"browser devices through the local socket by rule"
+            )
+            raise RosterActError(msg)
+        self._refuse_the_hub(device, act="marked as a gateway")
+        live = self._live.get(device)
+        if live is None:
+            msg = (
+                f"{device} holds no live enrolment at this hub, and only an enrolled hub "
+                f"device can be marked as a gateway: enrol it with 'ai-assistant-device "
+                f"enrol {device}' on this machine, then mark it"
+            )
+            raise RosterActError(msg)
+        if self.is_gateway(device):
+            return False
+        changed = self._store.mark_gateway(live[0], now=now)
+        self._marks[device] = (live[0], now)
+        if changed:
+            _log.info("device_gateway_marked", device=device, enrolment_id=live[0])
+        return changed
+
+    def unmark_gateway(self, device: str, *, now: datetime) -> bool:
+        """Withdraw a device's gateway mark, as the owner's act at the hub (§2:2, §2:4).
+
+        Its later requests that name a device are refused, and each change stream open
+        on its connections for a device it named ends at its next write or roster
+        check, as revoking a browser device ends one (ADR-0298 §7:16). No registration
+        under it is revoked; none can be used while it is unmarked.
+
+        Args:
+            device: The device.
+            now: The instant to record.
+
+        Returns:
+            Whether a standing mark was withdrawn.
+
+        Raises:
+            RosterActError: For ``hub``, which holds no mark to withdraw.
+        """
+        if device == HUB_DEVICE:
+            msg = (
+                f"{HUB_DEVICE} holds no mark to withdraw: a gateway on the hub's own "
+                f"machine names browser devices through the local socket by rule"
+            )
+            raise RosterActError(msg)
+        if not self.is_gateway(device):
+            self._marks.pop(device, None)
+            return False
+        enrolment_id, _ = self._marks.pop(device)
+        changed = self._store.withdraw_gateway_mark(enrolment_id, now=now)
+        _log.info("device_gateway_unmarked", device=device, enrolment_id=enrolment_id)
+        return changed
+
+    def gateways(self) -> Sequence[tuple[str, datetime]]:
+        """The devices marked as gateways now, and when each was marked (§2:5).
+
+        Returns:
+            Each marked device and the instant of its mark, ordered by device. ``hub``
+            is not among them: it names by rule, not by a mark.
+        """
+        return sorted(
+            (device, marked_at)
+            for device, (_, marked_at) in self._marks.items()
+            if self.is_gateway(device)
+        )
 
     def roles_of(self, device: str) -> frozenset[DeviceRole]:
         """The roles a device holds, as the checks read them at dispatch.
@@ -1268,7 +1562,8 @@ class DeviceRegistry:
         if not self._is_admitted(device):
             msg = (
                 f"{device} is not a device this hub admits: enrol it, or let a gateway "
-                f"that lists it name it once, then give it the role. A device whose "
+                f"that lists it name it once (one on this machine, or one you marked with "
+                f"'ai-assistant-device mark-gateway'), then give it the role. A device whose "
                 f"registrations and enrolment were all revoked holds no role until it is "
                 f"admitted again"
             )
@@ -1277,6 +1572,9 @@ class DeviceRegistry:
         self._roles[device] = self._roles.get(device, frozenset()) | {role}
         if changed:
             _log.info("device_role_assigned", device=device, role=role.value)
+            # A browser device's link stands on the role the owner gives it (ADR-0378
+            # §5:2), so giving one is an act the links follow.
+            self._admission_acted(device)
         return changed
 
     def withdraw(self, device: str, role: DeviceRole) -> bool:
@@ -1301,6 +1599,7 @@ class DeviceRegistry:
             self._roles.pop(device, None)
         if changed:
             _log.info("device_role_withdrawn", device=device, role=role.value)
+            self._admission_acted(device)
         return changed
 
     def revoke_device(self, device: str, *, now: datetime) -> DeviceRevocation:
@@ -1333,6 +1632,7 @@ class DeviceRegistry:
             self._refuse_the_hub(device, act="revoked")
         revocation = self._store.revoke_device(device, now=now)
         self._live.pop(device, None)
+        self._marks.pop(device, None)
         self._roles.pop(device, None)
         for pair in [pair for pair in self._registered if pair[0] == device]:
             self._registered.discard(pair)
@@ -1548,7 +1848,20 @@ class DeviceRegistry:
 
     def _is_admitted(self, device: str) -> bool:
         """Whether a live enrolment or a live registration admits a device."""
-        return device in self._live or any(pair[0] == device for pair in self._registered)
+        return device in self._live or self._is_registered(device)
+
+    def _is_registered(self, device: str) -> bool:
+        """Whether a device holds a live registration under any gateway."""
+        return any(pair[0] == device for pair in self._registered)
+
+    def _is_hub_device(self, device: str) -> bool:
+        """Whether the record has ever held a device as a hub device (ADR-0378 §3:1).
+
+        Its enrolment live or revoked: every machine ever enrolled is one, by the kind
+        the roster records and by the enrolment record's own history, either of which
+        suffices.
+        """
+        return self._kinds.get(device) is DeviceKind.HUB or device in self._known
 
     def _settle_roles(self, device: str) -> None:
         """Mirror the record's invariant: a device nothing admits holds no role."""
@@ -1598,6 +1911,35 @@ def _bounded_identity(identity: str) -> None:
             f"produces one, and an enrolment recorded under it could not be reported"
         )
         raise ValueError(msg)
+
+
+def _unbroken_since(rows: Sequence[sqlite3.Row]) -> datetime | None:
+    """When the run of spans that still holds began, unbroken since.
+
+    Each row is one span's start and its end, ``None`` while it is live. Spans that
+    overlap or meet — a rotation revokes one enrolment at the instant it makes the
+    next — are one run.
+
+    Args:
+        rows: The spans.
+
+    Returns:
+        When the run still open began, or ``None`` where no span is live.
+    """
+    # By start alone: two spans can start at one instant, and an open end is ``None``,
+    # which does not compare with an instant.
+    spans = sorted(
+        ((_instant(row[0]), None if row[1] is None else _instant(row[1])) for row in rows),
+        key=lambda span: span[0],
+    )
+    began: datetime | None = None
+    until: datetime | None = None
+    for start, end in spans:
+        if began is None or (until is not None and start > until):
+            began, until = start, end
+        elif until is not None:
+            until = None if end is None else max(until, end)
+    return began if began is not None and until is None else None
 
 
 def _as_enrolment(row: sqlite3.Row) -> Enrolment:

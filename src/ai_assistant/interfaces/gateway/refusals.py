@@ -39,6 +39,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import DeviceRefusal
+from ai_assistant.core.types import HUB_DEVICE_ID
 
 if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from collections.abc import Mapping
@@ -128,10 +129,21 @@ def refusal_detail(
             f"device in your devices: 'assistant my-devices --add {named}' adds it."
         )
     via = _UNNAMED_GATEWAY if gateway is None else gateway
+    # A gateway on the hub's own machine names without a mark (ADR-0378 §2:1), so only
+    # another machine's gateway can be refused for want of one.
+    unmarked = (
+        ""
+        if gateway == HUB_DEVICE_ID
+        else (
+            f"when this gateway's machine is not marked as a gateway (on the hub's "
+            f"machine, 'ai-assistant-device mark-gateway {via}' marks it), "
+        )
+    )
     return (
         f"This browser is device {named}, which the hub does not accept through this "
-        f"gateway. That is so when the owner revoked it here, when it is the hub's own "
-        f"machine (open the gateway's loopback address on that machine instead), or "
+        f"gateway. That is so {unmarked}"
+        f"when the owner revoked this device here, when it is a machine enrolled at the "
+        f"hub or the hub's own machine (open the gateway on that machine instead), or "
         f"when this gateway has named as many devices as the hub allows. On the hub's "
         f"machine, 'ai-assistant-device list' shows which, and 'ai-assistant-device "
         f"restore {named} --gateway {via}' restores a revoked one."

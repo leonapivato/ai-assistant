@@ -129,6 +129,10 @@ LIST: Final = "list"
 RESTORE: Final = "restore"
 ASSIGN: Final = "assign"
 WITHDRAW: Final = "withdraw"
+#: The gateway mark's two acts (ADR-0378 §2:2): marking an enrolled hub device as a
+#: gateway, which may then name browser devices, and withdrawing that mark.
+MARK_GATEWAY: Final = "mark-gateway"
+UNMARK_GATEWAY: Final = "unmark-gateway"
 
 
 class AdminListener:
@@ -400,6 +404,12 @@ class AdminListener:
             }
         if act == REVOKE:
             return await self._revoke(identity, request)
+        if act in (MARK_GATEWAY, UNMARK_GATEWAY):
+            if act == MARK_GATEWAY:
+                changed = self._registry.mark_gateway(identity, now=self._now())
+            else:
+                changed = self._registry.unmark_gateway(identity, now=self._now())
+            return {"ok": True, "changed": changed, "gateway": self._registry.is_gateway(identity)}
         if act == RESTORE:
             gateway = _name(request.get("gateway"), what="the gateway's device")
             restored = self._registry.restore_registration(
@@ -519,6 +529,12 @@ class AdminListener:
         return {
             "ok": True,
             "hub_identity": self._registry.hub_identity,
+            # The marked gateways (ADR-0378 §2:5): never more than the live enrolments,
+            # so unbounded, as the enrolments a whole-store delete reports are.
+            "gateways": [
+                {"device": device, "marked_at": marked_at.isoformat()}
+                for device, marked_at in self._registry.gateways()
+            ],
             "enrolments": [
                 {
                     "overlay_identity": one.overlay_identity,
@@ -535,6 +551,7 @@ class AdminListener:
                     "kind": one.kind.value,
                     "roles": sorted(role.value for role in one.roles),
                     "admitted": self._registry.is_known(one.device_id),
+                    "gateway": self._registry.is_gateway(one.device_id),
                 }
                 for one in devices
             ],
@@ -554,7 +571,9 @@ class AdminListener:
 
 
 #: The acts that name a device, and so carry an ``identity`` member.
-_NAMING_ACTS: Final = frozenset({ENROL, REVOKE, RESTORE, ASSIGN, WITHDRAW})
+_NAMING_ACTS: Final = frozenset(
+    {ENROL, REVOKE, RESTORE, ASSIGN, WITHDRAW, MARK_GATEWAY, UNMARK_GATEWAY}
+)
 
 
 class _MalformedError(ValueError):

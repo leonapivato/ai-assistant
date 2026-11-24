@@ -1453,6 +1453,9 @@ async def test_a_remote_gateway_relays_with_the_browser_devices_roles(tmp_path: 
     """ADR-0298 §8:1: "a gateway naming a browser device acts with that device's roles"
     — not the gateway's own. The gateway here holds the command role; the browser it
     names holds none, so the relayed request is refused while the gateway's own is not.
+
+    ADR-0378 §2:1: until the owner marks the gateway's device, its naming is refused as
+    not accepted on the same connection, which stays open, and registers nothing.
     """
     async with _remote(tmp_path) as hub:
         minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
@@ -1460,12 +1463,19 @@ async def test_a_remote_gateway_relays_with_the_browser_devices_roles(tmp_path: 
         async with _dialling(hub) as peer:
             assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
             await peer.send(_beliefs("r-0", acting_for="nPHONE22CNTRL"))
+            unmarked = await peer.receive()
+            unregistered = hub.registry.registrations()
+            hub.registry.mark_gateway(_DEVICE, now=_MOMENT)
+            await peer.send(_beliefs("r-1", acting_for="nPHONE22CNTRL"))
             relayed = await peer.receive()
-            await peer.send(_beliefs("r-1"))
+            await peer.send(_beliefs("r-2"))
             own = await peer.receive()
 
         ((registration,), _) = hub.registry.registrations()
 
+    assert unmarked.kind is env.FrameKind.ERROR
+    assert unmarked.payload["details"] == {"reason": "not_accepted"}
+    assert unregistered == ([], 0)
     assert relayed.kind is env.FrameKind.ERROR
     assert relayed.payload["details"] == {"reason": "not_allowed"}
     assert own.kind is env.FrameKind.RESULT

@@ -36,7 +36,7 @@ from test_gateway_streams import _Delivering, _harness, _values
 
 from ai_assistant.core.device_context import current_acting_for
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
-from ai_assistant.core.types import ChatDevice, ConversationSummary, DeviceAccess
+from ai_assistant.core.types import HUB_DEVICE_ID, ChatDevice, ConversationSummary, DeviceAccess
 from ai_assistant.interfaces.gateway.refusals import REFUSAL_FAULTS, refusal_detail
 from ai_assistant.testing import FakeAssistantEngine
 
@@ -327,6 +327,19 @@ def test_a_sentence_for_a_device_the_gateway_could_not_name_says_so() -> None:
     assert "<this machine's overlay identity>" in said
     assert "<the gateway machine's overlay identity>" in said
     assert "None" not in said
+
+
+def test_a_not_accepted_sentence_names_the_mark_for_a_gateway_on_another_machine() -> None:
+    """ADR-0378 §2:1: a gateway on another machine names no device until the owner marks
+    its device at the hub, so the sentence says what to run there; a gateway on the
+    hub's own machine names without a mark, and its sentence never asks for one."""
+    remote = refusal_detail(DeviceRefusal.NOT_ACCEPTED, device=_PHONE, gateway=_GATEWAY_NODE)
+    local = refusal_detail(DeviceRefusal.NOT_ACCEPTED, device=_PHONE, gateway=HUB_DEVICE_ID)
+
+    assert f"'ai-assistant-device mark-gateway {_GATEWAY_NODE}'" in remote
+    assert "enrolled at the hub" in remote
+    assert "mark-gateway" not in local
+    assert "enrolled at the hub" in local
 
 
 def test_the_three_reasons_are_three_conditions() -> None:
