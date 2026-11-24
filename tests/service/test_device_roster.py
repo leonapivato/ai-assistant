@@ -241,10 +241,13 @@ def test_the_mark_is_given_only_to_a_live_enrolment_and_never_to_the_hub(
     registry.revoke(_WATCH, now=_MOMENT)
     with pytest.raises(RosterActError, match="no live enrolment"):
         registry.mark_gateway(_WATCH, now=_LATER)
-    assert registry.gateways() == [
-        (_OTHER_GATEWAY, _MOMENT - timedelta(days=1)),
-        (_GATEWAY, _MOMENT - timedelta(days=1)),
-    ]
+    assert registry.gateways() == (
+        [
+            (_OTHER_GATEWAY, _MOMENT - timedelta(days=1)),
+            (_GATEWAY, _MOMENT - timedelta(days=1)),
+        ],
+        2,
+    )
 
 
 def test_marking_twice_changes_nothing_and_the_hub_is_always_a_gateway(
@@ -276,6 +279,42 @@ def test_withdrawing_the_mark_refuses_later_namings_and_revokes_no_registration(
     assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).accepted
 
 
+def test_a_withdrawal_the_record_cannot_write_leaves_the_mark_standing(
+    registry: DeviceRegistry, store: EnrolmentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record moves first: a withdrawal whose write fails leaves the gateway marked
+    in the live view as on the record, so the owner's retry performs it and a restart
+    hands back no mark the owner was told is gone (review of PR #3700)."""
+
+    def _unwritable(*args: object, **kwargs: object) -> bool:
+        msg = "attempt to write a readonly database"
+        raise sqlite3.OperationalError(msg)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(store, "withdraw_gateway_mark", _unwritable)
+        with pytest.raises(sqlite3.OperationalError):
+            registry.unmark_gateway(_GATEWAY, now=_LATER)
+    assert registry.is_gateway(_GATEWAY)
+
+    assert registry.unmark_gateway(_GATEWAY, now=_LATER)
+    assert not registry.is_gateway(_GATEWAY)
+    assert not DeviceRegistry(store, hub_identity=_HUB).is_gateway(_GATEWAY)
+
+
+def test_the_gateways_are_listed_newest_first_and_bounded(registry: DeviceRegistry) -> None:
+    """ADR-0378 §2:5's listing, bounded as every other section of it is."""
+    registry.enrol(_WATCH, now=_MOMENT)
+    registry.mark_gateway(_WATCH, now=_LATER)
+
+    rows, total = registry.gateways(limit=2)
+
+    assert total == 3
+    assert rows == [
+        (_WATCH, _LATER),
+        (_OTHER_GATEWAY, _MOMENT - timedelta(days=1)),
+    ]
+
+
 def test_the_hub_holds_no_mark_to_withdraw(registry: DeviceRegistry) -> None:
     """``hub`` names by rule, so there is nothing to withdraw (ADR-0378 §2:1)."""
     with pytest.raises(RosterActError, match="no mark"):
@@ -304,7 +343,7 @@ def test_the_mark_ends_with_its_enrolment(
     assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).refusal is (
         NamingRefusal.NOT_GATEWAY
     )
-    assert _GATEWAY not in [device for device, _ in registry.gateways()]
+    assert _GATEWAY not in [device for device, _ in registry.gateways()[0]]
     assert _GATEWAY not in store.live_marks()
     assert not DeviceRegistry(store, hub_identity=_HUB).is_gateway(_GATEWAY)
 

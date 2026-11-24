@@ -526,15 +526,16 @@ class AdminListener:
         enrolments, enrolled = self._registry.enrolments()
         devices, held = self._registry.roster()
         registrations, registered = self._registry.registrations()
+        gateways, marked = self._registry.gateways()
         return {
             "ok": True,
             "hub_identity": self._registry.hub_identity,
-            # The marked gateways (ADR-0378 §2:5): never more than the live enrolments,
-            # so unbounded, as the enrolments a whole-store delete reports are.
+            # The marked gateways (ADR-0378 §2:5), bounded as every other section is.
             "gateways": [
                 {"device": device, "marked_at": marked_at.isoformat()}
-                for device, marked_at in self._registry.gateways()
+                for device, marked_at in gateways
             ],
+            "gateways_omitted": marked - len(gateways),
             "enrolments": [
                 {
                     "overlay_identity": one.overlay_identity,
