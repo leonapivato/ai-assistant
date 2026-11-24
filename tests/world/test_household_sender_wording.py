@@ -228,4 +228,18 @@ async def test_one_input_from_the_owners_device_and_an_unlinked_one_is_told_apar
         ("received", "an unknown sender", "And the canoe?"),
     ]
     assert heard.section("The situation").split("\n")[3].startswith("- The senders: ")
-    _no_hub(heard.content, work.briefing)
+    # Planning too, its stimulus and its window items each by its own record, named in
+    # words since the work is no person's (§6:5); the unknown sender's words withheld.
+    briefing = work.briefing
+    told = tags(section(briefing, "# The stimulus"))
+    assert [(one.name, one.get("from"), one.text) for one in told] == [
+        ("said", "a device linked to Maren", "Is the lake warm?"),
+        ("received", "an unknown sender", None),
+    ]
+    items = tags(section(briefing, "## Stimulus origin knowledge"), "message")
+    assert [one.get("from") for one in items if one.get("shown_in")] == [
+        "Maren",
+        "an unknown sender",
+    ]
+    assert section(briefing, "## The situation").split("\n")[2].startswith("- The senders: ")
+    _no_hub(heard.content, briefing)

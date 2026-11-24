@@ -823,3 +823,64 @@ async def test_a_later_round_names_the_sender_of_an_input_taken_in_since() -> No
 
 def _call(call_id: str, name: str) -> ProposedCall:
     return ProposedCall(call_id=call_id, name=name, arguments={})
+
+
+def test_an_input_no_person_sent_names_no_sender_whatever_its_messages_record() -> None:
+    """§5:6: an approval's outcome is no one's, alone and beside the owner's message."""
+    outcome = RecordedInputMessage(text="Approved.", sent_at=AT)
+    approval = channel_kinds.SentInput("approvals", (), messages=(outcome,))
+    alone = channel_kinds.sender_line([approval], named=lambda _: MAREN, origin="the approvals")
+    assert alone == "- The sender: no person sent it; it came from the approvals."
+    beside = channel_kinds.sender_line(
+        [
+            channel_kinds.SentInput("conversation", (_sender(OWNER_PERSON_ID),), parties=(OWNER,)),
+            approval,
+        ],
+        named=lambda _: MAREN,
+        origin="the system's own chat",
+    )
+    assert beside == (
+        "- The sender: the message came by a device linked to Maren, which is a strong sign "
+        "that Maren sent it. The system counts it as Maren's. What came from the approvals no "
+        "person sent."
+    )
+
+
+async def test_an_approval_taken_in_is_framed_as_no_ones_words_in_both() -> None:
+    """§5:6, §6:1: understanding names no unknown sender for an approval's outcome."""
+    row = ROWS["a link at its kind's most"]
+    approval = JoinedInput(
+        joined_at=AT,
+        channel=ChannelIdentity(channel_type="approvals", instance_id="approvals"),
+        messages=(RecordedInputMessage(text="Approved.", sent_at=AT),),
+    )
+    model = FakeStructuredCompleter(json.dumps({"understanding": "Asks about the canoe."}))
+    stage = UnderstandingStage(
+        model=model, excerpt_chars=2000, prompt=default_prompt(UNDERSTANDING_PROMPT)
+    )
+    await stage.understand(
+        WORDS,
+        channel=CHAT,
+        window=TranscriptWindow(CHAT, ()),
+        audience=BOUNDED,
+        episodes=(),
+        version=1,
+        now=lambda: AT,
+        deadline=asyncio.get_running_loop().time() + 60,
+        person=_block(),
+        trigger=_trigger(row),
+        joined=(approval,),
+        zone=NEW_YORK,
+        own_zone=True,
+        received_at=AT,
+        person_id=OWNER_PERSON_ID,
+    )
+    heard = Rendered(model.calls[0].messages[1].content)
+    _, taken = heard.section("The stimulus").split("\n\n")
+    assert taken.endswith("an input with no one's words in it arrived on the approvals.")
+    assert "unknown sender" not in heard.content
+    assert (
+        heard.section("The situation")
+        .split("\n")[3]
+        .endswith("What came from the approvals no person sent.")
+    )

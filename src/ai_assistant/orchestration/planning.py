@@ -1412,6 +1412,10 @@ class PlanningInputs:
             §6:4): they are named so where the briefing says whose place it is, whose
             account an input came by and who wrote an earlier item, in a tag as in a line
             (§6:5). ``None`` names them in ADR-0353 §4:1's words.
+        input_messages: The trigger's messages as the pass took them in, each with its own
+            party and sender, where the trigger records none, as the hub chat's does not:
+            an input of two parties is shown message by message, each by its own record
+            (ADR-0375 §4:1-§4:3).
     """
 
     activation_id: str
@@ -1458,6 +1462,7 @@ class PlanningInputs:
     tickets: tuple[Ticket, ...] = ()
     approvals: bool = False
     place_name: str | None = None
+    input_messages: tuple[RecordedInputMessage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2803,7 +2808,9 @@ class _Request:
         # Withheld by its record's parties; with no record there is none to read. Where the
         # record holds each message with its own party, each is judged by its own (a
         # forward's sender, ADR-0351 §2:6-§2:7), and the person's own words are shown.
-        by_message = trigger is not None and bool(trigger.messages)
+        by_message = trigger is not None and (
+            bool(trigger.messages) or len({one.party for one in self._held_messages()}) > 1
+        )
         withheld = trigger is not None and not by_message and parties_are_outside(parties)
         shown_relayed = relayed and not withheld and relay_mark_counts(parties, relayed=True)
         at = inputs.received_at
@@ -2865,6 +2872,12 @@ class _Request:
             if one.is_input and one.author is PlaceAuthor.USER
         ]
         senders = () if trigger is None else trigger.senders
+        held = self._held_messages()
+        if len({one.party for one in held}) > 1:
+            # ADR-0375 §4:1-§4:3: an input of more than one party, each message by its own.
+            return [
+                self._recorded_message(one, channel=self._origin, senders=senders) for one in held
+            ]
         if items:
             tag = "said" if trigger is None else _words_tag(parties)
             writer = (
@@ -2887,6 +2900,23 @@ class _Request:
                 text=text,
             )
         ]
+
+    def _held_messages(self) -> list[RecordedInputMessage]:
+        """The input's messages as the pass took them in that the place window still holds.
+
+        Each matched to a stimulus item of the place window by when it was written and
+        what it says, so a message since deleted is not shown (ADR-0349 §6:6); none
+        where the trigger records its own messages or the pass handed none.
+        """
+        trigger = self._inputs.trigger
+        if trigger is not None and trigger.messages:
+            return []
+        shown = {
+            (one.at, one.text)
+            for one in self._inputs.place.items
+            if one.is_input and one.author is PlaceAuthor.USER
+        }
+        return [one for one in self._inputs.input_messages if (one.sent_at, one.text) in shown]
 
     def _writer(
         self,
@@ -3187,7 +3217,11 @@ class _Request:
             SentInput(
                 channel_type=None if self._origin is None else self._origin.channel_type,
                 senders=() if trigger is None else trigger.senders,
-                messages=() if trigger is None else trigger.messages,
+                messages=(
+                    inputs.input_messages
+                    if trigger is None or not trigger.messages
+                    else trigger.messages
+                ),
                 parties=None if trigger is None else trigger.parties,
                 count=self._trigger_count,
             ),
@@ -3476,7 +3510,15 @@ class _Request:
         """
         trigger = self._inputs.trigger
         if item.is_input and item.author is PlaceAuthor.USER and trigger is not None:
-            return self._naming.parties(trigger.parties)
+            own = next(
+                (
+                    one.party
+                    for one in self._inputs.input_messages
+                    if (one.sent_at, one.text) == (item.at, item.text) and one.party is not None
+                ),
+                None,
+            )
+            return self._naming.parties(trigger.parties if own is None else (own,))
         return self._naming.author(item.author)
 
     def _relayed_item(self, item: PlaceItem) -> bool:

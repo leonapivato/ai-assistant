@@ -718,55 +718,78 @@ def sender_line(
     ``canonical_senders``' order (§5:2). A link below its kind's declared most is said to
     be marked as less reliable, or as not to be relied on at none, and never by whom
     (§5:4). Whom it is counted as is read from the recorded parties (§5:5). An input no
-    person sent says so and names its origin (§5:6). No part says that a person typed,
-    wrote or sent anything, only how strong a sign the account is (§2:1).
+    person sent says so and names its origin, by its kind and never by a sender, whatever
+    its messages record (§5:6). No part says that a person typed, wrote or sent anything,
+    only how strong a sign the account is (§2:1).
 
     Args:
         inputs: The inputs the stimulus section renders: the trigger's, then each joined
             one's.
         named: A person the system serves, named in words, as the lines between the tags
             name them.
-        origin: The trigger's origin, by its name, for an input no person sent.
+        origin: The trigger's origin, by its name, for an input whose kind declares none.
         taken_in: Whether the inputs were taken in after the work was briefed, as
             planning's news says of them (ADR-0375 §2:2): the line says so.
 
     Returns:
         The line, with its leading ``- ``.
     """
-    groups = _grouped(inputs)
     of = " of what was taken in" if taken_in else ""
-    if not groups:
-        return f"- The sender{of}: {_unrecorded(inputs, named, origin)}"
+    sent = [one for one in inputs if _by_a_person(one)]
+    unsent = list(dict.fromkeys(_origin_name(one, origin) for one in inputs if one not in sent))
+    groups = _grouped(sent)
+    if not sent:
+        # §5:6: an input no person sent says so, and names its origin, and nothing more.
+        return f"- The sender{of}: no person sent it; it came from {_and(unsent)}."
     several = len(groups) > 1
     parts: list[str] = []
-    for sender, sent in groups:
-        forwards_only = not sent.own and sent.forwards > 0
+    for sender, held in groups:
+        forwards_only = not held.own and held.forwards > 0
         if several:
             subject, plural = "some of the messages", True
         else:
-            plural = sent.count > 1
+            plural = held.count > 1
             noun = "forward" if forwards_only else "message"
             subject = f"the {noun}s" if plural else f"the {noun}"
-        part = _part(sender, sent, named, subject=subject, plural=plural)
+        part = _part(sender, held, named, subject=subject, plural=plural)
         parts.append(part if not parts else _upper(part))
+    if not parts:
+        parts.append(_unrecorded(sent, named))
+    if unsent:
+        # §5:6, for an input taken in beside one a person sent: no person sent it.
+        parts.append(f"What came from {_and(unsent)} no person sent.")
     heading = "The senders" if several else "The sender"
     return f"- {heading}{of}: {' '.join(parts)}"
 
 
-def _unrecorded(inputs: Sequence[SentInput], named: Callable[[str], str], origin: str) -> str:
-    """The sender line where no input records a sender (§5:6).
+def _by_a_person(one: SentInput) -> bool:
+    """Whether a person may have sent ``one``: its kind is one a person sends on (§5:6).
 
-    An input of a kind no person sends on, whose parties are recorded, says that no person
-    sent it and where it came from; any other says that nothing of who sent it is
-    recorded, and whom the system counts it as where its parties say.
+    An input whose channel type no record names is read as one, so nothing of a person's
+    is ever said of no one's.
     """
-    if all(
-        one.channel_type is not None
-        and not sent_by_a_person(one.channel_type)
-        and one.parties is not None
-        for one in inputs
-    ):
-        return f"no person sent it; it came from {origin}."
+    return one.channel_type is None or sent_by_a_person(one.channel_type)
+
+
+def _origin_name(one: SentInput, origin: str) -> str:
+    """Where an input no person sent came from: its kind's origin, by name."""
+    kind = None if one.channel_type is None else origin_kind(one.channel_type)
+    if kind is not None:
+        return kind.name
+    return origin if one.channel_type is None else one.channel_type
+
+
+def _and(names: Sequence[str]) -> str:
+    """Names joined as a line says them: ``A``, ``A and B``, ``A, B and C``."""
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _unrecorded(inputs: Sequence[SentInput], named: Callable[[str], str]) -> str:
+    """The sender line's words where no input a person may have sent records a sender.
+
+    It says that nothing of how it came is recorded, and whom the system counts it as
+    where its parties say.
+    """
     parties = [party for one in inputs for party in (one.parties or ())]
     people = {one.identifier for one in parties if one.kind is HolderKind.PERSON}
     recorded = "the system recorded nothing of how the message came."
