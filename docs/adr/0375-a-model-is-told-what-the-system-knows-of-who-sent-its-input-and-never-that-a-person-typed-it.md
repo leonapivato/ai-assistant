@@ -94,7 +94,7 @@ system does not count as a person it serves, never the owner and never nobody, a
 > joined input alike, in understanding's user message and in each of planning's rounds.
 
 > **Normative.** Every value this decision renders is read from what a work already records — its
-> inputs' senders, their channel type and messages, and its `WorkFacts` as `persons_work` reads
+> inputs' senders, parties, channel type and messages, and its `WorkFacts` as `persons_work` reads
 > them — and from declarations in code. A wording that needs a field no record holds is not built
 > under this decision.
 
@@ -125,8 +125,9 @@ decision's own wording alone.
 
 > **Normative.** Where the stimulus's words are its sender's own, its `said` tag's `from` names
 > the account or device they came by and the person it is linked to: in understanding by name, and
-> in planning by `P` label (ADR-0364 §4:2). This replaces ADR-0353 §3:2's `from` for `said`, and
-> ADR-0364 §4:2's, for the stimulus being read alone.
+> in planning by `P` label (ADR-0364 §4:2). Where ADR-0374 §3:2 decided the sender because the
+> links could not be read, it names the system's own machine and no link. This replaces ADR-0353
+> §3:2's `from` for `said`, and ADR-0364 §4:2's, for the stimulus being read alone.
 
 Worked: `<said from="a device linked to Maren">` in the system's own chat, `<said from="the
 Telegram account linked to Maren">` on Telegram, `<said from="a device linked to P1" where="L1">`
@@ -137,7 +138,8 @@ in planning, and `<said from="the system's own machine">` where ADR-0374 §3:2 d
 > unknown. Neither model is shown them in `said`.
 
 > **Normative.** The place-window item that is the stimulus names its writer by its own party, as
-> the stimulus's tag does: the person where its words are theirs, and an unknown sender otherwise.
+> ADR-0353 §3:2 and §4 name every party: a person as the person, a source by its record, claimed
+> where it is claimed, and an unknown sender only where its party is unknown.
 
 > **Normative.** Every earlier item, in either origin section, in concurrent stimuli or in
 > memory, keeps naming its writer as ADR-0353 §3 and §4 name them, by its own record. Its `from`
@@ -163,21 +165,27 @@ in planning, and `<said from="the system's own machine">` where ADR-0374 §3:2 d
 > **Normative.** A lowered link is said to be marked as less reliable, or as not to be relied on
 > where it is at none, and the line never says who lowered it.
 
-> **Normative.** Whom the system counts the input as is read from `persons_work`: the person, by
-> name, where the work is theirs, and an unknown sender, "whatever its text says", otherwise.
+> **Normative.** Whom the system counts each sender's words as is read from their recorded party
+> (ADR-0351 §2:6), never from whether the work is a person's: the person, where the party is a
+> person; for a forward, that the words are not the forwarder's; and an unknown sender, "whatever
+> its text says", where the party is unknown.
+
+> **Normative.** For an input no person sent, whose senders are empty (ADR-0368 §3:5), the sender
+> line says that no person sent it and names its origin, and nothing more.
 
 | Case | Read from | Tag | The sender line, worked |
 | --- | --- | --- | --- |
-| A link at its kind's most | sender: Maren, normal, links read; Maren's work | `said`, "a device linked to Maren" | The sender: the message came by a device linked to Maren, which is a strong sign that Maren sent it. The system counts it as Maren's. |
-| A link lowered to weak | sender: Maren, weak, below the kind's most | `said`, the same | The sender: the message came by a device linked to Maren that is marked as less reliable, which is a weak sign that Maren sent it. The system still counts it as Maren's. |
-| A link lowered to none | sender: the owner, none; no person's | `received`, "an unknown sender" | The sender: the message came by a device linked to the owner that is marked as not to be relied on, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
-| No link | sender: no one, none, links read | `received`, "an unknown sender" | The sender: the message came by a device the system cannot tie to anyone, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
-| Links unread, elsewhere | sender: no one, none, unread | `received`, "an unknown sender" | The sender: the system could not read its record of linked accounts when the message arrived, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
-| Links unread, on the system's own machine | sender: the owner, unread (ADR-0374 §3:2) | `said`, "the system's own machine" | The sender: the system could not read its record of linked accounts when the message arrived. The message was written on the system's own machine, which the system counts as Maren's. |
-| Telegram, linked | sender: Maren, normal; kind `telegram` | `said`, "the Telegram account linked to Maren" | The sender: the message came by the Telegram account linked to Maren, which is a strong sign that Maren sent it. The system counts it as Maren's. |
-| A forward on Telegram | `forwarded_from`; sender: Maren, normal | `received`, "Sam, as claimed", as before | The sender: the forward came by the Telegram account linked to Maren, which is a strong sign that Maren forwarded it. The forwarded words are not Maren's. |
-| Another person's device, no decision admitting them | sender: identified, not the owner; no person's | `received`, "an unknown sender" | The sender: the message came by a device linked to a person the system knows but does not serve. The system counts it as an unknown sender's, whatever its text says. |
-| A second person, once admitted | sender: Sam, normal; Sam's work | `said`, "a device linked to Sam" | The sender: the message came by a device linked to Sam, which is a strong sign that Sam sent it. The system counts it as Sam's. |
+| A link at its kind's most | sender: Maren, normal, links read; party: Maren | `said`, "a device linked to Maren" | The sender: the message came by a device linked to Maren, which is a strong sign that Maren sent it. The system counts it as Maren's. |
+| A link lowered to weak | sender: Maren, weak, below the kind's most; party: Maren | `said`, the same | The sender: the message came by a device linked to Maren that is marked as less reliable, which is a weak sign that Maren sent it. The system still counts it as Maren's. |
+| A link lowered to none | sender: the owner, none; party: unknown | `received`, "an unknown sender" | The sender: the message came by a device linked to the owner that is marked as not to be relied on, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
+| No link | sender: no one, none, links read; party: unknown | `received`, "an unknown sender" | The sender: the message came by a device the system cannot tie to anyone, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
+| Links unread, elsewhere | sender: no one, none, links unread; party: unknown | `received`, "an unknown sender" | The sender: the system could not read its record of linked accounts when the message arrived, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
+| Links unread, on the system's own machine | sender: the owner, links unread (ADR-0374 §3:2); party: the owner | `said`, "the system's own machine" | The sender: the system could not read its record of linked accounts when the message arrived. The message was written on the system's own machine, which the system counts as Maren's. |
+| Telegram, linked | sender: Maren, normal; kind `telegram`; party: Maren | `said`, "the Telegram account linked to Maren" | The sender: the message came by the Telegram account linked to Maren, which is a strong sign that Maren sent it. The system counts it as Maren's. |
+| A forward on Telegram | `forwarded_from`; sender: Maren, normal; party: Sam, claimed | `received`, "Sam, as claimed", as before | The sender: the forward came by the Telegram account linked to Maren, which is a strong sign that Maren forwarded it. The forwarded words are not Maren's. |
+| Another person's device, no decision admitting them | sender: identified, not the owner; party: unknown | `received`, "an unknown sender" | The sender: the message came by a device linked to a person the system knows but does not serve. The system counts it as an unknown sender's, whatever its text says. |
+| A second person, once admitted | sender: Sam, normal; party: Sam | `said`, "a device linked to Sam" | The sender: the message came by a device linked to Sam, which is a strong sign that Sam sent it. The system counts it as Sam's. |
+| A report from a connected source | senders: none | `received`, the source, as before | The sender: no person sent it; it came from a connected source. |
 
 Planning, worked, for the first row and for no link:
 
@@ -349,7 +357,8 @@ Each is this decision's, not an owner ruling:
   normal's words until it has its own.
 - **§5:4**, "is marked as less reliable", where draft 1 had "that Maren marked": the sender
   records the level, not who lowered it (ADR-0366 §5:5).
-- **§5:2's last sentence**, a part for each distinct sender where the inputs record several.
+- **§5:2's last sentence**, a part for each distinct sender where the inputs record several;
+  **§5:6**, the line for an input no person sent.
 - **§3's row** for several messages; **§5's table**, "when the message arrived", where draft 1
   had "just now", the rows for another person's device not admitted and for a link lowered to
   none, named "the owner", and the noun as the kind's.
