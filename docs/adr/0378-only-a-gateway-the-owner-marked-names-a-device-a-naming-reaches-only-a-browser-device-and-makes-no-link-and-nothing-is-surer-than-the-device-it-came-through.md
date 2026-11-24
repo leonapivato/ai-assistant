@@ -1,6 +1,6 @@
 # 378. Only a gateway the owner marked names a device, a naming reaches only a browser device and makes no link, and nothing is surer than the device it came through
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 - Scope: decision D3 of milestone 21, "Every call checked" (acceptance
   [#3678](https://github.com/leonapivato/ai-assistant/issues/3678), lanes
