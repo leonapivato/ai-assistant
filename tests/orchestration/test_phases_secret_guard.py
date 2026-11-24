@@ -392,6 +392,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     each a ``ShownText``, code's or the result's own words with no record's content and
     no outside text held for a digest (§11:3), or a ``ShownRecord``, a closed kind, a
     record's id and a version: no carrier.
+    What the check made of a call, ``CallCheck`` (ADR-0379 §3:2), is a closed kind and a
+    ``CheckRun`` for each one it ran for: a ``CheckedFor``, a closed kind, a person's id and
+    a level, and a ``CheckOutcome``, a closed kind, a line's id and a level: no carrier.
     The episode look-ups' results (ADR-0358 §7-§10), on ``CallOutcome``, are planning's
     own shapes: ``EpisodesFound``, a page of ``EpisodeShown``, each an ``EpisodicMemory``
     judged above and the ``MatterShown`` it belongs to, a story's id, a version, its
@@ -654,6 +657,11 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "CallShowed",
         "ShownRecord",
         "ShownText",
+        # ADR-0379 §3:2: what the check made of a call, judged in the docstring above.
+        "CallCheck",
+        "CheckRun",
+        "CheckedFor",
+        "CheckOutcome",
         # ADR-0358 §7-§10: the episode look-ups' results, judged in the docstring above.
         "EpisodeProjection",
         "EpisodeRead",

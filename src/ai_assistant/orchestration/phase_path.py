@@ -270,6 +270,7 @@ from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEffect,
     ActivationRecall,
+    CallCheck,
     CallShowed,
     CapabilityEffect,
     CapabilityResult,
@@ -396,6 +397,7 @@ from ai_assistant.orchestration.message_tools import (
     text_arguments,
 )
 from ai_assistant.orchestration.outside_content import joined_parties, rests_on_outside_content
+from ai_assistant.orchestration.permission_check import CheckSubject
 from ai_assistant.orchestration.person_block import still_held
 from ai_assistant.orchestration.person_calls import (
     PERSON_MODEL_CALLS,
@@ -464,6 +466,7 @@ from ai_assistant.orchestration.task_scheduler import (
 )
 from ai_assistant.orchestration.understanding import WrittenBy, fetch_held
 from ai_assistant.orchestration.work_facts import (
+    check_runs_for,
     met_connection,
     persons_authority,
     persons_work,
@@ -2380,6 +2383,30 @@ class PhaseWorking:
         return persons_authority(state.work_facts, state.held_senders, relayed=self.relayed)
 
     @property
+    def check_subject(self) -> CheckSubject:
+        """Whom the check runs for in this work, at what level, and where a condition is met.
+
+        ADR-0368 §7's table, read from what the work records (:func:`~ai_assistant.
+        orchestration.work_facts.check_runs_for`): a task's work for its task's recorded
+        author at the level it records, though the work's own facts record none until the
+        check decides; a sender's work from its facts as they stand, read as carrying none
+        where :attr:`authority` would; and the one connection every one of its senders'
+        inputs came by, or its task records (§4:2, §6:4). Handed to the authorizer, which
+        decides none of it.
+        """
+        state = self._activation
+        task = None if self.scheduling is None else self.scheduling.task
+        return CheckSubject(
+            runs=check_runs_for(
+                None if state is None else state.work_facts,
+                own_input=self._own_input,
+                relayed=self.relayed,
+                task=task,
+            ),
+            met=None if state is None else met_connection(state.trigger, state.joined, task=task),
+        )
+
+    @property
     def outside_trigger(self) -> bool:
         """Whether the trigger's input is outside, read with its relay mark (ADR-0351 §5:3).
 
@@ -2762,6 +2789,7 @@ class PhaseWorking:
                         marked=one.planned.read_outside
                         or (outcome is not None and outcome.digested),
                         showed=shown,
+                        check=_checked(one.authorization, call.call_id),
                     )
                 )
                 self._entered.add((round_id, call.call_id))
@@ -3005,6 +3033,23 @@ def _acted_kind(one: ActedCall) -> CallOutcomeKind:
         ActedOutcome.NOT_DONE: CallOutcomeKind.NOT_DONE,
         ActedOutcome.UNKNOWN: CallOutcomeKind.UNKNOWN,
     }[one.outcome]
+
+
+def _checked(authorization: RoundAuthorization | None, call_id: str) -> CallCheck | None:
+    """What the check made of a call, as its verdict carries it (ADR-0379 §3:2).
+
+    A ``text`` call's is on its message's verdict, every other call's on its own; ``None``
+    where the round was not authorized or the call never reached the check.
+    """
+    if authorization is None:
+        return None
+    for one in authorization.verdicts:
+        if one.call_id == call_id:
+            return one.check
+    for message in authorization.call_messages:
+        if message.call_id == call_id:
+            return message.check
+    return None
 
 
 def _carded(
@@ -5471,6 +5516,7 @@ class PhasePath:
             gone=gone,
             person=None if state is None else persons_work(state.work_facts, state.held_senders),
             tickets=frozenset(one.request_id for one in await self._held_tickets(state)),
+            check_for=working.check_subject,
             taken_places=() if places is not None else _taken_places(state, place),
             # ADR-0364 §9:3: a work that keeps no list may send a text into any connection
             # it was shown that takes one.

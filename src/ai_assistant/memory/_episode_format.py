@@ -2,7 +2,7 @@
 
 Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286, 0307, 0308 and 0315; since then,
 each store's own label by ADRs 0328, 0332, 0338, 0345, 0349, 0350, 0352, 0351, 0353,
-0356, 0358, 0368 and 0374.
+0356, 0358, 0368 and 0374, and by ADR-0379's record of the check.
 """
 
 from __future__ import annotations
@@ -166,7 +166,7 @@ SHOWED_RECORD_FORMAT: Final[int] = 23
 #: 24, whose episodes it would not read (ADR-0326 §5:3).
 FACTS_RECORD_FORMAT: Final[int] = 24
 
-#: The memory store's own label, the one this build writes. It advances to 25 for
+#: The memory store's label for ADR-0374 §5:1's record. It advances to 25 for
 #: ADR-0374 §5:1's record: each ``InputSender``, on a trigger's ``senders`` and on each
 #: message's ``sender``, a joined input's included, gains ``links_unread``, whether it
 #: was set because the links could not be read, a field of a ``core`` model the store
@@ -176,7 +176,19 @@ FACTS_RECORD_FORMAT: Final[int] = 24
 #: sender written at 24 validates unchanged as one whose links were read (ADR-0374 §7),
 #: and an older build, which serves 12 to 24, refuses a file at 25, whose episodes it
 #: would not read (ADR-0326 §5:3).
-MEMORY_RECORD_FORMAT: Final[int] = 25
+UNREAD_RECORD_FORMAT: Final[int] = 25
+
+#: The memory store's own label, the one this build writes. It advances to 26 for
+#: ADR-0379 §3:2's record: each ``RecordedCall`` gains ``check``, what the check made of
+#: the call beside what was decided, a ``CallCheck`` holding a ``CheckRun`` for each one
+#: it ran for, with its ``CheckedFor`` and ``CheckOutcome`` and the closed
+#: ``CallCheckKind``, ``CheckedForKind`` and ``CheckOutcomeKind``: a field of a ``core``
+#: model the store serialises in every episode with a processing record, and members of
+#: closed enumerations a stored episode names (ADR-0326 §2:3). A file at 25 is upgraded in
+#: place by the label alone, since an entry written at 25 validates unchanged as one the
+#: check never reached, and an older build, which serves 12 to 25, refuses a file at 26,
+#: whose episodes it would not read (ADR-0326 §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 26
 
 #: The memory store's labels a build opens: its own, and each it upgrades from, in
 #: order (ADR-0326 §4:5, §5:1).
@@ -195,6 +207,7 @@ MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
         CALLED_RECORD_FORMAT,
         SHOWED_RECORD_FORMAT,
         FACTS_RECORD_FORMAT,
+        UNREAD_RECORD_FORMAT,
         MEMORY_RECORD_FORMAT,
     }
 )

@@ -2840,7 +2840,16 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     changes before its first deploy. ``ApprovalTap`` gains ``person`` and ``level``
 #:     (§4:1), but crosses no frame: the approval request is carried by no engine method.
 #:     The method set does not move: no ``Protocol`` gains a member.
-PROTOCOL_VERSION: Final[int] = 133
+#: 134: ADR-0124 §9:2 advances the version for ADR-0379 §3:2's record of the check, on
+#:     this ground: ``RecordedCall`` gains ``check``, a ``CallCheck`` holding a
+#:     ``CheckRun`` for each one the check ran for, with its ``CheckedFor`` and
+#:     ``CheckOutcome`` and the closed ``CallCheckKind``, ``CheckedForKind`` and
+#:     ``CheckOutcomeKind``, on the wire-carried ``EpisodicMemory.processing_record``'s
+#:     call entries. A peer at 133 refuses the new field as extra (ADR-0124 §9:2), and an
+#:     entry recorded before it decodes unchanged as one the check never reached.
+#:     ``ActionRequest`` gains ``rests_on`` (ADR-0367 §16), but crosses no frame. The
+#:     method set does not move: no ``Protocol`` gains a member.
+PROTOCOL_VERSION: Final[int] = 134
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

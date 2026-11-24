@@ -61,6 +61,20 @@ policy's recorded allow as the deciding decision (ADR-0321 §4:17). Under a tick
 as any approved call does (ADR-0361 §5:4); a deny still refuses it, and the policy's
 confirm still asks.
 
+**The check, recorded beside today's rules** (ADR-0367 §4:5, ADR-0379 §3:2). Once a call
+is bound, and before the policy, the check of
+:mod:`~ai_assistant.orchestration.permission_check` runs over the standing lines, read
+once a round from the line store, for whom the round is handed (``check_for``, ADR-0368
+§7), or, for a ticket's call, for its tapper at the level the tap came by (ADR-0367
+§5:5). ``request_approval`` is checked as a call of its own, and a ``text`` call into a
+connection that is not one of the work's inputs' as every call is (§4:7); one into such a
+place stays outside it. Its outcome rides on the call's verdict, whole, and nothing is
+decided by it: the request carries no line, no verdict, reason, ruling or call handed on
+changes, and a read of the lines that fails, or a check that raises, is recorded as such.
+Each call it reached is logged once the round is decided, as
+``permission_check_compared``, in codes alone, with what it would have decided beside
+what was.
+
 **It logs stage and code-owned reason only**, never arguments or rulings' text (ADR-0275
 §8).
 
@@ -95,6 +109,7 @@ from ai_assistant.core.errors import (
     StoryStoreError,
 )
 from ai_assistant.core.types import (
+    CHECK_NEEDS_A_YES,
     MAX_STORY_PAGE,
     ActionRequest,
     ActivationDigest,
@@ -102,9 +117,12 @@ from ai_assistant.core.types import (
     ApprovalEnd,
     ApprovalGiven,
     ApprovalRequestState,
+    CallCheck,
+    CallCheckKind,
     CapabilityEffect,
     CapabilityResult,
     CarriedProvenance,
+    CheckedFor,
     DiagnosticKind,
     DiagnosticSource,
     DigestOutcome,
@@ -143,12 +161,15 @@ from ai_assistant.orchestration.message_tools import (
     EMAIL_CAPABILITY,
     FROM_ARGUMENT,
     FROM_THE_PERSONS_ACCOUNT,
+    TEXT_CALL,
+    TEXT_CAPABILITY,
     TO_ARGUMENT,
     WORDS_ARGUMENT,
     exact_words,
     reworded,
 )
 from ai_assistant.orchestration.outside_content import from_outside, is_outside_episode
+from ai_assistant.orchestration.permission_check import CheckSubject, call_thing, checked
 from ai_assistant.orchestration.remembering import (
     CONFIRM_ARGUMENT,
     EPISODE_ARGUMENT,
@@ -164,6 +185,7 @@ from ai_assistant.orchestration.selection import (
     select,
 )
 from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.work_facts import tap_runs_for
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -174,14 +196,18 @@ if TYPE_CHECKING:
         DiagnosticSink,
         EgressBinder,
         MemoryStore,
+        PermissionLineStore,
         PlanStore,
         StoryStore,
         ToolRegistry,
     )
     from ai_assistant.core.types import (
         ActivationEffect,
+        ApprovalTap,
+        CheckOutcome,
         FrozenJson,
         FrozenJsonMapping,
+        PermissionLine,
         ToolDefinition,
     )
 
@@ -201,6 +227,7 @@ __all__ = [
     "read_outside_content",
     "shown_values",
     "values_digest",
+    "would_decide",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -317,6 +344,101 @@ class Verdict(StrEnum):
 
     NOT_DONE = "not_done"
     """A deny, a memory reject, or a call no tool could be bound to: never run."""
+
+
+# --- the check, beside today's rules (ADR-0367 §4:5, ADR-0379 §3) ------------------------
+
+#: How severe each verdict is, least to most.
+_SEVERITY: Final = {Verdict.ALLOWED: 0, Verdict.NEEDS_YOU: 1, Verdict.NOT_DONE: 2}
+
+
+def _check_word(made: CallCheck) -> str:
+    """What the check made of a call, as the diagnostic record notes it: codes alone."""
+    if made.kind is not CallCheckKind.CHECKED:
+        return made.kind.value
+    return "+".join(one.outcome.kind.value for one in made.runs)
+
+
+def _outcome_verdict(outcome: CheckOutcome, *, persons_work: bool) -> Verdict:
+    """What an outcome becomes (ADR-0379 §3:3's table, ADR-0368 §7:4).
+
+    Allowed, the call still passing every other check; a yes, which a work that is not a
+    person's asks for none of, so its call is not done; and not done.
+    """
+    if outcome.allows:
+        return Verdict.ALLOWED
+    if outcome.kind in CHECK_NEEDS_A_YES:
+        return Verdict.NEEDS_YOU if persons_work else Verdict.NOT_DONE
+    return Verdict.NOT_DONE
+
+
+def would_decide(
+    made: CallCheck, decided: Verdict, *, persons_work: bool
+) -> tuple[Verdict, CheckOutcome | None]:
+    """What would have been decided of a call were the check deciding, and by which outcome.
+
+    The check joins today's checks first, and a call runs only where every check allows it
+    (ADR-0367 §4:5): so what would be decided is the more severe of what was decided and
+    what each outcome becomes, a call of several senders done only where it is allowed
+    for every one (ADR-0368 §7:3). A check that did not run, or that a message stays
+    outside of, would decide nothing.
+
+    Args:
+        made: What the check made of the call.
+        decided: What today's rules decided of it.
+        persons_work: Whether the work is a person's (ADR-0368 §9:5), whose call needing a
+            yes asks for one (§7:4).
+
+    Returns:
+        The verdict, and the outcome it is the check's by: of the outcomes, the first
+        whose verdict is the most severe; ``None`` where the check ran no outcome.
+    """
+    if made.kind is not CallCheckKind.CHECKED:
+        return decided, None
+    deciding = made.runs[0].outcome
+    worst = _outcome_verdict(deciding, persons_work=persons_work)
+    for one in made.runs[1:]:
+        verdict = _outcome_verdict(one.outcome, persons_work=persons_work)
+        if _SEVERITY[verdict] > _SEVERITY[worst]:
+            deciding, worst = one.outcome, verdict
+    return (worst if _SEVERITY[worst] > _SEVERITY[decided] else decided), deciding
+
+
+def _compared(
+    state: _Round, verdicts: Sequence[CallVerdict], messages: Sequence[MessageVerdict]
+) -> None:
+    """Log, for each call the check reached, what it would have decided beside what was.
+
+    One ``permission_check_compared`` entry per call, of codes and levels alone: the
+    capability, what came of the check, the deciding outcome, whom it ran for and at what
+    level, what was decided, what would have been, and whether the two differ. No value of
+    the call, no person's identifier and no line's identifier is logged (ADR-0275 §8), so
+    a running hub's disagreements are counted from its log with no text leaving it.
+    """
+    decided: list[tuple[str, Verdict]] = [
+        (one.call_id, one.verdict) for one in verdicts if one.call_id in state.made
+    ]
+    decided.extend(
+        (one.call_id, Verdict.ALLOWED if one.allowed else Verdict.NOT_DONE)
+        for one in messages
+        if one.call_id is not None and one.call_id in state.made
+    )
+    persons_work = state.person is not None
+    for call_id, verdict in decided:
+        capability, made = state.made[call_id]
+        would, outcome = would_decide(made, verdict, persons_work=persons_work)
+        _log.info(
+            "permission_check_compared",
+            stage="authorizing",
+            capability=capability,
+            check=made.kind.value,
+            outcome=None if outcome is None else outcome.kind.value,
+            ran_for="+".join(one.checked_for.kind.value for one in made.runs) or None,
+            check_level="+".join(one.checked_for.level.value for one in made.runs) or None,
+            decided=verdict.value,
+            would_decide=would.value,
+            differs=would is not verdict,
+        )
 
 
 # --- the input -----------------------------------------------------------------------
@@ -448,6 +570,10 @@ class RoundToAuthorize:
         shown_places: For a work that keeps no list, each connection it was shown that
             takes a text message, which a ``send_text`` call may go into beside its
             input's (ADR-0364 §9:3).
+        check_for: Whom the check runs for in the work, at what level, and the one
+            connection a condition is met for (ADR-0368 §7), as the work records them:
+            handed in, and decided nowhere here. No one, by default. A call run under a
+            ticket is checked for its tapper instead (ADR-0367 §5:5).
 
     Raises:
         ValueError: If two calls or message calls share a call id, a message call names
@@ -470,6 +596,7 @@ class RoundToAuthorize:
     tickets: frozenset[str] = frozenset()
     taken_places: tuple[str, ...] = ()
     shown_places: tuple[str, ...] = ()
+    check_for: CheckSubject = field(default_factory=CheckSubject)
 
     def __post_init__(self) -> None:
         """Each call is one the round proposed, once."""
@@ -506,6 +633,8 @@ class CallVerdict:
         tool_check: Whether it is not done by the tool's own checks, which code runs here
             before the ruling, as an email's recipients and exact parts are, so planning
             is shown it not done rather than refused (ADR-0364 §6:2, §9:8, §9:13).
+        check: What the check made of it (ADR-0379 §3:2), recorded beside today's rules,
+            which still decide (ADR-0367 §4:5); ``None`` where it never reached the check.
     """
 
     call_id: str
@@ -514,6 +643,7 @@ class CallVerdict:
     decision_id: str | None = None
     effect_id: str | None = None
     tool_check: bool = False
+    check: CallCheck | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,6 +682,9 @@ class MessageVerdict:
         reason: Why it is not allowed; ``None`` where it is.
         call_id: The ``text`` call it rules on, by its id; ``None`` for the round's own
             message (ADR-0356 §7:7).
+        check: For a ``text`` call, what the check made of it (ADR-0367 §4:7, ADR-0379
+            §3:2), recorded beside its place's check, which still decides; ``None`` for
+            the round's own message, which is no call.
     """
 
     place: str | None
@@ -559,6 +692,7 @@ class MessageVerdict:
     effect_id: str | None = None
     reason: str | None = None
     call_id: str | None = None
+    check: CallCheck | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -924,6 +1058,10 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
         tickets=frozenset(str(one) for one in given.tickets),
         taken_places=tuple(str(one) for one in given.taken_places),
         shown_places=tuple(str(one) for one in given.shown_places),
+        check_for=CheckSubject(
+            runs=tuple(CheckedFor.model_validate(one.model_dump()) for one in given.check_for.runs),
+            met=None if given.check_for.met is None else str(given.check_for.met),
+        ),
     )
 
 
@@ -965,10 +1103,13 @@ class _Shown:
     ``request`` is the call rebuilt from the request's, its binding through
     ``EgressBinder.rebind`` (§5:2, ADR-0321 §4:2), and ``approval`` the tap's, whose form
     names the request. ``repeat`` is the deliberate-repeat mark the request recorded.
+    ``tap`` is the request's answer as the plan store holds it, whose person and level the
+    ticket's call is checked for (ADR-0367 §5:5, ADR-0377 §4:2).
     """
 
     approval: Approval
     request: ActionRequest
+    tap: ApprovalTap
     repeat: bool = False
     recorded: str | None = None
 
@@ -981,6 +1122,11 @@ class _Round:
     (ADR-0314 §4); ``None`` where the record is off, so nothing is noted. ``rounds`` are
     this activation's rounds the working set holds, the one being authorized included;
     ``stories`` are read once, the first time a call needs them.
+
+    ``subject`` is whom the check runs for (ADR-0368 §7); ``standing`` the standing lines,
+    read once, the first time a call reaches the check, and ``unread`` set where that read
+    failed; ``made`` holds, by call id, the call's capability and what the check made of
+    it, which its verdict carries once the round's verdicts are final.
     """
 
     activation_id: str
@@ -992,12 +1138,20 @@ class _Round:
     stories: tuple[str, ...] | None = None
     person: str | None = None
     tickets: frozenset[str] = frozenset()
+    subject: CheckSubject = field(default_factory=CheckSubject)
+    standing: tuple[PermissionLine, ...] | None = None
+    unread: bool = False
+    made: dict[str, tuple[str, CallCheck]] = field(default_factory=dict)
 
     def note(self, call: ProposedCall, check: str, verdict: str, reason: str | None) -> None:
         """Note one check ``call`` reached, its verdict and its reason."""
+        self.note_call(call.call_id, check, verdict, reason)
+
+    def note_call(self, call_id: str, check: str, verdict: str, reason: str | None) -> None:
+        """Note one check the call proposed under ``call_id`` reached."""
         if self.checks is None:
             return
-        self.checks.setdefault(call.call_id, []).append(
+        self.checks.setdefault(call_id, []).append(
             {"check": check, "verdict": verdict, "reason": reason}
         )
 
@@ -1122,6 +1276,7 @@ class AuthorizingStage:
         memory: MemoryStore,
         binder: EgressBinder | None = None,
         plans: PlanStore | None = None,
+        lines: PermissionLineStore | None = None,
         preference: Preference | None = None,
         registered_search: frozenset[str] = frozenset(),
         registered_forecast: frozenset[str] = frozenset(),
@@ -1146,6 +1301,9 @@ class AuthorizingStage:
                 none is wired, and then no ticket runs, nothing is found waiting on a
                 card, and a deliberate repeat is left to the claim, which refuses one
                 matching an unknown effect.
+            lines: The line store the check reads the standing lines from, once per
+                round (ADR-0367 §3:6, §4:1); ``None`` where none is wired, and then no
+                call is checked.
             preference: The deployment's tool preference sequence (ADR-0144 §4).
             registered_search: The ids of the tools that are this deployment's own
                 registered search (ADR-0247 §4), whose calls carry ``closed_loop``.
@@ -1165,6 +1323,7 @@ class AuthorizingStage:
         self._memory = memory
         self._binder = binder
         self._plans = plans
+        self._lines = lines
         self._preference = Preference() if preference is None else preference
         self._registered_search = frozenset(registered_search)
         self._registered_forecast = frozenset(registered_forecast)
@@ -1234,6 +1393,7 @@ class AuthorizingStage:
             checks={} if noting else None,
             person=snapshot.person,
             tickets=snapshot.tickets,
+            subject=snapshot.check_for,
         )
         progress.append(state)
         for one in snapshot.calls:
@@ -1242,14 +1402,28 @@ class AuthorizingStage:
         stories: tuple[str, ...] = ()
         if any(not one.call.request.tool.safe_to_repeat for one in state.allowed):
             stories = await self._stories_of(state)
+        message = None if snapshot.message is None else self._message(snapshot, snapshot.message)
+        call_messages: list[MessageVerdict] = []
+        for text in snapshot.call_messages:
+            call_messages.append(
+                replace(
+                    self._message(snapshot, text),
+                    check=await self._message_checked(snapshot, text, state),
+                )
+            )
+        verdicts = tuple(
+            one if one.call_id not in state.made else replace(one, check=state.made[one.call_id][1])
+            for one in state.verdicts
+        )
+        _compared(state, verdicts, call_messages)
         return RoundAuthorization(
             activation_id=snapshot.activation_id,
             round_id=snapshot.round.id,
-            verdicts=tuple(state.verdicts),
+            verdicts=verdicts,
             allowed=tuple(state.allowed),
             story_activations=stories,
-            message=None if snapshot.message is None else self._message(snapshot, snapshot.message),
-            call_messages=tuple(self._message(snapshot, one) for one in snapshot.call_messages),
+            message=message,
+            call_messages=tuple(call_messages),
             read_outside_content=read_outside,
         )
 
@@ -1463,9 +1637,15 @@ class AuthorizingStage:
         return {key: known[key] for key in keys}
 
     async def _ruled(
-        self, call: ProposedCall, selected: _Selected, state: _Round
+        self, call: ProposedCall, selected: _Selected, state: _Round, *, checking: bool = True
     ) -> _Ruled | CallVerdict:
-        """Bind the egress, build the request, ask the policy, and record the ruling.
+        """Bind the egress, build the request, check it, ask the policy, record the ruling.
+
+        **The check runs first** of ADR-0306 §4:1's checks (ADR-0367 §4:5), once the call
+        is bound, since a call's thing may be the account it is bound to (ADR-0376 §2:3).
+        Its outcome is recorded beside today's rules and changes nothing here: the request
+        carries no line, and the policy rules as it did. ``checking`` is off for the call a
+        ``request_approval`` asks about, which is a question and not a call made.
 
         **The kind's carried fact is written here, as the old path writes it**
         (ADR-0247 §4, ADR-0260 §6): ``closed_loop`` exactly for a call to this
@@ -1499,6 +1679,10 @@ class AuthorizingStage:
             request = ActionRequest(tool=tool, parameters=parameters, egress_binding=binding)
         except ValidationError, ValueError:
             return _not_done(call, _MALFORMED)
+        if checking:
+            await self._check_lines(
+                call.call_id, request.tool, state, binding=request.egress_binding
+            )
         effect_id = self._new_effect_id() if gets_effect_record(request.tool) else None
         ruling = await self._policy.decide(_detached_request(request))
         # Noted as the policy answers, so a check reached is in the record even where
@@ -1652,7 +1836,7 @@ class AuthorizingStage:
             state.note(call, "selection", selected.verdict.value, selected.reason)
             state.verdicts.append(_not_done(call, _not_asked(selected.reason)))
             return
-        ruled = await self._ruled(inner, selected, state)
+        ruled = await self._ruled(inner, selected, state, checking=False)
         if isinstance(ruled, CallVerdict):
             state.note(call, "request", ruled.verdict.value, ruled.reason)
             state.verdicts.append(_not_done(call, _not_asked(ruled.reason)))
@@ -1688,6 +1872,8 @@ class AuthorizingStage:
         except ValidationError, ValueError:
             state.verdicts.append(_not_done(call, _MALFORMED))
             return
+        # ADR-0379 §3:2: ``request_approval`` is a call of its own, checked as one.
+        await self._check_lines(call.call_id, request.tool, state)
         effect_id = self._new_effect_id()
         ruling = PermissionRuling(outcome=PermissionOutcome.ALLOW, reason=_RULED_BY_ITS_CALL)
         state.note(call, "request", Verdict.ALLOWED.value, None)
@@ -1775,6 +1961,7 @@ class AuthorizingStage:
         return _Shown(
             approval=approval,
             request=rebuilt,
+            tap=answer,
             repeat=held.deliberate_repeat,
             recorded=str(request.call.tool.capability),
         )
@@ -1837,6 +2024,13 @@ class AuthorizingStage:
         """
         call = one.call
         request = shown.request
+        # ADR-0367 §5:5: checked for the person whose tap approved it, at the level the tap
+        # came by (ADR-0377 §4:2), whatever the work carries. A tap arrives by no
+        # connection a condition names, so none is met.
+        tapper = CheckSubject(runs=(tap_runs_for(shown.tap),))
+        await self._check_lines(
+            call.call_id, request.tool, state, binding=request.egress_binding, subject=tapper
+        )
         effect_id = self._new_effect_id()
         ruling = await self._policy.decide(_detached_request(request))
         state.note(call, "policy", ruling.outcome.value, ruling.reason)
@@ -1909,6 +2103,82 @@ class AuthorizingStage:
         if state.stories is None:
             state.stories = await self._story_activations(state.activation_id)
         return state.stories
+
+    async def _standing_lines(self, state: _Round) -> tuple[PermissionLine, ...] | None:
+        """The standing lines, read once a round; ``None`` where they cannot be read.
+
+        A read that fails, for any reason, is logged once under a fixed event name with a
+        code-owned reason alone, and every call of the round is then recorded as the check
+        not having run. It never stops the round: today's rules still decide.
+        """
+        if state.standing is not None or state.unread or self._lines is None:
+            return state.standing
+        try:
+            state.standing = tuple(await self._lines.standing())
+        except Exception:  # a fault in the read is the check not having run, never a line
+            _log.warning("permission_check_unrun", stage="authorizing", reason="lines_unread")
+            state.unread = True
+        return state.standing
+
+    async def _check_lines(  # noqa: PLR0913 — the call, its declaration, the round, and what its thing and whom it runs for are read from
+        self,
+        call_id: str,
+        tool: ToolDefinition,
+        state: _Round,
+        *,
+        binding: EgressBinding | None = None,
+        subject: CheckSubject | None = None,
+        place: str | None = None,
+    ) -> None:
+        """Run the check for one call, and keep its outcome for the call's verdict.
+
+        ADR-0379 §3:2: every call the check checks gets one outcome for each one it runs
+        for (``subject``, or the work's), recorded whole. Where the lines cannot be read it
+        records that it did not run, and where it raises, that it failed, logged under a
+        fixed event name. Nothing it answers changes what is decided (ADR-0367 §4:5).
+        """
+        if self._lines is None:
+            return
+        capability = str(tool.capability)
+        lines = await self._standing_lines(state)
+        made: CallCheck
+        if lines is None:
+            made = CallCheck(kind=CallCheckKind.LINES_UNREAD)
+        else:
+            try:
+                made = checked(
+                    lines,
+                    tool,
+                    thing=call_thing(capability, binding=binding, place=place),
+                    subject=state.subject if subject is None else subject,
+                )
+            except Exception:  # a check that raises is recorded as such, and decides nothing
+                _log.warning("permission_check_failed", stage="authorizing", reason="defect")
+                made = CallCheck(kind=CallCheckKind.FAILED)
+        state.made[call_id] = (capability, made)
+        state.note_call(call_id, "check", _check_word(made), None)
+
+    async def _message_checked(
+        self, snapshot: RoundToAuthorize, message: RoundMessage, state: _Round
+    ) -> CallCheck | None:
+        """What the check makes of a ``text`` call (ADR-0367 §4:7).
+
+        A text into a place one of the work's own inputs came from, its input's or one a
+        take brought it, stays outside the check, checked by its place alone (ADR-0306
+        §4:7). A text into any other connection passes the check as every call does, its
+        thing the connection it goes into. The round's own message is no call.
+        """
+        call_id = message.call_id
+        if call_id is None or self._lines is None:
+            return None
+        own = (snapshot.input_place, *snapshot.taken_places)
+        if snapshot.places is None and message.place is not None and message.place in own:
+            outside = CallCheck(kind=CallCheckKind.OUTSIDE)
+            state.made[call_id] = (TEXT_CAPABILITY, outside)
+            state.note_call(call_id, "check", outside.kind.value, None)
+            return outside
+        await self._check_lines(call_id, TEXT_CALL, state, place=message.place)
+        return state.made[call_id][1]
 
     def _message(self, snapshot: RoundToAuthorize, message: RoundMessage) -> MessageVerdict:
         """A message's place, and nothing else, checked (§4:7).
