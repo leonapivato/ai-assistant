@@ -29,7 +29,8 @@
   it is also a hub device", as it reaches a listing) and
   [ADR-0366](0366-a-person-is-one-identity-the-hub-links-accounts-to-code-decides-who-sent-an-input-and-how-sure-it-is-and-a-persons-label-holds-for-one-work.md)
   (§4:1 and §5:6, each for a hub chat message that came through a device other than the one it is
-  written from), as §9 records.
+  written from) and [ADR-0377](0377-a-cards-tap-and-the-lines-stop-are-read-through-the-link-they-arrived-by-a-tap-answers-only-at-the-level-its-call-needs-and-an-answer-records-who-tapped-and-how-sure.md)
+  (§2:4, for a tap that came through a device other than its requesting device), as §9 records.
 
 ## Context
 
@@ -156,8 +157,12 @@ and never needs another device to speak for it. A browser device has no connecti
 > **Normative.** A message that came through the device it is written from is read as ADR-0366 §4:1
 > and §5:6 rule, unchanged.
 
-So a lowering of the connecting device's link binds every message recorded through it after the
-lowering (ADR-0373 §2:9). A level is about who wrote a message, not about what a request may do: the
+> **Normative.** A tap on the hub page whose request came through a device other than its requesting
+> device is read from both devices' hub chat accounts, as §4:3 to §4:5 read a message: the identity
+> both links tie, at the lower level, and otherwise no identified person, at none (ADR-0377 §2:4).
+
+So a lowering of the connecting device's link binds every message recorded, and every tap read,
+through it after the lowering (ADR-0373 §2:9). A level is about who wrote a message, not about what a request may do: the
 roles a request acts with are bounded by the mark (§2) and by revocation, and no level gates the
 owner's acts on links (ADR-0373 §4:5). ADR-0374 §3:1's exception is unchanged: no gateway may name
 `hub`, so a message recorded from `hub` always came through `hub`.
@@ -218,7 +223,7 @@ set and read at the hub alone, through the admin socket, and crosses no promoted
 ### 9. Relationship to earlier decisions
 
 > **Normative.** This numbered draft records its replacements on the status lines of ADR-0298,
-> ADR-0296 and ADR-0366 and in a dated header note on each, atomically with this ADR under ADR-0070
+> ADR-0296, ADR-0366 and ADR-0377 and in a dated header note on each, atomically with this ADR under ADR-0070
 > and ADR-0082, preserving their ratified bodies. Each replacement takes effect on this ADR's
 > ratification.
 
@@ -235,6 +240,7 @@ Superseded:
 | ADR-0296 §1:3, as it reaches a listing at a device that is no gateway or of a hub device | Such a listing registers nothing (§2:1, §3:1) |
 | ADR-0296 §1:4's "whether or not it is also a hub device", as it reaches a listing | A hub device is reached only through its own connection (§3:1) |
 | ADR-0366 §4:1 and §5:6, for a hub chat message that came through a device other than its own | Both links are read; the identity both tie, at the lower level (§4:3, §4:4) |
+| ADR-0377 §2:4, for a tap that came through a device other than its requesting device | Both devices' hub chat accounts are read, as for a message (§4:7) |
 
 Taken, with nothing superseded: ADR-0373 §6:2 and §6:3 (the role act links a browser device, §5:2);
 ADR-0374 §2:1 and §3:1 (§4:5, §4 prose). Read through and standing, each as written: ADR-0298 §2:1,
@@ -251,13 +257,14 @@ Named so B7 is scoped, and made by none of this decision.
   the episode's message record gain the device it came through (§7:1). No Protocol method changes.
 - **`service/`:** the roster's mark and its acts on `ai-assistant-device` (§2); `accept_naming`'s two
   refusals and their log (§2:1, §3); `DeviceLinks` following §5:2 instead of the registration.
-- **`orchestration/`:** the sender read of §4:3 to §4:5, and inspection (§7:2).
+- **`orchestration/`:** the sender read of §4:3 to §4:5, a tap's read of §4:7, and inspection
+  (§7:2).
 - **The stores and the wire:** the upgrades and the version of §8:2 and §8:3.
 
 ### 11. What this decision leaves to others
 
-- **ADR-0367 and decision D1:** what a level permits, the check, lines and grants.
-- **Decision D2:** taps and `/stop`.
+- **ADR-0367, ADR-0376 and ADR-0379:** what a level permits, the check, lines and grants.
+- **ADR-0377:** taps and `/stop`, save which links a tap through a named device is read from (§4:7).
 - **#3649 and #3658:** the durable admission generation, and the order of a first link's write.
 - **Milestone 5:** enrolling a second person's devices, and what a gateway one of them runs may name.
 - **A later decision:** marking a gateway from anywhere but the hub, and the web door's sign-in.
@@ -274,7 +281,8 @@ Each is this decision's, not an owner ruling:
 - **§3:1**, that a naming never reaches a hub device, live or revoked. This takes from ADR-0296 §1:4,
   an owner's ruling of 2026-10-04, the case of an enrolled machine's browser served by another
   machine's gateway: such a browser now reaches the hub through its own machine's gateway or not at all.
-- **§4:3**, the lower of the two levels, and no identified person where the links disagree.
+- **§4:3**, the lower of the two levels, and no identified person where the links disagree; and
+  **§4:7**, the same for a tap on the hub page.
 - **§5:2**, that a browser device's link rests on a roster role the owner gave it at the hub, and not
   on a membership, which `AssistantEngine` sets.
 - **§6**, that the local socket's label stands and is bounded by `hub`'s link rather than bound.
