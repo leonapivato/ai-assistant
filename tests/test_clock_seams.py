@@ -63,6 +63,7 @@ from ai_assistant.core.errors import (
     PersonModelStoreError,
     PlanningError,
     StoryStoreError,
+    ThingRecordStoreError,
     TraceStoreError,
 )
 from ai_assistant.core.types import (
@@ -98,6 +99,8 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     TextChannelPayload,
+    ThingKey,
+    ThingKind,
     ToolCall,
     ToolCost,
     ToolDefinition,
@@ -165,6 +168,7 @@ from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.permissions import (
     SqliteAuditTrail,
     SqlitePermissionLineStore,
+    SqliteThingRecordStore,
 )
 from ai_assistant.planning import (
     InMemoryPlanStore,
@@ -199,6 +203,7 @@ from ai_assistant.testing import (
     FakeSourceReadRecorder,
     FakeSourceReadTrail,
     FakeStoryStore,
+    FakeThingRecordStore,
     FakeToolCallingCompleter,
     FakeToolRegistry,
     FakeTraceRetention,
@@ -893,6 +898,25 @@ async def _sqlite_permission_line_store(now: Clock) -> None:
             store.close()
 
 
+#: A thing to record, so a write reads the store's clock (ADR-0381 §3:3).
+_CALENDAR: Final = ThingKey(kind=ThingKind.SOURCE, identifier="calendar")
+
+
+async def _fake_thing_record_store(now: Clock) -> None:
+    """A write stamps the record from the store's own clock (ADR-0381 §3:3)."""
+    await FakeThingRecordStore(now=now).record_whose(_CALENDAR, person=OWNER_PERSON_ID)
+
+
+async def _sqlite_thing_record_store(now: Clock) -> None:
+    """A write stamps the record from the store's own clock (ADR-0381 §3:3)."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqliteThingRecordStore(path=Path(directory) / "thing_records.db", now=now)
+        try:
+            await store.record_whose(_CALENDAR, person=OWNER_PERSON_ID)
+        finally:
+            store.close()
+
+
 async def _sqlite_story_store(now: Clock) -> None:
     """A create stamps the story and its log lines from the store's own clock."""
     with tempfile.TemporaryDirectory() as directory:
@@ -1025,6 +1049,8 @@ SEAMS = [
     Seam("SqliteIdentityStore", _sqlite_identity_store, IdentityStoreError),
     Seam("FakePermissionLineStore", _fake_permission_line_store, PermissionLineStoreError),
     Seam("SqlitePermissionLineStore", _sqlite_permission_line_store, PermissionLineStoreError),
+    Seam("FakeThingRecordStore", _fake_thing_record_store, ThingRecordStoreError),
+    Seam("SqliteThingRecordStore", _sqlite_thing_record_store, ThingRecordStoreError),
     Seam("SqliteStoryStore", _sqlite_story_store, StoryStoreError),
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
     Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),

@@ -29,6 +29,7 @@ from importlib.resources import files
 from typing import TYPE_CHECKING, Final, assert_never
 
 import structlog
+from pydantic import ValidationError
 
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
@@ -36,12 +37,15 @@ from ai_assistant.core.prompts import PROMPT_OVERRIDE_DIRECTORY, PromptOrigin, P
 from ai_assistant.core.types import (
     DELIVERY_RESERVE_BYTES,
     HUB_DEVICE_ID,
+    OWN_CHAT_CONNECTION,
     OWNER_PERSON_ID,
     Account,
     CanonicalDestination,
     DestinationProtocol,
     LabelBounds,
     SecretScope,
+    ThingKey,
+    ThingKind,
 )
 from ai_assistant.evaluation import FileDiagnosticRecord, MeasureReader, SqliteTraceStore
 from ai_assistant.memory import (
@@ -89,12 +93,14 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.approval_calls import ApprovalsSeams
+from ai_assistant.orchestration.approvals import THE_APPROVALS
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.channel_kinds import (
     EMAIL_ACCOUNT_KIND,
     FORECAST_ACCOUNT_KIND,
     SEARCH_ACCOUNT_KIND,
     AccountConnection,
+    place_of,
 )
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
@@ -144,6 +150,7 @@ from ai_assistant.orchestration.story_tidy_up import (
     StoryTidyUp,
 )
 from ai_assistant.orchestration.task_manager import TaskManagerLimits, TaskSchedulerSeams
+from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.orchestration.telegram import (
     TELEGRAM_CHANNEL_TYPE,
     TelegramCards,
@@ -163,6 +170,7 @@ from ai_assistant.permissions import (
     SqlitePermissionLineStore,
     SqliteSourceGrantStore,
     SqliteSourceReadTrail,
+    SqliteThingRecordStore,
     ThresholdActionPolicy,
 )
 from ai_assistant.permissions.spend import SpendConfiguration
@@ -635,6 +643,10 @@ IDENTITIES_FILENAME: Final = "identities.db"
 #: lines people make, grants and limits, with each making and removal, opened on every hub.
 PERMISSION_LINES_FILENAME: Final = "permission_lines.db"
 
+#: The file of whose each connection and source is (ADR-0381 §3:1): one record per thing,
+#: naming the owner, written at every start for each thing the hub holds (§4:1).
+THING_RECORDS_FILENAME: Final = "thing_records.db"
+
 #: The hub chat's channel type (ADR-0292), whose accounts are the devices it is written
 #: from (ADR-0293 §4:1).
 _HUB_CHAT: Final = "conversation"
@@ -859,6 +871,61 @@ def _account_connections(settings: Settings) -> tuple[AccountConnection, ...]:
         for reference, kind in named
         if reference is not None
     )
+
+
+def held_things(settings: Settings, *, sources: Sequence[Reader | None]) -> tuple[ThingKey, ...]:
+    """Every thing this hub holds as it starts, each once, as its record is keyed (ADR-0381 §2).
+
+    What the start records as the owner's where it has no record (§4:1), read from what
+    this root wires, in this order:
+
+    * **the system's own chat**, as one connection (§2:1, ADR-0376 §2:4), on every hub;
+    * **the line's place**, the one chat of the one bot the line is configured with, as
+      ``place_of`` names it, where the line is configured; a changed bot or chat is a new
+      place, recorded at the start that configures it;
+    * **the schedule and the approvals**, each as its one place, on every hub, as the
+      Task Scheduler and the Approvals channel are (ADR-0350 §7:1, ADR-0361 §3:4);
+    * **each account connection this hub registers** (:func:`_account_connections`), as
+      ``account:`` and its reference: an account connected while the hub runs is
+      registered, and so recorded, at the next start;
+    * **each source**, by its reader's declared identity (§2:2, ADR-0097 §1:1), once
+      however many of its readers this root built.
+
+    An account linked to identify its person, a device or the line's Telegram account,
+    is none of these and is not here (§2:3): its link in the identity store names its
+    person (:func:`configured_accounts`).
+
+    **A thing no record can name is left out, and the start goes on.** ``Settings`` takes
+    a reference verbatim, so one with surrounding whitespace is a connection no key
+    spells (:class:`~ai_assistant.core.types.ThingKey` refuses rather than strips). Left
+    out, it has no record and is no one's, which can only refuse (ADR-0381 §5); refusing
+    the start instead would stop a hub that runs today over a record nothing reads yet.
+
+    Args:
+        settings: The loaded settings.
+        sources: The readers this root built, ``None`` for each consumer of an
+            unconfigured source.
+
+    Returns:
+        The things' keys, each once.
+    """
+    connections = [OWN_CHAT_CONNECTION]
+    if settings.telegram_connection is not None and settings.telegram_user_id is not None:
+        connections.append(
+            place_of(line_channel(settings.telegram_connection, settings.telegram_user_id))
+        )
+    connections.extend((place_of(SCHEDULE), place_of(THE_APPROVALS)))
+    connections.extend(account.place for account in _account_connections(settings))
+    things = [(ThingKind.CONNECTION, one) for one in connections]
+    things.extend((ThingKind.SOURCE, reader.name) for reader in sources if reader is not None)
+    keys: dict[ThingKey, None] = {}
+    for kind, identifier in things:
+        try:
+            keys[ThingKey(kind=kind, identifier=identifier)] = None
+        except ValidationError:
+            # Neither the identifier nor why: a reference is the owner's configuration.
+            _log.warning("thing_not_recordable", kind=kind.value)
+    return tuple(keys)
 
 
 def _configured_search(
@@ -1358,6 +1425,19 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             path=directory / PERMISSION_LINES_FILENAME, now=_utcnow
         )
         opened.append(permission_lines.close)
+        # **ADR-0381 §3:1's store of whose each thing is, on its own file, on every hub.**
+        # Opening it is the start's writes (§4:1): before the engine below admits any
+        # work, each thing this hub holds that has no record is recorded as the owner's,
+        # so the start after the upgrade that builds it writes every one. Nothing asks
+        # the owner anything (§4:3). Nothing reads it yet: the card for a grant that asks
+        # and the Connections section's filter are the lanes that read it (§6). It reads
+        # no other store and no store reads it.
+        thing_records = SqliteThingRecordStore(
+            path=directory / THING_RECORDS_FILENAME,
+            held=held_things(settings, sources=(facet_reader, upcoming_reader)),
+            now=_utcnow,
+        )
+        opened.append(thing_records.close)
         # **The sole reader of ADR-0194 §1's four spend settings, and of the fifth
         # this mechanism depends on** (ADR-0194 §5, §11). The store takes explicit
         # values and never a `Settings` read, so this is the one place the two
@@ -2475,6 +2555,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # And the line store: no store reads it and it reads none, and nothing in
                 # the façade reads it yet.
                 _as_async(permission_lines.close),
+                # And the store of whose each thing is: no store reads it and it reads
+                # none, and nothing in the façade reads it yet.
+                _as_async(thing_records.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
                 # The grant store joins the same ordered shutdown as the other

@@ -277,6 +277,9 @@ if TYPE_CHECKING:
         TelegramPollClaim,
         TelegramPollOutcome,
         TelegramSendOutcome,
+        ThingKey,
+        ThingRecord,
+        ThingRecording,
         TicketClaim,
         ToolCall,
         ToolCost,
@@ -14824,5 +14827,102 @@ class PermissionLineStore(Protocol):
         Raises:
             ValueError: If ``line_id`` or ``by`` is not a non-blank ``str``.
             PermissionLineStoreError: If the store cannot be read or written.
+        """
+        ...
+
+
+@runtime_checkable
+class ThingRecordStore(Protocol):
+    """Whose each connection and source is, one record per thing (ADR-0381 §3).
+
+    **What it holds**: at most one record per thing, a connection or a source, keyed by the
+    thing (§3:2), naming whose it is and when it was recorded (§3:3). It records; it does
+    not decide. Nothing here says which things the hub holds (the composition root's,
+    ADR-0381 §4:1), what a record means for a call (its readers', §5, §6), or whether the
+    thing named exists. No other stored record carries this, and this store carries
+    nothing else (§3:1).
+
+    **Only the owner's identity is recorded in this milestone** (§1:3, §3:3): a write
+    naming anyone else, anyone's group included, is refused as a malformed argument before
+    anything is read.
+
+    **A write writes only where no record stands** (§3:4): where the thing already has
+    one, :meth:`record_whose` writes nothing and answers ``already_recorded`` with that
+    record, so a repeated write writes nothing. The store holds this rule, not its caller,
+    because only the step that writes can decide it against every other writer. Nothing
+    here changes or removes a record (§7:1): there is no member that could.
+
+    **A thing with no record belongs to no one** (§5:1), and :meth:`whose` answers ``None``
+    for it, never a record naming the owner in its place. A stored row that is not a
+    record is a store fault, raised rather than skipped; §5:1 reads a record the store
+    cannot read as none, so a reader turning a record into whose yes a call needs reads
+    :class:`~ai_assistant.core.errors.ThingRecordStoreError` as no record.
+
+    **Each write is one atomic step**, observing the store, deciding and writing against
+    every other member, across processes as well as coroutines. **Every read returns a
+    detached snapshot**: the exchanged types are frozen pydantic models.
+
+    Every member raises :class:`~ai_assistant.core.errors.ThingRecordStoreError` for a
+    store fault. A malformed argument is a ``ValueError``, raised before anything is read;
+    a model argument is validated again whole, since ``model_copy`` and
+    ``model_construct`` skip validation. Cancelling any member is governed by this
+    module's cancellation clause (ADR-0060). Every argument is immutable, so input
+    observation (ADR-0065) asks nothing further of it.
+
+    A store of ``permissions/`` under ADR-0326, on a file of its own in the hub's data
+    directory (§3:1).
+
+    **A BREAKING contract change under golden rule 5**, named by ADR-0381 §9, landing with
+    its conformance suite, its canonical fake in :mod:`ai_assistant.testing` and its store
+    (``CONTRIBUTING.md`` → "Adding a Protocol", ADR-0137 §2).
+    """
+
+    async def whose(self, key: ThingKey) -> ThingRecord | None:
+        """Read the record of the thing ``key`` names (ADR-0381 §6).
+
+        Args:
+            key: The thing.
+
+        Returns:
+            Its record; ``None`` where it has none, which ADR-0381 §5:1 reads as no one's.
+
+        Raises:
+            ValueError: If ``key`` is not a valid ``ThingKey``.
+            ThingRecordStoreError: If the store cannot be read, or the stored row is
+                corrupt.
+        """
+        ...
+
+    async def record_whose(self, key: ThingKey, *, person: str) -> ThingRecording:
+        """Record that the thing ``key`` names is ``person``'s, where no record stands (§3:4).
+
+        The record is written at the store's clock's reading, in one step that writes only
+        where the thing has no record.
+
+        Args:
+            key: The thing.
+            person: Whose it is, by their identity's id: the owner's, in this milestone.
+
+        Returns:
+            ``recorded`` with the record written; or ``already_recorded`` with the record
+            that already stood, whoever it names, having written nothing.
+
+        Raises:
+            ValueError: If ``key`` is not a valid ``ThingKey``, or ``person`` is not the
+                owner's identity (ADR-0381 §3:3).
+            ThingRecordStoreError: If the store cannot be read or written, or the record
+                that stands is corrupt.
+        """
+        ...
+
+    async def export(self) -> tuple[ThingRecord, ...]:
+        """Every record the store holds, in the order recorded (ADR-0381 §3:4, ADR-0004 §6).
+
+        Returns:
+            The records; none on a store that holds none.
+
+        Raises:
+            ThingRecordStoreError: If the store cannot be read, or a stored row is
+                corrupt.
         """
         ...

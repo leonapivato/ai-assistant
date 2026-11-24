@@ -26018,6 +26018,153 @@ class LineRemoval(BaseModel):
         return self
 
 
+# --- whose a thing is: one record per connection and source (ADR-0381 §2, §3) ---------
+#
+# Every connection the system has and every source carries one record saying whose it is
+# (ADR-0367 §6:1), kept in a store of its own keyed by the thing (ADR-0381 §3:1, §3:2),
+# never as a field on `ConnectedAccount`, `SourceGrant` or any other stored record. A
+# **thing** is a connection or a source; its **record** names its person and when it was
+# recorded. In this milestone every record names the owner (§3:3), and a thing with no
+# record belongs to no one (§5:1): no type here stands in for a missing record.
+
+#: The schedule, the Task Scheduler's one place, as a record names it (ADR-0381 §3:2): its
+#: place, ``<channel type>:<instance id>``, as an effect record names it. The schedule's
+#: identity is orchestration's (``task_scheduler.SCHEDULE``), which ``core`` cannot import,
+#: so it is spelled again here and a test holds the two equal.
+SCHEDULE_CONNECTION: Final = "task_scheduler:schedule"
+
+#: The approvals, the Approvals channel's one place, as a record names it (ADR-0381 §3:2),
+#: spelled again from ``approvals.THE_APPROVALS`` for :data:`SCHEDULE_CONNECTION`'s reason.
+APPROVALS_CONNECTION: Final = "approvals:approvals"
+
+#: The two built-in places no line names but a record does (ADR-0376 §2:4, ADR-0381 §2:1).
+_RECORDED_BUILT_IN_PLACES: Final = frozenset({SCHEDULE_CONNECTION, APPROVALS_CONNECTION})
+
+
+def _thing_connection(value: str) -> str:
+    """Refuse what is not a connection a record may name, returning it **unchanged**.
+
+    ADR-0381 §3:2: a connection spelled as a line spells one (:data:`LineConnection`), and
+    the schedule and the approvals as their places are, which no line names: so each of
+    those two channel types is admitted as its one place alone.
+
+    Raises:
+        ValueError: If it is neither a connection a line may name nor one of the two
+            built-in places.
+    """
+    if value in _RECORDED_BUILT_IN_PLACES:
+        return value
+    kind = value.partition(_CONNECTION_SEPARATOR)[0]
+    if kind in _NAMED_BY_NO_LINE:
+        msg = "a record names the schedule and the approvals each as its one place"
+        raise ValueError(msg)
+    return _line_connection(value)
+
+
+class ThingKind(StrEnum):
+    """Whether a thing is a connection or a source (ADR-0381 §3:2). Closed, never renamed."""
+
+    CONNECTION = "connection"
+    """A connection the system has (ADR-0364 §3:2), named as a record names one."""
+    SOURCE = "source"
+    """A source, named by its reader's declared identity (ADR-0097 §1:1)."""
+
+
+class ThingKey(BaseModel):
+    """What a record is keyed by: whether its thing is a connection or a source, and which.
+
+    ADR-0381 §3:2. A connection is spelled as a line spells one (ADR-0376 §2:4): one place
+    as ``<channel type>:<instance id>``, one account connection as ``account:`` and its
+    reference, and the system's own chat as :data:`OWN_CHAT_CONNECTION` alone, never one
+    of its conversations; and the schedule and the approvals as their places are,
+    :data:`SCHEDULE_CONNECTION` and :data:`APPROVALS_CONNECTION`. A source is its reader's
+    declared identity, the value ``Reader.name`` returns (ADR-0097 §1:1). Each is held
+    verbatim and compared as given, never normalised: a spelling with surrounding
+    whitespace is refused rather than stripped, since a stripped one would name a thing
+    the caller did not.
+
+    Whether the hub holds the thing named is not the type's to say.
+
+    Attributes:
+        kind: Connection or source.
+        identifier: Which connection or source.
+
+    Raises:
+        ValueError: If the identifier is not a spelling of its kind.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: ThingKind
+    identifier: NonBlankEncodableText
+
+    @model_validator(mode="after")
+    def _spelled_as_its_kind(self) -> Self:
+        if self.kind is ThingKind.CONNECTION:
+            _thing_connection(self.identifier)
+        elif self.identifier != self.identifier.strip():
+            msg = "a source's identity carries no surrounding whitespace"
+            raise ValueError(msg)
+        return self
+
+
+def _thing_person(value: str) -> str:
+    """Refuse any identifier but the owner's identity (ADR-0381 §1:3, §3:3).
+
+    Raises:
+        ValueError: If it names anyone else, anyone (``group:anyone``) included.
+    """
+    if value != OWNER_PERSON_ID:
+        msg = "in this milestone a record names the owner's identity alone (ADR-0381 §3:3)"
+        raise ValueError(msg)
+    return value
+
+
+type ThingPerson = Annotated[NonBlankEncodableText, AfterValidator(_thing_person)]
+"""Whose a thing is, as its record names it: :data:`OWNER_PERSON_ID` alone in this
+milestone (ADR-0381 §3:3); a person's or a group's identifier once a decision for milestone
+5 admits others (§1:3, §10)."""
+
+
+class ThingRecord(BaseModel):
+    """One record of whose a thing is, as its store keeps it (ADR-0381 §3:2, §3:3).
+
+    A thing has at most one, and nothing changes or removes it once written (§7:1). A
+    thing with no record belongs to no one (§5:1).
+
+    Attributes:
+        key: The thing it is the record of.
+        person: Whose the thing is: the owner's identity, in this milestone.
+        recorded_at: When the store recorded it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    key: ThingKey
+    person: ThingPerson
+    recorded_at: UtcInstant
+
+
+class ThingRecordingKind(StrEnum):
+    """What writing a record did in its store. Closed, added to, never renamed."""
+
+    RECORDED = "recorded"
+    """No record stood for the thing, and one was written (ADR-0381 §3:4)."""
+    ALREADY_RECORDED = "already_recorded"
+    """A record already stood for the thing, so nothing was written (§3:4)."""
+
+
+class ThingRecording(BaseModel):
+    """What writing a record did, with the record that now stands (ADR-0381 §3:4).
+
+    Attributes:
+        kind: What it did.
+        record: The record it wrote, or the one that already stood, left as it was.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: ThingRecordingKind
+    record: ThingRecord
+
+
 # --- the person model as the panels read and edit it (ADR-0338 §8:1-§8:3) ----------
 #
 # What ``AssistantEngine``'s person-model members carry: a read of one person's model

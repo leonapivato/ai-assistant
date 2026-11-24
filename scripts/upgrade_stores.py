@@ -52,6 +52,7 @@ from ai_assistant.app.composition import (
     PERMISSION_LINES_FILENAME,
     PERSON_MODEL_FILENAME,
     PROFILE_FIELD_CHARS,
+    THING_RECORDS_FILENAME,
     telegram_intake_path,
 )
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -174,6 +175,8 @@ from ai_assistant.core.types import (
     TaskSpawn,
     TaskWriteAnswer,
     TelegramOutcome,
+    ThingKey,
+    ThingKind,
     TicketClaim,
     ToolCost,
     ToolDefinition,
@@ -207,6 +210,7 @@ from ai_assistant.permissions import (
     SqlitePermissionLineStore,
     SqliteSourceGrantStore,
     SqliteSourceReadTrail,
+    SqliteThingRecordStore,
 )
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, EnrolmentStore
@@ -2310,6 +2314,41 @@ async def _read_permission_lines(directory: Path) -> Records:
         store.close()
 
 
+# --- thing_records.db ----------------------------------------------------------------
+
+#: The things the writer records beside those the composition's start recorded: a source
+#: and an account connection no setting of the check names (ADR-0381 §2).
+_WRITTEN_THINGS: Final = (
+    ThingKey(kind=ThingKind.SOURCE, identifier="upgrade-notes"),
+    ThingKey(kind=ThingKind.CONNECTION, identifier="account:conn-upgrade-thing"),
+)
+
+
+async def _write_thing_records(directory: Path, moment: Moment) -> None:
+    del moment  # the store stamps its own instants
+    # The composition's start has recorded every thing the check's settings hold, as the
+    # owner's (§4:1); these two are written through the store's one write member.
+    store = SqliteThingRecordStore(path=directory / THING_RECORDS_FILENAME)
+    try:
+        for key in _WRITTEN_THINGS:
+            await store.record_whose(key, person=OWNER_PERSON_ID)
+    finally:
+        store.close()
+
+
+async def _read_thing_records(directory: Path) -> Records:
+    store = SqliteThingRecordStore(path=directory / THING_RECORDS_FILENAME)
+    try:
+        # Keyed by the thing, so a head whose start holds one thing more reads back more
+        # and nothing else.
+        return {
+            f"record/{one.key.kind.value}/{one.key.identifier}": to_json(one)
+            for one in await store.export()
+        }
+    finally:
+        store.close()
+
+
 # --- devices.db -----------------------------------------------------------------------
 
 
@@ -2402,6 +2441,7 @@ STORES: Final[tuple[Store, ...]] = (
         _write_permission_lines,
         _read_permission_lines,
     ),
+    Store("thing_records", (THING_RECORDS_FILENAME,), _write_thing_records, _read_thing_records),
     Store("devices", (ENROLMENTS_FILENAME,), _write_devices, _read_devices),
 )
 

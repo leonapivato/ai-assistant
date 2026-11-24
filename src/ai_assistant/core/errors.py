@@ -1976,6 +1976,22 @@ class PermissionLineStoreError(AssistantError):
     """
 
 
+class ThingRecordStoreError(AssistantError):
+    """The store of whose each thing is could not read or write its records (ADR-0381 §3).
+
+    Its own class because a record of whose a connection or a source is is none of the
+    things the existing errors name: a caller reading one thing's record can catch a fault
+    of this store without catching another store's.
+
+    **It is raised only for a store fault**, a stored row that is not a record included,
+    never for a write the store declines: a write where a record already stands is a
+    :class:`~ai_assistant.core.types.ThingRecording` that says ``already_recorded``, and a
+    malformed *argument*, a person other than the owner's identity included, is a
+    ``ValueError``. ADR-0381 §5:1 reads a record the store cannot read as none, so a
+    caller that turns a record into whose yes a call needs reads this error as no record.
+    """
+
+
 class PersonModelOffError(AssistantError):
     """The person model is not switched on on this hub (ADR-0338 §8:1, §11:2).
 

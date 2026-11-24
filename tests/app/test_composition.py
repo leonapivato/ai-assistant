@@ -1215,6 +1215,9 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # held as identities and instants with no free text (§2), on a file of its
             # own because it reads no other store and no store reads it.
             "stories.db",
+            # ADR-0381 §3:1's store of whose each connection and source is, opened on
+            # every hub, the owner named at every start for each thing it holds (§4:1).
+            "thing_records.db",
             "traces.db",
         ]
         assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600
