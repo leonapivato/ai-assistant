@@ -10,6 +10,7 @@ could suggest a line decides a call says that none does yet (ADR-0367 §4:5).
 from __future__ import annotations
 
 import asyncio
+import shlex
 from io import StringIO
 from typing import TYPE_CHECKING, Final
 
@@ -80,9 +81,9 @@ def _cleared(output: StringIO) -> None:
 
 #: The default line of ``text``, as the listing shows it.
 _TEXT_DEFAULT: Final = [
-    'Default grant of tool "text"',
+    "Default grant of tool text",
     "  Who: anyone",
-    '  Action: "send_text"',
+    "  Action: send_text",
     "  How: allowed, at weak or above",
 ]
 
@@ -114,12 +115,12 @@ def test_the_listing_shows_each_made_line_and_each_default(
     assert _invoke("list") == 0
 
     assert output.getvalue().splitlines() == [
-        'Grant "line:1", made by you',
+        "Grant line:1, made by you",
         "  Who: you",
-        '  Action: "send_text"',
-        f'  On: "{_LINE_PLACE}"',
+        "  Action: send_text",
+        f"  On: {_LINE_PLACE}",
         "  How: allowed with approval, at normal or above",
-        '  Only when every message the work acts on came by: "conversation"',
+        "  Only when every message the work acts on came by: conversation",
         *_TEXT_DEFAULT,
         line_inspection.HOW_TO_ACT,
         line_inspection.NOT_YET_DECIDING,
@@ -150,9 +151,9 @@ def test_a_grant_sends_what_the_owner_typed_and_shows_the_line(
     assert code == 0
     assert output.getvalue().splitlines() == [
         "Made. The line stands until you remove it.",
-        'Grant "line:1", made by you',
+        "Grant line:1, made by you",
         "  Who: you",
-        '  Action: "send_text"',
+        "  Action: send_text",
         "  How: allowed, at weak or above",
         line_inspection.NOT_YET_DECIDING,
     ]
@@ -197,10 +198,10 @@ def test_a_limit_names_who_the_action_and_its_connection(
 
     assert output.getvalue().splitlines() == [
         "Made. The line stands until you remove it.",
-        'Limit "line:1", made by you',
+        "Limit line:1, made by you",
         "  Who: anyone",
-        '  Action: "send_text"',
-        f'  On: "{_LINE_PLACE}"',
+        "  Action: send_text",
+        f"  On: {_LINE_PLACE}",
         line_inspection.NOT_YET_DECIDING,
     ]
     assert engine.calls == [
@@ -279,9 +280,9 @@ def test_removing_a_line_shows_it_and_listing_after_shows_it_no_more(
 
     assert output.getvalue().splitlines() == [
         "Removed. The line no longer stands, and is kept as removed.",
-        'Limit "line:1", made by you',
+        "Limit line:1, made by you",
         "  Who: you",
-        '  Action: "send_text"',
+        "  Action: send_text",
     ]
     assert engine.calls[-1] == ("remove_line", {"line_id": "line:1"})
     kept = asyncio.run(lines.line("line:1"))
@@ -299,7 +300,7 @@ def test_removing_what_does_not_stand_is_no_error(
     assert _invoke("remove", "line:7") == 0
 
     assert output.getvalue().strip() == (
-        'No line you made with the id "line:7" stands, so nothing was changed.'
+        "No line you made with the id line:7 stands, so nothing was changed."
     )
 
 
@@ -326,7 +327,7 @@ def test_the_help_says_lines_do_not_decide_calls_yet(args: tuple[str, ...]) -> N
 
 
 def test_a_value_from_the_engine_cannot_pose_as_a_line(output: StringIO) -> None:
-    """Every engine-supplied value is escaped and quoted."""
+    """Every engine-supplied value is escaped before it reaches the terminal."""
     entry = PermissionLineEntry(
         kind=PermissionLineKind.GRANT,
         who=ANYONE_GROUP_ID,
@@ -339,5 +340,23 @@ def test_a_value_from_the_engine_cannot_pose_as_a_line(output: StringIO) -> None
     line_inspection.render_listing(Console(file=output, force_terminal=False, width=400), (entry,))
 
     lines = output.getvalue().splitlines()
-    assert lines[0] == 'Default grant of tool "text\\n  Who: you \\"x\\""'
+    assert lines[0] == "Default grant of tool 'text\\n  Who: you \\\"x\\\"'"
     assert sum(line.lstrip().startswith("Who:") for line in lines) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["account:mail$(printf demo)", "account:`id`", "telegram:a b/1", "account:it's", "line:1"],
+)
+def test_a_shown_value_pasted_into_a_shell_is_the_value_itself(value: str) -> None:
+    """A value the terminal shows as it is reads back unchanged, with nothing expanded."""
+    shown = line_inspection.word(value)
+
+    assert shlex.split(shown) == [value]
+
+
+def test_a_value_with_a_line_break_is_shown_escaped_and_expands_nothing() -> None:
+    shown = line_inspection.word("account:a\n$(x)")
+
+    assert "\n" not in shown
+    assert shlex.split(shown) == ["account:a\\n$(x)"]

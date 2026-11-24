@@ -519,7 +519,8 @@ class PermissionLinesContract:
     async def test_a_removal_is_recorded_by_the_owner_and_the_line_kept(
         self, permission_lines_subject: PermissionLinesSubject
     ) -> None:
-        """§4:6, §4:8, §6:3: ``removed``, the line kept with its removal by the owner."""
+        """§4:6, §4:8, §6:3: ``removed`` with the line as it stood; the store keeps it,
+        its removal recorded by the owner."""
         subject = permission_lines_subject
         made = await _grant(subject.engine, thing=LINE_PLACE)
         line = made.line  # type: ignore[attr-defined]
@@ -527,14 +528,13 @@ class PermissionLinesContract:
         result = await subject.engine.remove_line(line.id)
 
         assert result.outcome is RemoveLineOutcome.REMOVED
-        assert result.line is not None
-        assert result.line.id == line.id
-        assert result.line.parts == line.parts
-        assert result.line.made_by == OWNER_PERSON_ID
-        assert result.line.removed_by == OWNER_PERSON_ID
-        assert not result.line.standing
+        assert result.line == line
         assert await subject.lines.standing() == ()
-        assert await subject.lines.line(line.id) == result.line
+        kept = await subject.lines.line(line.id)
+        assert kept is not None
+        assert kept.parts == line.parts
+        assert (kept.made_by, kept.removed_by) == (OWNER_PERSON_ID, OWNER_PERSON_ID)
+        assert not kept.standing
 
     async def test_a_line_removed_already_is_not_standing(
         self, permission_lines_subject: PermissionLinesSubject
@@ -547,9 +547,12 @@ class PermissionLinesContract:
 
         again = await subject.engine.remove_line(line_id)
 
+        assert first.outcome is RemoveLineOutcome.REMOVED
         assert again.outcome is RemoveLineOutcome.NOT_STANDING
         assert again.line is None
-        assert await subject.lines.line(line_id) == first.line
+        kept = await subject.lines.line(line_id)
+        assert kept is not None
+        assert not kept.standing
 
     async def test_an_identifier_no_line_was_made_under_is_not_standing(
         self, permission_lines_subject: PermissionLinesSubject
