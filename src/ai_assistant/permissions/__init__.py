@@ -17,7 +17,12 @@ by the one :class:`~ai_assistant.permissions.grants.SqliteSourceGrantStore`; and
 by the one :class:`~ai_assistant.permissions.reads.SqliteSourceReadTrail`; and
 :class:`~ai_assistant.core.protocols.PermissionLineStore` (ADR-0367 §3:6, ADR-0376
 §4:8), the lines people make, implemented by
-:class:`~ai_assistant.permissions.lines.SqlitePermissionLineStore`.
+:class:`~ai_assistant.permissions.lines.SqlitePermissionLineStore`; and
+:class:`~ai_assistant.core.protocols.ThingRecordStore` (ADR-0381 §3), whose each
+connection and source is, implemented by
+:class:`~ai_assistant.permissions.thing_records.SqliteThingRecordStore`, which the
+hub's start fills with the owner's name for each thing it holds (§4:1) and which
+nothing reads yet.
 
 **Lines are not source grants** (ADR-0367 §14). A line says who may do what, how
 and at what bar; a source grant lets a reader read a source for a use. The line
@@ -67,6 +72,7 @@ from ai_assistant.permissions.policy import (
     ThresholdActionPolicy,
 )
 from ai_assistant.permissions.reads import SqliteSourceReadTrail
+from ai_assistant.permissions.thing_records import SqliteThingRecordStore
 
 __all__ = [
     "ConfiguredForecastDestination",
@@ -75,5 +81,6 @@ __all__ = [
     "SqlitePermissionLineStore",
     "SqliteSourceGrantStore",
     "SqliteSourceReadTrail",
+    "SqliteThingRecordStore",
     "ThresholdActionPolicy",
 ]

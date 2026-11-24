@@ -153,6 +153,7 @@ from ai_assistant.testing.telegram import (
     TelegramCall,
 )
 from ai_assistant.testing.telegram_intake import FakeTelegramIntakeRecord
+from ai_assistant.testing.thing_records import FakeThingRecordStore
 from ai_assistant.testing.tool_calling import (
     DEFAULT_ROUND_TEXT,
     FakeToolCallingCompleter,
@@ -268,6 +269,7 @@ __all__ = [
     "FakeStructuredCompleter",
     "FakeTelegramBotClient",
     "FakeTelegramIntakeRecord",
+    "FakeThingRecordStore",
     "FakeToolCallingCompleter",
     "FakeToolImplementation",
     "FakeToolInvoker",
