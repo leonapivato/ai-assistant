@@ -90,6 +90,7 @@ The watch sends `hello` first:
  "max_staged": 4, "max_flipbook_bytes": 2097152,
  "effects": ["fade", "slide-left", "slide-right", "slide-up", "slide-down"],
  "buttons": ["side"], "audio": ["pcm16-16k-mono"],
+ "audio_buffer_ms": 2000, "max_listen_s": 30,
  "has": ["mic", "speaker", "buzz", "wrist"]}
 ```
 
@@ -226,7 +227,9 @@ The watch reports what happened, never what it means.
  "at_ms": 1532, "did": {"show": 42}}
 ```
 
-`did` is present only when the watch acted on the press itself (section 4).
+`did` is present only when the watch acted on the press itself (section 4). It
+may also carry `"listen"` or `"listen_end"` with the stream's number when the
+press opened or closed the microphone (section 7).
 
 - Kinds: `press`, `long-press`, `tap` (outside any region, with x and y),
   `pan-end` (with the offset), `button` (which one, and short, long or double),
@@ -238,18 +241,41 @@ The watch reports what happened, never what it means.
 
 ## 7. Audio
 
-- `audio-start` opens a stream with an id and a format. Chunks follow as binary
-  audio frames. `audio-end` closes it.
-- Both directions use the same three messages.
-- Version 1 has one format: 16 kHz, 16-bit, mono, uncompressed.
-- `audio-stop` from either side cuts a stream short, so the owner can talk over
-  a reply.
-- The watch does not record while the link is down.
+- `audio-start` opens a stream with a number and a format. Chunks follow as
+  binary audio frames carrying that number. `audio-end` closes it.
+- Both directions use the same three messages. The watch numbers its streams
+  with odd numbers and the gateway with even ones, so a number names one stream.
+- Version 1 has one format: 16 kHz, 16-bit, mono, uncompressed, least
+  significant byte first. The watch sends a tenth of a second per frame.
+- `audio-stop` from either side cuts a stream short.
+- **One direction at a time.** Opening the microphone cuts whatever is playing,
+  and a stream from the gateway closes the microphone. The speaker never feeds
+  the microphone, and the owner talks over a reply by starting to talk.
+- **Opening the microphone.** A region may carry `"on_press": {"listen": true}`.
+  The watch then opens the microphone at once and says so in `did`, the same way
+  as instant navigation. The gateway may also send `listen`.
+- **Closing it.** The gateway decides when the person has finished and sends
+  `audio-stop`. The watch answers by sending what it still holds, then
+  `audio-end`. A press on a listening region while the microphone is open closes
+  it too.
+- **The watch closes it alone** after a limit it states in `hello`
+  (`max_listen_s`), when the screen goes off, and when the link drops. It does
+  not record while the link is down.
+- **An open microphone is always shown.** The watch draws its own mark while it
+  is open, on top of any screen, and keeps the screen on. No screen the hub
+  sends can hide it.
+- **Pace.** The watch holds a short stretch of sound for the speaker and states
+  how much in `hello` (`audio_buffer_ms`). The gateway sends at the pace of
+  speech, a little ahead. Sound that does not fit is lost and reported once.
+- Sound does not wait for pictures: an audio message is handled when it arrives
+  even if a screen before it is still waiting for an image.
 
 ## 8. Reports
 
 - `shown`: this screen is on the display now.
-- `played`: this audio stream finished, or was cut short.
+- `played`: this audio stream finished, or was cut short. It says which, and
+  how many milliseconds reached the speaker, so the hub knows how much of a
+  reply was heard.
 - `status`: battery, charging, signal strength, on the wrist or not.
 
 `shown` and `played` exist because the hub treats delivery as something the
@@ -276,7 +302,7 @@ of the hub.
 
 Screens, the image format, the cache, regions, instant navigation, panning,
 updates, flipbooks, moves, effects, overlays, the wake screen and the offline
-fallback all ran. Audio, TLS, admission, JPEG and the `text` message were not
+fallback all ran. TLS, admission, JPEG and the `text` message were not
 built.
 
 Eight points in the text above came from those builds: the wake mark, a
@@ -299,6 +325,14 @@ It changed nothing in the protocol. What it showed:
 - A flipbook is the same page rendered once per frame, keeping one layer.
 - The digit image for a clock or timer is drawn in the font and colour of the
   element that marks its place.
+
+Audio was built fourth, in the engine, the fake watch and the test gateway.
+The test gateway has no speech recognition and no voice: it plays back what it
+heard, which checks every sample both ways. Section 7 was rewritten from that
+build. Everything in it beyond the first, third and fifth points came from it.
+Two choices in it are mine and not yet ruled: that the gateway may open the
+microphone with `listen`, and that the hub, not the watch, decides when the
+person has finished talking.
 
 One thing the engine does is not protocol but shapes it: the watch frees a
 screen's decoded pixels when it leaves the screen, unless an update or a
@@ -348,7 +382,10 @@ at 320 x 192 (Espressif); about 32 frames a second pushed to a similar
 9. **Measurement.** Decode speed, screen push rate and Wi-Fi throughput on the
    real watch. The claim that our image format decodes much faster than PNG is
    an estimate; a bare ESP32-S3 board can time it before the watch arrives.
-10. **Later parts:** the `act` family, the JPEG stream, vector animation,
+10. **When the microphone may open.** Section 7 lets a press open it and lets
+    the gateway ask. Whether the gateway should be able to, and whether a wake
+    word belongs on the watch, is the owner's to rule.
+11. **Later parts:** the `act` family, the JPEG stream, vector animation,
     compressed audio, a LoRa text path.
 
 ## Sources
