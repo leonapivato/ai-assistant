@@ -13,6 +13,7 @@ An event's place is recorded as the owner's before the hub reads it (ADR-0381 §
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -247,5 +248,42 @@ async def test_lines_that_cannot_be_read_offer_the_owner_only_the_reply() -> Non
 
     assert [one.name for one in completer.calls[0].tools] == ["send_text"]
     assert {"event": "could_use_unread", "stage": "planning", "reason": "lines_unread"} in [
+        {key: one[key] for key in ("event", "stage", "reason") if key in one} for one in logs
+    ]
+
+
+class _Stuck:
+    """A store whose write never returns."""
+
+    def __init__(self) -> None:
+        self.held = FakeThingRecordStore()
+
+    async def whose(self, key: ThingKey) -> ThingRecord | None:
+        return await self.held.whose(key)
+
+    async def record_whose(self, key: ThingKey, *, person: str) -> ThingRecording:
+        del key, person
+        await asyncio.Event().wait()
+        raise AssertionError  # pragma: no cover - the wait above never returns
+
+    async def export(self) -> tuple[ThingRecord, ...]:
+        return await self.held.export()
+
+
+async def test_a_write_that_never_returns_is_cut_short_by_the_events_own_deadline() -> None:
+    """The write runs within the event's budget, so ``receive`` returns how the event
+    ended, the place left with no record (ADR-0381 §5:1)."""
+    things = _Stuck()
+    harness = phases_harness(things=things)
+
+    with capture_logs() as logs:
+        result = await asyncio.wait_for(
+            harness.engine.receive(event_input(), reply=None, timeout=timedelta(milliseconds=50)),
+            timeout=5,
+        )
+
+    assert result.channel == event_input().target
+    assert await things.whose(_EVENT_PLACE) is None
+    assert {"event": "thing_record_unwritten", "stage": "receive", "reason": "deadline"} in [
         {key: one[key] for key in ("event", "stage", "reason") if key in one} for one in logs
     ]

@@ -1327,6 +1327,11 @@ class PlanningInputs:
             ones its first round is offered (ADR-0368 §8:1); ``None`` where nothing
             narrows the offer. A call to one it leaves out is still judged and handed to
             authorizing, whose check decides it (§8:5).
+        shows: Whether a place may be shown to the work as a connection, by the place:
+            only one its authority could use (ADR-0368 §8:2), so a place on its list
+            that it may not be shown is left out of Connections, and an item from such a
+            place carries no ``where``, as an item whose place no kind declares carries
+            none; ``None`` where nothing narrows what is shown.
         label_arguments: For a capability, which of its arguments name things by
             label, and what kind of thing each names.
         evidence: Digested evidence from earlier rounds' results.
@@ -1435,6 +1440,7 @@ class PlanningInputs:
     outcomes: tuple[CallOutcome, ...] = ()
     capabilities: tuple[ToolDefinition, ...] = ()
     could_use: frozenset[str] | None = None
+    shows: Callable[[str], bool] | None = None
     label_arguments: Mapping[str, Mapping[str, LabelKinds]] = field(default_factory=dict)
     evidence: tuple[DigestedEvidence, ...] = ()
     outside_content_read: bool = False
@@ -3351,6 +3357,9 @@ class _Request:
             # A place no connection kind declares has no entry to show, so it takes no
             # label: every L label the briefing shows names an entry (§3:5).
             return None
+        if not self._may_show(place):
+            # ADR-0368 §8:2: a connection the work may not be shown has no entry either.
+            return None
         self._named_places.setdefault(place, channel)
         return self._book.label(LabelKind.PLACE, place)
 
@@ -3372,11 +3381,19 @@ class _Request:
             if built is not None:
                 extra.append(built)
         for one in self._inputs.places or ():
+            if not self._may_show(one.place):
+                # ADR-0368 §8:2: only a connection the work's authority could use.
+                continue
             if one.place not in held and one.place not in {x.place for x in extra}:
                 built = self._built_entry(one.place)
                 if built is not None:
                     extra.append(replace(built, suggested=one.suggested))
         return [*extra, *entries]
+
+    def _may_show(self, place: str) -> bool:
+        """Whether ``place`` may be shown to the work as a connection (ADR-0368 §8:2)."""
+        shows = self._inputs.shows
+        return shows is None or shows(place)
 
     @staticmethod
     def _built_entry(place: str) -> ConnectionShown | None:

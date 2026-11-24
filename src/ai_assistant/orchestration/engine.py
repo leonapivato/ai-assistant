@@ -3077,11 +3077,17 @@ class Engine:
             # ADR-0309 §2:6, ADR-0313 §4:3: an event runs through the phases, and the
             # event-summary stage runs no more.
             raise ConfigurationError("informational event processing is not wired")
-        # ADR-0381 §4:2: the event's place is a connection the hub comes to hold while
-        # running (ADR-0364 §3:2), so its record is written before the hub reads it.
-        if isinstance(accepted.target, ChannelIdentity):
-            await self._place_recorded(accepted.target)
         deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
+        # ADR-0381 §4:2: the event's place is a connection the hub comes to hold while
+        # running (ADR-0364 §3:2), so its record is written before the hub reads it,
+        # within the event's own budget: a write the deadline cuts short leaves the place
+        # with no record, and the event ends as one whose deadline passed does.
+        if isinstance(accepted.target, ChannelIdentity):
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await self._place_recorded(accepted.target)
+            except TimeoutError:
+                _log.warning("thing_record_unwritten", stage="receive", reason="deadline")
         state = admit_channel(
             accepted,
             capability,
