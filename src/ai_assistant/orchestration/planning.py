@@ -2574,6 +2574,29 @@ class _InPlace:
     section: str = _IN_ORIGIN_KNOWLEDGE
 
 
+#: How a place item read from the hub chat's transcript names the message it is, by its
+#: position (``phase_path.place_window``, as understanding names it).
+_MESSAGE_ITEM: Final = "message:"
+
+
+def _position(item: PlaceItem) -> int | None:
+    """The position of the transcript message a place item is, where it names one."""
+    named = item.referent_id or ""
+    if not named.startswith(_MESSAGE_ITEM):
+        return None
+    held = named.removeprefix(_MESSAGE_ITEM)
+    return int(held) if held.isdecimal() else None
+
+
+def _told_apart(messages: Sequence[RecordedInputMessage]) -> bool:
+    """Whether an input's messages differ in party or sender, so each is shown by its own.
+
+    ADR-0375 §2:1, §4:1: two messages the system counts as one person's may still have
+    come by different accounts, or one where the links could not be read.
+    """
+    return len({(one.party, one.sender) for one in messages}) > 1
+
+
 def _withheld_tag(tag: str, writer: str) -> str:
     """An item whose words are withheld, as ADR-0353 §2:7 renders one (ADR-0356 §3:6)."""
     return _tag(tag, [("from", writer), ("withheld", "yes")], None)
@@ -2809,7 +2832,7 @@ class _Request:
         # record holds each message with its own party, each is judged by its own (a
         # forward's sender, ADR-0351 §2:6-§2:7), and the person's own words are shown.
         by_message = trigger is not None and (
-            bool(trigger.messages) or len({one.party for one in self._held_messages()}) > 1
+            bool(trigger.messages) or _told_apart(self._held_messages())
         )
         withheld = trigger is not None and not by_message and parties_are_outside(parties)
         shown_relayed = relayed and not withheld and relay_mark_counts(parties, relayed=True)
@@ -2873,8 +2896,9 @@ class _Request:
         ]
         senders = () if trigger is None else trigger.senders
         held = self._held_messages()
-        if len({one.party for one in held}) > 1:
-            # ADR-0375 §4:1-§4:3: an input of more than one party, each message by its own.
+        if _told_apart(held):
+            # ADR-0375 §2:1, §4:1-§4:3: an input of more than one party or sender, each
+            # message by its own.
             return [
                 self._recorded_message(one, channel=self._origin, senders=senders) for one in held
             ]
@@ -2904,19 +2928,23 @@ class _Request:
     def _held_messages(self) -> list[RecordedInputMessage]:
         """The input's messages as the pass took them in that the place window still holds.
 
-        Each matched to a stimulus item of the place window by when it was written and
-        what it says, so a message since deleted is not shown (ADR-0349 §6:6); none
-        where the trigger records its own messages or the pass handed none.
+        Each matched to a stimulus item of the place window by its position, so a message
+        since deleted is not shown (ADR-0349 §6:6); none where the trigger records its own
+        messages or the pass handed none.
         """
         trigger = self._inputs.trigger
         if trigger is not None and trigger.messages:
             return []
         shown = {
-            (one.at, one.text)
+            _position(one)
             for one in self._inputs.place.items
             if one.is_input and one.author is PlaceAuthor.USER
         }
-        return [one for one in self._inputs.input_messages if (one.sent_at, one.text) in shown]
+        return [
+            one
+            for one in self._inputs.input_messages
+            if one.position is not None and one.position in shown
+        ]
 
     def _writer(
         self,
@@ -3510,11 +3538,12 @@ class _Request:
         """
         trigger = self._inputs.trigger
         if item.is_input and item.author is PlaceAuthor.USER and trigger is not None:
+            position = _position(item)
             own = next(
                 (
                     one.party
                     for one in self._inputs.input_messages
-                    if (one.sent_at, one.text) == (item.at, item.text) and one.party is not None
+                    if position is not None and one.position == position
                 ),
                 None,
             )
