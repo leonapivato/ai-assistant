@@ -75,6 +75,8 @@ from ai_assistant.core.types import (
     check_chat_position,
     check_story_page,
     checked_chat_devices,
+    grant_bar,
+    grant_how,
     person_model_lists,
     profile_field,
     profile_value,
@@ -137,11 +139,13 @@ if TYPE_CHECKING:
         ConversationSummary,
         EncodableText,
         GrantableSource,
+        GrantHow,
         GrantScope,
         HeldNotification,
         Identifier,
         LinkedAccount,
         LowerLinkResult,
+        MakeLineResult,
         MemoryKind,
         MessageReceipt,
         NonBlankEncodableText,
@@ -149,6 +153,7 @@ if TYPE_CHECKING:
         NotificationPreferences,
         PendingCandidate,
         PermissionDecision,
+        PermissionLineEntry,
         PersonModelEdit,
         PersonModelList,
         PersonModelView,
@@ -156,6 +161,7 @@ if TYPE_CHECKING:
         ProfileChange,
         ProfileField,
         RecordedInvocation,
+        RemoveLineResult,
         SecretValue,
         SourceGrant,
         SourceReadRecord,
@@ -772,6 +778,106 @@ class HubClient:
         return await self._call(  # type: ignore[no-any-return]
             "withdraw_lowering", lowering_id=named
         )
+
+    # --- the owner's permission lines (ADR-0376 §4 to §7) ---------------------
+    #
+    # The client relays and decides nothing: which lines stand, the default lines, and
+    # every outcome and refusal are the hub's (§4:5, §7). Each identifier is refused blank
+    # or unwritable here and stripped, and a ``how`` or a ``bar`` that is not one of its
+    # values refused, before the socket is opened (ADR-0085 §9, ADR-0376 §4:7). Each sits
+    # in the route table's command row, so a device without the command role is refused by
+    # the hub before dispatch (§6:2).
+
+    async def permission_lines(self) -> tuple[PermissionLineEntry, ...]:
+        """Every line that stands, one entry each (ADR-0376 §4:2, §5).
+
+        Returns:
+            The entries, as the hub listed them, never truncated.
+        """
+        return await self._call("permission_lines")  # type: ignore[no-any-return]
+
+    async def make_grant(  # noqa: PLR0913 — ADR-0376 §4:3's six parts of a grant, keyword-only
+        self,
+        *,
+        who: Identifier,
+        action: Identifier,
+        how: GrantHow,
+        bar: Sureness,
+        thing: Identifier | None = None,
+        condition: Identifier | None = None,
+    ) -> MakeLineResult:
+        """Make a grant, by the owner's act (ADR-0376 §4:3, §4:5).
+
+        Args:
+            who: The owner's identity or anyone.
+            action: The capability it allows.
+            how: How it allows.
+            bar: The least level it accepts.
+            thing: The one connection its calls must act through, or ``None``.
+            condition: The one connection its work's senders' inputs must have come by,
+                or ``None``.
+
+        Returns:
+            What the hub did.
+
+        Raises:
+            ValueError: If an identifier is not one, ``how`` is not one of its two values,
+                or ``bar`` is not one of the four, refused here before anything is sent.
+        """
+        named_who = identifier(who, name="who")
+        named_action = identifier(action, name="action")
+        named_thing = None if thing is None else identifier(thing, name="thing")
+        allows = grant_how(how)
+        least = grant_bar(bar)
+        named_condition = None if condition is None else identifier(condition, name="condition")
+        return await self._call(  # type: ignore[no-any-return]
+            "make_grant",
+            who=named_who,
+            action=named_action,
+            how=allows,
+            bar=least,
+            thing=named_thing,
+            condition=named_condition,
+        )
+
+    async def make_limit(
+        self, *, who: Identifier, action: Identifier, thing: Identifier | None = None
+    ) -> MakeLineResult:
+        """Make a limit, by the owner's act (ADR-0376 §4:4, §4:5).
+
+        Args:
+            who: The owner's identity or anyone.
+            action: The capability it says no to.
+            thing: The one connection its calls must act through, or ``None``.
+
+        Returns:
+            What the hub did.
+
+        Raises:
+            ValueError: If an identifier is not one, refused here before anything is sent.
+        """
+        named_who = identifier(who, name="who")
+        named_action = identifier(action, name="action")
+        named_thing = None if thing is None else identifier(thing, name="thing")
+        return await self._call(  # type: ignore[no-any-return]
+            "make_limit", who=named_who, action=named_action, thing=named_thing
+        )
+
+    async def remove_line(self, line_id: Identifier) -> RemoveLineResult:
+        """Remove a made line, by the owner's act (ADR-0376 §4:6).
+
+        Args:
+            line_id: The line, by the identifier :meth:`permission_lines` shows.
+
+        Returns:
+            What the hub did.
+
+        Raises:
+            ValueError: If ``line_id`` is not an identifier, refused here before anything
+                is sent.
+        """
+        named = identifier(line_id, name="line_id")
+        return await self._call("remove_line", line_id=named)  # type: ignore[no-any-return]
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------
     #

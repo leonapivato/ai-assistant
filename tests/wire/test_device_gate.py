@@ -36,6 +36,7 @@ from ai_assistant.core.errors import (
     DeviceRefusedError,
 )
 from ai_assistant.core.types import (
+    ANYONE_GROUP_ID,
     HUB_DEVICE_ID,
     HUB_REQUESTING_DEVICE,
     OWNER_PERSON_ID,
@@ -46,14 +47,19 @@ from ai_assistant.core.types import (
     ChatDevice,
     DeviceAccess,
     DeviceRole,
+    GrantHow,
+    MakeLineOutcome,
+    RemoveLineOutcome,
     RequestingDevice,
     Sureness,
     WithdrawLoweringOutcome,
 )
+from ai_assistant.orchestration.message_tools import TEXT_CALL
 from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.testing import (
     FakeAssistantEngine,
     FakeIdentityStore,
+    FakePermissionLineStore,
     FakePersonModelStore,
     FakePlanStore,
 )
@@ -420,6 +426,70 @@ async def test_the_hubs_own_machine_withdraws_whatever_level_every_link_stands_a
     assert {one.level for one in lowered} == {Sureness.NONE}
     assert {one.outcome for one in restored} == {WithdrawLoweringOutcome.WITHDRAWN}
     assert {one.level for one in after} == {Sureness.NORMAL}
+    assert {one for one, _ in roster.asked} == {HUB_DEVICE_ID}
+
+
+async def test_the_owners_lines_are_refused_to_a_device_without_the_command_role(
+    tmp_path: Path,
+) -> None:
+    """ADR-0376 §6:2, through a served connection: refused before dispatch, nothing written.
+
+    A device the owner gave the command role lists and makes lines; one without it is
+    refused the listing, a grant, a limit and a removal, and the store holds only what the
+    device with the role made.
+    """
+    engine = FakeAssistantEngine()
+    lines = FakePermissionLineStore()
+    engine.lines = lines
+    engine.declared_tools = (TEXT_CALL,)
+    roster = _Roster(devices={"bare": _BARE, "phone": _PHONE})
+    async with _client(engine, roster, tmp_path) as client:
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as listed:
+            await client.permission_lines()
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as granted:
+            await client.make_grant(
+                who=OWNER_PERSON_ID, action="send_text", how=GrantHow.ALLOWED, bar=Sureness.WEAK
+            )
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as limited:
+            await client.make_limit(who=OWNER_PERSON_ID, action="send_text")
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as removed:
+            await client.remove_line("line:1")
+        with acting_for("phone"):
+            made = await client.make_limit(who=OWNER_PERSON_ID, action="send_text")
+            shown = await client.permission_lines()
+    for refused in (listed, granted, limited, removed):
+        assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
+    assert made.outcome is MakeLineOutcome.MADE
+    assert made.line is not None
+    assert [one.line_id for one in shown if one.made] == [made.line.id]
+    assert len(await lines.standing()) == 1
+    assert [name for name, _ in engine.calls] == ["make_limit", "permission_lines"]
+
+
+async def test_the_hubs_own_machine_lists_and_removes_whatever_lines_stand(
+    tmp_path: Path,
+) -> None:
+    """ADR-0376 §6:5: on the local socket, the hub's machine always lists and removes.
+
+    A limit to anyone on every capability the hub declares stands, and the requests come
+    from the hub's own machine over the local socket under a roster, as the ``assistant``
+    command line on the hub sends them: each is admitted by the route table's row alone,
+    and the limits are removed.
+    """
+    engine = FakeAssistantEngine()
+    engine.lines = FakePermissionLineStore()
+    engine.declared_tools = (TEXT_CALL,)
+    roster = _Roster(devices={None: HUB_REQUESTING_DEVICE})
+    async with _client(engine, roster, tmp_path) as client:
+        made = await client.make_limit(who=ANYONE_GROUP_ID, action="send_text")
+        listed = await client.permission_lines()
+        assert made.line is not None
+        removed = await client.remove_line(made.line.id)
+        after = await client.permission_lines()
+    assert made.outcome is MakeLineOutcome.MADE
+    assert [one.line_id for one in listed if one.made] == [made.line.id]
+    assert removed.outcome is RemoveLineOutcome.REMOVED
+    assert [one for one in after if one.made] == []
     assert {one for one, _ in roster.asked} == {HUB_DEVICE_ID}
 
 

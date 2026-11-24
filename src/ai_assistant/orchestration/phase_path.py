@@ -4143,6 +4143,19 @@ class PhasePath:
             raise ValueError(msg)
         self._connections = connections
 
+    async def declared(self) -> tuple[ToolDefinition, ...]:
+        """Every tool the running hub declares for its works to call (ADR-0376's Words).
+
+        Each declaration the phases' tools hold, in the registry or among orchestration's
+        own calls attached so far, ordered by id, and ``text``'s, which every round offers
+        last (ADR-0356 §4:3): each tool once, by its id. What the owner's lines are listed
+        against and named by (ADR-0376 §4:2, §4:5).
+        """
+        held: dict[str, ToolDefinition] = {}
+        for one in (*await self._tools.all_tools(), TEXT_CALL):
+            held.setdefault(str(one.id), one)
+        return tuple(held.values())
+
     def conversation_target(self, conversation_id: str) -> PlaceTarget:
         """A conversation of the hub's chat as a place a message goes into, with its writer."""
         return PlaceTarget(

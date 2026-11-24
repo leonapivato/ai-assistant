@@ -169,6 +169,7 @@ if TYPE_CHECKING:
         ForecastOutcome,
         FrozenJsonMapping,
         GrantableSource,
+        GrantHow,
         GrantScope,
         HeldNotification,
         Identifier,
@@ -182,6 +183,7 @@ if TYPE_CHECKING:
         LinkedAccount,
         LinkWrite,
         LowerLinkResult,
+        MakeLineResult,
         Memory,
         MemoryChange,
         MemoryDecision,
@@ -209,6 +211,7 @@ if TYPE_CHECKING:
         PendingCandidate,
         PermissionDecision,
         PermissionLine,
+        PermissionLineEntry,
         PermissionRuling,
         PersonModel,
         PersonModelAct,
@@ -227,6 +230,7 @@ if TYPE_CHECKING:
         QuestionPart,
         RecordChunk,
         RecordedInvocation,
+        RemoveLineResult,
         RoundResponse,
         RulePush,
         ScheduledDue,
@@ -10361,6 +10365,143 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If ``lowering_id`` is blank or unwritable. Refused locally.
             IdentityStoreError: If the identity store cannot be read or written.
+        """
+        ...
+
+    # --- the owner's permission lines (ADR-0376 §4 to §7) ----------------------
+    #
+    # Four members, and no other for lines (§4:1): one lists every line that stands, one
+    # makes a grant, one makes a limit, one removes a made line. Each sits in the route
+    # table's command row, so a request from a device without the command role is refused
+    # before dispatch (§6:2), and a call to any of the three writes is the owner's own act:
+    # the store records the owner's identity as the maker of every line the first two make
+    # and the remover of every line the third removes (§6:3); no member lets anyone else
+    # make or remove one (§6:4). **No line, level or lowering gates a call**: the row alone
+    # admits one (§6:5), so the hub's own machine on the local socket reaches
+    # ``permission_lines`` and ``remove_line`` whatever lines stand. No tool, capability,
+    # plan step, work, model, task or upkeep calls one, and no model-authored value becomes
+    # an argument to one (§6:1); in this milestone only the ``assistant`` command line calls
+    # them (§6:6).
+    #
+    # **A line is spelled as ADR-0376 §2 names it.** Its who is
+    # :data:`~ai_assistant.core.types.OWNER_PERSON_ID` or
+    # :data:`~ai_assistant.core.types.ANYONE_GROUP_ID`; its action one capability, by its
+    # ``capability`` value; a connection, as its thing or its condition, as
+    # :data:`~ai_assistant.core.types.LineConnection` spells one. Each is an identifier on
+    # this surface, refused blank with ``ValueError`` before any I/O and stripped (clause 2);
+    # one that names nothing the hub knows is an outcome, never an error (§4:5, §4:7).
+    # **A making or a removal bears only on calls checked after it is recorded** (§4:9). A
+    # store that cannot be read or written raises
+    # :class:`~ai_assistant.core.errors.PermissionLineStoreError`. **A hub with no line
+    # store holds no made line**: it lists the default lines alone, removes nothing, and
+    # raises that error for a making its refusals have not already answered.
+
+    async def permission_lines(self) -> tuple[PermissionLineEntry, ...]:
+        """List every line that stands, one entry each (ADR-0376 §4:2, §5).
+
+        Each made line not removed, with its identifier and its maker; and the default
+        line of each tool the running hub declares, with that tool's id and no
+        identifier (§3:1, §3:3). In no contractual order. No entry carries a secret or
+        says whether its line has covered a call (§5:2). **Not paged, and never
+        truncated**: a listing that does not fit the contract limit is refused whole, as
+        ``linked_accounts`` is (ADR-0373 §2:2).
+
+        Returns:
+            The entries; empty where no line stands and the hub declares no tool with a
+            default grant.
+
+        Raises:
+            PermissionLineStoreError: If the line store cannot be read.
+        """
+        ...
+
+    async def make_grant(  # noqa: PLR0913 — ADR-0376 §4:3's six parts of a grant, keyword-only
+        self,
+        *,
+        who: Identifier,
+        action: Identifier,
+        how: GrantHow,
+        bar: Sureness,
+        thing: Identifier | None = None,
+        condition: Identifier | None = None,
+    ) -> MakeLineResult:
+        """Make a grant, by the owner's act (ADR-0376 §4:3, §4:5).
+
+        The outcome is decided in this order, writing nothing in the first five (§4:5):
+        ``refused`` with ``unknown_who`` where ``who`` is neither the owner's identity nor
+        anyone; ``refused``, ``unknown_action``, where no tool the running hub declares has
+        the capability ``action``; ``refused``, ``no_thing``, where a ``thing`` is given
+        and the action's calls have none (§2:3); ``refused``, ``unknown_connection``,
+        where ``thing`` or ``condition`` names no connection a line may name (§2:4) that
+        the hub has; ``unchanged``, with the standing line, where a made grant with exactly
+        the same parts stands, so repeating the call makes no second line; and otherwise
+        ``made``, with the line as the store recorded it, made by the owner (§6:3).
+
+        Args:
+            who: The owner's identity or anyone. No default.
+            action: The capability it allows, by its ``capability`` value. No default.
+            how: How it allows: ``allowed``, or ``with_approval``. No default.
+            bar: The least level it accepts, one of the four (ADR-0366 §5:1). No default.
+            thing: The one connection its calls must act through (§2:5), or ``None`` for
+                any.
+            condition: The one connection its work's senders' inputs must all have come
+                by (§2:6), or ``None`` for none.
+
+        Returns:
+            What it did.
+
+        Raises:
+            ValueError: If an identifier is blank or unwritable, ``how`` is not one of its
+                two values, or ``bar`` is not one of the four. Refused locally.
+            PermissionLineStoreError: If the line store cannot be read or written.
+        """
+        ...
+
+    async def make_limit(
+        self, *, who: Identifier, action: Identifier, thing: Identifier | None = None
+    ) -> MakeLineResult:
+        """Make a limit, by the owner's act (ADR-0376 §4:4, §4:5).
+
+        A limit says no to its calls at every level (ADR-0367 §3:2), with no how, no bar
+        and no condition (§2:6). The outcome is decided in :meth:`make_grant`'s order, on
+        the parts a limit has: ``unknown_who``, ``unknown_action``, ``no_thing`` and
+        ``unknown_connection`` refused and nothing written; ``unchanged`` where a made
+        limit with exactly the same parts stands; and otherwise ``made``, with the line
+        as the store recorded it, made by the owner (§6:3).
+
+        Args:
+            who: The owner's identity or anyone. No default.
+            action: The capability it says no to, by its ``capability`` value. No default.
+            thing: The one connection its calls must act through (§2:5), or ``None`` for
+                any.
+
+        Returns:
+            What it did.
+
+        Raises:
+            ValueError: If an identifier is blank or unwritable. Refused locally.
+            PermissionLineStoreError: If the line store cannot be read or written.
+        """
+        ...
+
+    async def remove_line(self, line_id: Identifier) -> RemoveLineResult:
+        """Remove a made line, by the owner's act (ADR-0376 §4:6).
+
+        Records the removal, by the owner (§6:3), and returns ``removed`` with the line,
+        kept by the store with its removal recorded (§4:8). Where no standing made line
+        has that identifier, because none was made or it was already removed, it writes
+        nothing and returns ``not_standing``, which is not an error. A default line has no
+        identifier, so none is removed here (§3:3, §3:4).
+
+        Args:
+            line_id: The line, by the identifier :meth:`permission_lines` shows.
+
+        Returns:
+            What it did.
+
+        Raises:
+            ValueError: If ``line_id`` is blank or unwritable. Refused locally.
+            PermissionLineStoreError: If the line store cannot be read or written.
         """
         ...
 

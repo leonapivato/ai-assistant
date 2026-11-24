@@ -8,7 +8,15 @@ from typing import TYPE_CHECKING, assert_never
 
 from pydantic import ValidationError
 
-from ai_assistant.core.types import AuthorityKind, EpisodicMemory, WorkForKind
+from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    AuthorityKind,
+    CallCheckKind,
+    CheckedForKind,
+    CheckOutcomeKind,
+    EpisodicMemory,
+    WorkForKind,
+)
 from ai_assistant.wire.errors import ProtocolError
 
 if TYPE_CHECKING:
@@ -17,7 +25,10 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
         ActivationUnderstanding,
+        CallCheck,
         ChannelIdentity,
+        CheckedFor,
+        CheckOutcome,
         EpisodePage,
         EpisodeProcessingRecord,
         EpisodeSummary,
@@ -519,6 +530,7 @@ def _call_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
         )
         if entry.reason is not None:
             lines.append(f"    Reason: {_quoted(entry.reason)}")
+        lines.extend(_check_lines(entry.check))
         delivered = entry.delivered
         if delivered is not None:
             lines.append(
@@ -528,6 +540,69 @@ def _call_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
             if delivered.reason is not None:
                 lines.append(f"      Why: {_quoted(delivered.reason)}")
     return lines
+
+
+def _check_lines(check: CallCheck | None) -> list[str]:
+    """What the check recorded of one call (ADR-0379 §3:2), as the record holds it.
+
+    For each one it ran for, at the level it ran at, its outcome, with the made line or
+    the bar the outcome carries (§3:1). An entry with none records a call the check never
+    reached, one recorded before the check was built among them: "not checked".
+    """
+    if check is None:
+        return ["    Check: not checked"]
+    match check.kind:
+        case CallCheckKind.CHECKED:
+            return [
+                f"    Check for {_checked_for(run.checked_for)}: {_check_outcome(run.outcome)}"
+                for run in check.runs
+            ]
+        case CallCheckKind.OUTSIDE:
+            return ["    Check: outside it, a message into a place the work's own input came from"]
+        case CallCheckKind.LINES_UNREAD:
+            return ["    Check: did not run, the lines could not be read"]
+        case CallCheckKind.FAILED:
+            return ["    Check: did not run to an outcome, it failed"]
+        case unreachable:
+            assert_never(unreachable)
+
+
+def _checked_for(checked_for: CheckedFor) -> str:
+    """Whom the check ran for, and at what level (ADR-0368 §7:1)."""
+    match checked_for.kind:
+        case CheckedForKind.PERSON:
+            person = checked_for.person or ""
+            who = "you" if person == OWNER_PERSON_ID else _quoted(person)
+            return f"{who}, at {checked_for.level.value}"
+        case CheckedForKind.ANYONE:
+            return "anyone, at none"
+        case CheckedForKind.NO_ONE:
+            return "no one"
+        case unreachable:
+            assert_never(unreachable)
+
+
+def _check_outcome(outcome: CheckOutcome) -> str:
+    """One of ADR-0379 §3:1's six outcomes, with the made line or the bar it carries."""
+    line = "" if outcome.line is None else _quoted(outcome.line)
+    bar = "" if outcome.bar is None else outcome.bar.value
+    match outcome.kind:
+        case CheckOutcomeKind.ALLOWED_ON_NO_LINE:
+            said = "allowed, on no line"
+        case CheckOutcomeKind.ALLOWED_ON_MADE_GRANT:
+            said = f"allowed, resting on the grant {line}"
+        case CheckOutcomeKind.NEEDS_YES_SHORTFALL:
+            said = f"needs a yes at {bar}: no grant applies at this level"
+        case CheckOutcomeKind.NEEDS_YES_WITH_APPROVAL:
+            said = "needs a yes: a grant allows it with approval"
+        case CheckOutcomeKind.NOT_DONE_LIMIT:
+            limit = f"the limit {line}" if line else "a limit"
+            said = f"not done: {limit} covers it"
+        case CheckOutcomeKind.NOT_DONE_NO_GRANT:
+            said = "not done: no grant covers it"
+        case unreachable:
+            assert_never(unreachable)
+    return said
 
 
 def _channel(place: ChannelIdentity) -> str:

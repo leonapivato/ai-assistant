@@ -460,6 +460,18 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "LowerLinkRefusal",
         "WithdrawLoweringResult",
         "WithdrawLoweringOutcome",
+        # ADR-0376 §4's four members for the owner's permission lines, and the types they
+        # carry (§4:10, §5): the listing's entry, each making's and removal's outcome with
+        # its closed reasons, and the line as the store recorded it with its kind.
+        # ``GrantHow`` and ``Sureness`` were already on a frame, in a tool's default grant.
+        "PermissionLineEntry",
+        "PermissionLine",
+        "PermissionLineKind",
+        "MakeLineResult",
+        "MakeLineOutcome",
+        "MakeLineRefusal",
+        "RemoveLineResult",
+        "RemoveLineOutcome",
     }
 )
 
@@ -929,8 +941,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     **ADR-0373 §2:1 adds three**, the owner's linked accounts: ``linked_accounts``,
     ``lower_link`` and ``withdraw_lowering`` — so the count rises to seventy-four.
     ADR-0177 §1:1's enumeration gains none of them (ADR-0373 §4:6).
+
+    **ADR-0376 §4:1 adds four**, the owner's permission lines: ``permission_lines``,
+    ``make_grant``, ``make_limit`` and ``remove_line`` — so the count rises to
+    seventy-eight. ADR-0177 §1:1's enumeration gains none of them (ADR-0376 §6:6).
     """
-    assert len(_method_names()) == 74
+    assert len(_method_names()) == 78
     assert "converse_spoken" not in _method_names()
     for retired in (
         "converse",
@@ -1987,6 +2003,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     call, beside what was decided. A peer at 133 refuses it as extra (ADR-0124 §9:2).
     **The method set does not move and stays at 74.**
 
+    **135 is ADR-0376 §7:1, on the method set.** ``AssistantEngine`` gains
+    ``permission_lines``, ``make_grant``, ``make_limit`` and ``remove_line`` (§4:1), so
+    **the method set moves to 78**; the types they carry are new but for ``GrantHow`` and
+    ``Sureness``, already carried in a tool's default grant, and no type a frame already
+    carried changes. A hub at 134 answers the four as unknown (ADR-0124 §9:2).
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1995,7 +2017,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (74, 134), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 135), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

@@ -92,6 +92,7 @@ from episode_inspection_contract import (
 )
 from linked_accounts_contract import CONFIGURED, LINKS_LIMIT, LinkedAccountsSubject
 from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
+from permission_lines_contract import DECLARED, HELD, LINES_LIMIT, PermissionLinesSubject
 from person_model_contract import (
     PERSON_BUDGET,
     PERSON_LIMIT,
@@ -111,6 +112,7 @@ from ai_assistant.testing import (
     FakeAssistantEngine,
     FakeIdentityStore,
     FakeMemoryStore,
+    FakePermissionLineStore,
     FakePlanStore,
 )
 from ai_assistant.wire import (
@@ -265,6 +267,23 @@ async def _linked(tmp_path: Path, *, store: bool = True) -> AsyncIterator[Linked
 
 
 @contextlib.asynccontextmanager
+async def _lines(tmp_path: Path, *, store: bool = True) -> AsyncIterator[PermissionLinesSubject]:
+    """A client of a hub whose fake engine answers from the injected line store."""
+    lines = FakePermissionLineStore()
+    backing = FakeAssistantEngine(max_payload_bytes=LINES_LIMIT)
+    if store:
+        backing.lines = lines
+    backing.declared_tools = DECLARED
+    backing.held_things = HELD
+    async with serving(
+        backing,
+        tmp_path / ("lines.sock" if store else "nolines.sock"),
+        max_frame_bytes=LINES_LIMIT + ENVELOPE_RESERVE_BYTES,
+    ) as client:
+        yield PermissionLinesSubject(engine=client, lines=lines)
+
+
+@contextlib.asynccontextmanager
 async def _person_model(tmp_path: Path, *, wired: bool) -> AsyncIterator[PersonModelSubject]:
     """A client of a hub whose fake engine holds the injected stores; wired or not."""
     people, memory = person_model_stores()
@@ -384,6 +403,20 @@ class TestHubEngineClientContract(AssistantEngineContract):
     async def linked_accounts_storeless(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
         """The same, the hub holding no identity store."""
         async with _linked(tmp_path, store=False) as subject:
+            yield subject.engine
+
+    @pytest.fixture
+    async def permission_lines_subject(
+        self, tmp_path: Path
+    ) -> AsyncIterator[PermissionLinesSubject]:
+        """The four members over an authenticated local socket, as the hub's machine."""
+        async with _lines(tmp_path) as subject:
+            yield subject
+
+    @pytest.fixture
+    async def permission_lines_storeless(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """The same, the hub holding no line store."""
+        async with _lines(tmp_path, store=False) as subject:
             yield subject.engine
 
     @pytest.fixture
