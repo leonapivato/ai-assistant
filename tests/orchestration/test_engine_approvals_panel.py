@@ -141,14 +141,18 @@ _PHONE: Final = Account(kind=CHAT_ACCOUNT_KIND, identifier="phone")
 
 
 async def _tapped_from(
-    device: str, identities: FakeIdentityStore | None
+    device: str, identities: FakeIdentityStore | None, *, through: str | None = None
 ) -> tuple[ApprovalPanelTapAnswer, ApprovalRequest]:
-    """A tap on the panel from ``device``, as the wire server serves it; what it recorded."""
+    """A tap on the panel from ``device``, as the wire server serves it; what it recorded.
+
+    ``through`` is the connecting device where a gateway named ``device`` (ADR-0378 §4:7).
+    """
     engine, plans = _engine([], identities=identities)
     await engine.start()
     try:
         await hold_request(plans, "approval:1")
-        with serving_device(RequestingDevice(device_id=device)):
+        requesting = RequestingDevice(device_id=device, connecting_device_id=through or device)
+        with serving_device(requesting):
             tapped = await engine.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
         (held,) = await plans.approval_requests(["approval:1"])
     finally:
@@ -194,6 +198,54 @@ async def test_where_the_links_cannot_be_read_the_hubs_machine_is_the_owners() -
         most_sureness(CHAT_ACCOUNT_KIND),
     )
     assert (from_phone.answer.person, from_phone.answer.level) == (None, Sureness.NONE)
+
+
+#: A gateway the owner marked, linked to the owner as the phone is.
+_GATEWAY: Final = Account(kind=CHAT_ACCOUNT_KIND, identifier="gateway-1")
+
+
+async def test_a_tap_through_a_gateway_is_read_from_both_devices() -> None:
+    """ADR-0378 §4:7: the identity both hub chat accounts tie, at the lower level; what a
+    tap records keeps B5's shape (ADR-0377 §4:1)."""
+    identities = FakeIdentityStore(configured=(_PHONE, _GATEWAY))
+    link = await identities.find_link(_GATEWAY)
+    assert link is not None
+    await identities.lower(link.id, Sureness.WEAK, by=OWNER_PERSON_ID)
+
+    answer, held = await _tapped_from("phone", identities, through="gateway-1")
+    _, alone = await _tapped_from("phone", identities)
+
+    assert answer is ApprovalPanelTapAnswer.ANSWERED
+    assert held.answer is not None
+    assert (held.answer.person, held.answer.level) == (OWNER_PERSON_ID, Sureness.WEAK)
+    assert alone.answer is not None
+    assert (alone.answer.person, alone.answer.level) == (OWNER_PERSON_ID, Sureness.NORMAL)
+
+
+async def test_a_tap_through_a_gateway_no_link_ties_records_no_one_at_none() -> None:
+    """ADR-0378 §4:7: where either device has no standing link, no identified person."""
+    _, held = await _tapped_from(
+        "phone", FakeIdentityStore(configured=(_PHONE,)), through="gateway-1"
+    )
+
+    assert held.answer is not None
+    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
+
+
+async def test_the_fake_reads_a_tap_through_a_gateway_as_the_engine_does() -> None:
+    """The canonical fake reads both devices' accounts, as the engine does (§4:7)."""
+    fake = FakeAssistantEngine()
+    fake.approval_clock = lambda: APPROVALS_AT
+    fake.plan_store = FakePlanStore(now=lambda: APPROVALS_AT)
+    fake.identities = FakeIdentityStore(configured=(_PHONE,))
+    await hold_request(fake.plan_store, "approval:1")
+
+    with serving_device(RequestingDevice(device_id="phone", connecting_device_id="gateway-1")):
+        await fake.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
+
+    (held,) = await fake.plan_store.approval_requests(["approval:1"])
+    assert held.answer is not None
+    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
 
 
 async def test_the_fake_reads_the_tapper_as_the_engine_does() -> None:

@@ -1992,16 +1992,21 @@ class FakeAssistantEngine:
     async def write_message(
         self, conversation_id: Identifier, *, message: UserMessage
     ) -> MessageReceipt:
-        """Write the user's message, and answer *received* (ADR-0293 §4)."""
+        """Write the user's message, and answer *received* (ADR-0293 §4).
+
+        It records the device it came through, the requesting device's connecting
+        device, as the engine does (ADR-0378 §4:2).
+        """
         named = identifier(conversation_id, name="conversation_id")
         sent = user_message(message)
         check_arguments(
             "write_message", max_bytes=self._max_payload_bytes, conversation_id=named, message=sent
         )
-        check_message_fits(named, sent, max_bytes=self._max_payload_bytes)
+        through = current_requesting_device().connecting_device_id
+        check_message_fits(named, sent, max_bytes=self._max_payload_bytes, came_through=through)
         self.calls.append(("write_message", {"conversation_id": named, "message": sent}))
         await self._joined(named)
-        receipt = await self.chat.append_message(named, sent.as_new_message())
+        receipt = await self.chat.append_message(named, sent.as_new_message(came_through=through))
         # The reader is told after the record, as the engine tells it (ADR-0293 §6:1),
         # a repeat included: the message it repeats may still be waiting.
         if receipt.position is not None and self.chat_reader:

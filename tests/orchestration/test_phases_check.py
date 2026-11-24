@@ -27,6 +27,7 @@ from test_phases_task_scheduler import (
 from test_phases_work_facts import _one_frozen
 
 from ai_assistant.core.types import (
+    HUB_DEVICE_ID,
     OWN_CHAT_CONNECTION,
     OWNER_PERSON_ID,
     Account,
@@ -69,8 +70,18 @@ _NO_LINE = CheckOutcome(kind=CheckOutcomeKind.ALLOWED_ON_NO_LINE)
 
 
 def _linked() -> FakeIdentityStore:
-    """The owner's phone, linked as the hub's start links it: the owner, at normal."""
-    return FakeIdentityStore(configured=[Account(kind="conversation", identifier=PHONE.device_id)])
+    """The owner's phone, linked as the hub's start links it: the owner, at normal.
+
+    Beside it the hub's own machine, which the hub's configuration links: the cases write
+    on the local socket, so each message came through ``hub`` and is read from both
+    links (ADR-0378 §6:1).
+    """
+    return FakeIdentityStore(
+        configured=[
+            Account(kind="conversation", identifier=PHONE.device_id),
+            Account(kind="conversation", identifier=HUB_DEVICE_ID),
+        ]
+    )
 
 
 def _entries(episode: EpisodicMemory) -> dict[str, RecordedCall]:

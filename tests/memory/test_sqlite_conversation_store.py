@@ -1313,7 +1313,7 @@ _INCOMPATIBLE_SHAPES: dict[str, str] = {
     "format9": "UPDATE episode_record_format SET version = 9",
     "format10": "UPDATE episode_record_format SET version = 10",
     "format11": "UPDATE episode_record_format SET version = 11",
-    "newer": "UPDATE episode_record_format SET version = 14",
+    "newer": "UPDATE episode_record_format SET version = 15",
     "malformed": "ALTER TABLE episode_record_format RENAME COLUMN version TO invalid",
 }
 

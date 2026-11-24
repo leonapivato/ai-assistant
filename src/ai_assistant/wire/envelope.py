@@ -2859,7 +2859,18 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     unknown (ADR-0124 §9:2's method-set limb). No type a frame already carried
 #:     changes. A gateway calls none of the four, but it speaks the wire, so it is
 #:     upgraded with the hub (ADR-0376 §7).
-PROTOCOL_VERSION: Final[int] = 135
+#: 136: ADR-0378 §8:3 advances the version in the change that adds the device a message
+#:     came through to types the wire carries: ``TranscriptMessage`` gains
+#:     ``came_through`` (§4:2), on every transcript page, change and change-stream chunk,
+#:     and the wire-carried ``EpisodicMemory.processing_record`` gains it twice (§7:1):
+#:     ``RecordedInputMessage`` gains ``device_id`` and ``came_through``, and
+#:     ``RecordedChannelTrigger`` gains ``message_devices``, a ``RecordedMessageDevices``
+#:     for each message of an input whose trigger records none; the episode's three are
+#:     left out of a dump where absent, so only a hub chat message's record carries
+#:     them. A peer at 135 refuses each new field it is sent as extra (ADR-0124 §9:2).
+#:     ``UserMessage`` does not change: a client cannot say what device a message came
+#:     through. The method set does not move: no ``Protocol`` gains a member.
+PROTOCOL_VERSION: Final[int] = 136
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

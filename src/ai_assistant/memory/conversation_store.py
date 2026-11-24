@@ -57,6 +57,13 @@ written before the column, at the label 12, is upgraded in place when the store 
 carries no effect id, and the label advances to the conversation store's own, which an
 older build refuses (§5:3).
 
+**A user's message records the device it came through** (ADR-0378 §4:2, §8:2):
+``messages`` holds ``came_through``, the connecting device of the request that wrote it,
+cleared on its marker as every property but its ids is. A file written before the
+column, at the label 13, is upgraded in place when the store opens (ADR-0326 §4:1): the
+column is added, each standing user's message is set as having come through the device
+it is written from, and the label advances to 14, which an older build refuses (§5:3).
+
 **There is no observation watermark** (ADR-0285 §4). The schema creates no
 ``observed_through`` column and nothing adds one to an existing file. Nothing drops
 it either: a file written by an earlier build that still carries the column is
@@ -115,6 +122,7 @@ from ai_assistant.core.types import (
     describe_untrusted,
 )
 from ai_assistant.memory._episode_format import (
+    CLAIMED_CONVERSATION_RECORD_FORMAT,
     CONVERSATION_RECORD_FORMAT,
     CONVERSATION_RECORD_FORMATS,
     inspect_existing,
@@ -255,6 +263,13 @@ _CHAT_SCHEMA: Final = (
 #: every message a file held before it carries no effect id (ADR-0326 §4:4).
 _EFFECT_COLUMN: Final = "effect_id TEXT"
 
+#: ADR-0378 §8:2's column, held apart from :data:`_CHAT_SCHEMA` as :data:`_EFFECT_COLUMN`
+#: is: :meth:`SqliteConversationStore._upgrade_to_came_through` adds it to every file
+#: that lacks it, and sets it on each standing user's message a file held before it to
+#: the device that message is written from (ADR-0326 §4:4). Nullable: the assistant's
+#: message and a marker carry none.
+_CAME_THROUGH_COLUMN: Final = "came_through TEXT"
+
 #: What makes an effect record name one message per conversation (ADR-0350 §12:9), and
 #: what :meth:`SqliteConversationStore.effect_position` reads through. Created after
 #: the column is there, so it is not in :data:`_CHAT_SCHEMA`.
@@ -306,7 +321,7 @@ _WRITING_ONLY: Final = json.dumps(sorted(one.value for one in DeviceAccess if no
 _DEVICE_CHANGES_SQL: Final = (
     "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "
     "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
-    "m.options, m.cut_off, m.device_id, m.message_id, m.deleted, "
+    "m.options, m.cut_off, m.device_id, m.message_id, m.deleted, m.came_through, "
     "(SELECT COALESCE(p.devices, X'') FROM chat_changes p "
     "WHERE p.conversation_id IS c.conversation_id "
     "AND p.kind IN ('conversation_started', 'devices_changed') AND p.seq < c.seq "
@@ -683,7 +698,7 @@ def _message_from(row: Sequence[Any]) -> TranscriptMessage | DeletedMessage:
     """Rebuild a message, or its marker, from the message columns.
 
     The columns are ``conversation_id, position, author, written_at, text,
-    replies_to, options, cut_off, device_id, message_id, deleted``.
+    replies_to, options, cut_off, device_id, message_id, deleted, came_through``.
 
     Raises:
         ConversationStoreError: If the stored row does not decode.
@@ -703,6 +718,7 @@ def _message_from(row: Sequence[Any]) -> TranscriptMessage | DeletedMessage:
             cut_off=_bool_of(row[7]),
             device_id=row[8],
             message_id=row[9],
+            came_through=row[11],
         )
     except (ValidationError, ValueError, TypeError, OverflowError) as exc:
         msg = f"a stored message could not be decoded: {exc}"
@@ -718,12 +734,12 @@ def _exported_from(row: Sequence[Any]) -> ExportedMessage:
         ConversationStoreError: If the stored row does not decode, or is a marker,
             which the export does not carry.
     """
-    message = _message_from(row[:11])
+    message = _message_from(row[:12])
     if not isinstance(message, TranscriptMessage):
         msg = "a deleted message's marker was read as a standing message"
         raise ConversationStoreError(msg)
     try:
-        return ExportedMessage(**dict(message), effect_id=row[11])
+        return ExportedMessage(**dict(message), effect_id=row[12])
     except ValidationError as exc:
         msg = f"a stored message's effect id could not be decoded: {exc}"
         raise ConversationStoreError(msg) from exc
@@ -1023,6 +1039,7 @@ class SqliteConversationStore:
             for statement in _CHAT_SCHEMA:
                 conn.execute(statement)
             self._upgrade_to_claimed(conn, existing_format)
+            self._upgrade_to_came_through(conn, existing_format)
             conn.execute(_EFFECT_INDEX)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS conversations_activity "
@@ -1133,7 +1150,40 @@ class SqliteConversationStore:
         present = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
         if _EFFECT_COLUMN.split(" ")[0] not in present:
             conn.execute("ALTER TABLE messages ADD COLUMN " + _EFFECT_COLUMN)
+        if found is not None and found < CLAIMED_CONVERSATION_RECORD_FORMAT:
+            conn.execute(
+                "UPDATE episode_record_format SET version = ?",
+                (CLAIMED_CONVERSATION_RECORD_FORMAT,),
+            )
+
+    @staticmethod
+    def _upgrade_to_came_through(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0378 §8:2's, in place (ADR-0326 §4:1).
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_claimed` has carried a file to 13, so the upgrades chain
+        (§4:5), and it completes or rolls back with the transaction (§4:3). The
+        ``messages`` table gains :data:`_CAME_THROUGH_COLUMN` where it lacks it, read from
+        ``PRAGMA table_info`` as :meth:`_upgrade_to_claimed` reads its column, so a fresh
+        file gains it here too. Each standing user's message a file held before it is set
+        as having come through the device it is written from, which is what a message
+        from before reads as (ADR-0378 §8:2); every other byte is kept (§4:4). The label
+        then advances, so an older build, which reads 12 and 13 alone, refuses the file
+        (§5:3).
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        present = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+        if _CAME_THROUGH_COLUMN.split(" ")[0] not in present:
+            conn.execute("ALTER TABLE messages ADD COLUMN " + _CAME_THROUGH_COLUMN)
         if found is not None and found < CONVERSATION_RECORD_FORMAT:
+            conn.execute(
+                "UPDATE messages SET came_through = device_id "
+                "WHERE deleted = 0 AND device_id IS NOT NULL AND came_through IS NULL"
+            )
             conn.execute(
                 "UPDATE episode_record_format SET version = ?", (CONVERSATION_RECORD_FORMAT,)
             )
@@ -1791,7 +1841,7 @@ class SqliteConversationStore:
                 "export transcripts",
                 "SELECT m.conversation_id, m.position, m.author, m.written_at, m.text, "
                 "m.replies_to, m.options, m.cut_off, m.device_id, m.message_id, m.deleted, "
-                "m.effect_id "
+                "m.came_through, m.effect_id "
                 "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
                 "WHERE c.deleted_at IS NULL AND m.deleted = 0 "
                 "ORDER BY m.conversation_id ASC, m.position ASC",
@@ -1877,8 +1927,8 @@ class SqliteConversationStore:
                 raise ConversationStoreError(msg) from exc
             conn.execute(
                 "INSERT INTO messages(conversation_id, position, author, written_at, text, "
-                "replies_to, options, cut_off, device_id, message_id, deleted, effect_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                "replies_to, options, cut_off, device_id, message_id, deleted, came_through, "
+                "effect_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                 (
                     conversation_id,
                     position,
@@ -1890,6 +1940,7 @@ class SqliteConversationStore:
                     int(recorded.cut_off),
                     recorded.device_id,
                     recorded.message_id,
+                    recorded.came_through,
                     message.effect_id,
                 ),
             )
@@ -1921,7 +1972,8 @@ class SqliteConversationStore:
             # §12:9); the text and every other property are cleared in place.
             deleted = conn.execute(
                 "UPDATE messages SET deleted = 1, author = NULL, written_at = NULL, "
-                "text = NULL, replies_to = NULL, options = NULL, cut_off = 0 "
+                "text = NULL, replies_to = NULL, options = NULL, cut_off = 0, "
+                "came_through = NULL "
                 "WHERE conversation_id = ? AND position = ? AND deleted = 0",
                 (conversation_id, position),
             ).rowcount
@@ -2028,7 +2080,7 @@ class SqliteConversationStore:
                 return None
             columns = (
                 "SELECT conversation_id, position, author, written_at, text, replies_to, "
-                "options, cut_off, device_id, message_id, deleted FROM messages "
+                "options, cut_off, device_id, message_id, deleted, came_through FROM messages "
             )
             if before is None:
                 rows = self._fetch(
@@ -2088,7 +2140,7 @@ class SqliteConversationStore:
                 "read the change stream",
                 "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "
                 "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
-                "m.options, m.cut_off, m.device_id, m.message_id, m.deleted "
+                "m.options, m.cut_off, m.device_id, m.message_id, m.deleted, m.came_through "
                 "FROM chat_changes c LEFT JOIN messages m ON c.kind = 'message_added' "
                 "AND m.conversation_id = c.conversation_id AND m.position = c.position "
                 "WHERE c.seq > ? AND (? IS NULL OR c.conversation_id IS NULL OR "
@@ -2267,7 +2319,8 @@ class SqliteConversationStore:
                 conn,
                 "read untaken messages",
                 "SELECT m.conversation_id, m.position, m.author, m.written_at, m.text, "
-                "m.replies_to, m.options, m.cut_off, m.device_id, m.message_id, m.deleted "
+                "m.replies_to, m.options, m.cut_off, m.device_id, m.message_id, m.deleted, "
+                "m.came_through "
                 "FROM messages m WHERE m.conversation_id = ? AND m.deleted = 0 "
                 "AND m.author = ? AND NOT EXISTS (SELECT 1 FROM taken_in t WHERE "
                 "t.conversation_id = m.conversation_id AND t.position = m.position) "
@@ -2429,7 +2482,7 @@ class SqliteConversationStore:
             conn,
             "read a conversation's snapshot at a change",
             "SELECT conversation_id, position, author, written_at, text, replies_to, "
-            "options, cut_off, device_id, message_id, deleted FROM messages "
+            "options, cut_off, device_id, message_id, deleted, came_through FROM messages "
             "WHERE conversation_id = ? AND position <= ? ORDER BY position DESC LIMIT ?",
             (conversation_id, recorded, CHAT_SNAPSHOT_ENTRIES),
         )

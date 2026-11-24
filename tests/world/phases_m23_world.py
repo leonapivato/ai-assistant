@@ -65,6 +65,7 @@ from structured_support import structured
 from understanding_support import TextAsStructured
 
 from ai_assistant.core.types import (
+    HUB_DEVICE_ID,
     Account,
     ChatDevice,
     DeviceAccess,
@@ -428,9 +429,14 @@ def build_phases_world(
         phases=phases,
         now=lambda: NOW,
         # ADR-0366 §4:1: the owner's phone is linked to them, as a hub links an admitted
-        # device, so what it writes is the owner's (ADR-0368 §9:1).
+        # device, so what it writes is the owner's (ADR-0368 §9:1); and the hub's own
+        # machine, as its configuration links it, since the world writes on the local
+        # socket and each message came through ``hub`` (ADR-0378 §6:1).
         identities=FakeIdentityStore(
-            configured=[Account(kind="conversation", identifier=PHONE.device_id)]
+            configured=[
+                Account(kind="conversation", identifier=PHONE.device_id),
+                Account(kind="conversation", identifier=HUB_DEVICE_ID),
+            ]
         ),
     )
     return PhasesWorld(

@@ -67,6 +67,7 @@ if TYPE_CHECKING:
         PlanningRound,
         RecordedCall,
         RecordedInputMessage,
+        RecordedMessageDevices,
         ReplyCapability,
         StageEntry,
         WorkFacts,
@@ -671,7 +672,7 @@ def active_state() -> ActivationState | None:
     return None if scope is None else scope.state
 
 
-def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata seams, the stage bound, the messages it took in and who sent them
+def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata seams, the stage bound, the messages it took in, who sent them and through which devices
     input: ChannelInput,  # noqa: A002 — channel contract parameter
     reply: ReplyCapability | None,
     *,
@@ -681,6 +682,7 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     messages: Sequence[RecordedInputMessage] = (),
     carries_outside_mark: bool = False,
     senders: Sequence[InputSender] = (),
+    message_devices: Sequence[RecordedMessageDevices] = (),
 ) -> ActivationState:
     """Allocate capture metadata after channel validation, without making it admission policy.
 
@@ -710,6 +712,10 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     (:func:`~ai_assistant.orchestration.work_facts.log_facts`): every reader reads them
     (ADR-0368 §9:1, §9:5), and a work whose facts could not be decided records none,
     which no reader reads as any person's.
+
+    **Through which devices** (ADR-0378 §7:1): ``message_devices`` are, for an input whose
+    trigger records no messages, as the hub chat's, each message's device it came through
+    beside the device it is written from, fixed on the trigger beside its senders.
     """
     parties, recorded = declared_input(
         input.target, messages, senders=senders, carries_outside_mark=carries_outside_mark
@@ -739,6 +745,7 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
             senders=canonical_senders(
                 (*senders, *(one.sender for one in recorded if one.sender is not None))
             ),
+            message_devices=tuple(message_devices),
         ),
         activation_id=activation_id,
         started_at=started_at,
