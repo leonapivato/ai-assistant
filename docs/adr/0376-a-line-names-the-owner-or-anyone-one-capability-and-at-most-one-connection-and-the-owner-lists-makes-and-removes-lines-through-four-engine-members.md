@@ -71,8 +71,9 @@ apart from lines. ADR-0373 gave the owner three members over links, placed in AD
 command-or-query row, and rested "the owner's own act" on who can reach that row (ADR-0373 §4).
 
 **Words.** A **line**, a **grant**, a **limit**, a **bar**, a **level**, **anyone**, **the
-check** and a **work** are ADR-0367's. A **capability** is a `ToolDefinition`'s `capability`. A
-call's **thing** is the connection the call acts through (§2:3). A **default line** is a tool's
+check** and a **work** are ADR-0367's. A **capability** is a `ToolDefinition`'s `capability`, and a
+tool the running hub **declares** is one whose declaration it holds for its works to call, in the
+tool registry or among orchestration's own calls. A call's **thing** is the connection the call acts through (§2:3). A **default line** is a tool's
 default grant (ADR-0367 §4:3); a **made line** is one a person made by an act under ADR-0367
 §3:5. The **store** is ADR-0367 §3:6's. The **owner's identity** is the one ADR-0345 §2:5's
 identifier names. A bare section reference, such as §4:2, is to this decision's own clauses.
