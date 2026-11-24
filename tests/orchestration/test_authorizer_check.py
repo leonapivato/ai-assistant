@@ -596,3 +596,44 @@ def test_a_check_that_did_not_run_would_decide_nothing_new() -> None:
             Verdict.ALLOWED,
             None,
         )
+
+
+async def test_a_text_into_an_absorbed_inputs_place_stays_outside() -> None:
+    """§4:7: a place any of the work's own inputs came from, an absorbed one's included,
+    though it is neither the trigger's place nor a taken input's."""
+    lines = FakePermissionLineStore(now=_now)
+    await _limit(lines, "send_text", thing=_LINE)
+    hub = _Hub(lines=lines)
+
+    decided = await hub.authorize(replace(_texts(_LINE), input_places=(_INPUT, _LINE)))
+
+    (into_line,) = decided.call_messages
+    assert into_line.check == CallCheck(kind=CallCheckKind.OUTSIDE)
+
+
+class _Raising:
+    """A policy that raises once asked: a fault after the check has run."""
+
+    async def decide(self, request: object) -> PermissionRuling:
+        del request
+        msg = "the policy failed"
+        raise RuntimeError(msg)
+
+    async def resolve(self, confirmed: object, *, approved: bool) -> PermissionRuling:
+        del confirmed, approved
+        raise AssertionError
+
+
+async def test_a_check_made_before_authorizing_fails_is_kept_in_the_sink() -> None:
+    """ADR-0379 §3:2: what the check made of a call it reached is written as it is made,
+    so a round whose authorizing then raises still keeps it."""
+    hub = _Hub(lines=FakePermissionLineStore(now=_now))
+    hub.stage._policy = _Raising()
+    sink: dict[str, CallCheck] = {}
+
+    with pytest.raises(RuntimeError, match="the policy failed"):
+        await hub.authorize(
+            replace(_round(_call("c1", "lookup", q="x")), check_for=_OWNER, check_sink=sink)
+        )
+
+    assert sink == {"c1": _ran((_NORMAL, _NO_LINE))}

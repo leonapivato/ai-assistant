@@ -397,7 +397,7 @@ from ai_assistant.orchestration.message_tools import (
     text_arguments,
 )
 from ai_assistant.orchestration.outside_content import joined_parties, rests_on_outside_content
-from ai_assistant.orchestration.permission_check import CheckSubject
+from ai_assistant.orchestration.permission_check import CheckSubject, place_connection
 from ai_assistant.orchestration.person_block import still_held
 from ai_assistant.orchestration.person_calls import (
     PERSON_MODEL_CALLS,
@@ -1814,6 +1814,9 @@ class _Round:
         handed: What came of each call acting finished, by its decision's id, as acting
             handed each back (ADR-0356 §8:6). Where acting raised or was cancelled before
             handing back the round, each finished call's entry is made from it.
+        checks: What the check made of each call it reached, by call id, written as each
+            is made (ADR-0379 §3:2), so a call's entry keeps it where authorizing then
+            failed or was cancelled.
     """
 
     planned: PlannedRound
@@ -1830,6 +1833,7 @@ class _Round:
     effects: Mapping[str, bool] = field(default_factory=dict)
     finished: Mapping[str, tuple[ToolOutcome, str | None]] = field(default_factory=dict)
     handed: dict[str, ActedCall] = field(default_factory=dict)
+    checks: dict[str, CallCheck] = field(default_factory=dict)
 
     def acted_one(self, acted: ActedCall) -> None:
         """Hold what came of one call, as acting hands it back (ADR-0356 §8:6)."""
@@ -1941,6 +1945,23 @@ class TicketsHeld(Protocol):
 #: The channel types whose places take a message from the assistant: the hub chat's
 #: conversations and the line's chat (ADR-0350 §5:11).
 _TAKES_A_MESSAGE: Final = frozenset({"conversation", "telegram"})
+
+
+def _input_places(state: ActivationState | None) -> tuple[str, ...]:
+    """Every place one of the work's own inputs came from (ADR-0367 §4:7).
+
+    Its trigger's, and each joined input's, an absorbed or a taken one's alike, each once
+    in order: a ``text`` call into one stays outside the check.
+    """
+    if state is None:
+        return ()
+    held: list[str] = []
+    trigger = state.trigger
+    came_by = None if trigger is None else trigger.channel or trigger.target
+    if isinstance(came_by, ChannelIdentity):
+        held.append(place_of(came_by))
+    held.extend(place_of(one.channel) for one in state.joined)
+    return tuple(dict.fromkeys(held))
 
 
 def _taken_places(state: ActivationState | None, own: str | None) -> tuple[str, ...]:
@@ -2382,8 +2403,7 @@ class PhaseWorking:
             return None
         return persons_authority(state.work_facts, state.held_senders, relayed=self.relayed)
 
-    @property
-    def check_subject(self) -> CheckSubject:
+    def check_subject(self, has: Collection[str] | None = None) -> CheckSubject:
         """Whom the check runs for in this work, at what level, and where a condition is met.
 
         ADR-0368 §7's table, read from what the work records (:func:`~ai_assistant.
@@ -2391,11 +2411,27 @@ class PhaseWorking:
         author at the level it records, though the work's own facts record none until the
         check decides; a sender's work from its facts as they stand, read as carrying none
         where :attr:`authority` would; and the one connection every one of its senders'
-        inputs came by, or its task records (§4:2, §6:4). Handed to the authorizer, which
+        inputs came by, or its task records (§4:2, §6:4), which a task's work meets
+        whether or not it holds an activation's state. Handed to the authorizer, which
         decides none of it.
+
+        Args:
+            has: The connections the hub has, as a line names them, where they are known:
+                a condition naming one it no longer has is met for no work, so the line
+                covers no call (ADR-0376 §2:8). ``None`` where they are not known.
+
+        Returns:
+            The subject.
         """
         state = self._activation
         task = None if self.scheduling is None else self.scheduling.task
+        met = met_connection(
+            None if state is None else state.trigger,
+            () if state is None else state.joined,
+            task=task,
+        )
+        if has is not None and met not in has:
+            met = None
         return CheckSubject(
             runs=check_runs_for(
                 None if state is None else state.work_facts,
@@ -2403,7 +2439,7 @@ class PhaseWorking:
                 relayed=self.relayed,
                 task=task,
             ),
-            met=None if state is None else met_connection(state.trigger, state.joined, task=task),
+            met=met,
         )
 
     @property
@@ -2789,7 +2825,8 @@ class PhaseWorking:
                         marked=one.planned.read_outside
                         or (outcome is not None and outcome.digested),
                         showed=shown,
-                        check=_checked(one.authorization, call.call_id),
+                        check=_checked(one.authorization, call.call_id)
+                        or one.checks.get(call.call_id),
                     )
                 )
                 self._entered.add((round_id, call.call_id))
@@ -5516,7 +5553,17 @@ class PhasePath:
             gone=gone,
             person=None if state is None else persons_work(state.work_facts, state.held_senders),
             tickets=frozenset(one.request_id for one in await self._held_tickets(state)),
-            check_for=working.check_subject,
+            check_for=working.check_subject(
+                None
+                if self._connections is None
+                else {
+                    connection
+                    for one in working.connections
+                    if (connection := place_connection(one.place)) is not None
+                }
+            ),
+            input_places=_input_places(state),
+            check_sink=latest.checks,
             taken_places=() if places is not None else _taken_places(state, place),
             # ADR-0364 §9:3: a work that keeps no list may send a text into any connection
             # it was shown that takes one.

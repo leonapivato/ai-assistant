@@ -188,7 +188,7 @@ from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.work_facts import tap_runs_for
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, MutableMapping, Sequence
 
     from ai_assistant.core.protocols import (
         ActionPolicy,
@@ -574,6 +574,14 @@ class RoundToAuthorize:
             connection a condition is met for (ADR-0368 §7), as the work records them:
             handed in, and decided nowhere here. No one, by default. A call run under a
             ticket is checked for its tapper instead (ADR-0367 §5:5).
+        input_places: Every place one of the work's own inputs came from, its trigger's
+            and each joined input's, an absorbed or a taken one's included: a ``text``
+            call into one stays outside the check (ADR-0367 §4:7). It widens no place a
+            message may go into.
+        check_sink: Where each call's check is written as it is made, by call id, so a
+            round whose authorizing then fails or is cancelled keeps what the check made
+            of the calls it reached (ADR-0379 §3:2); ``None`` where no one keeps them.
+            Written, never read, and handed through by reference.
 
     Raises:
         ValueError: If two calls or message calls share a call id, a message call names
@@ -597,6 +605,8 @@ class RoundToAuthorize:
     taken_places: tuple[str, ...] = ()
     shown_places: tuple[str, ...] = ()
     check_for: CheckSubject = field(default_factory=CheckSubject)
+    input_places: tuple[str, ...] = ()
+    check_sink: MutableMapping[str, CallCheck] | None = None
 
     def __post_init__(self) -> None:
         """Each call is one the round proposed, once."""
@@ -1062,6 +1072,8 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
             runs=tuple(CheckedFor.model_validate(one.model_dump()) for one in given.check_for.runs),
             met=None if given.check_for.met is None else str(given.check_for.met),
         ),
+        input_places=tuple(str(one) for one in given.input_places),
+        check_sink=given.check_sink,
     )
 
 
@@ -1142,6 +1154,13 @@ class _Round:
     standing: tuple[PermissionLine, ...] | None = None
     unread: bool = False
     made: dict[str, tuple[str, CallCheck]] = field(default_factory=dict)
+    sink: MutableMapping[str, CallCheck] | None = None
+
+    def checked(self, call_id: str, capability: str, made: CallCheck) -> None:
+        """Keep what the check made of a call, and write it to the sink where there is one."""
+        self.made[call_id] = (capability, made)
+        if self.sink is not None:
+            self.sink[call_id] = made
 
     def note(self, call: ProposedCall, check: str, verdict: str, reason: str | None) -> None:
         """Note one check ``call`` reached, its verdict and its reason."""
@@ -1394,6 +1413,7 @@ class AuthorizingStage:
             person=snapshot.person,
             tickets=snapshot.tickets,
             subject=snapshot.check_for,
+            sink=snapshot.check_sink,
         )
         progress.append(state)
         for one in snapshot.calls:
@@ -2155,7 +2175,7 @@ class AuthorizingStage:
             except Exception:  # a check that raises is recorded as such, and decides nothing
                 _log.warning("permission_check_failed", stage="authorizing", reason="defect")
                 made = CallCheck(kind=CallCheckKind.FAILED)
-        state.made[call_id] = (capability, made)
+        state.checked(call_id, capability, made)
         state.note_call(call_id, "check", _check_word(made), None)
 
     async def _message_checked(
@@ -2163,18 +2183,19 @@ class AuthorizingStage:
     ) -> CallCheck | None:
         """What the check makes of a ``text`` call (ADR-0367 §4:7).
 
-        A text into a place one of the work's own inputs came from, its input's or one a
-        take brought it, stays outside the check, checked by its place alone (ADR-0306
-        §4:7). A text into any other connection passes the check as every call does, its
-        thing the connection it goes into. The round's own message is no call.
+        A text into a place one of the work's own inputs came from, its trigger's or one
+        that joined it by an absorption or a take, stays outside the check, checked by its
+        place alone (ADR-0306 §4:7). A text into any other connection passes the check as
+        every call does, its thing the connection it goes into. The round's own message
+        is no call.
         """
         call_id = message.call_id
         if call_id is None or self._lines is None:
             return None
-        own = (snapshot.input_place, *snapshot.taken_places)
-        if snapshot.places is None and message.place is not None and message.place in own:
+        own = (snapshot.input_place, *snapshot.taken_places, *snapshot.input_places)
+        if message.place is not None and message.place in own:
             outside = CallCheck(kind=CallCheckKind.OUTSIDE)
-            state.made[call_id] = (TEXT_CAPABILITY, outside)
+            state.checked(call_id, TEXT_CAPABILITY, outside)
             state.note_call(call_id, "check", outside.kind.value, None)
             return outside
         await self._check_lines(call_id, TEXT_CALL, state, place=message.place)

@@ -11,11 +11,12 @@ records (ADR-0368 §6:1, §7's fifth row), though the work's own facts still car
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from exchange_support import text_call
 from phases_support import PHONE, open_conversation, phases_harness, said, until, written
 from task_support import seams
+from test_engine import AT
 from test_phases_task_scheduler import (
     _first_place,
     _Request,
@@ -26,21 +27,34 @@ from test_phases_task_scheduler import (
 from test_phases_work_facts import _one_frozen
 
 from ai_assistant.core.types import (
+    OWN_CHAT_CONNECTION,
     OWNER_PERSON_ID,
     Account,
     CallCheck,
     CallCheckKind,
     CallOutcomeKind,
+    ChannelIdentity,
     CheckedFor,
     CheckOutcome,
     CheckOutcomeKind,
     CheckRun,
+    DueNow,
     EpisodicMemory,
+    GrantHow,
+    LineParts,
     MessageAuthor,
+    PermissionLineKind,
+    PermissionRuling,
     ProposedCall,
     RoundResponse,
+    ScheduledOccurrence,
+    ScheduledTask,
+    ScheduledTaskAuthor,
     Sureness,
 )
+from ai_assistant.orchestration.permission_check import CheckSubject
+from ai_assistant.orchestration.phase_path import PhaseWorking, Scheduling
+from ai_assistant.orchestration.planning import PlaceWindow
 from ai_assistant.testing import FakeIdentityStore, FakePermissionLineStore
 from ai_assistant.testing.tool_calling import FakeToolCallingCompleter
 
@@ -153,3 +167,119 @@ async def test_a_tasks_text_is_checked_for_its_author_at_the_level_it_records() 
         )
     finally:
         await harness.engine.aclose()
+
+
+async def test_a_tasks_call_meets_the_condition_its_task_records() -> None:
+    """ADR-0368 §6:4: a grant whose condition names the connection the task was set by
+    applies in its work, which meets it though it holds no activation state of its own."""
+    lines = FakePermissionLineStore()
+    made = await lines.record_making(
+        LineParts(
+            kind=PermissionLineKind.GRANT,
+            who=OWNER_PERSON_ID,
+            action="send_text",
+            how=GrantHow.ALLOWED,
+            bar=Sureness.WEAK,
+            condition=OWN_CHAT_CONNECTION,
+        ),
+        by=OWNER_PERSON_ID,
+    )
+    completer = _responder(_spawning(connections="first place"), _texting_its_place)
+    harness = phases_harness(
+        completer, task_scheduler=seams(), identities=_linked(), phases={"lines": lines}
+    )
+    await harness.engine.start()
+    try:
+        conversation = await open_conversation(harness)
+        await harness.engine.write_message(conversation, message=said("m-1", "say hello soon"))
+        (episode,) = await _until_scheduled(harness, 1)
+
+        async def spoken() -> bool:
+            return any(
+                one.author is MessageAuthor.ASSISTANT and one.text == "hello"
+                for one in await written(harness, conversation)
+            )
+
+        await until(spoken, what="the task's message")
+        entry = _entries(episode)["t1"]
+        resting = CheckOutcome(kind=CheckOutcomeKind.ALLOWED_ON_MADE_GRANT, line=made.line.id)
+        assert entry.check == CallCheck(
+            kind=CallCheckKind.CHECKED,
+            runs=(CheckRun(checked_for=_OWNER_AT_NORMAL, outcome=resting),),
+        )
+    finally:
+        await harness.engine.aclose()
+
+
+class _Raising:
+    """A policy that raises once asked: a fault after the check has run."""
+
+    async def decide(self, request: object) -> PermissionRuling:
+        del request
+        msg = "the policy failed"
+        raise RuntimeError(msg)
+
+    async def resolve(self, confirmed: object, *, approved: bool) -> PermissionRuling:
+        del confirmed, approved
+        raise AssertionError
+
+
+async def test_a_check_made_before_authorizing_fails_is_kept_on_the_entry() -> None:
+    """ADR-0379 §3:2: the frozen episode keeps what the check made of a call it reached,
+    though authorizing then raised and nothing ran."""
+    harness = phases_harness(
+        FakeToolCallingCompleter(response=_remembering_then_replying),
+        identities=_linked(),
+        phases={"lines": FakePermissionLineStore(), "policy": _Raising()},
+    )
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "I water on Sundays"))
+
+    episode = await _one_frozen(harness)
+
+    remembered = _entries(episode)["r1"]
+    assert remembered.outcome is None
+    assert remembered.check == CallCheck(
+        kind=CallCheckKind.CHECKED,
+        runs=(CheckRun(checked_for=_OWNER_AT_NORMAL, outcome=_NO_LINE),),
+    )
+
+
+def test_a_condition_naming_a_connection_the_hub_no_longer_has_is_met_for_no_work() -> None:
+    """ADR-0376 §2:8: a task records where it was set; once the hub no longer has that
+    connection, a condition naming it is met for none of its work's calls."""
+    task = ScheduledTask(
+        id="t-1",
+        person=OWNER_PERSON_ID,
+        author=ScheduledTaskAuthor.PERSON,
+        author_person=OWNER_PERSON_ID,
+        setting_level=Sureness.WEAK,
+        setting_connection="telegram:line",
+        when=DueNow(),
+        instruction="water the plants",
+        parent="act-0",
+        set_in=ChannelIdentity(channel_type="telegram", instance_id="line"),
+        set_at=AT,
+        chain_length=1,
+        occurrences=(ScheduledOccurrence(number=1, due_at=AT),),
+    )
+
+    async def nothing_listed() -> Any:
+        return (), {}
+
+    working = PhaseWorking(
+        activation_id="activation",
+        place=PlaceWindow(takes_message=True),
+        conversation_id=None,
+        trigger=None,
+        owner_records=True,
+        round_limit=3,
+    )
+    working.scheduling = Scheduling(
+        person=OWNER_PERSON_ID, set_in=task.set_in, build=nothing_listed, task=task
+    )
+
+    author = (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.WEAK),)
+    assert working.check_subject() == CheckSubject(runs=author, met="telegram:line")
+    assert working.check_subject({"telegram:line"}).met == "telegram:line"
+    assert working.check_subject({OWN_CHAT_CONNECTION}) == CheckSubject(runs=author, met=None)
