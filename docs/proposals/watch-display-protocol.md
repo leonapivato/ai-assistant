@@ -284,6 +284,22 @@ layer's starting opacity, naming the screen in `update`, `flipbook` and `move`,
 the limit on see-through, digits sent as an image, the time zone in `welcome`,
 keeping order while waiting for an image, and the font that `text` needs.
 
+The hub-side renderer was built third. A screen is written as HTML, with inline
+SVG where wanted, and a headless browser draws it with scripts off and the
+network off. Attributes on the page mark its layers, press regions and
+overlays, so their places are measured from the page and never written by hand.
+It changed nothing in the protocol. What it showed:
+
+- One render took about 70 ms on a desktop PC, not measured on the hub's
+  server. A two-layer screen is ready well inside a second.
+- The same page gives the same images each time, so the content-hash cache
+  holds across renders.
+- Streamed text is the same page rendered with more words shown. Every word is
+  laid out from the start, so none moves and each step is one small `update`.
+- A flipbook is the same page rendered once per frame, keeping one layer.
+- The digit image for a clock or timer is drawn in the font and colour of the
+  element that marks its place.
+
 One thing the engine does is not protocol but shapes it: the watch frees a
 screen's decoded pixels when it leaves the screen, unless an update or a
 flipbook changed them, because those cannot be rebuilt from the stored image.
