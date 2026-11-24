@@ -327,8 +327,11 @@ It changed nothing in the protocol. What it showed:
   element that marks its place.
 
 Audio was built fourth, in the engine, the fake watch and the test gateway.
-The test gateway has no speech recognition and no voice: it plays back what it
-heard, which checks every sample both ways. Section 7 was rewritten from that
+The test gateway first played back what it heard, which checks every sample
+both ways. It then gained speech recognition and a voice running on the same
+machine, with no change to the protocol or the watch: about 0.8 s to
+transcribe a short question and 0.2 s to speak a sentence on a desktop PC.
+Which speech service the hub uses is not decided here. Section 7 was rewritten from that
 build. Everything in it beyond the first, third and fifth points came from it.
 Two choices in it are mine and not yet ruled: that the gateway may open the
 microphone with `listen`, and that the hub, not the watch, decides when the
