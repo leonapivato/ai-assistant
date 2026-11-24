@@ -3085,7 +3085,9 @@ class Engine:
         if isinstance(accepted.target, ChannelIdentity):
             try:
                 async with asyncio.timeout_at(deadline):
-                    await self._place_recorded(accepted.target)
+                    # ADR-0042 §2: tracked, so shutdown drains the write before it
+                    # closes the store; a deadline abandons the wait, not the write.
+                    await self._uninterruptibly(self._place_recorded(accepted.target))
             except TimeoutError:
                 _log.warning("thing_record_unwritten", stage="receive", reason="deadline")
         state = admit_channel(
