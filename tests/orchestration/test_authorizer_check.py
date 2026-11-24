@@ -265,19 +265,43 @@ async def test_the_owner_at_normal_is_decided_as_before_and_the_check_is_recorde
     assert await checking.trail.export() == await plain.trail.export()
 
 
+def _simplest(declared: Mapping[str, Any]) -> Any:
+    """The simplest value ``declared`` admits: an enum's first, an array of one, an object
+    of its required properties."""
+    if "enum" in declared:
+        return declared["enum"][0]
+    kind = declared.get("type", "string")
+    kind = kind if isinstance(kind, str) else kind[0]
+    if kind == "array":
+        return [_simplest(declared.get("items", {}))]
+    if kind == "object":
+        return _minimal(declared)
+    return {"string": "x", "integer": 1, "number": 1, "boolean": True}[kind]
+
+
 def _minimal(schema: Mapping[str, Any]) -> dict[str, Any]:
     """Arguments carrying every property ``schema`` requires, each its simplest value."""
-    simplest = {"string": "x", "integer": 1, "number": 1, "boolean": True, "array": []}
-    arguments: dict[str, Any] = {}
     properties = schema.get("properties", {})
-    for name in schema.get("required", ()):
-        declared = properties.get(name, {})
-        if "enum" in declared:
-            arguments[name] = declared["enum"][0]
-        else:
-            kind = declared.get("type", "string")
-            arguments[name] = simplest.get(kind if isinstance(kind, str) else kind[0], {})
-    return arguments
+    return {name: _simplest(properties.get(name, {})) for name in schema.get("required", ())}
+
+
+def _owners(call: ProposedCall) -> RoundToAuthorize:
+    return replace(_round(call), check_for=_OWNER, person=OWNER_PERSON_ID)
+
+
+async def _as_before(one: RoundToAuthorize, *tools: ToolDefinition, **seams: Any) -> None:
+    """``one`` is decided with the check over no made line exactly as with no check, and
+    the check reached its call and allowed it on no line."""
+    checking = _Hub(*tools, lines=FakePermissionLineStore(now=_now), **seams)
+    plain = _Hub(*tools, **seams)
+
+    decided = await checking.authorize(one)
+    before = await plain.authorize(one)
+
+    assert _unchecked(decided) == before
+    assert await checking.trail.export() == await plain.trail.export()
+    held = [*(one.check for one in decided.verdicts), *(one.check for one in decided.call_messages)]
+    assert held == [_ran((_NORMAL, _NO_LINE))]
 
 
 @pytest.mark.integration
@@ -286,9 +310,9 @@ async def test_every_declared_tool_is_decided_for_the_owner_at_normal_as_before(
 ) -> None:
     """#3678, "Nothing changes for what the owner asks": table-driven over every tool the
     composed hub declares, its own records' calls included, a call by the owner at normal
-    with no made line is decided exactly as with no check at all, which is how
-    ``348ff39e7`` decided it: the same verdicts, the same calls handed on, the same rulings
-    recorded."""
+    with no made line reaches the check, which allows it on no line, and is decided exactly
+    as with no check at all, which is how ``348ff39e7`` decided it: the same verdicts, the
+    same calls handed on, the same rulings recorded."""
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         phases = engine._phases
@@ -296,29 +320,36 @@ async def test_every_declared_tool_is_decided_for_the_owner_at_normal_as_before(
         declared = list(await phases._tools.all_tools())
     finally:
         await engine.aclose()
+    by_capability = {str(one.capability): one for one in declared}
     assert len(declared) > 5
 
     for number, tool in enumerate(declared):
+        capability = str(tool.capability)
+        tools = [tool]
         arguments = {
             key: value
             for key, value in _minimal(tool.model_dump()["parameters_schema"]).items()
             if key not in tool.system_supplied
         }
-        one = replace(
-            _round(_call(f"c{number}", str(tool.capability), **arguments)),
-            check_for=_OWNER,
-            person=OWNER_PERSON_ID,
-        )
-        checking = _Hub(tool, lines=FakePermissionLineStore(now=_now))
-        plain = _Hub(tool)
+        if capability == "request_approval":
+            # The call it asks about, a look-up the hub declares too.
+            tools.append(by_capability["report_current_time"])
+            arguments["call"] = {"tool": "report_current_time", "arguments": {}}
+        try:
+            await _as_before(_owners(_call(f"c{number}", capability, **arguments)), *tools)
+        except AssertionError as failed:
+            raise AssertionError(tool.id) from failed
 
-        decided = await checking.authorize(one)
-        before = await plain.authorize(one)
 
-        assert _unchecked(decided) == before, tool.id
-        assert await checking.trail.export() == await plain.trail.export(), tool.id
-        (verdict,) = decided.verdicts
-        assert verdict.check in {None, _ran((_NORMAL, _NO_LINE))}, tool.id
+async def test_an_email_and_a_text_are_decided_for_the_owner_at_normal_as_before() -> None:
+    """The two message calls the composed hub declares only with a connection: an email
+    from the owner's account, which still needs approval by rule, and a text into a
+    connection none of the work's inputs came from, which is sent."""
+    binder = FakeEgressBinder()
+    binder.register_egress(EMAIL, reference="conn-a", identity="me@example.com")
+
+    await _as_before(replace(_email_round(), person=OWNER_PERSON_ID), EMAIL, binder=binder)
+    await _as_before(_texts(_LINE, person=OWNER_PERSON_ID))
 
 
 # --- not done: a limit, no grant, a check that could not run ----------------------------
@@ -918,6 +949,20 @@ async def test_request_approval_is_checked_as_a_call_of_its_own() -> None:
     assert verdict.check == _ran((_NORMAL, _NO_LINE))
     (asked,) = decided.allowed
     assert asked.requested is not None
+
+
+async def test_request_approval_resting_on_a_made_grant_names_it() -> None:
+    """ADR-0367 §4:6: its own check resting on the owner's grant, its request and ruling
+    name it, and the trail resolves it."""
+    lines = FakePermissionLineStore(now=_now)
+    grant = await _grant(lines, "request_approval")
+    stage, _ = _ticket_hub(lines)
+
+    decided = await stage.authorize(_asking())
+
+    (asked,) = decided.allowed
+    assert asked.call.request.rests_on == grant
+    assert asked.call.decision.ruling.authorised_by == grant
 
 
 async def test_request_approval_a_limit_covers_asks_nothing() -> None:

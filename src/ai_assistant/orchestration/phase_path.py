@@ -2423,12 +2423,12 @@ class PhaseWorking:
         ADR-0368 §9:1: what every earlier decision's "the input carries the user's
         authority" reads (ADR-0292 §5:5, ADR-0351 §6:1, §6:5, §8:5), read from the work's
         three facts as they stand, never from the channel type it came by: the one
-        identified person whose authority it carries, and, for authority its senders'
-        input carries now, only while every message it took in is its sender's own and no
-        input the activation holds is relayed, so an activation holding a relayed input
-        acts with no authority from the version, or the append, that brings the relay
-        mark. Authority in advance, a task's work's, is no input's, so neither takes it
-        away (ADR-0368 §6:1, :func:`~ai_assistant.orchestration.work_facts.
+        identified person whose authority it carries, only while no input the activation
+        holds is relayed, so an activation holding a relayed input acts with no authority
+        from the version, or the append, that brings the relay mark (ADR-0351 §6:5); and,
+        for authority its senders' input carries now, only while every message it took in
+        is its sender's own. Authority in advance, a task's work's, is not read from its
+        input's words (ADR-0368 §6:1, :func:`~ai_assistant.orchestration.work_facts.
         carries_in_advance`). ``None`` where it carries no person's.
         """
         state = self._activation

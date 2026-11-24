@@ -71,8 +71,7 @@ authority, so whom the work is for does not move.
 senders its inputs record (:func:`held_senders`), read apart from its authority, and
 carries the authority of no more than one person. Whose authority it carries
 (:func:`persons_authority`, §9:1): the one identified person whose authority it carries,
-now or in advance, a relay mark taking away only authority carried now, which an input
-brings (ADR-0351 §6:5). Two inputs carry the same authority where they carry the same
+now or in advance. Two inputs carry the same authority where they carry the same
 people's (§9:2, :func:`authority_persons`). A work with no facts, because deciding them
 failed, is no person's and carries no one's authority: **recording fails closed**.
 
@@ -637,9 +636,10 @@ def authority_persons(facts: WorkFacts | None) -> tuple[str, ...]:
 def carries_in_advance(facts: WorkFacts | None) -> bool:
     """Whether a work carries a person's authority in advance, as a task's work does (§6:1).
 
-    Such authority is the task's, not an input's: nothing an input says or is marked as,
-    whether its words are its sender's own or whether it is relayed, gives or takes it away
-    (ADR-0368 §2:4, ADR-0351 §6:5).
+    Such authority is the task's, not its input's words': whether those words are a
+    sender's own is not read of it (ADR-0321 §3:3 reads a yes from words, and a task's input
+    states its task). A relayed input still takes it away, as it takes any authority away
+    from the activation holding it (ADR-0351 §6:5, which ADR-0368 §10 keeps).
 
     Args:
         facts: The work's facts, or ``None`` where none were recorded.
@@ -658,11 +658,9 @@ def persons_authority(
     What every earlier decision's "the input carries the user's authority" reads: the
     work carries the authority of one identified person, now or in advance, and no
     unidentified sender's beside it (§2:2), no input it holds has an unidentified sender,
-    and, for authority carried now, no input it holds is relayed (ADR-0351 §6:5), which no
-    fact records (§2:4) and the caller hands in: a relay mark takes away what an input
-    brought, and authority in advance is no input's (:func:`carries_in_advance`). Where it
-    names the user, it names this person. A person the hub does not admit carries none
-    here (:data:`_ADMITTED`).
+    and no input it holds is relayed (ADR-0351 §6:5), which no fact records (§2:4) and the
+    caller hands in, authority in advance included. Where it names the user, it names this
+    person. A person the hub does not admit carries none here (:data:`_ADMITTED`).
 
     Args:
         facts: The work's facts as they stand, or ``None`` where none were recorded.
@@ -674,7 +672,7 @@ def persons_authority(
         The person's id, or ``None`` where the work carries no person's authority.
     """
     persons = authority_persons(facts)
-    if (relayed and not carries_in_advance(facts)) or _with_an_unidentified(senders):
+    if relayed or _with_an_unidentified(senders):
         return None
     if len(persons) != 1 or persons[0] not in _ADMITTED:
         return None
@@ -749,8 +747,9 @@ def check_runs_for(
 
     - **A work carrying authority in advance**, as a task's work does: its author, at the
       level its facts record, the level the task records of the work that set it (§6:1,
-      §6:3, §7's fifth row), whatever its input's words are or are marked as
-      (:func:`carries_in_advance`). A task the assistant set carries none.
+      §6:3, §7's fifth row), whatever its input's words are (:func:`carries_in_advance`),
+      and no one where it holds a relayed input (ADR-0351 §6:5). A task the assistant set
+      carries none.
     - **A sender's work**: each identified person whose authority it carries, at the
       work's level, and a member of anyone alone, at none, where it carries an
       unidentified sender's (§7:1 to §7:3).
@@ -769,12 +768,12 @@ def check_runs_for(
     Returns:
         Each one the check runs for, in order, no one repeated; at least one.
     """
-    if facts is None:
+    if facts is None or relayed:
         return (CheckedFor.no_one(),)
     authority = facts.authority
     if authority.kind is AuthorityKind.IN_ADVANCE:
         return (_admitted(authority.persons[0], facts.level),)
-    if not own_input or relayed or authority.kind is AuthorityKind.NONE:
+    if not own_input or authority.kind is AuthorityKind.NONE:
         return (CheckedFor.no_one(),)
     runs = [_admitted(one, facts.level) for one in authority.persons]
     if authority.unidentified:

@@ -5,7 +5,8 @@ their authority; an unidentified sender's; the owner with an unidentified sender
 several senders one person makes; one sender by several connections, whose level is the
 lowest and whose met connection is none; a task's work, whose facts record its author's
 authority in advance at the level its task records (ADR-0368 §6:1, §6:3), whatever its
-input's words are or are marked as; and a work that carries none. Then a
+input's words are, and none where it holds a relayed input; and a work that carries none.
+Then a
 call run under a ticket, for its tapper at the level the tap came by (ADR-0367 §5:5,
 ADR-0377 §4:2 to §4:4).
 """
@@ -194,13 +195,22 @@ _ROWS: Final[list[tuple[str, WorkFacts | None, bool, bool, tuple[CheckedFor, ...
         (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.NORMAL),),
     ),
 ]
-_ROWS.append(
+_ROWS.extend(
     (
-        "in advance, a relayed input and words not its own take nothing away",
-        _facts(Sureness.WEAK, kind=AuthorityKind.IN_ADVANCE),
-        False,
-        True,
-        (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.WEAK),),
+        (
+            "in advance, its input's words not being a sender's own take nothing away",
+            _facts(Sureness.WEAK, kind=AuthorityKind.IN_ADVANCE),
+            False,
+            False,
+            (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.WEAK),),
+        ),
+        (
+            "in advance, a relayed input carries none (ADR-0351 §6:5)",
+            _facts(Sureness.WEAK, kind=AuthorityKind.IN_ADVANCE),
+            False,
+            True,
+            _NO_ONE,
+        ),
     )
 )
 
