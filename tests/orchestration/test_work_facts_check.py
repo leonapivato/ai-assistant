@@ -3,8 +3,9 @@
 Table-driven over the rows one person can reach: an identified sender's message carrying
 their authority; an unidentified sender's; the owner with an unidentified sender, the only
 several senders one person makes; one sender by several connections, whose level is the
-lowest and whose met connection is none; a task's work, for its recorded author at the
-level it records, though its own facts carry none; and a work that carries none. Then a
+lowest and whose met connection is none; a task's work, whose facts record its author's
+authority in advance at the level its task records (ADR-0368 §6:1, §6:3), whatever its
+input's words are or are marked as; and a work that carries none. Then a
 call run under a ticket, for its tapper at the level the tap came by (ADR-0367 §5:5,
 ADR-0377 §4:2 to §4:4).
 """
@@ -16,23 +17,29 @@ from typing import Final
 
 import pytest
 
+from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ApprovalGiver,
     ApprovalTap,
     AuthorityKind,
+    ChannelContext,
     ChannelIdentity,
     CheckedFor,
     DueNow,
+    RecordedChannelTrigger,
+    RecordedTextInput,
     ScheduledOccurrence,
     ScheduledTask,
     ScheduledTaskAuthor,
     Sureness,
+    WholeTextReply,
     WorkAuthority,
     WorkFacts,
     WorkFor,
 )
-from ai_assistant.orchestration.work_facts import check_runs_for, tap_runs_for
+from ai_assistant.orchestration.task_scheduler import SCHEDULE
+from ai_assistant.orchestration.work_facts import check_runs_for, started, tap_runs_for
 
 _AT: Final = datetime(2026, 11, 24, 9, 0, tzinfo=UTC)
 _CHAT: Final = ChannelIdentity(channel_type="conversation", instance_id="chat-1")
@@ -72,29 +79,33 @@ def _task(*, by_the_person: bool = True, level: Sureness = Sureness.NORMAL) -> S
     )
 
 
+#: A task's occurrence's recorded trigger: on the schedule, sent by no person.
+_OCCURRENCE: Final = RecordedChannelTrigger(
+    target=SCHEDULE,
+    channel=SCHEDULE,
+    payload=RecordedTextInput(text="it is time"),
+    context=ChannelContext(),
+    reply=WholeTextReply(),
+    parties=declared_input(SCHEDULE, ())[0],
+)
+
+
+def _task_facts(task: ScheduledTask) -> WorkFacts:
+    """A task's work's facts, as its occurrence's admission records them (§6:1, §6:3)."""
+    return started(_OCCURRENCE, task=task)
+
+
 _NO_ONE: Final = (CheckedFor.no_one(),)
 _NONE: Final = WorkFacts(for_whom=_OWNER, authority=WorkAuthority.none(), level=Sureness.NONE)
 
 #: Each row: its name, the work's facts, whether its input is its senders' own words,
-#: whether it holds a relayed input, its task, and whom the check runs for.
-_ROWS: Final[
-    list[
-        tuple[
-            str,
-            WorkFacts | None,
-            bool,
-            bool,
-            ScheduledTask | None,
-            tuple[CheckedFor, ...],
-        ]
-    ]
-] = [
+#: whether it holds a relayed input, and whom the check runs for.
+_ROWS: Final[list[tuple[str, WorkFacts | None, bool, bool, tuple[CheckedFor, ...]]]] = [
     (
         "an identified sender's message carrying their authority, at its level",
         _facts(Sureness.NORMAL),
         True,
         False,
-        None,
         (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.NORMAL),),
     ),
     (
@@ -102,7 +113,6 @@ _ROWS: Final[
         _facts(Sureness.WEAK),
         True,
         False,
-        None,
         (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.WEAK),),
     ),
     (
@@ -110,7 +120,6 @@ _ROWS: Final[
         _facts(Sureness.NONE, persons=(), unidentified=True),
         True,
         False,
-        None,
         (CheckedFor.anyone(),),
     ),
     (
@@ -118,7 +127,6 @@ _ROWS: Final[
         _facts(Sureness.NONE, unidentified=True),
         True,
         False,
-        None,
         (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.NONE), CheckedFor.anyone()),
     ),
     (
@@ -126,31 +134,27 @@ _ROWS: Final[
         _facts(Sureness.WEAK),
         True,
         False,
-        None,
         (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.WEAK),),
     ),
     (
-        "a task's work: its recorded author, at the level it records, whatever its facts",
-        _NONE,
+        "a task's work: its author, in advance, at the level its task records",
+        _task_facts(_task(level=Sureness.NORMAL)),
         False,
         False,
-        _task(level=Sureness.NORMAL),
         (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.NORMAL),),
     ),
     (
         "a task set at weak runs at weak",
-        _NONE,
+        _task_facts(_task(level=Sureness.WEAK)),
         False,
         False,
-        _task(level=Sureness.WEAK),
         (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.WEAK),),
     ),
     (
         "a task the assistant authored carries none",
-        _NONE,
+        _task_facts(_task(by_the_person=False)),
         False,
         False,
-        _task(by_the_person=False),
         _NO_ONE,
     ),
     (
@@ -158,16 +162,14 @@ _ROWS: Final[
         _NONE,
         False,
         False,
-        None,
         _NO_ONE,
     ),
-    ("a work with no facts fails closed", None, True, False, None, _NO_ONE),
+    ("a work with no facts fails closed", None, True, False, _NO_ONE),
     (
         "a forward: its input is not its sender's own words",
         _facts(Sureness.NORMAL),
         False,
         False,
-        None,
         _NO_ONE,
     ),
     (
@@ -175,7 +177,6 @@ _ROWS: Final[
         _facts(Sureness.NORMAL),
         True,
         True,
-        None,
         _NO_ONE,
     ),
     (
@@ -183,7 +184,6 @@ _ROWS: Final[
         _facts(Sureness.NORMAL, persons=("person:someone",)),
         True,
         False,
-        None,
         _NO_ONE,
     ),
     (
@@ -191,14 +191,22 @@ _ROWS: Final[
         _facts(Sureness.NORMAL, kind=AuthorityKind.IN_ADVANCE),
         True,
         False,
-        None,
         (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.NORMAL),),
     ),
 ]
+_ROWS.append(
+    (
+        "in advance, a relayed input and words not its own take nothing away",
+        _facts(Sureness.WEAK, kind=AuthorityKind.IN_ADVANCE),
+        False,
+        True,
+        (CheckedFor.for_person(OWNER_PERSON_ID, Sureness.WEAK),),
+    )
+)
 
 
 @pytest.mark.parametrize(
-    ("facts", "own_input", "relayed", "task", "expected"),
+    ("facts", "own_input", "relayed", "expected"),
     [row[1:] for row in _ROWS],
     ids=[row[0] for row in _ROWS],
 )
@@ -206,11 +214,39 @@ def test_the_check_runs_for_whom_the_table_names(
     facts: WorkFacts | None,
     own_input: bool,
     relayed: bool,
-    task: ScheduledTask | None,
     expected: tuple[CheckedFor, ...],
 ) -> None:
     """ADR-0368 §7:1 to §7:5 and its table, read from what the work records."""
-    assert check_runs_for(facts, own_input=own_input, relayed=relayed, task=task) == expected
+    assert check_runs_for(facts, own_input=own_input, relayed=relayed) == expected
+
+
+@pytest.mark.parametrize(
+    ("by_the_person", "level", "authority"),
+    [
+        (
+            True,
+            Sureness.NORMAL,
+            WorkAuthority(kind=AuthorityKind.IN_ADVANCE, persons=(OWNER_PERSON_ID,)),
+        ),
+        (
+            True,
+            Sureness.WEAK,
+            WorkAuthority(kind=AuthorityKind.IN_ADVANCE, persons=(OWNER_PERSON_ID,)),
+        ),
+        (False, Sureness.NONE, WorkAuthority.none()),
+    ],
+    ids=["set by the owner at normal", "set by the owner at weak", "set by the assistant"],
+)
+def test_a_tasks_work_records_its_authors_authority_in_advance(
+    by_the_person: bool, level: Sureness, authority: WorkAuthority
+) -> None:
+    """ADR-0368 §6:1, §6:3: its facts say so, at the level the task records; none where the
+    assistant set it. An occurrence handed no task records none, failing closed."""
+    facts = _task_facts(_task(by_the_person=by_the_person, level=level))
+    bare = started(_OCCURRENCE)
+
+    assert facts == WorkFacts(for_whom=_OWNER, authority=authority, level=level)
+    assert bare.authority == WorkAuthority.none()
 
 
 @pytest.mark.parametrize(

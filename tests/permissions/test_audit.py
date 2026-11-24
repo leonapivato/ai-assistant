@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
-    from ai_assistant.core.protocols import AuditTrail
+    from ai_assistant.core.protocols import AuditTrail, PermissionLineStore
     from ai_assistant.core.types import PermissionDecision
     from ai_assistant.testing.cancellation import SuspendedCall
 
@@ -102,6 +102,10 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
     @pytest.fixture
     def trail(self, ephemeral: SqliteAuditTrail) -> AuditTrail:
         return ephemeral
+
+    def trail_over(self, lines: PermissionLineStore) -> AuditTrail:
+        """An in-memory trail resolving a grant's name in ``lines`` (ADR-0367 §4:6)."""
+        return SqliteAuditTrail(path=":memory:", lines=lines)
 
     async def store_as_history(self, trail: AuditTrail, recorded: PermissionDecision) -> None:
         """Insert ``recorded`` through this store's own write, minus its validation.

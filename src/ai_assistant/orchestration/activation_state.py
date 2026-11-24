@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         RecordedInputMessage,
         RecordedMessageDevices,
         ReplyCapability,
+        ScheduledTask,
         StageEntry,
         WorkFacts,
     )
@@ -672,7 +673,7 @@ def active_state() -> ActivationState | None:
     return None if scope is None else scope.state
 
 
-def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata seams, the stage bound, the messages it took in, who sent them and through which devices
+def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata seams, the stage bound, the messages it took in, who sent them, through which devices, and a task's occurrence's task
     input: ChannelInput,  # noqa: A002 — channel contract parameter
     reply: ReplyCapability | None,
     *,
@@ -683,6 +684,7 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     carries_outside_mark: bool = False,
     senders: Sequence[InputSender] = (),
     message_devices: Sequence[RecordedMessageDevices] = (),
+    task: ScheduledTask | None = None,
 ) -> ActivationState:
     """Allocate capture metadata after channel validation, without making it admission policy.
 
@@ -708,7 +710,9 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     from the accounts it arrived by: those its ``messages`` each record, and ``senders``,
     for an input whose trigger records no messages, as the hub chat's does, whose parties
     are read from them; none for an input no person sent. **The three facts** it starts
-    with are recorded from the trigger here (§2:4), and logged
+    with are recorded from the trigger here (§2:4), a task's occurrence's from the task its
+    input names too, ``task``, whose author's authority its work carries in advance
+    (§6:1), and logged
     (:func:`~ai_assistant.orchestration.work_facts.log_facts`): every reader reads them
     (ADR-0368 §9:1, §9:5), and a work whose facts could not be decided records none,
     which no reader reads as any person's.
@@ -757,7 +761,7 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
         stage_limit=stage_limit,
         clock=clock,
     )
-    state.started_facts = record_started(state.trigger, activation_id=activation_id)
+    state.started_facts = record_started(state.trigger, activation_id=activation_id, task=task)
     return state
 
 

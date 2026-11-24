@@ -22,7 +22,7 @@ from ai_assistant.testing.cancellation import SuspendedMidWrite
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.protocols import AuditTrail
+    from ai_assistant.core.protocols import AuditTrail, PermissionLineStore
     from ai_assistant.core.types import PermissionDecision
 
 
@@ -37,6 +37,10 @@ class TestFakeAuditTrailContract(AuditTrailContract):
     @pytest.fixture
     def trail(self) -> AuditTrail:
         return FakeAuditTrail()
+
+    def trail_over(self, lines: PermissionLineStore) -> AuditTrail:
+        """A trail resolving a grant's name in ``lines`` (ADR-0367 §4:6)."""
+        return FakeAuditTrail(lines=lines)
 
     async def store_as_history(self, trail: AuditTrail, recorded: PermissionDecision) -> None:
         """Put ``recorded`` straight into the dict this fake holds (ADR-0247 §12 Arm D"').

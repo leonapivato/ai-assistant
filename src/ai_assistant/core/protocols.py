@@ -5116,7 +5116,11 @@ class ActionPolicy(Protocol):
 
         Must return ``authorised_by is None`` from a policy constructed with
         **no** authorisation source, so no such implementation can invent an
-        authorisation while ruling on a fresh request. **Must return
+        authorisation while ruling on a fresh request. **The grant a request rests on is
+        a source the request itself carries** (``ActionRequest.rests_on``, ADR-0367 §4:6,
+        §16): on such a request an ``ALLOW`` may name that grant in ``authorised_by``,
+        and no other value; a request carrying none gets nothing a policy with no source
+        could not give, so the policy stays a function of its argument. **Must return
         ``authorised_subject is None`` from every policy** (ADR-0321 §7:7): the
         field fingerprinted a standing recipient grant, recipient grants retired
         (§7:1), and no policy has a grant seam to read one from.
@@ -5578,15 +5582,24 @@ class AuditTrail(Protocol):
         **Validates a route-(c) standing row against the binding on the row, and
         reads nothing else for it** (ADR-0247 §2, ADR-0272 §1). A non-resolving
         ``ALLOW`` carrying an ``egress_binding`` and an ``authorised_by`` with
-        **no** ``authorised_subject`` is accepted **only** where **exactly one** of
+        **no** ``authorised_subject`` is route (c)'s **only** where **exactly one** of
         its binding's ``closed_loop`` and ``forecast_reach`` is ``True`` **and** its
-        ``authorised_by`` equals that binding's ``account.reference``; failing
-        either, it is refused with the ``InvalidAuthorisationError`` the ``Raises:``
-        section below names. Both facts are read **from the decision** — no store
-        read, no ``Settings`` read and no clock — and the trail holds no
-        configuration and is given none: the comparison of the binding's account
-        and origin against what the owner configured is the policy's, taken where
-        the configured values live.
+        ``authorised_by`` equals that binding's ``account.reference``. Both facts are
+        read **from the decision** — no store read, no ``Settings`` read and no clock
+        — and the trail holds no configuration and is given none: the comparison of
+        the binding's account and origin against what the owner configured is the
+        policy's, taken where the configured values live.
+
+        **Resolves every other standing row to the grant a person made that it names**
+        (ADR-0367 §3:6, §4:6; ADR-0379 §4). A non-resolving ``ALLOW`` naming an
+        authorisation, an egress call's or not, that is not route (c)'s is accepted
+        only where its ``authorised_by`` names, in the line store the implementation
+        was constructed with, a grant that allows, for the decision's capability, made
+        no later than the decision and standing when it is read; an implementation
+        given no line store, or one whose store cannot be read, refuses it with the
+        ``InvalidAuthorisationError`` the ``Raises:`` section below names. The store is
+        read, never written. What the line covers beyond its capability, whom and
+        which thing, is the check's, which named it (ADR-0376 §2:7).
 
         **Exactly one, because the eligibility fact is the kind's own** (ADR-0272
         §1). Each kind route (c) covers carries its own — ``closed_loop`` for a
@@ -5607,10 +5620,9 @@ class AuditTrail(Protocol):
             InvalidResolutionError: If ``resolves`` is set and the invariant
                 above does not hold.
             InvalidAuthorisationError: If an ``ALLOW``, resolving or not, carries
-                an ``authorised_subject``; or if a route-(c) decision carries a
-                binding that records no origin, that does not carry exactly one of
-                ``closed_loop`` and ``forecast_reach``, or a pointer that is not
-                that binding's ``account.reference``.
+                an ``authorised_subject``; if a standing egress decision carries a
+                binding that records no origin; or if a standing decision that is not
+                route (c)'s names no grant its line store resolves as above.
         """
         ...
 

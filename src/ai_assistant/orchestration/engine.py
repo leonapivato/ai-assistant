@@ -7177,7 +7177,7 @@ class Engine:
     # holds, as the canonical fake answers them. Each is the owner's own act, reached only
     # through the command row (§6:2, §6:3), and nothing in a work calls one (§6:1): the
     # command line is their only caller (§6:6). A line made here is recorded and listed,
-    # and read by the check; what a call is allowed to do is still today's rules' to say.
+    # and the check decides by it every call it checks after (§4:9).
 
     async def _declared(self) -> tuple[ToolDefinition, ...]:
         """Every tool the running hub declares, each once: none without the phases."""
@@ -7990,6 +7990,9 @@ class Engine:
             id_factory=lambda: activation_id,
             stage_limit=self._stage_record_limit,
             carries_outside_mark=task.outside_content,
+            # ADR-0368 §6:1, §6:3: its work carries its author's authority in advance, at
+            # the level the task records of the work that set it.
+            task=task,
         )
         deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
         work = self._activation_task(

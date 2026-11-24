@@ -61,20 +61,39 @@ policy's recorded allow as the deciding decision (ADR-0321 §4:17). Under a tick
 as any approved call does (ADR-0361 §5:4); a deny still refuses it, and the policy's
 confirm still asks.
 
-**The check, recorded beside today's rules** (ADR-0367 §4:5, ADR-0379 §3:2). Once a call
-is bound, and before the policy, the check of
-:mod:`~ai_assistant.orchestration.permission_check` runs over the standing lines, read
-from the line store for each call's check, so a line made or removed while a round is
-authorized bears on its later calls (ADR-0376 §4:9), for whom the round is handed
-(``check_for``, ADR-0368 §7), or, for a ticket's call, for its tapper at the level the tap
-came by (ADR-0367 §5:5). ``request_approval`` is checked as a call of its own, and a
-``text`` call into a connection that is not one of the work's inputs' as every call is
-(§4:7); one into such a place stays outside it. Its outcome rides on the call's verdict,
-whole, and nothing is decided by it: the request carries no line, no verdict, reason,
-ruling or call handed on changes, and a read of the lines that fails, or a check that
-raises, is recorded as such. Each call it reached is logged once the round is decided, as
-``permission_check_compared``, in codes alone, with what it would have decided beside
-what was.
+**The check decides, first** (ADR-0367 §4:5, ADR-0379 §3). Once a call is bound, and
+before the policy, the check of :mod:`~ai_assistant.orchestration.permission_check` runs
+over the standing lines, read from the line store for each call's check, so a line made or
+removed while a round is authorized bears on its later calls (ADR-0376 §4:9), for whom the
+round is handed (``check_for``, ADR-0368 §7), or, for a ticket's call, for its tapper at the
+level the tap came by (ADR-0367 §5:5). Its outcome rides on the call's verdict, whole
+(ADR-0379 §3:2), and is turned into what ADR-0379 §3:3's table rules, and nothing else:
+
+- *allowed*: on to the other checks, in their order, unchanged; resting on a made grant,
+  the request carries that grant (``ActionRequest.rests_on``), which the policy names in
+  its ruling (ADR-0367 §4:6, ADR-0379 §4);
+- *not done*, a limit or no grant: not done, with its reason, asking no one (§4:2), the
+  policy never asked;
+- *needs a yes*: the call needs the person, as a confirm does (ADR-0361 §2:4), where the
+  yes is theirs to give: a shortfall's always (§5:3); a grant that asks, the yes of whoever
+  the call's thing belongs to, read from its record (§5:6, ADR-0381 §6:1), and a call with
+  no thing the yes of the person the work is for (ADR-0381 §6:2). A thing with no record,
+  or one that is someone else's, is not done, and no one is asked (ADR-0381 §5:2). In a
+  work that is no person's, a call needing a yes is not done (ADR-0368 §7:4). A policy's
+  deny still refuses such a call: a check never turns a deny into anything else (§4:5).
+
+A check that could not run decides too: lines that cannot be read and a check that raises
+each leave the call not done, recorded as such (ADR-0379 §3:2). The call a
+``request_approval`` asks about is checked as a call made would be, and is asked about only
+where it needs a yes, or is allowed: one a limit or no grant refuses, or one whose thing is
+no one's, gets no request (ADR-0361 §2:3). ``request_approval`` is checked as a call of its
+own besides, which its verdict records. A ticket's call runs only where the check allows it
+for its tapper, a grant that asks met by the tap where the tap is the yes it needs. A
+``text`` call into a connection that is not one of the work's inputs' is checked as every
+call is (§4:7), and is sent only where the check allows it: a message is never asked about.
+One into such a place stays outside the check. A stage handed no line store checks
+nothing, so the composition root always hands it one. Every reason is code's own and names
+no line and no bar (ADR-0367 §3:7).
 
 **It logs stage and code-owned reason only**, never arguments or rulings' text (ADR-0275
 §8).
@@ -124,6 +143,7 @@ from ai_assistant.core.types import (
     CapabilityResult,
     CarriedProvenance,
     CheckedFor,
+    CheckOutcomeKind,
     DiagnosticKind,
     DiagnosticSource,
     DigestOutcome,
@@ -142,6 +162,8 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     StoryNote,
     TapOnCard,
+    ThingKey,
+    ThingKind,
     TicketState,
     ToolCall,
     ToolOutcome,
@@ -200,12 +222,12 @@ if TYPE_CHECKING:
         PermissionLineStore,
         PlanStore,
         StoryStore,
+        ThingRecordStore,
         ToolRegistry,
     )
     from ai_assistant.core.types import (
         ActivationEffect,
         ApprovalTap,
-        CheckOutcome,
         FrozenJson,
         FrozenJsonMapping,
         PermissionLine,
@@ -228,7 +250,6 @@ __all__ = [
     "read_outside_content",
     "shown_values",
     "values_digest",
-    "would_decide",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -347,10 +368,49 @@ class Verdict(StrEnum):
     """A deny, a memory reject, or a call no tool could be bound to: never run."""
 
 
-# --- the check, beside today's rules (ADR-0367 §4:5, ADR-0379 §3) ------------------------
+# --- the check decides (ADR-0367 §4:5, ADR-0379 §3) --------------------------------------
 
-#: How severe each verdict is, least to most.
-_SEVERITY: Final = {Verdict.ALLOWED: 0, Verdict.NEEDS_YOU: 1, Verdict.NOT_DONE: 2}
+#: ADR-0367 §4:2, §3:7: why the check leaves a call not done, in words naming no line.
+_LIMITED: Final = "this call is not permitted: it is forbidden for whom this work acts for"
+_NOT_GRANTED: Final = "this call is not permitted: nothing allows it for whom this work acts for"
+#: ADR-0379 §3:2: a check that could not run is not done, failing closed.
+_CHECK_UNREAD: Final = (
+    "whether this call is permitted could not be checked: the permissions could not be "
+    "read, so it is not done"
+)
+_CHECK_FAILED: Final = "whether this call is permitted could not be checked, so it is not done"
+#: ADR-0368 §7:4: a call needing a yes, in a work that is no person's.
+_NO_ONE_ASKED: Final = (
+    "this call needs a person's yes, and this work is no person's, so no one is asked and "
+    "it is not done"
+)
+#: ADR-0367 §5:3: a shortfall, which the person is asked about.
+_NOT_SURE_ENOUGH: Final = "this call needs the person's yes: this work is not sure enough of them"
+#: ADR-0367 §5:6, ADR-0381 §6: a grant that asks, which whoever the thing is asked about.
+_THEIR_YES: Final = "this call needs the yes of whoever it acts through"
+#: ADR-0381 §5:2: the thing it acts through has no record, so no one's yes is asked.
+_NO_ONES_THING: Final = (
+    "this call needs the yes of whoever the connection it acts through belongs to, and it "
+    "belongs to no one, so no one is asked and it is not done"
+)
+#: A yes no one this work is for can give: it is not asked for (ADR-0367 §16's
+#: "Approvals" change is not built).
+_SOMEONE_ELSES: Final = (
+    "this call needs the yes of someone this work is not for, who cannot be asked, so it "
+    "is not done"
+)
+#: ADR-0361 §2:9: ``request_approval`` never needs the person itself.
+_NOT_ASKABLE: Final = "asking for a yes is not permitted in this work"
+#: A message needing a yes: a message is never asked about (ADR-0356 §7:7).
+_MESSAGE_NOT_ASKED: Final = (
+    "this message needs the person's yes, and a message is not asked about, so it is not sent"
+)
+#: ADR-0367 §5:4, §5:5: a ticket whose tap fell short of what its call needs.
+_TAPPED_SHORT: Final = (
+    "the yes that approved this call was given less surely than this call needs, so it is not done"
+)
+#: ADR-0367 §5:6: a ticket whose tap is not the yes its call needs.
+_NOT_THEIR_YES: Final = "the yes that approved this call is not the yes it needs, so it is not done"
 
 
 def _check_word(made: CallCheck) -> str:
@@ -360,86 +420,54 @@ def _check_word(made: CallCheck) -> str:
     return "+".join(one.outcome.kind.value for one in made.runs)
 
 
-def _outcome_verdict(outcome: CheckOutcome, *, persons_work: bool) -> Verdict:
-    """What an outcome becomes (ADR-0379 §3:3's table, ADR-0368 §7:4).
+@dataclass(frozen=True, slots=True)
+class _Decided:
+    """What the check decides of one call (ADR-0379 §3:3).
 
-    Allowed, the call still passing every other check; a yes, which a work that is not a
-    person's asks for none of, so its call is not done; and not done.
+    ``reason`` is code's own, naming no line and no bar (ADR-0367 §3:7); ``rests_on`` is the
+    made grant an allowed call rests on, where it rests on one (§4:1).
     """
-    if outcome.allows:
-        return Verdict.ALLOWED
-    if outcome.kind in CHECK_NEEDS_A_YES:
-        return Verdict.NEEDS_YOU if persons_work else Verdict.NOT_DONE
-    return Verdict.NOT_DONE
+
+    verdict: Verdict
+    reason: str | None = None
+    rests_on: str | None = None
 
 
-def would_decide(
-    made: CallCheck, decided: Verdict, *, persons_work: bool
-) -> tuple[Verdict, CheckOutcome | None]:
-    """What would have been decided of a call were the check deciding, and by which outcome.
+def _refused_by(made: CallCheck) -> str | None:
+    """Why the check leaves a call not done whoever would be asked, or ``None``.
 
-    The check joins today's checks first, and a call runs only where every check allows it
-    (ADR-0367 §4:5): so what would be decided is the more severe of what was decided and
-    what each outcome becomes, a call of several senders done only where it is allowed
-    for every one (ADR-0368 §7:3). A check that did not run, or that a message stays
-    outside of, would decide nothing.
-
-    Args:
-        made: What the check made of the call.
-        decided: What today's rules decided of it.
-        persons_work: Whether the work is a person's (ADR-0368 §9:5), whose call needing a
-            yes asks for one (§7:4).
-
-    Returns:
-        The verdict, and the outcome it is the check's by: of the outcomes, the first
-        whose verdict is the most severe; ``None`` where the check ran no outcome.
+    A check that did not run (ADR-0379 §3:2), and a limit or no grant for any one it ran
+    for (ADR-0367 §4:2, ADR-0368 §7:3), in that order.
     """
-    if made.kind is not CallCheckKind.CHECKED:
-        return decided, None
-    deciding = made.runs[0].outcome
-    worst = _outcome_verdict(deciding, persons_work=persons_work)
-    for one in made.runs[1:]:
-        verdict = _outcome_verdict(one.outcome, persons_work=persons_work)
-        if _SEVERITY[verdict] > _SEVERITY[worst]:
-            deciding, worst = one.outcome, verdict
-    return (worst if _SEVERITY[worst] > _SEVERITY[decided] else decided), deciding
+    if made.kind is CallCheckKind.LINES_UNREAD:
+        return _CHECK_UNREAD
+    if made.kind is CallCheckKind.FAILED:
+        return _CHECK_FAILED
+    kinds = {one.outcome.kind for one in made.runs}
+    if CheckOutcomeKind.NOT_DONE_LIMIT in kinds:
+        return _LIMITED
+    if CheckOutcomeKind.NOT_DONE_NO_GRANT in kinds:
+        return _NOT_GRANTED
+    return None
 
 
-def _compared(
-    state: _Round, verdicts: Sequence[CallVerdict], messages: Sequence[MessageVerdict]
-) -> None:
-    """Log, for each call the check reached, what it would have decided beside what was.
+def _needs_a_yes(made: CallCheck) -> frozenset[CheckOutcomeKind]:
+    """The outcomes of ``made`` under which its call needs a yes (ADR-0379 §3:1)."""
+    return frozenset(one.outcome.kind for one in made.runs) & CHECK_NEEDS_A_YES
 
-    One ``permission_check_compared`` entry per call, of codes and levels alone: the
-    capability, what came of the check, the deciding outcome, whom it ran for and at what
-    level, what was decided, what would have been, and whether the two differ. No value of
-    the call, no person's identifier and no line's identifier is logged (ADR-0275 §8), so
-    a running hub's disagreements are counted from its log with no text leaving it.
+
+def _rests_on(made: CallCheck) -> str | None:
+    """The made grant an allowed call rests on (ADR-0379 §4:1), or ``None``.
+
+    Named only where the check ran for one: a work of several senders is done only where
+    every one is allowed (ADR-0368 §7:3), and how their outcomes join beyond that is left
+    to a later decision (ADR-0379 §8), so a ruling names no grant for it and ADR-0021
+    §5's floor still asks about a disclosing call.
     """
-    decided: list[tuple[str, Verdict]] = [
-        (one.call_id, one.verdict) for one in verdicts if one.call_id in state.made
-    ]
-    decided.extend(
-        (one.call_id, Verdict.ALLOWED if one.allowed else Verdict.NOT_DONE)
-        for one in messages
-        if one.call_id is not None and one.call_id in state.made
-    )
-    persons_work = state.person is not None
-    for call_id, verdict in decided:
-        capability, made = state.made[call_id]
-        would, outcome = would_decide(made, verdict, persons_work=persons_work)
-        _log.info(
-            "permission_check_compared",
-            stage="authorizing",
-            capability=capability,
-            check=made.kind.value,
-            outcome=None if outcome is None else outcome.kind.value,
-            ran_for="+".join(one.checked_for.kind.value for one in made.runs) or None,
-            check_level="+".join(one.checked_for.level.value for one in made.runs) or None,
-            decided=verdict.value,
-            would_decide=would.value,
-            differs=would is not verdict,
-        )
+    if len(made.runs) != 1:
+        return None
+    outcome = made.runs[0].outcome
+    return outcome.line if outcome.kind is CheckOutcomeKind.ALLOWED_ON_MADE_GRANT else None
 
 
 # --- the input -----------------------------------------------------------------------
@@ -644,8 +672,8 @@ class CallVerdict:
         tool_check: Whether it is not done by the tool's own checks, which code runs here
             before the ruling, as an email's recipients and exact parts are, so planning
             is shown it not done rather than refused (ADR-0364 §6:2, §9:8, §9:13).
-        check: What the check made of it (ADR-0379 §3:2), recorded beside today's rules,
-            which still decide (ADR-0367 §4:5); ``None`` where it never reached the check.
+        check: What the check made of it (ADR-0379 §3:2), which decides first (ADR-0367
+            §4:5); ``None`` where it never reached the check.
     """
 
     call_id: str
@@ -694,8 +722,8 @@ class MessageVerdict:
         call_id: The ``text`` call it rules on, by its id; ``None`` for the round's own
             message (ADR-0356 §7:7).
         check: For a ``text`` call, what the check made of it (ADR-0367 §4:7, ADR-0379
-            §3:2), recorded beside its place's check, which still decides; ``None`` for
-            the round's own message, which is no call.
+            §3:2), which decides beside its place's check; ``None`` for the round's own
+            message, which is no call.
     """
 
     place: str | None
@@ -1102,11 +1130,16 @@ class _Selected:
 
 @dataclass(frozen=True, slots=True)
 class _Ruled:
-    """A call ruled on: its request and the decision the trail holds."""
+    """A call ruled on: its request and the decision the trail holds.
+
+    ``yes`` is why the check has the call need a yes (ADR-0379 §3:3), where it does: the
+    call needs the person whatever the policy's other rules allow, unless they deny it.
+    """
 
     request: ActionRequest
     decision: PermissionDecision
     effect_id: str | None
+    yes: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1296,6 +1329,7 @@ class AuthorizingStage:
         binder: EgressBinder | None = None,
         plans: PlanStore | None = None,
         lines: PermissionLineStore | None = None,
+        things: ThingRecordStore | None = None,
         preference: Preference | None = None,
         registered_search: frozenset[str] = frozenset(),
         registered_forecast: frozenset[str] = frozenset(),
@@ -1320,9 +1354,12 @@ class AuthorizingStage:
                 none is wired, and then no ticket runs, nothing is found waiting on a
                 card, and a deliberate repeat is left to the claim, which refuses one
                 matching an unknown effect.
-            lines: The line store the check reads the standing lines from, once per
-                round (ADR-0367 §3:6, §4:1); ``None`` where none is wired, and then no
-                call is checked.
+            lines: The line store the check reads the standing lines from, for each
+                call's check (ADR-0367 §3:6, §4:1); ``None`` where none is wired, and then
+                no call is checked, which only a stage built to test the other checks is.
+            things: The store of whose each thing is, which a call covered only by a
+                grant that asks reads for whose yes it needs (ADR-0381 §6:1); ``None``
+                where none is wired, and then every thing reads as no one's (§5:1).
             preference: The deployment's tool preference sequence (ADR-0144 §4).
             registered_search: The ids of the tools that are this deployment's own
                 registered search (ADR-0247 §4), whose calls carry ``closed_loop``.
@@ -1343,6 +1380,7 @@ class AuthorizingStage:
         self._binder = binder
         self._plans = plans
         self._lines = lines
+        self._things = things
         self._preference = Preference() if preference is None else preference
         self._registered_search = frozenset(registered_search)
         self._registered_forecast = frozenset(registered_forecast)
@@ -1425,17 +1463,11 @@ class AuthorizingStage:
         message = None if snapshot.message is None else self._message(snapshot, snapshot.message)
         call_messages: list[MessageVerdict] = []
         for text in snapshot.call_messages:
-            call_messages.append(
-                replace(
-                    self._message(snapshot, text),
-                    check=await self._message_checked(snapshot, text, state),
-                )
-            )
+            call_messages.append(await self._call_message(snapshot, text, state))
         verdicts = tuple(
             one if one.call_id not in state.made else replace(one, check=state.made[one.call_id][1])
             for one in state.verdicts
         )
-        _compared(state, verdicts, call_messages)
         return RoundAuthorization(
             activation_id=snapshot.activation_id,
             round_id=snapshot.round.id,
@@ -1657,15 +1689,19 @@ class AuthorizingStage:
         return {key: known[key] for key in keys}
 
     async def _ruled(
-        self, call: ProposedCall, selected: _Selected, state: _Round, *, checking: bool = True
+        self, call: ProposedCall, selected: _Selected, state: _Round, *, keep: bool = True
     ) -> _Ruled | CallVerdict:
         """Bind the egress, build the request, check it, ask the policy, record the ruling.
 
-        **The check runs first** of ADR-0306 §4:1's checks (ADR-0367 §4:5), once the call
-        is bound, since a call's thing may be the account it is bound to (ADR-0376 §2:3).
-        Its outcome is recorded beside today's rules and changes nothing here: the request
-        carries no line, and the policy rules as it did. ``checking`` is off for the call a
-        ``request_approval`` asks about, which is a question and not a call made.
+        **The check runs first** of ADR-0306 §4:1's checks, and decides (ADR-0367 §4:5),
+        once the call is bound, since a call's thing may be the account it is bound to
+        (ADR-0376 §2:3). A call it leaves not done is not ruled on: no policy is asked and
+        nothing is recorded in the trail (§4:2). One it allows resting on a made grant is
+        ruled on carrying that grant (``ActionRequest.rests_on``, ADR-0379 §4:1); one that
+        needs a yes is ruled on as any call, and needs the person unless the policy denies
+        it. ``keep`` is off for the call a ``request_approval`` asks about, whose check
+        decides whether it is asked about while the episode keeps ``request_approval``'s
+        own.
 
         **The kind's carried fact is written here, as the old path writes it**
         (ADR-0247 §4, ADR-0260 §6): ``closed_loop`` exactly for a call to this
@@ -1699,9 +1735,19 @@ class AuthorizingStage:
             request = ActionRequest(tool=tool, parameters=parameters, egress_binding=binding)
         except ValidationError, ValueError:
             return _not_done(call, _MALFORMED)
-        if checking:
-            await self._check_lines(
-                call.call_id, request.tool, state, binding=request.egress_binding
+        made = await self._check_lines(
+            call.call_id, request.tool, state, binding=request.egress_binding, keep=keep
+        )
+        thing = call_thing(str(request.tool.capability), binding=request.egress_binding)
+        decided = await self._decided(made, state, thing=thing)
+        if decided.verdict is Verdict.NOT_DONE:
+            return _not_done(call, decided.reason or _CHECK_FAILED)
+        if decided.rests_on is not None:
+            request = ActionRequest(
+                tool=request.tool,
+                parameters=request.parameters,
+                egress_binding=request.egress_binding,
+                rests_on=decided.rests_on,
             )
         effect_id = self._new_effect_id() if gets_effect_record(request.tool) else None
         ruling = await self._policy.decide(_detached_request(request))
@@ -1709,7 +1755,8 @@ class AuthorizingStage:
         # appending its ruling to the trail then fails (ADR-0314 §4).
         state.note(call, "policy", ruling.outcome.value, ruling.reason)
         decision = await self._recorded(request, ruling, effect_id)
-        return _Ruled(request=request, decision=decision, effect_id=effect_id)
+        yes = decided.reason if decided.verdict is Verdict.NEEDS_YOU else None
+        return _Ruled(request=request, decision=decision, effect_id=effect_id, yes=yes)
 
     async def _recorded(
         self,
@@ -1746,12 +1793,14 @@ class AuthorizingStage:
             raise AuditError(msg)
         return recorded
 
-    async def _after_the_policy(
+    async def _after_the_policy(  # noqa: C901, PLR0911 — ADR-0306 §4:1's checks after the policy, in order, each able to end the ruling
         self, call: ProposedCall, ruled: _Ruled, state: _Round
     ) -> CallVerdict:
-        """The policy's ruling, the stand-in, then the person model's or a candidate's rule.
+        """The policy's ruling, the check's yes, the stand-in, then the register's rules.
 
-        ADR-0306 §4:1 to §4:9, and ADR-0338 §8:5's rule for the person model's calls.
+        ADR-0306 §4:1 to §4:9, and ADR-0338 §8:5's rule for the person model's calls. A
+        deny refuses whatever the check said (ADR-0367 §4:5); a call the check has need a
+        yes needs the person, as a confirm does (ADR-0379 §3:3).
         """
         decision = ruled.decision
 
@@ -1769,6 +1818,9 @@ class AuthorizingStage:
         outcome = decision.ruling.outcome
         if outcome is PermissionOutcome.DENY:
             return verdict(Verdict.NOT_DONE, _DENIED)
+        if ruled.yes is not None:
+            # ADR-0379 §3:3, ADR-0361 §2:4: the check has it need the person's yes.
+            return verdict(Verdict.NEEDS_YOU, ruled.yes)
         if outcome is PermissionOutcome.CONFIRM:
             return verdict(Verdict.NEEDS_YOU, _CONFIRM)
         tool = ruled.request.tool
@@ -1822,13 +1874,17 @@ class AuthorizingStage:
     async def _check_request(self, one: CallToAuthorize, state: _Round) -> None:  # noqa: PLR0911 — each way the nested call is refused is a return of its own
         """Rule a ``request_approval`` call by the call it asks about (ADR-0361 §2:3, §2:9).
 
-        The nested call is selected and ruled as every call is (ADR-0306 §4:1). Where the
-        policy denies it, or no tool takes it, the request is not written, and the call
-        comes back not allowed and not to be asked about (ADR-0321 §2:10's second case).
-        Otherwise the request is written, whether or not the ruling needs the person:
-        planning may narrow what runs freely, never widen it. ``request_approval`` itself
-        never needs the person and the stand-in never applies to it, so its own decision
-        is an allow resting on that ruling, naming the effect record its write claims.
+        ``request_approval`` is checked as a call of its own first, and its verdict records
+        that check (ADR-0379 §3:2): where it is not allowed, nothing is asked. The nested
+        call is then selected, checked and ruled as every call is (ADR-0306 §4:1). Where the
+        check leaves it not done, a limit or no grant covering it or its thing being no
+        one's (ADR-0381 §5:2), where the policy denies it, or where no tool takes it, the
+        request is not written, and the call comes back not allowed and not to be asked
+        about (ADR-0321 §2:10's second case). Otherwise the request is written, whether or
+        not the ruling needs the person: planning may narrow what runs freely, never widen
+        it. ``request_approval`` itself never needs the person and the stand-in never
+        applies to it, so its own decision is an allow resting on that ruling, naming the
+        effect record its write claims.
         """
         call = one.call
         nested = nested_call(call.arguments)
@@ -1856,7 +1912,20 @@ class AuthorizingStage:
             state.note(call, "selection", selected.verdict.value, selected.reason)
             state.verdicts.append(_not_done(call, _not_asked(selected.reason)))
             return
-        ruled = await self._ruled(inner, selected, state, checking=False)
+        own = await self._selected(call, state)
+        if isinstance(own, CallVerdict):
+            state.verdicts.append(own)
+            return
+        # ADR-0379 §3:2: ``request_approval`` is a call of its own, checked as one, first.
+        asking = await self._decided(
+            await self._check_lines(call.call_id, own.tool, state), state, thing=None
+        )
+        if asking.verdict is not Verdict.ALLOWED:
+            reason = _NOT_ASKABLE if asking.verdict is Verdict.NEEDS_YOU else asking.reason
+            state.note(call, "request", Verdict.NOT_DONE.value, reason)
+            state.verdicts.append(_not_done(call, reason or _NOT_ASKABLE))
+            return
+        ruled = await self._ruled(inner, selected, state, keep=False)
         if isinstance(ruled, CallVerdict):
             state.note(call, "request", ruled.verdict.value, ruled.reason)
             state.verdicts.append(_not_done(call, _not_asked(ruled.reason)))
@@ -1871,10 +1940,6 @@ class AuthorizingStage:
                     decision_id=verdict.decision_id,
                 )
             )
-            return
-        own = await self._selected(call, state)
-        if isinstance(own, CallVerdict):
-            state.verdicts.append(own)
             return
         try:
             request = ActionRequest(tool=own.tool, parameters=own.parameters)
@@ -1892,8 +1957,6 @@ class AuthorizingStage:
         except ValidationError, ValueError:
             state.verdicts.append(_not_done(call, _MALFORMED))
             return
-        # ADR-0379 §3:2: ``request_approval`` is a call of its own, checked as one.
-        await self._check_lines(call.call_id, request.tool, state)
         effect_id = self._new_effect_id()
         ruling = PermissionRuling(outcome=PermissionOutcome.ALLOW, reason=_RULED_BY_ITS_CALL)
         state.note(call, "request", Verdict.ALLOWED.value, None)
@@ -2032,7 +2095,12 @@ class AuthorizingStage:
     async def _check_approved(self, one: CallToAuthorize, shown: _Shown, state: _Round) -> None:
         """Rule a ticket's call fresh, and record it (ADR-0361 §5:4, ADR-0321 §4:3-§4:17).
 
-        The policy is asked as for every call. A deny refuses it, and is recorded naming
+        The check runs first, for its tapper at the tap's level (ADR-0367 §5:5), and a call
+        it does not allow is not done, the policy never asked: a limit, no grant, a tap
+        given less surely than a grant's bar (§5:4), and a grant that asks whose yes the
+        tap is not, being the yes of whoever the call's thing belongs to (§5:6, ADR-0381
+        §6:1), or for a call with no thing the request's person's (ADR-0381 §6:2). The
+        policy is then asked as for every call. A deny refuses it, and is recorded naming
         no approval: a yes never overrides one (§4:12). A confirm, the lineage rule's
         included, is resolved on route (a): the confirm is recorded naming the approval,
         ``ActionPolicy.resolve`` is asked with ``approved=True``, and the resolving
@@ -2046,11 +2114,26 @@ class AuthorizingStage:
         request = shown.request
         # ADR-0367 §5:5: checked for the person whose tap approved it, at the level the tap
         # came by (ADR-0377 §4:2), whatever the work carries. A tap arrives by no
-        # connection a condition names, so none is met.
+        # connection a condition names, so none is met. It runs only where the check
+        # allows it: the tap is the yes a grant that asks needs, where it is that yes.
         tapper = CheckSubject(runs=(tap_runs_for(shown.tap),))
-        await self._check_lines(
+        made = await self._check_lines(
             call.call_id, request.tool, state, binding=request.egress_binding, subject=tapper
         )
+        thing = call_thing(str(request.tool.capability), binding=request.egress_binding)
+        decided = await self._decided(made, state, thing=thing, tap=shown.tap)
+        if decided.verdict is not Verdict.ALLOWED:
+            reason = decided.reason or _CHECK_FAILED
+            state.note(call, "check", Verdict.NOT_DONE.value, reason)
+            state.verdicts.append(_not_done(call, reason))
+            return
+        if decided.rests_on is not None:
+            request = ActionRequest(
+                tool=request.tool,
+                parameters=request.parameters,
+                egress_binding=request.egress_binding,
+                rests_on=decided.rests_on,
+            )
         effect_id = self._new_effect_id()
         ruling = await self._policy.decide(_detached_request(request))
         state.note(call, "policy", ruling.outcome.value, ruling.reason)
@@ -2134,8 +2217,7 @@ class AuthorizingStage:
 
         A read that fails, for any reason, is logged once under a fixed event name with a
         code-owned reason alone, and that call and every later call of the round are then
-        recorded as the check not having run, with no further read. It never stops the
-        round: today's rules still decide.
+        recorded as the check not having run, with no further read: each is not done.
         """
         if state.unread or self._lines is None:
             return None
@@ -2155,16 +2237,23 @@ class AuthorizingStage:
         binding: EgressBinding | None = None,
         subject: CheckSubject | None = None,
         place: str | None = None,
-    ) -> None:
+        keep: bool = True,
+    ) -> CallCheck | None:
         """Run the check for one call, and keep its outcome for the call's verdict.
 
         ADR-0379 §3:2: every call the check checks gets one outcome for each one it runs
         for (``subject``, or the work's), recorded whole. Where the lines cannot be read it
         records that it did not run, and where it raises, that it failed, logged under a
-        fixed event name. Nothing it answers changes what is decided (ADR-0367 §4:5).
+        fixed event name; :meth:`_decided` turns either into the call not done. ``keep``
+        off notes it for the diagnostic record alone, for a call whose verdict records
+        another's check.
+
+        Returns:
+            What the check made of the call; ``None`` where no line store is wired, and
+            then nothing is checked.
         """
         if self._lines is None:
-            return
+            return None
         capability = str(tool.capability)
         lines = await self._standing_lines(state)
         made: CallCheck
@@ -2178,11 +2267,118 @@ class AuthorizingStage:
                     thing=call_thing(capability, binding=binding, place=place),
                     subject=state.subject if subject is None else subject,
                 )
-            except Exception:  # a check that raises is recorded as such, and decides nothing
+            except Exception:  # a check that raises is recorded as such, and fails closed
                 _log.warning("permission_check_failed", stage="authorizing", reason="defect")
                 made = CallCheck(kind=CallCheckKind.FAILED)
-        state.checked(call_id, capability, made)
-        state.note_call(call_id, "check", _check_word(made), None)
+        if keep:
+            state.checked(call_id, capability, made)
+        state.note_call(call_id, "check" if keep else "asked_check", _check_word(made), None)
+        return made
+
+    async def _decided(
+        self,
+        made: CallCheck | None,
+        state: _Round,
+        *,
+        thing: str | None,
+        tap: ApprovalTap | None = None,
+    ) -> _Decided:
+        """What the check's outcome decides of a call (ADR-0379 §3:3).
+
+        Not done where the check did not run, or a limit or no grant covers the call for
+        any one it ran for (ADR-0367 §4:2, ADR-0368 §7:3); needing a yes where a grant
+        would cover it but for its bar, or covers it only with approval
+        (:meth:`_yes_needed`); otherwise allowed, naming the made grant it rests on where it
+        rests on one (ADR-0379 §4:1). ``None`` is no check wired: allowed, resting on none.
+
+        Args:
+            made: What the check made of the call, or ``None``.
+            state: The round.
+            thing: The call's thing, whose record names whose yes a grant that asks needs.
+            tap: For a call run under a ticket, the tap that approved it.
+
+        Returns:
+            The decision.
+        """
+        if made is None:
+            return _Decided(Verdict.ALLOWED)
+        refused = _refused_by(made)
+        if refused is not None:
+            return _Decided(Verdict.NOT_DONE, refused)
+        needs = _needs_a_yes(made)
+        if needs:
+            return await self._yes_needed(needs, state, thing=thing, tap=tap)
+        return _Decided(Verdict.ALLOWED, rests_on=_rests_on(made))
+
+    async def _yes_needed(
+        self,
+        needs: frozenset[CheckOutcomeKind],
+        state: _Round,
+        *,
+        thing: str | None,
+        tap: ApprovalTap | None,
+    ) -> _Decided:
+        """What a call needing a yes comes to (ADR-0367 §5:3 to §5:6, ADR-0381 §5, §6).
+
+        A shortfall's yes is the person's whose authority the work carries; a grant that
+        asks needs the yes of whoever the call's thing belongs to, read from its record,
+        and, for a call with no thing, of the person the work is for. In a person's work
+        the call needs the person, unless that yes is no one's (no record) or someone
+        else's, when no one is asked and it is not done; in a work that is no person's it
+        is not done (ADR-0368 §7:4). Under a ticket, :meth:`_tap_is_the_yes` decides.
+        """
+        if tap is not None:
+            return await self._tap_is_the_yes(needs, state, thing=thing, tap=tap)
+        if state.person is None:
+            return _Decided(Verdict.NOT_DONE, _NO_ONE_ASKED)
+        if CheckOutcomeKind.NEEDS_YES_SHORTFALL in needs:
+            return _Decided(Verdict.NEEDS_YOU, _NOT_SURE_ENOUGH)
+        whose = state.person if thing is None else await self._whose(thing)
+        if whose is None:
+            return _Decided(Verdict.NOT_DONE, _NO_ONES_THING)
+        if whose != state.person:
+            return _Decided(Verdict.NOT_DONE, _SOMEONE_ELSES)
+        return _Decided(Verdict.NEEDS_YOU, _THEIR_YES)
+
+    async def _tap_is_the_yes(
+        self,
+        needs: frozenset[CheckOutcomeKind],
+        state: _Round,
+        *,
+        thing: str | None,
+        tap: ApprovalTap,
+    ) -> _Decided:
+        """Whether the tap that approved a ticket's call is the yes the call needs.
+
+        A shortfall for the tapper at the tap's level means the tap was given below the
+        bar, which answers nothing (ADR-0367 §5:4), so the call is not done. A grant that
+        asks is met where the tapper is whoever the call's thing belongs to, or, for a call
+        with no thing, the request's person (§5:6, ADR-0381 §6:1, §6:2); otherwise it is
+        not done.
+        """
+        if CheckOutcomeKind.NEEDS_YES_SHORTFALL in needs:
+            return _Decided(Verdict.NOT_DONE, _TAPPED_SHORT)
+        whose = state.person if thing is None else await self._whose(thing)
+        if whose is None and thing is not None:
+            return _Decided(Verdict.NOT_DONE, _NO_ONES_THING)
+        if whose is None or whose != tap.person:
+            return _Decided(Verdict.NOT_DONE, _NOT_THEIR_YES)
+        return _Decided(Verdict.ALLOWED)
+
+    async def _whose(self, thing: str) -> str | None:
+        """The person a connection's record names, or ``None`` (ADR-0381 §5:1, §6:1).
+
+        A thing with no record is no one's, and so is one whose record cannot be read,
+        logged under a fixed event name with a code-owned reason alone.
+        """
+        if self._things is None:
+            return None
+        try:
+            record = await self._things.whose(ThingKey(kind=ThingKind.CONNECTION, identifier=thing))
+        except Exception:  # §5:1: a record the store cannot read is read as none
+            _log.warning("thing_record_unread", stage="authorizing", reason="store")
+            return None
+        return None if record is None else str(record.person)
 
     async def _message_checked(
         self, snapshot: RoundToAuthorize, message: RoundMessage, state: _Round
@@ -2204,8 +2400,35 @@ class AuthorizingStage:
             state.checked(call_id, TEXT_CAPABILITY, outside)
             state.note_call(call_id, "check", outside.kind.value, None)
             return outside
-        await self._check_lines(call_id, TEXT_CALL, state, place=message.place)
-        return state.made[call_id][1]
+        return await self._check_lines(call_id, TEXT_CALL, state, place=message.place)
+
+    async def _call_message(
+        self, snapshot: RoundToAuthorize, message: RoundMessage, state: _Round
+    ) -> MessageVerdict:
+        """A ``text`` call's verdict: the check, where it reaches it, then its place.
+
+        A text the check reaches is sent only where the check allows it (ADR-0367 §4:5,
+        §4:7). One that needs a yes is not sent, since a message is never asked about, and
+        in a work that is no person's no one is asked either way (ADR-0368 §7:4).
+        """
+        made = await self._message_checked(snapshot, message, state)
+        refused: str | None = None
+        if made is not None and made.kind is not CallCheckKind.OUTSIDE:
+            refused = _refused_by(made)
+            if refused is None and _needs_a_yes(made):
+                refused = _MESSAGE_NOT_ASKED if state.person is not None else _NO_ONE_ASKED
+        if refused is not None:
+            _log.info("authorizing_message_not_allowed", stage="authorizing")
+            if message.call_id is not None:
+                state.note_call(message.call_id, "check", Verdict.NOT_DONE.value, refused)
+            return MessageVerdict(
+                place=message.place,
+                allowed=False,
+                reason=refused,
+                call_id=message.call_id,
+                check=made,
+            )
+        return replace(self._message(snapshot, message), check=made)
 
     def _message(self, snapshot: RoundToAuthorize, message: RoundMessage) -> MessageVerdict:
         """A message's place, and nothing else, checked (§4:7).

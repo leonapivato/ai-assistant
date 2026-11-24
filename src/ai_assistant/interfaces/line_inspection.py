@@ -14,11 +14,6 @@ shell word (:func:`word`): a value the terminal can show as it is is quoted so a
 shell reads it back unchanged, with nothing expanded, so it can be pasted into the command
 that acts on it; one carrying a control or format character is shown escaped, and quoted
 so pasting it expands nothing either, though it no longer names the same value.
-
-**A line does not yet decide any call** (ADR-0367 §4:5): the check reads the lines and
-its outcome is recorded beside today's rules, which still decide. :data:`NOT_YET_DECIDING`
-says so, once, wherever a command could suggest otherwise; the change that switches the
-check on removes it.
 """
 
 from __future__ import annotations
@@ -49,12 +44,6 @@ if TYPE_CHECKING:
         RemoveLineResult,
         Sureness,
     )
-
-#: The one sentence saying that lines do not decide calls yet (ADR-0367 §4:5).
-NOT_YET_DECIDING: Final = (
-    "Lines are recorded and listed, and do not decide any call until the release that "
-    "switches the check on: today's rules still do."
-)
 
 #: How the owner names a connection, as a line's thing or condition (ADR-0376 §2:4).
 CONNECTION_SPELLING: Final = (
@@ -170,7 +159,6 @@ def render_listing(console: Console, entries: Sequence[PermissionLineEntry]) -> 
     else:
         _print(console, "\n".join(line for one in entries for line in entry_lines(one)))
         _print(console, HOW_TO_ACT)
-    _print(console, NOT_YET_DECIDING)
 
 
 def made_text(result: MakeLineResult) -> tuple[bool, str]:
@@ -221,7 +209,6 @@ def render_made(console: Console, result: MakeLineResult) -> bool:
     _print(console, said)
     if result.line is not None:
         _print(console, "\n".join(line_lines(result.line)))
-    _print(console, NOT_YET_DECIDING)
     return stands
 
 

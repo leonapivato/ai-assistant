@@ -924,3 +924,76 @@ async def test_a_search_at_the_configured_provider_rules_exactly_as_it_did() -> 
         "this deployment's owner configured this search provider, so searching it is "
         "the destination they chose and the recipient they granted"
     )
+
+
+# --- ADR-0367 §4:6, ADR-0379 §4: a request resting on a grant the person made ----------
+
+_GRANT = "line:the-owners-grant"
+
+
+def _resting(subject: Any, line: str | None = _GRANT) -> Any:
+    """``subject`` carrying the grant it rests on, as the authorizer sets it."""
+    return subject.model_copy(update={"rests_on": line})
+
+
+async def test_a_grant_the_person_made_meets_the_disclosure_floor_and_is_named() -> None:
+    """ADR-0379 §4: the floor is met, and the ruling names the grant (ADR-0021 §5)."""
+    policy = ThresholdActionPolicy()
+    subject = _resting(request(binding(ALICE)))
+    bare = await policy.decide(_resting(subject, None))
+
+    ruled = await policy.decide(subject)
+
+    assert bare.outcome is PermissionOutcome.CONFIRM
+    assert ruled.outcome is PermissionOutcome.ALLOW
+    assert ruled.authorised_by == _GRANT
+    assert ruled.authorised_subject is None
+    assert _GRANT not in ruled.reason
+
+
+async def test_an_allow_on_no_floor_names_the_grant_it_rests_on() -> None:
+    """ADR-0367 §4:6: a ruling resting on a grant names it, though no rule asked."""
+    ruled = await ThresholdActionPolicy().decide(_resting(action()))
+
+    assert ruled.outcome is PermissionOutcome.ALLOW
+    assert ruled.authorised_by == _GRANT
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        pytest.param(TOOL.model_copy(update={"risk_level": RiskLevel.HIGH}), id="risk"),
+        pytest.param(
+            TOOL.model_copy(update={"cost": ToolCost(basis=CostBasis.UNKNOWN)}), id="cost"
+        ),
+    ],
+)
+async def test_a_grant_lifts_no_other_clause_that_asks(declared: ToolDefinition) -> None:
+    """ADR-0379 §3's worked call: whether the policy's other rules still ask is the policy's."""
+    ruled = await ThresholdActionPolicy().decide(_resting(request(binding(ALICE), tool=declared)))
+
+    assert ruled.outcome is PermissionOutcome.CONFIRM
+    assert ruled.authorised_by is None
+
+
+async def test_a_grant_lifts_neither_the_outside_content_clause_nor_a_deny() -> None:
+    """ADR-0367 §4:5: never the stand-in's clause, and never a deny."""
+    outside = await ThresholdActionPolicy().decide(_resting(request(binding(ALICE, external=True))))
+    denied = await ThresholdActionPolicy(deny_at_risk=RiskLevel.LOW).decide(_resting(action()))
+
+    assert (outside.outcome, outside.authorised_by) == (PermissionOutcome.CONFIRM, None)
+    assert (denied.outcome, denied.authorised_by) == (PermissionOutcome.DENY, None)
+
+
+async def test_route_c_is_taken_before_a_grant() -> None:
+    """At the configured provider the configuration is named, as before (ADR-0247 §2).
+
+    The building lane's choice ADR-0379 §8 leaves it: where route (c) and a made grant
+    both support an ``ALLOW``, the row names its configuration, which the trail reads
+    off the row alone, so a search rules as it did whatever grant stands.
+    """
+    policy = _at_provider()
+
+    ruled = await policy.decide(_resting(request(search_binding(), tool=SEARCH_TOOL)))
+
+    assert ruled.authorised_by == SEARCH_ACCOUNT.reference

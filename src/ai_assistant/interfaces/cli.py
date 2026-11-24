@@ -3408,14 +3408,13 @@ def links_withdraw(
 # The owner's listing of the lines that stand, a grant, a limit and a removal: in this
 # milestone the command line is the only caller of the four members (§6:6). Each call is
 # the owner's own act, sent with what the owner typed and nothing else (§6:1), and the hub
-# decides every outcome: this adapter renders them (`line_inspection`). A line does not
-# decide any call yet, and each command that could suggest otherwise says so.
+# decides every outcome: this adapter renders them (`line_inspection`).
 
 permissions_app = typer.Typer(
     name="permissions",
     help=(
         "Your permission lines: the grants and limits you made, and each tool's default, "
-        "which say who may have me do what. " + line_inspection.NOT_YET_DECIDING
+        "which say who may have me do what."
     ),
     no_args_is_help=True,
 )
@@ -3436,8 +3435,7 @@ async def _permissions(act: Callable[[AssistantEngine], Awaitable[int]]) -> int:
     "list",
     help=(
         "List every line that stands: each grant and limit you made, with the id "
-        "'assistant permissions remove' takes, and each tool's default grant. "
-        + line_inspection.NOT_YET_DECIDING
+        "'assistant permissions remove' takes, and each tool's default grant."
     ),
 )
 def permissions_list() -> None:
@@ -3497,7 +3495,7 @@ _GRANT_ASKED_THROUGH_OPTION = typer.Option(
     "grant",
     help=(
         "Make a grant: who may have me call a capability, how, and how sure I must be. "
-        "Making one you already made changes nothing. " + line_inspection.NOT_YET_DECIDING
+        "Making one you already made changes nothing."
     ),
 )
 def permissions_grant(  # noqa: PLR0913 — ADR-0376 §4:3's six parts of a grant
@@ -3528,7 +3526,7 @@ def permissions_grant(  # noqa: PLR0913 — ADR-0376 §4:3's six parts of a gran
     "limit",
     help=(
         "Make a limit: no call of a capability for whom it names, however sure I am. "
-        "Making one you already made changes nothing. " + line_inspection.NOT_YET_DECIDING
+        "Making one you already made changes nothing."
     ),
 )
 def permissions_limit(
