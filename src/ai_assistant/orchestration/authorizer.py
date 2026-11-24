@@ -64,14 +64,15 @@ confirm still asks.
 **The check, recorded beside today's rules** (ADR-0367 §4:5, ADR-0379 §3:2). Once a call
 is bound, and before the policy, the check of
 :mod:`~ai_assistant.orchestration.permission_check` runs over the standing lines, read
-once a round from the line store, for whom the round is handed (``check_for``, ADR-0368
-§7), or, for a ticket's call, for its tapper at the level the tap came by (ADR-0367
-§5:5). ``request_approval`` is checked as a call of its own, and a ``text`` call into a
-connection that is not one of the work's inputs' as every call is (§4:7); one into such a
-place stays outside it. Its outcome rides on the call's verdict, whole, and nothing is
-decided by it: the request carries no line, no verdict, reason, ruling or call handed on
-changes, and a read of the lines that fails, or a check that raises, is recorded as such.
-Each call it reached is logged once the round is decided, as
+from the line store for each call's check, so a line made or removed while a round is
+authorized bears on its later calls (ADR-0376 §4:9), for whom the round is handed
+(``check_for``, ADR-0368 §7), or, for a ticket's call, for its tapper at the level the tap
+came by (ADR-0367 §5:5). ``request_approval`` is checked as a call of its own, and a
+``text`` call into a connection that is not one of the work's inputs' as every call is
+(§4:7); one into such a place stays outside it. Its outcome rides on the call's verdict,
+whole, and nothing is decided by it: the request carries no line, no verdict, reason,
+ruling or call handed on changes, and a read of the lines that fails, or a check that
+raises, is recorded as such. Each call it reached is logged once the round is decided, as
 ``permission_check_compared``, in codes alone, with what it would have decided beside
 what was.
 
@@ -1135,10 +1136,10 @@ class _Round:
     this activation's rounds the working set holds, the one being authorized included;
     ``stories`` are read once, the first time a call needs them.
 
-    ``subject`` is whom the check runs for (ADR-0368 §7); ``standing`` the standing lines,
-    read once, the first time a call reaches the check, and ``unread`` set where that read
-    failed; ``made`` holds, by call id, the call's capability and what the check made of
-    it, which its verdict carries once the round's verdicts are final.
+    ``subject`` is whom the check runs for (ADR-0368 §7); ``unread`` is set where a read
+    of the standing lines failed, after which no call of the round reads them again;
+    ``made`` holds, by call id, the call's capability and what the check made of it,
+    which its verdict carries once the round's verdicts are final.
     """
 
     activation_id: str
@@ -1151,7 +1152,6 @@ class _Round:
     person: str | None = None
     tickets: frozenset[str] = frozenset()
     subject: CheckSubject = field(default_factory=CheckSubject)
-    standing: tuple[PermissionLine, ...] | None = None
     unread: bool = False
     made: dict[str, tuple[str, CallCheck]] = field(default_factory=dict)
     sink: MutableMapping[str, CallCheck] | None = None
@@ -2125,20 +2125,26 @@ class AuthorizingStage:
         return state.stories
 
     async def _standing_lines(self, state: _Round) -> tuple[PermissionLine, ...] | None:
-        """The standing lines, read once a round; ``None`` where they cannot be read.
+        """The standing lines, read for each call's check; ``None`` where they cannot be.
+
+        ADR-0376 §4:9: a making or a removal bears on every call the check checks after it
+        is recorded, a later call of a round already being authorized included, so each
+        call's check reads the lines as they then stand. What the check made of a call
+        already checked is kept as it was.
 
         A read that fails, for any reason, is logged once under a fixed event name with a
-        code-owned reason alone, and every call of the round is then recorded as the check
-        not having run. It never stops the round: today's rules still decide.
+        code-owned reason alone, and that call and every later call of the round are then
+        recorded as the check not having run, with no further read. It never stops the
+        round: today's rules still decide.
         """
-        if state.standing is not None or state.unread or self._lines is None:
-            return state.standing
+        if state.unread or self._lines is None:
+            return None
         try:
-            state.standing = tuple(await self._lines.standing())
+            return tuple(await self._lines.standing())
         except Exception:  # a fault in the read is the check not having run, never a line
             _log.warning("permission_check_unrun", stage="authorizing", reason="lines_unread")
             state.unread = True
-        return state.standing
+            return None
 
     async def _check_lines(  # noqa: PLR0913 — the call, its declaration, the round, and what its thing and whom it runs for are read from
         self,

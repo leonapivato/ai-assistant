@@ -37,7 +37,10 @@ from ai_assistant.core.types import (
     DiagnosticKind,
     DiagnosticSource,
     GrantHow,
+    LineMaking,
     LineParts,
+    LineRemoval,
+    PermissionLine,
     PermissionLineKind,
     PermissionOutcome,
     PermissionRuling,
@@ -74,7 +77,9 @@ from ai_assistant.testing import (
 from ai_assistant.tools.send_email import EMAIL, FROM_THE_PERSONS_ACCOUNT
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, MutableMapping
+    from collections.abc import Awaitable, Callable, Iterable, MutableMapping
+
+    from ai_assistant.core.protocols import PermissionLineStore
 
 _AT: Final = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 _NORMAL: Final = CheckedFor.for_person(OWNER_PERSON_ID, Sureness.NORMAL)
@@ -110,7 +115,7 @@ class _Hub:
     def __init__(
         self,
         *tools: ToolDefinition,
-        lines: FakePermissionLineStore | None = None,
+        lines: PermissionLineStore | None = None,
         binder: FakeEgressBinder | None = None,
         diagnostics: FakeDiagnosticSink | None = None,
     ) -> None:
@@ -226,6 +231,110 @@ async def test_a_limit_is_recorded_and_the_call_is_still_done_as_today() -> None
     assert compared["check_level"] == "normal"
     assert limit not in str(logs)
     assert OWNER_PERSON_ID not in str(logs)
+
+
+class _Between:
+    """A line store that runs the owner's act after the round's first read, before the next.
+
+    Over a :class:`FakePermissionLineStore`, ``held``; each read is counted, so a test sees
+    the check read the lines for each call's check.
+    """
+
+    def __init__(self, act: Callable[[FakePermissionLineStore], Awaitable[object]]) -> None:
+        self.held = FakePermissionLineStore(now=_now)
+        self._act = act
+        self.reads = 0
+
+    async def standing(self) -> tuple[PermissionLine, ...]:
+        self.reads += 1
+        if self.reads == 2:  # the first call is checked; the owner acts before the second
+            await self._act(self.held)
+        return await self.held.standing()
+
+    async def line(self, line_id: str) -> PermissionLine | None:
+        return await self.held.line(line_id)
+
+    async def record_making(self, parts: LineParts, *, by: str) -> LineMaking:
+        return await self.held.record_making(parts, by=by)
+
+    async def record_removal(self, line_id: str, *, by: str) -> LineRemoval:
+        return await self.held.record_removal(line_id, by=by)
+
+
+async def test_a_limit_made_between_two_calls_of_a_round_bears_on_the_later_call() -> None:
+    """ADR-0376 §4:9: a making bears on the calls checked after it, in the same round; what
+    the check made of the call checked before it is kept as it was."""
+    made: list[str] = []
+
+    async def act(store: FakePermissionLineStore) -> None:
+        made.append(await _limit(store, "lookup"))
+        made.append(await _limit(store, "book"))
+
+    lines = _Between(act)
+    hub = _Hub(lines=lines)
+
+    decided = await hub.authorize(_two_calls())
+
+    lookup, book = decided.verdicts
+    assert lookup.check == _ran((_NORMAL, _NO_LINE))
+    assert book.check == _ran((_NORMAL, _outcome(CheckOutcomeKind.NOT_DONE_LIMIT, line=made[1])))
+    assert lines.reads == 2
+    assert _unchecked(decided) == await _Hub().authorize(_two_calls())
+
+
+async def test_a_limit_removed_between_two_calls_of_a_round_no_longer_bears_on_the_later_call() -> (
+    None
+):
+    """ADR-0376 §4:9: a removal bears on the calls checked after it, in the same round."""
+    limits: list[str] = []
+
+    async def act(store: FakePermissionLineStore) -> None:
+        for one in limits:
+            await store.record_removal(one, by=OWNER_PERSON_ID)
+
+    lines = _Between(act)
+    limits.extend([await _limit(lines.held, "lookup"), await _limit(lines.held, "book")])
+    hub = _Hub(lines=lines)
+
+    decided = await hub.authorize(_two_calls())
+
+    lookup, book = decided.verdicts
+    assert lookup.check == _ran(
+        (_NORMAL, _outcome(CheckOutcomeKind.NOT_DONE_LIMIT, line=limits[0]))
+    )
+    assert book.check == _ran((_NORMAL, _NO_LINE))
+    assert lines.reads == 2
+    assert _unchecked(decided) == await _Hub().authorize(_two_calls())
+
+
+async def test_a_read_that_fails_mid_round_records_the_rest_of_the_round_as_not_run() -> None:
+    """A read that fails after a first that did not: the call before it keeps its outcome,
+    it and every later call are recorded as the check not having run, logged once, and no
+    further read is made."""
+
+    async def act(store: FakePermissionLineStore) -> None:
+        store.fail_next()
+
+    lines = _Between(act)
+    hub = _Hub(lines=lines)
+    three = replace(
+        _round(
+            _call("c1", "lookup", q="trains to Lyon"),
+            _call("c2", "book", q="a table"),
+            _call("c3", "lookup", q="trains to Nice"),
+        ),
+        check_for=_OWNER,
+    )
+
+    with capture_logs() as logs:
+        decided = await hub.authorize(three)
+
+    unread = CallCheck(kind=CallCheckKind.LINES_UNREAD)
+    assert [one.check for one in decided.verdicts] == [_ran((_NORMAL, _NO_LINE)), unread, unread]
+    assert lines.reads == 2
+    assert [one["reason"] for one in logs if one["event"] == "permission_check_unrun"] == [
+        "lines_unread"
+    ]
 
 
 async def test_lines_that_cannot_be_read_record_the_check_as_not_run() -> None:
