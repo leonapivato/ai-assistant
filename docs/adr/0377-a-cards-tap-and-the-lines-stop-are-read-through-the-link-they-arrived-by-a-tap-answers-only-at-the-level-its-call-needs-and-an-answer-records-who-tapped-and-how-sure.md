@@ -1,6 +1,6 @@
 # 377. A card's tap and the line's `/stop` are read through the link they arrived by, a tap answers only at the level its call needs, and an answer records who tapped and how sure
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 - Scope: decision D2 of milestone 21, "Every call checked" (acceptance
   [#3678](https://github.com/leonapivato/ai-assistant/issues/3678), lanes
