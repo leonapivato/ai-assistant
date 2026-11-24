@@ -1481,25 +1481,39 @@ class DeviceRegistry:
             )
             raise RosterActError(msg)
         if not self.is_gateway(device):
-            self._marks.pop(device, None)
             return False
-        enrolment_id, _ = self._marks.pop(device)
+        enrolment_id, _ = self._marks[device]
+        # The record first: a withdrawal whose write fails leaves the mark standing in
+        # the live view as it stands on the record, so the owner's retry performs it and
+        # a restart cannot hand back a mark the owner was told is gone.
         changed = self._store.withdraw_gateway_mark(enrolment_id, now=now)
+        del self._marks[device]
         _log.info("device_gateway_unmarked", device=device, enrolment_id=enrolment_id)
         return changed
 
-    def gateways(self) -> Sequence[tuple[str, datetime]]:
-        """The devices marked as gateways now, and when each was marked (§2:5).
+    def gateways(self, *, limit: int = LISTING_LIMIT) -> tuple[Sequence[tuple[str, datetime]], int]:
+        """The devices marked as gateways now, newest mark first, and how many (§2:5).
+
+        Bounded as every section of the owner's listing is, so the listing fits its frame
+        however many devices are marked.
+
+        Args:
+            limit: How many to return.
 
         Returns:
-            Each marked device and the instant of its mark, ordered by device. ``hub``
-            is not among them: it names by rule, not by a mark.
+            Each marked device and the instant of its mark, newest first and then by
+            device, and how many are marked in all. ``hub`` is not among them: it names
+            by rule, not by a mark.
         """
-        return sorted(
-            (device, marked_at)
-            for device, (_, marked_at) in self._marks.items()
-            if self.is_gateway(device)
+        marked = sorted(
+            (
+                (device, marked_at)
+                for device, (_, marked_at) in self._marks.items()
+                if self.is_gateway(device)
+            ),
+            key=lambda one: (-one[1].timestamp(), one[0]),
         )
+        return marked[:limit], len(marked)
 
     def roles_of(self, device: str) -> frozenset[DeviceRole]:
         """The roles a device holds, as the checks read them at dispatch.

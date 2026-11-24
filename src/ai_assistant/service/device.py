@@ -519,6 +519,7 @@ def _render_listing(reply: dict[str, Any]) -> None:
     print(f"  {HUB_DEVICE}  the hub's own machine, by rule")
     for one in reply.get("gateways", []):
         print(f"  {one['device']}  marked {one['marked_at']}")
+    _omitted(reply.get("gateways_omitted", 0), "gateway")
     if not reply.get("gateways"):
         print("  No other device is marked; 'ai-assistant-device mark-gateway <identity>'")
         print("  lets an enrolled device's gateway name browser devices.")

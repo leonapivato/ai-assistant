@@ -860,7 +860,10 @@ async def test_a_full_listing_of_the_longest_identities_still_fits_one_frame(
     for index in range(LISTING_LIMIT + 20):
         enrolled = f"{index:04d}".ljust(MAX_OVERLAY_IDENTITY_BYTES, "n")
         browser = f"{index:04d}".ljust(MAX_OVERLAY_IDENTITY_BYTES, "b")
-        store.enrol(enrolled, verifier=verifier, now=_MOMENT)
+        enrolment, _ = store.enrol(enrolled, verifier=verifier, now=_MOMENT)
+        # Every enrolled device marked as a gateway too (ADR-0378 §2:5), so the
+        # section of marks is past its bound as well.
+        store.mark_gateway(enrolment.enrolment_id, now=_MOMENT)
         store.register(browser, gateway=gateway, now=_MOMENT)
         for role in DeviceRole:
             store.assign_role(enrolled, role)
@@ -881,6 +884,7 @@ async def test_a_full_listing_of_the_longest_identities_still_fits_one_frame(
         ("enrolments", LISTING_LIMIT + 20),
         ("devices", 2 * (LISTING_LIMIT + 20)),
         ("registrations", LISTING_LIMIT + 20),
+        ("gateways", LISTING_LIMIT + 20),
     ):
         assert len(listed[section]) == LISTING_LIMIT
         assert listed[f"{section}_omitted"] == total - LISTING_LIMIT
@@ -1017,6 +1021,7 @@ async def test_a_gateway_is_marked_and_unmarked_through_the_socket_and_listed(
     assert again == {"ok": True, "changed": False, "gateway": True}
     assert named.accepted
     assert listed["gateways"] == [{"device": _DEVICE, "marked_at": _MOMENT.isoformat()}]
+    assert listed["gateways_omitted"] == 0
     assert {one["device"]: one["gateway"] for one in listed["devices"]} == {
         _DEVICE: True,
         _PHONE: False,

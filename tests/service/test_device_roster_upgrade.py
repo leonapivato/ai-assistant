@@ -145,7 +145,7 @@ def test_a_roster_from_before_marks_no_device(legacy: Path) -> None:
         assert "gateway_marks" in _tables(legacy)
         assert store.live_marks() == {}
         registry = DeviceRegistry(store, hub_identity=_HUB)
-        assert registry.gateways() == []
+        assert registry.gateways() == ([], 0)
         assert not registry.is_gateway(_LAPTOP)
 
         refused = registry.accept_naming(_LAPTOP, _PHONE, now=_NOW)
