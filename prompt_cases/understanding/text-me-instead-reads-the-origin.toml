@@ -1,5 +1,6 @@
 # Round 10, case 3a, an untagged line (#3481): "can you text me instead?" is read
-# against the situation's origin, the hub chat, which the understanding names.
+# against the situation's origin, the system's own chat, which the understanding names
+# by what the situation says it is (ADR-0375 §7 took "the hub chat" out of the briefing).
 prompt = "understanding"
 guards = "situation_unread"
 came_from = "#3481"
@@ -8,7 +9,7 @@ samples = 3
 
 [property]
 check = "understanding_names"
-phrases = ["hub chat"]
+phrases = ["chat with the system"]
 
 [input]
 file = "text-me-instead-reads-the-origin.json"
