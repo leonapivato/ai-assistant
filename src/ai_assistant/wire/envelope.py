@@ -2836,10 +2836,11 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``ApprovalPanelTapAnswer`` gains ``not_answered``, a tap read as the request's
 #:     person's but not at the level its call needs (§3:4), on the ``ApprovalPanelTap``
 #:     ``tap_approval`` returns. A peer at 132 refuses the new member as unknown (ADR-0124
-#:     §9:2). Nothing returns it until §3 is built, but every wire shape of milestone 21
-#:     changes before its first deploy. ``ApprovalTap`` gains ``person`` and ``level``
-#:     (§4:1), but crosses no frame: the approval request is carried by no engine method.
-#:     The method set does not move: no ``Protocol`` gains a member.
+#:     §9:2). §3, built later in milestone 21, returns it with no wire change, since
+#:     every wire shape of milestone 21 changes before its first deploy. ``ApprovalTap``
+#:     gains ``person`` and ``level`` (§4:1), but crosses no frame: the approval request
+#:     is carried by no engine method. The method set does not move: no ``Protocol``
+#:     gains a member.
 #: 134: ADR-0124 §9:2 advances the version for ADR-0379 §3:2's record of the check, on
 #:     this ground: ``RecordedCall`` gains ``check``, a ``CallCheck`` holding a
 #:     ``CheckRun`` for each one the check ran for, with its ``CheckedFor`` and
