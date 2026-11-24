@@ -2831,10 +2831,12 @@ class _Request:
         # Withheld by its record's parties; with no record there is none to read. Where the
         # record holds each message with its own party, each is judged by its own (a
         # forward's sender, ADR-0351 §2:6-§2:7), and the person's own words are shown.
-        by_message = trigger is not None and (
-            bool(trigger.messages) or _told_apart(self._held_messages())
-        )
-        withheld = trigger is not None and not by_message and parties_are_outside(parties)
+        held = self._held_messages()
+        by_message = trigger is not None and (bool(trigger.messages) or _told_apart(held))
+        # ADR-0375 §2:1: where the pass's messages are held, by those the window still
+        # shows, so a message since deleted lends its party to no other.
+        shown_parties = _known_parties(held) if held else parties
+        withheld = trigger is not None and not by_message and parties_are_outside(shown_parties)
         shown_relayed = relayed and not withheld and relay_mark_counts(parties, relayed=True)
         at = inputs.received_at
         if at is None:
@@ -2901,6 +2903,19 @@ class _Request:
             # message by its own.
             return [
                 self._recorded_message(one, channel=self._origin, senders=senders) for one in held
+            ]
+        if held:
+            # §2:1: one party and one sender among the messages the window still shows,
+            # by their own record, never by a deleted message's.
+            own = _known_parties(held)
+            evidence = tuple(one.sender for one in held if one.sender is not None)
+            return [
+                _Words(
+                    tag=_words_tag(own),
+                    writer=self._writer(self._origin, own, evidence or senders),
+                    at=None,
+                    text=_JOINED.join(items),
+                )
             ]
         if items:
             tag = "said" if trigger is None else _words_tag(parties)
@@ -3246,9 +3261,9 @@ class _Request:
                 channel_type=None if self._origin is None else self._origin.channel_type,
                 senders=() if trigger is None else trigger.senders,
                 messages=(
-                    inputs.input_messages
-                    if trigger is None or not trigger.messages
-                    else trigger.messages
+                    trigger.messages
+                    if trigger is not None and trigger.messages
+                    else tuple(self._held_messages()) or inputs.input_messages
                 ),
                 parties=None if trigger is None else trigger.parties,
                 count=self._trigger_count,
