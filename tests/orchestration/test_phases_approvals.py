@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     RoundResponse,
     ScheduledTaskAuthor,
     SuggestionKind,
+    Sureness,
     TicketState,
     ToolOutcome,
 )
@@ -237,13 +238,26 @@ async def _until_requests(harness: Harness, count: int) -> tuple[ApprovalRequest
     return await _requests(harness)
 
 
+def _owners_tap(request: ApprovalRequest) -> ApprovalTap:
+    """The owner's tap on the panel, as the surface records it (ADR-0377 §2:4, §4:1)."""
+    return ApprovalTap(
+        who=ApprovalGiver.USER_TAP_ON_HUB_PANEL,
+        at=request.written_at,
+        person=OWNER_PERSON_ID,
+        level=Sureness.NORMAL,
+    )
+
+
 async def _tap(
     harness: Harness,
     request: ApprovalRequest,
     state: ApprovalRequestState = ApprovalRequestState.APPROVED,
 ) -> None:
-    """A tap on the request's card, as its surface lands it, and the sensor woken (§4:9)."""
-    tap = ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=request.written_at)
+    """A tap on the request's card, as its surface lands it, and the sensor woken (§4:9).
+
+    The owner's, read through their linked device at normal, as ADR-0377 §4:1 records it.
+    """
+    tap = _owners_tap(request)
     await harness.plans.answer_approval_request(str(request.id), state, tap)
     harness.engine.approvals_changed()
 
@@ -614,7 +628,7 @@ async def test_an_outcome_marked_pushed_and_never_admitted_is_pushed_again_at_st
     await harness.plans.answer_approval_request(
         str(request.id),
         ApprovalRequestState.APPROVED,
-        ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=request.written_at),
+        _owners_tap(request),
     )
     left = "6f1c5e2a-7c4b-4d8e-9a3f-2b1d0c9e8f7a"
     await harness.plans.mark_approval_outcome_pushed(str(request.id), left)
