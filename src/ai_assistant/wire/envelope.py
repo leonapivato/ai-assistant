@@ -2862,7 +2862,9 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #: 136: ADR-0378 §8:3 advances the version in the change that adds the device a message
 #:     came through to types the wire carries: ``TranscriptMessage`` gains
 #:     ``came_through`` (§4:2), on every transcript page, change and change-stream chunk,
-#:     and the wire-carried ``EpisodicMemory.processing_record`` gains it twice (§7:1):
+#:     carried only where it is not the device the message is written from, so a message
+#:     that came through its own device is carried byte for byte as before; and the
+#:     wire-carried ``EpisodicMemory.processing_record`` gains it twice (§7:1):
 #:     ``RecordedInputMessage`` gains ``device_id`` and ``came_through``, and
 #:     ``RecordedChannelTrigger`` gains ``message_devices``, a ``RecordedMessageDevices``
 #:     for each message of an input whose trigger records none; the episode's three are

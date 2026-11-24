@@ -184,6 +184,11 @@ async def test_every_record_reads_back_as_having_come_through_itself(legacy: Pat
         ("conv-quiet", 1, None),
     }
     assert [(one.position, one.came_through) for one in waiting] == [(5, "phone")]
+    # Each reads back, and is carried, exactly as it was before the column: a message
+    # that came through its own device carries no ``came_through`` in its dump, so a
+    # message the size bound admitted then is one every read can still return.
+    assert not any("came_through" in one.model_dump() for one in exported.messages)
+    assert not any("came_through" in one.model_dump() for one in added)
 
 
 async def test_a_message_through_another_device_round_trips(legacy: Path) -> None:
