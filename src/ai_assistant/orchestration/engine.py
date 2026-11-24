@@ -274,6 +274,7 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
+from ai_assistant.orchestration.permission_check import level_needed
 from ai_assistant.orchestration.person_block import person_zone, still_held
 from ai_assistant.orchestration.person_calls import recorded_wording
 from ai_assistant.orchestration.phase_path import (
@@ -389,6 +390,7 @@ if TYPE_CHECKING:
         GrantScope,
         HeldNotification,
         Identifier,
+        InputSender,
         LinkedAccount,
         LowerLinkResult,
         MakeLineResult,
@@ -2394,10 +2396,13 @@ class Engine:
                 memory=memory,
                 activate=self._line_read_in,
                 # ADR-0332 §8, ADR-0349 §4:3: the line's `/stop` stops each activation
-                # running from its chat, each by the one stop.
+                # running from its chat, each by the one stop, where its sender, read
+                # through the link of the account that sent it, is identified (ADR-0377
+                # §5:1, §5:2): the same identity store the line's messages are read by.
                 stop=self._stop_line,
                 closing=lambda: self._closing,
                 mint=self._chat_activation_id,
+                identities=identities,
                 # ADR-0323 §4:13, §10: the window's messages, and a quoted one, link
                 # to the activation that wrote them, by their effect records.
                 written=self._phases.written_in,
@@ -7102,7 +7107,7 @@ class Engine:
             self._approval_facts,
             request_id,
             choice,
-            person=OWNER_PERSON_ID,
+            lines=self._lines,
             identities=self._identities,
             device=device,
             now=self._now(),
@@ -9491,13 +9496,13 @@ def _cut_entry(
     return best
 
 
-async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, its person, link, device, instant and bound
+async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, the lines, link, device, instant and bound
     plans: PlanStore,
     facts_of: Callable[[Sequence[ApprovalRequest]], Awaitable[Mapping[str, CardFacts]]],
     request_id: str,
     choice: ApprovalChoice,
     *,
-    person: str,
+    lines: PermissionLineStore | None,
     identities: IdentityStore | None,
     device: RequestingDevice,
     now: datetime,
@@ -9505,23 +9510,32 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
 ) -> tuple[ApprovalPanelTap, bool]:
     """Carry out a tap on the panel, as the hub page's ``ApprovalGiver`` (§4:8-§4:9).
 
-    The request is read first, and a tap on one that is not ``person``'s changes
-    nothing and shows nothing of it (§4:8). Otherwise it is marked approved or denied,
-    with the tap's instant, in the store's one step that refuses where the request is no
-    longer pending, so the first tap to land wins and a later one is answered with the
-    request's state.
+    Who tapped, and the level, are read through the hub chat's account for the requesting
+    device, exactly as a message written from that device is read (ADR-0377 §2:1, §2:4,
+    ADR-0378 §4:7): the device's link, or ADR-0374's reading where the links cannot be
+    read. The request is read first, and a tap on none, or on one whose person is not the
+    one read, identified at weak or above (ADR-0368 §9:4), changes nothing and shows
+    nothing of it, as a request that is not the person's (ADR-0377 §3:5).
 
-    The answer records who tapped and the level, read through the hub chat's account for
-    the requesting device, exactly as a message written from that device is read
-    (ADR-0377 §2:1, §2:4, §4:1): the device's link, or ADR-0374's reading where the links
-    cannot be read. Until ADR-0377 §3 is built they decide nothing (§1:4).
+    A tap from the request's person on a request it could answer now, pending and before
+    its expiry, answers it only at or above the level its call needs, read from the lines
+    as they stand now (§3:1, §3:2,
+    :func:`~ai_assistant.orchestration.permission_check.level_needed`). Below it, or where
+    the level cannot be read, it changes nothing and wakes nothing, and is answered
+    ``not_answered`` beside the request as the panel shows it (§3:3, §3:4).
+
+    Otherwise the request is marked approved or denied, with the tap's instant and the
+    person and level read (§4:1), in the store's one step that refuses where the request
+    is no longer pending, so the first tap to land wins and a later one is answered with
+    the request's state.
 
     Args:
         plans: The plan store.
         facts_of: Reads what the request's card shows beside it.
         request_id: The request tapped.
         choice: Approve or Deny.
-        person: The person tapping, whom the request must be for.
+        lines: The line store a tap's level is read against, or ``None`` where none is
+            wired, which holds no made line: the tools' default lines alone decide it.
         identities: The identity store the tapper's link is read from, or ``None``
             where none is wired.
         device: The requesting device, whose hub chat account the tap arrived by.
@@ -9538,16 +9552,26 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
         PlanningError: If the plan store cannot be read or written.
     """
     found = await plans.approval_requests([request_id])
-    if not found or found[0].person != person:
+    # ADR-0378 §4:7: through another device, from both devices' hub chat accounts.
+    tapper = await chat_sender_of(
+        identities, device.device_id, device.connecting_device_id, stage="approval_panel"
+    )
+    if not found or not tapper.identified or found[0].person != tapper.person:
+        if found:
+            _log.info("approval_tap_refused", stage="approval_panel", reason="not_the_persons")
         return ApprovalPanelTap(answer=ApprovalPanelTapAnswer.UNKNOWN), False
+    request = found[0]
+    if await _panel_tap_falls_short(lines, request, tapper, now=now):
+        # ADR-0377 §3:3, §3:4: nothing marked, nothing woken; the request as it stands.
+        facts = await facts_of((request,))
+        entry = approval_panel_entry(request, facts[str(request.id)], now=now)
+        return _fitted_tap(
+            ApprovalPanelTap(answer=ApprovalPanelTapAnswer.NOT_ANSWERED, entry=entry), max_bytes
+        ), False
     state = (
         ApprovalRequestState.APPROVED
         if choice is ApprovalChoice.APPROVE
         else ApprovalRequestState.DENIED
-    )
-    # ADR-0378 §4:7: through another device, from both devices' hub chat accounts.
-    tapper = await chat_sender_of(
-        identities, device.device_id, device.connecting_device_id, stage="approval_panel"
     )
     step = await plans.answer_approval_request(
         request_id,
@@ -9568,16 +9592,55 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
     else:
         answer = ApprovalPanelTapAnswer.ALREADY_ANSWERED
     landed = step.answer in {ApprovalStepAnswer.CHANGED, ApprovalStepAnswer.PAST_EXPIRY}
-    tapped = ApprovalPanelTap(answer=answer, entry=entry)
+    _log.info("approval_tap", stage="approval_panel", step=step.answer.value)
+    return _fitted_tap(ApprovalPanelTap(answer=answer, entry=entry), max_bytes), landed
+
+
+async def _panel_tap_falls_short(
+    lines: PermissionLineStore | None,
+    request: ApprovalRequest,
+    tapper: InputSender,
+    *,
+    now: datetime,
+) -> bool:
+    """Whether a panel tap by the request's person falls below its call's level (§3:1).
+
+    Only a request a tap could answer now, pending and before its expiry, is weighed: on
+    any other the store's step changes nothing whoever tapped. The level is read from the
+    lines as they stand now (ADR-0377 §3:2); where they cannot be read, or the reading
+    fails, it falls short, the closed direction, logged under a fixed event name with a
+    code-owned reason. Never raises but for a cancellation.
+    """
+    if card_state(request, now=now) != "pending":
+        return False
+    try:
+        standing = () if lines is None else await lines.standing()
+        needed = level_needed(standing, request.call, person=request.person)
+    except Exception:  # a fault in the read is no level, never a lower one
+        _log.warning("approval_tap_not_answered", stage="approval_panel", reason="lines_unread")
+        return True
+    if tapper.level < needed:
+        _log.info("approval_tap_not_answered", stage="approval_panel", reason="below_level")
+        return True
+    return False
+
+
+def _fitted_tap(tapped: ApprovalPanelTap, max_bytes: int) -> ApprovalPanelTap:
+    """``tapped``, its entry cut where the whole would not fit the contract's limit.
+
+    Whatever is shown, what the tap did stands; a cut that fits nothing is measured and
+    refused by the result's own check, as any oversized answer is.
+    """
+    entry = tapped.entry
+    if entry is None:
+        return tapped
 
     def fits(shown: ApprovalPanelEntry) -> bool:
         return len(canonical_payload(tapped.model_copy(update={"entry": shown}))) <= max_bytes
 
-    if not fits(entry):
-        # The step has landed whatever is shown; a cut that fits nothing is measured and
-        # refused by the result's own check, as any oversized answer is.
-        tapped = tapped.model_copy(update={"entry": _cut_entry(entry, fits) or entry})
-    return tapped, landed
+    if fits(entry):
+        return tapped
+    return tapped.model_copy(update={"entry": _cut_entry(entry, fits) or entry})
 
 
 __all__ = [

@@ -10266,16 +10266,20 @@ class AssistantEngine(Protocol):
         first tap to land, on the panel or on the card, wins, and a later one is
         answered with the request's state. A tap that landed wakes the Approvals
         channel's sensor, which pushes its outcome (§3:4); the line's reader edits the
-        card (§4:5). A request that is not the person's changes nothing and is answered
-        ``unknown``, showing nothing of it (§4:8).
+        card (§4:5). Who tapped, and at what level, are read through the requesting
+        device's link (ADR-0377 §2:4). A request that is not the tapper's changes nothing
+        and is answered ``unknown``, showing nothing of it (§4:8, ADR-0377 §3:5); one of
+        theirs that a tap below its call's level could answer changes nothing and is
+        answered ``not_answered`` (ADR-0377 §3:1 to §3:4).
 
         Args:
             request_id: The request, by the id :meth:`approvals` reads.
             choice: Approve or Deny.
 
         Returns:
-            ``answered``, ``already_answered``, ``expired`` or ``unknown``, with the
-            request as the panel now shows it on every answer but ``unknown``.
+            ``answered``, ``already_answered``, ``expired``, ``not_answered`` or
+            ``unknown``, with the request as the panel now shows it on every answer but
+            ``unknown``.
 
         Raises:
             ValueError: If ``request_id`` is not an identifier, or ``choice`` is

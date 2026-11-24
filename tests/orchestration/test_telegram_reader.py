@@ -22,7 +22,7 @@ import asyncio
 from dataclasses import replace
 from datetime import timedelta
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, Literal
 
 import pytest
 from identity_support import owners_identities
@@ -40,6 +40,7 @@ from telegram_support import (
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
+    Account,
     ActivationEffect,
     ApprovalGiver,
     ApprovalRequest,
@@ -60,6 +61,7 @@ from ai_assistant.core.types import (
     RecordedInputMessage,
     RequestedCall,
     SupportHolder,
+    Sureness,
     TelegramCallKind,
     TelegramCallOutcome,
     TelegramFailure,
@@ -93,7 +95,9 @@ from ai_assistant.orchestration.telegram import (
     line_channel,
 )
 from ai_assistant.orchestration.understanding import LineMessage, WrittenBy
+from ai_assistant.orchestration.work_facts import LINE_ACCOUNT_KIND
 from ai_assistant.testing import (
+    FakeIdentityStore,
     FakeMemoryStore,
     FakePlanStore,
     FakeTelegramBotClient,
@@ -104,6 +108,8 @@ from ai_assistant.testing.telegram import GET_UPDATES, SEND_MESSAGE
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+    from ai_assistant.core.protocols import IdentityStore
 
 
 class _Hold(HeldInput):
@@ -139,11 +145,15 @@ class _Line:
         poll_bound: timedelta = timedelta(seconds=2),
         start_wait: timedelta = DEFAULT_TELEGRAM_START_WAIT,
         plans: FakePlanStore | None = None,
+        identities: IdentityStore | None | Literal["owners"] = "owners",
     ) -> None:
         self.fake = client or FakeTelegramBotClient(chat_id=CHAT, first_message_id=900)
         self.intake = intake or FakeTelegramIntakeRecord()
         self.memory = memory or FakeMemoryStore(now=lambda: AT)
         self.telegram = YieldingTelegram(self.fake)
+        # ADR-0377 §2, §5:1: who taps and who sends `/stop` are read through the links, the
+        # line's account linked to the owner unless a case names another store, or none.
+        self.identities = owners_identities() if identities == "owners" else identities
         # ADR-0361 §4: the line's approval cards, where a case hands it a plan store.
         self.cards = (
             None
@@ -155,7 +165,7 @@ class _Line:
                 send_bound=timedelta(seconds=1),
                 plans=plans,
                 memory=self.memory,
-                identities=owners_identities(),
+                identities=self.identities,
                 person=OWNER_PERSON_ID,
                 now=lambda: AT,
             )
@@ -200,6 +210,7 @@ class _Line:
             stop=self._stop,
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
+            identities=self.identities,
             written=written,
             hold=lambda place: _Hold(place, self.told),
             sleep=self._rest,
@@ -1250,6 +1261,133 @@ async def test_a_stop_behind_a_full_page_waits_and_is_acted_on_when_a_poll_retur
     assert second != first
     assert line.stops == [first, second], "it stops what runs when a poll first returns it"
     assert len(line.inputs[1].updates) == 100
+    assert line.gate is not None
+    line.gate.set()
+    await line.stop()
+
+
+# --- the line's /stop is read through the link (ADR-0377 §5) ---------------------------------
+
+#: The line's account, as the identity store links it (ADR-0366 §2:5).
+_LINE_ACCOUNT: Final = Account(kind=LINE_ACCOUNT_KIND, identifier=str(CHAT))
+
+
+async def _lowered_to(level: Sureness) -> FakeIdentityStore:
+    """The owner's accounts, the line's link lowered to ``level`` by the owner's act."""
+    store = owners_identities()
+    link = await store.find_link(_LINE_ACCOUNT)
+    assert link is not None
+    await store.lower(link.id, level, by=OWNER_PERSON_ID)
+    return store
+
+
+async def _stop_not_carried_out(line: _Line, running: str | None) -> None:
+    """§5:4: it stops nothing, is not input, is recorded nowhere and is not answered; it
+    is dealt with, so it is confirmed, as another account's update is (ADR-0323 §5:2)."""
+    stop_id = 9
+    line.fake.hold(stop_command(stop_id))
+    await line.until(
+        lambda: any(one.get("offset") == stop_id + 1 for one in line.polls()),
+        what="it was confirmed",
+    )
+    assert line.stops == []
+    assert line.sent() == []
+    assert (await line.intake.recorded([stop_id])) == {}
+    assert all(stop_id not in one.update_ids for one in line.inputs), "and is no input"
+    if running is not None:
+        assert line.gate is not None
+        line.gate.set()
+    await line.stop()
+
+
+@pytest.mark.parametrize("running", [True, False], ids=["while-one-runs", "nothing-running"])
+async def test_a_stop_whose_link_stands_at_none_does_nothing(running: bool) -> None:
+    """§5:2, §5:4: at none its sender is unidentified (the owner's pick, 2026-11-24)."""
+    line = _Line(identities=await _lowered_to(Sureness.NONE))
+    if running:
+        activation = await _running(line)
+    else:
+        activation = None
+        line.start()
+
+    await _stop_not_carried_out(line, activation)
+
+
+async def test_a_stop_from_an_account_no_link_ties_does_nothing() -> None:
+    """§5:1, §5:4: no link, no identified sender."""
+    line = _Line(identities=FakeIdentityStore())
+    activation = await _running(line)
+
+    await _stop_not_carried_out(line, activation)
+
+
+@pytest.mark.parametrize("wired", [True, False], ids=["store-fails", "none-wired"])
+async def test_a_stop_whose_link_cannot_be_read_does_nothing(wired: bool) -> None:
+    """ADR-0374 §2:2, ADR-0377's consequences: where the identity store cannot be read, a
+    `/stop` on the line does nothing; the line's account is not the hub's own machine."""
+    store = owners_identities()
+    line = _Line(identities=store if wired else None)
+    activation = await _running(line)
+    if wired:
+        store.fail_next()
+
+    await _stop_not_carried_out(line, activation)
+
+
+async def test_a_stop_at_weak_is_carried_out() -> None:
+    """§5:2: identified, at weak or above, is enough: a stop only takes away."""
+    line = _Line(identities=await _lowered_to(Sureness.WEAK))
+    running = await _running(line)
+    line.fake.hold(stop_command(2))
+
+    await line.until(lambda: STOPPED_LINE in line.sent(), what="the stop was answered")
+
+    assert line.stops == [running]
+    assert line.gate is not None
+    line.gate.set()
+    await line.stop()
+
+
+async def test_a_stop_read_at_its_poll_is_read_at_the_level_that_then_stands() -> None:
+    """§5's note: a `/stop` that waited is read at the level standing when a poll returns
+    it: lowered to none after an earlier stop was carried out, the next does nothing."""
+    store = owners_identities()
+    line = _Line(identities=store)
+    line.fake.hold(stop_command(1))
+    line.start()
+    await line.until(lambda: line.sent() == [NOTHING_RUNNING_LINE], what="the first stop")
+    link = await store.find_link(_LINE_ACCOUNT)
+    assert link is not None
+    await store.lower(link.id, Sureness.NONE, by=OWNER_PERSON_ID)
+
+    line.fake.hold(stop_command(2))
+    await line.until(
+        lambda: any(one.get("offset") == 3 for one in line.polls()), what="it was confirmed"
+    )
+    await line.stop()
+
+    assert line.sent() == [NOTHING_RUNNING_LINE], "the second answered nothing"
+    assert (await line.intake.recorded([2])) == {}
+
+
+async def test_a_stop_from_another_account_linked_to_the_owner_is_still_gated_out() -> None:
+    """§2:3, ADR-0323 §5:1-§5:2: the line's gate stays in front of the link: a `/stop`
+    from an account other than the configured one is no stop, however its link reads."""
+    store = FakeIdentityStore(
+        configured=(
+            _LINE_ACCOUNT,
+            Account(kind=LINE_ACCOUNT_KIND, identifier=str(CHAT + 1)),
+        )
+    )
+    line = _Line(identities=store)
+    await _running(line)
+    line.fake.hold(text(9, "/stop", command="/stop", sender=CHAT + 1))
+    await line.until(
+        lambda: any(one.get("offset") == 10 for one in line.polls()), what="it was confirmed"
+    )
+
+    assert line.stops == []
+    assert line.sent() == []
     assert line.gate is not None
     line.gate.set()
     await line.stop()

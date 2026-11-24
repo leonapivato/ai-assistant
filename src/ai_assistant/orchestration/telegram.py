@@ -35,13 +35,18 @@ activation and not yet marked never make the reader poll in a loop.
 
 **The line's** ``/stop`` (ADR-0332 §8, ADR-0349 §4:3). A message from the configured
 account in its chat, not forwarded, whose whole text is ``/stop`` and which Telegram
-marked as that ``bot_command`` (:func:`is_stop_command`), is no input: the reader
-records it answered on the intake record (``claim_reply``), then stops **each**
-activation running from the chat, each by the one stop ``stop_activation`` runs, and
-answers by rule, :data:`STOPPED_LINE` where it stopped any or
-:data:`NOTHING_RUNNING_LINE`. It acts on one as soon as a poll returns it, which is only
-while it is within the page Telegram returns past the confirmed offset (§8:4). An input
-still in its start wait is no running activation, so a stop leaves it to start.
+marked as that ``bot_command`` (:func:`is_stop_command`), is no input. Who sent it, and
+at what level, are read through the link of the Telegram account that sent it, as a
+message from it is read, when the reader deals with it (ADR-0377 §5:1). Where that
+sender is identified, at weak or above (§5:2), the reader records it answered on the
+intake record (``claim_reply``), then stops **each** activation running from the chat,
+each by the one stop ``stop_activation`` runs, and answers by rule,
+:data:`STOPPED_LINE` where it stopped any or :data:`NOTHING_RUNNING_LINE`. Otherwise it
+stops nothing, is recorded nowhere and is not answered, as another account's update
+(§5:4), and no record gains who sent it (§5:5). It acts on one as soon as a poll returns
+it, which is only while it is within the page Telegram returns past the confirmed offset
+(§8:4). An input still in its start wait is no running activation, so a stop leaves it to
+start.
 
 **The confirm rule** (§5:6). The reader tells the intake record which updates are dealt
 with — input once its activation is admitted and has marked it taken in, a non-text
@@ -83,16 +88,19 @@ as the assistant's own message, with Approve and Deny buttons, whatever place as
 posted with no buttons, saying it is answered on the hub page (§4:4). The hub edits each
 card in place as its request's state changes (§4:5), from the reader's own loop, which
 reads the requests its cards are on after every poll. **A tap is a command** (§4:7): a
-button's callback, told apart by its structure, never perceived, carried out only from
-the configured account in its chat (ADR-0323 §4:1, as ADR-0332 §8:1 applies it to
-``/stop``) and only where its token resolves to a request of the person's (ADR-0362
-§4:4), and dealt with as any other account's update otherwise (§5:2). It is recorded
-answered on the intake record as ``/stop`` is, which claims its answer's call (§13:2), so a
-repeated fetch carries it out once. **Who tapped, and at what level**, are read through
-the link of the Telegram account the callback names as its sender, exactly as a message
-from that account is read (ADR-0377 §2:1, §2:2, by
-:func:`~ai_assistant.orchestration.work_facts.sender_of`), and recorded on the answer
-(§4:1); they decide nothing yet (§1:4).
+button's callback, told apart by its structure, never perceived, and dealt with as any
+other account's update (§5:2) unless it is the configured account's, in its chat, the
+line's gate, which stays in front of the link (ADR-0377 §2:3). **Who tapped, and at what
+level**, are read through the link of the Telegram account the callback names as its
+sender, exactly as a message from that account is read (ADR-0377 §2:1, §2:2, by
+:func:`~ai_assistant.orchestration.work_facts.sender_of`). A tap whose token resolves to a
+request whose person that is answers it only at or above the level its call needs
+(§3:1, :func:`~ai_assistant.orchestration.permission_check.level_needed`), and below it
+changes nothing and is answered with :data:`TAP_NOT_ANSWERED_LINE` alone (§3:3, §3:4); a
+tap read as anyone else's is dealt with as another account's update (§3:5). A tap
+answered is recorded answered on the intake record as ``/stop`` is, which claims its
+answer's call (§13:2), so a repeated fetch carries it out once, and the answer records who
+tapped and the level (§4:1).
 
 **It logs code-owned reasons only.** No line, record or error here carries a message's
 text, and the bot's token never reaches this module: the client binds it (§11:8-§11:9).
@@ -162,6 +170,7 @@ from ai_assistant.orchestration.channel_kinds import (
 )
 from ai_assistant.orchestration.chat import CHAT_WINDOW_SIZE, COULDNT_FINISH
 from ai_assistant.orchestration.defects import is_defect, log_defect
+from ai_assistant.orchestration.permission_check import level_needed
 from ai_assistant.orchestration.phase_path import Delivery, Fitted
 from ai_assistant.orchestration.understanding import (
     LineMessage,
@@ -178,6 +187,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         IdentityStore,
         MemoryStore,
+        PermissionLineStore,
         PlanStore,
         TelegramBotClient,
         TelegramIntakeRecord,
@@ -206,6 +216,7 @@ __all__ = [
     "RUNNING_POLL_PACE",
     "STOPPED_LINE",
     "STOP_COMMAND",
+    "TAP_NOT_ANSWERED_LINE",
     "TELEGRAM",
     "TELEGRAM_CHANNEL_TYPE",
     "TELEGRAM_DESCRIPTION",
@@ -266,6 +277,9 @@ _TAP_ALREADY: Final = {
     ApprovalRequestState.EXPIRED: "This request has expired.",
 }
 _TAP_EXPIRED: Final = "This request has expired."
+#: What a tap from the request's person below the level its call needs is answered with,
+#: and all it says (ADR-0377 §3:4): no level, no line and no bar.
+TAP_NOT_ANSWERED_LINE: Final = "This tap did not answer the request."
 _TAP_UNRECORDED: Final = "Your answer could not be recorded. Try again, or answer on the hub page."
 
 #: A card's callback data: its token, then the button's verb (ADR-0361 §4:10).
@@ -894,14 +908,17 @@ class TelegramCards:
     changed while the hub was down is edited too.
 
     **The tap** (:meth:`tap`, §4:7-§4:10) is a command: its token is resolved by the
-    store's read by card token, a tap whose token resolves to no request of the person's
-    left unanswered (ADR-0362 §4:4), the request marked approved or denied with the tap's
-    instant as the line's ``ApprovalGiver``, in one step where the first tap wins, the
-    callback answered, the card edited and the Approvals sensor woken. The answer records
-    who tapped and the level, read through the link of the account the callback names as
-    its sender, as a message from it is read (ADR-0377 §2:1, §2:2, §4:1); until ADR-0377
-    §3 is built they decide nothing, and a tap is carried out as ADR-0361 §4:8 has it
-    (§1:4).
+    store's read by card token, and who tapped, and at what level, are read through the
+    link of the account the callback names as its sender, as a message from it is read
+    (ADR-0377 §2:1, §2:2). A tap whose token resolves to no request, or to a request
+    whose person is not the one read, identified, is left unanswered (ADR-0362 §4:4,
+    ADR-0377 §3:5): a tapper at none is an unidentified sender (ADR-0368 §9:4).
+    One from the request's person below the level its call needs, read from the lines as
+    they stand when it lands, changes nothing and is answered with
+    :data:`TAP_NOT_ANSWERED_LINE` (§3:1 to §3:4). Otherwise the request is marked approved
+    or denied with the tap's instant as the line's ``ApprovalGiver`` and the person and
+    level read (§4:1), in one step where the first tap wins, the callback answered, the
+    card edited and the Approvals sensor woken.
     """
 
     def __init__(  # noqa: PLR0913 — the bot and its records, the stores, the person, the clock and the two seams a test varies
@@ -916,6 +933,7 @@ class TelegramCards:
         identities: IdentityStore | None,
         person: str,
         now: Clock,
+        lines: PermissionLineStore | None = None,
         mint: Callable[[], str] = _mint_token,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -932,9 +950,14 @@ class TelegramCards:
             identities: The identity store a tapper's link is read from (ADR-0377 §2),
                 or ``None`` where none is wired, which reads as links that cannot be
                 read (ADR-0374 §2:1).
-            person: The line's person, the configured account's: a tap answers only
-                their requests (§4:8).
+            person: The line's person, the configured account's, whose requests' cards
+                the line's chat holds: the window shows them and a start reads them to
+                edit (§4:3, §4:5). Whom a tap may answer is read through the tapper's
+                link instead (ADR-0377 §3:1).
             now: The wall clock, in UTC.
+            lines: The line store, whose standing lines a tap's level is read against
+                (ADR-0377 §3:2), or ``None`` where none is wired, which holds no made
+                line: the tools' default lines alone then decide it.
             mint: Mints a card's token.
             sleep: How a retry waits.
         """
@@ -947,6 +970,7 @@ class TelegramCards:
         self._identities = identities
         self._person = person
         self._now = now
+        self._lines = lines
         self._mint = mint
         self._sleep = sleep
         self._wake: Callable[[], None] | None = None
@@ -1330,16 +1354,24 @@ class TelegramCards:
     ) -> None:
         """Carry out a tap from the request's person: mark, answer, edit and wake (§4:9).
 
-        The tap goes ahead only where its token resolves to a request of this person's
-        (ADR-0362 §4:4). Where it resolves to none, or the store cannot say, nothing is
-        claimed, marked or answered, and the callback's spinner times out on the phone,
-        as ADR-0323 §5:2 leaves another account's update.
-
         Who tapped, and at what level, are read through the link of the account the
-        callback names as its sender, as a message arriving by it now would be, and
-        recorded on the answer (ADR-0377 §2:1, §2:2, §4:1). Where the read names no one,
-        the answer records no person, at none; that changes nothing of whether the tap
-        is carried out (§1:4).
+        callback names as its sender, as a message arriving by it now would be (ADR-0377
+        §2:1, §2:2). The tap goes ahead only where its token resolves to a request whose
+        person that is, identified (ADR-0362 §4:4, ADR-0377 §3:1). Where it resolves to none,
+        to a request of anyone else's, or the tapper is not identified, at weak or above
+        (ADR-0368 §9:4), or the store cannot say,
+        nothing is claimed, marked or answered, and the callback's spinner times out on the
+        phone, as ADR-0323 §5:2 leaves another account's update (ADR-0377 §3:5).
+
+        A tap from the request's person on a request it could answer now, pending and
+        before its expiry, answers it only at or above the level its call needs, read from
+        the lines as they stand now (§3:1, §3:2). Below it, or where the level cannot be
+        read, it changes nothing: the request is not marked, no card is edited, and the
+        callback is answered with :data:`TAP_NOT_ANSWERED_LINE` alone (§3:3, §3:4). On a
+        request no tap can answer now the tap is carried out as before, and the store's
+        step answers it with the request's state.
+
+        The answer records the person and level read (§4:1).
 
         ``claim`` is the intake record's claim of the tap's answer, which records the
         update answered, as ``/stop``'s does: a tap the record already holds was carried
@@ -1351,18 +1383,53 @@ class TelegramCards:
         """
         resolved = await self._resolved(callback)
         if resolved is None:
-            return  # ADR-0362 §4:4: no request of this person's, so no answer goes ahead
+            return  # ADR-0362 §4:4: no request, so no answer goes ahead
         request, state = resolved
-        first = await claim()
-        if first is None:
-            return  # held already: a repeat carries nothing out (§5:9)
         tapper = await sender_of(
             self._identities, line_account(callback.sender_id), stage="telegram_cards"
         )
-        words, shown = await self._marked(request, state, tapper)
+        if not tapper.identified or tapper.person != request.person:
+            # ADR-0377 §3:5: anyone else's tap, an unidentified sender's at none among
+            # them (ADR-0368 §9:4), as another account's update (§5:2).
+            _log.info("approval_tap_refused", stage="reader", reason="not_the_persons")
+            return
+        now = self._now()
+        short = await self._falls_short(request, tapper, now=now)
+        first = await claim()
+        if first is None:
+            return  # held already: a repeat carries nothing out (§5:9)
+        if short:
+            # ADR-0377 §3:3, §3:4: nothing marked, no card edited, the one fixed text.
+            await self._answered(callback, TAP_NOT_ANSWERED_LINE, first, claim)
+            return
+        words, shown = await self._marked(request, state, tapper, at=now)
         await self._answered(callback, words, first, claim)
         self._watched[str(shown.id)] = None
         await self._edited(shown, _EDITS_PER_READ)
+
+    async def _falls_short(
+        self, request: ApprovalRequest, tapper: InputSender, *, now: datetime
+    ) -> bool:
+        """Whether a tap by the request's person falls below its call's level (§3:1).
+
+        Only a request a tap could answer now, pending and before its expiry, is weighed:
+        on any other the store's step changes nothing whoever tapped. The level is read
+        from the lines as they stand now (§3:2); where they cannot be read, or the reading
+        fails, it falls short, the closed direction, logged under a fixed event name with
+        a code-owned reason. Never raises but for a cancellation.
+        """
+        if card_state(request, now=now) != "pending":
+            return False
+        try:
+            lines = () if self._lines is None else await self._lines.standing()
+            needed = level_needed(lines, request.call, person=request.person)
+        except Exception:  # a fault in the read is no level, never a lower one
+            _log.warning("approval_tap_not_answered", stage="reader", reason="lines_unread")
+            return True
+        if tapper.level < needed:
+            _log.info("approval_tap_not_answered", stage="reader", reason="below_level")
+            return True
+        return False
 
     async def _resolved(
         self, callback: TelegramCallback
@@ -1370,8 +1437,8 @@ class TelegramCards:
         """The tap's request and the state its button asks for, or ``None`` (ADR-0362 §4:4).
 
         ``None`` where the data is malformed, the token names no card of this channel's,
-        the request is another person's, or the store failed to read it. Never raises
-        but for a cancellation.
+        or the store failed to read it. Whose request it is, is the tap's to weigh against
+        who tapped (ADR-0377 §3:1). Never raises but for a cancellation.
         """
         data = callback.data or ""
         token, _, verb = data.rpartition(_VERB_SEPARATOR)
@@ -1388,22 +1455,25 @@ class TelegramCards:
         ):
             _log.info("approval_tap_ignored", stage="reader", reason="unknown_token")
             return None
-        if request.person != self._person:
-            _log.info("approval_tap_refused", stage="reader", reason="not_the_persons")
-            return None
         state = (
             ApprovalRequestState.APPROVED if verb == _APPROVE_VERB else ApprovalRequestState.DENIED
         )
         return request, state
 
     async def _marked(
-        self, request: ApprovalRequest, state: ApprovalRequestState, tapper: InputSender
+        self,
+        request: ApprovalRequest,
+        state: ApprovalRequestState,
+        tapper: InputSender,
+        *,
+        at: datetime,
     ) -> tuple[str, ApprovalRequest]:
         """Mark ``request`` as the tap asks; what to answer, and the request as it stands.
 
         The first tap to land wins, and a later one is answered with the request's state
-        (§4:9). The answer records ``tapper``'s person and level (ADR-0377 §4:1). Never
-        raises but for a cancellation: a store that fails is answered so.
+        (§4:9). The answer records ``tapper``'s person and level, and the tap's instant
+        ``at`` (ADR-0377 §4:1). Never raises but for a cancellation: a store that fails is
+        answered so.
         """
         try:
             step = await self._plans.answer_approval_request(
@@ -1411,7 +1481,7 @@ class TelegramCards:
                 state,
                 ApprovalTap(
                     who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD,
-                    at=self._now(),
+                    at=at,
                     person=tapper.person,
                     level=tapper.level,
                 ),
@@ -1556,7 +1626,7 @@ class TelegramReader:
     running then is drained as any other, the loop ending once they have.
     """
 
-    def __init__(  # noqa: PLR0913 — the bot and its records, the episodes, how an activation runs and stops, the engine's two seams, the writers' links, the hold, and two bounds
+    def __init__(  # noqa: PLR0913 — the bot and its records, the episodes, how an activation runs and stops, the engine's two seams, the writers' links, the hold, the links, and two bounds
         self,
         *,
         seams: TelegramLineSeams,
@@ -1566,6 +1636,7 @@ class TelegramReader:
         stop: Callable[[str], Awaitable[bool]],
         closing: Callable[[], bool],
         mint: Callable[[], str],
+        identities: IdentityStore | None = None,
         written: Callable[
             [str, Sequence[str], Sequence[int] | None], Awaitable[Mapping[int, WrittenBy]]
         ]
@@ -1589,6 +1660,9 @@ class TelegramReader:
             closing: Whether the engine has begun shutting down, after which nothing
                 new is taken in.
             mint: The activation id the next input is admitted with.
+            identities: The identity store a stop command's sender is read from
+                (ADR-0377 §5:1), or ``None`` where none is wired, which reads as links
+                that cannot be read (ADR-0374 §2:1): no stop command is then carried out.
             written: Reads which activation wrote each message in a place, by its
                 effect record (ADR-0303 §7:1): the phases' ``written_in``. ``None``
                 links no assistant message, and the window then holds only the user's.
@@ -1618,6 +1692,7 @@ class TelegramReader:
         self._written = written
         self._sleep = sleep
         self._stop = stop
+        self._identities = identities
         self._start_wait = seams.start_wait
         self._task: asyncio.Task[object] | None = None
         # Whether the loop is polling or resting, which a close ends at once; an
@@ -1834,7 +1909,7 @@ class TelegramReader:
             if message is None:
                 batch.dealt.add(update.update_id)  # §5:2: not input, recorded nowhere
             elif is_stop_command(message):
-                if await self._stopping(update.update_id):
+                if await self._stopping(update.update_id, message.sender_id):
                     batch.dealt.add(update.update_id)
             elif message.text is None or not message.text.strip():
                 # §5:3: answered by rule. Whether this claimed the reply or the record
@@ -1848,12 +1923,14 @@ class TelegramReader:
         return pending
 
     async def _tapped(self, update_id: int, callback: TelegramCallback) -> None:
-        """Carry a tap out where it is the configured account's, in its chat (§4:8).
+        """Hand a tap to the cards where it passes the line's gate (ADR-0377 §2:3).
 
-        ADR-0323 §4:1's test, as ADR-0332 §8:1 applies it to ``/stop``: the tapper is the
-        configured account, no bot, in its private chat with the bot. A tap from anyone
-        else, or anywhere else, changes nothing and is dealt with as §5:2 deals with
-        another account's update: not input, recorded nowhere and not answered.
+        The line's gate stays in front of the link: the tapper is the configured account,
+        no bot, in its private chat with the bot. A tap from anyone else, or anywhere else,
+        changes nothing, its link is not read, and it is dealt with as §5:2 deals with
+        another account's update: not input, recorded nowhere and not answered. Whether
+        one that passes answers anything is the cards' to read through its link
+        (:meth:`TelegramCards.tap`).
 
         Raises:
             TelegramIntakeRecordError: If the record cannot be written for the claim; the
@@ -1964,21 +2041,33 @@ class TelegramReader:
         if not task.cancelled():
             task.exception()  # retrieved, so a failure is never reported unretrieved
 
-    async def _stopping(self, update_id: int) -> bool:
+    async def _stopping(self, update_id: int, sender_id: int | None) -> bool:
         """Act on a stop command: record it answered, stop what runs, answer (§8:4-§8:6).
 
-        The record holds it answered before anything is stopped, so a poll that returns
-        it again stops nothing and answers nothing (§8:6). Then each activation running
-        from the line's chat is stopped, each by the one stop (ADR-0349 §4:3), and the
-        line answers by rule from the writer, never from an activation (§8:5).
+        Its sender, and the level, are read first, through the link of the Telegram
+        account that sent it, as a message from it is read now (ADR-0377 §5:1). Where
+        the sender is not identified, at weak or above (§5:2), it stops nothing, is
+        claimed and answered nowhere, and is dealt with as another account's update
+        (§5:4); the log line that says so names no account and no person, and no record
+        gains who sent it (§5:5).
+
+        Otherwise the record holds it answered before anything is stopped, so a poll that
+        returns it again stops nothing and answers nothing (§8:6). Then each activation
+        running from the line's chat is stopped, each by the one stop (ADR-0349 §4:3),
+        and the line answers by rule from the writer, never from an activation (§8:5).
 
         Returns:
-            Whether the record holds it answered, so it is dealt with.
+            Whether it is dealt with: the record holds it answered, or it was not
+            carried out.
 
         Raises:
             TelegramIntakeRecordError: If the record cannot be written for the claim; it
                 is then not dealt with, and nothing is stopped.
         """
+        sender = await sender_of(self._identities, line_account(sender_id), stage="telegram_reader")
+        if not sender.identified:
+            _log.info("telegram_stop_not_carried_out", stage="reader", reason="not_identified")
+            return True
         first = await self._intake.claim_reply(update_id)
         if first is None:
             return True  # held already: a repeat stops nothing (§5:9)

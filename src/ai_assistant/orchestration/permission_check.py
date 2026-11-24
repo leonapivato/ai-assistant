@@ -34,6 +34,12 @@ for every other capability, none.
 
 **Whom it runs for** (:class:`CheckSubject`) is handed to the authorizer, which decides
 none of it (ADR-0368 §7, :func:`~ai_assistant.orchestration.work_facts.check_runs_for`).
+
+**The level a request's call needs** (:func:`level_needed`, ADR-0377 §3:2): the least level
+at which this check, over the standing lines, finds a grant covering and applying to the
+call for the request's person, a grant that allows with approval counted alike; weak where
+that is none or where no grant covers it. It is what a tap on the request's card must reach
+to answer it (§3:1), on the line and on the hub page alike.
 """
 
 from __future__ import annotations
@@ -66,13 +72,14 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from datetime import datetime
 
-    from ai_assistant.core.types import PermissionLine, ToolDefinition
+    from ai_assistant.core.types import PermissionLine, RequestedCall, ToolDefinition
 
 __all__ = [
     "CheckSubject",
     "call_thing",
     "check_call",
     "checked",
+    "level_needed",
     "place_connection",
 ]
 
@@ -81,6 +88,19 @@ _OWN_CHAT_KIND: Final = OWN_CHAT_CONNECTION
 
 #: A connection as a line names it, which a call's thing is spelled as (ADR-0376 §2:4).
 _LINE_CONNECTION: Final = TypeAdapter[str](LineConnection)
+
+#: The outcomes at which the check finds a grant covering a call and applying at the
+#: level, one that allows with approval counted (ADR-0377 §3:2, ADR-0379 §2:3, §2:4).
+_A_GRANT_APPLIES: Final = frozenset(
+    {
+        CheckOutcomeKind.ALLOWED_ON_NO_LINE,
+        CheckOutcomeKind.ALLOWED_ON_MADE_GRANT,
+        CheckOutcomeKind.NEEDS_YES_WITH_APPROVAL,
+    }
+)
+
+#: The levels, least first, that :func:`level_needed` tries in turn.
+_LEVELS: Final = tuple(sorted(Sureness, key=lambda level: level.rank))
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,3 +344,47 @@ def call_thing(
         except ValidationError:
             return None
     return None
+
+
+def level_needed(lines: Sequence[PermissionLine], call: RequestedCall, *, person: str) -> Sureness:
+    """The level a tap must reach to answer a request for ``call`` (ADR-0377 §3:2).
+
+    The least level at which :func:`check_call`, over ``lines`` and the call's declared
+    default, finds a grant covering the call for ``person`` and applying at that level,
+    counting one that allows with approval; and weak where that level is none or where no
+    grant covers it. A shortfall's card needs its grant's bar (ADR-0367 §5:4), which is
+    this same least level (ADR-0379 §2:5), so one computation serves every card.
+
+    A limit is not weighed: it decides that the call is not done, at every level, and never
+    which level a grant applies at (ADR-0379 §2:2). A ticket the tap grants is still checked
+    when its call runs (ADR-0367 §5:5), and a limit refuses it there.
+
+    The call is checked as a ticket's call is checked for its tapper: its thing derived
+    from its values and its binding (:func:`call_thing`), and no connection met for a
+    condition, since a tap arrives by none a condition names. So a tap that reaches the
+    level this gives is not refused for its level when its ticket's call is checked,
+    unless the lines change in between.
+
+    Args:
+        lines: The standing made lines, as the line store lists them, read when the tap
+            lands; a removed one is weighed as no line.
+        call: The request's call, as the request records it.
+        person: The request's person.
+
+    Returns:
+        The level, never below weak.
+    """
+    grants = [one for one in lines if one.kind is PermissionLineKind.GRANT]
+    tool = call.tool
+    thing = call_thing(str(tool.capability), binding=call.binding)
+    for level in _LEVELS:
+        outcome = check_call(
+            grants,
+            tool,
+            thing=thing,
+            checked_for=CheckedFor.for_person(person, level),
+            met=None,
+        )
+        if outcome.kind in _A_GRANT_APPLIES:
+            return max(level, Sureness.WEAK)
+    return Sureness.WEAK

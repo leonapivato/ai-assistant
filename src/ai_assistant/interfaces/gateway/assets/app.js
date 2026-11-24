@@ -5027,6 +5027,11 @@ function approvalTapWords(choice, tap) {
   if (tap.answer === "unknown") {
     return "That request is not one waiting on you here, so nothing changed.";
   }
+  // ADR-0377 §3:4: a tap from the request's person that did not answer it. The words
+  // name no level, line or bar.
+  if (tap.answer === "not_answered") {
+    return "That tap did not answer the request, so nothing changed. It is still waiting.";
+  }
   const stands = APPROVAL_STATE_WORDS[tap.entry.state] || tap.entry.state;
   return `That was already answered, so nothing changed. It stands: ${stands}`;
 }

@@ -329,12 +329,18 @@ async def test_a_panel_tap_from_a_device_not_admitted_changes_nothing(
     only from a device admitted under ADR-0124.
 
     A device without the command role is refused the panel's read and its tap before
-    dispatch, so the request stays pending and no tap is recorded; the owner's device
-    then answers it.
+    dispatch, so the request stays pending and no tap is recorded; the owner's device,
+    its hub chat account and the connection's linked to the owner (ADR-0377 §2:4,
+    §3:1), then answers it.
     """
     engine = FakeAssistantEngine()
     engine.plan_store = FakePlanStore(now=lambda: APPROVALS_AT)
     engine.approval_clock = lambda: APPROVALS_AT
+    # ADR-0378 §4:7: the phone acting through the hub's own connection, so both devices'
+    # hub chat accounts are read.
+    engine.identities = FakeIdentityStore(
+        configured=(_HUB_CHAT, Account(kind="conversation", identifier="phone"))
+    )
     await hold_request(engine.plan_store, "approval:1")
     roster = _Roster(devices={"bare": _BARE, "phone": _PHONE})
     async with _client(engine, roster, tmp_path) as client:

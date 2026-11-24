@@ -46,8 +46,10 @@ from ai_assistant.core.types import (
     ControllerRule,
     CostBasis,
     DataTier,
+    DefaultGrant,
     EpisodeProcessingRecord,
     EpisodicMemory,
+    GrantHow,
     Idempotency,
     MemorySource,
     NewConversation,
@@ -62,6 +64,7 @@ from ai_assistant.core.types import (
     RequestedCall,
     Reversibility,
     RiskLevel,
+    Sureness,
     TicketState,
     ToolCost,
     ToolDefinition,
@@ -113,6 +116,15 @@ BOOK: Final = ToolDefinition(
     },
 )
 
+#: :data:`BOOK`, declared with a default line whose bar is strong: no tap the hub's own
+#: machine makes, at the hub chat's most, normal, reaches it (ADR-0377 §3:2).
+BOOK_AT_STRONG: Final = ToolDefinition.model_validate(
+    {
+        **BOOK.model_dump(),
+        "default_grant": DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.STRONG).model_dump(),
+    }
+)
+
 #: Where the asking work of a seeded episode came from: the hub chat.
 HUB_CHAT: Final = ChannelIdentity(channel_type="conversation", instance_id="conv-1")
 
@@ -144,6 +156,7 @@ async def hold_request(  # noqa: PLR0913 — one knob per part of a request a ca
     date: str = "Friday",
     person: str = OWNER_PERSON_ID,
     activation: str = "act-ask",
+    tool: ToolDefinition = BOOK,
 ) -> ApprovalRequest:
     """Write one request as ``request_approval`` writes it, ``ago`` before the subject's now.
 
@@ -156,7 +169,7 @@ async def hold_request(  # noqa: PLR0913 — one knob per part of a request a ca
         person=person,
         activation_id=activation,
         round=f"round:{activation}",
-        call=RequestedCall(tool=BOOK, values={"date": date}),
+        call=RequestedCall(tool=tool, values={"date": date}),
         why=why,
         written_at=at,
         expires_at=at + DAY,
@@ -730,6 +743,26 @@ class ApprovalsPanelContract:
         assert tapped.entry is None
         (held,) = await subject.plans.approval_requests(["approval:theirs"])
         assert held.state is ApprovalRequestState.PENDING
+
+    @pytest.mark.parametrize("choice", [ApprovalChoice.APPROVE, ApprovalChoice.DENY])
+    async def test_a_tap_below_the_level_its_call_needs_does_not_answer(
+        self, approvals_subject: ApprovalsPanelSubject, choice: ApprovalChoice
+    ) -> None:
+        """ADR-0377 §3:1 to §3:4: the request's person, at normal on the hub's own machine,
+        below its call's strong bar: nothing is recorded on it, and the tap is answered
+        ``not_answered`` beside the request as the panel shows it, still pending."""
+        subject = approvals_subject
+        await hold_request(subject.plans, "approval:1", tool=BOOK_AT_STRONG)
+        (shown,) = (await subject.engine.approvals()).pending
+
+        tapped = await subject.engine.tap_approval("approval:1", choice=choice)
+
+        assert tapped.answer is ApprovalPanelTapAnswer.NOT_ANSWERED
+        assert tapped.entry == shown
+        (held,) = await subject.plans.approval_requests(["approval:1"])
+        assert held.state is ApprovalRequestState.PENDING
+        assert held.answer is None
+        assert (await subject.engine.approvals()).pending == (shown,)
 
     async def test_the_request_id_is_normalised(
         self, approvals_subject: ApprovalsPanelSubject

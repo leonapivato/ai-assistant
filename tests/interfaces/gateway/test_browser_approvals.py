@@ -20,7 +20,12 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from approvals_panel_contract import APPROVALS_AT, hold_asking_episode, hold_request
+from approvals_panel_contract import (
+    APPROVALS_AT,
+    BOOK_AT_STRONG,
+    hold_asking_episode,
+    hold_request,
+)
 from browser_drive import DESKTOP, PHONE, driving, press
 from playwright.async_api import expect
 
@@ -198,6 +203,37 @@ async def test_a_tap_after_the_cards_is_answered_with_the_requests_state(
         (held,) = await plans.approval_requests(["approval:1"])
         assert held.state is ApprovalRequestState.APPROVED
         assert drive.engine.approvals_woken == 0
+        assert heard == []
+
+
+@_WIDTHS
+async def test_a_tap_below_its_calls_level_is_said_and_leaves_the_request_waiting(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """ADR-0377 §3:3, §3:4: the hub answers ``not_answered``; the page says, in words of
+    its own naming no level, that the tap did not answer the request, and the request is
+    still shown waiting, with its buttons."""
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        heard = _complaints(drive.page)
+        plans = _stores(drive)
+        await hold_request(plans, "approval:1", why=_WHY, tool=BOOK_AT_STRONG)
+        await _open(drive)
+        pending = drive.page.locator("#approvals-pending .approval-row")
+        await expect(pending).to_have_count(1)
+
+        async with drive.page.expect_response("**/approval/tap"):
+            await pending.first.get_by_role("button", name="Approve").click()
+
+        await expect(drive.page.locator("#approvals-outcome")).to_have_text(
+            "That tap did not answer the request, so nothing changed. It is still waiting."
+        )
+        await expect(pending).to_have_count(1)
+        await expect(pending.first.get_by_role("button", name="Approve")).to_be_enabled()
+        (held,) = await plans.approval_requests(["approval:1"])
+        assert held.state is ApprovalRequestState.PENDING
+        assert held.answer is None
+        assert drive.engine.approvals_woken == 0
+        assert await _overflow(drive.page) <= 0
         assert heard == []
 
 
