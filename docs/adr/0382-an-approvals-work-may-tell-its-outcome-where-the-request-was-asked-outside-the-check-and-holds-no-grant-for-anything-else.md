@@ -33,12 +33,15 @@ line's chat (ADR-0361 §6:7). That input came from the approvals, which takes no
 not into a place one of the work's own inputs came from (ADR-0367 §4:7), it passes the check, and
 ADR-0368 §7:5 allows it nothing.
 
-As built at `348ff39e7`: the round of a work that keeps a place list carries no `input_place`, and
-`input_places` holds only the approvals' place (`phase_path._input_places`), so
-`AuthorizingStage._message_checked` checks the text for `CheckedFor.no_one()`, and
-`permission_check.check_call` returns `not_done_no_grant` beside today's rules, which allow it. No
-merged clause gives the approval's work that place. Once B8 makes the check decide, a person who
-approves, denies or lets a card expire is told nothing, unless the asking work still runs and
+As the first deploy's rehearsal recorded it at `348ff39e7`: the round of a work that keeps a place
+list carries no `input_place`, and `input_places` holds only the approvals' place
+(`phase_path._input_places`), so `AuthorizingStage._message_checked` checks the text for
+`CheckedFor.no_one()`, and `permission_check.check_call` returns `not_done_no_grant` beside today's
+rules, which allow it. As built at `e42a3f881` the text is not even attempted: `CouldUse.shows`
+shows a place only where it is among the work's own input places (`phase_path._own_places`) or in
+a connection its authority could use, so the asking place is filtered from what the approval's
+work is shown. No merged clause gives that work the place. Now that the check decides, a person
+who approves, denies or lets a card expire is told nothing, unless the asking work still runs and
 takes the outcome over (ADR-0361 §6:4). The card's in-place edit (ADR-0361 §4:5) still shows the request's
 state, but not what came of running it.
 
@@ -80,10 +83,17 @@ inputs came from, as if that work were the asking one answering there, and chang
 > **Normative.** Every other check on a message still applies to one §2:1 keeps outside: its place
 > (ADR-0361 §6:7) and, once built, its work's mark (ADR-0370 §5:1).
 
+> **Normative.** A place §2:1 keeps outside the check is one an approval's work could use, in
+> ADR-0368 §8's sense: it is shown in that work's Connections section and `search_connections`
+> finds it (ADR-0368 §8:2), as a place one of a work's own inputs came from is.
+
 The ground is ADR-0361 §6:3. Code records the approval's input as meant for the asking activation,
 in `continues`: the outcome is the rest of the answer to what was asked there, and the place check
 already rules who can read it there. The asking work could have said it there outside the check;
-the approval's work says nothing there the asking work could not.
+the approval's work says nothing there the asking work could not. §2:5 follows from ADR-0368 §8's
+own reading of *could use*, which includes a connection "which the check would not reach (ADR-0367
+§4:7)", and its closing note: "A connection a work's own input came from is one it could use, since
+a reply into it is outside the check."
 
 ### 3. Nothing else changes for that work
 
@@ -142,30 +152,32 @@ to refuse is a text into the line's chat.
 | ADR-0306 §4:7, ADR-0356 §7:7, ADR-0364 §9:3, §9:4 | Read through ADR-0367's record; no record |
 | ADR-0367 §5:5, ADR-0368 §2:5, §4:1, §6:1, §6:2 | Read through (§3:2, §4) |
 | ADR-0370 §5:1 | Read through (§2:4) |
+| ADR-0368 §8:2 | Read through §5:1: its *could use* names ADR-0367 §4:7, as amended; no record (§2:5) |
 | #3678's "can only answer in its place" | Not an ADR: no record; its wording is the coordinator's to edit on the owner's answer |
 
 ### 6. What building it needs
 
 > **Normative.** Building this decision changes nothing in `core/protocols.py` or `core/types.py`.
 
-For B8: the round an approval's work authorizes (`RoundToAuthorize`, orchestration's own and no
-Protocol) must also be handed the places §2:2 reads, which the engine reads where
-`_approval_context` already reads the asking place, from `EpisodeProcessingRecord.trigger` and
-`.joined` or the running state. `_message_checked` then keeps a text into one of them outside,
-recorded as `CallCheckKind.OUTSIDE`, as it does a work's own input places; keeping them apart from
-`input_places`, which are the work's own, is B8's call. §4:4's reason is new text; its outcome stays
+The build hands the places §2:2 reads, which the engine reads where `_approval_context` already
+reads the asking place, from `EpisodeProcessingRecord.trigger` and `.joined` or the running state,
+to two consumers, both orchestration's own and no Protocol. The round an approval's work authorizes
+(`RoundToAuthorize`): `_message_checked` then keeps a text into one of them outside, recorded as
+`CallCheckKind.OUTSIDE`, as it does a work's own input places. And what narrows the work's shown
+connections (`connections_it_could_use`, whose `CouldUse.shows` then shows them, §2:5). Keeping them
+apart from `input_places`, which are the work's own, is the build's call. §4:4's reason is new text; its outcome stays
 *not done: no grant covers it* (ADR-0379 §3:1).
 
 ### 7. What this decision leaves to others
 
-- **B8:** the build, its field, its tests, and whether the first deploy's count changes.
+- **The build:** its fields, its tests, and what it logs.
 - **ADR-0377 §3:** who may answer a card, and a tap that does not answer.
 - **A later decision:** telling a task's request's outcome when the task's work has ended (§4:3).
 
 ## Consequences
 
-- After B8, a person who answers a card asked in the hub chat or on the line is told the outcome
-  there, as before the check, whatever they answered.
+- Once built, a person who answers a card asked in the hub chat or on the line is told the
+  outcome there, as before the check, whatever they answered.
 - A text into the line's chat from an approval's work whose request was asked in the hub chat,
   which the place list allows today, is not done (§3:3); the card's edit still shows the state.
 - An approval asked by a task's work is answered only by a takeover (§4:3).
