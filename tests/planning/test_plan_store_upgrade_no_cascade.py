@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from task_setters import decoded, unset
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import OccurrencePush, OccurrenceState, ScheduledTask
@@ -139,7 +140,7 @@ async def test_a_pending_occurrence_below_a_cascade_record_ends_cancelled(legacy
     """
     tasks, _ = await _opened(legacy)
 
-    assert _label(legacy) == "19"
+    assert _label(legacy) == "20"
     assert list(tasks) == _TASKS
     for task_id in ("t-below-pending", "t-grandchild"):
         (occurrence,) = tasks[task_id].occurrences
@@ -202,9 +203,10 @@ async def test_every_other_record_is_carried_as_it_stands(legacy: Path) -> None:
     assert after["activation_effects"] == before["activation_effects"]
     assert after["observations"] == before["observations"]
     untouched = {"t-below-pushed", "t-free", "t-free-pushed"}
-    assert [row for row in after["scheduled_tasks"] if row[0] in untouched] == [
+    # The step past 19 adds who set each task to its blob, and nothing else (ADR-0368 §6:3).
+    assert unset(row for row in after["scheduled_tasks"] if row[0] in untouched) == decoded(
         row for row in before["scheduled_tasks"] if row[0] in untouched
-    ]
+    )
     assert set(after["stopped_activations"]) >= set(before["stopped_activations"])
 
 
@@ -215,7 +217,7 @@ async def test_the_upgraded_file_reopens_as_it_is(legacy: Path) -> None:
 
     assert await _opened(legacy) == first
     assert _dump(legacy) == dumped
-    assert _label(legacy) == "19"
+    assert _label(legacy) == "20"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

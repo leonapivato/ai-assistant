@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     ScheduledOccurrence,
     ScheduledTask,
     ScheduledTaskAuthor,
+    Sureness,
     TaskRefusal,
     TaskRuleKind,
     TaskSpawn,
@@ -43,6 +44,17 @@ def _rule(**fields: Any) -> DueOnRule:
     )
 
 
+def _set_by(author: object) -> dict[str, Any]:
+    """Who set a task of ``author`` (ADR-0368 §6:1): the person at normal, or no one at none."""
+    if author is ScheduledTaskAuthor.PERSON:
+        return {
+            "author_person": "person:owner",
+            "setting_level": Sureness.NORMAL,
+            "setting_connection": None,
+        }
+    return {"author_person": None, "setting_level": Sureness.NONE, "setting_connection": None}
+
+
 def _task(*occurrences: ScheduledOccurrence, **fields: Any) -> ScheduledTask:
     """A task the person set on a daily rule, holding ``occurrences``."""
     return ScheduledTask.model_validate(
@@ -57,6 +69,7 @@ def _task(*occurrences: ScheduledOccurrence, **fields: Any) -> ScheduledTask:
             "set_at": _AT - _DAY,
             "chain_length": 1,
             "occurrences": occurrences or (ScheduledOccurrence(number=1, due_at=_AT),),
+            **_set_by(fields.get("author", ScheduledTaskAuthor.PERSON)),
             **fields,
         }
     )
@@ -254,6 +267,7 @@ def _spawn(**fields: Any) -> TaskSpawn:
             "set_in": _HUB_CHAT,
             "set_at": _AT - _DAY,
             "first_due_at": _AT,
+            **_set_by(fields.get("author", ScheduledTaskAuthor.PERSON)),
             **fields,
         }
     )
@@ -307,5 +321,5 @@ def test_the_export_carries_a_task_with_a_rule() -> None:
     task = _task(_done(1, _AT, "a1"), ScheduledOccurrence(number=2, due_at=_AT + _DAY))
     export = PlanExport(exported_at=_AT, scheduled_tasks=(task,))
 
-    assert export.schema_version == 29
+    assert export.schema_version == 30
     assert PlanExport.model_validate_json(export.model_dump_json()) == export

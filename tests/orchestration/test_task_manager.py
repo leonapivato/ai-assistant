@@ -28,6 +28,7 @@ from task_support import (
 
 from ai_assistant.core.errors import ClaimStopped, ConversationStoreError, PlanningError
 from ai_assistant.core.types import (
+    OWN_CHAT_CONNECTION,
     OWNER_PERSON_ID,
     ActionRequest,
     ActivationEffect,
@@ -46,7 +47,9 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     RequestedCall,
+    ScheduledTask,
     ScheduledTaskAuthor,
+    Sureness,
     TapOnCard,
     TicketState,
     ToolCall,
@@ -1064,3 +1067,101 @@ async def test_a_cancel_under_a_ticket_reaches_a_task_its_work_did_not_spawn() -
     assert isinstance(done, ToolResult), done
     assert done.outcome is ToolOutcome.SUCCEEDED
     assert await world.held(task.id) is None
+
+
+# --- who set a task, carried to it (ADR-0368 §6:1, §6:3, §6:4) ------------------------------
+
+
+async def _spawned_task(world: _World, spawned: object) -> ScheduledTask:
+    """The task a spawn that answered ``spawned`` wrote."""
+    assert isinstance(spawned, ToolResult), spawned
+    listing = decode_listing(spawned.output)
+    assert listing is not None
+    assert listing.spawned is not None
+    (task,) = await world.plans.scheduled_tasks([listing.spawned.task_id])
+    return task
+
+
+def _setter(task: ScheduledTask) -> tuple[str | None, Sureness, str | None]:
+    return task.author_person, task.setting_level, task.setting_connection
+
+
+async def test_a_spawn_from_the_persons_work_records_them_at_its_level_and_connection() -> None:
+    """§6:1, §6:4: the person whose authority the work carried, its level, where it met."""
+    world = _World()
+    spawner = _spawner(activation(), level=Sureness.WEAK, connection="telegram:line")
+
+    task = await _spawned_task(world, await _spawn(world, spawner, delay_minutes=30))
+
+    assert task.author is ScheduledTaskAuthor.PERSON
+    assert _setter(task) == (OWNER_PERSON_ID, Sureness.WEAK, "telegram:line")
+
+
+async def test_a_spawn_from_a_work_carrying_no_ones_authority_records_none() -> None:
+    """§6:1's last clause: no person, at none, whatever the work's level; it still records
+    where the work met a connection."""
+    world = _World()
+    spawner = _spawner(
+        activation(), authority=None, level=Sureness.NORMAL, connection=OWN_CHAT_CONNECTION
+    )
+
+    task = await _spawned_task(world, await _spawn(world, spawner, delay_minutes=30))
+
+    assert task.author is ScheduledTaskAuthor.ASSISTANT
+    assert _setter(task) == (None, Sureness.NONE, OWN_CHAT_CONNECTION)
+
+
+async def test_a_spawn_under_a_ticket_records_the_person_at_none() -> None:
+    """ADR-0367 §5:5: the tap's level is not recorded yet, so none, and no connection."""
+    world = _World()
+    request = await _ticket(world, SPAWN)
+    spawner = _spawner(
+        activation(), authority=None, level=Sureness.NORMAL, connection=OWN_CHAT_CONNECTION
+    )
+
+    task = await _spawned_task(world, await _spawn_under(world, request, spawner, delay_minutes=30))
+
+    assert task.author is ScheduledTaskAuthor.PERSON
+    assert _setter(task) == (OWNER_PERSON_ID, Sureness.NONE, None)
+
+
+async def test_a_replace_by_a_work_records_the_replacing_works_setter() -> None:
+    """ADR-0350 §9:4 takes the replaced task's parent, places and chain, and no more."""
+    world = _World()
+    setting = _spawner(activation(), level=Sureness.STRONG, connection="telegram:line")
+    first = await _spawned_task(world, await _spawn(world, setting, delay_minutes=30))
+    replacing = _spawner(activation(), level=Sureness.WEAK, connection=OWN_CHAT_CONNECTION)
+
+    task = await _spawned_task(
+        world, await _spawn(world, replacing, delay_minutes=45, replaces=first.id)
+    )
+
+    assert task.parent == first.parent
+    assert _setter(task) == (OWNER_PERSON_ID, Sureness.WEAK, OWN_CHAT_CONNECTION)
+
+
+async def test_the_task_managers_replace_keeps_the_replaced_tasks_level_and_connection() -> None:
+    """The command is the person's act and no work's: what the replaced task records of how
+    sure and where stands, and a task the assistant set gives the person at none."""
+    world = _World()
+    setting = _spawner(activation(), level=Sureness.WEAK, connection="telegram:line")
+    persons = await _spawned_task(world, await _spawn(world, setting, delay_minutes=30))
+    assistants = await _spawned_task(
+        world,
+        await _spawn(
+            world, _spawner(activation(), authority=None, level=Sureness.NORMAL), delay_minutes=30
+        ),
+    )
+
+    kept = await world.manager.replace(
+        persons.id, instruction="the bins", when=DueAt(at=AT + timedelta(hours=2))
+    )
+    given = await world.manager.replace(
+        assistants.id, instruction="the bins", when=DueAt(at=AT + timedelta(hours=2))
+    )
+
+    assert kept.task is not None
+    assert given.task is not None
+    assert _setter(kept.task) == (OWNER_PERSON_ID, Sureness.WEAK, "telegram:line")
+    assert given.task.author is ScheduledTaskAuthor.PERSON
+    assert _setter(given.task) == (OWNER_PERSON_ID, Sureness.NONE, None)

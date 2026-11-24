@@ -1382,12 +1382,19 @@ async def _spawned(store: SqlitePlanStore, spawn: TaskSpawn, digest: str, moment
 
 
 def _task_spawn(task_id: str, moment: Moment, **parts: object) -> TaskSpawn:
-    """A spawn for the owner, set in the check's conversation, as the actuator states it."""
+    """A spawn for the owner, set in the check's conversation, as the actuator states it.
+
+    The assistant's, by default, so it records no person, at none, and no connection
+    (ADR-0368 §6:1).
+    """
     return TaskSpawn.model_validate(
         {
             "id": task_id,
             "person": OWNER_PERSON_ID,
             "author": ScheduledTaskAuthor.ASSISTANT,
+            "author_person": None,
+            "setting_level": Sureness.NONE,
+            "setting_connection": None,
             "when": DueNow(),
             "instruction": f"Do the step {task_id}.",
             "set_in": _CHANNEL,
@@ -1438,6 +1445,10 @@ async def _write_scheduled_tasks(store: SqlitePlanStore, moment: Moment) -> None
             "task-upgrade-rule",
             moment,
             author=ScheduledTaskAuthor.PERSON,
+            # ADR-0368 §6:1, §6:4: set by the owner's own message in the system's chat.
+            author_person=OWNER_PERSON_ID,
+            setting_level=Sureness.NORMAL,
+            setting_connection=OWN_CHAT_CONNECTION,
             when=DueOnRule(
                 repeats=TaskRuleKind.WEEKLY,
                 days=(RuleDay.TUESDAY, RuleDay.THURSDAY),
@@ -1657,6 +1668,33 @@ def _finding_with_no_annotations(finding: Json) -> Json:
         "further_candidates": [],
         "framed": [],
         "outcome": outcome,
+    }
+
+
+def _plans_setter_carry(records: Records) -> Records:
+    """What a plan store read back before ADR-0368 §6:3 reads back after it (§6:1, §6:4).
+
+    The upgrade from label 19 rewrites every task's record and nothing else: a task the
+    person set records the person it is for, at normal, and one the assistant set no
+    person, at none; neither records a connection. Said here rather than left to the
+    comparison letting the head read back more, so the head is held to exactly those.
+    """
+    return {
+        key: _with_setter(value) if key.startswith("task/") else value
+        for key, value in records.items()
+    }
+
+
+def _with_setter(task: Json) -> Json:
+    """One scheduled task's read-back, given what the upgrade past 19 writes of it."""
+    if not isinstance(task, dict):
+        return task
+    persons = task.get("author") == ScheduledTaskAuthor.PERSON.value
+    return {
+        **task,
+        "author_person": task.get("person") if persons else None,
+        "setting_level": (Sureness.NORMAL if persons else Sureness.NONE).value,
+        "setting_connection": None,
     }
 
 
@@ -2339,12 +2377,13 @@ STORES: Final[tuple[Store, ...]] = (
         ("plans.db",),
         _write_plans,
         _read_plans,
-        shape=5,
+        shape=6,
         carries={
             1: _plans_observations_carry,
             2: _plans_finding_carry,
             3: _plans_annotation_carry,
             4: _plans_cascade_carry,
+            5: _plans_setter_carry,
         },
     ),
     Store("conversations", ("conversations.db",), _write_conversations, _read_conversations),

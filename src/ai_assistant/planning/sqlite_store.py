@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import ValidationError
 
@@ -41,7 +42,9 @@ from ai_assistant.core.types import (
     ObservationRecord,
     PlanExport,
     ScheduledTask,
+    ScheduledTaskAuthor,
     ScheduledTaskWrite,
+    Sureness,
     TaskWriteAnswer,
     TicketClaim,
 )
@@ -268,13 +271,32 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: blob too, left out where unset, so a version 19 file written before it reads unchanged:
 #: its upgrade is the empty one ADR-0326 §4's note names, the label stays, and
 #: ``tests/planning/test_plan_store_upgrade_request_wording.py`` is its test.
-_SCHEMA_VERSION = 19
+#:
+#: **Version 20 is ADR-0368 §6:1, §6:3 and §6:4's**: a scheduled task records who set it
+#: and how sure, ``author_person``, ``setting_level`` and ``setting_connection``, each
+#: required. No column changes, since the task is its blob, but every task stored before
+#: them lacks them, so **a version 19 file is upgraded in place** (ADR-0326 §4:1) by
+#: rewriting each task's blob (:meth:`SqlitePlanStore._record_task_setters`): a task the
+#: person set records the person it is for, at normal, and one the assistant set no
+#: person, at none; neither records a connection. A build reading 19 refuses the fields
+#: as extra, so it must refuse a file at 20 (ADR-0326 §5:3).
+_SCHEMA_VERSION = 20
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
 #: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
 #: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
 #: ruling (§4:6).
-_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16, 17, 18)
+_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16, 17, 18, 19)
+
+#: The last label whose scheduled tasks record no setter: a file at it or below has its
+#: tasks' blobs given one by the open (ADR-0368 §6:1, §6:3, §6:4).
+_LAST_UNSET_LABEL = 19
+
+#: What the upgrade past :data:`_LAST_UNSET_LABEL` records of a task the person set: the
+#: level of the work that set it, at normal. Before it the owner was the hub's only person
+#: and no link stood below normal, and every task carries the owner's authority after the
+#: upgrade with nothing to set up (#3678).
+_UPGRADED_PERSONS_LEVEL: Final = Sureness.NORMAL
 
 #: The table ADR-0350 §12:3 gave the store for a stop command's cascade records, and the
 #: last label that holds it. A file at that label or below may hold it, and the open
@@ -620,6 +642,10 @@ class SqlitePlanStore:
                 for statement in _RECORD_SCHEMA:
                     conn.execute(statement)
                 self._verify_record_tables(conn)
+                # ADR-0368 §6:3: the upgrade past 19 gives every task who set it, on the
+                # tables just verified and before anything reads a task as this build's.
+                if held is not None and held <= _LAST_UNSET_LABEL:
+                    self._record_task_setters(conn)
                 # ADR-0352 §2:6: the upgrade past 17 applies the cascade records' reach
                 # and drops them, on the tables just verified, in this transaction.
                 if held is not None and held <= _LAST_CASCADE_LABEL:
@@ -781,9 +807,51 @@ class SqlitePlanStore:
         open's ``CREATE TABLE IF NOT EXISTS`` creates, empty, in this same transaction. An
         effect record's ``ticket`` and ``request`` default to empty, so every record reads
         back as it was, no row is rewritten, and the step is the label alone.
+
+        **19 → 20** (ADR-0368 §6:1, §6:3, §6:4): a scheduled task records who set it and
+        how sure. The step moves the label here, and :meth:`_record_task_setters` rewrites
+        each task's blob once the record tables are verified, in this same transaction.
         """
         for step in range(held, _SCHEMA_VERSION):
             conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))
+
+    def _record_task_setters(self, conn: sqlite3.Connection) -> None:
+        """Give every task a file stored before ADR-0368 §6:3 who set it (§6:1, §6:4).
+
+        Run in the open's transaction, after the record tables are verified, for a file
+        the open upgraded from :data:`_LAST_UNSET_LABEL` or below, and before anything
+        reads a task as this build's. Each task's blob gains the three fields and keeps
+        every other byte's value (ADR-0326 §4:4):
+
+        - a task the person set (``author`` ``person``) records the person it is for as
+          its author's person, at :data:`_UPGRADED_PERSONS_LEVEL`: the owner, the hub's
+          only person when it was set;
+        - a task the assistant set records no person, at none (§6:1's last clause);
+        - neither records a connection, since none was recorded of where it was set, so a
+          grant's condition naming a connection is met in no such task's work.
+
+        The rewrite is of the stored JSON, not through this build's model, so a later
+        step's own change to the task meets the blob this step leaves. A row that is not
+        a task as an earlier release wrote one is refused as damage (ADR-0326 §5:1), and
+        the open, with every step it took, is rolled back (§4:3).
+
+        Raises:
+            PlanningError: If a stored task is not a JSON object naming its person and an
+                author of the person or the assistant, or already records a setter.
+        """
+        rows = conn.execute("SELECT id, data FROM scheduled_tasks").fetchall()
+        for task_id, data in rows:
+            record = _unset_task(task_id, data)
+            persons = record["author"] == ScheduledTaskAuthor.PERSON.value
+            record["author_person"] = record["person"] if persons else None
+            record["setting_level"] = (
+                _UPGRADED_PERSONS_LEVEL.value if persons else Sureness.NONE.value
+            )
+            record["setting_connection"] = None
+            conn.execute(
+                "UPDATE scheduled_tasks SET data = ? WHERE id = ?",
+                (json.dumps(record, ensure_ascii=False, separators=(",", ":")), task_id),
+            )
 
     def _refuse_foreign_tables(self, conn: sqlite3.Connection, held: int | None) -> None:
         """Refuse a file holding a table this code does not create, at the label it holds.
@@ -2378,6 +2446,48 @@ def _checked_task(path: str, row: Sequence[Any]) -> ScheduledTask:
         )
         raise PlanningError(msg)
     return task
+
+
+#: The fields a task records of who set it (ADR-0368 §6:1, §6:3, §6:4), which no task
+#: stored before :data:`_LAST_UNSET_LABEL` was passed holds.
+_SETTER_FIELDS: Final = ("author_person", "setting_level", "setting_connection")
+
+#: A task's author as an earlier release stored it (ADR-0350 §3:7).
+_STORED_AUTHORS: Final = frozenset(one.value for one in ScheduledTaskAuthor)
+
+
+def _unset_task(task_id: object, data: object) -> dict[str, Any]:
+    """One stored task's blob, as a release before ADR-0368 §6:3 wrote it, decoded.
+
+    Args:
+        task_id: The row's promoted id, for the message.
+        data: The row's blob.
+
+    Returns:
+        The blob as a JSON object.
+
+    Raises:
+        PlanningError: If it is not a JSON object naming a person and an author of the
+            person or the assistant, or it already records who set it.
+    """
+    try:
+        record = json.loads(str(data))
+    except ValueError as exc:
+        msg = f"the plan store holds scheduled task {task_id!r} as no JSON object: {exc}"
+        raise PlanningError(msg) from exc
+    if (
+        not isinstance(record, dict)
+        or not isinstance(record.get("person"), str)
+        or not isinstance(record.get("author"), str)
+        or record["author"] not in _STORED_AUTHORS
+        or any(one in record for one in _SETTER_FIELDS)
+    ):
+        msg = (
+            f"the plan store holds scheduled task {task_id!r} in no shape a release before "
+            f"label {_LAST_UNSET_LABEL + 1} wrote; the store is damaged (ADR-0326 §5:1)"
+        )
+        raise PlanningError(msg)
+    return record
 
 
 def _checked_request(path: str, row: Sequence[Any]) -> ApprovalRequest:

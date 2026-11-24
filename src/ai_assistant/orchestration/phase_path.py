@@ -305,6 +305,7 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     StoryRelation,
+    Sureness,
     ToolDefinition,
     ToolFailure,
     ToolFailureKind,
@@ -462,7 +463,11 @@ from ai_assistant.orchestration.task_scheduler import (
     spawning,
 )
 from ai_assistant.orchestration.understanding import WrittenBy, fetch_held
-from ai_assistant.orchestration.work_facts import persons_authority, persons_work
+from ai_assistant.orchestration.work_facts import (
+    met_connection,
+    persons_authority,
+    persons_work,
+)
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -5982,10 +5987,17 @@ class PhasePath:
         state = active_state()
         standing = None if state is None else state.standing
         task = scheduling.task
+        # ADR-0368 §6:1, §6:3, §6:4: what a task it spawns records of who set it, carried
+        # from the work's recorded facts and inputs and decided nowhere here.
+        facts = None if state is None else state.work_facts
         return Spawner(
             activation_id=working.activation_id,
             person=scheduling.person,
             authority=working.authority,
+            level=Sureness.NONE if facts is None else facts.level,
+            connection=None
+            if state is None
+            else met_connection(state.trigger, state.joined, task=task),
             set_in=scheduling.set_in,
             places=tuple(one.place for one in scheduling.places),
             carried=() if task is None else tuple(place_of(one) for one in task.places),

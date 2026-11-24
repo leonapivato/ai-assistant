@@ -14,6 +14,9 @@ request validates unchanged: the upgrade is the empty one ADR-0326 §4's note na
 the label stays ``19``. The head opens a copy, reads every request back as it was, each
 declaration with no default grant (ADR-0380 §3:1), and a request it then writes holds the
 declaration this build declares, default grant and all.
+
+This build's open moves the label on to ``20`` (ADR-0368 §6:3), a step that rewrites
+a scheduled task's row alone, and the file holds none, so nothing else moves.
 """
 
 from __future__ import annotations
@@ -105,7 +108,7 @@ async def test_every_request_reads_back_as_the_previous_release_wrote_it(legacy:
         "effect-q-before-pin",
     ]
     assert [one.model_dump_json() for one in read] == _stored_requests(legacy)
-    assert _label(legacy) == "19"
+    assert _label(legacy) == "20"
 
 
 async def test_a_stored_call_differs_from_this_builds_declaration_by_its_grant_alone(
@@ -171,4 +174,4 @@ async def test_a_request_written_after_holds_its_default_grant_across_a_reopen(
 
     assert read.call.tool == PIN
     assert read.call.tool.default_grant == PIN.default_grant
-    assert _label(legacy) == "19"
+    assert _label(legacy) == "20"
