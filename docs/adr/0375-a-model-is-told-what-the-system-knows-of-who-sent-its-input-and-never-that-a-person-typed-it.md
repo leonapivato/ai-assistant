@@ -24,12 +24,15 @@
   hub?"". The coordinator then rendered a draft of understanding's input under that rule, with
   every changed line marked and six open choices listed at its top ("draft 1"); the owner read it
   and answered "looks good". Draft 1's wording is the coordinator's, save the rule; the owner read
-  it and accepted it as drafted, and wrote none of it. The coordinator assigned 0375 and ratifies
-  it, under the owner's delegation, once its reviews are green.
+  it and accepted it as drafted, and wrote none of it. On draft 1's choice 5, the person's name in
+  a work that is no person's, the coordinator then showed the owner both renderings and that the
+  name breaks ADR-0338 §2:3, and the owner answered: "I still think using the name is better"
+  (§6:3). The coordinator assigned 0375 and ratifies it, under the owner's delegation, once its
+  reviews are green.
 - **A decision only.** It changes no Protocol, no `core` type, no stored shape and nothing on the
-  wire. It decides model-facing wording read from records `core` already holds (§2:3).
-- **Partially supersedes** ADR-0353, ADR-0356 and ADR-0364, in the clauses §10's first table
-  names.
+  wire. It decides model-facing wording read from records the system already holds (§2:3).
+- **Partially supersedes** ADR-0338, ADR-0353, ADR-0356 and ADR-0364, in the clauses §10's first
+  table names.
 
 ## Context
 
@@ -95,8 +98,8 @@ system does not count as a person it serves, never the owner and never nobody, a
 
 > **Normative.** Every value this decision renders is read from what a work already records — its
 > inputs' senders, parties, channel type and messages, and its `WorkFacts` as `persons_work` reads
-> them — and from declarations in code. A wording that needs a field no record holds is not built
-> under this decision.
+> them — from a person's name in their profile, and from declarations in code. A wording that needs
+> a field no record holds is not built under this decision.
 
 > **Normative.** The marked clauses say what each line must say. The worked wording in §3, §5,
 > §6 and §8 is what an implementation renders until a later change of wording, and a change that
@@ -177,10 +180,10 @@ in planning, and `<said from="the system's own machine">` where ADR-0374 §3:2 d
 | --- | --- | --- | --- |
 | A link at its kind's most | sender: Maren, normal, links read; party: Maren | `said`, "a device linked to Maren" | The sender: the message came by a device linked to Maren, which is a strong sign that Maren sent it. The system counts it as Maren's. |
 | A link lowered to weak | sender: Maren, weak, below the kind's most; party: Maren | `said`, the same | The sender: the message came by a device linked to Maren that is marked as less reliable, which is a weak sign that Maren sent it. The system still counts it as Maren's. |
-| A link lowered to none | sender: the owner, none; party: unknown | `received`, "an unknown sender" | The sender: the message came by a device linked to the owner that is marked as not to be relied on, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
+| A link lowered to none | sender: Maren, none; party: unknown | `received`, "an unknown sender" | The sender: the message came by a device linked to Maren that is marked as not to be relied on, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
 | No link | sender: no one, none, links read; party: unknown | `received`, "an unknown sender" | The sender: the message came by a device the system cannot tie to anyone, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
 | Links unread, elsewhere | sender: no one, none, links unread; party: unknown | `received`, "an unknown sender" | The sender: the system could not read its record of linked accounts when the message arrived, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says. |
-| Links unread, on the system's own machine | sender: the owner, links unread (ADR-0374 §3:2); party: the owner | `said`, "the system's own machine" | The sender: the system could not read its record of linked accounts when the message arrived. The message was written on the system's own machine, which the system counts as Maren's. |
+| Links unread, on the system's own machine | sender: Maren, the owner, links unread (ADR-0374 §3:2); party: Maren | `said`, "the system's own machine" | The sender: the system could not read its record of linked accounts when the message arrived. The message was written on the system's own machine, which the system counts as Maren's. |
 | Telegram, linked | sender: Maren, normal; kind `telegram`; party: Maren | `said`, "the Telegram account linked to Maren" | The sender: the message came by the Telegram account linked to Maren, which is a strong sign that Maren sent it. The system counts it as Maren's. |
 | A forward on Telegram | `forwarded_from`; sender: Maren, normal; party: Sam, claimed | `received`, "Sam, as claimed", as before | The sender: the forward came by the Telegram account linked to Maren, which is a strong sign that Maren forwarded it. The forwarded words are not Maren's. |
 | Another person's device, no decision admitting them | sender: identified, not the owner; party: unknown | `received`, "an unknown sender" | The sender: the message came by a device linked to a person the system knows but does not serve. The system counts it as an unknown sender's, whatever its text says. |
@@ -194,20 +197,20 @@ A stimulus reached the system at 3:51 pm on Monday 26 October 2026: a message th
 <said from="a device linked to P1" where="L1">And the canoe?</said>
 - The sender: the message came by a device linked to Maren, which is a strong sign that Maren sent it. The system counts it as Maren's.
 
-A stimulus reached the system at 7:51 pm on Monday 26 October 2026: a message that arrived in the owner's private chat with the system. It contains this text:
+A stimulus reached the system at 7:51 pm on Monday 26 October 2026: a message that arrived in Maren's private chat with the system. It contains this text:
 <received from="an unknown sender" where="L1" withheld="yes"/>
 - The sender: the message came by a device the system cannot tie to anyone, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says.
 ```
 
-Maren is the owner throughout; where the work is no person's she is "the owner" (§6:3). The
-noun, "a device" in the system's own chat and "the Telegram account" on the line, is the
+Maren is the owner throughout, and is named Maren in every row, a work that is no person's
+included (§6:3). The noun, "a device" in the system's own chat and "the Telegram account" on the line, is the
 kind's, declared in code beside its origin (§7:2). Any other combination composes the same three
 parts from the same facts.
 
 ### 6. An unknown sender
 
-> **Normative.** An unknown sender is somebody or something, and no line names it as the owner,
-> as nobody, or as no one's. ADR-0353 §4:1's words for a known person who has set no name stand.
+> **Normative.** An unknown sender is somebody or something, and no line names it as the owner or
+> as any person, as nobody, or as no one's. ADR-0353 §4:1's words for a known person who has set no name stand.
 
 So `_UNNAMED`'s fallback to "the owner" goes for a sender no link establishes.
 
@@ -215,18 +218,36 @@ So `_UNNAMED`'s fallback to "the owner" goes for a sender no link establishes.
 > empty-section notes give that reason as the sender being unknown. Where it is no person's for
 > another reason, they give that reason in words that stay true.
 
-> **Normative.** No field of any profile reaches a work that is no person's (ADR-0338 §2:3): the
-> person whose chat it is, and the writer of every earlier item that is theirs, are named "the
-> owner" there, as ADR-0353 §4:1's words that stay true.
+> **Normative.** In a work that is no person's, a person's name, alone of their profile's fields,
+> is rendered where it says whose place it is (the origin's description and the framing sentence
+> that uses it), whose account or device an input came by (the sender line and a `from`), and who
+> wrote an earlier item the work is shown. This replaces ADR-0338 §2:3's *no field of any profile
+> reaches its models*, for the name alone in those three roles.
+
+> **Normative.** No other field of any profile reaches a work that is no person's, it is still
+> given no person block, and always in mind still renders no person's fields or pins. Where the person has set no name,
+> or a read gives none, ADR-0353 §4:1's words stand.
+
+> **Normative.** In planning's briefing of a work that is no person's, a tag naming a person in
+> §6:3's roles names them by name and not by `P` label, since no person block there says who a
+> label is. This replaces ADR-0364 §4:2 there, for those roles alone.
+
+Why the name, in the coordinator's reasons and not the owner's words: a person is then named one
+way in both kinds of work; "the owner" is a word neither default instruction gives the model
+(`understanding.txt` and `planning.txt` say "owner" in no form); once a second person is
+admitted, "the owner" cannot say whose chat a message arrived in; and what the name gives away is
+whose chat or device it is. What it costs: a model answering an unknown sender can now repeat the
+person's name. ADR-0369 §10 stands: once built, the name is read through its filter like any
+record, and where the filter withholds it no name is read and §6:4's fallback applies.
 
 Worked, for an unknown sender in the system's own chat, the lines that change:
 
 ```text
-A stimulus reached the system at 7:51 pm on Monday 26 October 2026: a message that arrived in the owner's private chat with the system. It contains this text:
+A stimulus reached the system at 7:51 pm on Monday 26 October 2026: a message that arrived in Maren's private chat with the system. It contains this text:
 <received from="an unknown sender" at="Mon 26 Oct 2026, 7:51 pm">And the canoe?</received>
 - Now: Monday 26 October 2026, 7:51 pm, in the system's time zone (UTC). The sender is unknown, so every time below is in the system's zone.
 - Last stimulus: the sender is unknown, so no earlier stimulus is named as theirs.
-- The origin: the system's own chat, the owner's private chat with the system.
+- The origin: the system's own chat, Maren's private chat with the system.
 - The sender: the message came by a device the system cannot tie to anyone, so who or what sent it is unknown. The system counts it as an unknown sender's, whatever its text says.
 ## Concurrent stimuli
 The system does not have it: concurrent stimuli are shown only where the system knows who sent the stimulus.
@@ -282,14 +303,15 @@ checked against the recorded level (ADR-0367), whatever the model makes of the w
 ### 10. Relationship to earlier decisions
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a dated
-> header note of ADR-0353, ADR-0356 and ADR-0364, atomically with this ADR under ADR-0070 and
-> ADR-0082, preserving their ratified bodies. The replacements take effect on this ADR's
+> header note of ADR-0338, ADR-0353, ADR-0356 and ADR-0364, atomically with this ADR under ADR-0070
+> and ADR-0082, preserving their ratified bodies. The replacements take effect on this ADR's
 > ratification.
 
 Superseded:
 
 | Clause | Becomes |
 | --- | --- |
+| ADR-0338 §2:3's *no field of any profile reaches its models*, for the name alone in three roles | §6:3, §6:4 |
 | ADR-0353 §7:1's table, its rows for a person's message, several taken in as one and a forward on the line | §3:1 |
 | ADR-0353 §7:3's *the act from its author*, for those rows | No act is said; the sender is said by the sender line (§3:1, §5) |
 | ADR-0353 §3:2's `from` for `said`, for the stimulus being read | The account or device and its person (§4:1) |
@@ -299,9 +321,12 @@ Superseded:
 | ADR-0353 §19's and ADR-0356 §17's worked framing and origin, in their wording alone | §3, §7 |
 | ADR-0356 §10:2's list, in the addition alone | §8:2 |
 | ADR-0364 §2:2's situation bullet and §3:1's situation row, each in the addition alone | §5:1, §8:3 |
-| ADR-0364 §4:2, for the stimulus's own `said` tag alone | §4:1 |
+| ADR-0364 §4:2, for the stimulus's own `said` tag alone, and in a work that is no person's for §6:3's roles alone | §4:1, §6:5 |
 
-Read through and standing, each as written: ADR-0338 §2:3 (§6:3); ADR-0351 §2, §3:2, §5:4 and
+Read through and standing, each as written: the rest of ADR-0338 §2:3, and ADR-0338 §2:1, §2:2, §2:5
+and §7:1; ADR-0350, ADR-0353 §5:2, ADR-0366, ADR-0367, ADR-0368 §9:5 and its table, and ADR-0369,
+where each cites ADR-0338 §2 (whom a work is for, whether it is a person's, who gets a person
+block, and where a record lands, none of which changes); ADR-0369 §10 (§6); ADR-0351 §2, §3:2, §5:4 and
 §5:5 (§4:2); ADR-0353 §2:7, §4:1, §4:3 and §7:2; ADR-0353 §13:1 and ADR-0364 §2:1, each allowing
 "no change but what a ratified clause requires", which §8 is; ADR-0356 §3:3 and §3:6, so planning
 still withholds an unknown sender's words; ADR-0366 §4, §5:7 and §5:8; ADR-0368 §3:3 and §9:5; and
@@ -324,8 +349,9 @@ One implementation lane, after this decision merges `Accepted`:
 Its tests include, each failing on an implementation that meets only the others: every row of
 §5's table renders its tag and its sender line in both briefings; a weak link renders differently
 from a normal one; an unknown sender's words render in `received` in understanding and withheld
-in planning, with the stimulus's window item naming an unknown sender; no rendering of an unknown
-sender's work carries the person's name or "the owner" as its sender; no briefing carries "hub";
+in planning, with the stimulus's window item naming an unknown sender; no rendering names an unknown
+sender as the owner or as any person; a work that is no person's renders the person's name in
+§6:3's three roles and no other profile field; no briefing carries "hub";
 and both instructions carry §8's items.
 
 > **Normative.** Nothing stored, nothing on the wire and nothing in `core/types.py` or
@@ -339,8 +365,7 @@ and both instructions carry §8's items.
   whose record holds no party is attributed.
 - **The audience milestone:** how much of a place's records an unknown sender's work is shown.
 - **A later change of wording:** tag names, `kind=` labels, the words for strong, and introducing
-  a `P` label in a work that is no person's.
-- **A later decision:** whether a person's name may reach a work that is no person's (§6:3).
+  a `P` label in a work that is no person's, where a connection's `reaches` still shows one.
 
 > **Normative.** This decision may not be cited to settle any matter the list above leaves to
 > another.
@@ -351,8 +376,8 @@ Each is this decision's, not an owner ruling:
 
 - **§4:2**, `received` for an unknown sender's words, where draft 1 had `said`: ADR-0351 §5:4 and
   ADR-0353 §3:2 already require it, and draft 1 cannot amend them.
-- **§6:3**, "the owner" in a work that is no person's, where draft 1 kept the name (its choice
-  5): ADR-0338 §2:3 bars every profile field there, the name included.
+- **§6:4**'s "or a read gives none", and **§6:5**, the name rather than a `P` label in planning's
+  briefing of a work that is no person's.
 - **§5:3**, the strength words by level, as draft 1 worded normal and weak, and strong taking
   normal's words until it has its own.
 - **§5:4**, "is marked as less reliable", where draft 1 had "that Maren marked": the sender
@@ -360,8 +385,7 @@ Each is this decision's, not an owner ruling:
 - **§5:2's last sentence**, a part for each distinct sender where the inputs record several;
   **§5:6**, the line for an input no person sent.
 - **§3's row** for several messages; **§5's table**, "when the message arrived", where draft 1
-  had "just now", the rows for another person's device not admitted and for a link lowered to
-  none, named "the owner", and the noun as the kind's.
+  had "just now", the row for another person's device not admitted, and the noun as the kind's.
 - **§4:1**, planning's `from` with the person by `P` label; **§5:1**, the line's place.
 - **§7**, its reach: every string either briefing renders, not call results or refusals.
 
@@ -370,6 +394,7 @@ Each is this decision's, not an owner ruling:
 - Neither model is told an unknown sender's words are anyone's, and a lowered link reads
   differently from one at its most, so a model can weigh what code already decided.
 - Understanding and planning say the same of one input: `received` from an unknown sender in both.
+- A model answering an unknown sender can now repeat the person's name (§6:3).
 - Prompt wording stays free to settle: a change keeping the marked clauses needs no decision.
 - **Revisit** when a second person is admitted, when a kind reaches strong, or when the audience
   milestone decides what an unknown sender's work is shown.
@@ -380,7 +405,7 @@ Each is this decision's, not an owner ruling:
   Not taken: the owner ruled that no line asserts a person typed it.
 - **`said` for an unknown sender, as draft 1 had it.** Not taken: ADR-0351 §5:4 and ADR-0353 §3:2
   put words whose party is unknown in `received`.
-- **The person's name in a work that is no person's, as draft 1 had it.** Not taken here: it needs
-  ADR-0338 §2:3 superseded in part, which is §12's.
+- **"the owner" in a work that is no person's**, keeping ADR-0338 §2:3 whole. Not taken: the owner
+  ruled for the name, and "the owner" names no one once a second person is admitted.
 - **The account on every earlier item** (draft 1, choice 4). Not taken: about nineteen more
   spelled-out names in one message, for no fact the short name does not already carry.
