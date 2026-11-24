@@ -11,6 +11,7 @@ read the cautious way where its episode cannot be read (§2:11).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -26,8 +27,10 @@ from test_engine_contract import _wire
 from ai_assistant.core.channel_validation import most_sureness
 from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.types import (
+    HUB_DEVICE_ID,
     OWNER_PERSON_ID,
     Account,
+    ApprovalCardState,
     ApprovalChoice,
     ApprovalPanelTapAnswer,
     ApprovalRequestState,
@@ -35,6 +38,7 @@ from ai_assistant.core.types import (
     DefaultGrant,
     GrantHow,
     LineParts,
+    PermissionLine,
     PermissionLineKind,
     RecordedCall,
     RecordedChannelTrigger,
@@ -376,6 +380,57 @@ async def test_a_tap_whose_lines_cannot_be_read_answers_nothing() -> None:
 
     assert answer is ApprovalPanelTapAnswer.NOT_ANSWERED
     assert held.answer is None
+
+
+class _HeldLines:
+    """Over a :class:`FakePermissionLineStore`, ``store``: its first read waits until a case
+    lets it go, so a tap's level is read while another tap lands; later reads do not."""
+
+    def __init__(self) -> None:
+        self.store = FakePermissionLineStore(now=lambda: APPROVALS_AT)
+        self.reading = asyncio.Event()
+        self.go = asyncio.Event()
+        read = self.store.standing
+
+        async def standing() -> tuple[PermissionLine, ...]:
+            if not self.reading.is_set():
+                self.reading.set()
+                await self.go.wait()
+            return await read()
+
+        self.store.standing = standing  # type: ignore[method-assign]  # the read a case holds
+
+
+async def test_below_the_level_a_tap_another_answered_meanwhile_gets_its_state() -> None:
+    """§4:9, ``ApprovalPanelTap``'s request as it now stands: the phone's weak tap reads the
+    lines while the hub's own machine denies the request; the weak tap marks nothing and is
+    answered ``already_answered`` with the request denied, never ``not_answered``."""
+    lines = _HeldLines()
+    identities = FakeIdentityStore(
+        configured=(_PHONE, Account(kind=CHAT_ACCOUNT_KIND, identifier=HUB_DEVICE_ID))
+    )
+    link = await identities.find_link(_PHONE)
+    assert link is not None
+    await identities.lower(link.id, Sureness.WEAK, by=OWNER_PERSON_ID)
+    engine, plans = _engine([], identities=identities, lines=lines.store)
+    await engine.start()
+    try:
+        await hold_request(plans, "approval:1", tool=_BOOK_AT_NORMAL)
+        with serving_device(RequestingDevice(device_id="phone")):
+            weak = asyncio.ensure_future(
+                engine.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
+            )
+        await lines.reading.wait()
+        denied = await engine.tap_approval("approval:1", choice=ApprovalChoice.DENY)
+        lines.go.set()
+        tapped = await weak
+    finally:
+        await engine.aclose()
+
+    assert denied.answer is ApprovalPanelTapAnswer.ANSWERED
+    assert tapped.answer is ApprovalPanelTapAnswer.ALREADY_ANSWERED
+    assert tapped.entry is not None
+    assert tapped.entry.state is ApprovalCardState.DENIED
 
 
 async def test_the_fake_weighs_a_tap_against_its_lines_as_the_engine_does() -> None:

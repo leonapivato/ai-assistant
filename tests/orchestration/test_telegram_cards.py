@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     Idempotency,
     LineParts,
     PermissionDecision,
+    PermissionLine,
     PermissionLineKind,
     PermissionOutcome,
     PermissionRuling,
@@ -597,6 +598,51 @@ async def test_below_the_level_a_tap_on_an_expired_request_is_answered_with_its_
 
     assert rig.fake.answered == (("callback-1", "This request has expired."),)
     assert (await rig.request(str(request.id))).answer is None
+
+
+class _HeldLines:
+    """Over a :class:`FakePermissionLineStore`, ``store``: its first read waits until a case
+    lets it go, so a tap's level is read while another tap lands; later reads do not."""
+
+    def __init__(self) -> None:
+        self.store = FakePermissionLineStore(now=lambda: AT)
+        self.reading = asyncio.Event()
+        self.go = asyncio.Event()
+        read = self.store.standing
+
+        async def standing() -> tuple[PermissionLine, ...]:
+            if not self.reading.is_set():
+                self.reading.set()
+                await self.go.wait()
+            return await read()
+
+        self.store.standing = standing  # type: ignore[method-assign]  # the read a case holds
+
+
+async def test_below_the_level_a_tap_another_answered_meanwhile_is_answered_its_state() -> None:
+    """§4:9: the owner's weak tap reads the lines; the request is denied meanwhile; the weak
+    tap marks nothing and is answered with the state the first tap gave it."""
+    store = FakeIdentityStore(configured=(_LINE_ACCOUNT,))
+    lines = _HeldLines()
+    rig = _Rig(identities=store, lines=lines.store)
+    _, request = await rig.ask(tool=_SEND)
+    await _lowered(store, Sureness.WEAK)
+
+    weak = asyncio.ensure_future(rig.tapped(rig.tap(request), 9))
+    await lines.reading.wait()
+    await rig.plans.answer_approval_request(
+        str(request.id),
+        ApprovalRequestState.DENIED,
+        ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT),
+    )
+    lines.go.set()
+    await weak
+
+    assert rig.fake.answered == (("callback-1", "This request was already denied."),)
+    held = await rig.request(str(request.id))
+    assert held.state is ApprovalRequestState.DENIED
+    assert held.answer is not None
+    assert held.answer.who is ApprovalGiver.USER_TAP_ON_HUB_PANEL
 
 
 async def test_below_the_level_a_tap_held_already_answers_nothing_again() -> None:

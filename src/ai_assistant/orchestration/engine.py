@@ -9522,7 +9522,8 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
     as they stand now (§3:1, §3:2,
     :func:`~ai_assistant.orchestration.permission_check.level_needed`). Below it, or where
     the level cannot be read, it changes nothing and wakes nothing, and is answered
-    ``not_answered`` beside the request as the panel shows it (§3:3, §3:4).
+    ``not_answered`` beside the request as the panel shows it (§3:3, §3:4); where another
+    tap answered the request meanwhile, with its state, as a later tap is (§4:9).
 
     Otherwise the request is marked approved or denied, with the tap's instant and the
     person and level read (§4:1), in the store's one step that refuses where the request
@@ -9562,11 +9563,15 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
         return ApprovalPanelTap(answer=ApprovalPanelTapAnswer.UNKNOWN), False
     request = found[0]
     if await _panel_tap_falls_short(lines, request, tapper, now=now):
-        # ADR-0377 §3:3, §3:4: nothing marked, nothing woken; the request as it stands.
+        # ADR-0377 §3:3, §3:4: nothing marked, nothing woken; the request as it now
+        # stands, read again, since another tap may have answered it while the lines were
+        # read, and a later tap is answered with the state the first gave it (§4:9).
+        again = await plans.approval_requests([request_id])
+        request = again[0] if again else request
         facts = await facts_of((request,))
         entry = approval_panel_entry(request, facts[str(request.id)], now=now)
         return _fitted_tap(
-            ApprovalPanelTap(answer=ApprovalPanelTapAnswer.NOT_ANSWERED, entry=entry), max_bytes
+            ApprovalPanelTap(answer=_unanswered(entry), entry=entry), max_bytes
         ), False
     state = (
         ApprovalRequestState.APPROVED
@@ -9594,6 +9599,15 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
     landed = step.answer in {ApprovalStepAnswer.CHANGED, ApprovalStepAnswer.PAST_EXPIRY}
     _log.info("approval_tap", stage="approval_panel", step=step.answer.value)
     return _fitted_tap(ApprovalPanelTap(answer=answer, entry=entry), max_bytes), landed
+
+
+def _unanswered(entry: ApprovalPanelEntry) -> ApprovalPanelTapAnswer:
+    """What a panel tap that marked nothing is answered, by where its request now stands."""
+    if entry.state is ApprovalCardState.PENDING:
+        return ApprovalPanelTapAnswer.NOT_ANSWERED
+    if entry.state is ApprovalCardState.EXPIRED:
+        return ApprovalPanelTapAnswer.EXPIRED
+    return ApprovalPanelTapAnswer.ALREADY_ANSWERED
 
 
 async def _panel_tap_falls_short(
