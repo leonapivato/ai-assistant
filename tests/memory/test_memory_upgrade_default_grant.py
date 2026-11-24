@@ -11,8 +11,10 @@ still hold them, which is why this store holds a ``ToolDefinition`` at all.
 
 A declaration with no default grant leaves the field out of its dump, so the stored
 episode validates unchanged: the upgrade is the empty one ADR-0326 §4's note names, and
-the label stays ``25``. The head opens a copy and reads the episode back as it was, each
-asked call's declaration with no default grant (ADR-0380 §3:1).
+the label stayed ``25``. The head opens a copy and reads the episode back as it was, each
+asked call's declaration with no default grant (ADR-0380 §3:1), and writes the label it
+writes, which a later change moved by the label alone (ADR-0379 §3:2's record of the
+check).
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import pytest
 
 from ai_assistant.core.types import EpisodicMemory
 from ai_assistant.memory import SqliteMemoryStore
+from ai_assistant.memory._episode_format import MEMORY_RECORD_FORMAT
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.orchestration.person_calls import PIN
 from ai_assistant.testing import FakeTraceSink
@@ -101,4 +104,4 @@ async def test_the_episode_reads_back_as_the_previous_release_wrote_it(legacy: P
     for asked, current in zip(round_.asked, (EMAIL, PIN), strict=True):
         assert asked.tool == current.model_copy(update={"default_grant": None})
     assert episode.model_dump_json(exclude={"revision"}) == _stored(legacy)[_EPISODE]
-    assert _label(legacy) == 25
+    assert _label(legacy) == MEMORY_RECORD_FORMAT

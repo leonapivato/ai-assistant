@@ -220,6 +220,7 @@ if TYPE_CHECKING:
         MemoryStore,
         NotificationPolicy,
         OutboundTransport,
+        PermissionLineStore,
         PlanStore,
         Reader,
         Secrets,
@@ -1429,10 +1430,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # **ADR-0367 §3:6's line store, on its own file, on every hub.** The lines people
         # make, grants and limits, each under an identifier never reused, keeping every
         # making and removal (§3:5). It starts empty: no line is seeded, and a tool's
-        # default line is its declaration's, never the store's (ADR-0376 §3:3). Nothing
-        # reads it yet: no call is checked against a line until the lanes that build the
-        # check, and no member makes or removes one until the owner's acts are built. It
-        # reads no other store, and it is not ADR-0097's source grants (ADR-0367 §14).
+        # default line is its declaration's, never the store's (ADR-0376 §3:3). The
+        # authorizer's check reads it (ADR-0367 §4:1), its outcome recorded beside
+        # today's rules, which still decide until the check does (§4:5); no member makes
+        # or removes one until the owner's acts are built. It reads no other store, and
+        # it is not ADR-0097's source grants (ADR-0367 §14).
         permission_lines = SqlitePermissionLineStore(
             path=directory / PERMISSION_LINES_FILENAME, now=_utcnow
         )
@@ -2111,6 +2113,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
                 diagnostics=diagnostics,
                 tidy_up=tidy_up,
+                lines=permission_lines,
             ),
             planning_prompt=prompts[PLANNING_PROMPT.name],
             digesting_prompt=prompts[DIGESTING_PROMPT.name],
@@ -2879,7 +2882,8 @@ class _PhaseSeams:
     one trail every ruling is recorded in, one plan store every effect is claimed in,
     one story store the backstop's match is read from, one memory store, one egress
     binder, one registry that is also the invoker, and one tidy-up, so at
-    most one run is on a story at a time (ADR-0300 §5:10).
+    most one run is on a story at a time (ADR-0300 §5:10). ``lines`` is the one line
+    store, whose standing lines the authorizer's check reads (ADR-0367 §3:6, §4:1).
     """
 
     model: RoutingProvider
@@ -2896,6 +2900,7 @@ class _PhaseSeams:
     booking_configured: bool
     tidy_up: StoryTidyUp
     diagnostics: DiagnosticSink | None = None
+    lines: PermissionLineStore | None = None
 
 
 def _build_phase_path(
@@ -3054,6 +3059,9 @@ def _build_phase_path(
             # ADR-0321 §4:4, §4:11, §6:1: the yes path's facts are read from the one
             # plan store acting claims in.
             plans=seams.plans,
+            # ADR-0367 §4:1, §4:5: the check reads the standing lines, and its outcome is
+            # recorded beside today's rules, which still decide.
+            lines=seams.lines,
             preference=Preference(TOOL_PREFERENCE),
             registered_search=(
                 frozenset() if seams.searcher is None else frozenset({WEB_SEARCH_ID})

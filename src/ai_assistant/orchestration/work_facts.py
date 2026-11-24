@@ -79,6 +79,10 @@ takes it.
 task's work the one its task records. A task records it of the work that set it (§6:3);
 nothing reads it yet, and it is no fact of the work (§2:4).
 
+**Whom the check runs for** (:func:`check_runs_for`, ADR-0368 §7): read from the work's
+facts, its task's recorded author and level, and what makes it carry none, and handed to
+the authorizer, which decides none of it.
+
 **One line per recording** (:func:`log_facts`): ``work_facts_recorded``, with what was
 decided as codes and levels alone, never a person's identifier or an input's words, which
 is what a running hub shows of the switch.
@@ -106,6 +110,7 @@ from ai_assistant.core.types import (
     Account,
     AuthorityKind,
     ChannelIdentity,
+    CheckedFor,
     HolderKind,
     InputSender,
     LineConnection,
@@ -124,6 +129,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import IdentityStore
     from ai_assistant.core.types import (
+        ApprovalTap,
         ChannelTarget,
         JoinedInput,
         RecordedChannelTrigger,
@@ -140,6 +146,7 @@ __all__ = [
     "NO_LINK",
     "authority_persons",
     "chat_account",
+    "check_runs_for",
     "held_senders",
     "joined",
     "line_account",
@@ -153,6 +160,7 @@ __all__ = [
     "sender_of",
     "senders_of",
     "started",
+    "tap_runs_for",
     "unread",
     "unrecorded",
 ]
@@ -574,6 +582,80 @@ def met_connection(
         return _LINE_CONNECTION.validate_python(only)
     except ValidationError:  # a place no line can name meets no condition
         return None
+
+
+def _admitted(person: str | None, level: Sureness) -> CheckedFor:
+    """``person`` at ``level``, where the hub admits them; no one otherwise (:data:`_ADMITTED`)."""
+    if person is None or person not in _ADMITTED:
+        return CheckedFor.no_one()
+    return CheckedFor.for_person(person, level)
+
+
+def check_runs_for(
+    facts: WorkFacts | None,
+    *,
+    own_input: bool,
+    relayed: bool,
+    task: ScheduledTask | None = None,
+) -> tuple[CheckedFor, ...]:
+    """Whom the check runs for in a work, and at what level (ADR-0368 §7's table).
+
+    Read from what the work records, and decided nowhere else (ADR-0367 §4:1):
+
+    - **A task's work** (``task``): its task's recorded author, at the level the task
+      records of the work that set it (§6:1, §6:3), whatever the work's own facts say,
+      which record none until the check decides (§7's fifth row). A task the assistant
+      authored, recording no person, carries none.
+    - **A sender's work**: each identified person whose authority it carries, at the
+      work's level, and a member of anyone alone, at none, where it carries an
+      unidentified sender's (§7:1 to §7:3). In advance, its author, at its level.
+    - **A work that carries none** (§7:5): no one, at none. So is a work with no facts,
+      one whose input is not its senders' own words (``own_input``, ADR-0321 §3:3), and
+      one holding a relayed input (ADR-0351 §6:5), whatever its facts say (ADR-0368
+      §9:1), as :func:`persons_authority` reads it.
+
+    A person the hub does not admit is read as no one (:data:`_ADMITTED`).
+
+    Args:
+        facts: The work's facts as they stand, or ``None`` where none were recorded.
+        own_input: Whether every message the work's input took in is its sender's own.
+        relayed: Whether any input the work holds is relayed.
+        task: The task whose occurrence started it, where it is a task's work.
+
+    Returns:
+        Each one the check runs for, in order, no one repeated; at least one.
+    """
+    if task is not None:
+        return (_admitted(task.author_person, task.setting_level),)
+    if facts is None or not own_input or relayed:
+        return (CheckedFor.no_one(),)
+    authority = facts.authority
+    if authority.kind is AuthorityKind.NONE:
+        return (CheckedFor.no_one(),)
+    runs = [_admitted(one, facts.level) for one in authority.persons]
+    if authority.unidentified:
+        runs.append(CheckedFor.anyone())
+    return tuple(dict.fromkeys(runs)) or (CheckedFor.no_one(),)
+
+
+def tap_runs_for(tap: ApprovalTap) -> CheckedFor:
+    """Whom the check runs for on a call run under a ticket, and at what level.
+
+    ADR-0367 §5:5: the person whose tap approved it, at the level that tap came by, which
+    the request's answer records (ADR-0377 §4:1, §4:2), and none where it records none
+    (§4:4). A tap read as no one's is an unidentified tapper's, a member of anyone alone at
+    none, as a message by that account would be (ADR-0377 §2, ADR-0368 §7:2). A person the
+    hub does not admit is read as no one (:data:`_ADMITTED`).
+
+    Args:
+        tap: The request's answer, as the plan store holds it.
+
+    Returns:
+        Whom the check runs for.
+    """
+    if tap.person is None:
+        return CheckedFor.anyone()
+    return _admitted(tap.person, tap.level_read)
 
 
 def links_unread(senders: Iterable[InputSender]) -> bool:

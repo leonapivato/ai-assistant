@@ -5390,6 +5390,210 @@ class CallShowed(BaseModel):
     cut: bool = False
 
 
+# --- the check's outcome, and its record of a call (ADR-0367 §4, ADR-0379 §3) ----------
+#
+# The check (ADR-0367 §4:1) decides one of ADR-0379 §3:1's six outcomes for a call, for one
+# person and one level, from the lines that cover it (§2). Here are the outcome, whom the
+# check ran for, and what an episode's entry for a call keeps of it (§3:2). Whether a line
+# covers a call, and which decides, are the check's, not these types'.
+
+
+class CheckOutcomeKind(StrEnum):
+    """The check's outcome for one call (ADR-0379 §3:1). Closed: exactly these six."""
+
+    ALLOWED_ON_NO_LINE = "allowed_on_no_line"
+    """Allowed, and only default lines allow it: a ruling names no line (§2:3, §4:2)."""
+    ALLOWED_ON_MADE_GRANT = "allowed_on_made_grant"
+    """Allowed, resting on a grant a person made, which a ruling names (§2:3, §4:1)."""
+    NEEDS_YES_SHORTFALL = "needs_yes_shortfall"
+    """A grant covers it but none applies at the level: it needs a yes at its bar (§2:5)."""
+    NEEDS_YES_WITH_APPROVAL = "needs_yes_with_approval"
+    """Only a grant that allows with approval applies: it needs a yes (§2:4)."""
+    NOT_DONE_LIMIT = "not_done_limit"
+    """A limit covers it: not done, whatever grants also cover it (§2:2)."""
+    NOT_DONE_NO_GRANT = "not_done_no_grant"
+    """No grant covers it: not done (§2:6, ADR-0367 §4:2)."""
+
+
+#: The outcomes the check allows a call by (ADR-0379 §3:1).
+CHECK_ALLOWS: Final = frozenset(
+    {CheckOutcomeKind.ALLOWED_ON_NO_LINE, CheckOutcomeKind.ALLOWED_ON_MADE_GRANT}
+)
+
+#: The outcomes under which a call needs a yes (ADR-0379 §3:1).
+CHECK_NEEDS_A_YES: Final = frozenset(
+    {CheckOutcomeKind.NEEDS_YES_SHORTFALL, CheckOutcomeKind.NEEDS_YES_WITH_APPROVAL}
+)
+
+
+class CheckOutcome(BaseModel):
+    """One of the check's six outcomes, carrying what it carries (ADR-0379 §3:1).
+
+    *Allowed, resting on a made grant* carries that grant's identifier; *needs a yes: a
+    shortfall* carries its bar, never below weak (§2:5, its note); *not done: a limit
+    covers it* carries, where a made limit covers the call, the identifier of one (§2:8).
+    No other outcome carries a line or a bar.
+
+    Attributes:
+        kind: Which of the six it is.
+        line: The made line it names, by its identifier in the line store, where it names
+            one.
+        bar: A shortfall's bar.
+
+    Raises:
+        ValueError: If it carries a line or a bar its kind does not carry, or lacks one its
+            kind requires.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: CheckOutcomeKind
+    line: NonBlankEncodableText | None = None
+    bar: Sureness | None = None
+
+    @model_validator(mode="after")
+    def _carries_what_its_kind_carries(self) -> Self:
+        kind = self.kind
+        if kind is CheckOutcomeKind.ALLOWED_ON_MADE_GRANT and self.line is None:
+            msg = "an outcome resting on a made grant names it (ADR-0379 §3:1)"
+            raise ValueError(msg)
+        if self.line is not None and kind not in {
+            CheckOutcomeKind.ALLOWED_ON_MADE_GRANT,
+            CheckOutcomeKind.NOT_DONE_LIMIT,
+        }:
+            msg = "only a made grant that allows, or a made limit, is named (ADR-0379 §4)"
+            raise ValueError(msg)
+        if (kind is CheckOutcomeKind.NEEDS_YES_SHORTFALL) != (self.bar is not None):
+            msg = "a shortfall carries its bar, and no other outcome carries one (§3:1)"
+            raise ValueError(msg)
+        if self.bar is Sureness.NONE:
+            msg = "a shortfall's bar is never below weak (ADR-0379 §2:5)"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def allows(self) -> bool:
+        """Whether the check allows the call (§2:3): the call still passes every other check."""
+        return self.kind in CHECK_ALLOWS
+
+
+class CheckedForKind(StrEnum):
+    """Whom the check ran for (ADR-0368 §7). Closed, added to, never renamed."""
+
+    PERSON = "person"
+    """An identified person, by their identity's id: the lines naming them or anyone."""
+    ANYONE = "anyone"
+    """A member of anyone alone, as for an unidentified sender (§7:2): only grants to anyone
+    apply, at none."""
+    NO_ONE = "no_one"
+    """No one: a work that carries no authority holds no grant (§7:5)."""
+
+
+class CheckedFor(BaseModel):
+    """Whom the check ran for, and at what level (ADR-0368 §7:1).
+
+    Attributes:
+        kind: A person, a member of anyone alone, or no one.
+        person: For a person, their identity's id; ``None`` otherwise.
+        level: The level the check ran at: for a person, the work's, the task's or the
+            tap's (§7's table, ADR-0367 §5:5); none for anyone else.
+
+    Raises:
+        ValueError: If a person is named exactly where its kind names none, or a member of
+            anyone or no one is at a level above none.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: CheckedForKind
+    person: NonBlankEncodableText | None = None
+    level: Sureness = Sureness.NONE
+
+    @model_validator(mode="after")
+    def _a_person_exactly_where_one_is_named(self) -> Self:
+        if (self.kind is CheckedForKind.PERSON) != (self.person is not None):
+            msg = "the check runs for a named person exactly where it runs for a person"
+            raise ValueError(msg)
+        if self.kind is not CheckedForKind.PERSON and self.level is not Sureness.NONE:
+            msg = "the check runs for anyone else at none (ADR-0368 §7:2, §7:5)"
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def no_one(cls) -> CheckedFor:
+        """No one, at none (ADR-0368 §7:5)."""
+        return cls(kind=CheckedForKind.NO_ONE)
+
+    @classmethod
+    def anyone(cls) -> CheckedFor:
+        """A member of anyone alone, at none (ADR-0368 §7:2)."""
+        return cls(kind=CheckedForKind.ANYONE)
+
+    @classmethod
+    def for_person(cls, person: str, level: Sureness) -> CheckedFor:
+        """``person``, at ``level``."""
+        return cls(kind=CheckedForKind.PERSON, person=person, level=level)
+
+
+class CheckRun(BaseModel):
+    """The check's outcome for one call, for one of those it ran for (ADR-0379 §3:2).
+
+    Attributes:
+        checked_for: Whom it ran for, and at what level.
+        outcome: Its outcome, whole.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    checked_for: CheckedFor
+    outcome: CheckOutcome
+
+
+class CallCheckKind(StrEnum):
+    """What came of checking a call (ADR-0379 §3:2). Closed, added to, never renamed."""
+
+    CHECKED = "checked"
+    """The check ran, for each one it runs for (ADR-0368 §7:3), each with its outcome."""
+    OUTSIDE = "outside"
+    """A message into a place one of the work's own inputs came from, which stays outside
+    the check, checked by its place alone (ADR-0367 §4:7)."""
+    LINES_UNREAD = "lines_unread"
+    """The check did not run: the standing lines could not be read."""
+    FAILED = "failed"
+    """The check did not run to an outcome: it raised."""
+
+
+class CallCheck(BaseModel):
+    """What the check made of one call, as its episode's entry keeps it (ADR-0379 §3:2).
+
+    Recorded beside what was decided, whether the check decides or, as when it is first
+    built, is recorded beside today's rules (ADR-0367 §4:5). An entry with none records a
+    call the check never reached: one recorded before the check was built, or one refused
+    before any check, by planning's own check, by selection or by its tool's own checks.
+
+    Attributes:
+        kind: Whether it ran, stayed outside it, or did not run, and why.
+        runs: Where it ran, its outcome for each one it ran for, in the order they were
+            handed to it; none otherwise.
+
+    Raises:
+        ValueError: If it holds an outcome exactly where it did not run, or names one of
+            those it ran for twice.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: CallCheckKind
+    runs: tuple[CheckRun, ...] = ()
+
+    @model_validator(mode="after")
+    def _outcomes_exactly_where_it_ran(self) -> Self:
+        if (self.kind is CallCheckKind.CHECKED) != bool(self.runs):
+            msg = "a call's check holds an outcome exactly where it ran (ADR-0379 §3:2)"
+            raise ValueError(msg)
+        ran_for = [one.checked_for for one in self.runs]
+        if len({(one.kind, one.person) for one in ran_for}) != len(ran_for):
+            msg = "a call's check holds one outcome for each one it ran for"
+            raise ValueError(msg)
+        return self
+
+
 class RecordedCall(BaseModel):
     """One call a planning round proposed, as the episode records it (ADR-0356 §8).
 
@@ -5416,6 +5620,10 @@ class RecordedCall(BaseModel):
             (ADR-0358 §11:2-§11:4). ``None`` where the entry keeps none: a call not
             done, and an entry recorded before the addition, which validates unchanged
             and whose full view says what it showed was not kept (§11:6).
+        check: What the check made of it (ADR-0379 §3:2), beside what was decided.
+            ``None`` where it was not checked: an entry recorded before the check was
+            built, which validates unchanged, or a call refused before the check
+            (:class:`CallCheck`).
 
     Raises:
         ValueError: If it carries a reason without an outcome, a delivery on a call
@@ -5434,6 +5642,7 @@ class RecordedCall(BaseModel):
     recorded_at: UtcInstant
     marked: bool = False
     showed: CallShowed | None = None
+    check: CallCheck | None = None
 
     @model_validator(mode="after")
     def _well_formed(self) -> Self:
@@ -16959,6 +17168,17 @@ class ActionRequest(BaseModel):
             "``None`` where the request is not an egress call. Exactly one field, "
             "never several: four independent optional fields would admit fifteen "
             "partial states that ADR-0148 §8's third floor exists to refuse."
+        ),
+    )
+    rests_on: NonBlankEncodableText | None = Field(
+        default=None,
+        description=(
+            "The line the call rests on (ADR-0367 §4:6, §16): the made grant the check's "
+            "outcome names, by its identifier in the line store (ADR-0379 §4:1), so a "
+            "policy reads no store and stays a function of its argument (ADR-0021 §3). "
+            "``None`` where the outcome names none. The authorizer sets it; until the "
+            "check decides (ADR-0367 §4:5) it is left unset on every request, so what a "
+            "recorded decision and a held ticket compare equal to is unchanged."
         ),
     )
 

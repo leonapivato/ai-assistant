@@ -100,6 +100,7 @@ from ai_assistant.memory._episode_format import (
     SHOWED_RECORD_FORMAT,
     TAKEN_OVER_RECORD_FORMAT,
     UNDERSTOOD_RECORD_FORMAT,
+    UNREAD_RECORD_FORMAT,
     inspect_existing,
     stored_format,
 )
@@ -605,6 +606,7 @@ class SqliteMemoryStore:
             self._upgrade_to_showed(conn, existing_format)
             self._upgrade_to_facts(conn, existing_format)
             self._upgrade_to_unread(conn, existing_format)
+            self._upgrade_to_checked(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -1627,6 +1629,28 @@ class SqliteMemoryStore:
         one whose links were read, since nothing read a sender then and the log is the
         only record of a fault from that time (ADR-0374 §7). So every record a file at 24
         holds validates unchanged, and none is rewritten (§4:4).
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        if found is None or found >= UNREAD_RECORD_FORMAT:
+            return
+        conn.execute("UPDATE episode_record_format SET version = ?", (UNREAD_RECORD_FORMAT,))
+
+    @staticmethod
+    def _upgrade_to_checked(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0379 §3:2's record, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_unread` has carried a file to 25, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+
+        **The label alone moves.** Each stored call's entry gains ``check``, which reads
+        ``None`` where it is absent: an entry recorded before the check was built reads
+        as one the check never reached, which it was. So every record a file at 25 holds
+        validates unchanged, and none is rewritten (§4:4).
 
         Args:
             conn: The connection, inside :meth:`_setup`'s transaction.
