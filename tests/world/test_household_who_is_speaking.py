@@ -47,7 +47,9 @@ if TYPE_CHECKING:
 #: What planning's always-in-mind section says of a person's stimulus where no
 #: person-model store is wired, as here, and of one that is no person's (ADR-0338 §2:3).
 _A_PERSONS: Final = "no profile or kept memory is read for this stimulus"
-_NO_PERSONS: Final = "this stimulus is no person's, so none is kept in mind"
+#: Always in mind's note for a work that is no person's because its sender is unknown
+#: (ADR-0375 §6:2).
+_NO_PERSONS: Final = "the sender is unknown, so nothing kept in mind about a person is read"
 
 
 def _theirs(person: Person, level: Sureness) -> WorkFacts:

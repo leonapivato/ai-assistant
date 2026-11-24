@@ -801,7 +801,7 @@ async def test_other_work_from_an_unshown_conversation_brings_its_connection() -
     where = stimulus.get("where")
     assert where is not None
     entry = tag(started, "connection", label=where)
-    assert entry.text == "a conversation in the hub chat"
+    assert entry.text == "a conversation in the system's own chat"
 
 
 async def test_a_work_this_works_stop_ended_is_not_named_again() -> None:

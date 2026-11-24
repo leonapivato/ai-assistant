@@ -96,7 +96,7 @@ EMAIL_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind]]] = {
 
 #: How a result names each platform, by channel type (ADR-0357 §3:1).
 _PLATFORM_NAMES: Final[Mapping[str, str]] = {
-    "conversation": "the hub chat",
+    "conversation": "the system's own chat",
     "telegram": "Telegram",
     "email": "email",
 }

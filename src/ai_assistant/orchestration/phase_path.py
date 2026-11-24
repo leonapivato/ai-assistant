@@ -289,6 +289,7 @@ from ai_assistant.core.types import (
     Modality,
     NewMessage,
     PlanningLabel,
+    ProfileField,
     ProjectedCall,
     ProjectedEvidence,
     ProjectedRecall,
@@ -309,6 +310,7 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
+    WorkForKind,
     parties_are_outside,
 )
 from ai_assistant.orchestration.acting import (
@@ -345,7 +347,7 @@ from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
 )
 from ai_assistant.orchestration.candidates import pending_candidates
-from ai_assistant.orchestration.channel_kinds import place_channel, place_of, takes_text
+from ai_assistant.orchestration.channel_kinds import place_channel, place_of, served, takes_text
 from ai_assistant.orchestration.chat import couldnt_finish
 from ai_assistant.orchestration.controller import (
     Stage,
@@ -503,6 +505,7 @@ if TYPE_CHECKING:
         StorySummaryState,
         ToolCall,
         TranscriptMessage,
+        WorkFacts,
     )
     from ai_assistant.orchestration.acting import OwnRecordsAnswer, OwnRecordsCalls
     from ai_assistant.orchestration.activation_state import ActivationState
@@ -545,6 +548,7 @@ __all__ = [
     "failing_stage",
     "is_defect",
     "log_defect",
+    "place_name",
     "place_window",
 ]
 
@@ -3480,6 +3484,44 @@ def _unfinished(working: PhaseWorking, state: ActivationState | None) -> bool:
     return ended or (working.place.takes_message and working.undelivered)
 
 
+async def place_name(
+    blocks: PersonBlocks | None, facts: WorkFacts | None, *, stage: str
+) -> str | None:
+    """The name alone of the person whose place a work that is no person's is at.
+
+    ADR-0375 §6:3: in a work that is no person's, a person's name, alone of their
+    profile's fields, is rendered where it says whose place it is, whose account an input
+    came by and who wrote an earlier item. Whose place it is is whom the work is for, as
+    its facts read it: whoever the connection it came by belongs to, where no sender is
+    identified (ADR-0368 §3:3), the owner until a later decision admits another
+    (milestone 5). A person the system does not serve is never read (:func:`served`).
+
+    One read of the person-model store, of which the name alone is kept: nothing else of
+    the profile, no pin and no person block leaves here (§6:4). A store that cannot be
+    read, a person it does not hold or a name not set gives ``None``, and ADR-0353 §4:1's
+    words stand.
+
+    Args:
+        blocks: The person blocks, whose store is read; ``None`` where none is wired.
+        facts: The work's facts as they stand; ``None`` where none were recorded.
+        stage: The stage asking, named in the log entry of a read that failed.
+
+    Returns:
+        The name, or ``None``.
+    """
+    if blocks is None or facts is None or facts.for_whom.kind is not WorkForKind.PERSON:
+        return None
+    person_id = facts.for_whom.id
+    if person_id is None or not served(person_id):
+        return None
+    try:
+        model = await blocks.store.read(person_id)
+    except PersonModelStoreError:
+        _log.warning("place_name_unread", stage=stage)
+        return None
+    return None if model is None else model.profile.value(ProfileField.NAME)
+
+
 def failing_stage(state: ActivationState | None) -> ControllerStage | None:
     """The stage whose failure ended the pass, read off its record, or ``None``.
 
@@ -4550,6 +4592,9 @@ class PhasePath:
             and state.standing.author is not None,
             waiting=bool(waiting),
         )
+        no_persons = (
+            state is not None and persons_work(state.work_facts, state.held_senders) is None
+        )
         inputs = PlanningInputs(
             activation_id=working.activation_id,
             place=working.place,
@@ -4582,6 +4627,13 @@ class PhasePath:
             # ADR-0356 §3:2, ADR-0353 §4, §6, §7: whose stimulus it is, its inputs as
             # recorded, and the running work its concurrent stimuli show.
             person_id=None if state is None else persons_work(state.work_facts, state.held_senders),
+            # ADR-0375 §6:3: in a work that is no person's, the name alone of the person
+            # whose place it is.
+            place_name=(
+                await place_name(self._person_blocks, state.work_facts, stage="planning")
+                if state is not None and no_persons
+                else None
+            ),
             # ADR-0364 §3:9: the trigger as the lifecycle resolved it, so a hub chat's
             # stimulus names the conversation it came from by its ``where``.
             trigger=working.trigger if state is None else state.trigger,

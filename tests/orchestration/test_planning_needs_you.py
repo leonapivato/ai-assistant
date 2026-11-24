@@ -110,7 +110,7 @@ async def test_a_call_needing_a_yes_is_asked_for_by_request_approval() -> None:
 
 async def test_in_an_activation_that_is_no_persons_nothing_is_asked() -> None:
     """§2:5: no request can be written for no one."""
-    _, shown = await _reported(_needs_you("r", "c1"), approvals=True)
+    _, shown = await _reported(_needs_you("r", "c1"), approvals=True, person_id=None)
     assert shown == {
         "outcome": "refused",
         "because": "it needs approval, and this work is no person's, so no one can be asked for it",

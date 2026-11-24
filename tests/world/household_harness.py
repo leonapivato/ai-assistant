@@ -88,6 +88,8 @@ from phases_support import event, frozen, input_of, phases_harness, processing, 
 from structlog.testing import capture_logs
 from telegram_support import CASE_START_WAIT, REFERENCE, YieldingTelegram
 from telegram_support import text as line_update
+from test_engine import AT as HARNESS_AT
+from understanding_support import STATED_PROPOSAL, understanding_stage
 
 from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.types import (
@@ -108,6 +110,7 @@ from ai_assistant.core.types import (
     TranscriptMessage,
     UserMessage,
 )
+from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.orchestration.telegram import TelegramLineSeams, line_channel
 from ai_assistant.orchestration.work_facts import (
     chat_account,
@@ -118,6 +121,9 @@ from ai_assistant.orchestration.work_facts import (
 )
 from ai_assistant.testing import (
     FakeIdentityStore,
+    FakeMemoryStore,
+    FakeModelProvider,
+    FakePersonModelStore,
     FakeTelegramBotClient,
     FakeTelegramIntakeRecord,
     FakeToolCallingCompleter,
@@ -231,12 +237,15 @@ class Work:
         replies: What the work wrote back where the message came from, in order.
         rounds: Each planning round the work ran, as the planner was asked it: what it
             was shown, and the calls the rounds before it proposed, with their results.
+        understood: Each understanding call the work made, as its user message: what
+            understanding was shown (ADR-0353 §2).
     """
 
     episode: EpisodicMemory
     logged: tuple[MutableMapping[str, Any], ...]
     replies: tuple[str, ...]
     rounds: tuple[RoundCall, ...] = ()
+    understood: tuple[str, ...] = ()
 
     @property
     def record(self) -> EpisodeProcessingRecord:
@@ -300,14 +309,20 @@ class Household:
         harness: The engine and the fakes behind it.
     """
 
-    def __init__(self, planner: RoundReply | None = None) -> None:
+    def __init__(
+        self, planner: RoundReply | None = None, *, people: FakePersonModelStore | None = None
+    ) -> None:
         """Build the household: the owner alone, no account linked, the line wired.
 
         Args:
             planner: What planning proposes in each round; by default one reply in a
                 work's first round and nothing in its second.
+            people: The person-model store the person blocks are assembled from, and a
+                work that is no person's reads a name from (ADR-0375 §6:3); none wired
+                by default.
         """
         self.identities = FakeIdentityStore()
+        self.understanding = FakeModelProvider(reply=STATED_PROPOSAL)
         self.planner = FakeToolCallingCompleter(response=planner or replies(DEFAULT_ROUND_TEXT))
         self.owner = Person(OWNER_PERSON_ID)
         self.bot = FakeTelegramBotClient(chat_id=LINE_CHAT, first_message_id=700)
@@ -320,8 +335,16 @@ class Household:
             send_bound=timedelta(seconds=1),
             start_wait=CASE_START_WAIT,
         )
+        knobs: dict[str, Any] = {}
+        if people is not None:
+            memory = FakeMemoryStore(now=lambda: HARNESS_AT)
+            knobs = {"memory": memory, "person_blocks": PersonBlocks(store=people, memory=memory)}
         self.harness: Harness = phases_harness(
-            self.planner, identities=self.identities, telegram=line
+            self.planner,
+            identities=self.identities,
+            telegram=line,
+            understanding=understanding_stage(model=self.understanding),
+            **knobs,
         )
         self._devices: list[ChatDevice] = []
         self._conversation: str | None = None
@@ -518,6 +541,7 @@ class Household:
     async def _one_work(self, write: Callable[[], Any]) -> Work:
         before = {one.id for one in await frozen(self.harness)}
         planned_before = len(self.planner.calls)
+        understood_before = len(self.understanding.calls)
         sent_before = len(self.bot.messages)
         written_before = len(await self._replies())
         with capture_logs() as logs:
@@ -540,6 +564,9 @@ class Household:
             logged=entries,
             replies=replies,
             rounds=tuple(self.planner.calls[planned_before:]),
+            understood=tuple(
+                one.messages[-1].content for one in self.understanding.calls[understood_before:]
+            ),
         )
 
     async def _settled(self, before: set[str]) -> EpisodicMemory:

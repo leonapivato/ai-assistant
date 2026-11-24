@@ -153,8 +153,8 @@ async def test_connections_show_the_origin_every_single_place_and_three_of_the_h
     shown = section(completer.last_call.exchange.briefing, "## Connections")
     entries = tags(shown, "connection")
     assert [one.attributes["label"] for one in entries] == ["L1", "L2", "L3", "L4", "L5", "L6"]
-    assert shown.startswith("- The hub chat:")
-    assert [one.text for one in entries[:3]] == ["a conversation in the hub chat"] * 3
+    assert shown.startswith("- The system's own chat:")
+    assert [one.text for one in entries[:3]] == ["a conversation in the system's own chat"] * 3
     assert {one.attributes["reaches"] for one in entries[:4]} == {"P1"}
     assert entries[4].attributes["can"].endswith("it takes no message")
     assert entries[5].attributes["reaches"] == "the addresses a call names"
@@ -169,7 +169,9 @@ async def test_the_situation_names_the_time_and_the_last_stimulus_alone() -> Non
     await stage.plan(_inputs())
 
     situation = section(completer.last_call.exchange.briefing, "## The situation")
-    assert len(situation.split("\n")) == 2
+    # ADR-0375 §5:1: the sender line follows the time and the last stimulus.
+    assert len(situation.split("\n")) == 3
+    assert situation.split("\n")[-1].startswith("- The sender: ")
     assert "Places a message" not in completer.last_call.exchange.briefing
 
 
@@ -464,7 +466,7 @@ async def test_search_connections_finds_an_unshown_conversation_and_labels_it() 
     (entry,) = shown["result"]["connections"]
     (tag,) = tags(entry, "connection")
     assert tag.attributes["label"] == "L7"
-    assert tag.text == "a conversation in the hub chat"
+    assert tag.text == "a conversation in the system's own chat"
     assert "Porto" not in entry
 
 
@@ -631,7 +633,7 @@ async def test_a_connection_the_hub_hands_between_rounds_joins_in_the_news() -> 
 
     news = completer.calls[1].exchange.steps[0].report.news
     entries = tags(news, "connection")
-    (entry,) = [one for one in entries if one.text == "a conversation in the hub chat"]
+    (entry,) = [one for one in entries if one.text == "a conversation in the system's own chat"]
     assert entry.get("label") == "L7"
 
 

@@ -1027,7 +1027,7 @@ def _place_said(channel: ChannelIdentity, here: ChannelIdentity) -> str:
     if channel.channel_type == "telegram":
         return "on Telegram"
     if channel.channel_type == "conversation":
-        return "in another conversation in the hub's chat"
+        return "in another conversation in the system's own chat"
     return f"in {place_description(channel)}"
 
 
@@ -1076,7 +1076,7 @@ def read_back(task: ScheduledTask, zone: ZoneInfo, *, now: datetime, line: bool)
 
 #: Each place's kind, described for reading (§5:12).
 _PLACE_DESCRIPTIONS: Final = {
-    "conversation": "a conversation in the hub's chat",
+    "conversation": "a conversation in the system's own chat",
     "telegram": "the person's Telegram chat with their assistant",
     TASK_SCHEDULER: "a scheduled step, started by the Task Scheduler",
     # ADR-0362 §3:4: a ticket's spawn runs in the approval's own activation too.

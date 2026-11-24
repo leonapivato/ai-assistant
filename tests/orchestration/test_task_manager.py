@@ -823,7 +823,7 @@ async def test_a_parents_words_tell_its_own_time_not_the_replacing_spawns() -> N
     (listed,) = (await _listing(world)).scheduled
     assert listed.parent == parent
     assert listed.parent_text == (
-        "spawned by the person's message in a conversation in the hub's chat, "
+        "spawned by the person's message in a conversation in the system's own chat, "
         "Tue 30 Dec 2025 00:00 (UTC)"
     )
 
@@ -931,7 +931,7 @@ async def test_a_parent_still_running_is_not_read_through_and_the_task_is_descri
 
     assert listed.parent == parent
     assert listed.parent_text == (
-        "spawned by the person's message in a conversation in the hub's chat, "
+        "spawned by the person's message in a conversation in the system's own chat, "
         "Thu 01 Jan 2026 00:00 (UTC)"
     )
 

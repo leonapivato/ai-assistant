@@ -315,8 +315,10 @@ async def test_the_reasons_name_what_each_state_is() -> None:
     unprofiled = await _rendered(**_STATES["unprofiled person"])
     nobody = await _rendered(**_STATES["no person"])
     assert unprofiled.section("Always in mind") != nobody.section("Always in mind")
-    assert "no person's" in nobody.section("Always in mind")
-    assert "no person's" not in unprofiled.section("Always in mind")
+    # ADR-0375 §6:2: a work that is no person's for a reason other than an unknown sender
+    # says that reason in words that stay true.
+    assert "one person's" in nobody.section("Always in mind")
+    assert "one person's" not in unprofiled.section("Always in mind")
 
 
 # --- §3:5: escaping --------------------------------------------------------------------
@@ -340,7 +342,10 @@ async def test_a_value_is_escaped_in_a_tag_an_attribute_and_a_line() -> None:
     content = message.content
     # In the framing sentence too: the person's name is a record's value (§3:5).
     first = message.section("The stimulus").split("\n")[0]
-    assert 'a message Maren &lt;the&gt; &amp; "co" typed on Telegram' in first
+    assert (
+        'a message that arrived in Maren &lt;the&gt; &amp; "co"\'s private chat with the system '
+        "on Telegram"
+    ) in first
     # In a tag: no heading and no tag of the text's own.
     (words,) = message.tags("The stimulus")
     assert words.text == hostile
@@ -436,9 +441,10 @@ async def test_a_message_starting_a_new_conversation_is_framed_so() -> None:
     message = await _rendered()
 
     assert message.section("The stimulus") == (
-        "A stimulus reached the system at 3:51 pm on Monday 26 October 2026: a message Maren "
-        "typed in the hub chat, starting a new conversation. It contains this text:\n"
-        '<said from="Maren">What\'s on today?</said>'
+        "A stimulus reached the system at 3:51 pm on Monday 26 October 2026: a message that "
+        "arrived in Maren's private chat with the system, starting a new conversation. It "
+        "contains this text:\n"
+        '<said from="a device linked to Maren">What\'s on today?</said>'
     )
 
 
@@ -459,13 +465,14 @@ async def test_several_messages_are_framed_as_they_contain_these_messages() -> N
     first, *_ = message.section("The stimulus").split("\n")
     assert first == (
         "A stimulus reached the system at 3:51 pm on Monday 26 October 2026: three messages "
-        "Maren typed or forwarded on Telegram. They contain these messages:"
+        "that arrived in Maren's private chat with the system on Telegram, one of them "
+        "forwarded. They contain these messages:"
     )
     tags = message.tags("The stimulus")
     assert [(one.name, one.get("from")) for one in tags] == [
         ("received", "A stranger, as claimed"),
-        ("said", "Maren"),
-        ("said", "Maren"),
+        ("said", "the Telegram account linked to Maren"),
+        ("said", "the Telegram account linked to Maren"),
     ]
     assert all(one.get("at") == "Mon 26 Oct 2026, 3:51 pm" for one in tags)
 
@@ -482,7 +489,9 @@ async def test_a_forward_alone_is_framed_as_forwarded_and_attributed_to_its_send
 
     message = await _rendered("Pay now", channel=LINE, window=window)
 
-    assert "a message Maren forwarded on Telegram" in message.section("The stimulus")
+    assert "a message forwarded into Maren's private chat with the system on Telegram" in (
+        message.section("The stimulus")
+    )
     # §7:2: a sender the medium does not name is named as unknown.
     (words,) = message.tags("The stimulus")
     assert (words.name, words.get("from")) == ("received", "an unknown sender")
@@ -569,8 +578,9 @@ async def test_an_input_taken_in_from_other_work_is_framed_as_its_own_kind_and_t
     trigger, taken = message.section("The stimulus").split("\n\n")
     assert trigger.startswith("A stimulus reached the system at 3:51 pm")
     assert taken == (
-        "A stimulus reached the system at 3:50 pm on Monday 26 October 2026: a message Maren "
-        "typed on Telegram, taken in from other work, which was stopped. It contains this "
+        "A stimulus reached the system at 3:50 pm on Monday 26 October 2026: a message that "
+        "arrived in Maren's private chat with the system on Telegram, taken in from other "
+        "work, which was stopped. It contains this "
         'text:\n<said from="Maren" at="Mon 26 Oct 2026, 3:50 pm">for four</said>'
     )
     assert "a-older" not in message.content
@@ -713,7 +723,9 @@ async def test_times_render_in_the_persons_zone_and_the_zone_is_said_once() -> N
         "- Now: Monday 26 October 2026, 3:51 pm, in Maren's time zone (America/New_York). "
         "Every time below is in this zone.",
         "- Maren's last stimulus: Mon 26 Oct 2026, 9:12 am, on Telegram.",
-        "- The origin: the hub chat, Maren's private chat with the system.",
+        "- The origin: the system's own chat, Maren's private chat with the system.",
+        "- The sender: the message came by a device linked to Maren, which is a strong sign "
+        "that Maren sent it. The system counts it as Maren's.",
     ]
     (remembered,) = message.containers("Short-term memory")
     assert remembered.get("at") == "Mon 26 Oct 2026, 9:12 am"
@@ -727,8 +739,8 @@ async def test_times_render_in_the_hubs_zone_where_the_person_set_none() -> None
 
     first = message.section("The situation").split("\n")[0]
     assert first == (
-        "- Now: Monday 26 October 2026, 7:51 pm, in the hub's time zone (Europe/Lisbon). "
-        "Maren has not set a time zone, so every time below is in the hub's zone."
+        "- Now: Monday 26 October 2026, 7:51 pm, in the system's time zone (Europe/Lisbon). "
+        "Maren has not set a time zone, so every time below is in the system's zone."
     )
     assert "7:51 pm on Monday 26 October 2026" in message.section("The stimulus")
     assert "Europe/Lisbon" not in message.section("Always in mind")
@@ -948,7 +960,8 @@ async def test_a_concurrent_stimulus_holding_several_inputs_renders_one_tag_each
     message = await _rendered(running=(entry,))
 
     assert message.section("Concurrent stimuli") == (
-        '<stimulus label="R1" origin="the hub chat" at="Mon 26 Oct 2026, 3:49 pm" acted="no">\n'
+        '<stimulus label="R1" origin="the system\'s own chat" at="Mon 26 Oct 2026, 3:49 pm" '
+        'acted="no">\n'
         '  <said from="Maren">book a table at Luigi\'s</said>\n'
         '  <said from="Maren">for 4</said>\n'
         "</stimulus>"

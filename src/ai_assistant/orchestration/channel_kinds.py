@@ -47,11 +47,23 @@ things up in it or act in it, with its limits, whether its places take a text me
 the many-place connection it groups under, where it has one, and whether it reaches the
 addresses a call names. :func:`takes_text` reads from a recorded place whether a text
 message may go into it.
+
+**What a briefing says of who sent an input** (ADR-0375 §4, §5). Understanding and planning
+each render the stimulus's own ``said`` tag and the situation's sender line from the same
+records, so both are composed here, once, and each briefing names the people in them its own
+way: :func:`account_of` is a ``said`` tag's ``from``, the account or device the words came
+by and its person; :func:`sender_line` is the sender line, by what each input came, how
+strong a sign that is of who sent it, and whom the system counts it as, read from the
+senders, parties and channel types the inputs record and the kinds' declarations alone
+(§2:3). Whom the system counts as a person it serves is :func:`served`, read from ``core``'s
+one declaration of whose words a sender's are (ADR-0351 §3:2), so the owner alone until a
+later decision admits another (milestone 5), and a person identified but not served is never
+named (§5's table).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
@@ -61,13 +73,21 @@ from ai_assistant.core.channel_validation import (
     APPROVALS,
     TASK_SCHEDULER,
     declared_input,
+    most_sureness,
     origin_kind,
+    sender_party,
     sent_by_a_person,
 )
-from ai_assistant.core.types import ChannelIdentity
+from ai_assistant.core.types import (
+    ChannelIdentity,
+    HolderKind,
+    InputSender,
+    Sureness,
+    canonical_senders,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from ai_assistant.core.channel_validation import OriginKind
     from ai_assistant.core.types import ApprovalGiver, RecordedInputMessage, SupportHolder
@@ -79,18 +99,25 @@ __all__ = [
     "EMAIL_ACCOUNT_KIND",
     "FORECAST_ACCOUNT_KIND",
     "SEARCH_ACCOUNT_KIND",
+    "SYSTEMS_OWN_MACHINE",
     "AccountConnection",
     "Audience",
     "ChannelKind",
     "ConnectionKind",
     "Direction",
     "Reach",
+    "SentInput",
     "WindowSource",
     "account_kind",
+    "account_of",
+    "arrival",
     "confirms_delivery",
     "connection_kind",
     "place_channel",
     "place_of",
+    "sender_line",
+    "sender_unknown",
+    "served",
     "takes_text",
 ]
 
@@ -310,14 +337,15 @@ class ConnectionKind:
     reaches_people: bool = True
 
 
-#: Each channel kind's connections, by channel type (ADR-0364 §3:3): the hub chat's
-#: conversations, the line's chat, the schedule and the approvals.
+#: Each channel kind's connections, by channel type (ADR-0364 §3:3): the system's own
+#: chat's conversations, the line's chat, the schedule and the approvals, each in the
+#: system's words (ADR-0375 §7).
 CONNECTION_KINDS: Final[dict[str, ConnectionKind]] = {
     "conversation": ConnectionKind(
-        is_a="a conversation in the hub chat",
+        is_a="a conversation in the system's own chat",
         can="sense it, and act in it: it takes text messages",
         takes_text=True,
-        group="The hub chat",
+        group="The system's own chat",
     ),
     "telegram": ConnectionKind(
         is_a="the messaging line's chat, on Telegram",
@@ -419,3 +447,365 @@ def takes_text(place: str) -> bool:
     """Whether a text message may go into the connection ``place`` names (ADR-0364 §9:2)."""
     kind = connection_kind(place)
     return kind is not None and kind.takes_text
+
+
+# --- who sent an input, as a briefing says it (ADR-0375 §4, §5) -----------------------
+
+#: The ``from`` of words written on the system's own machine where the links could not be
+#: read (ADR-0375 §4:1, ADR-0374 §3:2): no link is named, since none was read.
+SYSTEMS_OWN_MACHINE: Final = "the system's own machine"
+
+#: The account a message came by where its kind declares no noun for one.
+_AN_ACCOUNT: Final = "an account"
+
+#: Who sent a message whose reader found no sender: no link, at none (ADR-0366 §5:6).
+_NO_SENDER: Final = InputSender(person=None, level=Sureness.NONE)
+
+
+@dataclass(frozen=True, slots=True)
+class SentInput:
+    """One input a stimulus section renders, as the sender line reads it (ADR-0375 §5:2).
+
+    Attributes:
+        channel_type: The channel type it came in on, whose kind declares the noun for the
+            account it came by and its most sureness; ``None`` where none is recorded.
+        senders: Who sent it, as recorded (ADR-0368 §2:6); none for an input no person
+            sent (ADR-0368 §3:5).
+        messages: Its recorded messages, each with its own party and sender; none for an
+            input that records none.
+        parties: Its recorded parties, which an input that records no messages is
+            counted by; ``None`` where they are unknown.
+        count: How many messages the stimulus section renders of it, for an input that
+            records none.
+    """
+
+    channel_type: str | None
+    senders: tuple[InputSender, ...] = ()
+    messages: tuple[RecordedInputMessage, ...] = ()
+    parties: tuple[SupportHolder, ...] | None = None
+    count: int = 1
+
+
+@dataclass(slots=True)
+class _Sent:
+    """What one sender sent of the inputs a stimulus section renders."""
+
+    channel_type: str | None
+    count: int = 0
+    forwards: int = 0
+    own: list[SupportHolder] = field(default_factory=list)
+
+
+def served(person_id: str | None) -> bool:
+    """Whether the system counts ``person_id`` as a person it serves (ADR-0375 §5:5).
+
+    Read from ``core``'s one declaration of whose words an identified sender's are
+    (:func:`~ai_assistant.core.channel_validation.sender_party`, ADR-0351 §3:2): a person
+    whose identified sender's words it counts as that person's. That is the owner alone
+    until a later decision admits another (ADR-0366 §1:3, milestone 5); an identity a link
+    names that no decision admits is not served, and is never named (§5's table).
+
+    Args:
+        person_id: A person's id, or ``None``.
+
+    Returns:
+        Whether that person is one the system serves.
+    """
+    if person_id is None:
+        return False
+    party = sender_party(InputSender(person=person_id, level=Sureness.WEAK))
+    return party.kind is HolderKind.PERSON
+
+
+def sender_unknown(senders: Iterable[InputSender]) -> bool:
+    """Whether any of ``senders`` is one the system counts as an unknown sender (§6:2).
+
+    No link establishes it as a person the system serves: no person, a link at none, or
+    a person the system knows but does not serve.
+    """
+    return any(not (one.identified and served(one.person)) for one in senders)
+
+
+def _noun(channel_type: str | None) -> str:
+    """The account a person sends a message by on ``channel_type``'s kind (ADR-0375 §5)."""
+    kind = None if channel_type is None else origin_kind(channel_type)
+    return kind.noun if kind is not None and kind.noun else _AN_ACCOUNT
+
+
+def account_of(channel_type: str | None, sender: InputSender | None, person: str) -> str | None:
+    """A ``said`` tag's ``from``: the account the words came by and its person (§4:1).
+
+    ``a device linked to Maren``, ``the Telegram account linked to Maren``, or the
+    system's own machine where the links could not be read and the sender was decided as
+    ADR-0374 §3:2 decides it, naming no link.
+
+    Args:
+        channel_type: The channel type the words came in on.
+        sender: Who sent them, as recorded; ``None`` where none is recorded.
+        person: The sender's person, as the briefing names a person in a tag.
+
+    Returns:
+        The ``from``; ``None`` where no sender naming a person is recorded, so the caller
+        names the person alone.
+    """
+    if sender is None or sender.person is None:
+        return None
+    if sender.links_unread:
+        return SYSTEMS_OWN_MACHINE
+    return f"{_noun(channel_type)} linked to {person}"
+
+
+def _grouped(inputs: Sequence[SentInput]) -> list[tuple[InputSender, _Sent]]:
+    """Each distinct sender of ``inputs``, in ``canonical_senders``' order, with what it sent.
+
+    A recorded message is its own sender's, or its input's one sender's where it records
+    none; an input that records no messages is each of its senders', counted by its
+    recorded party where it has one sender, and as ``core`` declares a sender's words
+    otherwise (ADR-0351 §3:2).
+    """
+    found: list[InputSender] = []
+    sent: dict[str | None, _Sent] = {}
+
+    def add(
+        sender: InputSender, channel_type: str | None, party: SupportHolder | None, *, count: int
+    ) -> None:
+        found.append(sender)
+        held = sent.setdefault(sender.person, _Sent(channel_type=channel_type))
+        held.count += count
+        if party is None or party.kind not in {HolderKind.PERSON, HolderKind.UNKNOWN}:
+            # A forward's party is its original sender, claimed (ADR-0351 §2:7).
+            held.forwards += count
+        else:
+            held.own.append(party)
+
+    for one in inputs:
+        sole = one.senders[0] if len(one.senders) == 1 else None
+        if one.messages:
+            for message in one.messages:
+                party = message.party
+                if message.forwarded_from is not None:
+                    party = None
+                elif party is None:
+                    party = sender_party(message.sender or sole)
+                add(message.sender or sole or _NO_SENDER, one.channel_type, party, count=1)
+            continue
+        recorded = one.parties if one.parties is not None and len(one.parties) == 1 else None
+        for sender in one.senders:
+            party = recorded[0] if recorded is not None and sole else sender_party(sender)
+            add(sender, one.channel_type, party, count=one.count if sole else 1)
+    return [(one, sent[one.person]) for one in canonical_senders(found)]
+
+
+def _whose(
+    sent: _Sent, named: Callable[[str], str], them: str, theirs: str, *, still: bool
+) -> str | None:
+    """Whom the system counts one sender's own words as, by their parties (§5:5)."""
+    if not sent.own:
+        return None
+    people = {one.identifier for one in sent.own if one.kind is HolderKind.PERSON}
+    if len(people) == 1 and all(one.kind is HolderKind.PERSON for one in sent.own):
+        (person,) = people
+        if person is not None:
+            again = "still " if still else ""
+            return f"the system {again}counts {them} as {named(person)}'s"
+    return f"the system counts {them} as an unknown sender's, whatever {theirs} text says"
+
+
+def _counted(
+    sender: InputSender, sent: _Sent, named: Callable[[str], str], them: str, *, still: bool
+) -> str:
+    """The sender line's last part for one sender: whom the system counts it as (§5:5)."""
+    theirs = "their" if them == "them" else "its"
+    own = _whose(sent, named, them, theirs, still=still)
+    if not sent.forwards:
+        return f"{_upper(own or '')}."
+    by = named(sender.person) if sender.person is not None and sender.identified else None
+    if by is not None and not served(sender.person):
+        by = None
+    not_theirs = (
+        f"The forwarded words are not {by}'s"
+        if by
+        else ("The forwarded words are not the forwarder's")
+    )
+    if own is None:
+        return f"{not_theirs}."
+    return f"{not_theirs}; {own.replace(f'counts {them}', 'counts the rest', 1)}."
+
+
+def _part(
+    sender: InputSender, sent: _Sent, named: Callable[[str], str], *, subject: str, plural: bool
+) -> str:
+    """One sender's part of the sender line: by what, how strong a sign, whom (§5:2-§5:5)."""
+    them = "them" if plural else "it"
+    verb = "forwarded" if not sent.own and sent.forwards else "sent"
+    noun = _noun(sent.channel_type)
+    unknown = f"so who or what {verb} {them} is unknown"
+    if sender.links_unread:
+        return _unread(sender, sent, named, subject=subject, plural=plural, unknown=unknown)
+    counted = _counted(sender, sent, named, them, still=False)
+    if sender.person is None:
+        return f"{subject} came by {noun} the system cannot tie to anyone, {unknown}. {counted}"
+    if not served(sender.person):
+        return (
+            f"{subject} came by {noun} linked to a person the system knows but does not serve. "
+            f"{counted}"
+        )
+    person = named(sender.person)
+    most = Sureness.NONE if sent.channel_type is None else most_sureness(sent.channel_type)
+    lowered = sender.level < most
+    if sender.level is Sureness.NONE:
+        marked = " that is marked as not to be relied on" if lowered else ""
+        return f"{subject} came by {noun} linked to {person}{marked}, {unknown}. {counted}"
+    # §5:3: strong, which no kind reaches, takes normal's words until it has its own.
+    sign = "a weak sign" if sender.level is Sureness.WEAK else "a strong sign"
+    marked = " that is marked as less reliable" if lowered else ""
+    counted = _counted(sender, sent, named, them, still=lowered)
+    return (
+        f"{subject} came by {noun} linked to {person}{marked}, which is {sign} that {person} "
+        f"{verb} {them}. {counted}"
+    )
+
+
+def _unread(  # noqa: PLR0913 — the sender, what it sent, how people are named, and the three words its sentence takes
+    sender: InputSender,
+    sent: _Sent,
+    named: Callable[[str], str],
+    *,
+    subject: str,
+    plural: bool,
+    unknown: str,
+) -> str:
+    """A part for a sender set because the links could not be read (ADR-0374 §2:2, §3:2).
+
+    No link is named, since none was read; one written on the system's own machine is
+    said to be, and whom the system counts it as.
+    """
+    them = "them" if plural else "it"
+    counted = _counted(sender, sent, named, them, still=False)
+    unread = f"the system could not read its record of linked accounts when {subject} arrived"
+    if sender.person is None:
+        return f"{unread}, {unknown}. {counted}"
+    machine = f"{_upper(subject)} {'were' if plural else 'was'} written on the system's own machine"
+    people = {one.identifier for one in sent.own if one.kind is HolderKind.PERSON}
+    if not sent.forwards and people == {sender.person}:
+        return f"{unread}. {machine}, which the system counts as {named(sender.person)}'s."
+    return f"{unread}. {machine}. {counted}"
+
+
+def _upper(words: str) -> str:
+    """``words`` with its first letter capitalised, to begin a sentence."""
+    return words[:1].upper() + words[1:]
+
+
+def sender_line(inputs: Sequence[SentInput], *, named: Callable[[str], str], origin: str) -> str:
+    """The situation's sender line (ADR-0375 §5), for the inputs a stimulus section renders.
+
+    By what each input came, how strong a sign that is of who sent it and whom the system
+    counts it as, and nothing else: one part for each distinct sender, in
+    ``canonical_senders``' order (§5:2). A link below its kind's declared most is said to
+    be marked as less reliable, or as not to be relied on at none, and never by whom
+    (§5:4). Whom it is counted as is read from the recorded parties (§5:5). An input no
+    person sent says so and names its origin (§5:6). No part says that a person typed,
+    wrote or sent anything, only how strong a sign the account is (§2:1).
+
+    Args:
+        inputs: The inputs the stimulus section renders: the trigger's, then each joined
+            one's.
+        named: A person the system serves, named in words, as the lines between the tags
+            name them.
+        origin: The trigger's origin, by its name, for an input no person sent.
+
+    Returns:
+        The line, with its leading ``- ``.
+    """
+    groups = _grouped(inputs)
+    if not groups:
+        return f"- The sender: {_unrecorded(inputs, named, origin)}"
+    several = len(groups) > 1
+    parts: list[str] = []
+    for sender, sent in groups:
+        forwards_only = not sent.own and sent.forwards > 0
+        if several:
+            subject, plural = "some of the messages", True
+        else:
+            plural = sent.count > 1
+            noun = "forward" if forwards_only else "message"
+            subject = f"the {noun}s" if plural else f"the {noun}"
+        part = _part(sender, sent, named, subject=subject, plural=plural)
+        parts.append(part if not parts else _upper(part))
+    heading = "The senders" if several else "The sender"
+    return f"- {heading}: {' '.join(parts)}"
+
+
+def _unrecorded(inputs: Sequence[SentInput], named: Callable[[str], str], origin: str) -> str:
+    """The sender line where no input records a sender (§5:6).
+
+    An input of a kind no person sends on, whose parties are recorded, says that no person
+    sent it and where it came from; any other says that nothing of who sent it is
+    recorded, and whom the system counts it as where its parties say.
+    """
+    if all(
+        one.channel_type is not None
+        and not sent_by_a_person(one.channel_type)
+        and one.parties is not None
+        for one in inputs
+    ):
+        return f"no person sent it; it came from {origin}."
+    parties = [party for one in inputs for party in (one.parties or ())]
+    people = {one.identifier for one in parties if one.kind is HolderKind.PERSON}
+    recorded = "the system recorded nothing of how the message came."
+    if parties and len(people) == 1 and all(one.kind is HolderKind.PERSON for one in parties):
+        (person,) = people
+        if person is not None:
+            return f"{recorded} The system counts it as {named(person)}'s."
+    if parties and all(one.kind is HolderKind.UNKNOWN for one in parties):
+        return f"{recorded} The system counts it as an unknown sender's, whatever its text says."
+    return recorded
+
+
+#: How many messages the framing sentence spells as a word (ADR-0353 §7:1).
+_COUNTS: Final = ("two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+
+
+def _how_many(number: int) -> str:
+    """How many messages, as the framing sentence says it: ``three``, or ``12``."""
+    return _COUNTS[number - 2] if 2 <= number <= len(_COUNTS) + 1 else str(number)  # noqa: PLR2004 — "two" is the first spelled
+
+
+def arrival(kind: OriginKind, person: str, *, count: int, forwards: int) -> tuple[str, str]:
+    """A framing sentence's ``{what}`` and ``{content}`` for messages a person sends.
+
+    ADR-0375 §3:1: where the messages arrived, by the origin's description, and for a
+    forward that it was forwarded, naming no sender and no act: ``a message that arrived
+    in Maren's private chat with the system``, ``three messages that arrived in …``, ``a
+    message forwarded into …``.
+
+    Args:
+        kind: The origin's kind, a kind a person sends on.
+        person: The person whose place it is, named as the lines between the tags name
+            them, already escaped.
+        count: How many messages the input holds.
+        forwards: How many of them are forwards.
+
+    Returns:
+        ``{what}`` and ``{content}``.
+    """
+    place = kind.described.replace("{person}", person)
+    several = count > 1
+    many = _how_many(count)
+    if count and forwards == count:
+        what = (
+            f"{many} messages forwarded into {place}"
+            if several
+            else (f"a message forwarded into {place}")
+        )
+    else:
+        what = (
+            f"{many} messages that arrived in {place}"
+            if several
+            else (f"a message that arrived in {place}")
+        )
+        if forwards:
+            some = "one" if forwards == 1 else _how_many(forwards)
+            what += f", {some} of them forwarded"
+    return what, "these messages" if several else kind.content

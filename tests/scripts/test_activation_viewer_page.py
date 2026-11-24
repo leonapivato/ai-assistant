@@ -190,8 +190,9 @@ async def test_a_tagged_input_shows_its_framing_then_each_message_as_text(
         rows = card.locator(".arrival-message")
         await expect(rows.locator(".m")).to_have_text(
             [
-                "#1 · Mon 26 Oct 2026, 3:48 pm · said from Maren",
-                "#2 · Mon 26 Oct 2026, 3:51 pm · said from Maren · replies to message 1",
+                "#1 · Mon 26 Oct 2026, 3:48 pm · said from the Telegram account linked to Maren",
+                "#2 · Mon 26 Oct 2026, 3:51 pm · said from the Telegram account linked to Maren"
+                " · replies to message 1",
             ]
         )
         await expect(rows.locator(".part-text")).to_have_text([FIRST, SECOND])

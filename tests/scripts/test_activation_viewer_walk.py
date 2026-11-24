@@ -320,15 +320,22 @@ def test_a_tagged_request_s_stimulus_is_the_input_step(record: Path) -> None:
     assert arrival["text"] == f"{FIRST}\n{SECOND}"
     assert arrival["framing"] == [
         "A stimulus reached the system at 3:51 pm on Monday 26 October 2026: two messages "
-        "Maren typed on Telegram. They contain these messages:"
+        "that arrived in Maren's private chat with the system on Telegram. They contain these "
+        "messages:"
     ]
     assert arrival["received_as"] == arrival["framing"][0]
     assert [
         (one["position"], one["tag"], one["writer"], one["written_at"], one["replies_to"])
         for one in arrival["messages"]
     ] == [
-        (1, "said", "Maren", "Mon 26 Oct 2026, 3:48 pm", None),
-        (2, "said", "Maren", "Mon 26 Oct 2026, 3:51 pm", "message 1"),
+        (1, "said", "the Telegram account linked to Maren", "Mon 26 Oct 2026, 3:48 pm", None),
+        (
+            2,
+            "said",
+            "the Telegram account linked to Maren",
+            "Mon 26 Oct 2026, 3:51 pm",
+            "message 1",
+        ),
     ]
     assert [(one["text"], one["at"], one["input"]) for one in arrival["messages"]] == [
         (FIRST, None, 0),

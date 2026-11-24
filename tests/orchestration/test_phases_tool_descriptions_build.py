@@ -66,7 +66,7 @@ async def test_a_text_into_the_origin_by_its_label_is_sent() -> None:
     """§9:1-§9:2: the stimulus's ``where`` names its origin, which takes a text."""
 
     def first(exchange: PlanningExchange) -> RoundResponse:
-        origin = _label_of(exchange.briefing, "a conversation in the hub chat")
+        origin = _label_of(exchange.briefing, "a conversation in the system's own chat")
         return RoundResponse(calls=(text_call("Hi.", connection=origin),))
 
     results, _, said = await _first_round_results(first)
@@ -109,7 +109,7 @@ async def test_a_text_whose_exact_tag_is_never_closed_comes_back_not_done() -> N
     """§9:8: the tool's own check, so not done, and nothing is written."""
 
     def first(exchange: PlanningExchange) -> RoundResponse:
-        origin = _label_of(exchange.briefing, "a conversation in the hub chat")
+        origin = _label_of(exchange.briefing, "a conversation in the system's own chat")
         return RoundResponse(calls=(text_call("Say <exact>this", connection=origin),))
 
     results, _, said = await _first_round_results(first)
@@ -123,7 +123,7 @@ async def test_a_literal_tag_sent_escaped_arrives_as_written() -> None:
     """§9:8: a backslash before a tag sends it as literal text."""
 
     def first(exchange: PlanningExchange) -> RoundResponse:
-        origin = _label_of(exchange.briefing, "a conversation in the hub chat")
+        origin = _label_of(exchange.briefing, "a conversation in the system's own chat")
         return RoundResponse(
             calls=(text_call("Type \\<exact> to mark a part.", connection=origin),)
         )
@@ -144,7 +144,7 @@ async def test_every_work_is_shown_its_connections_and_the_approvals_among_them(
 
     shown = section(completer.calls[0].exchange.briefing, "## Connections")
     texts = [one.text or "" for one in tags(shown, "connection")]
-    assert "a conversation in the hub chat" in texts
+    assert "a conversation in the system's own chat" in texts
     assert any("the approvals" in one for one in texts)
 
 

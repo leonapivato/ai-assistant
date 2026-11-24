@@ -24,10 +24,12 @@ from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActivationRecall,
     BeliefBand,
+    ChannelContext,
     ChannelIdentity,
     DiagnosticEntry,
     DiagnosticKind,
     DiagnosticSource,
+    InputSender,
     MemoryKind,
     MessageAuthor,
     Profile,
@@ -35,6 +37,11 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
+    RecordedChannelTrigger,
+    RecordedTextInput,
+    SupportHolder,
+    Sureness,
+    WholeTextReply,
 )
 from ai_assistant.evaluation.diagnostic_record import FileDiagnosticRecord
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
@@ -144,6 +151,16 @@ async def understanding_entries() -> tuple[DiagnosticEntry, ...]:
             ),
             recalled=recalled,
             person=_person(),
+            # The owner's input, by their linked Telegram account (ADR-0375 §4:1).
+            trigger=RecordedChannelTrigger(
+                target=_LINE,
+                channel=_LINE,
+                payload=RecordedTextInput(text=f"{FIRST}\n\n{SECOND}"),
+                context=ChannelContext(),
+                reply=WholeTextReply(),
+                parties=(SupportHolder.person(OWNER_PERSON_ID),),
+                senders=(InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL),),
+            ),
             zone=ZoneInfo("America/New_York"),
             own_zone=True,
             received_at=ARRIVED,

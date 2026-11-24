@@ -314,7 +314,10 @@ async def test_a_task_the_assistant_set_is_told_in_the_persons_zone_in_input_and
         await harness.engine.aclose()
 
     (text,) = inputs.inputs
-    assert "set by the assistant in a conversation in the hub's chat, Wed 31 Dec 2025 19:00" in text
+    assert (
+        "set by the assistant in a conversation in the system's own chat, Wed 31 Dec 2025 19:00"
+        in text
+    )
     assert "(America/New_York)" in text
     assert "(UTC)" not in text
     (window,) = inputs.windows

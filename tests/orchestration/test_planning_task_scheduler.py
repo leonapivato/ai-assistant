@@ -95,11 +95,11 @@ async def test_connections_group_places_under_headings_that_take_no_label() -> N
 
     listed = section(_sent(completer), "## Connections")
     headings = [line for line in listed.split("\n") if "<connection" not in line]
-    assert headings == ["- The hub chat:"]
+    assert headings == ["- The system's own chat:"]
     here, line = tags(listed, "connection")
     assert (here.get("label"), here.text, here.get("suggested")) == (
         "L1",
-        "a conversation in the hub chat",
+        "a conversation in the system's own chat",
         None,
     )
     assert (line.get("label"), line.text, line.get("suggested")) == (
@@ -359,7 +359,7 @@ async def test_an_ended_step_says_where_its_messages_went_as_the_place_list_show
     assert told["wrote_into"] == ["L2"]
     assert "may_have_written_into" not in told
     assert off_the_list["wrote_into"] == [
-        "a conversation in the hub's chat, not among your connections"
+        "a conversation in the system's own chat, not among your connections"
     ]
     assert off_the_list["may_have_written_into"] == ["L1"]
     assert silent["wrote_into"] == "wrote no message"
