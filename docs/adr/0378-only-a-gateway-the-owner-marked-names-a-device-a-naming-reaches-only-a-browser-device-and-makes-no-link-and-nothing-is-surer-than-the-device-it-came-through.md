@@ -16,8 +16,12 @@
   that bears here was put as "#3665 is in: a device cannot be read as another device because a
   request names it. It needs a decision first, amending ADR-0298." "Yes, go" answered "Shall I post
   the batch issue and start D1, D2, D3 and B1". Those answers accepted the outcome #3678 records ("A
-  device is itself") and ruled no mechanism: every mechanism here is this decision's (§12). The
-  coordinator assigned 0378 and ratifies it, under the owner's delegation, once its reviews are green.
+  device is itself") and ruled no mechanism. Later that day the owner answered "Go with your
+  recommendation" to "Shall I ratify with the strict rule ("Yes, strict"), keep the old case for
+  enrolled machines ("Keep the old case"), or run the first deploy without device naming ("Deploy
+  first")?", put with the coordinator's pick, the strict rule. That answer chose §3:1's strict rule
+  over keeping ADR-0296 §1:4's case for an enrolled machine, and nothing more: every other mechanism
+  here is this decision's (§12). The coordinator assigned 0378 and ratifies it, under the owner's delegation, once its reviews are green.
 - **Contract-surface decision; a decision only.** This document changes no Protocol, type, field or
   code. It decides which device a request acts as and how a message's sender is read, which bounds
   the `core` types and stored shapes lane B7 of #3679 changes (§10), so it takes the adversarial and
@@ -273,7 +277,8 @@ Named so B7 is scoped, and made by none of this decision.
 
 ### 12. What this decision settled where the rulings left a point open
 
-Each is this decision's, not an owner ruling:
+Each is this decision's, not an owner ruling, save §3:1's choice, which the owner made
+(Authorization):
 
 - **§2**, that naming needs the owner's mark at the hub; that `hub` names without one; that the mark is
   not a role and ends with the enrolment; and that withdrawing it, or enrolling a named machine, ends
@@ -281,6 +286,7 @@ Each is this decision's, not an owner ruling:
 - **§3:1**, that a naming never reaches a hub device, live or revoked. This takes from ADR-0296 §1:4,
   an owner's ruling of 2026-10-04, the case of an enrolled machine's browser served by another
   machine's gateway: such a browser now reaches the hub through its own machine's gateway or not at all.
+  The owner chose this over keeping that case; how it is stated is this decision's.
 - **§4:3**, the lower of the two levels, and no identified person where the links disagree; and
   **§4:7**, the same for a tap on the hub page.
 - **§5:2**, that a browser device's link rests on a roster role the owner gave it at the hub, and not
