@@ -31,10 +31,13 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
+    DefaultGrant,
+    GrantHow,
     Idempotency,
     LabelKind,
     Reversibility,
     RiskLevel,
+    Sureness,
     ToolCost,
     ToolDefinition,
 )
@@ -133,6 +136,7 @@ TEXT_CALL: Final = ToolDefinition(
     result=CapabilityResult.NO_OUTSIDE_TEXT,
     outcome_can_be_unknown=True,
     safe_to_repeat=True,
+    default_grant=DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.WEAK),
     parameters_schema={
         "type": "object",
         "properties": {

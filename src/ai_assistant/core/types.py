@@ -14789,6 +14789,35 @@ class CapabilityResult(StrEnum):
     """The call may return text someone other than the user or the assistant wrote."""
 
 
+class GrantHow(StrEnum):
+    """How a grant allows its call (ADR-0367 §3:1). Closed, never renamed."""
+
+    ALLOWED = "allowed"
+    """The call is allowed."""
+    WITH_APPROVAL = "with_approval"
+    """The call is allowed with approval: it needs a yes (ADR-0367 §5:6)."""
+
+
+class DefaultGrant(BaseModel):
+    """A tool's default grant, as its declaration gives it (ADR-0367 §4:3, ADR-0376 §3:1).
+
+    The declaration gives its how and its bar, and nothing else. Its who is anyone, its
+    action the declaring tool's capability, and it has no thing and no condition: those
+    are ADR-0376 §3:1's, the same for every tool, so no declaration states them. It is a
+    line held by its declaration, not by the line store: it has no identifier there and
+    no ruling names it (§3:3). Whether it covers a call, and what it decides, are the
+    check's.
+
+    Attributes:
+        how: How it allows the tool's calls.
+        bar: The least level it accepts (ADR-0366 §5:1, ADR-0367 §5:1).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    how: GrantHow
+    bar: Sureness
+
+
 class ToolDefinition(BaseModel):
     """A declaration of what a tool is and what invoking it risks (ADR-0016 §1).
 
@@ -14805,6 +14834,11 @@ class ToolDefinition(BaseModel):
     Frozen because a permission decision is recorded against the definition in
     force, and one that can be edited
     afterwards makes the audit trail a description of the present.
+
+    ``default_grant`` is the one field here a permission decision depends on that is
+    optional, by ADR-0380's scoped exception to ADR-0016 §1: absent, the declaration has
+    no default line, which can refuse a call and never allow one (§2). Every tool the
+    running hub declares carries one all the same (§4:1), and a test holds that.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -14887,6 +14921,18 @@ class ToolDefinition(BaseModel):
     parameters_schema: FrozenJsonMapping = Field(
         default=_EMPTY_PARAMS,
         description="JSON Schema (draft 2020-12) for the call's arguments; enforced by ADR-0145.",
+    )
+    default_grant: DefaultGrant | None = Field(
+        default=None,
+        exclude_if=_is_none,
+        description=(
+            "The tool's default grant: its how and its bar, the rest of the line being "
+            "ADR-0376 §3:1's (ADR-0367 §4:3). Optional and absent by default, and absence "
+            "is read as no default line, never as any how or bar (ADR-0380 §2:1, §2:2). "
+            "Left out of a dump where it is absent, so a declaration encoded before the "
+            "field, stored or on the wire, decodes and encodes unchanged (§3:1). Every "
+            "tool the running hub declares carries one (§4:1)."
+        ),
     )
 
     @field_validator("description")
@@ -25707,13 +25753,8 @@ class PermissionLineKind(StrEnum):
     """It says no: no how, no bar and no condition, and it holds at every level."""
 
 
-class GrantHow(StrEnum):
-    """How a grant allows its call (ADR-0367 §3:1). Closed, never renamed."""
-
-    ALLOWED = "allowed"
-    """The call is allowed."""
-    WITH_APPROVAL = "with_approval"
-    """The call is allowed with approval: it needs a yes (ADR-0367 §5:6)."""
+# `GrantHow`, how a grant allows its call, is declared beside `ToolDefinition`, whose
+# default grant carries one too (ADR-0376 §3:1).
 
 
 class LineParts(BaseModel):

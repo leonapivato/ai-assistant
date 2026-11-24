@@ -19,9 +19,12 @@ from pydantic import BaseModel, ValidationError
 from ai_assistant.core.types import (
     CostBasis,
     DataTier,
+    DefaultGrant,
+    GrantHow,
     Idempotency,
     Reversibility,
     RiskLevel,
+    Sureness,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -785,3 +788,78 @@ def test_a_subclass_whose_class_object_is_unhashable_still_constructs() -> None:
     definition = _Unhashable(**_definition().model_dump())
 
     assert definition.description == "Send an email."
+
+
+# --- the default grant (ADR-0367 §4:3, ADR-0380) ---------------------------
+
+
+_WEAK_GRANT = DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.WEAK)
+
+
+def test_a_declaration_carries_its_default_grants_how_and_bar() -> None:
+    """ADR-0376 §3:1: the declaration gives the how and the bar, and nothing else."""
+    definition = _definition(default_grant=_WEAK_GRANT)
+
+    assert definition.default_grant == _WEAK_GRANT
+    assert definition.model_dump(mode="json")["default_grant"] == {
+        "how": "allowed",
+        "bar": "weak",
+    }
+    assert set(DefaultGrant.model_fields) == {"how", "bar"}
+
+
+def test_the_default_grant_is_optional_and_absent_by_default() -> None:
+    """ADR-0380 §2:1: absent is no default grant, never a how or a bar."""
+    assert _definition().default_grant is None
+
+
+@pytest.mark.parametrize(
+    "grant",
+    [
+        {"how": "allowed"},
+        {"bar": "weak"},
+        {"how": "allowed", "bar": "weak", "who": "group:anyone"},
+        {"how": "allowed", "bar": "weak", "thing": "telegram:line"},
+        {"how": "allowed", "bar": "weak", "condition": "telegram:line"},
+        {"how": "sometimes", "bar": "weak"},
+        {"how": "allowed", "bar": "certain"},
+        {"how": None, "bar": "weak"},
+    ],
+)
+def test_a_default_grant_is_its_how_and_its_bar_alone(grant: dict[str, object]) -> None:
+    """Both required; no who, thing or condition (ADR-0376 §3:1); closed members alone."""
+    with pytest.raises(ValidationError):
+        _definition(default_grant=grant)
+
+
+def test_a_default_grant_is_frozen() -> None:
+    with pytest.raises(ValidationError):
+        _WEAK_GRANT.bar = Sureness.NORMAL
+
+
+def test_a_declaration_encoded_before_the_field_reads_and_encodes_unchanged() -> None:
+    """ADR-0380 §3:1: no key in, no grant read, and no key out, stored or on the wire."""
+    earlier = _definition().model_dump_json()
+    assert '"default_grant"' not in earlier
+
+    read = ToolDefinition.model_validate_json(earlier)
+
+    assert read.default_grant is None
+    assert read.model_dump_json() == earlier
+    assert _Recorded.model_validate_json(_Recorded(tool=read).model_dump_json()).tool == read
+
+
+def test_a_declarations_default_grant_survives_every_rebuild() -> None:
+    """Through a JSON round trip and the rebuild a record makes (ADR-0016 §1's by value)."""
+    definition = _definition(default_grant=_WEAK_GRANT)
+
+    assert ToolDefinition.model_validate_json(definition.model_dump_json()) == definition
+    assert _Recorded(tool=definition).tool.default_grant == _WEAK_GRANT
+
+
+def test_two_declarations_differing_in_their_default_grant_are_unequal() -> None:
+    """A change to a tool's default is a change to its declaration, as any field's is."""
+    normal = DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.NORMAL)
+
+    assert _definition(default_grant=_WEAK_GRANT) != _definition(default_grant=normal)
+    assert _definition(default_grant=_WEAK_GRANT) != _definition()

@@ -24,10 +24,13 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
+    DefaultGrant,
+    GrantHow,
     Idempotency,
     LabelKind,
     Reversibility,
     RiskLevel,
+    Sureness,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -84,6 +87,7 @@ NOTE_RELIANCE: Final = ToolDefinition(
     result=CapabilityResult.NONE,
     outcome_can_be_unknown=False,
     safe_to_repeat=True,
+    default_grant=DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.WEAK),
     parameters_schema={
         "type": "object",
         "properties": {

@@ -57,10 +57,13 @@ from ai_assistant.core.types import (
     CapabilityResult,
     CostBasis,
     DataTier,
+    DefaultGrant,
+    GrantHow,
     Idempotency,
     LabelKind,
     Reversibility,
     RiskLevel,
+    Sureness,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -148,6 +151,7 @@ def _declared(
         result=CapabilityResult.NO_OUTSIDE_TEXT,
         outcome_can_be_unknown=False,
         safe_to_repeat=True,
+        default_grant=DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.WEAK),
         parameters_schema=schema,
     )
 

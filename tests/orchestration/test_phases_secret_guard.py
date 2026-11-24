@@ -419,8 +419,9 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     what a tool declares of itself: identifiers, closed values, the tiers it reaches as
     members of ``DataTier`` (a label, not a value of that tier), descriptions, a JSON
     schema, a ``Decimal`` and currency names. ``system_supplied`` names arguments the hub
-    fills after the round is recorded; it holds names, never values. A credential a tool
-    needs is read through ``Secrets`` inside ``tools/`` and is in no declaration.
+    fills after the round is recorded; it holds names, never values. Its
+    ``DefaultGrant`` (ADR-0367 §4:3) is two closed values, a how and a bar. A credential
+    a tool needs is read through ``Secrets`` inside ``tools/`` and is in no declaration.
 
     **Planning's own shapes** (ADR-0309 §2:3). ``PlanningInputs``, ``PlaceWindow``,
     ``PlaceItem``, ``CallOutcome``, ``DigestedEvidence``, ``DigestItem``,
@@ -547,6 +548,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ConnectionKind",
         "ConnectionShown",
         "ConnectionsFound",
+        "DefaultGrant",
         "DeletedMessage",
         "DigestItem",
         "DigestReply",

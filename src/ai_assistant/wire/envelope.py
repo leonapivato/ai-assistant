@@ -2822,7 +2822,17 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     input's (ADR-0374 §7). A peer at 130 refuses the new field as extra (ADR-0124
 #:     §9:2). 130 was never deployed, but it is a merged release's, so it is advanced
 #:     from and not reused. The method set does not move: no ``Protocol`` gains a member.
-PROTOCOL_VERSION: Final[int] = 131
+#: 132: ADR-0124 §9:2 advances the version for ADR-0367 §4:3's default grant, on this
+#:     ground: ``ToolDefinition`` gains ``default_grant`` (a ``DefaultGrant``, carrying
+#:     the closed ``GrantHow`` and ``Sureness``), optional and left out of a dump where
+#:     absent (ADR-0380 §2:1, §3:1). Every tool the hub declares carries one, so every
+#:     ``PermissionDecision`` recorded from now on carries it inside its ``tool``,
+#:     returned by ``recent_decisions`` and ``export_decisions``, and a peer at 131
+#:     refuses it as extra (ADR-0124 §9:2). A declaration encoded before the field, as an
+#:     earlier decision and the asked calls of an earlier
+#:     ``EpisodicMemory.processing_record`` hold one, encodes and decodes unchanged. The
+#:     method set does not move: no ``Protocol`` gains a member.
+PROTOCOL_VERSION: Final[int] = 132
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

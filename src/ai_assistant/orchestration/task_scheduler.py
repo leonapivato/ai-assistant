@@ -52,10 +52,12 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     CostBasis,
     DataTier,
+    DefaultGrant,
     DueAfterTasks,
     DueAt,
     DueNow,
     DueOnRule,
+    GrantHow,
     Idempotency,
     LabelKind,
     OccurrenceState,
@@ -65,6 +67,7 @@ from ai_assistant.core.types import (
     RiskLevel,
     RuleDay,
     ScheduledTaskAuthor,
+    Sureness,
     TaskRuleKind,
     ToolCost,
     ToolDefinition,
@@ -253,6 +256,7 @@ def _declared(  # noqa: PLR0913 — the capability, its words, its schema, and t
         result=CapabilityResult.NO_OUTSIDE_TEXT,
         outcome_can_be_unknown=False,
         safe_to_repeat=safe_to_repeat,
+        default_grant=DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.WEAK),
         parameters_schema=schema,
     )
 

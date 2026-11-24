@@ -77,6 +77,8 @@ from ai_assistant.core.types import (
     CapabilityResult,
     CostBasis,
     DataTier,
+    DefaultGrant,
+    GrantHow,
     Idempotency,
     MemorySource,
     Provenance,
@@ -85,6 +87,7 @@ from ai_assistant.core.types import (
     SearchOutcome,
     SearchRefusal,
     SemanticMemory,
+    Sureness,
     ToolCost,
     ToolDefinition,
 )
@@ -169,6 +172,7 @@ FAKE_WEB_SEARCH: Final = ToolDefinition(
     result=CapabilityResult.MAY_CARRY_OUTSIDE_TEXT,
     outcome_can_be_unknown=True,
     safe_to_repeat=True,
+    default_grant=DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.NORMAL),
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

@@ -54,9 +54,12 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     CostBasis,
+    DefaultGrant,
+    GrantHow,
     Idempotency,
     Reversibility,
     RiskLevel,
+    Sureness,
     ToolCost,
     ToolDefinition,
 )
@@ -153,6 +156,7 @@ CURRENT_TIME = ToolDefinition(
     result=CapabilityResult.NO_OUTSIDE_TEXT,
     outcome_can_be_unknown=False,
     safe_to_repeat=True,
+    default_grant=DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.WEAK),
     parameters_schema={"type": "object", "properties": {}, "additionalProperties": False},
 )
 """Declaration for :class:`CurrentTime` (ADR-0048 §2).
