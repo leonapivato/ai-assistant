@@ -2849,7 +2849,17 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     entry recorded before it decodes unchanged as one the check never reached.
 #:     ``ActionRequest`` gains ``rests_on`` (ADR-0367 §16), but crosses no frame. The
 #:     method set does not move: no ``Protocol`` gains a member.
-PROTOCOL_VERSION: Final[int] = 134
+#: 135: ADR-0376 §7:1 advances the version in the change that adds its four members, on
+#:     the method-set limb: ``AssistantEngine`` gains ``permission_lines``, ``make_grant``,
+#:     ``make_limit`` and ``remove_line`` (§4:1), carrying the new ``PermissionLineEntry``,
+#:     ``MakeLineResult`` and ``RemoveLineResult`` with the closed ``MakeLineOutcome``,
+#:     ``MakeLineRefusal`` and ``RemoveLineOutcome``, and ``PermissionLine`` and
+#:     ``PermissionLineKind``, which no frame carried before; ``GrantHow`` and
+#:     ``Sureness`` were already carried. A hub at 134 answers the four methods as
+#:     unknown (ADR-0124 §9:2's method-set limb). No type a frame already carried
+#:     changes. A gateway calls none of the four, but it speaks the wire, so it is
+#:     upgraded with the hub (ADR-0376 §7).
+PROTOCOL_VERSION: Final[int] = 135
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

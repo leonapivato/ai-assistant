@@ -69,6 +69,7 @@ from episode_inspection_contract import (
 )
 from linked_accounts_contract import CONFIGURED, LINKS_LIMIT, LinkedAccountsSubject
 from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
+from permission_lines_contract import DECLARED, HELD, LINES_LIMIT, PermissionLinesSubject
 from person_model_contract import (
     PERSON_BUDGET,
     PERSON_LIMIT,
@@ -122,6 +123,7 @@ from ai_assistant.testing import (
     FakeAssistantEngine,
     FakeIdentityStore,
     FakeMemoryStore,
+    FakePermissionLineStore,
     FakePlanStore,
 )
 
@@ -192,6 +194,17 @@ def _linked(*, store: bool = True) -> LinkedAccountsSubject:
     if store:
         built.identities = identities
     return LinkedAccountsSubject(engine=built, identities=identities)
+
+
+def _lines(*, store: bool = True) -> PermissionLinesSubject:
+    """A fake at the listing's bound over an empty line store, ``DECLARED`` and ``HELD``."""
+    lines = FakePermissionLineStore()
+    built = FakeAssistantEngine(max_payload_bytes=LINES_LIMIT)
+    if store:
+        built.lines = lines
+    built.declared_tools = DECLARED
+    built.held_things = HELD
+    return PermissionLinesSubject(engine=built, lines=lines)
 
 
 def _approvals() -> ApprovalsPanelSubject:
@@ -277,6 +290,16 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def linked_accounts_storeless(self) -> AssistantEngine:
         """The canonical fake with no identity store, as it is built."""
         return _linked(store=False).engine
+
+    @pytest.fixture
+    def permission_lines_subject(self) -> PermissionLinesSubject:
+        """The canonical fake handed a line store, the declared tools and the held things."""
+        return _lines()
+
+    @pytest.fixture
+    def permission_lines_storeless(self) -> AssistantEngine:
+        """The canonical fake with no line store, as it is built."""
+        return _lines(store=False).engine
 
     @pytest.fixture
     def engine(self) -> AssistantEngine:

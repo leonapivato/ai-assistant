@@ -140,6 +140,7 @@ from ai_assistant.core.types import (
     user_message,
 )
 from ai_assistant.orchestration import linked_accounts as owners_links
+from ai_assistant.orchestration import permission_lines as owners_lines
 from ai_assistant.orchestration import person_panel
 from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
@@ -216,7 +217,13 @@ from ai_assistant.testing.stories import FakeStoryStore
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 
-    from ai_assistant.core.protocols import AuditTrail, IdentityStore, SourceReadTrail, SpendLedger
+    from ai_assistant.core.protocols import (
+        AuditTrail,
+        IdentityStore,
+        PermissionLineStore,
+        SourceReadTrail,
+        SpendLedger,
+    )
     from ai_assistant.core.types import (
         ApprovalChoice,
         ApprovalPanel,
@@ -229,18 +236,22 @@ if TYPE_CHECKING:
         ConnectedAccount,
         ConnectionAct,
         EncodableText,
+        GrantHow,
         HeldNotification,
         Identifier,
         LinkedAccount,
         LowerLinkResult,
+        MakeLineResult,
         MessageReceipt,
         NonBlankEncodableText,
         NotificationPreferences,
+        PermissionLineEntry,
         PersonModelEdit,
         PersonModelList,
         PersonModelView,
         ProfileChange,
         ProfileField,
+        RemoveLineResult,
         ReplyCapability,
         SecretValue,
         SourceReadRecord,
@@ -252,6 +263,8 @@ if TYPE_CHECKING:
         StorySummaryView,
         StoryView,
         Sureness,
+        ThingKey,
+        ToolDefinition,
         TranscriptPage,
         UserMessage,
         WithdrawLoweringResult,
@@ -398,6 +411,19 @@ class FakeAssistantEngine:
         #: hub that holds no link, which lists none and names none. A consumer gives it
         #: a :class:`~ai_assistant.testing.FakeIdentityStore`.
         self.identities: IdentityStore | None = None
+        #: The line store the four members for lines answer from (ADR-0376 §4), as the
+        #: engine's ``lines`` is: ``None``, the default, is a hub that holds no made line,
+        #: which lists the default lines alone. A consumer gives it a
+        #: :class:`~ai_assistant.testing.FakePermissionLineStore`.
+        self.lines: PermissionLineStore | None = None
+        #: The tools this hub declares, whose capabilities a line may name and whose
+        #: default lines the listing shows (ADR-0376 §3:1, §4:5), as the engine's phases
+        #: declare them. None, the default.
+        self.declared_tools: tuple[ToolDefinition, ...] = ()
+        #: The things this hub holds as it starts (ADR-0381 §2:1), whose connections a
+        #: line may name (ADR-0376 §2:4, §4:5), as the engine's ``held_things`` are. None,
+        #: the default.
+        self.held_things: tuple[ThingKey, ...] = ()
         #: The placement each held belief carries (ADR-0217 §1), by record id. Held
         #: **beside** the beliefs rather than on them, because
         #: :class:`~ai_assistant.core.types.Belief` carries no placement: ADR-0217 §7
@@ -1231,6 +1257,65 @@ class FakeAssistantEngine:
         return self._checked(
             await owners_links.withdraw_lowering(self.identities, named), "withdraw_lowering"
         )
+
+    # --- the owner's permission lines (ADR-0376 §4 to §7) ---------------------
+    #
+    # The engine's own answers (:mod:`~ai_assistant.orchestration.permission_lines`), over
+    # :attr:`lines`, :attr:`declared_tools` and :attr:`held_things`, so the suite compares
+    # two implementations of the surface rather than two of the store. Arguments are
+    # validated first, then measured.
+
+    async def permission_lines(self) -> tuple[PermissionLineEntry, ...]:
+        """Every line that stands, never truncated (ADR-0376 §4:2, §5)."""
+        self.calls.append(("permission_lines", {}))
+        return self._checked(
+            await owners_lines.permission_lines(self.lines, self.declared_tools),
+            "permission_lines",
+        )
+
+    async def make_grant(  # noqa: PLR0913 — ADR-0376 §4:3's six parts of a grant, keyword-only
+        self,
+        *,
+        who: Identifier,
+        action: Identifier,
+        how: GrantHow,
+        bar: Sureness,
+        thing: Identifier | None = None,
+        condition: Identifier | None = None,
+    ) -> MakeLineResult:
+        """Make a grant, by the owner's act (ADR-0376 §4:3, §4:5)."""
+        line = owners_lines.grant_arguments(
+            who=who, action=action, how=how, bar=bar, thing=thing, condition=condition
+        )
+        return await self._make("make_grant", line)
+
+    async def make_limit(
+        self, *, who: Identifier, action: Identifier, thing: Identifier | None = None
+    ) -> MakeLineResult:
+        """Make a limit, by the owner's act (ADR-0376 §4:4, §4:5)."""
+        line = owners_lines.limit_arguments(who=who, action=action, thing=thing)
+        return await self._make("make_limit", line)
+
+    async def _make(self, method: str, line: owners_lines.LineArguments) -> MakeLineResult:
+        arguments = line.arguments()
+        check_arguments(method, max_bytes=self._max_payload_bytes, **arguments)
+        self.calls.append(
+            (method, {name: value for name, value in arguments.items() if value is not None})
+        )
+        made = await owners_lines.make_line(
+            self.lines,
+            line,
+            tools=self.declared_tools,
+            connections=owners_lines.nameable_connections(self.held_things),
+        )
+        return self._checked(made, method)
+
+    async def remove_line(self, line_id: Identifier) -> RemoveLineResult:
+        """Remove a made line, by the owner's act (ADR-0376 §4:6)."""
+        named = identifier(line_id, name="line_id")
+        check_arguments("remove_line", max_bytes=self._max_payload_bytes, line_id=named)
+        self.calls.append(("remove_line", {"line_id": named}))
+        return self._checked(await owners_lines.remove_line(self.lines, named), "remove_line")
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) ------------
     #

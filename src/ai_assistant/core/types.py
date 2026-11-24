@@ -26278,6 +26278,231 @@ class LineRemoval(BaseModel):
         return self
 
 
+# --- the owner's lines, as the engine lists, makes and removes them (ADR-0376 §4, §5) ---
+#
+# What ``AssistantEngine``'s four members for lines carry (ADR-0376 §4:1): one entry per line
+# that stands, a made line or a tool's default line (§5:1), and what a making or a removal
+# did. Each outcome and each reason is a closed set of exactly the members §4 names (§4:10).
+# A refused or repeated act is an outcome, never an error (§4:7). Nothing here carries a
+# credential, a token or any other secret the hub holds, and no entry says whether its line
+# has covered any call (§5:2): an entry carries a line's parts, an identifier and a maker, or
+# the id of the tool whose declaration holds it.
+
+
+class PermissionLineEntry(BaseModel):
+    """One line that stands, as ``permission_lines`` lists it (ADR-0376 §5:1).
+
+    **What §5:1 names, and no more**: whether the line is a grant or a limit; its who, its
+    action and its thing or none; for a grant, its how, its bar and its condition or none;
+    and either, for a made line, its identifier and the identity of whoever made it, or,
+    for a default line, the id of the tool that declares it and no identifier. A default
+    line is a grant to anyone with no thing and no condition (§3:1).
+
+    Attributes:
+        kind: Grant or limit.
+        who: The owner's identity or anyone (§2:1).
+        action: Exactly one capability (§2:2).
+        thing: Its one connection, or ``None`` (§2:5).
+        how: For a grant, how it allows; ``None`` for a limit.
+        bar: For a grant, its bar; ``None`` for a limit.
+        condition: For a grant, its one connection condition, or ``None`` (§2:6).
+        line_id: For a made line, its identifier in the line store, which ``remove_line``
+            names it by; ``None`` for a default line, which has none (§3:3).
+        made_by: For a made line, the identity of whoever made it; ``None`` for a default
+            line, which no person set (§3:1).
+        tool_id: For a default line, the id of the tool whose declaration holds it;
+            ``None`` for a made line.
+
+    Raises:
+        ValueError: If its parts do not fit its kind, it is neither exactly a made line
+            nor exactly a default line, or a default line is not §3:1's shape.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: PermissionLineKind
+    who: LineWho
+    action: VisibleIdentifier
+    thing: LineConnection | None = None
+    how: GrantHow | None = None
+    bar: Sureness | None = None
+    condition: LineConnection | None = None
+    line_id: NonBlankEncodableText | None = None
+    made_by: NonBlankEncodableText | None = None
+    tool_id: VisibleIdentifier | None = None
+
+    @model_validator(mode="after")
+    def _a_made_line_or_a_default_line(self) -> Self:
+        _check_line_shape(self.kind, how=self.how, bar=self.bar, condition=self.condition)
+        made = self.line_id is not None
+        if made != (self.made_by is not None):
+            msg = "a made line's entry carries its identifier and its maker together (§5:1)"
+            raise ValueError(msg)
+        if made == (self.tool_id is not None):
+            msg = "an entry is a made line's or a default line's, exactly one (§5:1)"
+            raise ValueError(msg)
+        if not made and (
+            self.kind is not PermissionLineKind.GRANT
+            or self.who != ANYONE_GROUP_ID
+            or self.thing is not None
+            or self.condition is not None
+        ):
+            msg = "a default line is a grant to anyone with no thing and no condition (§3:1)"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def made(self) -> bool:
+        """Whether a person made it, rather than its tool's declaration holding it."""
+        return self.line_id is not None
+
+
+class MakeLineOutcome(StrEnum):
+    """What ``make_grant`` or ``make_limit`` did (ADR-0376 §4:3 to §4:5). Closed: these three."""
+
+    MADE = "made"
+    """It recorded a new line, made by the owner, under a new identifier."""
+    UNCHANGED = "unchanged"
+    """A made line of the same kind with exactly the same parts already stood, so nothing
+    was written and no second line was made."""
+    REFUSED = "refused"
+    """It was refused, with its reason, and nothing was written."""
+
+
+class MakeLineRefusal(StrEnum):
+    """Why ``make_grant`` or ``make_limit`` was refused (ADR-0376 §4:5). Closed: these four.
+
+    Listed in the order the members decide them: the first that applies is the one given.
+    """
+
+    UNKNOWN_WHO = "unknown_who"
+    """The who is neither the owner's identity nor anyone (§2:1)."""
+    UNKNOWN_ACTION = "unknown_action"
+    """No tool the running hub declares has the capability."""
+    NO_THING = "no_thing"
+    """A thing was given, and the action's calls have none (§2:3)."""
+    UNKNOWN_CONNECTION = "unknown_connection"
+    """A thing or a condition names no connection a line may name (§2:4) that the hub has."""
+
+
+class MakeLineResult(BaseModel):
+    """What ``make_grant`` or ``make_limit`` did, with the line it names (ADR-0376 §4).
+
+    Attributes:
+        outcome: What it did.
+        line: The line as the store recorded it, or the standing line it repeated; set
+            exactly where it was not refused.
+        refusal: Why it was refused; set exactly where it was.
+
+    Raises:
+        ValueError: If the fields do not fit the outcome, or the line does not stand.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outcome: MakeLineOutcome
+    line: PermissionLine | None = None
+    refusal: MakeLineRefusal | None = None
+
+    @model_validator(mode="after")
+    def _the_fields_fit_the_outcome(self) -> Self:
+        refused = self.outcome is MakeLineOutcome.REFUSED
+        if refused != (self.refusal is not None):
+            msg = "a making names its refusal exactly when it was refused"
+            raise ValueError(msg)
+        if refused != (self.line is None):
+            msg = "a making carries its line exactly when it was not refused"
+            raise ValueError(msg)
+        if self.line is not None and not self.line.standing:
+            msg = "a making names a line that stands"
+            raise ValueError(msg)
+        return self
+
+
+class RemoveLineOutcome(StrEnum):
+    """What ``remove_line`` did (ADR-0376 §4:6). Closed: exactly these two."""
+
+    REMOVED = "removed"
+    """It recorded the removal of a standing made line, by the owner."""
+    NOT_STANDING = "not_standing"
+    """No standing made line has that identifier, because none was made or it was already
+    removed, so nothing was written. Not an error."""
+
+
+class RemoveLineResult(BaseModel):
+    """What ``remove_line`` did, with the line it removed (ADR-0376 §4:6).
+
+    Attributes:
+        outcome: What it did.
+        line: The line it removed, as the store now keeps it: its parts, identifier and
+            maker as it stood, and its removal recorded; set exactly where it removed one.
+
+    Raises:
+        ValueError: If the line does not fit the outcome.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outcome: RemoveLineOutcome
+    line: PermissionLine | None = None
+
+    @model_validator(mode="after")
+    def _a_removed_line_exactly_when_removed(self) -> Self:
+        removed = self.outcome is RemoveLineOutcome.REMOVED
+        if removed != (self.line is not None):
+            msg = "a removal carries its line exactly when it removed one"
+            raise ValueError(msg)
+        if self.line is not None and self.line.standing:
+            msg = "a removal carries the line with its removal recorded"
+            raise ValueError(msg)
+        return self
+
+
+def grant_how(value: object) -> GrantHow:
+    """How a grant allows, from ``make_grant``'s ``how`` argument (ADR-0376 §4:7).
+
+    Refused locally, before any I/O, by every implementation of
+    ``AssistantEngine.make_grant``, the wire client included (ADR-0085 §9).
+
+    Args:
+        value: The argument as the caller passed it: a :class:`GrantHow`, or its value.
+
+    Returns:
+        How the grant allows.
+
+    Raises:
+        ValueError: If it names neither ``allowed`` nor ``with_approval``.
+    """
+    if isinstance(value, GrantHow):
+        return value
+    if isinstance(value, str):
+        try:
+            return GrantHow(value)
+        except ValueError:
+            pass
+    msg = "how must be one of allowed and with_approval (ADR-0367 §3:1)"
+    raise ValueError(msg)
+
+
+def grant_bar(value: object) -> Sureness:
+    """A grant's bar, from ``make_grant``'s ``bar`` argument (ADR-0376 §4:7).
+
+    :func:`sureness_level` under the argument's own name, refused locally before any I/O
+    by every implementation, the wire client included (ADR-0085 §9).
+
+    Args:
+        value: The argument as the caller passed it: a :class:`Sureness`, or its value.
+
+    Returns:
+        The bar.
+
+    Raises:
+        ValueError: If it names none of the four (ADR-0366 §5:1).
+    """
+    try:
+        return sureness_level(value)
+    except ValueError:
+        msg = "bar must be one of none, weak, normal and strong (ADR-0366 §5:1)"
+        raise ValueError(msg) from None
+
+
 # --- whose a thing is: one record per connection and source (ADR-0381 §2, §3) ---------
 #
 # Every connection the system has and every source carries one record saying whose it is

@@ -110,11 +110,15 @@ def test_a_round_after_the_decision_shows_its_notes_and_each_calls_entry() -> No
         '    Notes (rests on outside content): "pitch 4 is free"',
         "Calls:",
         '  Round "r1", call "c1": web_search (no effect): done',
+        "    Check: not checked",
         '  Round "r2", call "c2": text (with an effect; rests on outside content): done',
+        "    Check: not checked",
         '    Sent to telegram/conn-1/42: sent: "Pitch 4 is booked."',
         '  Round "r2", call "c3": text (with an effect): refused',
         '    Reason: "names a place it was never shown"',
+        "    Check: not checked",
         '  Round "r2", call "c4": tidy_up (with an effect): no outcome recorded',
+        "    Check: not checked",
     ]
 
 
@@ -162,9 +166,10 @@ def test_a_delivery_that_failed_says_why() -> None:
     )
     record = _staged(_record("failed", response="none"), rounds=rounds, call_records=(entry,))
 
-    assert _planning(record)[-4:] == [
+    assert _planning(record)[-5:] == [
         '  Round "r1", call "c1": text (with an effect): not_done',
         '    Reason: "the place refused it"',
+        "    Check: not checked",
         '    Sent to telegram/conn-1/42: failed: "Booked."',
         '      Why: "blocked by the user"',
     ]

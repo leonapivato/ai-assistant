@@ -272,6 +272,7 @@ from ai_assistant.core.types import (
     DevicesChangedChange,
     DiscloserProvenance,
     EgressBinding,
+    GrantHow,
     GrantScope,
     HolderKind,
     MemoryKind,
@@ -320,6 +321,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces import (
     episode_inspection,
+    line_inspection,
     link_inspection,
     person_inspection,
     story_inspection,
@@ -3399,6 +3401,166 @@ def links_withdraw(
         return _EXIT_OK
 
     raise typer.Exit(asyncio.run(_links(write)))
+
+
+# --- your permission lines (ADR-0376 §4 to §7) -----------------------------------
+#
+# The owner's listing of the lines that stand, a grant, a limit and a removal: in this
+# milestone the command line is the only caller of the four members (§6:6). Each call is
+# the owner's own act, sent with what the owner typed and nothing else (§6:1), and the hub
+# decides every outcome: this adapter renders them (`line_inspection`). A line does not
+# decide any call yet, and each command that could suggest otherwise says so.
+
+permissions_app = typer.Typer(
+    name="permissions",
+    help=(
+        "Your permission lines: the grants and limits you made, and each tool's default, "
+        "which say who may have me do what. " + line_inspection.NOT_YET_DECIDING
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(permissions_app, name="permissions")
+
+
+async def _permissions(act: Callable[[AssistantEngine], Awaitable[int]]) -> int:
+    """Open the engine and run one permission-line act, inside one error boundary."""
+    try:
+        engine = await _open_engine()
+        return await act(engine)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+
+@permissions_app.command(
+    "list",
+    help=(
+        "List every line that stands: each grant and limit you made, with the id "
+        "'assistant permissions remove' takes, and each tool's default grant. "
+        + line_inspection.NOT_YET_DECIDING
+    ),
+)
+def permissions_list() -> None:
+    """List every line that stands."""
+
+    async def read(engine: AssistantEngine) -> int:
+        line_inspection.render_listing(console, await engine.permission_lines())
+        return _EXIT_OK
+
+    raise typer.Exit(asyncio.run(_permissions(read)))
+
+
+#: The parameters the grant and limit commands share, hoisted to module scope for the
+#: reason the ``beliefs`` enum options are (ruff's B008).
+_LINE_ACTION_ARGUMENT = typer.Argument(
+    ...,
+    callback=_present_id,
+    help="The capability, as 'assistant permissions list' shows it, such as send_text.",
+)
+_LINE_WHO_OPTION = typer.Option(
+    ...,
+    "--who",
+    callback=_present_id,
+    help="Whom the line is about: 'me', or 'anyone', which includes everyone.",
+)
+_LINE_ON_OPTION = typer.Option(
+    None,
+    "--on",
+    callback=_present_optional_id,
+    help=(
+        "Only calls that act through this connection: where send_text sends, or the "
+        "account send_email sends from. " + line_inspection.CONNECTION_SPELLING
+    ),
+)
+_GRANT_HOW_OPTION = typer.Option(
+    ...,
+    "--how",
+    help="'allowed', or 'with_approval', which asks you first.",
+)
+_GRANT_BAR_OPTION = typer.Option(
+    ...,
+    "--bar",
+    help="How sure I must be that the work is the person's, at least, for it to apply.",
+)
+_GRANT_ASKED_THROUGH_OPTION = typer.Option(
+    None,
+    "--asked-through",
+    callback=_present_optional_id,
+    help=(
+        "Only where every message the work acts on came by this connection. "
+        + line_inspection.CONNECTION_SPELLING
+    ),
+)
+
+
+@permissions_app.command(
+    "grant",
+    help=(
+        "Make a grant: who may have me call a capability, how, and how sure I must be. "
+        "Making one you already made changes nothing. " + line_inspection.NOT_YET_DECIDING
+    ),
+)
+def permissions_grant(  # noqa: PLR0913 — ADR-0376 §4:3's six parts of a grant
+    action: str = _LINE_ACTION_ARGUMENT,
+    who: str = _LINE_WHO_OPTION,
+    how: GrantHow = _GRANT_HOW_OPTION,
+    bar: Sureness = _GRANT_BAR_OPTION,
+    on: str | None = _LINE_ON_OPTION,
+    asked_through: str | None = _GRANT_ASKED_THROUGH_OPTION,
+) -> None:
+    """Make a grant."""
+
+    async def write(engine: AssistantEngine) -> int:
+        result = await engine.make_grant(
+            who=line_inspection.who_named(who),
+            action=action,
+            how=how,
+            bar=bar,
+            thing=on,
+            condition=asked_through,
+        )
+        return _EXIT_OK if line_inspection.render_made(console, result) else _EXIT_ERROR
+
+    raise typer.Exit(asyncio.run(_permissions(write)))
+
+
+@permissions_app.command(
+    "limit",
+    help=(
+        "Make a limit: no call of a capability for whom it names, however sure I am. "
+        "Making one you already made changes nothing. " + line_inspection.NOT_YET_DECIDING
+    ),
+)
+def permissions_limit(
+    action: str = _LINE_ACTION_ARGUMENT,
+    who: str = _LINE_WHO_OPTION,
+    on: str | None = _LINE_ON_OPTION,
+) -> None:
+    """Make a limit."""
+
+    async def write(engine: AssistantEngine) -> int:
+        result = await engine.make_limit(
+            who=line_inspection.who_named(who), action=action, thing=on
+        )
+        return _EXIT_OK if line_inspection.render_made(console, result) else _EXIT_ERROR
+
+    raise typer.Exit(asyncio.run(_permissions(write)))
+
+
+@permissions_app.command("remove")
+def permissions_remove(
+    line_id: str = typer.Argument(
+        ..., callback=_present_id, help="The line, by the id 'assistant permissions list' shows."
+    ),
+) -> None:
+    """Remove a grant or a limit you made. It is kept, as removed, but no longer stands."""
+
+    async def write(engine: AssistantEngine) -> int:
+        result = await engine.remove_line(line_id)
+        line_inspection.render_removed(console, line_id, result)
+        return _EXIT_OK
+
+    raise typer.Exit(asyncio.run(_permissions(write)))
 
 
 @app.command()

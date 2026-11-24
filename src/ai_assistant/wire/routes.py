@@ -122,6 +122,14 @@ class Route(StrEnum):
 #: or link gates them** (§4:5): this row alone admits a call, and the hub's own machine,
 #: which holds every role (ADR-0298 §3:2), reaches them whatever level any link stands
 #: at (ADR-0373 §5:1).
+#:
+#: ADR-0376 §6:2 places ``permission_lines``, ``make_grant``, ``make_limit`` and
+#: ``remove_line``, the owner's listing of the lines that stand, a grant, a limit and a
+#: removal, in the command-or-query row, as §8 records against ADR-0298 §5:1's table, so
+#: a request from a device without the command role is refused before dispatch. **No
+#: line, level or lowering gates them** (§6:5): this row alone admits a call, and the
+#: hub's own machine, which holds every role (ADR-0298 §3:2), reaches the listing and the
+#: removal whatever lines stand.
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
@@ -151,12 +159,15 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "link_story",
             "linked_accounts",
             "lower_link",
+            "make_grant",
+            "make_limit",
             "merge_stories",
             "move_story_members",
             "my_devices",
             "notification_preferences",
             "notifications",
             "pending_candidates",
+            "permission_lines",
             "person_model",
             "pin_memory",
             "profile_changes",
@@ -165,6 +176,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "recent_grants",
             "recent_invocations",
             "recent_reads",
+            "remove_line",
             "remove_style_mark",
             "reprovision_account",
             "revoke",

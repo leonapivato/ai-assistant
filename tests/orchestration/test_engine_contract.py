@@ -74,6 +74,7 @@ from episode_inspection_contract import (
 )
 from linked_accounts_contract import CONFIGURED, LINKS_LIMIT, LinkedAccountsSubject
 from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
+from permission_lines_contract import HELD, LINES_LIMIT, PermissionLinesSubject
 from person_model_contract import (
     PERSON_BUDGET,
     PERSON_LIMIT,
@@ -133,6 +134,7 @@ from ai_assistant.testing import (
     FakeIdentityStore,
     FakeMemoryStore,
     FakeNotificationOutbox,
+    FakePermissionLineStore,
     FakePlanStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
@@ -160,6 +162,7 @@ if TYPE_CHECKING:
         EgressBinding,
         FrozenJson,
         SourceGrant,
+        ThingKey,
     )
     from ai_assistant.tools.invocation import BoundImplementation
 
@@ -337,6 +340,8 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     person_blocks: PersonBlocks | None = None,
     now: Callable[[], datetime] | None = None,
     identities: FakeIdentityStore | None = None,
+    lines: FakePermissionLineStore | None = None,
+    held_things: tuple[ThingKey, ...] = (),
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -488,6 +493,8 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         person_blocks=person_blocks,
         now=(lambda: datetime.now(UTC)) if now is None else now,
         identities=identities,
+        lines=lines,
+        held_things=held_things,
         # ADR-0309 §2:6: the phases plan what the chat's reader takes in and every event,
         # as they will on every deployment once the switch lane lands; they are wired
         # only beside the reader, so a subject with it off has none. Over the same
@@ -526,6 +533,17 @@ async def _linked(*, store: bool = True) -> AsyncIterator[LinkedAccountsSubject]
     await built.start()
     try:
         yield LinkedAccountsSubject(engine=built, identities=identities)
+    finally:
+        await built.aclose()
+
+
+async def _lines(*, store: bool = True) -> AsyncIterator[PermissionLinesSubject]:
+    """An engine at the listing's bound over an empty line store, holding ``HELD``."""
+    lines = FakePermissionLineStore()
+    built = _wire(max_payload_bytes=LINES_LIMIT, lines=lines if store else None, held_things=HELD)
+    await built.start()
+    try:
+        yield PermissionLinesSubject(engine=built, lines=lines)
     finally:
         await built.aclose()
 
@@ -647,6 +665,18 @@ class TestEngineContract(AssistantEngineContract):
     async def linked_accounts_storeless(self) -> AsyncIterator[AssistantEngine]:
         """The production engine handed no identity store."""
         async for subject in _linked(store=False):
+            yield subject.engine
+
+    @pytest.fixture
+    async def permission_lines_subject(self) -> AsyncIterator[PermissionLinesSubject]:
+        """The production engine handed the line store and the held things, as the root."""
+        async for subject in _lines():
+            yield subject
+
+    @pytest.fixture
+    async def permission_lines_storeless(self) -> AsyncIterator[AssistantEngine]:
+        """The production engine handed no line store."""
+        async for subject in _lines(store=False):
             yield subject.engine
 
     @pytest.fixture

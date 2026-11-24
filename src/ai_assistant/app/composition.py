@@ -1432,9 +1432,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # making and removal (§3:5). It starts empty: no line is seeded, and a tool's
         # default line is its declaration's, never the store's (ADR-0376 §3:3). The
         # authorizer's check reads it (ADR-0367 §4:1), its outcome recorded beside
-        # today's rules, which still decide until the check does (§4:5); no member makes
-        # or removes one until the owner's acts are built. It reads no other store, and
-        # it is not ADR-0097's source grants (ADR-0367 §14).
+        # today's rules, which still decide until the check does (§4:5); the owner makes
+        # and removes lines through the engine's four members for them (ADR-0376 §4). It
+        # reads no other store, and it is not ADR-0097's source grants (ADR-0367 §14).
         permission_lines = SqlitePermissionLineStore(
             path=directory / PERMISSION_LINES_FILENAME, now=_utcnow
         )
@@ -2395,6 +2395,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # links, and the engine records it with each work's three facts beside the
             # channel-type rules, which still decide (ADR-0368 §1:3).
             identities=identities,
+            # ADR-0376 §4: the owner's four members for lines list, make and remove
+            # through the **same** line store the authorizer's check reads, so a line the
+            # owner makes is weighed on every call checked after it (§4:9); and a line's
+            # thing or condition may name each connection among the things this hub holds
+            # as it starts (ADR-0381 §2:1), less the schedule and the approvals (§2:4).
+            lines=permission_lines,
+            held_things=held,
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
             observer=observer,

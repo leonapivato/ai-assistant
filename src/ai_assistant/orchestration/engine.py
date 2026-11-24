@@ -174,6 +174,7 @@ from ai_assistant.core.types import (
     user_message,
 )
 from ai_assistant.orchestration import linked_accounts as owners_links
+from ai_assistant.orchestration import permission_lines as owners_lines
 from ai_assistant.orchestration import person_panel
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import (
@@ -358,6 +359,7 @@ if TYPE_CHECKING:
         MemoryStore,
         NotificationPolicy,
         NotificationStore,
+        PermissionLineStore,
         PlanStore,
         SourceReadTrail,
         SpeechSynthesizer,
@@ -382,17 +384,20 @@ if TYPE_CHECKING:
         DueOccurrence,
         EncodableText,
         GrantableSource,
+        GrantHow,
         GrantScope,
         HeldNotification,
         Identifier,
         LinkedAccount,
         LowerLinkResult,
+        MakeLineResult,
         MessageReceipt,
         NonBlankEncodableText,
         NotificationCandidate,
         NotificationDisposition,
         NotificationPreferences,
         PermissionDecision,
+        PermissionLineEntry,
         PersonModelEdit,
         PersonModelList,
         PersonModelView,
@@ -401,6 +406,7 @@ if TYPE_CHECKING:
         RecordedCall,
         RecordedChannelTrigger,
         RecordedInvocation,
+        RemoveLineResult,
         RequestingDevice,
         RulePush,
         ScheduledTask,
@@ -417,6 +423,8 @@ if TYPE_CHECKING:
         StorySummaryView,
         StoryView,
         Sureness,
+        ThingKey,
+        ToolDefinition,
         TranscriptPage,
         UserMessage,
         WithdrawLoweringResult,
@@ -1693,6 +1701,8 @@ class Engine:
         account_connections: Sequence[AccountConnection] = (),
         connections_recent: int = DEFAULT_CONNECTIONS_RECENT,
         identities: IdentityStore | None = None,
+        lines: PermissionLineStore | None = None,
+        held_things: Sequence[ThingKey] = (),
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -2098,6 +2108,15 @@ class Engine:
                 whose work each is and whose authority it carries (ADR-0368 §2, §9).
                 ``None`` is a store that cannot be read: every message is read as
                 ADR-0374 rules for links that cannot be read.
+            lines: The line store (ADR-0367 §3:6), the **same** one the authorizer's
+                check reads, so a line the owner makes is one the check weighs on every
+                call after it (ADR-0376 §4:9). The owner's four members for lines list,
+                make and remove through it (§4); ``None`` is a hub that holds no made
+                line, which lists the default lines alone.
+            held_things: The things the hub holds as it starts, as their records are
+                keyed (ADR-0381 §2:1): the connections among them that a line may name
+                are those a line's thing or condition may name (ADR-0376 §2:4, §4:5).
+                None by default, where no connection may be named.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2340,6 +2359,9 @@ class Engine:
         self._account_connections = tuple(account_connections)
         self._connections_recent = connections_recent
         self._identities = identities
+        # ADR-0376 §4: the line store and the connections a line may name that the hub has.
+        self._lines = lines
+        self._line_connections = owners_lines.nameable_connections(held_things)
         if self._phases is not None:
             # ADR-0349 §4:6, §6:1, §7:20: planning's stop call, its findings look-up and
             # its answer to an offer, and the waits acting and planning hold (§7:12,
@@ -7124,6 +7146,97 @@ class Engine:
             owners_links.withdraw_lowering(self._identities, named),
             "withdraw_lowering",
             checked=True,
+        )
+
+    # --- the owner's permission lines (ADR-0376 §4 to §7) --------------------
+    #
+    # Answered by :mod:`~ai_assistant.orchestration.permission_lines` over the line store
+    # this engine was handed, the tools its phases declare and the connections the hub
+    # holds, as the canonical fake answers them. Each is the owner's own act, reached only
+    # through the command row (§6:2, §6:3), and nothing in a work calls one (§6:1): the
+    # command line is their only caller (§6:6). A line made here is recorded and listed,
+    # and read by the check; what a call is allowed to do is still today's rules' to say.
+
+    async def _declared(self) -> tuple[ToolDefinition, ...]:
+        """Every tool the running hub declares, each once: none without the phases."""
+        return () if self._phases is None else await self._phases.declared()
+
+    async def permission_lines(self) -> tuple[PermissionLineEntry, ...]:
+        """Every line that stands, one entry each (ADR-0376 §4:2, §5).
+
+        Measured whole against the contract limit and never truncated (§4:2).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            PermissionLineStoreError: If the line store cannot be read.
+            OversizedValueError: If the listing does not fit the contract limit.
+        """
+        self._reject_if_closing()
+
+        async def listed() -> tuple[PermissionLineEntry, ...]:
+            return await owners_lines.permission_lines(self._lines, await self._declared())
+
+        return await self._tracked(listed(), "permission_lines", checked=True)
+
+    async def make_grant(  # noqa: PLR0913 — ADR-0376 §4:3's six parts of a grant, keyword-only
+        self,
+        *,
+        who: Identifier,
+        action: Identifier,
+        how: GrantHow,
+        bar: Sureness,
+        thing: Identifier | None = None,
+        condition: Identifier | None = None,
+    ) -> MakeLineResult:
+        """Make a grant, by the owner's act (ADR-0376 §4:3, §4:5).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an identifier is blank or unwritable, ``how`` is not one of its
+                two values, or ``bar`` is not one of the four.
+            PermissionLineStoreError: If the line store cannot be read or written.
+        """
+        self._reject_if_closing()
+        line = owners_lines.grant_arguments(
+            who=who, action=action, how=how, bar=bar, thing=thing, condition=condition
+        )
+        check_arguments("make_grant", max_bytes=self._max_payload_bytes, **line.arguments())
+        return await self._tracked(self._made(line), "make_grant", checked=True)
+
+    async def make_limit(
+        self, *, who: Identifier, action: Identifier, thing: Identifier | None = None
+    ) -> MakeLineResult:
+        """Make a limit, by the owner's act (ADR-0376 §4:4, §4:5).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an identifier is blank or unwritable.
+            PermissionLineStoreError: If the line store cannot be read or written.
+        """
+        self._reject_if_closing()
+        line = owners_lines.limit_arguments(who=who, action=action, thing=thing)
+        check_arguments("make_limit", max_bytes=self._max_payload_bytes, **line.arguments())
+        return await self._tracked(self._made(line), "make_limit", checked=True)
+
+    async def _made(self, line: owners_lines.LineArguments) -> MakeLineResult:
+        """Make the line ``line`` names, against what this hub declares and has (§4:5)."""
+        return await owners_lines.make_line(
+            self._lines, line, tools=await self._declared(), connections=self._line_connections
+        )
+
+    async def remove_line(self, line_id: Identifier) -> RemoveLineResult:
+        """Remove a made line, by the owner's act (ADR-0376 §4:6).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``line_id`` is not an identifier.
+            PermissionLineStoreError: If the line store cannot be read or written.
+        """
+        self._reject_if_closing()
+        named = identifier(line_id, name="line_id")
+        check_arguments("remove_line", max_bytes=self._max_payload_bytes, line_id=named)
+        return await self._tracked(
+            owners_lines.remove_line(self._lines, named), "remove_line", checked=True
         )
 
     async def _approval_facts(self, requests: Sequence[ApprovalRequest]) -> dict[str, CardFacts]:

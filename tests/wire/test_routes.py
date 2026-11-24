@@ -145,6 +145,32 @@ def test_the_linked_accounts_members_are_the_surfaces_own() -> None:
     assert _LINK_MEMBERS <= METHODS
 
 
+#: ADR-0376 §4:1's four members for the owner's permission lines.
+_LINE_MEMBERS: Final = frozenset({"permission_lines", "make_grant", "make_limit", "remove_line"})
+
+
+@pytest.mark.parametrize("method", sorted(_LINE_MEMBERS))
+def test_the_permission_line_members_are_commands(method: str) -> None:
+    """ADR-0376 §6:2: in the command-or-query row, refused without the command role.
+
+    And §6:5: the row alone admits a call, so the hub's own machine, which holds every role
+    (ADR-0298 §3:2), is let through with no line, level or lowering asked.
+    """
+    assert route_of(method) is Route.COMMAND
+    with pytest.raises(DeviceRefusedError) as refused:
+        check_request(method, {}, device=_NOBODY, acting_for=None, knows=_everything_known)
+    assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
+    check_request(method, {}, device=_COMMANDER, acting_for=None, knows=_everything_known)
+    check_request(
+        method, {}, device=HUB_REQUESTING_DEVICE, acting_for=None, knows=_everything_known
+    )
+
+
+def test_the_permission_line_members_are_the_surfaces_own() -> None:
+    """The four are on the surface, so the row names no stale method."""
+    assert _LINE_MEMBERS <= METHODS
+
+
 @pytest.mark.parametrize("method", ["approvals", "tap_approval"])
 def test_the_approvals_panels_members_are_commands_for_an_admitted_device(method: str) -> None:
     """ADR-0361 §4:8: a tap from the hub page is carried out only from a device admitted
