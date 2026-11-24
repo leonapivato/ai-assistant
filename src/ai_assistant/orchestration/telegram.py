@@ -1367,7 +1367,8 @@ class TelegramCards:
         before its expiry, answers it only at or above the level its call needs, read from
         the lines as they stand now (§3:1, §3:2). Below it, or where the level cannot be
         read, it changes nothing: the request is not marked, no card is edited, and the
-        callback is answered with :data:`TAP_NOT_ANSWERED_LINE` alone (§3:3, §3:4). On a
+        callback is answered with :data:`TAP_NOT_ANSWERED_LINE` alone (§3:3, §3:4), or,
+        where another tap answered the request meanwhile, with its state (§4:9). On a
         request no tap can answer now the tap is carried out as before, and the store's
         step answers it with the request's state.
 
@@ -1400,7 +1401,7 @@ class TelegramCards:
             return  # held already: a repeat carries nothing out (§5:9)
         if short:
             # ADR-0377 §3:3, §3:4: nothing marked, no card edited, the one fixed text.
-            await self._answered(callback, TAP_NOT_ANSWERED_LINE, first, claim)
+            await self._answered(callback, await self._unanswered(request, now=now), first, claim)
             return
         words, shown = await self._marked(request, state, tapper, at=now)
         await self._answered(callback, words, first, claim)
@@ -1430,6 +1431,24 @@ class TelegramCards:
             _log.info("approval_tap_not_answered", stage="reader", reason="below_level")
             return True
         return False
+
+    async def _unanswered(self, request: ApprovalRequest, *, now: datetime) -> str:
+        """What a tap that marked nothing is answered with (ADR-0377 §3:4, §4:9).
+
+        The request is read again: another tap may have answered it while the lines were
+        read, and a later tap is answered with the state the first gave it. Where it still
+        waits, or cannot be read again, the one fixed text. Never raises but for a
+        cancellation.
+        """
+        try:
+            again = await self._plans.approval_requests([str(request.id)])
+        except PlanningError:
+            _log.warning("approval_tap_unread", stage="reader", reason="store_failed")
+            return TAP_NOT_ANSWERED_LINE
+        current = again[0] if again else request
+        if card_state(current, now=now) == "pending":
+            return TAP_NOT_ANSWERED_LINE
+        return _TAP_ALREADY.get(current.state, _TAP_EXPIRED)
 
     async def _resolved(
         self, callback: TelegramCallback
