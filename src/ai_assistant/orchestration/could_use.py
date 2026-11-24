@@ -43,6 +43,7 @@ and every call is still checked when made, whatever was offered or shown (§8:5)
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -78,7 +79,7 @@ from ai_assistant.orchestration.task_scheduler import TASK_SCHEDULER_CAPABILITIE
 from ai_assistant.orchestration.work_facts import tap_runs_for
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping, Sequence
+    from collections.abc import Collection, Iterable, Iterator, Sequence
 
     from ai_assistant.core.types import PermissionLine, ToolDefinition
     from ai_assistant.orchestration.approvals import Ticket
@@ -91,6 +92,7 @@ __all__ = [
     "connection_key",
     "connections_it_could_use",
     "could_allow",
+    "records_it_needs",
     "ticket_could_run",
 ]
 
@@ -211,19 +213,24 @@ def could_allow(
     )
 
 
-def ticket_could_run(authority: WorkAuthority, ticket: Ticket) -> bool:
+def ticket_could_run(
+    authority: WorkAuthority, ticket: Ticket, *, whose: Mapping[str, str] | None = None
+) -> bool:
     """Whether a ticket the work holds could run its call (ADR-0367 §5:4-§5:6).
 
     Checked for the person whose tap approved it, at the level the tap came by, no
     connection met for a condition; it runs where the check allows it, or where the call
     needs the yes of a grant that asks and the tap could be that yes: for a call with no
-    thing, the tapper being the work's person (ADR-0381 §6:2); for a call with a thing, a
-    tap by a person, since whose the thing is is its record's and the offer reads no
-    record (§6:4). A shortfall means the tap fell below the bar, which answers nothing.
+    thing, the tapper being the work's person (ADR-0381 §6:2); for a call with a thing, the
+    tapper being whom its record names (§6:1), or, where no record is handed in, as for the
+    offer, which reads none (§6:4), a tap by a person. A shortfall means the tap fell below
+    the bar, which answers nothing.
 
     Args:
         authority: What the work's calls are checked against: its lines and its person.
         ticket: The ticket.
+        whose: The person each connection's record names, as read; ``None`` where no
+            record is read.
 
     Returns:
         Whether it could run.
@@ -242,12 +249,24 @@ def ticket_could_run(authority: WorkAuthority, ticket: Ticket) -> bool:
         return False
     if CheckOutcomeKind.NEEDS_YES_WITH_APPROVAL not in kinds:
         return True
+    return _the_taps_yes(authority, answer.person, thing=thing, whose=whose)
+
+
+def _the_taps_yes(
+    authority: WorkAuthority,
+    tapper: str | None,
+    *,
+    thing: str | None,
+    whose: Mapping[str, str] | None,
+) -> bool:
+    """Whether a tap is the yes a grant that asks needs (ADR-0367 §5:6, ADR-0381 §6:1-§6:2)."""
+    if tapper is None:
+        return False
     if thing is None:
-        # ADR-0381 §6:2: a call with no thing needs the work's person's yes.
-        return authority.person is not None and answer.person == authority.person
-    # A call with a thing needs the yes of whoever its record names (§6:1), which the offer
-    # does not read (§6:4): a tap by a person could be that yes.
-    return answer.person is not None
+        # §6:2: a call with no thing needs the work's person's yes.
+        return tapper == authority.person
+    # §6:1: a call with a thing needs the yes of whoever its record names.
+    return whose is None or whose.get(thing) == tapper
 
 
 def connection_key(place: str) -> str:
@@ -337,18 +356,26 @@ def capabilities_it_could_use(
 class CouldUse:
     """The connections a work's authority could use, read for the section and the search.
 
+    A place is shown where one of the work's own inputs came from it, or where it is in a
+    connection the work could use. A connection on which no call of any declared capability
+    is made at all, such as an event's place, offers nothing the check could refuse: it is
+    left as it is shown without a filter, an item naming it by ``where`` included.
+
     Attributes:
         connections: Each connection it could use, keyed by :func:`connection_key`.
         own: Each place one of its own inputs came from, which it could use whatever the
             check would make of a call into it (ADR-0367 §4:7).
+        refused: Each connection, by key, on which calls are made but none of the work's
+            could run: those it may not be shown.
     """
 
     connections: frozenset[str]
     own: frozenset[str]
+    refused: frozenset[str] = frozenset()
 
     def shows(self, place: str) -> bool:
-        """Whether the place may be shown to the work: its own input's, or one it could use."""
-        return place in self.own or connection_key(place) in self.connections
+        """Whether the place may be shown to the work."""
+        return place in self.own or connection_key(place) not in self.refused
 
 
 def _acting_in(
@@ -378,13 +405,15 @@ def connections_it_could_use(  # noqa: PLR0913 — the authority, what the hub h
     accounts: Mapping[str, str],
     own: Collection[str],
     whose: Mapping[str, str],
+    tickets: Sequence[Ticket] = (),
 ) -> CouldUse:
     """The connections a work's authority could use (ADR-0368 §8:2, ADR-0381 §6:3).
 
     Each connection the hub has on which some call of the work could run
-    (:func:`could_allow`), its record read as ``whose`` hands it in; the system's own chat
-    weighed whether or not a conversation of it is listed, since a search finds them; and
-    each place its own input came from.
+    (:func:`could_allow`), or which a ticket it holds could run its call on
+    (:func:`ticket_could_run`), each record read as ``whose`` hands it in; the system's own
+    chat weighed whether or not a conversation of it is listed, since a search finds them;
+    and each place its own input came from.
 
     Args:
         authority: What the work's calls are checked against.
@@ -395,23 +424,91 @@ def connections_it_could_use(  # noqa: PLR0913 — the authority, what the hub h
         own: Each place one of the work's own inputs came from.
         whose: The person each connection's record names, as read; a connection missing
             from it has no record (ADR-0381 §5:1).
+        tickets: The tickets the work holds.
 
     Returns:
-        What the work could use.
+        What the work could use, and what it may not be shown.
     """
     tools = _by_capability((*declarations, TEXT_CALL))
-    usable: set[str] = set()
-    if could_allow(authority, TEXT_CALL, thing=OWN_CHAT_CONNECTION, whose=whose):
-        usable.add(OWN_CHAT_CONNECTION)
+    acted_on: dict[str, tuple[frozenset[str], str | None]] = {
+        OWN_CHAT_CONNECTION: (frozenset({TEXT_CAPABILITY}), OWN_CHAT_CONNECTION)
+    }
     for entry in had:
-        key = connection_key(entry.place)
-        if key in usable:
-            continue
         capabilities, thing = _acting_in(entry, accounts)
+        declared = frozenset(one for one in capabilities if one in tools)
+        if declared:
+            acted_on.setdefault(connection_key(entry.place), (declared, thing))
+    usable = {
+        key
+        for key, (capabilities, thing) in acted_on.items()
         if any(
             could_allow(authority, tool, thing=thing, whose=whose)
             for capability in sorted(capabilities)
-            for tool in tools.get(capability, ())
-        ):
-            usable.add(key)
-    return CouldUse(connections=frozenset(usable), own=frozenset(own))
+            for tool in tools[capability]
+        )
+    }
+    for ticket in tickets:
+        if ticket_could_run(authority, ticket, whose=whose):
+            usable.update(_ticketed(ticket, acted_on))
+    return CouldUse(
+        connections=frozenset(usable),
+        own=frozenset(own),
+        refused=frozenset(acted_on) - usable,
+    )
+
+
+def _ticketed(
+    ticket: Ticket, acted_on: Mapping[str, tuple[frozenset[str], str | None]]
+) -> set[str]:
+    """The connections a ticket's call is on: its thing, or each its capability acts in."""
+    call = ticket.request.call
+    capability = current_name(str(call.tool.capability))
+    thing = call_thing(str(call.tool.capability), binding=call.binding)
+    if thing is not None:
+        return {thing}
+    return {key for key, (capabilities, _) in acted_on.items() if capability in capabilities}
+
+
+class _Asked(Mapping[str, str]):
+    """A mapping holding no record, which notes each connection a reading asks about."""
+
+    def __init__(self) -> None:
+        self.asked: set[str] = set()
+
+    def __getitem__(self, key: str) -> str:
+        self.asked.add(key)
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+
+def records_it_needs(  # noqa: PLR0913 — as connections_it_could_use takes them
+    authority: WorkAuthority,
+    had: Sequence[ConnectionShown],
+    *,
+    declarations: Sequence[ToolDefinition],
+    accounts: Mapping[str, str],
+    own: Collection[str],
+    tickets: Sequence[Ticket] = (),
+) -> frozenset[str]:
+    """The connections whose records :func:`connections_it_could_use` would read.
+
+    Only those on which an outcome needs the yes of whoever the call's thing belongs to,
+    the one outcome that reads a record (ADR-0381 §6:1, §6:3); none where every outcome is
+    decided without one, so a caller reads only these.
+    """
+    asked = _Asked()
+    connections_it_could_use(
+        authority,
+        had,
+        declarations=declarations,
+        accounts=accounts,
+        own=own,
+        whose=asked,
+        tickets=tickets,
+    )
+    return frozenset(asked.asked)

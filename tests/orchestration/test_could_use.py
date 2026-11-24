@@ -45,6 +45,7 @@ from ai_assistant.orchestration.could_use import (
     capabilities_it_could_use,
     connection_key,
     connections_it_could_use,
+    records_it_needs,
 )
 from ai_assistant.orchestration.lookups import ConnectionSearch
 from ai_assistant.orchestration.message_tools import TEXT_CALL
@@ -312,36 +313,115 @@ def test_a_work_of_several_senders_could_use_only_what_every_one_of_them_could()
     assert _capabilities(authority) == {"send_text"}
 
 
-def test_a_connection_no_call_acts_in_is_usable_only_as_an_inputs_own() -> None:
-    """The schedule is weighed by the Task Scheduler's calls: with none declared, nothing
-    is on it, so the owner at normal is not shown it; an event's place only as its own."""
-    authority = _owner(Sureness.NORMAL)
+def test_a_connection_no_call_is_made_on_is_left_as_it_is_shown() -> None:
+    """A connection on which no declared capability makes a call offers nothing the check
+    could refuse, so it is not filtered, at none as for the owner: an event's place, or the
+    schedule where no Task Scheduler call is declared. One calls are made on, all refused
+    at none, is not shown unless an input of the work came from it."""
     kind = connection_kind("informational_event:door")
     assert kind is not None
     event = ConnectionShown(place="informational_event:door", kind=kind)
 
-    could = connections_it_could_use(
-        authority,
-        (*_HAD, event),
-        declarations=(TEXT_CALL,),
-        accounts={},
-        own=(),
-        whose={},
-    )
+    def could(authority: WorkAuthority) -> CouldUse:
+        return connections_it_could_use(
+            authority,
+            (*_HAD, event),
+            declarations=(TEXT_CALL,),
+            accounts={},
+            own=(_HERE,),
+            whose={},
+        )
 
-    assert not could.shows(SCHEDULE_CONNECTION)
-    assert not could.shows(_SEARCH)
-    assert could.shows(_LINE)
+    at_none = could(_no_ones(CheckedFor.anyone()))
+    assert at_none.shows("informational_event:door")
+    assert at_none.shows(SCHEDULE_CONNECTION)
+    assert at_none.shows(_SEARCH)
+    assert at_none.shows(_HERE)
+    assert not at_none.shows(_OTHER)
+    assert not at_none.shows(_LINE)
+    assert could(_owner(Sureness.NORMAL)).shows(_LINE)
 
 
 def test_a_conversation_is_shown_as_the_systems_own_chat_is() -> None:
     """ADR-0376 §2:4: every conversation is the one connection, the system's own chat."""
-    could = CouldUse(connections=frozenset({OWN_CHAT_CONNECTION}), own=frozenset())
+    could = CouldUse(
+        connections=frozenset(), own=frozenset(), refused=frozenset({OWN_CHAT_CONNECTION})
+    )
 
     assert connection_key(_OTHER) == OWN_CHAT_CONNECTION
     assert connection_key(SCHEDULE_CONNECTION) == SCHEDULE_CONNECTION
-    assert could.shows("conversation:any")
-    assert not could.shows(_LINE)
+    assert not could.shows("conversation:any")
+    assert could.shows(_LINE)
+
+
+def test_a_record_is_read_only_where_an_outcome_needs_its_things_yes() -> None:
+    """ADR-0381 §6:1, §6:3: none where every outcome is decided without one, a grant that
+    asks on a capability whose calls have no thing included; the thing's alone where one
+    needs it."""
+    no_thing = _line(
+        PermissionLineKind.GRANT, "search_web", how=GrantHow.WITH_APPROVAL, bar=Sureness.WEAK
+    )
+    on_mail = _line(
+        PermissionLineKind.GRANT,
+        "send_email",
+        thing=_MAIL,
+        how=GrantHow.WITH_APPROVAL,
+        bar=Sureness.WEAK,
+        number=2,
+    )
+
+    def needed(authority: WorkAuthority) -> frozenset[str]:
+        return records_it_needs(
+            authority, _HAD, declarations=_DECLARED, accounts=_ACCOUNTS, own=(_HERE,)
+        )
+
+    assert needed(_owner(Sureness.NORMAL)) == frozenset()
+    assert needed(_owner(Sureness.NORMAL, no_thing, on_mail)) == frozenset()
+    assert needed(_owner(Sureness.WEAK, no_thing)) == frozenset()
+    assert needed(_owner(Sureness.WEAK, on_mail)) == {_MAIL}
+
+
+def test_a_ticket_the_work_holds_shows_the_connection_its_call_acts_in() -> None:
+    """ADR-0368 §8: a connection a ticket it holds could run its call on is one it could
+    use, though the work carries no authority: the schedule, for a Task Scheduler call."""
+    tap = ApprovalTap(
+        who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD,
+        at=_AT + timedelta(minutes=1),
+        person=OWNER_PERSON_ID,
+        level=Sureness.NORMAL,
+    )
+    listing = next(one for one in TASK_SCHEDULER_CALLS if str(one.capability) == "list_tasks")
+    ticket = Ticket(
+        request=ApprovalRequest(
+            id="approval:2",
+            person=OWNER_PERSON_ID,
+            activation_id="act-asker",
+            round="round:ask",
+            call=RequestedCall(tool=listing, values={}),
+            why="You asked what is scheduled.",
+            written_at=_AT,
+            expires_at=_AT + timedelta(hours=24),
+            state=ApprovalRequestState.APPROVED,
+            answer=tap,
+            ticket=TicketState.HELD,
+        )
+    )
+    authority = _no_ones(CheckedFor.no_one())
+
+    def shown(tickets: tuple[Ticket, ...]) -> bool:
+        return connections_it_could_use(
+            authority,
+            _HAD,
+            declarations=_DECLARED,
+            accounts=_ACCOUNTS,
+            own=(APPROVALS_CONNECTION,),
+            whose={},
+            tickets=tickets,
+        ).shows(SCHEDULE_CONNECTION)
+
+    assert not shown(())
+    assert shown((ticket,))
+    assert "list_tasks" in _capabilities(authority, tickets=(ticket,))
 
 
 async def test_a_connections_search_finds_only_what_the_work_could_use() -> None:
@@ -351,7 +431,11 @@ async def test_a_connections_search_finds_only_what_the_work_could_use() -> None
     second = await store.start()
     search = ConnectionSearch(conversations=store, scan=10, page_size=5)
     own_place = f"conversation:{first.id}"
-    at_none = CouldUse(connections=frozenset(), own=frozenset({own_place}))
+    at_none = CouldUse(
+        connections=frozenset(),
+        own=frozenset({own_place}),
+        refused=frozenset({OWN_CHAT_CONNECTION}),
+    )
     owners = CouldUse(connections=frozenset({OWN_CHAT_CONNECTION}), own=frozenset())
 
     narrowed = await search.search("text messages", 1, shows=at_none.shows)

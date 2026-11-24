@@ -285,7 +285,6 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EpisodicMemory,
     ForecastRefusal,
-    GrantHow,
     LabelKind,
     Memory,
     MemoryKind,
@@ -293,7 +292,6 @@ from ai_assistant.core.types import (
     MessageAuthor,
     Modality,
     NewMessage,
-    PermissionLineKind,
     PlanningLabel,
     ProfileField,
     ProjectedCall,
@@ -376,8 +374,8 @@ from ai_assistant.orchestration.could_use import (
     CouldUse,
     WorkAuthority,
     capabilities_it_could_use,
-    connection_key,
     connections_it_could_use,
+    records_it_needs,
 )
 from ai_assistant.orchestration.defects import ToleratedStageError, is_defect, log_defect
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
@@ -4810,6 +4808,8 @@ class PhasePath:
             person=person,
             places=None if working.scheduling is None else working.scheduling.places,
             connections=working.shown_connections,
+            # ADR-0368 §8:2: a list's place, or one an item names, only where it may be shown.
+            shows=None if working.could_show is None else working.could_show.shows,
             offers=offers,
             waiting=waiting,
             declined=() if state is None else state.declined,
@@ -5362,7 +5362,6 @@ class PhasePath:
         try:
             async with asyncio.timeout_at(given.deadline):
                 lines = await self._lines_now()
-                whose = await self._records(lines, offered, working.connections)
                 accounts = await self._accounts_acting()
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
@@ -5374,6 +5373,20 @@ class PhasePath:
             person=None if state is None else persons_work(state.work_facts, state.held_senders),
         )
         own = _own_places(state, working)
+        # ADR-0381 §6:3: a record is read only where an outcome needs its thing's yes.
+        needed = records_it_needs(
+            authority,
+            working.connections,
+            declarations=offered,
+            accounts=accounts,
+            own=own,
+            tickets=tickets,
+        )
+        try:
+            async with asyncio.timeout_at(given.deadline):
+                whose = await self._records(needed)
+        except TimeoutError:
+            raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         could = connections_it_could_use(
             authority,
             working.connections,
@@ -5381,6 +5394,7 @@ class PhasePath:
             accounts=accounts,
             own=own,
             whose=whose,
+            tickets=tickets,
         )
         working.could_show = could
         working.shown_connections = tuple(
@@ -5416,37 +5430,18 @@ class PhasePath:
             _log.warning("could_use_unread", stage="planning", reason="lines_unread")
             return None
 
-    async def _records(
-        self,
-        lines: Sequence[PermissionLine] | None,
-        offered: Sequence[ToolDefinition],
-        had: Sequence[ConnectionShown],
-    ) -> dict[str, str]:
-        """Whose each connection a call's thing can be is, by its record (ADR-0381 §6:3).
+    async def _records(self, needed: Collection[str]) -> dict[str, str]:
+        """Whose each of ``needed`` is, by its record (ADR-0381 §6:1, §6:3).
 
-        Read only where a grant that asks could cover a call, since only that outcome
-        reads a record (§6:1): a standing made grant, or a declared default, that allows
-        with approval. A record that cannot be read is read as none (§5:1).
+        ``needed`` are the connections on which an outcome needs the yes of whoever the
+        call's thing belongs to, the one outcome that reads a record. A record that cannot
+        be read is read as none (§5:1), logged under a fixed event name with a code-owned
+        reason alone.
         """
-        if self._things is None or lines is None:
-            return {}
-        asks = any(
-            one.kind is PermissionLineKind.GRANT and one.how is not GrantHow.ALLOWED
-            for one in lines
-        ) or any(
-            one.default_grant is not None and one.default_grant.how is not GrantHow.ALLOWED
-            for one in offered
-        )
-        if not asks:
-            return {}
-        keys = dict.fromkeys(
-            (
-                OWN_CHAT_CONNECTION,
-                *(connection_key(one.place) for one in had),
-            )
-        )
         whose: dict[str, str] = {}
-        for key in keys:
+        if self._things is None:
+            return whose
+        for key in sorted(needed):
             try:
                 record = await self._things.whose(
                     ThingKey(kind=ThingKind.CONNECTION, identifier=key)
