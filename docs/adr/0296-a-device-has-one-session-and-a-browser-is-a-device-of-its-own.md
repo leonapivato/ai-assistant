@@ -1,6 +1,6 @@
 # 296. A device has one session, and a browser is a device of its own
 
-- Status: Partially superseded by ADR-0298 (§1:5's acceptance of a name only for a browser device registered under that gateway, and the sentence under it that the gateway is not trusted to act as any other device, as they reach a machine a gateway names for the first time) and ADR-0327 (§1:1, §1:3, §1:7 and §5:4, each only as it reaches the browser device of a hosted listener)
+- Status: Partially superseded by ADR-0298 (§1:5's acceptance of a name only for a browser device registered under that gateway, and the sentence under it that the gateway is not trusted to act as any other device, as they reach a machine a gateway names for the first time) and ADR-0327 (§1:1, §1:3, §1:7 and §5:4, each only as it reaches the browser device of a hosted listener) and ADR-0378 (§1:3, as it reaches a listing at a device that is no gateway or of a hub device, and §1:4's "whether or not it is also a hub device", as it reaches a listing)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the device session, how a device is known to the hub, what it may do, and how ADR-0292's routes and ADR-0293's change stream reach it.
 - Authorization: the owner accepted proposal #2687 on 2026-10-04, at `099c83da`, which records the rulings of the owner's walkthrough the same day, and the dispatcher assigned 0296. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
@@ -35,6 +35,7 @@
   ADR-0327. This reciprocal header record accompanies the numbered draft under
   ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
+- Partially superseded: 2026-11-24 by [ADR-0378](0378-only-a-gateway-the-owner-marked-names-a-device-a-naming-reaches-only-a-browser-device-and-makes-no-link-and-nothing-is-surer-than-the-device-it-came-through.md) — §1:3, as it reaches a listing at a gateway whose device is neither the hub's own machine nor an enrolled hub device the owner marked as a gateway, or a listing of a machine that is a hub device: such a listing registers nothing at the hub (ADR-0378 §2:1, §3:1); and §1:4's "whether or not it is also a hub device", as it reaches a listing: a hub device is reached only through its own connection, never by a gateway's naming (ADR-0378 §3:1, §3:3). Every other clause stands. This replacement takes effect on ratification of ADR-0378. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
