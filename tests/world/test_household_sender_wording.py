@@ -243,3 +243,57 @@ async def test_one_input_from_the_owners_device_and_an_unlinked_one_is_told_apar
     ]
     assert section(briefing, "## The situation").split("\n")[2].startswith("- The senders: ")
     _no_hub(heard.content, briefing)
+
+
+async def test_the_same_words_at_the_same_time_from_two_senders_are_told_apart() -> None:
+    """§4:3, §6:1: each stimulus window item by its own message, matched by position.
+
+    The owner's device and an unlinked one both write "Hello" into one start wait: the
+    unknown sender's is never the owner's because its words and time match theirs.
+    """
+    async with Household(people=await _people()) as home:
+        mine = await home.device(home.owner, "home-pc")
+        stranger = await home.device(None, "tablet")
+        work = await home.say_together((mine, "Hello"), (stranger, "Hello"))
+
+    briefing = work.briefing
+    told = tags(section(briefing, "# The stimulus"))
+    assert [(one.name, one.get("from")) for one in told] == [
+        ("said", "a device linked to Maren"),
+        ("received", "an unknown sender"),
+    ]
+    items = tags(section(briefing, "## Stimulus origin knowledge"), "message")
+    assert [one.get("from") for one in items if one.get("shown_in")] == [
+        "Maren",
+        "an unknown sender",
+    ]
+
+
+async def test_one_persons_messages_by_two_accounts_keep_each_ones_evidence() -> None:
+    """§2:1, §4:1: the owner on the system's own machine, links unread, and on a device.
+
+    Both are counted as the owner's, and each is still told by the account it came by,
+    in planning as in understanding.
+    """
+    async with Household(people=await _people()) as home:
+        machine = await home.device(home.owner, HUB_DEVICE_ID)
+        phone = await home.device(home.owner, "phone")
+
+        async def written() -> None:
+            with home._start_wait_held():
+                home.fault_next_read()
+                await home.post(machine, "Lights off.")
+                await home.post(phone, "And lock up.")
+
+        work = await home._one_work(written)
+
+    heard = _heard(work)
+    assert [(one.name, one.get("from")) for one in heard.tags("The stimulus")] == [
+        ("said", "the system's own machine"),
+        ("said", "a device linked to Maren"),
+    ]
+    told = tags(section(work.briefing, "# The stimulus"))
+    assert [(one.name, one.get("from")) for one in told] == [
+        ("said", "the system's own machine"),
+        ("said", "a device linked to P1"),
+    ]
