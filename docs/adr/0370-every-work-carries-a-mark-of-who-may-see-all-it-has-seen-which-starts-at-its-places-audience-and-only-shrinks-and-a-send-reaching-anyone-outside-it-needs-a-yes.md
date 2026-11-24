@@ -1,6 +1,6 @@
 # 370. Every work carries a mark of who may see all it has seen, which starts at its place's audience and only shrinks, and a send reaching anyone outside it needs a yes
 
-- Status: Partially superseded by ADR-0372 (§3:1, in a message's and a signal's floor; §3:2 and §3:4, for the first pass and in reading the cut; §4:1, §4:2 and §4:5, each in the addition alone; §4:3, in who may see a message: a place's start level, audience labels and the re-run by story)
+- Status: Partially superseded by ADR-0372 (§3:1, in a message's and a signal's floor; §3:2 and §3:4, for the first pass and in reading the cut; §4:1, §4:2 and §4:5, each in the addition alone; §4:3, in who may see a message: a place's start level, audience labels and the re-run by story) and ADR-0382 (§5:7 and §5:8, each in the addition alone: an approval's work's message into a place an input of the asking activation came from is checked as §5:7 checks one into a place the work's own input came from, and is not among §5:8's other sends)
 - Date: 2026-11-22
 - Scope: lane 6 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into

@@ -18,9 +18,11 @@
   or code. It amends who the check exempts, so it takes the adversarial and the architecture review.
 - **Partially supersedes**
   [ADR-0367](0367-grants-say-who-may-do-what-and-how-sure-the-hub-must-be-every-call-is-checked-against-them-and-powers-are-handed-on-in-part.md)
-  (§4:7, in the addition alone) and
+  (§4:7, in the addition alone),
   [ADR-0368](0368-every-work-records-whom-it-is-for-whose-authority-it-carries-and-how-sure-the-hub-is-and-an-instruction-given-in-advance-carries-its-authors.md)
-  (§7:5, in the addition alone).
+  (§7:5, in the addition alone) and
+  [ADR-0370](0370-every-work-carries-a-mark-of-who-may-see-all-it-has-seen-which-starts-at-its-places-audience-and-only-shrinks-and-a-send-reaching-anyone-outside-it-needs-a-yes.md)
+  (§5:7 and §5:8, each in the addition alone).
 
 ## Context
 
@@ -144,6 +146,11 @@ to refuse is a text into the line's chat.
 > exception for a message ADR-0367 §4:7 keeps outside reaches one §2:1 keeps outside. §7's table
 > row for an approval's outcome stands.
 
+> **Normative.** This decision partially supersedes ADR-0370 §5:7 and §5:8, each in the addition
+> alone: a message §2:1 keeps outside is checked as §5:7 checks a message into a place one of a
+> work's own inputs came from, outside the grant check and against the mark as every send is, and
+> is not among §5:8's other sends.
+
 | Clause | What this decision does |
 | --- | --- |
 | ADR-0367 §4:7 | Partially supersedes it (§5:1) |
@@ -151,7 +158,7 @@ to refuse is a text into the line's chat.
 | ADR-0361 §6:1, §6:3, §6:4, §6:7 | Reads them through; no record, since no clause of them changes |
 | ADR-0306 §4:7, ADR-0356 §7:7, ADR-0364 §9:3, §9:4 | Read through ADR-0367's record; no record |
 | ADR-0367 §5:5, ADR-0368 §2:5, §4:1, §6:1, §6:2 | Read through (§3:2, §4) |
-| ADR-0370 §5:1 | Read through (§2:4) |
+| ADR-0370 §5:7, §5:8 | Partially supersedes them (§5:3); §5:1's mark still applies (§2:4) |
 | ADR-0368 §8:2 | Read through §5:1: its *could use* names ADR-0367 §4:7, as amended; no record (§2:5) |
 | #3678's "can only answer in its place" | Not an ADR: no record; its wording is the coordinator's to edit on the owner's answer |
 
