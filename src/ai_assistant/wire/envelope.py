@@ -2832,7 +2832,15 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     earlier decision and the asked calls of an earlier
 #:     ``EpisodicMemory.processing_record`` hold one, encodes and decodes unchanged. The
 #:     method set does not move: no ``Protocol`` gains a member.
-PROTOCOL_VERSION: Final[int] = 132
+#: 133: ADR-0377 §8 advances the version for the panel's outcome, on this ground:
+#:     ``ApprovalPanelTapAnswer`` gains ``not_answered``, a tap read as the request's
+#:     person's but not at the level its call needs (§3:4), on the ``ApprovalPanelTap``
+#:     ``tap_approval`` returns. A peer at 132 refuses the new member as unknown (ADR-0124
+#:     §9:2). Nothing returns it until §3 is built, but every wire shape of milestone 21
+#:     changes before its first deploy. ``ApprovalTap`` gains ``person`` and ``level``
+#:     (§4:1), but crosses no frame: the approval request is carried by no engine method.
+#:     The method set does not move: no ``Protocol`` gains a member.
+PROTOCOL_VERSION: Final[int] = 133
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

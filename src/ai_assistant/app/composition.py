@@ -2176,7 +2176,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # ADR-0361 §4:2-§4:10: the line's approval cards, over the same bot, its
             # records and one chat: `request_approval` posts through them, the reader
             # edits them and carries a tap out. The line is the owner's, so a tap
-            # answers only the owner's requests (ADR-0338 §2:2).
+            # answers only the owner's requests (ADR-0338 §2:2); who tapped and the
+            # level are read through the tapping account's link in the identity store
+            # and recorded on the answer (ADR-0377 §2:2, §4:1).
             line_cards = TelegramCards(
                 client=line_client,
                 intake=telegram_intake,
@@ -2184,6 +2186,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 send_bound=settings.telegram_send_bound,
                 plans=plans,
                 memory=memory,
+                identities=identities,
                 person=OWNER_PERSON_ID,
                 now=_utcnow,
             )

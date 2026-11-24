@@ -1499,7 +1499,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 30
+        assert export.schema_version == 31
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -2128,7 +2128,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 30
+        assert export.schema_version == 31
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -2375,7 +2375,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 30
+        assert export.schema_version == 31
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -3166,7 +3166,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 30
+        assert exported.schema_version == 31
         assert [one.id for one in exported.scheduled_tasks] == ["t2", "t1"]
         assert removed == 4
         cleared = await store.export()
@@ -3566,7 +3566,7 @@ class PlanStoreContract:
         exported = await store.export()
         await store.clear()
 
-        assert exported.schema_version == 30
+        assert exported.schema_version == 31
         assert exported.scheduled_tasks == (held,)
         assert len(exported.scheduled_tasks[0].occurrences) == 4
         assert (await store.export()).scheduled_tasks == ()
@@ -3802,6 +3802,39 @@ class PlanStoreContract:
         assert (yes.request.ticket, yes.request.answer) == (TicketState.HELD, _tap())
         assert (no.request.state, no.request.ticket) == (ApprovalRequestState.DENIED, None)
         assert await store.approval_requests(["q1", "q2"]) == (yes.request, no.request)
+
+    @pytest.mark.parametrize(
+        ("person", "level"),
+        [
+            (_PERSON, Sureness.NORMAL),
+            (_PERSON, Sureness.NONE),
+            (None, Sureness.NONE),
+            (_PERSON, None),
+        ],
+        ids=["identified", "lowered-to-none", "no-one", "level-not-recorded"],
+    )
+    async def test_a_tap_keeps_who_tapped_and_the_level_through_every_read(
+        self, store: PlanStore, person: str | None, level: Sureness | None
+    ) -> None:
+        """ADR-0377 §4:1: the answer holds the person and the level the surface read,
+        as given, through the read by id, by token, by person, and the export."""
+        await _asked(store, _request("q1"))
+        await store.record_approval_card("q1", _card("tok-1"))
+        tap = ApprovalTap(
+            who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, at=_TAP_AT, person=person, level=level
+        )
+
+        step = await store.answer_approval_request("q1", ApprovalRequestState.APPROVED, tap)
+
+        assert step.request.answer == tap
+        assert (await _request_held(store, "q1")).answer == tap
+        by_token = await store.approval_request_by_token("tok-1")
+        assert by_token is not None
+        assert by_token.answer == tap
+        (listed,) = await store.person_approval_requests(_PERSON, list(ApprovalRequestState))
+        assert listed.answer == tap
+        (exported,) = (await store.export()).approval_requests
+        assert exported.answer == tap
 
     async def test_two_taps_racing_the_first_wins(self, store: PlanStore) -> None:
         """§4:9: the step refuses where the request is no longer pending.
@@ -4308,7 +4341,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 30
+        assert exported.schema_version == 31
         assert exported.approval_requests == held
         # Two requests and their two effect records.
         assert removed == 4

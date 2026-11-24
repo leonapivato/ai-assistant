@@ -88,7 +88,11 @@ the configured account in its chat (ADR-0323 §4:1, as ADR-0332 §8:1 applies it
 ``/stop``) and only where its token resolves to a request of the person's (ADR-0362
 §4:4), and dealt with as any other account's update otherwise (§5:2). It is recorded
 answered on the intake record as ``/stop`` is, which claims its answer's call (§13:2), so a
-repeated fetch carries it out once.
+repeated fetch carries it out once. **Who tapped, and at what level**, are read through
+the link of the Telegram account the callback names as its sender, exactly as a message
+from that account is read (ADR-0377 §2:1, §2:2, by
+:func:`~ai_assistant.orchestration.work_facts.sender_of`), and recorded on the answer
+(§4:1); they decide nothing yet (§1:4).
 
 **It logs code-owned reasons only.** No line, record or error here carries a message's
 text, and the bot's token never reaches this module: the client binds it (§11:8-§11:9).
@@ -164,6 +168,7 @@ from ai_assistant.orchestration.understanding import (
     TranscriptWindow,
     WrittenBy,
 )
+from ai_assistant.orchestration.work_facts import line_account, sender_of
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -171,6 +176,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
+        IdentityStore,
         MemoryStore,
         PlanStore,
         TelegramBotClient,
@@ -891,7 +897,11 @@ class TelegramCards:
     store's read by card token, a tap whose token resolves to no request of the person's
     left unanswered (ADR-0362 §4:4), the request marked approved or denied with the tap's
     instant as the line's ``ApprovalGiver``, in one step where the first tap wins, the
-    callback answered, the card edited and the Approvals sensor woken.
+    callback answered, the card edited and the Approvals sensor woken. The answer records
+    who tapped and the level, read through the link of the account the callback names as
+    its sender, as a message from it is read (ADR-0377 §2:1, §2:2, §4:1); until ADR-0377
+    §3 is built they decide nothing, and a tap is carried out as ADR-0361 §4:8 has it
+    (§1:4).
     """
 
     def __init__(  # noqa: PLR0913 — the bot and its records, the stores, the person, the clock and the two seams a test varies
@@ -903,6 +913,7 @@ class TelegramCards:
         send_bound: timedelta,
         plans: PlanStore,
         memory: MemoryStore,
+        identities: IdentityStore | None,
         person: str,
         now: Clock,
         mint: Callable[[], str] = _mint_token,
@@ -918,6 +929,9 @@ class TelegramCards:
             plans: The plan store, which holds the Approvals channel's requests.
             memory: The memory store, where a card's facts are read again after a start
                 from the asking activation's episode.
+            identities: The identity store a tapper's link is read from (ADR-0377 §2),
+                or ``None`` where none is wired, which reads as links that cannot be
+                read (ADR-0374 §2:1).
             person: The line's person, the configured account's: a tap answers only
                 their requests (§4:8).
             now: The wall clock, in UTC.
@@ -930,6 +944,7 @@ class TelegramCards:
         self._send_bound = send_bound
         self._plans = plans
         self._memory = memory
+        self._identities = identities
         self._person = person
         self._now = now
         self._mint = mint
@@ -1320,6 +1335,12 @@ class TelegramCards:
         claimed, marked or answered, and the callback's spinner times out on the phone,
         as ADR-0323 §5:2 leaves another account's update.
 
+        Who tapped, and at what level, are read through the link of the account the
+        callback names as its sender, as a message arriving by it now would be, and
+        recorded on the answer (ADR-0377 §2:1, §2:2, §4:1). Where the read names no one,
+        the answer records no person, at none; that changes nothing of whether the tap
+        is carried out (§1:4).
+
         ``claim`` is the intake record's claim of the tap's answer, which records the
         update answered, as ``/stop``'s does: a tap the record already holds was carried
         out, and a repeated fetch changes nothing and answers nothing.
@@ -1335,7 +1356,10 @@ class TelegramCards:
         first = await claim()
         if first is None:
             return  # held already: a repeat carries nothing out (§5:9)
-        words, shown = await self._marked(request, state)
+        tapper = await sender_of(
+            self._identities, line_account(callback.sender_id), stage="telegram_cards"
+        )
+        words, shown = await self._marked(request, state, tapper)
         await self._answered(callback, words, first, claim)
         self._watched[str(shown.id)] = None
         await self._edited(shown, _EDITS_PER_READ)
@@ -1373,18 +1397,24 @@ class TelegramCards:
         return request, state
 
     async def _marked(
-        self, request: ApprovalRequest, state: ApprovalRequestState
+        self, request: ApprovalRequest, state: ApprovalRequestState, tapper: InputSender
     ) -> tuple[str, ApprovalRequest]:
         """Mark ``request`` as the tap asks; what to answer, and the request as it stands.
 
         The first tap to land wins, and a later one is answered with the request's state
-        (§4:9). Never raises but for a cancellation: a store that fails is answered so.
+        (§4:9). The answer records ``tapper``'s person and level (ADR-0377 §4:1). Never
+        raises but for a cancellation: a store that fails is answered so.
         """
         try:
             step = await self._plans.answer_approval_request(
                 str(request.id),
                 state,
-                ApprovalTap(who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, at=self._now()),
+                ApprovalTap(
+                    who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD,
+                    at=self._now(),
+                    person=tapper.person,
+                    level=tapper.level,
+                ),
             )
         except PlanningError:
             _log.warning("approval_tap_unrecorded", stage="reader", reason="store_failed")

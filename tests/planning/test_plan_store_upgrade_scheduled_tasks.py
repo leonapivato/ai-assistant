@@ -109,8 +109,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "20"
-    assert export.schema_version == 30
+    assert _label(legacy) == "21"
+    assert export.schema_version == 31
     assert export.stopped_activations == ("act-before-stopped",)
     effects = {one.id: one for one in export.activation_effects}
     assert list(effects) == ["effect-before-call", "effect-before-message", "effect-before-part"]
@@ -178,7 +178,7 @@ async def test_the_upgraded_file_holds_a_scheduled_task_and_keeps_what_it_carrie
         assert [one.id for one in spent] == ["effect-before-part"]
     finally:
         reopened.close()
-    assert _label(legacy) == "20"
+    assert _label(legacy) == "21"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

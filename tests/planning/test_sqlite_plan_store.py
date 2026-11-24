@@ -687,22 +687,23 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-async def test_a_fresh_file_is_labelled_version_20_and_holds_only_its_five_tables(
+async def test_a_fresh_file_is_labelled_version_21_and_holds_only_its_five_tables(
     tmp_path: Path,
 ) -> None:
-    """The absolute figure's home, and the shape it labels (ADR-0368 §6:3).
+    """The absolute figure's home, and the shape it labels (ADR-0377 §4:1).
 
-    Version 20 is the store ADR-0309 §5 leaves, its effect records carrying the question
+    Version 21 is the store ADR-0309 §5 leaves, its effect records carrying the question
     part ADR-0321 §4:9 promotes, with the observation records ADR-0329 §16 and ADR-0346
     add, the Task Scheduler's scheduled tasks ADR-0350 adds, less the cascade records
     ADR-0352 retires, and the approval requests ADR-0361 adds: five record tables beside
-    ``meta``, and no table of the old path; each task records who set it (ADR-0368 §6:3).
+    ``meta``, and no table of the old path; each task records who set it (ADR-0368 §6:3),
+    and each answer who tapped and how sure (ADR-0377 §4:1).
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
 
-    assert sqlite_store._SCHEMA_VERSION == 20
-    assert _meta(path, "schema_version") == "20"
+    assert sqlite_store._SCHEMA_VERSION == 21
+    assert _meta(path, "schema_version") == "21"
     assert _tables(path) == {"meta", *_RECORD_TABLES}
 
 

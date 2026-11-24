@@ -12,7 +12,7 @@ read the cautious way where its episode cannot be read (§2:11).
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from approvals_panel_contract import (
     APPROVALS_AT,
@@ -22,18 +22,31 @@ from approvals_panel_contract import (
 )
 from test_engine_contract import _wire
 
+from ai_assistant.core.channel_validation import most_sureness
+from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    Account,
     ApprovalChoice,
     ApprovalPanelTapAnswer,
+    ApprovalRequestState,
     ChannelContext,
     RecordedCall,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RequestingDevice,
+    Sureness,
     WholeTextReply,
 )
 from ai_assistant.orchestration.approval_calls import CardFacts
 from ai_assistant.orchestration.engine import approval_card_facts, episode_card_facts
-from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore, FakePlanStore
+from ai_assistant.orchestration.work_facts import CHAT_ACCOUNT_KIND
+from ai_assistant.testing import (
+    FakeAssistantEngine,
+    FakeIdentityStore,
+    FakeMemoryStore,
+    FakePlanStore,
+)
 from ai_assistant.testing.parties import OWNERS_WORDS
 
 if TYPE_CHECKING:
@@ -41,12 +54,15 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.engine import Engine
 
 
-def _engine(woken: list[None]) -> tuple[Engine, FakePlanStore]:
+def _engine(
+    woken: list[None], *, identities: FakeIdentityStore | None = None
+) -> tuple[Engine, FakePlanStore]:
     plans = FakePlanStore(now=lambda: APPROVALS_AT)
     engine = _wire(
         plans=plans,
         memory=FakeMemoryStore(now=lambda: APPROVALS_AT),
         now=lambda: APPROVALS_AT,
+        identities=identities,
     )
     # The sensor's wake, observed: this subject wires no Approvals channel, so the
     # engine's own would wake nothing.
@@ -116,6 +132,85 @@ async def test_the_fake_counts_the_wake_where_the_engine_runs_it() -> None:
     await fake.tap_approval("approval:1", choice=ApprovalChoice.DENY)
 
     assert fake.approvals_woken == 1
+
+
+# --- who tapped, and how sure (ADR-0377 §2:4, §4:1) ---
+
+#: The owner's phone, as the hub chat's account for that device (ADR-0298 §2:1).
+_PHONE: Final = Account(kind=CHAT_ACCOUNT_KIND, identifier="phone")
+
+
+async def _tapped_from(
+    device: str, identities: FakeIdentityStore | None
+) -> tuple[ApprovalPanelTapAnswer, ApprovalRequest]:
+    """A tap on the panel from ``device``, as the wire server serves it; what it recorded."""
+    engine, plans = _engine([], identities=identities)
+    await engine.start()
+    try:
+        await hold_request(plans, "approval:1")
+        with serving_device(RequestingDevice(device_id=device)):
+            tapped = await engine.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
+        (held,) = await plans.approval_requests(["approval:1"])
+    finally:
+        await engine.aclose()
+    return tapped.answer, held
+
+
+async def test_a_tap_records_the_requesting_devices_link_at_its_level() -> None:
+    """§2:4, §4:1: the hub chat's account for the requesting device, read at the façade,
+    as a message written from it is, its lowering included; still answered (§1:4)."""
+    identities = FakeIdentityStore(configured=(_PHONE,))
+    link = await identities.find_link(_PHONE)
+    assert link is not None
+    await identities.lower(link.id, Sureness.WEAK, by=OWNER_PERSON_ID)
+
+    answer, held = await _tapped_from("phone", identities)
+
+    assert answer is ApprovalPanelTapAnswer.ANSWERED
+    assert held.state is ApprovalRequestState.APPROVED
+    assert held.answer is not None
+    assert (held.answer.person, held.answer.level) == (OWNER_PERSON_ID, Sureness.WEAK)
+
+
+async def test_a_tap_from_a_device_no_link_ties_records_no_one_at_none() -> None:
+    """§2:1: an account no link ties is no one's, at none; today's test still answers."""
+    answer, held = await _tapped_from("stranger", FakeIdentityStore(configured=(_PHONE,)))
+
+    assert answer is ApprovalPanelTapAnswer.ANSWERED
+    assert held.answer is not None
+    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
+
+
+async def test_where_the_links_cannot_be_read_the_hubs_machine_is_the_owners() -> None:
+    """ADR-0374 §2:2, §3: no store wired; the hub's own machine is the owner's at the hub
+    chat's most, and any other device is no one's, at none."""
+    _, from_hub = await _tapped_from("hub", None)
+    _, from_phone = await _tapped_from("phone", None)
+
+    assert from_hub.answer is not None
+    assert from_phone.answer is not None
+    assert (from_hub.answer.person, from_hub.answer.level) == (
+        OWNER_PERSON_ID,
+        most_sureness(CHAT_ACCOUNT_KIND),
+    )
+    assert (from_phone.answer.person, from_phone.answer.level) == (None, Sureness.NONE)
+
+
+async def test_the_fake_reads_the_tapper_as_the_engine_does() -> None:
+    """The canonical fake reads its :attr:`identities` through the requesting device."""
+    fake = FakeAssistantEngine()
+    fake.approval_clock = lambda: APPROVALS_AT
+    fake.plan_store = FakePlanStore(now=lambda: APPROVALS_AT)
+    fake.identities = FakeIdentityStore(configured=(_PHONE,))
+    await hold_request(fake.plan_store, "approval:1")
+
+    with serving_device(RequestingDevice(device_id="phone")):
+        await fake.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
+
+    (held,) = await fake.plan_store.approval_requests(["approval:1"])
+    assert held.answer is not None
+    assert held.answer.person == OWNER_PERSON_ID
+    assert held.answer.level is not None
 
 
 # --- the card's facts (§2:11) ---

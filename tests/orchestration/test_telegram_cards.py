@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 import pytest
 
@@ -19,6 +19,7 @@ from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     TELEGRAM_MESSAGE_LIMIT,
+    Account,
     ActionRequest,
     ActivationEffect,
     ApprovalGiver,
@@ -38,6 +39,7 @@ from ai_assistant.core.types import (
     RequestedCall,
     Reversibility,
     RiskLevel,
+    Sureness,
     TelegramCallback,
     TelegramFailure,
     TicketState,
@@ -64,6 +66,7 @@ from ai_assistant.orchestration.telegram import (
     line_channel,
 )
 from ai_assistant.testing import (
+    FakeIdentityStore,
     FakeMemoryStore,
     FakePlanStore,
     FakeTelegramBotClient,
@@ -72,6 +75,7 @@ from ai_assistant.testing import (
 from ai_assistant.testing.telegram import EDIT_MESSAGE_TEXT
 
 if TYPE_CHECKING:
+    from ai_assistant.core.protocols import IdentityStore
     from ai_assistant.core.types import FrozenJson
 
 pytestmark = pytest.mark.anyio
@@ -81,6 +85,9 @@ DAY: Final = timedelta(hours=24)
 CHAT: Final = 424242
 REFERENCE: Final = "telegram-bot"
 CHANNEL: Final = line_channel(REFERENCE, CHAT)
+
+#: The configured account, the line's sender, as the identity store links it (ADR-0366).
+_LINE_ACCOUNT: Final = Account(kind="telegram", identifier=str(CHAT))
 
 _BOOK: Final = ToolDefinition(
     id="book",
@@ -121,13 +128,22 @@ class _Rig:
     """The line's cards over the fakes, and ``request_approval``'s runner posting through them."""
 
     def __init__(
-        self, *, plans: FakePlanStore | None = None, memory: FakeMemoryStore | None = None
+        self,
+        *,
+        plans: FakePlanStore | None = None,
+        memory: FakeMemoryStore | None = None,
+        identities: IdentityStore | None | Literal["owners"] = "owners",
     ):
         self.clock = _Clock()
         self.fake = FakeTelegramBotClient(chat_id=CHAT, first_message_id=500)
         self.intake = FakeTelegramIntakeRecord()
         self.plans = plans or FakePlanStore(now=self.clock)
         self.memory = memory or FakeMemoryStore(now=self.clock)
+        # ADR-0377 §2:2: a tapper is read through the tapping account's link; the line's
+        # account is linked to the owner unless a case names another store, or none.
+        self.identities = (
+            FakeIdentityStore(configured=(_LINE_ACCOUNT,)) if identities == "owners" else identities
+        )
         self.woken = 0
         self.rests: list[float] = []
         self.cards = self.over(self.fake)
@@ -144,6 +160,7 @@ class _Rig:
             send_bound=timedelta(seconds=1),
             plans=self.plans,
             memory=self.memory,
+            identities=self.identities,
             person=person,
             now=self.clock,
             sleep=self._rest,
@@ -356,14 +373,84 @@ async def test_a_tap_approves_answers_edits_the_card_and_wakes_the_sensor() -> N
 
     held = await rig.request(str(request.id))
     assert held.state is ApprovalRequestState.APPROVED
+    # ADR-0377 §4:1: who tapped and the level, read through the account's link.
     assert held.answer == ApprovalTap(
-        who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, at=AT + timedelta(minutes=3)
+        who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD,
+        at=AT + timedelta(minutes=3),
+        person=OWNER_PERSON_ID,
+        level=Sureness.NORMAL,
     )
     assert held.ticket is TicketState.HELD
     assert rig.fake.answered == (("callback-1", "Approved."),)
     assert rig.shown(held).endswith("Approved: not used yet.")
     assert rig.fake.buttons == {}
     assert rig.woken == 1, "by the tap"
+
+
+# --- who tapped, and how sure (ADR-0377 §2, §4) --------------------------------------------
+
+
+async def _lowered(store: FakeIdentityStore, level: Sureness) -> None:
+    """Lower the line account's link to ``level``, by the owner's act (ADR-0373 §2:3)."""
+    link = await store.find_link(_LINE_ACCOUNT)
+    assert link is not None
+    await store.lower(link.id, level, by=OWNER_PERSON_ID)
+
+
+@pytest.mark.parametrize("level", [Sureness.WEAK, Sureness.NONE], ids=["weak", "none"])
+async def test_a_tap_records_its_link_at_the_level_it_now_stands_at(level: Sureness) -> None:
+    """§2:1, §4:1: read as a message by the account now would be, lowering included.
+
+    Today's test still carries the tap out (§1:4): the level is recorded, and decides
+    nothing yet.
+    """
+    store = FakeIdentityStore(configured=(_LINE_ACCOUNT,))
+    rig = _Rig(identities=store)
+    _, request = await rig.ask()
+    await _lowered(store, level)
+
+    await rig.tapped(rig.tap(request))
+
+    held = await rig.request(str(request.id))
+    assert held.state is ApprovalRequestState.APPROVED
+    assert held.answer is not None
+    assert (held.answer.person, held.answer.level) == (OWNER_PERSON_ID, level)
+    assert rig.fake.answered == (("callback-1", "Approved."),)
+
+
+async def test_a_tap_by_an_account_no_link_ties_records_no_one_at_none() -> None:
+    """§2:1, ADR-0366 §4:1, §5:6: no link, no person, at none; still carried out today."""
+    rig = _Rig(identities=FakeIdentityStore())
+    _, request = await rig.ask()
+
+    await rig.tapped(rig.tap(request, approve=False))
+
+    held = await rig.request(str(request.id))
+    assert held.state is ApprovalRequestState.DENIED
+    assert held.answer is not None
+    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
+    assert held.answer.level_read is Sureness.NONE
+
+
+@pytest.mark.parametrize("wired", [True, False], ids=["store-fails", "none-wired"])
+async def test_a_tap_whose_link_cannot_be_read_records_no_one_at_none(wired: bool) -> None:
+    """§2:1, ADR-0374 §2:2: no fault is read as a link, so the tapper is no one, at none.
+
+    The line's account is not the hub's own machine, so nothing stands in for the link
+    (§3:1). The tap is carried out as today's test has it (§1:4).
+    """
+    store = FakeIdentityStore(configured=(_LINE_ACCOUNT,))
+    rig = _Rig(identities=store if wired else None)
+    _, request = await rig.ask()
+    if wired:
+        store.fail_next()
+
+    await rig.tapped(rig.tap(request))
+
+    held = await rig.request(str(request.id))
+    assert held.state is ApprovalRequestState.APPROVED
+    assert held.answer is not None
+    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
 
 
 async def test_a_deny_is_marked_and_answered() -> None:

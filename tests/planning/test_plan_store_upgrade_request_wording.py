@@ -21,8 +21,10 @@ the label stays ``19``. The head opens a copy, writes nothing to open it, and re
 record back as it was, each request serialising to the bytes the file holds. The opened
 file then holds a pin's request carrying its wording, which outlives a reopen.
 
-This build's open moves the label on to ``20`` (ADR-0368 §6:3), a step that rewrites
-a scheduled task's row alone, and the file holds none, so nothing else moves.
+This build's open moves the label on to ``21``: the step past 19 rewrites a scheduled
+task's row alone (ADR-0368 §6:3), and the file holds none; the step past 20 gives each
+answered request's answer who tapped, the request's person at no recorded level (ADR-0377
+§4:3), and nothing else moves.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from request_tappers import decoded, untapped
 
 from ai_assistant.core.types import (
     ActivationEffect,
@@ -161,10 +164,13 @@ def test_the_fixture_is_the_previous_releases_file() -> None:
     assert all('"wording"' not in data for data in _stored_requests(_FIXTURE))
 
 
-async def test_the_head_opens_it_moving_its_label_alone(legacy: Path) -> None:
-    """ADR-0326 §4's note: the wording's upgrade is empty, and no row moves.
+async def test_the_head_opens_it_moving_its_label_and_its_answers_tappers_alone(
+    legacy: Path,
+) -> None:
+    """ADR-0326 §4's note: the wording's upgrade is empty, and no other row moves.
 
-    The one change is the label, which the step past 19 moves (ADR-0368 §6:3).
+    The label moves past 19 and 20 (ADR-0368 §6:3, ADR-0377 §4:3), and each answer gains
+    the request's person at no recorded level, and nothing else.
     """
     before = _dump(legacy)
 
@@ -174,8 +180,13 @@ async def test_the_head_opens_it_moving_its_label_alone(legacy: Path) -> None:
     finally:
         store.close()
 
-    assert _label(legacy) == "20"
-    assert {**_dump(legacy), "meta": before["meta"]} == before
+    assert _label(legacy) == "21"
+    after = _dump(legacy)
+    assert {**after, "meta": before["meta"], "approval_requests": []} == {
+        **before,
+        "approval_requests": [],
+    }
+    assert untapped(after["approval_requests"]) == decoded(before["approval_requests"])
 
 
 async def test_every_request_reads_back_as_the_previous_release_wrote_it(legacy: Path) -> None:
@@ -252,5 +263,5 @@ async def test_the_opened_file_holds_a_worded_request_across_a_reopen(legacy: Pa
     assert [one.id for one in export.approval_requests] == [*_REQUESTS, "q-after-pin"]
     assert export.approval_requests[-1] == request
     assert export.approval_requests[-1].call.wording == "Robin takes green tea."
-    assert export.schema_version == 30
-    assert _label(legacy) == "20"
+    assert export.schema_version == 31
+    assert _label(legacy) == "21"

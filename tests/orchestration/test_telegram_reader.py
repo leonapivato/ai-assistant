@@ -25,6 +25,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
+from identity_support import owners_identities
 from story_support import episode
 from telegram_support import (
     AT,
@@ -154,6 +155,7 @@ class _Line:
                 send_bound=timedelta(seconds=1),
                 plans=plans,
                 memory=self.memory,
+                identities=owners_identities(),
                 person=OWNER_PERSON_ID,
                 now=lambda: AT,
             )

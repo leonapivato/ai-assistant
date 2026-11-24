@@ -342,6 +342,7 @@ from ai_assistant.orchestration.work_facts import (
     chat_account,
     line_account,
     persons_work,
+    sender_of,
     senders_of,
 )
 
@@ -7042,15 +7043,24 @@ class Engine:
         check_arguments(
             "tap_approval", max_bytes=self._max_payload_bytes, request_id=named, choice=chosen
         )
-        return await self._tracked(self._tap_approval(named, chosen), "tap_approval", checked=True)
+        # ADR-0377 §2:4: the tapper is read through the hub chat's account for the
+        # requesting device, read here, since the tracked task runs with it unset.
+        device = current_requesting_device()
+        return await self._tracked(
+            self._tap_approval(named, chosen, device), "tap_approval", checked=True
+        )
 
-    async def _tap_approval(self, request_id: str, choice: ApprovalChoice) -> ApprovalPanelTap:
+    async def _tap_approval(
+        self, request_id: str, choice: ApprovalChoice, device: RequestingDevice
+    ) -> ApprovalPanelTap:
         tapped, landed = await tap_on_approval_panel(
             self._plans,
             self._approval_facts,
             request_id,
             choice,
             person=OWNER_PERSON_ID,
+            identities=self._identities,
+            device=device,
             now=self._now(),
             max_bytes=self._max_payload_bytes,
         )
@@ -9343,13 +9353,15 @@ def _cut_entry(
     return best
 
 
-async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, its person, instant and bound
+async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, its person, link, device, instant and bound
     plans: PlanStore,
     facts_of: Callable[[Sequence[ApprovalRequest]], Awaitable[Mapping[str, CardFacts]]],
     request_id: str,
     choice: ApprovalChoice,
     *,
     person: str,
+    identities: IdentityStore | None,
+    device: RequestingDevice,
     now: datetime,
     max_bytes: int,
 ) -> tuple[ApprovalPanelTap, bool]:
@@ -9361,12 +9373,20 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
     longer pending, so the first tap to land wins and a later one is answered with the
     request's state.
 
+    The answer records who tapped and the level, read through the hub chat's account for
+    the requesting device, exactly as a message written from that device is read
+    (ADR-0377 §2:1, §2:4, §4:1): the device's link, or ADR-0374's reading where the links
+    cannot be read. Until ADR-0377 §3 is built they decide nothing (§1:4).
+
     Args:
         plans: The plan store.
         facts_of: Reads what the request's card shows beside it.
         request_id: The request tapped.
         choice: Approve or Deny.
         person: The person tapping, whom the request must be for.
+        identities: The identity store the tapper's link is read from, or ``None``
+            where none is wired.
+        device: The requesting device, whose hub chat account the tap arrived by.
         now: The tap's instant.
         max_bytes: The contract's size limit: a request whose card no answer can carry
             is shown by its start, as the panel shows it (:func:`fit_approval_panel`).
@@ -9387,8 +9407,16 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
         if choice is ApprovalChoice.APPROVE
         else ApprovalRequestState.DENIED
     )
+    tapper = await sender_of(identities, chat_account(device.device_id), stage="approval_panel")
     step = await plans.answer_approval_request(
-        request_id, state, ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=now)
+        request_id,
+        state,
+        ApprovalTap(
+            who=ApprovalGiver.USER_TAP_ON_HUB_PANEL,
+            at=now,
+            person=tapper.person,
+            level=tapper.level,
+        ),
     )
     facts = await facts_of((step.request,))
     entry = approval_panel_entry(step.request, facts[str(step.request.id)], now=now)
