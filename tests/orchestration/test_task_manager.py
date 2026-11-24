@@ -1140,11 +1140,12 @@ async def test_a_replace_by_a_work_records_the_replacing_works_setter() -> None:
     assert _setter(task) == (OWNER_PERSON_ID, Sureness.WEAK, OWN_CHAT_CONNECTION)
 
 
-async def test_the_task_managers_replace_keeps_the_replaced_tasks_level_and_connection() -> None:
-    """The command is the person's act and no work's: what the replaced task records of how
-    sure and where stands, and a task the assistant set gives the person at none."""
+async def test_the_task_managers_replace_records_the_person_at_none_and_no_connection() -> None:
+    """The command is the person's act and no work's, and nothing records how sure it is or
+    where it came from: the new task never keeps what the replaced task's setting work
+    established, and records the person at none (ADR-0368 §6:1, §6:4)."""
     world = _World()
-    setting = _spawner(activation(), level=Sureness.WEAK, connection="telegram:line")
+    setting = _spawner(activation(), level=Sureness.STRONG, connection="telegram:line")
     persons = await _spawned_task(world, await _spawn(world, setting, delay_minutes=30))
     assistants = await _spawned_task(
         world,
@@ -1153,15 +1154,14 @@ async def test_the_task_managers_replace_keeps_the_replaced_tasks_level_and_conn
         ),
     )
 
-    kept = await world.manager.replace(
-        persons.id, instruction="the bins", when=DueAt(at=AT + timedelta(hours=2))
-    )
-    given = await world.manager.replace(
-        assistants.id, instruction="the bins", when=DueAt(at=AT + timedelta(hours=2))
-    )
+    replaced = [
+        await world.manager.replace(
+            one.id, instruction="the bins", when=DueAt(at=AT + timedelta(hours=2))
+        )
+        for one in (persons, assistants)
+    ]
 
-    assert kept.task is not None
-    assert given.task is not None
-    assert _setter(kept.task) == (OWNER_PERSON_ID, Sureness.WEAK, "telegram:line")
-    assert given.task.author is ScheduledTaskAuthor.PERSON
-    assert _setter(given.task) == (OWNER_PERSON_ID, Sureness.NONE, None)
+    for written in replaced:
+        assert written.task is not None
+        assert written.task.author is ScheduledTaskAuthor.PERSON
+        assert _setter(written.task) == (OWNER_PERSON_ID, Sureness.NONE, None)

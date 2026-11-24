@@ -850,7 +850,7 @@ class SqlitePlanStore:
             record["setting_connection"] = None
             conn.execute(
                 "UPDATE scheduled_tasks SET data = ? WHERE id = ?",
-                (json.dumps(record, ensure_ascii=False, separators=(",", ":")), task_id),
+                (_encoded_task(task_id, record), task_id),
             )
 
     def _refuse_foreign_tables(self, conn: sqlite3.Connection, held: int | None) -> None:
@@ -2488,6 +2488,28 @@ def _unset_task(task_id: object, data: object) -> dict[str, Any]:
         )
         raise PlanningError(msg)
     return record
+
+
+def _encoded_task(task_id: object, record: dict[str, Any]) -> str:
+    """One upgraded task's blob as the text the store holds, or refused as damage.
+
+    A blob holding text no release could encode, such as an escaped lone surrogate,
+    decodes but cannot be written back as UTF-8, so it is refused as damage (ADR-0326
+    §5:1) rather than escaping the open as a ``UnicodeEncodeError``.
+
+    Raises:
+        PlanningError: If the blob does not encode as UTF-8.
+    """
+    text = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        msg = (
+            f"the plan store holds scheduled task {task_id!r} with text no release could "
+            f"encode; the store is damaged (ADR-0326 §5:1)"
+        )
+        raise PlanningError(msg) from exc
+    return text
 
 
 def _checked_request(path: str, row: Sequence[Any]) -> ApprovalRequest:

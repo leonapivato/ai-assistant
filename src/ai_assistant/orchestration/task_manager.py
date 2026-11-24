@@ -1145,16 +1145,16 @@ class TaskManager:
                 raise PlanningError(msg)
         command = str(uuid.uuid4())
         effect = _command_effect(command, self._now())
-        # The command is the person's act and no work's (§10:5), so no work's facts say
-        # how sure it is or where it came from: the new task keeps what the replaced one
-        # records of both, none for a task the assistant set (ADR-0368 §6:1, §6:4).
+        # The command is the person's act and no work's (§10:5), and nothing records how
+        # sure it is or where it came from, so the new task, whose instruction is the
+        # command's, records the person at none and no connection: it holds no more than
+        # anyone holds, and never what the replaced task's setting work established
+        # (ADR-0368 §6:1, §6:4; ADR-0350 §9:4 passes on parent, places and chain alone).
         spawner = Spawner(
             activation_id=command,
             person=replaced.person,
             authority=replaced.person,
             set_in=replaced.set_in,
-            level=replaced.setting_level,
-            connection=replaced.setting_connection,
         )
         written = await self.spawn(
             spawner,

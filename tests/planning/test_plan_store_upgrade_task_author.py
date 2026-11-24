@@ -290,8 +290,17 @@ async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> 
         '{"id":"t-person-at","person":"person:owner","author":"robot"}',
         '{"id":"t-person-at","person":"person:owner","author":["person"]}',
         '{"id":"t-person-at","person":"person:owner","author":"person","setting_level":"strong"}',
+        '{"id":"t-person-at","person":"person:owner","author":"person","instruction":"\\ud800"}',
     ],
-    ids=["not-json", "not-an-object", "no-person", "no-author", "author-not-text", "set-already"],
+    ids=[
+        "not-json",
+        "not-an-object",
+        "no-person",
+        "no-author",
+        "author-not-text",
+        "set-already",
+        "unencodable",
+    ],
 )
 async def test_a_task_no_earlier_release_wrote_is_refused_as_damage(
     legacy: Path, damage: str
