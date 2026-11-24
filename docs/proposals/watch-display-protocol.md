@@ -380,12 +380,12 @@ at 320 x 192 (Espressif); about 32 frames a second pushed to a similar
 
 ## What this leaves open
 
-1. **The PIN.** The ruling is a PIN per approval. Its shape is mine and not
-   ruled: the hub checks the digits, not the watch; it raises that one answer
-   to normal and never to strong; the answer records that a PIN raised it;
-   five wrong tries lock raising until the owner clears it elsewhere.
-   ADR-0377 §2 reads a tap's level from the link it arrived by, so a raise for
-   one tap needs a decision of its own before it is built.
+1. **The PIN.** Ruled, shape included ("Yes, as put", 2026-11-24): the hub
+   checks the digits, not the watch; it raises that one answer to normal and
+   never to strong; the answer records that a PIN raised it; five wrong tries
+   lock raising until the owner clears it elsewhere. ADR-0377 §2 reads a
+   tap's level from the link it arrived by, so a raise for one tap needs a
+   decision of its own before the hub builds it.
 2. **Admission.** Ruled. Left to its decision: where the secret sits in the
    watch's flash, and what a lost watch costs (ADR-0124's expelling a device).
 3. **The public door.** Ruled. It is a new edge: ADR-0124 keeps the remote
