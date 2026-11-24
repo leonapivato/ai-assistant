@@ -52,6 +52,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     Account,
+    DeviceRole,
     EvaluationTrace,
     LinkAct,
     LinkActHow,
@@ -2063,9 +2064,10 @@ async def _until_linked(identities: FakeIdentityStore, device: str, *, standing:
 async def test_the_hub_links_the_devices_the_owner_admitted_and_follows_each_act(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, engine: FakeEngine
 ) -> None:
-    """A device admitted before the hub starts is linked before any door accepts; a
-    browser device a gateway on this machine names is linked as it is registered; and
-    the owner's revocation at the control socket ends its link (ADR-0373 §6:2, §6:3)."""
+    """A device linked before the hub starts is linked before any door accepts; a
+    browser device a gateway on this machine names is linked once the owner gives it a
+    role at the control socket, never by the naming (ADR-0378 §5:1, §5:2); and the
+    owner's revocation there ends its link (ADR-0373 §6:2, §6:3)."""
     identities = FakeIdentityStore(configured=(Account(kind=HUB_CHAT, identifier="hub"),))
 
     def _build(settings: Settings, *, data_dir: Path) -> Composition:
@@ -2081,6 +2083,7 @@ async def test_the_hub_links_the_devices_the_owner_admitted_and_follows_each_act
     settings.data_dir.mkdir(mode=0o700)
     record = EnrolmentStore(settings.data_dir / ENROLMENTS_FILENAME)
     record.register("nTABLET4CNTRL", gateway="hub", now=datetime(2026, 11, 23, tzinfo=UTC))
+    record.assign_role("nTABLET4CNTRL", DeviceRole.COMMANDS)
     record.close()
     tablet = Account(kind=HUB_CHAT, identifier="nTABLET4CNTRL")
 
@@ -2092,6 +2095,10 @@ async def test_the_hub_links_the_devices_the_owner_admitted_and_follows_each_act
         client = HubEngineClient(socket_path(settings.data_dir), read_timeout=ADMIN_TIMEOUT)
         with acting_for("nPHONE22CNTRL"), pytest.raises(DeviceRefusedError):
             await client.beliefs()
+        unlinked = await identities.find_link(Account(kind=HUB_CHAT, identifier="nPHONE22CNTRL"))
+        await _act_once_serving(
+            control, {"act": "assign", "identity": "nPHONE22CNTRL", "role": "commands"}
+        )
         await _until_linked(identities, "nPHONE22CNTRL", standing=True)
         reply = await _act_once_serving(control, {"act": "revoke", "identity": "nPHONE22CNTRL"})
         await _until_linked(identities, "nPHONE22CNTRL", standing=False)
@@ -2101,6 +2108,7 @@ async def test_the_hub_links_the_devices_the_owner_admitted_and_follows_each_act
 
     assert code == EXIT_OK
     assert reply["ok"] is True
+    assert unlinked is None
     assert followed is not None
     assert followed.act == LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID)
     owner = await identities.identity(OWNER_PERSON_ID)

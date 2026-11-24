@@ -15,8 +15,10 @@ table's checks and the engine's start to refuse.
   device the overlay agent named, with the roles the owner gave it (§4:1).
 * **``acting_for``:** the machine the gateway named, accepted and — the first time —
   registered under that gateway (§4:2), with that machine's own roles (§8:1). The
-  gateway is the connecting device: an enrolled hub device on the remote listener,
-  and ``hub`` for a gateway on the hub's own machine (§4:4).
+  gateway is the connecting device: ``hub`` for a gateway on the hub's own machine,
+  and otherwise an enrolled hub device **the owner marked as a gateway** at the hub
+  (ADR-0378 §2:1). The named machine is a browser device, never a hub device (§3:1).
+  Either way the value carries the connecting device beside it (ADR-0378 §10).
 
 **A connection admitted under the hub's own overlay identity is refused every
 request** (issue #2726). A record written before ADR-0298 can hold a live
@@ -41,6 +43,8 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
+import structlog
+
 from ai_assistant.core.errors import AssistantError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import HUB_DEVICE_ID, HUB_REQUESTING_DEVICE, RequestingDevice
 from ai_assistant.service.enrolment import NamingRefusal
@@ -50,12 +54,23 @@ if TYPE_CHECKING:
 
     from ai_assistant.service.enrolment import DeviceRegistry
 
+_log = structlog.get_logger(__name__)
 
 #: What a refused naming tells the device, by the roster's reason. Every one is
-#: §6:2's first reason, ``NOT_ACCEPTED``; the sentence says which, so the owner can
-#: tell a revoked registration from a full gateway. No name is quoted, so each fits
+#: §6:2's first reason, ``NOT_ACCEPTED`` (ADR-0378 §8:1); the sentence says which, so
+#: the owner can tell an unmarked gateway from a revoked registration from a full
+#: gateway, and what to run. No name is quoted, so each fits
 #: :data:`~ai_assistant.core.errors.DEVICE_REFUSAL_MESSAGE_BYTES` by construction.
 _NAMING_REFUSED: Final[Mapping[NamingRefusal, str]] = {
+    NamingRefusal.NOT_GATEWAY: (
+        "this device is not marked as a gateway, so it may name no other device; the "
+        "owner marks it on the hub's machine with 'ai-assistant-device mark-gateway' "
+        "and this device's overlay identity"
+    ),
+    NamingRefusal.HUB_DEVICE: (
+        "the device named is enrolled at this hub, or was; a hub device reaches the hub "
+        "through its own connection and never through a gateway"
+    ),
     NamingRefusal.REVOKED: (
         "the owner revoked this device's registration under this gateway; only the "
         "owner's act at the hub restores it"
@@ -115,22 +130,26 @@ class HubRoster:
             DeviceRefusedError: With ``NOT_ACCEPTED`` where the connection is the
                 hub's own overlay identity (#2726), where the owner's revocation of
                 the connecting or named device is in flight, or where the hub does
-                not accept the name under that gateway (§6:2). A registration a first
-                naming made stands either way (§6:1).
+                not accept the name under that gateway (§6:2): from a device that is
+                no gateway, or naming a hub device (ADR-0378 §2:1, §3:1). A
+                registration a first naming made stands either way (§6:1); a refused
+                naming makes none (ADR-0378 §3:2).
             AssistantError: Where a first naming's registration could not be
                 written. The request has changed nothing and the connection stays
                 open, so the gateway's next request for the device tries again.
         """
         if self._is_hub_identity(connecting):
+            self._naming_refused(connecting, acting_for, reason="hub_identity")
             raise DeviceRefusedError(_HUB_IDENTITY_REFUSED, reason=DeviceRefusal.NOT_ACCEPTED)
         if self._registry.is_withheld(connecting) or (
             acting_for is not None and self._registry.is_withheld(acting_for)
         ):
+            self._naming_refused(connecting, acting_for, reason="withheld")
             raise DeviceRefusedError(_WITHHELD, reason=DeviceRefusal.NOT_ACCEPTED)
         if acting_for is None:
             if connecting == HUB_DEVICE_ID:
                 return HUB_REQUESTING_DEVICE
-            return self._device(connecting)
+            return self._device(connecting, connecting=connecting)
         try:
             verdict = self._registry.accept_naming(connecting, acting_for, now=datetime.now(UTC))
         except sqlite3.Error as exc:
@@ -143,7 +162,7 @@ class HubRoster:
             raise DeviceRefusedError(
                 _NAMING_REFUSED[verdict.refusal], reason=DeviceRefusal.NOT_ACCEPTED
             )
-        return self._device(acting_for)
+        return self._device(acting_for, connecting=connecting)
 
     def knows(self, device_id: str) -> bool:
         """Whether the hub knows an id as a device (ADR-0298 §4:11).
@@ -164,9 +183,26 @@ class HubRoster:
             and self._registry.is_known(device_id)
         )
 
-    def _device(self, device_id: str) -> RequestingDevice:
+    def _device(self, device_id: str, *, connecting: str) -> RequestingDevice:
         """One device other than the hub's own machine, with its roles as recorded."""
-        return RequestingDevice(device_id=device_id, roles=self._registry.roles_of(device_id))
+        return RequestingDevice(
+            device_id=device_id,
+            roles=self._registry.roles_of(device_id),
+            connecting_device_id=connecting,
+        )
+
+    @staticmethod
+    def _naming_refused(connecting: str, acting_for: str | None, *, reason: str) -> None:
+        """Log a naming refused before the registry was asked (ADR-0378 §3:5).
+
+        The registry logs every naming it refuses under the same event
+        (:meth:`~ai_assistant.service.enrolment.DeviceRegistry.accept_naming`); a request
+        that names no device is no naming, and is not logged here.
+        """
+        if acting_for is not None:
+            _log.warning(
+                "device_naming_refused", connecting=connecting, device=acting_for, reason=reason
+            )
 
     def _is_hub_identity(self, device_id: str) -> bool:
         """Whether an id is the hub's own overlay identity, where the hub has one."""

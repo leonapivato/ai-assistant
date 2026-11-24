@@ -24,6 +24,10 @@ owner did not name. ``revoke`` without ``--gateway`` revokes the whole device �
 enrolment, every registration of it and its roles (§4:10); with one it revokes that
 registration alone, and ``restore`` is the only way a revoked registration comes
 back (§4:9).
+
+**The gateway mark is given and withdrawn here and nowhere else** (ADR-0378 §2:2):
+``mark-gateway`` lets an enrolled hub device name browser devices on its requests,
+and ``unmark-gateway`` withdraws that. ``list`` shows which devices are marked.
 """
 
 from __future__ import annotations
@@ -45,8 +49,10 @@ from ai_assistant.service.admin import (
     ASSIGN,
     ENROL,
     LIST,
+    MARK_GATEWAY,
     RESTORE,
     REVOKE,
+    UNMARK_GATEWAY,
     WITHDRAW,
 )
 from ai_assistant.service.enrolment import HUB_DEVICE
@@ -72,13 +78,17 @@ currently holds.
 A device is a machine: a hub device is enrolled here and reaches the hub over
 its remote listener; a browser device is a machine a gateway lists, registered
 the first time that gateway names it. A gateway on the hub's own machine is
-named '{HUB_DEVICE}'. The roles are '{DeviceRole.COMMANDS.value}' (commands and queries)
-and '{DeviceRole.SPOKES.value}' (host of spokes).
+named '{HUB_DEVICE}' and names browser devices without a mark; a gateway on any
+other machine names none until you mark its enrolled device with 'mark-gateway'.
+No gateway can name a machine enrolled here: a hub device reaches the hub
+through its own connection. The roles are '{DeviceRole.COMMANDS.value}' (commands and
+queries) and '{DeviceRole.SPOKES.value}' (host of spokes).
 
 The hub checks every request against these roles. A device does nothing until
 it is given a role: an enrolled device, and a browser device a gateway names, is
-refused until then. The hub's own machine holds every role through its local
-socket and needs none given.
+refused until then, and a browser device is linked to you, so that what it
+writes is read as yours, only while it holds a role. The hub's own machine
+holds every role through its local socket and needs none given.
 
 An enrolment prints its credential once. The hub keeps only a verifier, so a
 credential that is lost cannot be recovered — enrol the device again, which mints
@@ -118,7 +128,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         one = acts.add_parser(act, help=f"{verb} one role")
         one.add_argument("identity", help="the device's overlay identity")
         one.add_argument("role", choices=roles, help="the role")
-    acts.add_parser(LIST, help="show the devices, enrolments and registrations recorded")
+    mark = acts.add_parser(
+        MARK_GATEWAY, help="let an enrolled device's gateway name browser devices"
+    )
+    mark.add_argument("identity", help="the gateway machine's overlay identity")
+    unmark = acts.add_parser(
+        UNMARK_GATEWAY, help="stop an enrolled device's gateway naming browser devices"
+    )
+    unmark.add_argument("identity", help="the gateway machine's overlay identity")
+    acts.add_parser(LIST, help="show the devices, gateways, enrolments and registrations recorded")
     return parser.parse_args(argv)
 
 
@@ -403,8 +421,11 @@ def _render(reply: Any, act: str) -> int:
         print("Give the device both values. The credential is shown once and never again:")
         print("the hub keeps only a verifier it cannot be recovered from.")
         return EXIT_OK
-    if act == REVOKE:
-        _render_revocation(reply)
+    if act in (REVOKE, MARK_GATEWAY, UNMARK_GATEWAY):
+        if act == REVOKE:
+            _render_revocation(reply)
+        else:
+            _render_mark(reply, act)
         return EXIT_OK
     held = ", ".join(reply.get("roles", [])) or "none"
     if act == RESTORE:
@@ -450,6 +471,24 @@ def _render_revocation(reply: dict[str, Any]) -> None:
     print("What it already received, it keeps — revocation is prospective.")
 
 
+def _render_mark(reply: dict[str, Any], act: str) -> None:
+    """Print what marking a gateway, or withdrawing its mark, did (ADR-0378 §2)."""
+    if act == MARK_GATEWAY:
+        if reply.get("changed"):
+            print("Marked as a gateway: from its next request it may name browser devices.")
+        else:
+            print("Already marked as a gateway; nothing changed.")
+        print("A browser device it names holds no role, and is not linked to you, until you")
+        print("give it one with 'ai-assistant-device assign'.")
+        return
+    if reply.get("changed"):
+        print("Its gateway mark is withdrawn: every naming it sends is refused, and each")
+        print("change stream it holds for a device it named ends. No registration under it")
+        print("is revoked; marking it again lets it use them.")
+    else:
+        print("That device was not marked as a gateway; nothing changed.")
+
+
 def _render_memberships(reply: dict[str, Any]) -> None:
     """Say that a revoked device left "my devices" and its conversations, where it did."""
     if reply.get("memberships"):
@@ -473,8 +512,16 @@ def _render_listing(reply: dict[str, Any]) -> None:
     for device in devices:
         roles = ", ".join(device["roles"]) or "no role"
         state = "" if device["admitted"] else "  (not admitted)"
-        print(f"  {device['device']}  {device['kind']}  {roles}{state}")
+        gateway = "  gateway" if device.get("gateway") else ""
+        print(f"  {device['device']}  {device['kind']}  {roles}{gateway}{state}")
     _omitted(reply.get("devices_omitted", 0), "device")
+    print("Gateways:")
+    print(f"  {HUB_DEVICE}  the hub's own machine, by rule")
+    for one in reply.get("gateways", []):
+        print(f"  {one['device']}  marked {one['marked_at']}")
+    if not reply.get("gateways"):
+        print("  No other device is marked; 'ai-assistant-device mark-gateway <identity>'")
+        print("  lets an enrolled device's gateway name browser devices.")
     enrolments = reply.get("enrolments", [])
     print("Enrolments:")
     if not enrolments:

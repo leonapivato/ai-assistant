@@ -13264,21 +13264,59 @@ class RequestingDevice(BaseModel):
     engine through :mod:`ai_assistant.core.device_context` rather than through any
     ``AssistantEngine`` argument (§2:2).
 
+    **It carries the connecting device beside it** (ADR-0378 §10), so the engine
+    learns which device each request came through without reading the wire: the
+    device whose connection carried the request, ``hub`` on the local socket. The
+    wire server sets it from the connection alone, never from a value the request
+    carries (ADR-0298 §2:4). Where a request names no device the two are one device,
+    and that is the default: a value built with no connecting device came through the
+    device it is.
+
     Attributes:
         device_id: The device's id: an overlay identity, or :data:`HUB_DEVICE_ID`
             for the hub's own machine (§3:1).
         roles: The roles the roster records for it at dispatch (§4:1).
+        connecting_device_id: The connecting device of the request: the admitted
+            overlay identity on the remote listener, :data:`HUB_DEVICE_ID` on the
+            local socket (ADR-0378 §4:2). It differs from ``device_id`` only where a
+            gateway named a browser device in ``acting_for``; where none is given it
+            is ``device_id``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     device_id: Identifier
     roles: frozenset[DeviceRole] = frozenset()
+    # The declared default is never what a value holds: ``device_id`` is required, and
+    # the validator below puts it here wherever no connecting device is given. It is
+    # declared so a construction that names none type-checks as optional.
+    connecting_device_id: Identifier = Field(default=HUB_DEVICE_ID, validate_default=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _came_through_itself(cls, data: object) -> object:
+        """Default the connecting device to the device itself, where none is given."""
+        if isinstance(data, dict) and "connecting_device_id" not in data and "device_id" in data:
+            return {**data, "connecting_device_id": data["device_id"]}
+        return data
+
+    @model_validator(mode="after")
+    def _no_gateway_names_the_hub(self) -> RequestingDevice:
+        """Refuse ``hub`` as a device another device's connection carried (ADR-0298 §3:3)."""
+        if self.device_id == HUB_DEVICE_ID and self.connecting_device_id != HUB_DEVICE_ID:
+            msg = "the hub's own machine reaches the hub through its local socket alone"
+            raise ValueError(msg)
+        return self
 
     @property
     def is_hub(self) -> bool:
         """Whether this is the hub's own machine (ADR-0298 §3:1)."""
         return self.device_id == HUB_DEVICE_ID
+
+    @property
+    def is_named(self) -> bool:
+        """Whether a gateway named this device, so it came through another (ADR-0378 §4:2)."""
+        return self.connecting_device_id != self.device_id
 
 
 #: The hub's own machine as a requesting device, holding every role (ADR-0298 §3:2).

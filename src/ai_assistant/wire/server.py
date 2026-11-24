@@ -43,7 +43,12 @@ from ai_assistant.core.channel_validation import validate_combination
 from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.errors import AssistantError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.streams import closing_stream
-from ai_assistant.core.types import HUB_DEVICE_ID, HUB_REQUESTING_DEVICE, ChatStreamChunk
+from ai_assistant.core.types import (
+    HUB_DEVICE_ID,
+    HUB_REQUESTING_DEVICE,
+    ChatStreamChunk,
+    RequestingDevice,
+)
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES
 from ai_assistant.wire.envelope import CHANGE_STREAM_DEAD_PEER, CHANGE_STREAM_HEARTBEAT
@@ -74,7 +79,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import DeviceRole, RequestingDevice
+    from ai_assistant.core.types import DeviceRole
 
 _log = structlog.get_logger(__name__)
 
@@ -361,7 +366,12 @@ class _Session:
 
 
 def _requesting_device(session: _Session, acting_for: str | None) -> RequestingDevice:
-    """Decide one request's requesting device (ADR-0298 §2:1).
+    """Decide one request's requesting device, and set the device it came through.
+
+    ADR-0298 §2:1 decides the device; ADR-0378 §10 has the wire server alone set the
+    **connecting device** on it, from the connection the request arrived on and never
+    from a value the request carries (ADR-0298 §2:4). So whatever the roster
+    answers, the value the engine is served carries this connection's device.
 
     Raises:
         DeviceRefusedError: If the request names ``hub`` (§3:3), or the roster does
@@ -370,9 +380,22 @@ def _requesting_device(session: _Session, acting_for: str | None) -> RequestingD
     if session.roster is None:
         return HUB_REQUESTING_DEVICE
     if acting_for == HUB_DEVICE_ID:
+        # The roster logs every other naming it refuses under this event (ADR-0378
+        # §3:5); this one is refused here, before the roster is asked.
+        _log.warning(
+            "device_naming_refused",
+            connecting=session.connecting,
+            device=acting_for,
+            reason="reserved",
+        )
         msg = "no gateway may name the hub's own machine; it reaches the hub on its own socket"
         raise DeviceRefusedError(msg, reason=DeviceRefusal.NOT_ACCEPTED)
-    return session.roster.requesting_device(connecting=session.connecting, acting_for=acting_for)
+    decided = session.roster.requesting_device(connecting=session.connecting, acting_for=acting_for)
+    return RequestingDevice(
+        device_id=decided.device_id,
+        roles=decided.roles,
+        connecting_device_id=session.connecting,
+    )
 
 
 def _admitted(
@@ -1374,7 +1397,16 @@ class _ChangeStreamWriter:
         )
 
     async def relay(self, step: asyncio.Future[Any]) -> bool:
-        """Write what the engine's finished step gave; ``False`` once the stream ended."""
+        """Write what the engine's finished step gave; ``False`` once the stream ended.
+
+        **A stream for a device a gateway named asks the roster again before it
+        writes what the engine gave** (ADR-0378 §3:4). Enrolling the named machine,
+        or withdrawing the mark of the gateway that named it (§2:4), makes the roster
+        refuse the naming; deciding the device again here, synchronously and with no
+        suspension before the write, ends the stream with that refusal before it sends
+        anything the engine recorded after the act. A stream naming no device is
+        ended by its own device's revocation, which closes the connection (§7:15).
+        """
         try:
             value = step.result()
         except StopAsyncIteration:
@@ -1382,6 +1414,12 @@ class _ChangeStreamWriter:
         except AssistantError as exc:
             await self.fail(exc)
             return False
+        if self.frame.acting_for is not None:
+            try:
+                _requesting_device(self.session, self.frame.acting_for)
+            except AssistantError as exc:
+                await self.fail(exc)
+                return False
         if not isinstance(value, ChatStreamChunk):
             await self.emit(env.FrameKind.RESULT, value)
             return False

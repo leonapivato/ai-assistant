@@ -327,6 +327,36 @@ async def test_a_change_of_roles_is_sent_and_a_revoked_name_ends_the_stream(
     assert refused.value.reason is DeviceRefusal.NOT_ACCEPTED
 
 
+async def test_a_naming_the_roster_stops_accepting_ends_the_stream_before_its_next_change(
+    tmp_path: Path,
+) -> None:
+    """ADR-0378 §3:4: enrolling a named machine "ends each change stream open for it on a
+    gateway's connection, with ``DeviceRefusedError``, before the stream sends anything
+    recorded after the enrolment"; withdrawing the gateway's mark ends it as well (§2:4).
+
+    Either makes the roster refuse the naming. The heartbeat is left at its 15 seconds,
+    so the stream's re-check on it cannot be what ends the stream here: the change the
+    engine records after the act is never sent, and the refusal comes in its place.
+    """
+    engine, conversation = await _engine_with_a_conversation()
+    after = (await engine.chat.changes(after=0, limit=100)).next_after
+    phone = RequestingDevice(device_id="phone", roles=frozenset({DeviceRole.COMMANDS}))
+    roster = _Roster(devices={"phone": phone})
+    async with _client(engine, tmp_path, roster) as client:
+        with acting_for("phone"):
+            async with closing_stream(client.follow_chat(after=after)) as chunks:
+                await _next(chunks, wanted="roles")
+                await engine.write_message(conversation, message=_said("m-1"))
+                before = await _next(chunks, wanted="change")
+                del roster.devices["phone"]
+                await engine.write_message(conversation, message=_said("m-2"))
+                with pytest.raises(DeviceRefusedError) as refused:
+                    await _next(chunks, wanted="change")
+
+    assert before.change is not None
+    assert refused.value.reason is DeviceRefusal.NOT_ACCEPTED
+
+
 # --- the client's idle deadline (§7:13) --------------------------------------
 
 

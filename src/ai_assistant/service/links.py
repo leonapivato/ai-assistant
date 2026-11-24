@@ -1,32 +1,41 @@
-"""The owner's admitted devices, followed into the identity store as links (ADR-0373 §6).
+"""The owner's linked devices, followed into the identity store as links (ADR-0373 §6).
 
 ADR-0373 §6:2 names enrolling a device as one of the owner's acts a link is recorded
-from, and §6:3 says such a link stands only while that act stands. The device record
-(:mod:`ai_assistant.service.enrolment`) holds those acts — each enrolment at the hub
-and each registration of a browser device by a gateway (ADR-0296 §1) — and this module
-follows it: every device the record admits is linked to the owner's identity as the hub
-chat's account, ``conversation`` with the device's id (ADR-0293 §4:1), by the owner's
-``device`` act; and a ``device`` link whose device nothing admits any more is ended.
+from, and §6:3 says such a link stands only while that act stands. ADR-0378 §5 names
+the act for a browser device: the owner's giving it a roster role at the hub, a link
+that stands only while it holds one and has a live registration (§5:2). **No naming
+or registration links anything** (§5:1): a gateway's naming is not the owner's act,
+and the hub cannot tell a listing from a forged one. The device record
+(:mod:`ai_assistant.service.enrolment`) holds those acts, and this module follows it:
+every device the record links (:meth:`~ai_assistant.service.enrolment.DeviceRegistry.
+linkable`) is linked to the owner's identity as the hub chat's account,
+``conversation`` with the device's id (ADR-0293 §4:1), by the owner's ``device`` act;
+and a ``device`` link whose device the record no longer links is ended.
+
+**At the upgrade** (ADR-0378 §5:3), the start's following below is what ends a browser
+device's standing ``device`` link that a naming made, where the device holds no role
+or no live registration, and leaves standing each one §5:2 still holds, with no act of
+the owner's.
 
 **At the act.** :class:`DeviceLinks` registers on the registry
 (:meth:`~ai_assistant.service.enrolment.DeviceRegistry.when_admission_acted`), which
-calls it once each enrolment, revocation, restored registration or first naming has
-taken effect. The callback only schedules: the identity store is asynchronous, and the
-record's acts are synchronous so that ADR-0124 §8's commit, live-view transition and
-expulsion are one instant. An ``await`` inside them would split it, so the link is
-written just after the act, never as part of it.
+calls it once each enrolment, revocation, restored registration, role given or taken,
+or first naming has taken effect. The callback only schedules: the identity store is
+asynchronous, and the record's acts are synchronous so that ADR-0124 §8's commit,
+live-view transition and expulsion are one instant. An ``await`` inside them would
+split it, so the link is written just after the act, never as part of it.
 
 **Each act is written as it left the record, in the order the acts were made.** Whether
-the record admits the device is read in the act's own step, and one worker replays the
-acts in order: linked where the act left the device admitted, its ``device`` link ended
+the record links the device is read in the act's own step, and one worker replays the
+acts in order: linked where the act left the device linkable, its ``device`` link ended
 where it did not. So an enrolment and its revocation made back to back cannot land in the
 wrong order, and a revocation and a restore made back to back end the old link and make
 a new one, as two acts do (ADR-0366 §3), however late the writes run.
 
 **At start.** :meth:`DeviceLinks.follow` does for the device record what the identity
-store's opening does for the owner's configuration (L1): every admitted device that no
+store's opening does for the owner's configuration (L1): every linkable device that no
 standing link holds is linked, and every standing ``device`` link whose device is not
-admitted is ended. It lives here because the record is ``service``'s, and neither
+linkable is ended. It lives here because the record is ``service``'s, and neither
 ``memory`` nor ``app`` may import it.
 
 **What a failed write does.** Admission is the record's and does not wait on, or
@@ -38,7 +47,7 @@ links yet (L4 switches the readers), and a revoked device is refused at admissio
 whatever its link says, so the residue changes no answer the hub gives. A revoked
 device admitted again before that repair never keeps the old link: a ``device`` link
 made before the device's current, unbroken admission began
-(:meth:`~ai_assistant.service.enrolment.DeviceRegistry.admitted_since`, read from the
+(:meth:`~ai_assistant.service.enrolment.DeviceRegistry.linkable_since`, read from the
 record, which keeps every revocation) stood on an admission that has ended, so it is
 ended and a new one made, at the re-admitting act or at the next start.
 
@@ -51,7 +60,7 @@ and its ``configured`` link is never ended here: only a ``device`` link is. Wher
 to a device already linked by its admission — the account is linked again by the
 ``configured`` act it still stands on, so it is never left unlinked. ``hub`` and
 the hub's own overlay identity are never followed here at all (the registry's
-:meth:`~ai_assistant.service.enrolment.DeviceRegistry.admits`): the hub's own machine is
+:meth:`~ai_assistant.service.enrolment.DeviceRegistry.linkable`): the hub's own machine is
 the configuration's ``hub`` link.
 """
 
@@ -89,7 +98,8 @@ _log = structlog.get_logger(__name__)
 #: from (ADR-0293 §4:1): the kind every device link's account carries.
 HUB_CHAT: Final = "conversation"
 
-#: The act every device link is recorded from: the owner's admitting the device.
+#: The act every device link is recorded from: the owner's enrolling the device, or
+#: giving a browser device a roster role (ADR-0378 §5:2).
 _DEVICE_ACT: Final = LinkAct(how=LinkActHow.DEVICE, by=OWNER_PERSON_ID)
 
 #: The act a configured account is linked by, where ending a device link hands it back.
@@ -102,7 +112,7 @@ def _account(device: str) -> Account:
 
 
 class DeviceLinks:
-    """Keeps a ``device`` link standing for exactly the devices the record admits."""
+    """Keeps a ``device`` link standing for exactly the devices the record links."""
 
     def __init__(
         self,
@@ -136,11 +146,12 @@ class DeviceLinks:
         registry.when_admission_acted(self._acted)
 
     async def follow(self) -> None:
-        """Follow the record at start: link each admitted device, end each link it left.
+        """Follow the record at start: link each linkable device, end each link it left.
 
-        Devices admitted before this hub linked them, or while a link write failed, are
-        linked; each standing ``device`` link whose device the record no longer admits
-        is ended. A link from any other act is left as it is.
+        Devices linkable before this hub linked them, or while a link write failed, are
+        linked; each standing ``device`` link whose device the record no longer links
+        is ended — at the upgrade to ADR-0378, each a naming made for a browser device
+        that holds no role (§5:3). A link from any other act is left as it is.
 
         A store fault is logged (``device_links_unfollowed``) and the hub starts all
         the same: admission does not depend on a link, and the next start follows
@@ -161,12 +172,12 @@ class DeviceLinks:
             _log.info("device_links_followed", linked=linked, ended=ended)
 
     async def _follow(self) -> tuple[int, int]:
-        """Link the admitted devices and end the links of those no longer admitted.
+        """Link the linkable devices and end the links of those no longer linkable.
 
         Returns:
             How many links were made, and how many ended.
         """
-        admitted = self._registry.admitted_devices()
+        admitted = self._registry.linkable_devices()
         accounts = {_account(device) for device in admitted}
         owner = await self._identities.identity(OWNER_PERSON_ID)
         ended = 0
@@ -209,7 +220,7 @@ class DeviceLinks:
         and make a new one, as two acts do (ADR-0366 §3), however late the writes run.
         """
         try:
-            since = self._registry.admitted_since(device)
+            since = self._registry.linkable_since(device)
         except sqlite3.Error as exc:
             _log.warning(
                 "device_link_unwritten",
@@ -262,7 +273,7 @@ class DeviceLinks:
                     )
 
     async def _settle(self, device: str, *, since: datetime | None) -> None:
-        """Link ``device`` where the act left it admitted; end its link where not.
+        """Link ``device`` where the act left it linkable; end its link where not.
 
         **A link is written only while the admission it stands on still holds.** Where
         the admission the act left (begun at ``since``) is no longer the device's
@@ -276,7 +287,7 @@ class DeviceLinks:
         revocation's write failed, and the device was admitted again — is ended before
         the device is linked anew, so the new admission never stands on the old link.
         """
-        if since is not None and self._registry.admitted_since(device) != since:
+        if since is not None and self._registry.linkable_since(device) != since:
             return
         account = _account(device)
         held = await self._identities.find_link(account)
@@ -301,7 +312,7 @@ class DeviceLinks:
         makes a new link (ADR-0366 §3). Read from the record, which keeps every
         revocation, so a start repairs a revocation whose write failed.
         """
-        since = self._registry.admitted_since(held.account.identifier)
+        since = self._registry.linkable_since(held.account.identifier)
         return since is not None and held.made_at < since
 
     async def _link(self, device: str) -> bool:

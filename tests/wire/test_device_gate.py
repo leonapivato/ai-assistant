@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import pytest
+import structlog
 from approvals_panel_contract import APPROVALS_AT, hold_request
 
 from ai_assistant.core.device_context import acting_for, current_requesting_device
@@ -85,6 +86,12 @@ _FRAME: Final = 1 << 20
 _LIMITS: Final = ConnectionLimits(max_frame_bytes=_FRAME, read_timeout=_PATIENT, build="test")
 _PHONE: Final = RequestingDevice(device_id="phone", roles=frozenset({DeviceRole.COMMANDS}))
 _BARE: Final = RequestingDevice(device_id="bare")
+#: ``_PHONE`` as the engine is served it on the local socket: the wire server sets the
+#: connecting device from the connection, whatever the roster's answer carried
+#: (ADR-0378 §10, ADR-0298 §2:4).
+_PHONE_THROUGH_HUB: Final = RequestingDevice(
+    device_id="phone", roles=_PHONE.roles, connecting_device_id=HUB_DEVICE_ID
+)
 #: The owner's two configured accounts: the hub chat on the hub's own machine, and the line.
 _HUB_CHAT: Final = Account(kind="conversation", identifier=HUB_DEVICE_ID)
 _LINE: Final = Account(kind="telegram", identifier="424242")
@@ -175,7 +182,9 @@ async def test_the_client_writes_the_outbound_name_and_the_engine_runs_as_its_de
     """§1:5 and §2:1-2: the gateway's value reaches the frame, the roster decides.
 
     On the local socket the connecting device is ``hub`` (§2:1); the request that
-    names no device is the connecting device's own.
+    names no device is the connecting device's own. ADR-0378 §10: the engine is served
+    the connecting device beside it, set by the wire server from the connection — the
+    scripted roster's answer carries ``phone`` there, and the engine sees ``hub``.
     """
     engine = _Recording()
     roster = _Roster(devices={None: HUB_REQUESTING_DEVICE, "phone": _PHONE})
@@ -184,7 +193,9 @@ async def test_the_client_writes_the_outbound_name_and_the_engine_runs_as_its_de
             await client.forget("rec-1")
         await client.forget("rec-2")
     assert roster.asked == [(HUB_DEVICE_ID, "phone"), (HUB_DEVICE_ID, None)]
-    assert engine.seen == [_PHONE, HUB_REQUESTING_DEVICE]
+    assert _PHONE.connecting_device_id == "phone"
+    assert engine.seen == [_PHONE_THROUGH_HUB, HUB_REQUESTING_DEVICE]
+    assert [one.connecting_device_id for one in engine.seen] == [HUB_DEVICE_ID, HUB_DEVICE_ID]
 
 
 async def test_a_name_breaking_its_conditions_is_refused_before_any_io(tmp_path: Path) -> None:
@@ -219,15 +230,23 @@ async def test_a_refused_request_is_answered_and_the_engine_is_never_called(
 async def test_a_gateway_naming_the_hub_is_refused_before_the_roster_is_asked(
     tmp_path: Path,
 ) -> None:
-    """§3:3: no gateway may name ``hub``, whatever the roster would have said."""
+    """§3:3: no gateway may name ``hub``, whatever the roster would have said — logged,
+    as the roster logs every other naming it refuses (ADR-0378 §3:5)."""
     engine = _Recording()
     roster = _Roster(devices={"hub": HUB_REQUESTING_DEVICE})
-    async with _client(engine, roster, tmp_path) as client:
-        with acting_for(HUB_DEVICE_ID), pytest.raises(DeviceRefusedError) as refused:
-            await client.forget("rec-1")
+    with structlog.testing.capture_logs() as captured:
+        async with _client(engine, roster, tmp_path) as client:
+            with acting_for(HUB_DEVICE_ID), pytest.raises(DeviceRefusedError) as refused:
+                await client.forget("rec-1")
     assert refused.value.reason is DeviceRefusal.NOT_ACCEPTED
     assert roster.asked == []
     assert engine.seen == []
+    (logged,) = [entry for entry in captured if entry["event"] == "device_naming_refused"]
+    assert (logged["connecting"], logged["device"], logged["reason"]) == (
+        HUB_DEVICE_ID,
+        HUB_DEVICE_ID,
+        "reserved",
+    )
 
 
 async def test_a_refusal_leaves_the_connection_open(tmp_path: Path) -> None:
@@ -264,7 +283,7 @@ async def test_a_refusal_leaves_the_connection_open(tmp_path: Path) -> None:
     assert [answer.kind for answer in answers] == [env.FrameKind.ERROR, env.FrameKind.RESULT]
     assert answers[0].payload["code"] == "DeviceRefusedError"
     assert answers[0].payload["details"] == {"reason": "not_accepted"}
-    assert engine.seen == [_PHONE]
+    assert engine.seen == [_PHONE_THROUGH_HUB]
 
 
 async def test_the_remote_listeners_connecting_device_is_its_admitted_identity(
@@ -300,6 +319,7 @@ async def test_the_remote_listeners_connecting_device_is_its_admitted_identity(
             await server.wait_closed()
     assert answer.kind is env.FrameKind.RESULT
     assert roster.asked == [("laptop.tailnet", None)]
+    assert [one.connecting_device_id for one in engine.seen] == ["laptop.tailnet"]
 
 
 async def test_a_panel_tap_from_a_device_not_admitted_changes_nothing(

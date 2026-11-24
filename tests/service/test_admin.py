@@ -892,6 +892,14 @@ async def test_a_full_listing_of_the_longest_identities_still_fits_one_frame(
 _PHONE: Final = "nPHONE22CNTRL"
 
 
+def _gateway(registry: DeviceRegistry) -> DeviceRegistry:
+    """Enrol ``_DEVICE`` and mark it as a gateway, once, so it may name (ADR-0378 §2:1)."""
+    if not registry.is_gateway(_DEVICE):
+        registry.enrol(_DEVICE, now=_MOMENT)
+        registry.mark_gateway(_DEVICE, now=_MOMENT)
+    return registry
+
+
 async def test_roles_are_given_and_taken_through_the_socket(tmp_path: Path) -> None:
     """ADR-0298 §4:12: roles are assigned "only by ``ai-assistant-device`` on the hub's
     own machine". Each reply says whether it changed anything and what the device
@@ -972,13 +980,104 @@ async def test_the_listing_shows_the_roster_and_every_registration(tmp_path: Pat
             "kind": "browser_device",
             "roles": ["commands"],
             "admitted": True,
+            "gateway": False,
         },
-        _DEVICE: {"device": _DEVICE, "kind": "browser_device", "roles": [], "admitted": False},
+        _DEVICE: {
+            "device": _DEVICE,
+            "kind": "browser_device",
+            "roles": [],
+            "admitted": False,
+            "gateway": False,
+        },
     }
     assert [(one["device"], one["gateway"], one["live"]) for one in listed["registrations"]] == [
         (_DEVICE, "hub", False),
         (_PHONE, "hub", True),
     ]
+
+
+async def test_a_gateway_is_marked_and_unmarked_through_the_socket_and_listed(
+    tmp_path: Path,
+) -> None:
+    """ADR-0378 §2:2: "The owner marks a device as a gateway, and withdraws the mark,
+    only at the hub with ``ai-assistant-device``"; §2:5: the listing "lists which devices
+    are marked as gateways, beside the registrations under each"."""
+    async with _admin(tmp_path) as (listener, registry):
+        registry.enrol(_DEVICE, now=_MOMENT)
+        marked = await _act(listener, {"act": "mark-gateway", "identity": _DEVICE})
+        again = await _act(listener, {"act": "mark-gateway", "identity": _DEVICE})
+        named = registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
+        listed = await _act(listener, {"act": "list"})
+        unmarked = await _act(listener, {"act": "unmark-gateway", "identity": _DEVICE})
+        refused = registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
+        after = await _act(listener, {"act": "list"})
+        browser = await _act(listener, {"act": "mark-gateway", "identity": _PHONE})
+        hub_itself = await _act(listener, {"act": "mark-gateway", "identity": "hub"})
+    assert marked == {"ok": True, "changed": True, "gateway": True}
+    assert again == {"ok": True, "changed": False, "gateway": True}
+    assert named.accepted
+    assert listed["gateways"] == [{"device": _DEVICE, "marked_at": _MOMENT.isoformat()}]
+    assert {one["device"]: one["gateway"] for one in listed["devices"]} == {
+        _DEVICE: True,
+        _PHONE: False,
+    }
+    assert [(one["device"], one["gateway"]) for one in listed["registrations"]] == [
+        (_PHONE, _DEVICE)
+    ]
+    assert unmarked == {"ok": True, "changed": True, "gateway": False}
+    assert not refused.accepted
+    assert after["gateways"] == []
+    assert browser["ok"] is False
+    assert "no live enrolment" in browser["error"]
+    assert hub_itself["ok"] is False
+    assert "needs no mark" in hub_itself["error"]
+
+
+@pytest.mark.parametrize(
+    ("act", "reply", "said"),
+    [
+        ("mark-gateway", {"ok": True, "changed": True, "gateway": True}, "Marked as a gateway"),
+        ("mark-gateway", {"ok": True, "changed": False, "gateway": True}, "Already marked"),
+        (
+            "unmark-gateway",
+            {"ok": True, "changed": True, "gateway": False},
+            "gateway mark is withdrawn",
+        ),
+        ("unmark-gateway", {"ok": True, "changed": False, "gateway": False}, "was not marked"),
+    ],
+)
+def test_the_command_renders_a_mark_and_its_withdrawal(
+    capsys: pytest.CaptureFixture[str], act: str, reply: dict[str, Any], said: str
+) -> None:
+    """Each answer says what changed, and what the owner does next."""
+    assert _render(reply, act) == EXIT_OK
+    assert said in capsys.readouterr().out
+
+
+def test_the_command_lists_the_gateways(capsys: pytest.CaptureFixture[str]) -> None:
+    """``hub`` names by rule, and each marked device is listed with when it was marked."""
+    _render(
+        {
+            "ok": True,
+            "hub_identity": _HUB_ID,
+            "devices": [
+                {
+                    "device": _DEVICE,
+                    "kind": "hub_device",
+                    "roles": [],
+                    "admitted": True,
+                    "gateway": True,
+                }
+            ],
+            "gateways": [{"device": _DEVICE, "marked_at": _MOMENT.isoformat()}],
+        },
+        "list",
+    )
+    printed = capsys.readouterr().out
+    assert "Gateways:" in printed
+    assert "hub  the hub's own machine, by rule" in printed
+    assert f"{_DEVICE}  marked {_MOMENT.isoformat()}" in printed
+    assert f"{_DEVICE}  hub_device  no role  gateway" in printed
 
 
 async def test_a_hub_with_no_remote_listener_refuses_an_enrolment_and_performs_roster_acts(
@@ -1047,7 +1146,7 @@ async def test_a_restore_reports_the_roles_the_device_actually_holds(tmp_path: P
     claiming it holds none."""
     async with _admin(tmp_path) as (listener, registry):
         registry.accept_naming("hub", _PHONE, now=_MOMENT)
-        registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
+        _gateway(registry).accept_naming(_DEVICE, _PHONE, now=_MOMENT)
         registry.assign(_PHONE, DeviceRole.COMMANDS)
         await _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": "hub"})
         restored = await _act(listener, {"act": "restore", "identity": _PHONE, "gateway": "hub"})
@@ -1174,7 +1273,7 @@ async def test_revoking_one_registration_keeps_a_device_something_else_admits(
     space = await _sets_naming(_PHONE)
     async with _admin(tmp_path, remove_device=space.remove_device) as (listener, registry):
         registry.accept_naming("hub", _PHONE, now=_MOMENT)
-        registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
+        _gateway(registry).accept_naming(_DEVICE, _PHONE, now=_MOMENT)
         first = await _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": "hub"})
         kept = await space.my_devices()
         last = await _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": _DEVICE})
@@ -1209,7 +1308,7 @@ async def test_a_removal_that_fails_revokes_nothing(tmp_path: Path) -> None:
         failed = await _act(listener, {"act": "revoke", "identity": _PHONE})
         still = registry.is_known(_PHONE)
         again = await _act(listener, {"act": "revoke", "identity": _PHONE})
-        renamed = registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
+        renamed = _gateway(registry).accept_naming(_DEVICE, _PHONE, now=_MOMENT)
 
     assert failed["ok"] is False
     assert "nothing was revoked" in failed["error"]
@@ -1294,7 +1393,7 @@ async def test_no_other_act_lands_while_a_revocation_awaits_the_store(tmp_path: 
 
     async with _admin(tmp_path, remove_device=_paused) as (listener, registry):
         registry.accept_naming("hub", _PHONE, now=_MOMENT)
-        registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
+        _gateway(registry).accept_naming(_DEVICE, _PHONE, now=_MOMENT)
         registry.revoke_registration(_PHONE, gateway=_DEVICE, now=_MOMENT)
         revoking = asyncio.create_task(
             _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": "hub"})

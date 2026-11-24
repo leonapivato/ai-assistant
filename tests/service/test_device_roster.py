@@ -58,8 +58,20 @@ def store(tmp_path: Path) -> Iterator[EnrolmentStore]:
 
 @pytest.fixture
 def registry(store: EnrolmentStore) -> DeviceRegistry:
-    """The live view over it, on a hub with a remote listener."""
-    return DeviceRegistry(store, hub_identity=_HUB)
+    """The live view over it, on a hub with a remote listener.
+
+    Both gateways are enrolled hub devices the owner marked (ADR-0378 §2:1), so the
+    namings below are ones the hub may accept.
+    """
+    return _marked(DeviceRegistry(store, hub_identity=_HUB))
+
+
+def _marked(registry: DeviceRegistry, *gateways: str) -> DeviceRegistry:
+    """Enrol each gateway and mark it, so its namings are ones the hub may accept."""
+    for gateway in gateways or (_GATEWAY, _OTHER_GATEWAY):
+        registry.enrol(gateway, now=_MOMENT - timedelta(days=1))
+        registry.mark_gateway(gateway, now=_MOMENT - timedelta(days=1))
+    return registry
 
 
 # --- registration: a gateway's first naming is the listing reaching the hub --------
@@ -127,26 +139,42 @@ def test_a_gateway_on_the_local_socket_registers_under_hub(registry: DeviceRegis
     assert registration.gateway == HUB_DEVICE
 
 
-def test_a_machine_already_a_device_keeps_its_kind_and_roles_when_named(
-    registry: DeviceRegistry,
+@pytest.mark.parametrize("revoked", [False, True])
+def test_no_naming_reaches_a_hub_device_live_or_revoked(
+    registry: DeviceRegistry, *, revoked: bool
 ) -> None:
-    """ADR-0296 §1:4, the owner's ruling: "a listing leaves the roles of a machine that
-    is already a device as they are" — a laptop enrolled as a hub device and listed at
-    another machine's gateway "is that one device, with the roles the user gave the
-    laptop"."""
+    """ADR-0378 §3:1: "The hub refuses, as not accepted, … a name the hub knows as a hub
+    device, whether that device's enrolment is live or revoked", and §3:2: "A refused
+    naming registers nothing, and changes no registration, role or link"."""
     registry.enrol(_WATCH, now=_MOMENT)
     registry.assign(_WATCH, DeviceRole.COMMANDS)
+    if revoked:
+        registry.revoke(_WATCH, now=_MOMENT)
+    before = registry.registrations()
 
-    verdict = registry.accept_naming(_GATEWAY, _WATCH, now=_LATER)
+    for gateway in (HUB_DEVICE, _GATEWAY):
+        verdict = registry.accept_naming(gateway, _WATCH, now=_LATER)
+        assert verdict.refusal is NamingRefusal.HUB_DEVICE
+        assert not verdict.registered
 
-    assert verdict.registered
+    assert registry.registrations() == before
     assert registry.kind_of(_WATCH) is DeviceKind.HUB
-    assert registry.roles_of(_WATCH) == frozenset({DeviceRole.COMMANDS})
 
 
-def test_a_browser_device_later_enrolled_is_one_hub_device(registry: DeviceRegistry) -> None:
+def test_a_marked_gateway_cannot_name_itself(registry: DeviceRegistry) -> None:
+    """A gateway's own device is a hub device, so a naming of it is refused (§3:1)."""
+    assert registry.accept_naming(_GATEWAY, _GATEWAY, now=_MOMENT).refusal is (
+        NamingRefusal.HUB_DEVICE
+    )
+
+
+def test_a_browser_device_later_enrolled_is_one_hub_device_no_naming_reaches(
+    registry: DeviceRegistry,
+) -> None:
     """A machine is one device however it is admitted (ADR-0296 §1:4): enrolling a
-    registered browser device makes it a hub device, keeping its roles."""
+    registered browser device makes it a hub device, keeping its roles. ADR-0378 §3:3:
+    "Once a machine is enrolled, no naming reaches it, its earlier registrations as a
+    browser device included" — the registration stays on the record, unusable."""
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
     registry.assign(_PHONE, DeviceRole.COMMANDS)
 
@@ -156,6 +184,146 @@ def test_a_browser_device_later_enrolled_is_one_hub_device(registry: DeviceRegis
     assert registry.roles_of(_PHONE) == frozenset({DeviceRole.COMMANDS})
     (device,) = [one for one in registry.roster()[0] if one.device_id == _PHONE]
     assert device.kind is DeviceKind.HUB
+    assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).refusal is (
+        NamingRefusal.HUB_DEVICE
+    )
+    ((registration,), _) = registry.registrations()
+    assert registration.is_live
+
+
+# --- who may name (ADR-0378 §2) ----------------------------------------------------
+
+
+def test_a_device_that_is_no_gateway_may_name_no_one(registry: DeviceRegistry) -> None:
+    """ADR-0378 §2:1: "A request may carry ``acting_for`` only where its connecting
+    device is the hub's own machine on the local socket, or an enrolled hub device the
+    owner has marked as a gateway"; refused "before it registers … anything" (§3:2).
+    An enrolled, unmarked device and a machine never enrolled are both refused."""
+    registry.enrol(_WATCH, now=_MOMENT)
+    before = registry.registrations()
+
+    for connecting in (_WATCH, "nSTRANGERCNTRL"):
+        verdict = registry.accept_naming(connecting, _PHONE, now=_MOMENT)
+        assert verdict.refusal is NamingRefusal.NOT_GATEWAY
+        assert not verdict.registered
+
+    assert registry.registrations() == before
+    assert registry.kind_of(_PHONE) is None
+
+
+def test_every_refused_naming_is_logged_under_one_event(registry: DeviceRegistry) -> None:
+    """ADR-0378 §3:5: "The hub logs each naming it refuses under one fixed event name,
+    with the connecting device, the name and why it was refused"."""
+    registry.enrol(_WATCH, now=_MOMENT)
+    with structlog.testing.capture_logs() as captured:
+        registry.accept_naming(_WATCH, _PHONE, now=_MOMENT)
+        registry.accept_naming(_GATEWAY, HUB_DEVICE, now=_MOMENT)
+        registry.accept_naming(_GATEWAY, _WATCH, now=_MOMENT)
+
+    refused = [entry for entry in captured if entry["event"] == "device_naming_refused"]
+    assert [(one["connecting"], one["device"], one["reason"]) for one in refused] == [
+        (_WATCH, _PHONE, "not_gateway"),
+        (_GATEWAY, HUB_DEVICE, "reserved"),
+        (_GATEWAY, _WATCH, "hub_device"),
+    ]
+
+
+def test_the_mark_is_given_only_to_a_live_enrolment_and_never_to_the_hub(
+    registry: DeviceRegistry,
+) -> None:
+    """ADR-0378 §2:3: "Only a hub device whose enrolment is live can be marked"; ``hub``
+    names without one (§12), so marking it is refused in a sentence too."""
+    registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
+    for device in (_PHONE, "nSTRANGERCNTRL", HUB_DEVICE, _HUB):
+        with pytest.raises(RosterActError):
+            registry.mark_gateway(device, now=_MOMENT)
+    registry.enrol(_WATCH, now=_MOMENT)
+    registry.revoke(_WATCH, now=_MOMENT)
+    with pytest.raises(RosterActError, match="no live enrolment"):
+        registry.mark_gateway(_WATCH, now=_LATER)
+    assert registry.gateways() == [
+        (_OTHER_GATEWAY, _MOMENT - timedelta(days=1)),
+        (_GATEWAY, _MOMENT - timedelta(days=1)),
+    ]
+
+
+def test_marking_twice_changes_nothing_and_the_hub_is_always_a_gateway(
+    registry: DeviceRegistry,
+) -> None:
+    """Reported rather than refused, as a role given twice is."""
+    assert not registry.mark_gateway(_GATEWAY, now=_LATER)
+    assert registry.is_gateway(HUB_DEVICE)
+    assert not registry.is_gateway(_HUB)
+
+
+def test_withdrawing_the_mark_refuses_later_namings_and_revokes_no_registration(
+    registry: DeviceRegistry,
+) -> None:
+    """ADR-0378 §2:4: "Withdrawing a mark refuses the device's later requests that carry
+    ``acting_for`` … It revokes no registration under the device, and none can be used
+    while the device is unmarked." Marking it again lets it use them."""
+    registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
+
+    assert registry.unmark_gateway(_GATEWAY, now=_LATER)
+    assert not registry.unmark_gateway(_GATEWAY, now=_LATER)
+
+    assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).refusal is (
+        NamingRefusal.NOT_GATEWAY
+    )
+    ((registration,), _) = registry.registrations()
+    assert registration.is_live
+    assert registry.mark_gateway(_GATEWAY, now=_LATER)
+    assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).accepted
+
+
+def test_the_hub_holds_no_mark_to_withdraw(registry: DeviceRegistry) -> None:
+    """``hub`` names by rule, so there is nothing to withdraw (ADR-0378 §2:1)."""
+    with pytest.raises(RosterActError, match="no mark"):
+        registry.unmark_gateway(HUB_DEVICE, now=_MOMENT)
+    assert registry.accept_naming(HUB_DEVICE, _PHONE, now=_MOMENT).accepted
+
+
+@pytest.mark.parametrize("act", ["revoke", "revoke_device", "rotate"])
+def test_the_mark_ends_with_its_enrolment(
+    registry: DeviceRegistry, store: EnrolmentStore, act: str
+) -> None:
+    """ADR-0378 §2:3: "Revoking its enrolment ends the mark, and a device enrolled again
+    is no gateway until the owner marks it again" — a rotation included, which revokes
+    the enrolment the mark was given under. The record keeps the ended mark, and a
+    restart reads it as ended."""
+    if act == "revoke":
+        registry.revoke(_GATEWAY, now=_MOMENT)
+        registry.enrol(_GATEWAY, now=_LATER)
+    elif act == "revoke_device":
+        registry.revoke_device(_GATEWAY, now=_MOMENT)
+        registry.enrol(_GATEWAY, now=_LATER)
+    else:
+        assert registry.enrol(_GATEWAY, now=_LATER).rotated
+
+    assert not registry.is_gateway(_GATEWAY)
+    assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).refusal is (
+        NamingRefusal.NOT_GATEWAY
+    )
+    assert _GATEWAY not in [device for device, _ in registry.gateways()]
+    assert _GATEWAY not in store.live_marks()
+    assert not DeviceRegistry(store, hub_identity=_HUB).is_gateway(_GATEWAY)
+
+
+def test_the_mark_survives_a_restart_and_its_withdrawal_too(tmp_path: Path) -> None:
+    """The mark is durable state the hub owns, read back into the live view."""
+    first = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    live = _marked(DeviceRegistry(first, hub_identity=_HUB))
+    live.unmark_gateway(_OTHER_GATEWAY, now=_LATER)
+    first.close()
+
+    second = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    try:
+        reopened = DeviceRegistry(second, hub_identity=_HUB)
+        assert reopened.is_gateway(_GATEWAY)
+        assert not reopened.is_gateway(_OTHER_GATEWAY)
+        assert reopened.accept_naming(_GATEWAY, _PHONE, now=_LATER).accepted
+    finally:
+        second.close()
 
 
 # --- what no gateway may name ------------------------------------------------------
@@ -175,12 +343,13 @@ def test_no_gateway_may_name_the_hubs_own_machine(registry: DeviceRegistry, name
 
 
 def test_a_hub_with_no_overlay_identity_still_refuses_hub(store: EnrolmentStore) -> None:
-    """``hub`` is the hub's machine "in every configuration" (§3:1)."""
+    """``hub`` is the hub's machine "in every configuration" (§3:1); with no remote
+    listener the only gateway is the hub's own machine, which names without a mark."""
     registry = DeviceRegistry(store, hub_identity=None)
-    assert registry.accept_naming(_GATEWAY, HUB_DEVICE, now=_MOMENT).refusal is (
+    assert registry.accept_naming(HUB_DEVICE, HUB_DEVICE, now=_MOMENT).refusal is (
         NamingRefusal.RESERVED
     )
-    assert registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT).accepted
+    assert registry.accept_naming(HUB_DEVICE, _PHONE, now=_MOMENT).accepted
 
 
 def test_the_hub_holds_every_role_by_rule_and_is_always_known(registry: DeviceRegistry) -> None:
@@ -189,16 +358,17 @@ def test_the_hub_holds_every_role_by_rule_and_is_always_known(registry: DeviceRe
     …" — by rule, with no row."""
     assert registry.roles_of(HUB_DEVICE) == EVERY_ROLE
     assert registry.is_known(HUB_DEVICE)
-    assert registry.roster() == ([], 0)
+    assert HUB_DEVICE not in [one.device_id for one in registry.roster()[0]]
 
 
 @pytest.mark.parametrize("name", [HUB_DEVICE, _HUB])
 def test_the_hubs_own_machine_is_never_enrolled(registry: DeviceRegistry, name: str) -> None:
     """ADR-0298 §3:4: "the hub refuses it, and its own overlay identity where it has
     one, as the identity of an enrolment" — before anything is minted."""
+    before = registry.enrolments()
     with pytest.raises(RosterActError, match="hub's own machine"):
         registry.enrol(name, now=_MOMENT)
-    assert registry.enrolments() == ([], 0)
+    assert registry.enrolments() == before
 
 
 @pytest.mark.parametrize(
@@ -312,9 +482,10 @@ def test_revoking_a_device_revokes_everything_that_admits_it_and_clears_its_role
     closed (ADR-0124 §8), and every gateway's naming of it is refused afterwards."""
     expelled: list[tuple[str, str]] = []
     registry.when_expelled(lambda identity, reason: expelled.append((identity, reason)))
-    registry.enrol(_PHONE, now=_MOMENT)
+    # Named while a browser device, then enrolled: its registrations stand on the record.
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
     registry.accept_naming(_OTHER_GATEWAY, _PHONE, now=_MOMENT)
+    registry.enrol(_PHONE, now=_MOMENT)
     registry.assign(_PHONE, DeviceRole.COMMANDS)
     registry.assign(_PHONE, DeviceRole.SPOKES)
 
@@ -327,9 +498,7 @@ def test_revoking_a_device_revokes_everything_that_admits_it_and_clears_its_role
     assert registry.roles_of(_PHONE) == frozenset()
     assert not registry.is_known(_PHONE)
     for gateway in (_GATEWAY, _OTHER_GATEWAY):
-        assert registry.accept_naming(gateway, _PHONE, now=_LATER).refusal is (
-            NamingRefusal.REVOKED
-        )
+        assert not registry.accept_naming(gateway, _PHONE, now=_LATER).accepted
 
 
 def test_a_device_re_enrolled_after_revocation_holds_no_role(registry: DeviceRegistry) -> None:
@@ -362,8 +531,8 @@ def test_revoking_the_last_admission_clears_roles_and_revoking_one_of_two_does_n
 
     Asserted on the record as well as the view, because the record is what a restart
     reads and the two must not disagree."""
-    registry.enrol(_PHONE, now=_MOMENT)
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
+    registry.enrol(_PHONE, now=_MOMENT)
     registry.assign(_PHONE, DeviceRole.COMMANDS)
 
     registry.revoke(_PHONE, now=_LATER)  # the enrolment alone; the registration admits it
@@ -380,14 +549,18 @@ def test_revoking_a_gateways_device_leaves_the_registrations_under_it(
 ) -> None:
     """ADR-0298 §4:13: "Revoking a gateway's device does not revoke the registrations
     of other devices under it; no connection can use them while the gateway is
-    revoked." """
-    registry.enrol(_GATEWAY, now=_MOMENT)
+    revoked." Its mark ends with its enrolment (ADR-0378 §2:3), so nothing it sends
+    could use them either."""
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
 
     registry.revoke_device(_GATEWAY, now=_LATER)
 
     assert registry.is_known(_PHONE)
-    assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).accepted
+    ((registration,), _) = registry.registrations()
+    assert registration.is_live
+    assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).refusal is (
+        NamingRefusal.NOT_GATEWAY
+    )
 
 
 # --- the bound -----------------------------------------------------------------------
@@ -404,7 +577,7 @@ def test_a_naming_beyond_the_bound_is_refused_and_registers_nothing(
     """ADR-0298 §4:7: "The hub bounds the live registrations under one gateway … and
     refuses a naming beyond it". A machine already registered is still accepted, the
     bound is per gateway, and a revoked registration frees its place."""
-    registry = DeviceRegistry(store, hub_identity=_HUB, max_registrations_per_gateway=2)
+    registry = _marked(DeviceRegistry(store, hub_identity=_HUB, max_registrations_per_gateway=2))
     registry.accept_naming(_GATEWAY, "nONE", now=_MOMENT)
     registry.accept_naming(_GATEWAY, "nTWO", now=_MOMENT)
 
@@ -423,7 +596,7 @@ def test_a_restore_is_held_to_the_bound_too(store: EnrolmentStore) -> None:
     """ADR-0298 §4:7 bounds the *live* registrations under one gateway, so the owner's
     restore cannot take a gateway past it either: refused in a sentence, with nothing
     changed."""
-    registry = DeviceRegistry(store, hub_identity=_HUB, max_registrations_per_gateway=1)
+    registry = _marked(DeviceRegistry(store, hub_identity=_HUB, max_registrations_per_gateway=1))
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
     registry.revoke_registration(_PHONE, gateway=_GATEWAY, now=_MOMENT)
     registry.accept_naming(_GATEWAY, _WATCH, now=_MOMENT)
@@ -439,9 +612,9 @@ def test_the_bound_counts_what_the_record_already_holds(tmp_path: Path) -> None:
     """The count is rebuilt from the record at start, so a restart is not a way past
     the bound."""
     first = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
-    DeviceRegistry(first, hub_identity=_HUB, max_registrations_per_gateway=1).accept_naming(
-        _GATEWAY, _PHONE, now=_MOMENT
-    )
+    _marked(
+        DeviceRegistry(first, hub_identity=_HUB, max_registrations_per_gateway=1)
+    ).accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
     first.close()
 
     second = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
@@ -475,7 +648,7 @@ def test_a_machine_nothing_admits_is_given_no_role(registry: DeviceRegistry) -> 
     with pytest.raises(RosterActError, match="not a device this hub admits"):
         registry.assign(_PHONE, DeviceRole.COMMANDS)
     assert registry.roles_of(_PHONE) == frozenset()
-    assert registry.roster() == ([], 0)
+    assert _PHONE not in [one.device_id for one in registry.roster()[0]]
 
 
 # --- the record ----------------------------------------------------------------------
@@ -484,7 +657,7 @@ def test_a_machine_nothing_admits_is_given_no_role(registry: DeviceRegistry) -> 
 def test_the_roster_survives_a_restart(tmp_path: Path) -> None:
     """The roster is durable state the hub owns, read back whole into the live view."""
     first = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
-    live = DeviceRegistry(first, hub_identity=_HUB)
+    live = _marked(DeviceRegistry(first, hub_identity=_HUB))
     live.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
     live.accept_naming(_GATEWAY, _WATCH, now=_MOMENT)
     live.assign(_PHONE, DeviceRole.COMMANDS)

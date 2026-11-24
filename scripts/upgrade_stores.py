@@ -2390,11 +2390,13 @@ def _devices(directory: Path) -> EnrolmentStore:
 async def _write_devices(directory: Path, moment: Moment) -> None:
     store = _devices(directory)
     try:
-        store.enrol("phone.tailnet.example", verifier="v" * 64, now=moment.ago(days=3))
+        phone, _ = store.enrol("phone.tailnet.example", verifier="v" * 64, now=moment.ago(days=3))
         store.enrol("laptop.tailnet.example", verifier="w" * 64, now=moment.ago(days=2))
         store.revoke("laptop.tailnet.example", now=moment.ago(days=1))
         store.register("phone-gateway", gateway="phone.tailnet.example", now=moment.ago(hours=5))
         store.assign_role("phone.tailnet.example", DeviceRole.SPOKES)
+        # ADR-0378 §2: the phone is marked as a gateway, so a later head reads a mark back.
+        store.mark_gateway(phone.enrolment_id, now=moment.ago(hours=6))
     finally:
         store.close()
 
@@ -2409,6 +2411,13 @@ async def _read_devices(directory: Path) -> Records:
         records.update(_keyed("enrolment", enrolments, _field("enrolment_id")))
         records.update(_keyed("device", devices, _field("device_id")))
         records.update(_keyed("registration", registrations, _field("registration_id")))
+        # One record per standing gateway mark (ADR-0378 §2), so a base from before the
+        # mark, which holds none, reads back no record the head would call unwritten.
+        marks = [
+            {"device": device, "enrolment_id": enrolment_id, "marked_at": marked_at}
+            for device, (enrolment_id, marked_at) in sorted(store.live_marks().items())
+        ]
+        records.update(_keyed("gateway_mark", marks, _field("device")))
         records["verifiers"] = to_json(store.live_verifiers())
         return records
     finally:

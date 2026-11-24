@@ -117,6 +117,30 @@ def test_a_requesting_device_is_frozen_and_its_id_is_an_identifier() -> None:
         RequestingDevice(device_id="   ")
 
 
+def test_a_requesting_device_came_through_itself_unless_a_connecting_device_is_given() -> None:
+    """ADR-0378 §10: the connecting device rides on the requesting device. A request
+    naming no device came through the device it is, which is the default; a named one
+    carries the gateway's device, so it reads as named."""
+    named = RequestingDevice(device_id="phone.tailnet", connecting_device_id=HUB_DEVICE_ID)
+
+    assert _PHONE.connecting_device_id == "phone.tailnet"
+    assert not _PHONE.is_named
+    assert HUB_REQUESTING_DEVICE.connecting_device_id == HUB_DEVICE_ID
+    assert not HUB_REQUESTING_DEVICE.is_named
+    assert named.is_named
+    assert named.connecting_device_id == HUB_DEVICE_ID
+    with pytest.raises(ValidationError):
+        RequestingDevice(device_id="phone.tailnet", connecting_device_id="   ")
+
+
+def test_no_connecting_device_but_the_hubs_own_carries_the_hub() -> None:
+    """ADR-0298 §3:3: the hub's own machine reaches the hub through its local socket and
+    nothing else, so a value holding ``hub`` as a device another device carried is
+    refused as it is built."""
+    with pytest.raises(ValidationError, match="local socket"):
+        RequestingDevice(device_id=HUB_DEVICE_ID, connecting_device_id="laptop.tailnet")
+
+
 def test_a_device_refusal_carries_one_of_three_reasons() -> None:
     """§6:2: the reason is a public attribute, coerced from its string value."""
     assert {member.value for member in DeviceRefusal} == {

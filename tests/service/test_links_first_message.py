@@ -1,4 +1,10 @@
-"""A device's first hub chat message, and the link its admission made (#3656, ADR-0373 §6).
+"""A device's first hub chat message, and the link the owner's act made (#3656, ADR-0373 §6).
+
+**ADR-0378 §5 has no naming make a link.** A browser device a gateway registers is
+linked by the owner's act that gives it a roster role, while it holds one (§5:2), so a
+browser device that is only an end of a conversation writes as an unidentified sender
+until the owner gives it a role, and the cases below give the role where they read the
+owner's message.
 
 #3656 asked whether a browser device a gateway names for the first time, on a request
 that is itself a hub chat message, has its message's sender read before the link its
@@ -47,12 +53,14 @@ from ai_assistant.core.types import (
     Account,
     ChatDevice,
     DeviceAccess,
+    DeviceRole,
     InputSender,
     LinkAct,
     LinkActHow,
     MessageAuthor,
     UserMessage,
 )
+from ai_assistant.orchestration.work_facts import NO_LINK
 from ai_assistant.service.admin import AdminListener
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
 from ai_assistant.service.links import HUB_CHAT, DeviceLinks
@@ -186,8 +194,8 @@ async def test_a_first_naming_that_is_a_message_records_nothing_and_reads_no_sen
     hub: _Hub,
 ) -> None:
     """#3656's scenario: a gateway names a browser device for the first time on a
-    ``write_message``. The naming registers the device (ADR-0298 §4:2) and its link is
-    written (ADR-0373 §6:2), but the device is an end of no conversation, so the message
+    ``write_message``. The naming registers the device (ADR-0298 §4:2) and links nothing
+    (ADR-0378 §5:1), and the device is an end of no conversation, so the message
     is refused before anything is recorded (§5 "Writing", §6:1) — as a device holding no
     role, which it does not until the owner gives it one (§6:2) — with no message, no work,
     and no sender read for it. The hub could not have made it an end first: a set naming a
@@ -205,6 +213,8 @@ async def test_a_first_naming_that_is_a_message_records_nothing_and_reads_no_sen
     assert await frozen(hub.harness) == []
     registrations, _ = hub.registry.registrations()
     assert [(one.device_id, one.gateway) for one in registrations] == [(_BROWSER, HUB_DEVICE_ID)]
+    assert await hub.link_of(_BROWSER) is None
+    await hub.act("assign", identity=_BROWSER, role=DeviceRole.COMMANDS.value)
     link = await hub.link_of(_BROWSER)
     assert link is not None
     assert (link.person_id, link.act) == (OWNER_PERSON_ID, _DEVICE_ACT)
@@ -214,21 +224,30 @@ async def test_a_newly_named_devices_first_recorded_message_is_the_owners_at_the
     hub: _Hub,
 ) -> None:
     """The first message a newly named browser device can write follows the owner's act
-    naming it in the conversation, which its registration preceded: it is the owner's,
-    at the most the hub chat's kind declares (ADR-0366 §4:1, §5:6)."""
+    naming it in the conversation, which its registration preceded. Its sender is no one
+    until the owner gives it a role (ADR-0378 §5:2, "a browser device that is only such
+    an end writes as an unidentified sender"); then the owner's, at the most the hub
+    chat's kind declares (ADR-0366 §4:1, §5:6)."""
     conversation = (await hub.client.start_conversation()).id
     with acting_for(_BROWSER), pytest.raises(DeviceRefusedError):
         await hub.client.write_message(conversation, message=_message(_BROWSER, 1))
     await hub.name_in(conversation, HUB_DEVICE_ID, _BROWSER)
 
-    async def write() -> None:
-        with acting_for(_BROWSER):
-            await hub.client.write_message(conversation, message=_message(_BROWSER, 2))
+    def write(number: int) -> Any:
+        async def written_by_the_browser() -> None:
+            with acting_for(_BROWSER):
+                await hub.client.write_message(conversation, message=_message(_BROWSER, number))
 
-    episode = await hub.work_of(write)
+        return written_by_the_browser
 
-    assert await hub.recorded(conversation) == [_BROWSER]
-    assert processing(episode).trigger.senders == (_OWNER_AT_MOST,)
+    unlinked = await hub.work_of(write(2))
+    await hub.act("assign", identity=_BROWSER, role=DeviceRole.COMMANDS.value)
+    await hub.links.settled()
+    linked = await hub.work_of(write(3))
+
+    assert await hub.recorded(conversation) == [_BROWSER, _BROWSER]
+    assert processing(unlinked).trigger.senders == (NO_LINK,)
+    assert processing(linked).trigger.senders == (_OWNER_AT_MOST,)
 
 
 async def test_an_enrolled_device_writes_nothing_until_the_owner_names_it(hub: _Hub) -> None:
@@ -265,12 +284,14 @@ async def test_a_restored_registration_writes_nothing_until_the_owner_names_it_a
 ) -> None:
     """A restored registration (ADR-0298 §4:9): the revocation left the device admitted
     by nothing, so it removed the device from every set first (§4:10). The restore
-    re-admits it as an end of no conversation: its first request after the restore is
-    refused, and once the owner names it again its message is the owner's, by a new link
-    made after the restore (ADR-0366 §3)."""
+    re-admits it as an end of no conversation, holding no role: its first request after
+    the restore is refused, and once the owner names it again and gives it a role again
+    its message is the owner's, by a new link made after the restore (ADR-0366 §3,
+    ADR-0378 §5:2)."""
     conversation = (await hub.client.start_conversation()).id
     with acting_for(_BROWSER), pytest.raises(DeviceRefusedError):
         await hub.client.beliefs()
+    await hub.act("assign", identity=_BROWSER, role=DeviceRole.COMMANDS.value)
     await hub.name_in(conversation, HUB_DEVICE_ID, _BROWSER)
     before = await hub.link_of(_BROWSER)
     revoked = await hub.act("revoke", identity=_BROWSER, gateway=HUB_DEVICE_ID)
@@ -279,6 +300,7 @@ async def test_a_restored_registration_writes_nothing_until_the_owner_names_it_a
         await hub.client.write_message(conversation, message=_message(_BROWSER, 1))
     assert await hub.recorded(conversation) == []
     await hub.name_in(conversation, HUB_DEVICE_ID, _BROWSER)
+    await hub.act("assign", identity=_BROWSER, role=DeviceRole.COMMANDS.value)
 
     async def write() -> None:
         with acting_for(_BROWSER):
@@ -302,11 +324,9 @@ async def test_a_set_naming_an_unadmitted_device_lets_its_first_naming_be_a_mess
     device the record does not admit, which the wire's §4:12 check never writes — written
     here past that check, as a set from before it bound (ADR-0298 §9:2) would be.
 
-    The message is the owner's at the kind's most. **What orders it is the event loop,
-    not a guarantee:** the naming schedules the link's write in its own synchronous step,
-    before the request is dispatched, and the chat's reader reads the sender only after
-    its start wait; over a store that answers, the write has run by then. A store that
-    stalls the write past the start wait is the case nothing here orders."""
+    The message is an unidentified sender's, at none: the naming links nothing
+    (ADR-0378 §5:1), so no write of a link races the chat's read of its sender any
+    more, and only the owner's act giving the device a role links it (§5:2)."""
     conversation = (await hub.client.start_conversation()).id
     held = [
         ChatDevice(device_id=one, access=DeviceAccess.READ_WRITE)
@@ -324,4 +344,5 @@ async def test_a_set_naming_an_unadmitted_device_lets_its_first_naming_be_a_mess
     assert await hub.recorded(conversation) == [_BROWSER]
     registrations, _ = hub.registry.registrations()
     assert [(one.device_id, one.gateway) for one in registrations] == [(_BROWSER, HUB_DEVICE_ID)]
-    assert processing(episode).trigger.senders == (_OWNER_AT_MOST,)
+    assert processing(episode).trigger.senders == (NO_LINK,)
+    assert await hub.link_of(_BROWSER) is None

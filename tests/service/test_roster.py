@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import pytest
+import structlog
 
 from ai_assistant.core.errors import AssistantError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import HUB_DEVICE_ID, HUB_REQUESTING_DEVICE, DeviceRole
@@ -138,21 +139,78 @@ def test_an_enrolled_device_acts_with_its_own_roles(
     assert after.roles == frozenset({DeviceRole.SPOKES})
 
 
-def test_a_remote_gateways_naming_registers_the_browser_under_that_gateway(
+def test_a_marked_remote_gateways_naming_registers_the_browser_under_that_gateway(
     roster: HubRoster, registry: DeviceRegistry
 ) -> None:
     """ADR-0298 §4:4: the gateway of a registration is the connecting device — here an
-    enrolled hub device — and the request acts as the browser, not as the gateway (§8:1).
-    """
+    enrolled hub device the owner marked (ADR-0378 §2:1) — and the request acts as the
+    browser, not as the gateway (§8:1), carrying the gateway as the device it came
+    through (ADR-0378 §10)."""
     registry.enrol(_GATEWAY, now=_MOMENT)
     registry.assign(_GATEWAY, DeviceRole.COMMANDS)
+    registry.mark_gateway(_GATEWAY, now=_MOMENT)
 
     device = roster.requesting_device(connecting=_GATEWAY, acting_for=_PHONE)
 
     assert device.device_id == _PHONE
     assert device.roles == frozenset()
+    assert device.connecting_device_id == _GATEWAY
+    assert device.is_named
     ((registration,), _) = registry.registrations()
     assert registration.gateway == _GATEWAY
+
+
+def test_an_unmarked_enrolled_device_may_name_no_one(
+    roster: HubRoster, registry: DeviceRegistry
+) -> None:
+    """ADR-0378 §2:1: refused with the reason that the device named is not accepted,
+    "before it registers or dispatches anything", and the sentence says what the owner
+    runs. Its own requests are served as before (§2:6: the mark is no role)."""
+    registry.enrol(_GATEWAY, now=_MOMENT)
+    registry.assign(_GATEWAY, DeviceRole.COMMANDS)
+
+    with structlog.testing.capture_logs() as captured:
+        refusal = _refused(roster, connecting=_GATEWAY, acting_for=_PHONE)
+
+    assert refusal.reason is DeviceRefusal.NOT_ACCEPTED
+    assert "ai-assistant-device mark-gateway" in str(refusal)
+    assert registry.registrations()[1] == 0
+    assert registry.kind_of(_PHONE) is None
+    assert [entry["reason"] for entry in captured if entry["event"] == "device_naming_refused"] == [
+        "not_gateway"
+    ]
+    own = roster.requesting_device(connecting=_GATEWAY, acting_for=None)
+    assert own.roles == frozenset({DeviceRole.COMMANDS})
+    assert own.connecting_device_id == _GATEWAY
+    assert not own.is_named
+
+
+def test_no_naming_reaches_an_enrolled_device_even_from_the_hub(
+    roster: HubRoster, registry: DeviceRegistry
+) -> None:
+    """ADR-0378 §3:1: a name the hub knows as a hub device is refused as not accepted,
+    from every gateway, ``hub`` included, so no request acts with an enrolled device's
+    roles but its own connection's."""
+    registry.enrol(_GATEWAY, now=_MOMENT)
+    registry.assign(_GATEWAY, DeviceRole.COMMANDS)
+
+    refusal = _refused(roster, connecting=HUB_DEVICE_ID, acting_for=_GATEWAY)
+
+    assert refusal.reason is DeviceRefusal.NOT_ACCEPTED
+    assert "enrolled at this hub" in str(refusal)
+    assert registry.registrations()[1] == 0
+
+
+def test_a_request_names_its_connecting_device_beside_its_requesting_device(
+    roster: HubRoster,
+) -> None:
+    """ADR-0378 §10: the engine learns the connecting device of each request — ``hub``
+    on the local socket, whether or not the request names a browser device."""
+    named = roster.requesting_device(connecting=HUB_DEVICE_ID, acting_for=_PHONE)
+    own = roster.requesting_device(connecting=HUB_DEVICE_ID, acting_for=None)
+
+    assert (named.device_id, named.connecting_device_id) == (_PHONE, HUB_DEVICE_ID)
+    assert (own.device_id, own.connecting_device_id) == (HUB_DEVICE_ID, HUB_DEVICE_ID)
 
 
 # --- refusals: §6:2's first reason ------------------------------------------------------
@@ -251,14 +309,27 @@ def test_a_device_being_revoked_is_refused_and_known_as_no_device(
     registry.enrol(_GATEWAY, now=_MOMENT)
     roster.requesting_device(connecting=HUB_DEVICE_ID, acting_for=_PHONE)
 
-    with registry.withheld(_PHONE), registry.withheld(_GATEWAY):
+    with (
+        registry.withheld(_PHONE),
+        registry.withheld(_GATEWAY),
+        structlog.testing.capture_logs() as captured,
+    ):
         relayed = _refused(roster, connecting=HUB_DEVICE_ID, acting_for=_PHONE)
         own = _refused(roster, connecting=_GATEWAY, acting_for=None)
         known = (roster.knows(_PHONE), roster.knows(_GATEWAY))
 
+    # The naming is logged as refused (ADR-0378 §3:5); the device's own request is none.
+    refused = [entry for entry in captured if entry["event"] == "device_naming_refused"]
+    assert [(one["connecting"], one["device"], one["reason"]) for one in refused] == [
+        (HUB_DEVICE_ID, _PHONE, "withheld")
+    ]
+
     assert relayed.reason is DeviceRefusal.NOT_ACCEPTED
     assert own.reason is DeviceRefusal.NOT_ACCEPTED
     assert known == (False, False)
+    assert roster.requesting_device(connecting=HUB_DEVICE_ID, acting_for=_PHONE).device_id == (
+        _PHONE
+    )
     assert roster.knows(_PHONE), "released once the block ends"
 
 
