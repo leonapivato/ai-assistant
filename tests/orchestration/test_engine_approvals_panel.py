@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Final
 
 from approvals_panel_contract import (
     APPROVALS_AT,
+    BOOK,
     HUB_CHAT,
     hold_asking_episode,
     hold_request,
@@ -31,11 +32,16 @@ from ai_assistant.core.types import (
     ApprovalPanelTapAnswer,
     ApprovalRequestState,
     ChannelContext,
+    DefaultGrant,
+    GrantHow,
+    LineParts,
+    PermissionLineKind,
     RecordedCall,
     RecordedChannelTrigger,
     RecordedTextInput,
     RequestingDevice,
     Sureness,
+    ToolDefinition,
     WholeTextReply,
 )
 from ai_assistant.orchestration.approval_calls import CardFacts
@@ -45,6 +51,7 @@ from ai_assistant.testing import (
     FakeAssistantEngine,
     FakeIdentityStore,
     FakeMemoryStore,
+    FakePermissionLineStore,
     FakePlanStore,
 )
 from ai_assistant.testing.parties import OWNERS_WORDS
@@ -55,7 +62,10 @@ if TYPE_CHECKING:
 
 
 def _engine(
-    woken: list[None], *, identities: FakeIdentityStore | None = None
+    woken: list[None],
+    *,
+    identities: FakeIdentityStore | None = None,
+    lines: FakePermissionLineStore | None = None,
 ) -> tuple[Engine, FakePlanStore]:
     plans = FakePlanStore(now=lambda: APPROVALS_AT)
     engine = _wire(
@@ -63,6 +73,7 @@ def _engine(
         memory=FakeMemoryStore(now=lambda: APPROVALS_AT),
         now=lambda: APPROVALS_AT,
         identities=identities,
+        lines=lines,
     )
     # The sensor's wake, observed: this subject wires no Approvals channel, so the
     # engine's own would wake nothing.
@@ -140,17 +151,24 @@ async def test_the_fake_counts_the_wake_where_the_engine_runs_it() -> None:
 _PHONE: Final = Account(kind=CHAT_ACCOUNT_KIND, identifier="phone")
 
 
-async def _tapped_from(
-    device: str, identities: FakeIdentityStore | None, *, through: str | None = None
+async def _tapped_from(  # noqa: PLR0913 — one knob per part of the tap a case varies
+    device: str,
+    identities: FakeIdentityStore | None,
+    *,
+    through: str | None = None,
+    tool: ToolDefinition = BOOK,
+    lines: FakePermissionLineStore | None = None,
+    woken: list[None] | None = None,
 ) -> tuple[ApprovalPanelTapAnswer, ApprovalRequest]:
     """A tap on the panel from ``device``, as the wire server serves it; what it recorded.
 
     ``through`` is the connecting device where a gateway named ``device`` (ADR-0378 §4:7).
+    The request is for ``tool``'s call, weighed against ``lines`` (ADR-0377 §3:2).
     """
-    engine, plans = _engine([], identities=identities)
+    engine, plans = _engine([] if woken is None else woken, identities=identities, lines=lines)
     await engine.start()
     try:
-        await hold_request(plans, "approval:1")
+        await hold_request(plans, "approval:1", tool=tool)
         requesting = RequestingDevice(device_id=device, connecting_device_id=through or device)
         with serving_device(requesting):
             tapped = await engine.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
@@ -162,7 +180,8 @@ async def _tapped_from(
 
 async def test_a_tap_records_the_requesting_devices_link_at_its_level() -> None:
     """§2:4, §4:1: the hub chat's account for the requesting device, read at the façade,
-    as a message written from it is, its lowering included; still answered (§1:4)."""
+    as a message written from it is, its lowering included; at weak it answers a call that
+    needs weak (§3:1, §3:2)."""
     identities = FakeIdentityStore(configured=(_PHONE,))
     link = await identities.find_link(_PHONE)
     assert link is not None
@@ -176,28 +195,42 @@ async def test_a_tap_records_the_requesting_devices_link_at_its_level() -> None:
     assert (held.answer.person, held.answer.level) == (OWNER_PERSON_ID, Sureness.WEAK)
 
 
-async def test_a_tap_from_a_device_no_link_ties_records_no_one_at_none() -> None:
-    """§2:1: an account no link ties is no one's, at none; today's test still answers."""
+async def test_a_tap_from_a_device_no_link_ties_is_anyone_elses() -> None:
+    """§2:1, §3:5: an account no link ties is no one's, at none, so its tap is dealt with
+    as one on a request that is not the person's: nothing changes, nothing is shown."""
     answer, held = await _tapped_from("stranger", FakeIdentityStore(configured=(_PHONE,)))
 
-    assert answer is ApprovalPanelTapAnswer.ANSWERED
-    assert held.answer is not None
-    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
+    assert answer is ApprovalPanelTapAnswer.UNKNOWN
+    assert held.state is ApprovalRequestState.PENDING
+    assert held.answer is None
+
+
+async def test_a_tap_from_a_device_whose_link_stands_at_none_is_anyone_elses() -> None:
+    """§3:5, ADR-0368 §9:4: at none the tapper is unidentified, whoever the link names."""
+    identities = FakeIdentityStore(configured=(_PHONE,))
+    link = await identities.find_link(_PHONE)
+    assert link is not None
+    await identities.lower(link.id, Sureness.NONE, by=OWNER_PERSON_ID)
+
+    answer, held = await _tapped_from("phone", identities)
+
+    assert answer is ApprovalPanelTapAnswer.UNKNOWN
+    assert held.answer is None
 
 
 async def test_where_the_links_cannot_be_read_the_hubs_machine_is_the_owners() -> None:
     """ADR-0374 §2:2, §3: no store wired; the hub's own machine is the owner's at the hub
-    chat's most, and any other device is no one's, at none."""
+    chat's most, and answers; any other device is no one's, at none, and changes nothing."""
     _, from_hub = await _tapped_from("hub", None)
-    _, from_phone = await _tapped_from("phone", None)
+    phone, from_phone = await _tapped_from("phone", None)
 
     assert from_hub.answer is not None
-    assert from_phone.answer is not None
     assert (from_hub.answer.person, from_hub.answer.level) == (
         OWNER_PERSON_ID,
         most_sureness(CHAT_ACCOUNT_KIND),
     )
-    assert (from_phone.answer.person, from_phone.answer.level) == (None, Sureness.NONE)
+    assert phone is ApprovalPanelTapAnswer.UNKNOWN
+    assert from_phone.answer is None
 
 
 #: A gateway the owner marked, linked to the owner as the phone is.
@@ -222,14 +255,15 @@ async def test_a_tap_through_a_gateway_is_read_from_both_devices() -> None:
     assert (alone.answer.person, alone.answer.level) == (OWNER_PERSON_ID, Sureness.NORMAL)
 
 
-async def test_a_tap_through_a_gateway_no_link_ties_records_no_one_at_none() -> None:
-    """ADR-0378 §4:7: where either device has no standing link, no identified person."""
-    _, held = await _tapped_from(
+async def test_a_tap_through_a_gateway_no_link_ties_is_anyone_elses() -> None:
+    """ADR-0378 §4:7: where either device has no standing link, no identified person, so
+    the tap changes nothing (ADR-0377 §3:5)."""
+    answer, held = await _tapped_from(
         "phone", FakeIdentityStore(configured=(_PHONE,)), through="gateway-1"
     )
 
-    assert held.answer is not None
-    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
+    assert answer is ApprovalPanelTapAnswer.UNKNOWN
+    assert held.answer is None
 
 
 async def test_the_fake_reads_a_tap_through_a_gateway_as_the_engine_does() -> None:
@@ -241,11 +275,11 @@ async def test_the_fake_reads_a_tap_through_a_gateway_as_the_engine_does() -> No
     await hold_request(fake.plan_store, "approval:1")
 
     with serving_device(RequestingDevice(device_id="phone", connecting_device_id="gateway-1")):
-        await fake.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
+        tapped = await fake.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
 
+    assert tapped.answer is ApprovalPanelTapAnswer.UNKNOWN
     (held,) = await fake.plan_store.approval_requests(["approval:1"])
-    assert held.answer is not None
-    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
+    assert held.answer is None
 
 
 async def test_the_fake_reads_the_tapper_as_the_engine_does() -> None:
@@ -263,6 +297,100 @@ async def test_the_fake_reads_the_tapper_as_the_engine_does() -> None:
     assert held.answer is not None
     assert held.answer.person == OWNER_PERSON_ID
     assert held.answer.level is not None
+
+
+# --- a tap answers only at the level its call needs (ADR-0377 §3) ---
+
+#: :data:`BOOK`, declared with a default line whose bar is normal, as what leaves the hub
+#: is (#3678).
+_BOOK_AT_NORMAL: Final = ToolDefinition.model_validate(
+    {
+        **BOOK.model_dump(),
+        "default_grant": DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.NORMAL).model_dump(),
+    }
+)
+
+
+async def _phone_at(level: Sureness) -> FakeIdentityStore:
+    identities = FakeIdentityStore(configured=(_PHONE,))
+    link = await identities.find_link(_PHONE)
+    assert link is not None
+    await identities.lower(link.id, level, by=OWNER_PERSON_ID)
+    return identities
+
+
+async def test_a_tap_below_its_calls_level_answers_nothing_and_wakes_nothing() -> None:
+    """§3:1 to §3:4: the owner's phone at weak, a call that needs normal."""
+    woken: list[None] = []
+    answer, held = await _tapped_from(
+        "phone", await _phone_at(Sureness.WEAK), tool=_BOOK_AT_NORMAL, woken=woken
+    )
+
+    assert answer is ApprovalPanelTapAnswer.NOT_ANSWERED
+    assert held.state is ApprovalRequestState.PENDING
+    assert held.answer is None
+    assert woken == []
+
+
+async def test_a_tap_at_its_calls_level_answers_it_as_today() -> None:
+    """§3:1, #3678: the owner at normal answers a call that needs normal."""
+    answer, held = await _tapped_from(
+        "phone", FakeIdentityStore(configured=(_PHONE,)), tool=_BOOK_AT_NORMAL
+    )
+
+    assert answer is ApprovalPanelTapAnswer.ANSWERED
+    assert held.state is ApprovalRequestState.APPROVED
+
+
+async def _owners_grant(lines: FakePermissionLineStore, bar: Sureness) -> None:
+    await lines.record_making(
+        LineParts(
+            kind=PermissionLineKind.GRANT,
+            who=OWNER_PERSON_ID,
+            action=str(BOOK.capability),
+            how=GrantHow.ALLOWED,
+            bar=bar,
+        ),
+        by=OWNER_PERSON_ID,
+    )
+
+
+async def test_the_level_is_read_from_the_lines_the_engine_holds() -> None:
+    """§3:2: the owner's grant at strong, the only line covering the call, puts it past the
+    hub's own machine at normal; the line store is the engine's own."""
+    lines = FakePermissionLineStore(now=lambda: APPROVALS_AT)
+    await _owners_grant(lines, Sureness.STRONG)
+
+    answer, held = await _tapped_from("hub", None, lines=lines)
+
+    assert answer is ApprovalPanelTapAnswer.NOT_ANSWERED
+    assert held.answer is None
+
+
+async def test_a_tap_whose_lines_cannot_be_read_answers_nothing() -> None:
+    """§3:2 cannot be read: the closed direction, as below the level."""
+    lines = FakePermissionLineStore(now=lambda: APPROVALS_AT)
+    lines.fail_next()
+
+    answer, held = await _tapped_from("hub", None, lines=lines)
+
+    assert answer is ApprovalPanelTapAnswer.NOT_ANSWERED
+    assert held.answer is None
+
+
+async def test_the_fake_weighs_a_tap_against_its_lines_as_the_engine_does() -> None:
+    """The canonical fake reads :attr:`lines` as the engine reads its line store."""
+    fake = FakeAssistantEngine()
+    fake.approval_clock = lambda: APPROVALS_AT
+    fake.plan_store = FakePlanStore(now=lambda: APPROVALS_AT)
+    fake.lines = FakePermissionLineStore(now=lambda: APPROVALS_AT)
+    await _owners_grant(fake.lines, Sureness.STRONG)
+    await hold_request(fake.plan_store, "approval:1")
+
+    tapped = await fake.tap_approval("approval:1", choice=ApprovalChoice.APPROVE)
+
+    assert tapped.answer is ApprovalPanelTapAnswer.NOT_ANSWERED
+    assert fake.approvals_woken == 0
 
 
 # --- the card's facts (§2:11) ---

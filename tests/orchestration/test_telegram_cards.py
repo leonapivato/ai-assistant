@@ -31,9 +31,13 @@ from ai_assistant.core.types import (
     CapabilityResult,
     CostBasis,
     DataTier,
+    DefaultGrant,
     DeliveryStatus,
+    GrantHow,
     Idempotency,
+    LineParts,
     PermissionDecision,
+    PermissionLineKind,
     PermissionOutcome,
     PermissionRuling,
     RequestedCall,
@@ -62,12 +66,14 @@ from ai_assistant.orchestration.telegram import (
     APPROVE_LABEL,
     CARD_TOO_LONG_LINE,
     DENY_LABEL,
+    TAP_NOT_ANSWERED_LINE,
     TelegramCards,
     line_channel,
 )
 from ai_assistant.testing import (
     FakeIdentityStore,
     FakeMemoryStore,
+    FakePermissionLineStore,
     FakePlanStore,
     FakeTelegramBotClient,
     FakeTelegramIntakeRecord,
@@ -75,7 +81,7 @@ from ai_assistant.testing import (
 from ai_assistant.testing.telegram import EDIT_MESSAGE_TEXT
 
 if TYPE_CHECKING:
-    from ai_assistant.core.protocols import IdentityStore
+    from ai_assistant.core.protocols import IdentityStore, PermissionLineStore
     from ai_assistant.core.types import FrozenJson
 
 pytestmark = pytest.mark.anyio
@@ -133,6 +139,7 @@ class _Rig:
         plans: FakePlanStore | None = None,
         memory: FakeMemoryStore | None = None,
         identities: IdentityStore | None | Literal["owners"] = "owners",
+        lines: PermissionLineStore | None = None,
     ):
         self.clock = _Clock()
         self.fake = FakeTelegramBotClient(chat_id=CHAT, first_message_id=500)
@@ -144,6 +151,8 @@ class _Rig:
         self.identities = (
             FakeIdentityStore(configured=(_LINE_ACCOUNT,)) if identities == "owners" else identities
         )
+        # ADR-0377 §3:2: the lines a tap's level is read against; none made by default.
+        self.lines = lines
         self.woken = 0
         self.rests: list[float] = []
         self.cards = self.over(self.fake)
@@ -163,6 +172,7 @@ class _Rig:
             identities=self.identities,
             person=person,
             now=self.clock,
+            lines=self.lines,
             sleep=self._rest,
         )
         cards.wake_with(self._wake)
@@ -175,9 +185,14 @@ class _Rig:
         self.rests.append(seconds)
 
     async def ask(
-        self, *, date: str = "2026-11-02", read_outside: bool = False
+        self,
+        *,
+        date: str = "2026-11-02",
+        read_outside: bool = False,
+        tool: ToolDefinition = _BOOK,
+        person: str = OWNER_PERSON_ID,
     ) -> tuple[ToolResult, ApprovalRequest]:
-        """One ``request_approval`` call, its card posted on the line."""
+        """One ``request_approval`` call for ``tool``, ``person``'s, its card posted."""
         n = next(self._asked)
         arguments: dict[str, FrozenJson] = {
             "call": {"tool": "book", "arguments": {"date": date}},
@@ -201,10 +216,10 @@ class _Rig:
             claimed_at=self.clock(),
         )
         asker = ApprovalAsker(
-            person=OWNER_PERSON_ID,
+            person=person,
             activation_id="act-ask",
             round_id="round:ask",
-            requested={f"decision:{n}": RequestedCall(tool=_BOOK, values={"date": date})},
+            requested={f"decision:{n}": RequestedCall(tool=tool, values={"date": date})},
             read_outside=read_outside,
         )
         with asking(asker):
@@ -215,12 +230,10 @@ class _Rig:
                 deliberate_repeat=False,
             )
         assert isinstance(answer, ToolResult)
-        return answer, (await self.requests())[-1]
+        return answer, (await self.requests(person))[-1]
 
-    async def requests(self) -> tuple[ApprovalRequest, ...]:
-        return await self.plans.person_approval_requests(
-            OWNER_PERSON_ID, tuple(ApprovalRequestState)
-        )
+    async def requests(self, person: str = OWNER_PERSON_ID) -> tuple[ApprovalRequest, ...]:
+        return await self.plans.person_approval_requests(person, tuple(ApprovalRequestState))
 
     async def request(self, request_id: str) -> ApprovalRequest:
         (one,) = await self.plans.approval_requests([request_id])
@@ -397,60 +410,207 @@ async def _lowered(store: FakeIdentityStore, level: Sureness) -> None:
     await store.lower(link.id, level, by=OWNER_PERSON_ID)
 
 
-@pytest.mark.parametrize("level", [Sureness.WEAK, Sureness.NONE], ids=["weak", "none"])
-async def test_a_tap_records_its_link_at_the_level_it_now_stands_at(level: Sureness) -> None:
-    """§2:1, §4:1: read as a message by the account now would be, lowering included.
-
-    Today's test still carries the tap out (§1:4): the level is recorded, and decides
-    nothing yet.
-    """
+async def test_a_tap_records_its_link_at_the_level_it_now_stands_at() -> None:
+    """§2:1, §4:1: read as a message by the account now would be, lowering included; at
+    weak it answers a card whose call needs weak (§3:1, §3:2)."""
     store = FakeIdentityStore(configured=(_LINE_ACCOUNT,))
     rig = _Rig(identities=store)
     _, request = await rig.ask()
-    await _lowered(store, level)
+    await _lowered(store, Sureness.WEAK)
 
     await rig.tapped(rig.tap(request))
 
     held = await rig.request(str(request.id))
     assert held.state is ApprovalRequestState.APPROVED
     assert held.answer is not None
-    assert (held.answer.person, held.answer.level) == (OWNER_PERSON_ID, level)
+    assert (held.answer.person, held.answer.level) == (OWNER_PERSON_ID, Sureness.WEAK)
     assert rig.fake.answered == (("callback-1", "Approved."),)
 
 
-async def test_a_tap_by_an_account_no_link_ties_records_no_one_at_none() -> None:
-    """§2:1, ADR-0366 §4:1, §5:6: no link, no person, at none; still carried out today."""
+async def _changes_nothing(rig: _Rig, request: ApprovalRequest, update_id: int) -> None:
+    """ADR-0362 §4:4: no answer went, nothing was marked, edited, recorded or woken."""
+    assert rig.fake.answered == ()
+    assert await rig.request(str(request.id)) == request
+    assert rig.edits() == 0
+    assert rig.woken == 0
+    assert await rig.intake.recorded([update_id]) == {}, "recorded nowhere (ADR-0323 §5:2)"
+
+
+@pytest.mark.parametrize("approve", [True, False], ids=["approve", "deny"])
+async def test_a_tap_whose_link_stands_at_none_is_an_unidentified_senders_and_dealt_with_so(
+    approve: bool,
+) -> None:
+    """ADR-0377 §3:5, ADR-0368 §9:4: at none the tapper is unidentified, whatever person the
+    link names; its tap changes nothing and nothing answers it, as another account's."""
+    store = FakeIdentityStore(configured=(_LINE_ACCOUNT,))
+    rig = _Rig(identities=store)
+    _, request = await rig.ask()
+    await _lowered(store, Sureness.NONE)
+
+    await rig.tapped(rig.tap(request, approve=approve), 9)
+
+    await _changes_nothing(rig, request, 9)
+
+
+async def test_a_tap_by_an_account_no_link_ties_changes_nothing() -> None:
+    """§2:1, §3:5, ADR-0366 §4:1, §5:6: no link, no person, at none: anyone else's tap."""
     rig = _Rig(identities=FakeIdentityStore())
     _, request = await rig.ask()
 
-    await rig.tapped(rig.tap(request, approve=False))
+    await rig.tapped(rig.tap(request, approve=False), 9)
 
-    held = await rig.request(str(request.id))
-    assert held.state is ApprovalRequestState.DENIED
-    assert held.answer is not None
-    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
-    assert held.answer.level_read is Sureness.NONE
+    await _changes_nothing(rig, request, 9)
 
 
 @pytest.mark.parametrize("wired", [True, False], ids=["store-fails", "none-wired"])
-async def test_a_tap_whose_link_cannot_be_read_records_no_one_at_none(wired: bool) -> None:
-    """§2:1, ADR-0374 §2:2: no fault is read as a link, so the tapper is no one, at none.
-
-    The line's account is not the hub's own machine, so nothing stands in for the link
-    (§3:1). The tap is carried out as today's test has it (§1:4).
-    """
+async def test_a_tap_whose_link_cannot_be_read_changes_nothing(wired: bool) -> None:
+    """§2:1, ADR-0374 §2:2: no fault is read as a link, so the tapper is no one, at none,
+    and the tap does nothing (ADR-0377's consequences). The line's account is not the hub's
+    own machine, so nothing stands in for the link (ADR-0374 §3:1)."""
     store = FakeIdentityStore(configured=(_LINE_ACCOUNT,))
     rig = _Rig(identities=store if wired else None)
     _, request = await rig.ask()
     if wired:
         store.fail_next()
 
+    await rig.tapped(rig.tap(request), 9)
+
+    await _changes_nothing(rig, request, 9)
+
+
+# --- a tap answers only at the level its call needs (ADR-0377 §3) ---------------------------
+
+#: A call whose default line asks normal of a tap, as what leaves the hub does (#3678).
+_SEND: Final = ToolDefinition.model_validate(
+    {
+        **_BOOK.model_dump(),
+        "id": "send",
+        "capability": "send",
+        "default_grant": DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.NORMAL).model_dump(),
+    }
+)
+
+
+async def _below_level(rig: _Rig, request: ApprovalRequest, update_id: int) -> None:
+    """§3:3, §3:4: the request as it was, no card edited, nothing woken; the callback
+    answered with the one fixed text, its answer claimed on the intake record (§13:2)."""
+    assert rig.fake.answered == (("callback-1", TAP_NOT_ANSWERED_LINE),)
+    assert await rig.request(str(request.id)) == request
+    assert rig.edits() == 0
+    assert rig.woken == 0
+    assert set(await rig.intake.recorded([update_id])) == {update_id}
+
+
+@pytest.mark.parametrize("approve", [True, False], ids=["approve", "deny"])
+async def test_a_tap_from_the_person_below_the_calls_level_does_not_answer(approve: bool) -> None:
+    """§3:1, §3:2: at weak, a card whose call's default bar is normal is not answered,
+    Approve and Deny alike (§10's "a Deny needs the same level as an Approve")."""
+    store = FakeIdentityStore(configured=(_LINE_ACCOUNT,))
+    rig = _Rig(identities=store)
+    _, request = await rig.ask(tool=_SEND)
+    await _lowered(store, Sureness.WEAK)
+
+    await rig.tapped(rig.tap(request, approve=approve), 9)
+
+    await _below_level(rig, request, 9)
+
+
+async def test_a_tap_at_the_calls_level_answers_it() -> None:
+    """§3:1: the owner at normal answers a card whose call needs normal, as on 348ff39e7."""
+    rig = _Rig()
+    _, request = await rig.ask(tool=_SEND)
+
     await rig.tapped(rig.tap(request))
 
     held = await rig.request(str(request.id))
     assert held.state is ApprovalRequestState.APPROVED
     assert held.answer is not None
-    assert (held.answer.person, held.answer.level) == (None, Sureness.NONE)
+    assert (held.answer.person, held.answer.level) == (OWNER_PERSON_ID, Sureness.NORMAL)
+    assert rig.fake.answered == (("callback-1", "Approved."),)
+    assert rig.woken == 1
+
+
+async def test_a_made_grant_raising_the_level_is_read_when_the_tap_lands() -> None:
+    """§3:2: the lines as they stand when the tap lands. The owner's grant for the call at
+    strong, made after the card was posted, is the only one covering it: the owner at
+    normal does not answer; once it is removed, no grant covers it, and weak would do."""
+    lines = FakePermissionLineStore(now=lambda: AT)
+    rig = _Rig(lines=lines)
+    _, request = await rig.ask()
+    made = await lines.record_making(
+        LineParts(
+            kind=PermissionLineKind.GRANT,
+            who=OWNER_PERSON_ID,
+            action="book",
+            how=GrantHow.ALLOWED,
+            bar=Sureness.STRONG,
+        ),
+        by=OWNER_PERSON_ID,
+    )
+
+    await rig.tapped(rig.tap(request), 9)
+
+    await _below_level(rig, request, 9)
+    await lines.record_removal(str(made.line.id), by=OWNER_PERSON_ID)
+    await rig.tapped(rig.tap(request), 10)
+    assert (await rig.request(str(request.id))).state is ApprovalRequestState.APPROVED
+
+
+async def test_a_tap_whose_lines_cannot_be_read_does_not_answer() -> None:
+    """§3:2 cannot be read, so no level is reached: the closed direction, as below it."""
+    lines = FakePermissionLineStore(now=lambda: AT)
+    rig = _Rig(lines=lines)
+    _, request = await rig.ask()
+    lines.fail_next()
+
+    await rig.tapped(rig.tap(request), 9)
+
+    await _below_level(rig, request, 9)
+
+
+async def test_a_limit_leaves_the_level_to_the_grants() -> None:
+    """A limit decides that the call is not done when its ticket's call is checked
+    (ADR-0367 §5:5), never the level a tap needs: the owner at normal still answers."""
+    lines = FakePermissionLineStore(now=lambda: AT)
+    rig = _Rig(lines=lines)
+    _, request = await rig.ask(tool=_SEND)
+    await lines.record_making(
+        LineParts(kind=PermissionLineKind.LIMIT, who=OWNER_PERSON_ID, action="send"),
+        by=OWNER_PERSON_ID,
+    )
+
+    await rig.tapped(rig.tap(request))
+
+    assert (await rig.request(str(request.id))).state is ApprovalRequestState.APPROVED
+
+
+async def test_below_the_level_a_tap_on_an_expired_request_is_answered_with_its_state() -> None:
+    """§3:1 weighs a tap that could answer: on a request past its expiry no tap can, so
+    the store's step answers it with the request's state, as for any tap (§4:9, §3:5)."""
+    store = FakeIdentityStore(configured=(_LINE_ACCOUNT,))
+    rig = _Rig(identities=store)
+    _, request = await rig.ask(tool=_SEND)
+    await _lowered(store, Sureness.WEAK)
+    rig.clock.at = AT + DAY
+
+    await rig.tapped(rig.tap(request))
+
+    assert rig.fake.answered == (("callback-1", "This request has expired."),)
+    assert (await rig.request(str(request.id))).answer is None
+
+
+async def test_below_the_level_a_tap_held_already_answers_nothing_again() -> None:
+    """§5:9: a repeated fetch of a tap the intake record holds answered sends nothing."""
+    store = FakeIdentityStore(configured=(_LINE_ACCOUNT,))
+    rig = _Rig(identities=store)
+    _, request = await rig.ask(tool=_SEND)
+    await _lowered(store, Sureness.WEAK)
+    callback = rig.tap(request)
+    await rig.tapped(callback, 7)
+
+    await rig.tapped(callback, 7)
+
+    assert rig.fake.answered == (("callback-1", TAP_NOT_ANSWERED_LINE),)
 
 
 async def test_a_deny_is_marked_and_answered() -> None:
@@ -543,15 +703,6 @@ class _TokenReadFails(FakePlanStore):
         return await super().approval_request_by_token(token)
 
 
-async def _changes_nothing(rig: _Rig, request: ApprovalRequest, update_id: int) -> None:
-    """ADR-0362 §4:4: no answer went, nothing was marked, edited, recorded or woken."""
-    assert rig.fake.answered == ()
-    assert await rig.request(str(request.id)) == request
-    assert rig.edits() == 0
-    assert rig.woken == 0
-    assert await rig.intake.recorded([update_id]) == {}, "recorded nowhere (ADR-0323 §5:2)"
-
-
 @pytest.mark.parametrize(
     "data",
     ["no-such-token:y", "no-such-token:n", "no-separator", "token:maybe", ":y", "", None],
@@ -590,15 +741,18 @@ async def test_a_tap_whose_token_the_store_cannot_read_is_not_answered() -> None
 
 
 async def test_a_tap_on_another_persons_request_is_not_answered() -> None:
-    """ADR-0362 §4:4, ADR-0361 §4:8: an answer goes ahead only where the update comes
-    from the request's person; a request of another person's is answered nothing."""
+    """ADR-0362 §4:4, ADR-0377 §3:5: an answer goes ahead only where the tapper, read
+    through the link, is the request's person; another person's request is answered
+    nothing, whatever person the cards were built for (ADR-0377 §8)."""
     rig = _Rig()
-    _, request = await rig.ask()
-    elsewhere = rig.over(rig.fake, person="someone-else")
+    _, request = await rig.ask(person="person:guest")
+    as_the_guests = rig.over(rig.fake, person="person:guest")
 
-    await elsewhere.tap(rig.tap(request), partial(rig.intake.claim_reply, 9))
+    await rig.tapped(rig.tap(request), 9)
+    await as_the_guests.tap(rig.tap(request), partial(rig.intake.claim_reply, 10))
 
     await _changes_nothing(rig, request, 9)
+    assert await rig.intake.recorded([10]) == {}
 
 
 async def test_a_tap_on_a_known_card_after_an_unknown_one_is_still_answered() -> None:

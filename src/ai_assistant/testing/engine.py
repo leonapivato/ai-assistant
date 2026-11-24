@@ -411,9 +411,10 @@ class FakeAssistantEngine:
         #: hub that holds no link, which lists none and names none. A consumer gives it
         #: a :class:`~ai_assistant.testing.FakeIdentityStore`.
         self.identities: IdentityStore | None = None
-        #: The line store the four members for lines answer from (ADR-0376 §4), as the
-        #: engine's ``lines`` is: ``None``, the default, is a hub that holds no made line,
-        #: which lists the default lines alone. A consumer gives it a
+        #: The line store the four members for lines answer from (ADR-0376 §4), and a
+        #: panel tap's level is read against (ADR-0377 §3:2), as the engine's ``lines``
+        #: is: ``None``, the default, is a hub that holds no made line, which lists the
+        #: default lines alone and weighs a tap against them alone. A consumer gives it a
         #: :class:`~ai_assistant.testing.FakePermissionLineStore`.
         self.lines: PermissionLineStore | None = None
         #: The tools this hub declares, whose capabilities a line may name and whose
@@ -1207,13 +1208,14 @@ class FakeAssistantEngine:
         )
         self.calls.append(("tap_approval", {"request_id": named, "choice": chosen}))
         # ADR-0377 §2:4: the tapper is read through the requesting device's hub chat
-        # account, over :attr:`identities`, as the engine reads it.
+        # account, over :attr:`identities`, as the engine reads it; and it answers only
+        # at the level the request's call needs over :attr:`lines` (§3:1, §3:2).
         tapped, landed = await tap_on_approval_panel(
             self.plan_store,
             self._approval_facts,
             named,
             chosen,
-            person=OWNER_PERSON_ID,
+            lines=self.lines,
             identities=self.identities,
             device=current_requesting_device(),
             now=self.approval_clock(),

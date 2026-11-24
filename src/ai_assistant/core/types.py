@@ -27412,8 +27412,7 @@ class ApprovalPanelTapAnswer(StrEnum):
     NOT_ANSWERED = "not_answered"
     """The tap was read as the request's person's, but not at the level the request's
     call needs, so it did not answer: the request stays pending, and nothing is recorded
-    on it (ADR-0377 §3:3, §3:4). Shown beside the request as the panel shows it. Nothing
-    returns it until ADR-0377 §3 is built (§1:4)."""
+    on it (ADR-0377 §3:3, §3:4). Shown beside the request as the panel shows it."""
 
 
 class ApprovalPanelTap(BaseModel):
