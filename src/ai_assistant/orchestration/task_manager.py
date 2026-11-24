@@ -141,6 +141,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ConversationStore, MemoryStore, PlanStore
     from ai_assistant.core.types import (
+        ApprovalTap,
         FrozenJson,
         ProcessingReason,
         ProcessingStatus,
@@ -1088,6 +1089,22 @@ class TaskManager:
                 await self.tidy([replaces])
         return written
 
+    async def ticket_tap(self, request_id: str) -> ApprovalTap | None:
+        """The tap that answered the approval request ``request_id``, as the store holds it.
+
+        A ticket's call is its tapper's, at the level the tap came by (ADR-0367 §5:5,
+        ADR-0377 §4:2), which the request's answer records (§4:1).
+
+        Returns:
+            The answer; ``None`` where the store holds no such request, or it is
+            unanswered.
+
+        Raises:
+            PlanningError: If the plan store cannot be read.
+        """
+        found = await self._plans.approval_requests([request_id])
+        return found[0].answer if found else None
+
     async def cancel(
         self, task_id: str, *, person: str | None = None, spawned_by: str | None = None
     ) -> ScheduledTaskCancel:
@@ -1289,9 +1306,28 @@ class ScheduledTaskCalls:
         self._manager = manager
         self._now = now
 
-    async def run(self, call: ToolCall) -> OwnRecordsAnswer:
+    async def _caller(self, call: ToolCall) -> Spawner | None:
+        """Who calls the Task Scheduler, as :func:`current_spawner` holds it, for ``call``.
+
+        A call run under a ticket is its tapper's, read from the answer the plan store
+        holds for the ticket's request (:func:`_ticket_caller`).
+
+        Raises:
+            PlanningError: If the ticket's request cannot be read.
+        """
+        spawner = current_spawner()
+        approval = call.decision.approval
+        if spawner is None or approval is None or not isinstance(approval.how, TapOnCard):
+            return spawner
+        return _ticket_caller(spawner, await self._manager.ticket_tap(str(approval.how.request)))
+
+    async def run(self, call: ToolCall) -> OwnRecordsAnswer:  # noqa: PLR0911 — each refusal is a return of its own
         """Run a cancel or a list pull; a spawn reaches :meth:`run_claiming` alone."""
-        spawner = _caller(call)
+        try:
+            spawner = await self._caller(call)
+        except PlanningError:
+            _log.warning("task_call_not_done", stage="acting", reason="store_failed")
+            return NotDone(reason=_STORE_FAULT)
         if spawner is None:
             return NotDone(reason=_NOT_OFFERED)
         capability = str(call.request.tool.capability)
@@ -1358,7 +1394,11 @@ class ScheduledTaskCalls:
         Raises:
             ClaimStopped: If the store holds a stop record for the spawning activation.
         """
-        spawner = _caller(call)
+        try:
+            spawner = await self._caller(call)
+        except PlanningError:
+            _log.warning("task_call_not_done", stage="acting", reason="store_failed")
+            return Unwritten(reason=_STORE_FAULT)
         if spawner is None or str(call.request.tool.capability) != SPAWN_CAPABILITY:
             return Unwritten(reason=_NOT_OFFERED)
         arguments = call.request.parameters
@@ -1421,22 +1461,23 @@ def _refused(written: ScheduledTaskWrite) -> ClaimingAnswer | None:
     return None
 
 
-def _caller(call: ToolCall) -> Spawner | None:
-    """Who calls the Task Scheduler, as :func:`current_spawner` holds it, for ``call`` alone.
+def _ticket_caller(spawner: Spawner, tap: ApprovalTap | None) -> Spawner:
+    """Who calls the Task Scheduler under a ticket the tap ``tap`` granted (ADR-0367 §5:5).
 
     ADR-0362 §3:5: for a call run under a ticket, the rules reading whether the calling
     activation's input carries the person's authority read it as carried, for that call
-    alone: the task it spawns is the person's (ADR-0350 §3:7), and it may replace or cancel
-    any of the person's tasks (§4:4). The person approved that exact call on its card.
+    alone. ADR-0367 §5:5 and ADR-0368 §6:1 make that authority the tapper's, at the level
+    the tap came by, which the answer records (ADR-0377 §4:1, §4:2): so where the tapper
+    is the person, the task it spawns is the person's (ADR-0350 §3:7), records them at
+    that level, and the call may replace or cancel any of the person's tasks (§4:4). An
+    answer recorded before its level was reads as the request's person's at none (§4:3,
+    §4:4). A tap read as no one's, or as anyone but the person, carries no authority over
+    the person's tasks, so the task it spawns is the assistant's, at none. No connection
+    is recorded: a tap arrived by no connection a grant's condition names (ADR-0368 §4:2).
     """
-    spawner = current_spawner()
-    approval = call.decision.approval
-    if spawner is None or approval is None or not isinstance(approval.how, TapOnCard):
-        return spawner
-    # ADR-0367 §5:5: a ticket's call is the tapper's, at the level the tap came by, which
-    # no record holds yet (ADR-0377), so a task it spawns records the person at none and
-    # no connection: it holds no more than anyone holds until that level is recorded.
-    return replace(spawner, authority=spawner.person, level=Sureness.NONE, connection=None)
+    if tap is None:
+        return replace(spawner, authority=None, level=Sureness.NONE, connection=None)
+    return replace(spawner, authority=tap.person, level=tap.level_read, connection=None)
 
 
 def _suggested(

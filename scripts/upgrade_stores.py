@@ -1523,7 +1523,14 @@ async def _write_approval_requests(store: SqlitePlanStore, moment: Moment) -> No
     await store.record_approval_card(
         "q-upgrade-approved", ApprovalCard(place=_LINE, position=7, token=_UPGRADE_CARD)
     )
-    tap = ApprovalTap(who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD, at=moment.ago(minutes=11))
+    # ADR-0377 §4:1: the owner tapped, read through the line's link at normal, so a later
+    # head reads back who tapped and how sure.
+    tap = ApprovalTap(
+        who=ApprovalGiver.USER_TAP_ON_TELEGRAM_CARD,
+        at=moment.ago(minutes=11),
+        person=OWNER_PERSON_ID,
+        level=Sureness.NORMAL,
+    )
     steps = [
         (
             await store.answer_approval_request(
@@ -1673,6 +1680,30 @@ def _finding_with_no_annotations(finding: Json) -> Json:
         "framed": [],
         "outcome": outcome,
     }
+
+
+def _plans_tapper_carry(records: Records) -> Records:
+    """What a plan store read back before ADR-0377 §4:1 reads back after it (§4:3).
+
+    The upgrade from label 20 rewrites every answered request's record and nothing else:
+    its answer reads as the request's person's, at no recorded level. Said here rather
+    than left to the comparison letting the head read back more, so the head is held to
+    exactly those.
+    """
+    return {
+        key: _with_tapper(value) if key.startswith("approval/") else value
+        for key, value in records.items()
+    }
+
+
+def _with_tapper(request: Json) -> Json:
+    """One approval request's read-back, given what the upgrade past 20 writes of it."""
+    if not isinstance(request, dict):
+        return request
+    answer = request.get("answer")
+    if not isinstance(answer, dict):
+        return request
+    return {**request, "answer": {**answer, "person": request.get("person"), "level": None}}
 
 
 def _plans_setter_carry(records: Records) -> Records:
@@ -2416,13 +2447,14 @@ STORES: Final[tuple[Store, ...]] = (
         ("plans.db",),
         _write_plans,
         _read_plans,
-        shape=6,
+        shape=7,
         carries={
             1: _plans_observations_carry,
             2: _plans_finding_carry,
             3: _plans_annotation_carry,
             4: _plans_cascade_carry,
             5: _plans_setter_carry,
+            6: _plans_tapper_carry,
         },
     ),
     Store("conversations", ("conversations.db",), _write_conversations, _read_conversations),

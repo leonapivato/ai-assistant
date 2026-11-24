@@ -4164,7 +4164,7 @@ class PlanStore(Protocol):
         Args:
             request_id: The request tapped.
             state: ``approved`` or ``denied``.
-            tap: Who tapped, as their surface's giver, and when.
+            tap: Its surface's giver, when, and who tapped and how sure (ADR-0377 §4:1).
 
         Returns:
             ``changed``, ``not_pending`` or ``past_expiry``, with the request as held.

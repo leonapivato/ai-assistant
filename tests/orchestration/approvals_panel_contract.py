@@ -571,7 +571,15 @@ class ApprovalsPanelContract:
         (held,) = await subject.plans.approval_requests(["approval:1"])
         assert held.state is ApprovalRequestState.APPROVED
         assert held.ticket is TicketState.HELD
-        assert held.answer == ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=APPROVALS_AT)
+        assert held.answer is not None
+        assert (held.answer.who, held.answer.at) == (
+            ApprovalGiver.USER_TAP_ON_HUB_PANEL,
+            APPROVALS_AT,
+        )
+        # ADR-0377 §2:4, §4:1: read through the requesting device's hub chat account, here
+        # the hub's own machine, which is the owner's however the links read (ADR-0374 §3).
+        assert held.answer.person == OWNER_PERSON_ID
+        assert held.answer.level is not None
 
     async def test_a_deny_grants_no_ticket(self, approvals_subject: ApprovalsPanelSubject) -> None:
         """§5:9."""

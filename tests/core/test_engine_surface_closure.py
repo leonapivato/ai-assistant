@@ -1977,6 +1977,11 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``export_decisions`` return carries it. A peer at 131 refuses it as extra (ADR-0124
     §9:2). **The method set does not move and stays at 74.**
 
+    **133 is ADR-0377 §8, on a wire-carried core type alone.** ``ApprovalPanelTapAnswer``
+    gains ``not_answered`` (§3:4), on the ``ApprovalPanelTap`` ``tap_approval`` returns.
+    A peer at 132 refuses the new member as unknown (ADR-0124 §9:2). **The method set
+    does not move and stays at 74.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1985,7 +1990,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (74, 132), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (74, 133), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

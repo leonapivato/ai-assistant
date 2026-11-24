@@ -12414,7 +12414,15 @@ class ScheduledDue(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 30 because a scheduled task gained who set it and how sure**
+    **``schema_version`` is 31 because a request's answer gained who tapped and how sure**
+    (ADR-0377 §4:1, §8): ``person`` and ``level`` on each ``ApprovalTap``, the plan
+    store's upgrade writing, on every answer stored before them, the request's person and
+    no level (§4:3). No member is added, since they ride inside ``approval_requests``, but
+    a reader of 30 refuses them as extra, so the label moves. The closure rule is extended
+    by nothing: they name a person and a level, neither of which is a record the document
+    carries.
+
+    **It was 30 because a scheduled task gained who set it and how sure**
     (ADR-0368 §6:1, §6:3, §6:4): ``author_person``, ``setting_level`` and
     ``setting_connection``, which every task carries, the plan store's upgrade writing them
     on each task stored before them. No member is added, since they ride inside
@@ -12531,12 +12539,12 @@ class PlanExport(BaseModel):
     # Its approval requests hold the person's call arguments (ADR-0145 §8).
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
-    schema_version: Literal[30] = Field(
-        default=30,
+    schema_version: Literal[31] = Field(
+        default=31,
         description=(
-            "Shape of this export, pinned to exactly 30 (ADR-0039 §10, ADR-0368 §6:3): an "
+            "Shape of this export, pinned to exactly 31 (ADR-0039 §10, ADR-0377 §4:1): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[30]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[31]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -17383,20 +17391,52 @@ class RequestedCall(BaseModel):
 
 
 class ApprovalTap(BaseModel):
-    """A request's answer: who tapped, as their surface's giver, and when (ADR-0361 §4:9).
+    """A request's answer: its surface's giver, when, who tapped and how sure (ADR-0361 §4:9).
+
+    ``who`` and ``at`` are the surface's :class:`ApprovalGiver` and the tap's instant.
+    ``person`` and ``level`` are who tapped and the level the tap came by, as ADR-0377
+    §2 reads them through the link of the account the tap arrived by, exactly as a
+    message arriving by that account would be read (§4:1): on the line the Telegram
+    account the callback names as its sender, on the hub page the hub chat's account for
+    the requesting device. ``person`` is ``None`` where that read named no one, and the
+    level is then none; like :class:`InputSender`'s, it keeps whom a link names even at
+    none.
+
+    **An answer recorded before §4:1 was built** reads as the request's person's, its
+    level not recorded (§4:3): the plan store's upgrade writes the request's person and
+    leaves ``level`` ``None``, which is never a level. A reader of the level a tap came by
+    reads :attr:`level_read`, which is none where none is recorded (§4:2, §4:4).
+
+    Each is optional, so a tap built without them names no one at no recorded level,
+    which every reader reads as none.
 
     Raises:
-        ValueError: If ``who`` is no tap's giver (:data:`TAP_GIVERS`).
+        ValueError: If ``who`` is no tap's giver (:data:`TAP_GIVERS`), or a tap naming no
+            one is at a level above none.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     who: ApprovalGiver
     at: UtcInstant
+    person: NonBlankEncodableText | None = None
+    level: Sureness | None = None
+
+    @property
+    def level_read(self) -> Sureness:
+        """The level the tap came by, as a check reads it (ADR-0377 §4:2, §4:4).
+
+        The level recorded, or none where none is recorded, as on an answer recorded
+        before the level was (§4:3).
+        """
+        return Sureness.NONE if self.level is None else self.level
 
     @model_validator(mode="after")
     def _a_surfaces_tap(self) -> Self:
         if self.who not in TAP_GIVERS:
             msg = "a request is answered by a tap on one of its surfaces (ADR-0361 §4:9)"
+            raise ValueError(msg)
+        if self.person is None and self.level not in {None, Sureness.NONE}:
+            msg = "a tap read as no one's is at none (ADR-0377 §2:1, ADR-0366 §5:6)"
             raise ValueError(msg)
         return self
 
@@ -26711,6 +26751,11 @@ class ApprovalPanelTapAnswer(StrEnum):
     UNKNOWN = "unknown"
     """No request of the person's is held by that id, so the tap changed nothing: one
     from anyone but the request's person changes nothing (§4:8)."""
+    NOT_ANSWERED = "not_answered"
+    """The tap was read as the request's person's, but not at the level the request's
+    call needs, so it did not answer: the request stays pending, and nothing is recorded
+    on it (ADR-0377 §3:3, §3:4). Shown beside the request as the panel shows it. Nothing
+    returns it until ADR-0377 §3 is built (§1:4)."""
 
 
 class ApprovalPanelTap(BaseModel):
@@ -26718,7 +26763,8 @@ class ApprovalPanelTap(BaseModel):
 
     ``entry`` is the request as the panel now shows it, its state the one the first tap
     to land gave it; ``None`` exactly where the answer is ``unknown``, which shows
-    nothing of a request that is not the person's.
+    nothing of a request that is not the person's. A tap that did not answer
+    (``not_answered``, ADR-0377 §3:4) shows its request still pending.
 
     Raises:
         ValueError: If the entry is missing on a known request, given on an unknown
@@ -26735,6 +26781,12 @@ class ApprovalPanelTap(BaseModel):
             msg = "a tap's answer shows its request exactly where the request is known"
             raise ValueError(msg)
         if self.entry is None:
+            return self
+        if self.answer is ApprovalPanelTapAnswer.NOT_ANSWERED:
+            # ADR-0377 §3:3: a tap that does not answer leaves the request as it was.
+            if self.entry.state is not ApprovalCardState.PENDING:
+                msg = "a tap that did not answer shows its request still pending"
+                raise ValueError(msg)
             return self
         if self.answer is ApprovalPanelTapAnswer.EXPIRED and (
             self.entry.state is not ApprovalCardState.EXPIRED

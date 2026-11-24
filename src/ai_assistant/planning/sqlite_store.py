@@ -280,13 +280,26 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: person set records the person it is for, at normal, and one the assistant set no
 #: person, at none; neither records a connection. A build reading 19 refuses the fields
 #: as extra, so it must refuse a file at 20 (ADR-0326 §5:3).
-_SCHEMA_VERSION = 20
+#:
+#: **Version 21 is ADR-0377 §4:1's**: a request's answer records who tapped and the level
+#: the tap came by, ``person`` and ``level`` on its ``ApprovalTap``. No column changes,
+#: since the request is its blob, but every answer stored before them lacks them, so **a
+#: version 20 file is upgraded in place** (ADR-0326 §4:1) by rewriting each answered
+#: request's blob (:meth:`SqlitePlanStore._record_tappers`): its answer reads as the
+#: request's person's, since ADR-0361 §4:8 carried out a tap from no one else, at no
+#: recorded level (ADR-0377 §4:3). A build reading 20 refuses the fields as extra, so it
+#: must refuse a file at 21 (ADR-0326 §5:3).
+_SCHEMA_VERSION = 21
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
 #: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
 #: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
 #: ruling (§4:6).
-_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16, 17, 18, 19)
+_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16, 17, 18, 19, 20)
+
+#: The last label whose requests' answers record no tapper: a file at it or below has
+#: each answered request's blob given one by the open (ADR-0377 §4:1, §4:3).
+_LAST_UNTAPPED_LABEL = 20
 
 #: The last label whose scheduled tasks record no setter: a file at it or below has its
 #: tasks' blobs given one by the open (ADR-0368 §6:1, §6:3, §6:4).
@@ -642,14 +655,8 @@ class SqlitePlanStore:
                 for statement in _RECORD_SCHEMA:
                     conn.execute(statement)
                 self._verify_record_tables(conn)
-                # ADR-0368 §6:3: the upgrade past 19 gives every task who set it, on the
-                # tables just verified and before anything reads a task as this build's.
-                if held is not None and held <= _LAST_UNSET_LABEL:
-                    self._record_task_setters(conn)
-                # ADR-0352 §2:6: the upgrade past 17 applies the cascade records' reach
-                # and drops them, on the tables just verified, in this transaction.
-                if held is not None and held <= _LAST_CASCADE_LABEL:
-                    self._retire_cascades(conn)
+                if held is not None:
+                    self._rewrite_upgraded(conn, held)
         except _ClockFailedError as carried:
             conn.close()
             clock_failure = carried.failure
@@ -669,6 +676,24 @@ class SqlitePlanStore:
         if clock_failure is not None:
             raise clock_failure
         return conn
+
+    def _rewrite_upgraded(self, conn: sqlite3.Connection, held: int) -> None:
+        """Rewrite the records an upgrade from ``held`` changes, on the verified tables.
+
+        Run in the open's transaction, after the record tables are verified and before
+        anything reads a record as this build's.
+        """
+        # ADR-0368 §6:3: the upgrade past 19 gives every task who set it.
+        if held <= _LAST_UNSET_LABEL:
+            self._record_task_setters(conn)
+        # ADR-0377 §4:3: the upgrade past 20 gives every answer who tapped, read as the
+        # request's person's at no recorded level.
+        if held <= _LAST_UNTAPPED_LABEL:
+            self._record_tappers(conn)
+        # ADR-0352 §2:6: the upgrade past 17 applies the cascade records' reach and drops
+        # them, in this transaction.
+        if held <= _LAST_CASCADE_LABEL:
+            self._retire_cascades(conn)
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
@@ -811,9 +836,47 @@ class SqlitePlanStore:
         **19 → 20** (ADR-0368 §6:1, §6:3, §6:4): a scheduled task records who set it and
         how sure. The step moves the label here, and :meth:`_record_task_setters` rewrites
         each task's blob once the record tables are verified, in this same transaction.
+
+        **20 → 21** (ADR-0377 §4:1, §4:3): a request's answer records who tapped and how
+        sure. The step moves the label here, and :meth:`_record_tappers` rewrites each
+        answered request's blob once the record tables are verified, in this same
+        transaction.
         """
         for step in range(held, _SCHEMA_VERSION):
             conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))
+
+    def _record_tappers(self, conn: sqlite3.Connection) -> None:
+        """Give every answer a file stored before ADR-0377 §4:1 who tapped (§4:3).
+
+        Run in the open's transaction, after the record tables are verified, for a file
+        the open upgraded from :data:`_LAST_UNTAPPED_LABEL` or below, and before anything
+        reads a request as this build's. Each answered request's answer gains ``person``,
+        the request's person, since ADR-0361 §4:8 carried out a tap from no one else, and
+        ``level``, ``None``: not recorded, never a level (§4:3), which a check reads as
+        none (§4:4). Every other byte's value is kept (ADR-0326 §4:4), and a request with
+        no answer is not rewritten.
+
+        The rewrite is of the stored JSON, not through this build's model, so a later
+        step's own change to the request meets the blob this step leaves. A row that is
+        not a request as an earlier release wrote one is refused as damage (ADR-0326
+        §5:1), and the open, with every step it took, is rolled back (§4:3).
+
+        Raises:
+            PlanningError: If a stored request is not a JSON object naming its person, its
+                answer is neither absent nor an object, or it already records a tapper.
+        """
+        rows = conn.execute("SELECT id, data FROM approval_requests").fetchall()
+        for request_id, data in rows:
+            record = _untapped_request(request_id, data)
+            answer = record.get("answer")
+            if answer is None:
+                continue
+            answer["person"] = record["person"]
+            answer["level"] = None
+            conn.execute(
+                "UPDATE approval_requests SET data = ? WHERE id = ?",
+                (_encoded_record("approval request", request_id, record), request_id),
+            )
 
     def _record_task_setters(self, conn: sqlite3.Connection) -> None:
         """Give every task a file stored before ADR-0368 §6:3 who set it (§6:1, §6:4).
@@ -2500,16 +2563,70 @@ def _encoded_task(task_id: object, record: dict[str, Any]) -> str:
     Raises:
         PlanningError: If the blob does not encode as UTF-8.
     """
+    return _encoded_record("scheduled task", task_id, record)
+
+
+def _encoded_record(what: str, key: object, record: dict[str, Any]) -> str:
+    """One upgraded record's blob as the text the store holds, or refused as damage.
+
+    Args:
+        what: What the record is, for the message.
+        key: The row's promoted id, for the message.
+        record: The blob, decoded and rewritten.
+
+    Raises:
+        PlanningError: If the blob does not encode as UTF-8.
+    """
     text = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
     try:
         text.encode("utf-8")
     except UnicodeEncodeError as exc:
         msg = (
-            f"the plan store holds scheduled task {task_id!r} with text no release could "
+            f"the plan store holds {what} {key!r} with text no release could "
             f"encode; the store is damaged (ADR-0326 §5:1)"
         )
         raise PlanningError(msg) from exc
     return text
+
+
+#: The fields a request's answer records of who tapped (ADR-0377 §4:1), which no answer
+#: stored before :data:`_LAST_UNTAPPED_LABEL` was passed holds.
+_TAPPER_FIELDS: Final = ("person", "level")
+
+
+def _untapped_request(request_id: object, data: object) -> dict[str, Any]:
+    """One stored request's blob, as a release before ADR-0377 §4:1 wrote it, decoded.
+
+    Args:
+        request_id: The row's promoted id, for the message.
+        data: The row's blob.
+
+    Returns:
+        The blob as a JSON object.
+
+    Raises:
+        PlanningError: If it is not a JSON object naming a person, its answer is neither
+            absent nor an object, or its answer already records who tapped.
+    """
+    try:
+        record = json.loads(str(data))
+    except ValueError as exc:
+        msg = f"the plan store holds approval request {request_id!r} as no JSON object: {exc}"
+        raise PlanningError(msg) from exc
+    answer = record.get("answer") if isinstance(record, dict) else None
+    if (
+        not isinstance(record, dict)
+        or not isinstance(record.get("person"), str)
+        or not (answer is None or isinstance(answer, dict))
+        or (isinstance(answer, dict) and any(one in answer for one in _TAPPER_FIELDS))
+    ):
+        msg = (
+            f"the plan store holds approval request {request_id!r} in no shape a release "
+            f"before label {_LAST_UNTAPPED_LABEL + 1} wrote; the store is damaged "
+            f"(ADR-0326 §5:1)"
+        )
+        raise PlanningError(msg)
+    return record
 
 
 def _checked_request(path: str, row: Sequence[Any]) -> ApprovalRequest:

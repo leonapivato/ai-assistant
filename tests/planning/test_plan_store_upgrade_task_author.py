@@ -14,7 +14,7 @@ person set and two the assistant set, none recording who set it:
   settled done;
 - ``t-assistant-waiting``, the assistant's, waiting on ``t-person-at``.
 
-The head opens a copy and must upgrade it in place (ADR-0326 §4:1): move the label to 20,
+The head opens a copy and must upgrade it in place (ADR-0326 §4:1): move the label to 21,
 carry every record (§4:4), and give each task who set it, and nothing else: a task the
 person set records the person it is for, at normal, and one the assistant set no person,
 at none, neither recording a connection (ADR-0368 §6:1, §6:4; #3678's "every existing
@@ -135,8 +135,8 @@ async def test_every_task_is_upgraded_to_record_who_set_it(legacy: Path) -> None
     finally:
         store.close()
 
-    assert _label(legacy) == "20"
-    assert export.schema_version == 30
+    assert _label(legacy) == "21"
+    assert export.schema_version == 31
     tasks = {one.id: one for one in export.scheduled_tasks}
     assert list(tasks) == _TASKS
     assert {
@@ -177,7 +177,7 @@ async def test_every_other_record_and_field_is_carried_as_it_stands(legacy: Path
 
 
 async def test_the_upgraded_file_reopens_as_it_is(legacy: Path) -> None:
-    """The step is taken once: a second open at 20 rewrites nothing."""
+    """The step is taken once: a second open at the head's label rewrites nothing."""
     _open(legacy).close()
     upgraded = _dump(legacy)
 

@@ -140,7 +140,7 @@ async def test_a_pending_occurrence_below_a_cascade_record_ends_cancelled(legacy
     """
     tasks, _ = await _opened(legacy)
 
-    assert _label(legacy) == "20"
+    assert _label(legacy) == "21"
     assert list(tasks) == _TASKS
     for task_id in ("t-below-pending", "t-grandchild"):
         (occurrence,) = tasks[task_id].occurrences
@@ -217,7 +217,7 @@ async def test_the_upgraded_file_reopens_as_it_is(legacy: Path) -> None:
 
     assert await _opened(legacy) == first
     assert _dump(legacy) == dumped
-    assert _label(legacy) == "20"
+    assert _label(legacy) == "21"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

@@ -1180,12 +1180,16 @@ class FakeAssistantEngine:
             "tap_approval", max_bytes=self._max_payload_bytes, request_id=named, choice=chosen
         )
         self.calls.append(("tap_approval", {"request_id": named, "choice": chosen}))
+        # ADR-0377 §2:4: the tapper is read through the requesting device's hub chat
+        # account, over :attr:`identities`, as the engine reads it.
         tapped, landed = await tap_on_approval_panel(
             self.plan_store,
             self._approval_facts,
             named,
             chosen,
             person=OWNER_PERSON_ID,
+            identities=self.identities,
+            device=current_requesting_device(),
             now=self.approval_clock(),
             max_bytes=self._max_payload_bytes,
         )

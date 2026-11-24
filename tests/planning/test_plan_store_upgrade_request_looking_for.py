@@ -18,8 +18,10 @@ the label stays ``19``. The head opens a copy, writes nothing to open it, and re
 record back as it was, each request serialising to the bytes the file holds. The opened
 file then holds a search's request carrying its *looking for*, which outlives a reopen.
 
-This build's open moves the label on to ``20`` (ADR-0368 §6:3), a step that rewrites
-a scheduled task's row alone, and the file holds none, so nothing else moves.
+This build's open moves the label on to ``21``: the step past 19 rewrites a scheduled
+task's row alone (ADR-0368 §6:3), and the file holds none; the step past 20 gives each
+answered request's answer who tapped, the request's person at no recorded level (ADR-0377
+§4:3), which each request read back carries, and nothing else moves.
 """
 
 from __future__ import annotations
@@ -124,7 +126,7 @@ async def test_every_request_reads_back_as_the_previous_release_wrote_it(legacy:
     assert requests["q-before-pin"].call.wording == "Robin is vegetarian."
     assert by_token == requests["q-before-pin"]
     assert [one.id for one in pushed] == ["q-before-search"]
-    assert export.schema_version == 30
+    assert export.schema_version == 31
 
 
 async def test_each_stored_request_serialises_to_the_bytes_the_file_holds(legacy: Path) -> None:
@@ -136,7 +138,7 @@ async def test_each_stored_request_serialises_to_the_bytes_the_file_holds(legacy
         store.close()
 
     assert [one.model_dump_json() for one in read] == _stored_requests(legacy)
-    assert _label(legacy) == "20"
+    assert _label(legacy) == "21"
 
 
 async def test_the_stored_email_runs_as_the_send_email_it_translates_to(legacy: Path) -> None:
@@ -209,5 +211,5 @@ async def test_the_opened_file_holds_a_kept_looking_for_across_a_reopen(legacy: 
 
     assert [one.id for one in export.approval_requests] == [*_REQUESTS, "q-after-search"]
     assert export.approval_requests[-1].call.looking_for == "When does it open on Sunday?"
-    assert export.schema_version == 30
-    assert _label(legacy) == "20"
+    assert export.schema_version == 31
+    assert _label(legacy) == "21"

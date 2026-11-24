@@ -942,14 +942,20 @@ async def test_a_parent_still_running_is_not_read_through_and_the_task_is_descri
 # --- under a ticket (ADR-0362 §3:1, §3:3-§3:5) ---------------------------------------------
 
 
-async def _ticket(
+async def _ticket(  # noqa: PLR0913 — the call, and how its tap answered and was read
     world: _World,
     tool: ToolDefinition,
     values: Mapping[str, FrozenJson] | None = None,
     *,
     approve: bool = True,
+    tapper: str | None = OWNER_PERSON_ID,
+    level: Sureness | None = Sureness.NORMAL,
 ) -> ApprovalRequest:
-    """A request for one call of ``tool``, written with its effect, and approved by a tap."""
+    """A request for one call of ``tool``, written with its effect, and approved by a tap.
+
+    The tap records ``tapper`` at ``level``, as ADR-0377 §4:1 has an answer record who
+    tapped: the owner, at normal, unless a case names another.
+    """
     asking = activation()
     request = ApprovalRequest(
         id=f"request:{activation()}",
@@ -976,7 +982,9 @@ async def _ticket(
     written = await world.plans.write_approval_request(request, effect, match=None)
     assert written.answer is ApprovalWriteAnswer.WRITTEN, written
     if approve:
-        tap = ApprovalTap(who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT)
+        tap = ApprovalTap(
+            who=ApprovalGiver.USER_TAP_ON_HUB_PANEL, at=AT, person=tapper, level=level
+        )
         await world.plans.answer_approval_request(request.id, ApprovalRequestState.APPROVED, tap)
     return request
 
@@ -1111,10 +1119,25 @@ async def test_a_spawn_from_a_work_carrying_no_ones_authority_records_none() -> 
     assert _setter(task) == (None, Sureness.NONE, OWN_CHAT_CONNECTION)
 
 
-async def test_a_spawn_under_a_ticket_records_the_person_at_none() -> None:
-    """ADR-0367 §5:5: the tap's level is not recorded yet, so none, and no connection."""
+@pytest.mark.parametrize(
+    ("level", "recorded"),
+    [
+        (Sureness.WEAK, Sureness.WEAK),
+        (Sureness.STRONG, Sureness.STRONG),
+        (None, Sureness.NONE),
+    ],
+    ids=["weak", "strong", "not-recorded"],
+)
+async def test_a_spawn_under_a_ticket_records_its_tapper_at_the_taps_level(
+    level: Sureness | None, recorded: Sureness
+) -> None:
+    """ADR-0367 §5:5, ADR-0368 §6:1: the tapper, at the level the tap came by, no connection.
+
+    Whatever the work's own level and connection. An answer recorded before its level was
+    reads as none (ADR-0377 §4:3, §4:4).
+    """
     world = _World()
-    request = await _ticket(world, SPAWN)
+    request = await _ticket(world, SPAWN, level=level)
     spawner = _spawner(
         activation(), authority=None, level=Sureness.NORMAL, connection=OWN_CHAT_CONNECTION
     )
@@ -1122,7 +1145,62 @@ async def test_a_spawn_under_a_ticket_records_the_person_at_none() -> None:
     task = await _spawned_task(world, await _spawn_under(world, request, spawner, delay_minutes=30))
 
     assert task.author is ScheduledTaskAuthor.PERSON
-    assert _setter(task) == (OWNER_PERSON_ID, Sureness.NONE, None)
+    assert _setter(task) == (OWNER_PERSON_ID, recorded, None)
+
+
+@pytest.mark.parametrize("tapper", [None, "person:someone-else"], ids=["no-one", "another"])
+async def test_a_spawn_under_a_ticket_another_tapped_is_the_assistants_at_none(
+    tapper: str | None,
+) -> None:
+    """ADR-0367 §5:5, ADR-0368 §6:1: a tap read as no one's, or as another's, carries no
+    authority over the person's tasks, so the task it spawns is the assistant's, at none.
+
+    Today's test still carries such a tap out on a surface (ADR-0377 §1:4); what it
+    grants is its tapper's alone.
+    """
+    world = _World()
+    level = Sureness.NONE if tapper is None else Sureness.NORMAL
+    request = await _ticket(world, SPAWN, tapper=tapper, level=level)
+    spawner = _spawner(activation(), authority=None, level=Sureness.NORMAL)
+
+    task = await _spawned_task(world, await _spawn_under(world, request, spawner, delay_minutes=30))
+
+    assert task.author is ScheduledTaskAuthor.ASSISTANT
+    assert _setter(task) == (None, Sureness.NONE, None)
+
+
+class _UnreadRequests(FakePlanStore):
+    """A plan store whose approval requests cannot be read, once a case says so."""
+
+    unreadable = False
+
+    async def approval_requests(self, request_ids: Sequence[str], /) -> tuple[ApprovalRequest, ...]:
+        if self.unreadable:
+            msg = "the requests cannot be read"
+            raise PlanningError(msg)
+        return await super().approval_requests(request_ids)
+
+
+async def test_a_call_under_a_ticket_whose_tap_cannot_be_read_is_not_done() -> None:
+    """A ticket's call is its tapper's, so where the tap cannot be read nothing is written."""
+    plans = _UnreadRequests(now=lambda: AT)
+    world = _World(plans=plans)
+    task = await write_task(world.plans, activation(), when=DueAt(at=AT + timedelta(hours=1)))
+    request = await _ticket(world, SPAWN)
+    cancel = await _ticket(world, CANCEL_TASK, {"task": task.id})
+    plans.unreadable = True
+
+    spawned = await _spawn_under(world, request, _spawner(activation()), delay_minutes=30)
+    with spawning(_spawner(activation(), authority=None)):
+        cancelled = await world.calls.run(_under(cancel, CANCEL_TASK, {"task": task.id}))
+
+    assert isinstance(spawned, Unwritten)
+    assert isinstance(cancelled, NotDone)
+    assert spawned.reason == cancelled.reason == "the Task Scheduler could not be read or written"
+    plans.unreadable = False
+    assert await world.held(task.id) is not None
+    (held,) = await world.plans.approval_requests([request.id])
+    assert held.ticket is TicketState.HELD
 
 
 async def test_a_replace_by_a_work_records_the_replacing_works_setter() -> None:
