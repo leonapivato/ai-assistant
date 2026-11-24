@@ -43,11 +43,11 @@ sends on it by an account (:func:`sent_by_a_person`), and the sender its reader 
 names the party. A kind not built, a mail channel or a spoke that tells who is talking,
 declares nothing here until it is, and a channel type with no declaration is refused.
 
-**What understanding is told of an origin** (ADR-0353 §6:3, §7:5). Beside the parties,
-each kind declares how understanding names one of its origins, what the origin is and who
-is there, in the system's words, and how a stimulus from it is framed: what a person does
-to send one, the preposition its origin takes, and what its content is called
-(:class:`OriginKind`). It is keyed by channel type, as the parties are, so the hub chat,
+**What the models are told of an origin** (ADR-0353 §6:3, §7:5, ADR-0375 §7:2). Beside
+the parties, each kind declares how the models name one of its origins, what the origin is
+and who is there, in the system's words, and how a stimulus from it is framed: the
+account a person sends one by, the preposition its origin takes, and what its content is
+called (:class:`OriginKind`). It is keyed by channel type, as the parties are, so the hub chat,
 which no ``ChannelKind`` declares in code, declares it here too, and a declared kind reads
 it rather than restating it. A kind with no row is rendered with the fallback ADR-0353
 §6:3 and §7:5 give it.
@@ -398,49 +398,66 @@ def link_level(link: Link) -> Sureness:
 
 @dataclass(frozen=True, slots=True)
 class OriginKind:
-    """What understanding is told of an origin of one channel type (ADR-0353 §6:3, §7:5).
+    """What the models are told of an origin of one channel type (ADR-0353 §6:3, §7:5).
 
     Every value is the system's own words, never a record's (§3:4), and none says how a
-    reply is shown there, which is planning's (§6:3, ADR-0292 §8:1).
+    reply is shown there, which is planning's (§6:3, ADR-0292 §8:1). Each calls the system
+    "the system", never "the hub" (ADR-0375 §7:1), and each is declared here once, beside
+    the kind (§7:2).
 
     Attributes:
         name: How an origin of the kind is named, as ``origin=`` and the situation write
-            it (§4:4): ``the hub chat``.
-        where: The name with the preposition a stimulus's place takes: ``in the hub chat``.
+            it (§4:4): ``the system's own chat``.
+        where: The name with the preposition a stimulus's place takes: ``in the system's
+            own chat``.
         described: What the origin is and who is there, after its name in the situation's
-            line (§6:1), with ``{person}`` standing for the person it is for, named.
-        act: What the person does to send a message there, in the framing sentence (§7:1):
-            ``typed``; empty for a kind whose input no person sends.
+            line (§6:1), with ``{person}`` standing for the person whose place it is,
+            named; the framing sentence of a message a person sends says the message
+            arrived in it (ADR-0375 §3:1).
+        noun: The account a person sends a message there by, as the sender line and a
+            ``said`` tag's ``from`` name it (ADR-0375 §4:1, §5): ``a device``; empty for a
+            kind whose input no person sends.
         content: What its input's content is called in the framing sentence's
             ``{content}`` slot (§7:1): ``this text`` or ``this report``.
         remembered: Whether its place window is built from the episodes the system
             recorded there, rather than read from the medium, so that understanding renders
             it as memory and says that the origin provides no history (ADR-0353 §2, §8:1;
             ADR-0323 §10:1).
+        person_where: Where, as a person reading a card is told it, for a kind whose
+            words for a person differ from the models' (ADR-0375 §1:2 changes only what
+            the models are told); ``None`` where they are the same.
     """
 
     name: str
     where: str
     described: str
-    act: str
+    noun: str
     content: str
     remembered: bool = False
+    person_where: str | None = None
+
+    @property
+    def where_for_a_person(self) -> str:
+        """Where, as a person reading a card is told it: ``in the hub chat``."""
+        return self.where if self.person_where is None else self.person_where
 
 
-#: ADR-0353 §6:3, §7:5: each kind's origin, as understanding is told of it.
+#: ADR-0353 §6:3, §7:5, ADR-0375 §3, §5 and §7: each kind's origin, as the models are told
+#: of it.
 _ORIGINS: Final = {
     "conversation": OriginKind(
-        name="the hub chat",
-        where="in the hub chat",
+        name="the system's own chat",
+        where="in the system's own chat",
         described="{person}'s private chat with the system",
-        act="typed",
+        noun="a device",
         content="this text",
+        person_where="in the hub chat",
     ),
     "telegram": OriginKind(
         name="Telegram",
         where="on Telegram",
         described="{person}'s private chat with the system on Telegram",
-        act="typed",
+        noun="the Telegram account",
         content="this text",
         remembered=True,
     ),
@@ -448,14 +465,14 @@ _ORIGINS: Final = {
         name="a connected source",
         where="from a connected source",
         described="a source connected to the system that reports to it; no one there talks with it",
-        act="",
+        noun="",
         content="this report",
     ),
     TASK_SCHEDULER: OriginKind(
         name="the schedule",
         where="on the schedule",
         described="the system's schedule of the work set to run later; no one is there",
-        act="",
+        noun="",
         content="this text",
     ),
     # ADR-0361 §3:6: the Approvals channel's origin, in the Task Scheduler's style.
@@ -465,7 +482,7 @@ _ORIGINS: Final = {
         described=(
             "the system's requests for {person}'s yes, each answered on a card; no one is there"
         ),
-        act="",
+        noun="",
         content="this text",
     ),
 }

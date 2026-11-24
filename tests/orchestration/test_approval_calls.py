@@ -266,7 +266,7 @@ def test_the_registers_origin_row_and_empty_parties() -> None:
     kind = origin_kind(APPROVALS)
     assert kind is not None
     assert kind.name == "the approvals"
-    assert kind.act == ""
+    assert kind.noun == ""
     assert "no one is there" in kind.described
     assert declared_input(THE_APPROVALS) == ((), ())
 

@@ -13,7 +13,8 @@ always present, in one order, under fixed headings, and it holds no JSON::
 
     # The stimulus            each input's framing sentence, then its tagged content (§7)
     # Knowledge
-    ## The situation          now and the zone, the person's last stimulus, the origin (§6)
+    ## The situation          now and the zone, the person's last stimulus, the origin,
+                              the sender (§6, ADR-0375 §5)
     ## Stimulus origin knowledge   the place window, where the medium supplies it  (H)
     ## Concurrent stimuli     ADR-0349 §5's in-progress entries                   (R)
     # Memory
@@ -36,8 +37,16 @@ where it is claimed, and an unknown party as unknown. The tag follows the partie
 (ADR-0351 §5): the person's own words are ``said``, the assistant's statement a ``task``,
 and every other ``received``. Every value from a record is escaped wherever it is
 rendered, so nothing in it can be read as a tag or a heading (§3:5). Every time is
-written in full in the zone of the person the stimulus is for, or the hub's where they
+written in full in the zone of the person the stimulus is for, or the system's where they
 set none, and the situation says which once (§5).
+
+**Who sent it is said, never that anyone typed it** (ADR-0375). The framing sentence of a
+message a person sends says where it arrived (§3); the stimulus's own words are ``said``
+from the account or device they came by and its person, or ``received`` from an unknown
+sender (§4); and the situation's sender line says by what it came, how strong a sign that
+is, and whom the system counts it as (§5). In a work that is no person's, a person is named
+by the name alone the phase read for them (§6:3), and the system is "the system" in every
+line (§7).
 
 **Labels** are minted in the order the message renders them, each letter its own
 sequence, under ADR-0276 §3:3's scheme: ``H`` for the place window, ``P`` for the episode
@@ -142,6 +151,13 @@ from ai_assistant.core.types import (
     parties_are_persons_own,
     relay_mark_counts,
 )
+from ai_assistant.orchestration.channel_kinds import (
+    SentInput,
+    account_of,
+    arrival,
+    sender_line,
+    sender_unknown,
+)
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.matters import EntryInput
@@ -161,6 +177,7 @@ if TYPE_CHECKING:
         ChannelIdentity,
         ClaimedAuthor,
         EpisodeProjection,
+        InputSender,
         JoinedInput,
         RecordedChannelTrigger,
         RecordedInputMessage,
@@ -224,7 +241,11 @@ _REPAIR_LABEL_CHARS: Final = 32
 #:   makes the stimulus part of that work (ADR-0349 §5:2-§5:6, §7:3, and ADR-0353 §10);
 #: - ADR-0351 §5:12's relay line;
 #: - that an unclear point's readings say what the stimulus would mean, never what to do
-#:   (ADR-0276 §6:1, as ADR-0353 §9 amends it).
+#:   (ADR-0276 §6:1, as ADR-0353 §9 amends it);
+#: - that the situation says what the system knows about who or what sent the stimulus
+#:   (ADR-0375 §8:1); and
+#: - that where an attribute names an account or a device, the system knows which account
+#:   the item came by, not who was using it (ADR-0375 §8:1).
 #:
 #: It need no longer say what a ground means, anything of a question mark, a ``Q`` label
 #: or an answer, that the language is a hint, that always in mind's ``M`` labels come
@@ -650,10 +671,15 @@ NOTE_REASONS: Final = (_NOTHING_THERE, _NOTHING_SHOWN, _NOT_PROVIDED, _NOT_HELD,
 _SYSTEM: Final = "the system"
 #: An unknown party, named as unknown (§4:3, §7:2).
 _UNKNOWN: Final = "an unknown sender"
-#: The person the system serves, where they have set no name (§4:1).
+#: The person the system serves, where they have set no name, or a read gives none
+#: (§4:1, ADR-0375 §6:4). Never an unknown sender's name (ADR-0375 §6:1).
 _UNNAMED: Final = "the owner"
 #: Another person, whom no block names (§4:1).
 _SOMEONE: Final = "a person the system knows"
+#: Why a work is no person's where a sender is unknown, and where it is for another
+#: reason, in words that stay true (ADR-0375 §6:2).
+_SENDER_UNKNOWN: Final = "the sender is unknown"
+_NOT_ONE_PERSONS: Final = "the system does not count this stimulus as one person's"
 
 
 def _text(value: str) -> str:
@@ -782,27 +808,44 @@ def _received(words: Sequence[_Words]) -> list[_Words]:
 class _Naming:
     """Who the stimulus is for, and how each party is named (ADR-0353 §4).
 
+    In a work that is no person's, the place is the owner's, whose every connection is
+    until a later decision admits another (``_Naming.place``); there, the person whose
+    place it is is named by the name the phase read for them, alone of their profile
+    (ADR-0375 §6:3), or in ADR-0353 §4:1's words where it read none (§6:4).
+
     Attributes:
         person_id: The person the stimulus is for, or ``None`` where it is no person's.
         name: Their name, as the person block holds it, or ``None`` where it is not set
             or no block was assembled.
+        place_name: In a work that is no person's, the name alone of the person whose
+            place it is, as the phase read it; ``None`` where it read none (§6:4).
     """
 
     person_id: str | None
     name: str | None
+    place_name: str | None = None
+
+    @property
+    def place(self) -> str:
+        """Whose place the stimulus's origin is: its person's, or the owner's (§4:1)."""
+        return self.person_id or OWNER_PERSON_ID
 
     @property
     def who(self) -> str:
         """The person the stimulus is for, named, or in words that stay true (§4:1)."""
         if self.name:
             return self.name
-        return _UNNAMED if self.person_id in {None, OWNER_PERSON_ID} else _SOMEONE
+        if self.place_name:
+            return self.place_name
+        return _UNNAMED if self.place == OWNER_PERSON_ID else _SOMEONE
 
     def person(self, identifier: str | None) -> str:
-        """A person, by the block's name where the block is theirs (§4:1)."""
-        if identifier == self.person_id or (
-            identifier == OWNER_PERSON_ID and self.person_id is None
-        ):
+        """A person, by the block's name where the block is theirs (§4:1).
+
+        In a work that is no person's, the person whose place it is by the name read for
+        them (ADR-0375 §6:3).
+        """
+        if identifier is None or identifier == self.place:
             return self.who
         return _UNNAMED if identifier == OWNER_PERSON_ID else _SOMEONE
 
@@ -978,6 +1021,7 @@ class UnderstandingStage:
         own_zone: bool = False,
         received_at: datetime | None = None,
         person_id: str | None = None,
+        place_name: str | None = None,
     ) -> ActivationUnderstanding:
         """Read one input against its context, and record what it was understood to mean.
 
@@ -1019,13 +1063,18 @@ class UnderstandingStage:
             trigger: The activation's recorded trigger, whose parties and messages the
                 stimulus is attributed and framed by (ADR-0353 §3:1, §7:3).
             zone: The zone every time is rendered in (ADR-0353 §5:2): the person's, or
-                the hub's where they set none; UTC where none is handed.
-            own_zone: Whether ``zone`` is the person's own rather than the hub's.
+                the system's where they set none; UTC where none is handed.
+            own_zone: Whether ``zone`` is the person's own rather than the system's.
             received_at: When the stimulus reached the system, for its framing sentence
                 and the person's last stimulus; ``now`` where none is handed.
             person_id: The person whose work it is, as its three facts read
                 (ADR-0368 §9:5), where no person block names them; ``None`` where it is
                 no person's, or where no trigger is handed.
+            place_name: For a work that is no person's, the name of the person whose
+                place it is, as the phase read it, and nothing else of their profile
+                (ADR-0375 §6:3, §6:4): they are named so where it says whose place it is,
+                whose account an input came by and who wrote an earlier item. ``None``
+                names them in ADR-0353 §4:1's words.
 
         Returns:
             The recorded understanding.
@@ -1044,7 +1093,7 @@ class UnderstandingStage:
             excerpt_chars=self._excerpt_chars,
             zone=zone or _UTC,
             own_zone=own_zone,
-            naming=_naming(person, trigger, parties, person_id=person_id),
+            naming=_naming(person, trigger, parties, person_id=person_id, place_name=place_name),
             channel=channel,
             now=moment,
             received_at=received_at or moment,
@@ -1206,20 +1255,23 @@ def _naming(
     parties: Sequence[SupportHolder] | None,
     *,
     person_id: str | None,
+    place_name: str | None = None,
 ) -> _Naming:
     """Who the stimulus is for, from its person block, else its work's facts (ADR-0338 §2:2).
 
     Its facts are read by the caller (ADR-0368 §9:5) and handed in as ``person_id``. With
     no trigger handed, the one person its parties name, where they name one person
     alone (ADR-0351 §3:2): the parties are set from who sent it, never from its channel.
+    A work given no block takes the name the phase read for the person whose place it is
+    (ADR-0375 §6:3); a person's block names its person.
     """
     if person is not None:
         return _Naming(person_id=person.person_id, name=person.profile.value(ProfileField.NAME))
     if trigger is not None:
-        return _Naming(person_id=person_id, name=None)
+        return _Naming(person_id=person_id, name=None, place_name=place_name)
     named = {one.identifier for one in parties or () if one.kind is HolderKind.PERSON}
     alone = parties_are_persons_own(parties) and len(named) == 1
-    return _Naming(person_id=named.pop() if alone else None, name=None)
+    return _Naming(person_id=named.pop() if alone else None, name=None, place_name=place_name)
 
 
 # --- the renderer (ADR-0353 §2-§8) -------------------------------------------------------
@@ -1255,6 +1307,10 @@ class _Renderer:
         self.story_members: dict[str, StoryMember] = {}
         self.running: dict[str, str] = {}
         self.counts: dict[str, int] = {}
+        # What the sender line reads (ADR-0375 §5): each input the stimulus section
+        # renders, and the trigger's parties, set before any section renders.
+        self._held_inputs: list[SentInput] = []
+        self._parties: tuple[SupportHolder, ...] | None = None
 
     # --- labels and times ---
 
@@ -1299,6 +1355,8 @@ class _Renderer:
         Labels are minted in the order the sections render them, each letter its own
         sequence (ADR-0353 §2:3). No question is marked (§11:1).
         """
+        self._parties = parties
+        self._held_inputs = self._inputs_sent(trigger, joined, parties, count=1)
         placed = _Placed.of(window, audience, episodes)
         kind = _origin_of(self._channel)
         remembered = kind is not None and kind.remembered
@@ -1340,7 +1398,7 @@ class _Renderer:
             "# Knowledge",
             "",
             "## The situation",
-            *self._situation(kind, last),
+            *self._situation(kind, last, parties),
             "",
             "## Stimulus origin knowledge",
             *(knowledge_lines or [self._knowledge_note(window, remembered=remembered)]),
@@ -1409,16 +1467,23 @@ class _Renderer:
                 **by_position,
             }
             words = [
-                self._input_message(one, window, replied, numbers[one.position])
+                self._input_message(
+                    one, window, replied, numbers[one.position], trigger=trigger, parties=parties
+                )
                 for one in window.input_messages
             ]
         elif trigger is not None and trigger.messages:
-            words = [self._recorded_message(one, None) for one in trigger.messages]
+            words = [
+                self._recorded_message(one, None, channel=self._channel, senders=trigger.senders)
+                for one in trigger.messages
+            ]
         else:
             words = [
                 _Words(
                     tag=_words_tag(parties),
-                    writer=self._naming.parties(parties),
+                    writer=self._writer(
+                        self._channel, parties, () if trigger is None else trigger.senders
+                    ),
                     at=None,
                     text=text,
                     replies_to=self._supplied_reply(window),
@@ -1432,12 +1497,16 @@ class _Renderer:
         )
         if relay_mark_counts(parties, relayed=self._relayed):
             words = _received(words)
+        self._held_inputs = self._inputs_sent(trigger, joined, parties, count=len(words))
         lines = self._framed(
             self._channel, parties, words, at=self._received_at, new_conversation=new_conversation
         )
         for one in joined:
             joined_parties = _known_parties(one.messages)
-            joined_words = [self._recorded_message(message, None) for message in one.messages]
+            joined_words = [
+                self._recorded_message(message, None, channel=one.channel, senders=one.senders)
+                for message in one.messages
+            ]
             if relay_mark_counts(joined_parties, relayed=one.relayed):
                 joined_words = _received(joined_words)
             lines.append("")
@@ -1451,6 +1520,34 @@ class _Renderer:
                 )
             )
         return lines
+
+    def _inputs_sent(
+        self,
+        trigger: RecordedChannelTrigger | None,
+        joined: Sequence[JoinedInput],
+        parties: tuple[SupportHolder, ...] | None,
+        *,
+        count: int,
+    ) -> list[SentInput]:
+        """Each input the stimulus section renders, as the sender line reads it (§5:2)."""
+        return [
+            SentInput(
+                channel_type=self._channel.channel_type,
+                senders=() if trigger is None else trigger.senders,
+                messages=() if trigger is None else trigger.messages,
+                parties=parties,
+                count=count,
+            ),
+            *(
+                SentInput(
+                    channel_type=one.channel.channel_type,
+                    senders=one.senders,
+                    messages=one.messages,
+                    parties=_known_parties(one.messages),
+                )
+                for one in joined
+            ),
+        ]
 
     @staticmethod
     def _supplied_reply(window: ChannelWindow) -> str | None:
@@ -1477,7 +1574,9 @@ class _Renderer:
 
         Every slot is filled from records alone, with a fallback that stays true: an
         unknown sender is named as unknown, and an act the record does not establish is
-        not said to have happened (§7:2).
+        not said to have happened (§7:2). A message a person sends is framed by where it
+        arrived, and names no sender and no act (ADR-0375 §3:1): the sender line says who
+        sent it (§5).
         """
         local = self._local(at)
         what, content = self._what(channel, parties, words)
@@ -1516,8 +1615,8 @@ class _Renderer:
         where = _line(_origin_where(channel))
         if parties is not None and not parties:
             return f"an input with no one's words in it arrived {where}", None
-        if kind is not None and kind.act:
-            return self._sent(kind, where, words)
+        if kind is not None and kind.noun:
+            return self._sent(kind, words)
         content = kind.content if kind is not None else "this text"
         if parties and all(one.kind is HolderKind.ASSISTANT_STATEMENT for one in parties):
             what = "a step of scheduled work came due"
@@ -1529,32 +1628,33 @@ class _Renderer:
             what = f"an input {where}"
         return what, content
 
-    def _sent(self, kind: OriginKind, where: str, words: Sequence[_Words]) -> tuple[str, str]:
-        """``{what}`` for a message a person sends: what they did, and how many (§7:1)."""
-        forwards = sum(one.forward for one in words)
-        if forwards == len(words):
-            act = "forwarded"
-        elif forwards:
-            act = f"{kind.act} or forwarded"
-        else:
-            act = kind.act
-        who = _line(self._naming.who)
-        if len(words) > 1:
-            return f"{_count(len(words))} messages {who} {act} {where}", "these messages"
-        return f"a message {who} {act} {where}", kind.content
+    def _sent(self, kind: OriginKind, words: Sequence[_Words]) -> tuple[str, str]:
+        """``{what}`` for a message a person sends: where it arrived, and how many.
 
-    def _input_message(
+        ADR-0375 §3:1: by the origin's description, and for a forward that it was
+        forwarded, naming no sender and no act.
+        """
+        forwards = sum(one.forward for one in words)
+        return arrival(kind, _line(self._naming.who), count=len(words), forwards=forwards)
+
+    def _input_message(  # noqa: PLR0913 — the message, its window, the labels, its number, and the record it is attributed by
         self,
         message: TranscriptMessage | LineMessage,
         window: TranscriptWindow,
         by_position: Mapping[int, str],
         number: int,
+        *,
+        trigger: RecordedChannelTrigger | None,
+        parties: Sequence[SupportHolder] | None,
     ) -> _Words:
         """One message of the input as the medium holds it: who wrote it, when, what it answers.
 
         A forward is its original sender's, claimed, and never the person's words
-        (ADR-0323 §4:10, ADR-0351 §2:7). What it replies to is named by the window item's
-        label, or by the number of the input's own message it replies to.
+        (ADR-0323 §4:10, ADR-0351 §2:7). Any other is attributed by its record: by the
+        recorded message at its position, where the trigger records its messages, else by
+        the trigger's parties and senders (ADR-0375 §4:1, §4:2), never by its medium's
+        author. What it replies to is named by the window item's label, or by the number
+        of the input's own message it replies to.
         """
         forward = window.forwarded.get(message.position)
         replies = None if message.replies_to is None else by_position.get(message.replies_to)
@@ -1568,22 +1668,76 @@ class _Renderer:
                 forward=True,
                 number=number,
             )
+        senders = () if trigger is None else trigger.senders
+        recorded = next(
+            (
+                one
+                for one in (() if trigger is None else trigger.messages)
+                if one.position == message.position and one.forwarded_from is None
+            ),
+            None,
+        )
+        if recorded is not None:
+            attributed = self._recorded_message(
+                recorded, replies, channel=window.conversation, senders=senders
+            )
+            tag, writer = attributed.tag, attributed.writer
+        else:
+            tag = _words_tag(parties)
+            writer = self._writer(window.conversation, parties, senders)
         return _Words(
-            tag="said",
-            writer=self._naming.who,
+            tag=tag,
+            writer=writer,
             at=message.written_at,
             text=message.text,
             replies_to=replies,
             number=number,
         )
 
-    def _recorded_message(self, message: RecordedInputMessage, replies: str | None) -> _Words:
-        """One recorded message of an input, attributed by its own party (ADR-0351 §2:6)."""
+    def _writer(
+        self,
+        channel: ChannelIdentity | None,
+        parties: Sequence[SupportHolder] | None,
+        senders: Sequence[InputSender],
+    ) -> str:
+        """Whom an input's words are from, as their tag's ``from`` names them (§4:3).
+
+        Words that are one person's own are from the account or device they came by and
+        its person (ADR-0375 §4:1), where a sender naming that person is recorded; every
+        other by its parties, an unknown sender's as unknown (§4:2).
+        """
+        people = {one.identifier for one in parties or ()}
+        if _words_tag(parties) == "said" and len(people) == 1:
+            (person,) = people
+            sender = next((one for one in senders if one.person == person), None)
+            told = account_of(
+                None if channel is None else channel.channel_type,
+                sender,
+                self._naming.person(person),
+            )
+            if told is not None:
+                return told
+        return self._naming.parties(parties)
+
+    def _recorded_message(
+        self,
+        message: RecordedInputMessage,
+        replies: str | None,
+        *,
+        channel: ChannelIdentity | None,
+        senders: Sequence[InputSender],
+    ) -> _Words:
+        """One recorded message of an input, attributed by its own party (ADR-0351 §2:6).
+
+        Its own sender names the account it came by, or its input's where it records none
+        (ADR-0375 §4:1).
+        """
         party = None if message.party is None else (message.party,)
         if message.forwarded_from is not None:
             writer = self._naming.forward(message.forwarded_from)
         else:
-            writer = self._naming.parties(party)
+            own = senders if message.sender is None else (message.sender,)
+            writer = self._writer(channel, party, own)
         return _Words(
             tag=_words_tag(party),
             writer=writer,
@@ -1595,34 +1749,51 @@ class _Renderer:
 
     # --- the situation (§6) ---
 
-    def _situation(self, kind: OriginKind | None, last: tuple[datetime, str] | None) -> list[str]:
-        """Now with the zone, the person's last stimulus, and the origin (§6:1)."""
+    def _situation(
+        self,
+        kind: OriginKind | None,
+        last: tuple[datetime, str] | None,
+        parties: Sequence[SupportHolder] | None,
+    ) -> list[str]:
+        """Now with the zone, the person's last stimulus, the origin and the sender (§6:1).
+
+        ADR-0375 §5:1: the sender line follows the origin's; §6:2: a work that is no
+        person's because its sender is unknown says so, and one that is for another
+        reason says that in words that stay true; §7:1: a zone that is not a person's is
+        the system's.
+        """
         local = self._local(self._now)
         now = f"{_long_day(local)}, {_clock(local)}"
         naming = self._naming
         who = _line(naming.who)
         zone = _line(self._zone.key)
+        unknown = self._sender_unknown(parties)
+        why = _SENDER_UNKNOWN if unknown else _NOT_ONE_PERSONS
         if self._own_zone:
             first = (
                 f"- Now: {now}, in {who}'s time zone ({zone}). Every time below is in this zone."
             )
         elif naming.person_id is not None and self._profiled:
             first = (
-                f"- Now: {now}, in the hub's time zone ({zone}). {_upper(who)} has not set a "
-                "time zone, so every time below is in the hub's zone."
+                f"- Now: {now}, in the system's time zone ({zone}). {_upper(who)} has not set "
+                "a time zone, so every time below is in the system's zone."
             )
         elif naming.person_id is not None:
             first = (
-                f"- Now: {now}, in the hub's time zone ({zone}). The system holds no time zone "
-                f"of {who}'s, so every time below is in the hub's zone."
+                f"- Now: {now}, in the system's time zone ({zone}). The system holds no time "
+                f"zone of {who}'s, so every time below is in the system's zone."
             )
         else:
             first = (
-                f"- Now: {now}, in the hub's time zone ({zone}). This stimulus is no person's, "
-                "so every time below is in the hub's zone."
+                f"- Now: {now}, in the system's time zone ({zone}). {_upper(why)}, so every "
+                "time below is in the system's zone."
             )
         if naming.person_id is None:
-            second = "- Last stimulus: this stimulus is no person's, so no earlier one is named."
+            second = (
+                f"- Last stimulus: {_SENDER_UNKNOWN}, so no earlier stimulus is named as theirs."
+                if unknown
+                else f"- Last stimulus: {why}, so no earlier one is named."
+            )
         elif last is None:
             second = (
                 f"- {_upper(who)}'s last stimulus: the system holds none earlier than this one."
@@ -1635,7 +1806,27 @@ class _Renderer:
         else:
             described = kind.described.replace("{person}", who)
             third = f"- The origin: {name}, {described}."
-        return [first, second, third]
+        fourth = sender_line(
+            self._held_inputs, named=lambda one: _line(naming.person(one)), origin=_line(name)
+        )
+        return [first, second, third, fourth]
+
+    def _sender_unknown(self, parties: Sequence[SupportHolder] | None) -> bool:
+        """Whether the stimulus is no person's because a sender is unknown (ADR-0375 §6:2).
+
+        A sender its inputs record that no link establishes as a person the system
+        serves, or, where none is recorded, words whose party is unknown.
+        """
+        senders = [sender for one in self._held_inputs for sender in one.senders]
+        senders.extend(
+            message.sender
+            for one in self._held_inputs
+            for message in one.messages
+            if message.sender is not None
+        )
+        if senders:
+            return sender_unknown(senders)
+        return any(one.kind is HolderKind.UNKNOWN for one in parties or ())
 
     def _last(
         self,
@@ -1788,6 +1979,12 @@ class _Renderer:
     def _concurrent(self, running: Sequence[InProgressEntry], more: int) -> list[str]:
         """Each running activation under its ``R`` label, newest first, and how many more."""
         if not running:
+            if self._naming.person_id is None and self._sender_unknown(self._parties):
+                # ADR-0375 §6:2: the reason, where it is the sender being unknown.
+                return [
+                    f"{_NOT_HELD}: concurrent stimuli are shown only where the system knows "
+                    "who sent the stimulus."
+                ]
             if self._naming.person_id is None:
                 return [
                     f"{_NOT_HELD}: concurrent stimuli are shown only for a stimulus that is a "
@@ -1833,7 +2030,11 @@ class _Renderer:
         """Who the person is to the system, three of their fields, and what they pinned."""
         if person is None:
             if self._naming.person_id is None:
-                return [f"{_NOT_HELD}: this stimulus is no person's, so none is kept in mind."]
+                why = _SENDER_UNKNOWN if self._sender_unknown(self._parties) else _NOT_ONE_PERSONS
+                return [
+                    f"{_NOT_HELD}: {why}, so nothing kept in mind about a person is read for "
+                    "this stimulus."
+                ]
             return [f"{_NOT_HELD}: no profile or pinned memory is read for this stimulus."]
         profile = person.profile
         name = profile.value(ProfileField.NAME)

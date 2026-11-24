@@ -925,7 +925,10 @@ async def test_a_line_input_taking_in_a_forward_is_attributed_message_by_message
     )
 
     sent = _sent(model)
-    assert "two messages the owner typed or forwarded on Telegram" in sent.section("The stimulus")
+    assert (
+        "two messages that arrived in the owner's private chat with the system on Telegram, "
+        "one of them forwarded"
+    ) in sent.section("The stimulus")
     forwarded, own = sent.tags("The stimulus")
     # ADR-0323 §4:10, ADR-0351 §2:7: a forward is its sender's, claimed, never the owner's.
     assert (forwarded.name, forwarded.get("from")) == ("received", "A stranger, as claimed")
@@ -943,9 +946,16 @@ async def test_a_line_input_with_no_forward_is_the_users_message() -> None:
     )
 
     sent = _sent(model)
-    assert "a message the owner typed on Telegram" in sent.section("The stimulus")
+    assert (
+        "a message that arrived in the owner's private chat with the system on Telegram"
+    ) in sent.section("The stimulus")
     (words,) = sent.tags("The stimulus")
-    assert (words.name, words.get("from"), words.text) == ("said", "the owner", "Hello")
+    # ADR-0375 §4:1: the account the words came by, and its person.
+    assert (words.name, words.get("from"), words.text) == (
+        "said",
+        "the Telegram account linked to the owner",
+        "Hello",
+    )
 
 
 async def test_a_forward_in_the_window_is_rendered_as_someone_elses_claimed() -> None:

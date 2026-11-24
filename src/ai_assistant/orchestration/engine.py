@@ -274,7 +274,12 @@ from ai_assistant.orchestration.payloads import (
 )
 from ai_assistant.orchestration.person_block import person_zone, still_held
 from ai_assistant.orchestration.person_calls import recorded_wording
-from ai_assistant.orchestration.phase_path import PlaceTarget, Scheduling, failing_stage
+from ai_assistant.orchestration.phase_path import (
+    PlaceTarget,
+    Scheduling,
+    failing_stage,
+    place_name,
+)
 from ai_assistant.orchestration.planning import (
     ConnectionShown,
     PlaceAuthor,
@@ -7255,6 +7260,7 @@ class Engine:
             filled=call.tool.system_supplied,
             worded=recorded_wording(call),
         )
+        # ADR-0375 §7: a briefing renders it, so in the system's words.
         where = "where nothing is recorded" if kind is None else kind.where
         text = (
             f"A request for the person's yes, as its card shows it: {line}. Why, as the "
@@ -8571,6 +8577,15 @@ class Engine:
                 # ADR-0353 §5:2: every time is rendered in the person's zone, or the hub's
                 # where they set none or the stimulus is no person's.
                 own = None if person is None else person_zone(person.profile, stage="understanding")
+                # ADR-0375 §6:3: in a work that is no person's, the name alone of the person
+                # whose place it is; a person's work names them from their block.
+                named = (
+                    await place_name(self._person_blocks, state.work_facts, stage="understanding")
+                    if state is not None
+                    and person is None
+                    and persons_work(state.work_facts, state.held_senders) is None
+                    else None
+                )
                 understood = await self._understanding.understand(
                     input.text,
                     channel=input.channel,
@@ -8601,6 +8616,7 @@ class Engine:
                     person_id=None
                     if state is None
                     else persons_work(state.work_facts, state.held_senders),
+                    place_name=named,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the

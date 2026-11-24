@@ -172,7 +172,7 @@ async def test_the_fields_are_the_persons_own_choices_and_unset_ones_say_so() ->
         for line in section(_sent(completer), "## The situation").split("\n")
         if line.startswith("- Now:")
     ]
-    assert "in the hub's time zone (Europe/Lisbon)" in now
+    assert "in the system's time zone (Europe/Lisbon)" in now
     assert "Robin Vale has not set a time zone" in now
 
 

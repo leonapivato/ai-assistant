@@ -193,7 +193,7 @@ async def test_a_set_profile_is_asked_and_a_yes_sets_nothing() -> None:
     # ADR-0364 §6:3: refused, its why saying it needs approval, which nothing here asks.
     assert "it needs approval, and nothing here can ask for it" in hub.planner.shown(1)
     # The situation's clock line names the zone it tells time in (ADR-0356 §3:1).
-    assert "in the hub's time zone (UTC)" in hub.planner.shown(0)
+    assert "in the system's time zone (UTC)" in hub.planner.shown(0)
 
     hub.reader.yes()
     hub.planner.then(says("I'm waiting on your answer above.", call_id="m2"))
@@ -208,4 +208,4 @@ async def test_a_set_profile_is_asked_and_a_yes_sets_nothing() -> None:
     hub.planner.then(_DONE)
     await hub.turn("What time is it?", conversation=conversation, message_id="m-3")
 
-    assert "in the hub's time zone (UTC)" in hub.planner.shown(3)
+    assert "in the system's time zone (UTC)" in hub.planner.shown(3)

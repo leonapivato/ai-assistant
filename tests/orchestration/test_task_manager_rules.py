@@ -675,7 +675,10 @@ async def test_a_one_off_occurrences_input_states_no_rule_and_no_skip() -> None:
 
     assert "repeats" not in text
     assert "skipped" not in text
-    assert "set by the assistant in a conversation in the hub's chat, Fri 23 Oct 2026 09:00" in text
+    assert (
+        "set by the assistant in a conversation in the system's own chat, Fri 23 Oct 2026 09:00"
+        in text
+    )
     assert "due Sat 24 Oct 2026 08:00 (America/New_York)" in text
 
 

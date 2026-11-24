@@ -487,7 +487,7 @@ async def test_separate_work_continues_nothing_and_each_runs_on_its_own() -> Non
     (entry,) = understanding.shown["what's the weather there?"]
     assert {key: entry[key] for key in ("label", "origin", "acted", "input")} == {
         "label": "R1",
-        "origin": "the hub chat",
+        "origin": "the system's own chat",
         "input": "book Riverside",
         "acted": "no",
     }
@@ -830,7 +830,7 @@ def _taken_place(request: _Request) -> str:
     (place,) = [
         one
         for one in tags(request.news(), "connection")
-        if one.text == "a conversation in the hub chat"
+        if one.text == "a conversation in the system's own chat"
     ]
     return str(place.get("label"))
 
@@ -1006,7 +1006,8 @@ async def test_an_offer_taken_ends_the_offering_one_silent_and_the_reply_covers_
     news = after.rounds[-1].report.news
     taken = [one for one in tags(news, "message") if one.text == newer_text]
     assert len(taken) == 1
-    assert taken[0].get("from") == tag(after.briefing, "said").get("from")
+    # ADR-0375 §4:1: the stimulus's own words name the device they came by and its person.
+    assert tag(after.briefing, "said").get("from") == f"a device linked to {taken[0].get('from')}"
     assert taken[0].get("at") is not None
     (offer,) = _offers(after)
     assert f"- The offer of {offer.get('label')} is no longer open." in news

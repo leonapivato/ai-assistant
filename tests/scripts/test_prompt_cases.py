@@ -110,9 +110,13 @@ _CONNECTION_ENTRY: Final = re.compile(r'<connection label="(L[0-9]+)"')
 _CONNECTION_LABEL: Final = re.compile(r"\bL[0-9]+\b")
 #: Any label a prompt names a thing by: a letter, then a number from 1.
 _ANY_LABEL: Final = re.compile(r"\b[A-Z][1-9][0-9]*\b")
-#: Who a person's words are from: a ``P`` label (ADR-0364 §4:2).
+#: Who a person's words are from: a ``P`` label (ADR-0364 §4:2), or, for the stimulus's
+#: own words, the account they came by and its person by ``P`` label, or the system's own
+#: machine (ADR-0375 §4:1).
 _SAID_FROM: Final = re.compile(r'<said from="([^"]*)"')
-_PERSON_LABEL: Final = re.compile(r"P[1-9][0-9]*")
+_PERSON_LABEL: Final = re.compile(
+    r"(?:(?:a device|the Telegram account) linked to )?P[1-9][0-9]*|the system's own machine"
+)
 #: The one result that opens with no outcome: a tidy-up that started (ADR-0364 §6:1).
 _TIDY_STARTED: Final = "started"
 

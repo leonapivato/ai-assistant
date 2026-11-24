@@ -26,6 +26,7 @@ from structlog.testing import capture_logs
 from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActivationDigest,
     ActivationUnderstanding,
     ApprovalGiver,
@@ -260,6 +261,9 @@ def _inputs(**fields: Any) -> PlanningInputs:
         "activation_id": "a1",
         "place": _CHAT,
         "capabilities": _TOOLS,
+        # The owner's work, so a tag names them by ``P`` label (ADR-0364 §4:2), as a
+        # work that is no person's does not (ADR-0375 §6:5).
+        "person_id": OWNER_PERSON_ID,
     }
     values.update(fields)
     return PlanningInputs(**values)
@@ -445,7 +449,7 @@ async def test_the_default_zone_shows_the_current_time_in_utc() -> None:
     stage, completer, _ = _stage()
     await stage.plan(_inputs())
     assert _now_line(completer).startswith(
-        "- Now: Sunday 11 October 2026, 12:00 pm, in the hub's time zone (UTC)."
+        "- Now: Sunday 11 October 2026, 12:00 pm, in the system's time zone (UTC)."
     )
 
 
@@ -455,7 +459,7 @@ async def test_a_configured_zone_shows_the_local_time_with_its_offset_and_name()
     stage, completer = _zoned("Asia/Kolkata", _AT)
     planned = await stage.plan(_inputs())
     assert _now_line(completer).startswith(
-        "- Now: Sunday 11 October 2026, 5:30 pm, in the hub's time zone (Asia/Kolkata)."
+        "- Now: Sunday 11 October 2026, 5:30 pm, in the system's time zone (Asia/Kolkata)."
     )
     assert planned.round.recorded_at == _AT
 
@@ -475,7 +479,7 @@ async def test_a_daylight_saving_zone_shows_the_offset_in_force_at_that_instant(
     stage, completer = _zoned("America/New_York", at)
     await stage.plan(_inputs())
     assert _now_line(completer).startswith(
-        f"- Now: {shown}, in the hub's time zone (America/New_York)."
+        f"- Now: {shown}, in the system's time zone (America/New_York)."
     )
 
 
@@ -544,7 +548,9 @@ async def test_the_situation_names_the_time_and_the_last_stimulus_alone(
     inputs = _inputs(place=PlaceWindow(takes_message=takes_message))
     assert await _echoed(stage, completer, sink, inputs) == set()
     situation = section(_sent(completer), "## The situation").split("\n")
-    assert len([one for one in situation if one.startswith("- ")]) == 2
+    # ADR-0375 §5:1: and the sender line after them.
+    assert len([one for one in situation if one.startswith("- ")]) == 3
+    assert situation[-1].startswith("- The sender: ")
     assert not any("reply can be written" in one for one in situation)
 
 

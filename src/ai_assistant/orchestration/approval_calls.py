@@ -458,7 +458,11 @@ def card_text(request: ApprovalRequest, facts: CardFacts, *, now: datetime) -> s
         worded=recorded_wording(call),
     )
     kind = None if facts.origin is None else origin_kind(facts.origin.channel_type)
-    where = "Where it was asked is not recorded." if kind is None else f"Asked {kind.where}."
+    where = (
+        "Where it was asked is not recorded."
+        if kind is None
+        else f"Asked {kind.where_for_a_person}."
+    )
     void = carried(call)
     lines = [
         "Approval needed:",

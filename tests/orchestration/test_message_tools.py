@@ -95,7 +95,7 @@ def test_an_argument_missing_or_wrong_comes_back_saying_which(
 
 
 def test_a_result_names_each_platform() -> None:
-    assert platform_name("conversation") == "the hub chat"
+    assert platform_name("conversation") == "the system's own chat"
     assert platform_name("telegram") == "Telegram"
     assert platform_name("email") == "email"
 

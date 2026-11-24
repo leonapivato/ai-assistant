@@ -71,7 +71,7 @@ async def test_the_hubs_zone_is_used_where_the_persons_is_not_set_or_there_is_no
     await stage.plan(_person_inputs(person=person))
 
     assert _now_line(_sent(completer)).startswith(
-        "- Now: Wednesday 21 October 2026, 10:00 am, in the hub's time zone (Europe/Lisbon)."
+        "- Now: Wednesday 21 October 2026, 10:00 am, in the system's time zone (Europe/Lisbon)."
     )
 
 
@@ -82,7 +82,7 @@ async def test_a_zone_that_does_not_resolve_falls_back_to_the_hubs() -> None:
     await stage.plan(_person_inputs(person=_block(time_zone="Mars/Olympus")))
 
     now = _now_line(_sent(completer))
-    assert "in the hub's time zone (Europe/Lisbon)" in now
+    assert "in the system's time zone (Europe/Lisbon)" in now
     assert "Mars/Olympus" not in _sent(completer)
 
 

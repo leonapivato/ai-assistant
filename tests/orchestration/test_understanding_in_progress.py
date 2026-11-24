@@ -154,13 +154,13 @@ async def test_each_taken_in_input_renders_with_the_input_apart_and_dated() -> N
 
     stimulus = _payload(model).section("The stimulus")
     trigger, taken = stimulus.split("\n\n")
-    assert trigger.endswith('<said from="the owner">book Riverside</said>')
+    assert trigger.endswith('<said from="a device linked to the owner">book Riverside</said>')
     # ADR-0353 §2:2, §7:1: the joined input after the trigger's, with its own framing
     # sentence, its time and origin, and that it was taken in from work that was stopped.
     assert taken.startswith(
         "A stimulus reached the system at 9:00 am on Wednesday 21 October 2026: a message "
-        "the owner typed on Telegram, taken in from other work, which was stopped. It "
-        "contains this text:"
+        "that arrived in the owner's private chat with the system on Telegram, taken in from "
+        "other work, which was stopped. It contains this text:"
     )
     assert taken.endswith("for four</said>")
     # The activation a merge stopped is never named to the model: it is no label.
