@@ -1829,31 +1829,6 @@ async def _read_conversations(directory: Path) -> Records:
         store.close()
 
 
-def _conversations_came_through_carry(records: Records) -> Records:
-    """What a conversation store read back before ADR-0378 §8:2 reads back after it.
-
-    The upgrade from label 13 sets, on each standing user's message, the device it came
-    through to the device it is written from, and the assistant's message carries none.
-    Said here rather than left to the comparison letting the head read back more, so the
-    head is held to exactly that, on every read a message is carried in.
-    """
-    return {key: _came_through_itself(value) for key, value in records.items()}
-
-
-def _came_through_itself(value: Json) -> Json:
-    """``value`` with each user's message in it read as having come through its own device."""
-    if isinstance(value, list):
-        return [_came_through_itself(one) for one in value]
-    if not isinstance(value, dict):
-        return value
-    held = {key: _came_through_itself(one) for key, one in value.items()}
-    if held.get("author") == MessageAuthor.USER.value and "came_through" not in held:
-        held["came_through"] = held.get("device_id")
-    elif held.get("author") == MessageAuthor.ASSISTANT.value and "came_through" not in held:
-        held["came_through"] = None
-    return held
-
-
 # --- grants.db ------------------------------------------------------------------------
 
 
@@ -2491,14 +2466,7 @@ STORES: Final[tuple[Store, ...]] = (
             6: _plans_tapper_carry,
         },
     ),
-    Store(
-        "conversations",
-        ("conversations.db",),
-        _write_conversations,
-        _read_conversations,
-        shape=2,
-        carries={1: _conversations_came_through_carry},
-    ),
+    Store("conversations", ("conversations.db",), _write_conversations, _read_conversations),
     Store("grants", ("grants.db",), _write_grants, _read_grants),
     Store("reads", ("reads.db",), _write_reads, _read_reads),
     Store("notifications", ("notifications.db",), _write_notifications, _read_notifications),

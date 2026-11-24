@@ -13452,6 +13452,22 @@ def _came_through_itself(data: object) -> object:
     return data
 
 
+def _came_through_where_it_differs(
+    handler: SerializerFunctionWrapHandler, value: NewMessage | TranscriptMessage
+) -> dict[str, Any]:
+    """``value`` dumped with ``came_through`` only where it is not the device written from.
+
+    Decoding puts it back (:func:`_came_through_itself`), so nothing is lost; and a
+    message that came through the device it is written from, as every message recorded
+    before the field did (ADR-0378 §8:2), dumps exactly as it did before, so a message
+    the size bound admitted then is one every read can still return (ADR-0293 §4:7).
+    """
+    dumped: dict[str, Any] = handler(value)
+    if value.came_through is None or value.came_through == value.device_id:
+        dumped.pop("came_through", None)
+    return dumped
+
+
 def _check_message_claim(author: MessageAuthor, effect_id: str | None) -> None:
     """ADR-0350 §12:9: only the assistant's message is claimed under an effect record.
 
@@ -13542,6 +13558,12 @@ class NewMessage(BaseModel):
     def _came_through_itself(cls, data: object) -> object:
         return _came_through_itself(data)
 
+    @model_serializer(mode="wrap")
+    def _came_through_where_it_differs(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        return _came_through_where_it_differs(handler, self)
+
     @model_validator(mode="after")
     def _the_shape_is_its_authors(self) -> Self:
         _check_message_shape(
@@ -13576,7 +13598,10 @@ class TranscriptMessage(BaseModel):
     request. It differs from ``device_id`` only where a gateway named the device it is
     written from, or where the local socket wrote under another device's name (ADR-0298
     §2:8). A message built without it, or recorded before it was kept, came through the
-    device it is written from (§8:2). The assistant's message carries none.
+    device it is written from (§8:2). The assistant's message carries none. **A dump
+    carries it only where it differs** from ``device_id``, and decoding puts it back, so
+    a message that came through its own device is carried exactly as it was before the
+    field, and one the size bound admitted then is one every read can still return.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -13597,6 +13622,12 @@ class TranscriptMessage(BaseModel):
     @classmethod
     def _came_through_itself(cls, data: object) -> object:
         return _came_through_itself(data)
+
+    @model_serializer(mode="wrap")
+    def _came_through_where_it_differs(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        return _came_through_where_it_differs(handler, self)
 
     @model_validator(mode="after")
     def _the_shape_is_its_authors(self) -> Self:

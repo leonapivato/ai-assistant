@@ -16,14 +16,26 @@ from typing import TYPE_CHECKING, Final, cast
 import pytest
 from structlog.testing import capture_logs
 
-from ai_assistant.core.errors import IdentityStoreError
+from ai_assistant.core.errors import IdentityStoreError, OversizedValueError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     Account,
+    ChatChanges,
     InputSender,
     LinkAct,
     LinkActHow,
+    MessageAddedChange,
+    MessageAuthor,
+    NewMessage,
     Sureness,
+    TranscriptMessage,
+    TranscriptPage,
+    UserMessage,
+)
+from ai_assistant.orchestration.conversations import (
+    check_message_fits,
+    fit_changes,
+    fit_transcript,
 )
 from ai_assistant.orchestration.work_facts import (
     HUB_MACHINE,
@@ -255,3 +267,75 @@ async def test_each_account_is_read_once_across_messages() -> None:
     )
     assert found == {1: _OWNER, 2: _OWNER, 3: _OWNER}
     assert asked == [chat_account(_BROWSER), chat_account(_GATEWAY)]
+
+
+# --- what a message costs to read back ---------------------------------------------------
+
+
+_CONVERSATION: Final = "3f2b8c1e-5d4a-4f6b-9a7c-1e2d3c4b5a69"
+_LONG_DEVICE: Final = "d" * 128
+_LIMIT: Final = 4096
+
+
+def _recorded(text: str, *, came_through: str | None) -> TranscriptMessage:
+    """A user's message as the widest record holds it; built without ``came_through``
+    where it is ``None``, as a record from before the field is."""
+    held: dict[str, object] = {
+        "conversation_id": _CONVERSATION,
+        "position": 2**63 - 1,
+        "written_at": datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC),
+        "author": MessageAuthor.USER,
+        "text": text,
+        "device_id": _LONG_DEVICE,
+        "message_id": "m",
+    }
+    if came_through is not None:
+        held["came_through"] = came_through
+    return TranscriptMessage.model_validate(held)
+
+
+def test_a_message_through_its_own_device_dumps_as_before_the_field() -> None:
+    """ADR-0378 §8:2: only a message that came through another device carries the field
+    in a dump; decoding puts it back, and an assistant's message carries none."""
+    itself = _recorded("hi", came_through=None)
+    named = _recorded("hi", came_through=_GATEWAY)
+    assert itself.came_through == _LONG_DEVICE
+    assert "came_through" not in itself.model_dump(mode="json")
+    assert named.model_dump(mode="json")["came_through"] == _GATEWAY
+    assert TranscriptMessage.model_validate(itself.model_dump(mode="json")) == itself
+    assert TranscriptMessage.model_validate(named.model_dump(mode="json")) == named
+    said = NewMessage(author=MessageAuthor.ASSISTANT, text="hello")
+    assert said.came_through is None
+    assert "came_through" not in said.model_dump()
+
+
+def test_a_message_admitted_at_the_bound_before_the_field_is_still_read_back() -> None:
+    """ADR-0293 §4:7, ADR-0326 §4:4: the largest message the bound admitted before the
+    field, from a long device id, reads back within the limit once the upgrade records
+    it as having come through that device; one through a gateway is measured with it."""
+    low, high = 1, 4096
+    while high - low > 1:
+        middle = (low + high) // 2
+        try:
+            check_message_fits(
+                _CONVERSATION,
+                UserMessage(device_id=_LONG_DEVICE, message_id="m", text="x" * middle),
+                max_bytes=_LIMIT,
+            )
+            low = middle
+        except OversizedValueError:
+            high = middle
+    largest = "x" * low
+    upgraded = _recorded(largest, came_through=_LONG_DEVICE)
+    page = TranscriptPage(conversation_id=_CONVERSATION, entries=(upgraded,), as_of=2**63 - 1)
+    assert fit_transcript(page, max_bytes=_LIMIT) == page
+    added = MessageAddedChange(seq=2**63 - 1, message=upgraded)
+    changes = ChatChanges(changes=(added,), next_after=2**63 - 1)
+    assert fit_changes(changes, max_bytes=_LIMIT) == changes
+    with pytest.raises(OversizedValueError):
+        check_message_fits(
+            _CONVERSATION,
+            UserMessage(device_id=_LONG_DEVICE, message_id="m", text=largest),
+            max_bytes=_LIMIT,
+            came_through="g" * 128,
+        )
