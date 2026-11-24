@@ -351,6 +351,17 @@ Two choices in it are mine and not yet ruled: that the gateway may open the
 microphone with `listen`, and that the hub, not the watch, decides when the
 person has finished talking.
 
+Admission and the PIN were built fifth, after the owner's rulings on them.
+`hello` carries a `credential`, the secret written to the watch when it was
+enrolled; the gateway keeps only a hash, reads nothing but `hello` until it
+matches, and otherwise answers `refused` with reason `not-admitted` and
+closes. The secret is in the first message, so the link must be TLS. The PIN
+needed nothing new on the watch: the keypad is an ordinary screen and the
+digits reach the gateway as ordinary presses, which it compares itself. Two
+things this showed: a denial needs the PIN as an approval does (ADR-0377 §3),
+and the digits are visible to whatever logs presses, so a gateway must keep
+presses on a PIN screen out of its logs.
+
 One thing the engine does is not protocol but shapes it: the watch frees a
 screen's decoded pixels when it leaves the screen, unless an update or a
 flipbook changed them, because those cannot be rebuilt from the stored image.
