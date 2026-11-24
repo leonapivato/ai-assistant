@@ -113,6 +113,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from ai_assistant.core.channel_validation import (
+    APPROVALS,
     OriginKind,
     declared_input,
     origin_kind,
@@ -1511,7 +1512,11 @@ class _Renderer:
             self._channel, parties, words, at=self._received_at, new_conversation=new_conversation
         )
         for one in joined:
-            joined_parties = _known_parties(one.messages)
+            # ADR-0361 §6:1: an approval's input carries no one's words; its kind declares
+            # its parties empty, so it names no sender, as planning's does (ADR-0375 §6:1).
+            joined_parties = (
+                () if one.channel.channel_type == APPROVALS else _known_parties(one.messages)
+            )
             joined_words = [
                 self._recorded_message(message, None, channel=one.channel, senders=one.senders)
                 for message in one.messages

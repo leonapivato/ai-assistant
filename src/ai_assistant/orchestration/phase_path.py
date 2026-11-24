@@ -4634,6 +4634,9 @@ class PhasePath:
                 if state is not None and no_persons
                 else None
             ),
+            # ADR-0375 §4:1-§4:3: each message the pass took in, by its own party and
+            # sender, where the trigger records none, as the hub chat's.
+            input_messages=() if state is None else state.input_messages,
             # ADR-0364 §3:9: the trigger as the lifecycle resolved it, so a hub chat's
             # stimulus names the conversation it came from by its ``where``.
             trigger=working.trigger if state is None else state.trigger,
