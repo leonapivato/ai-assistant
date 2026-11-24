@@ -1960,6 +1960,22 @@ class IdentityStoreError(AssistantError):
     """
 
 
+class PermissionLineStoreError(AssistantError):
+    """The line store could not read or write its lines (ADR-0367 §3:6, ADR-0376 §4:7).
+
+    Its own class because a permission line is none of the things the existing errors
+    name, and not ADR-0097's source grant (ADR-0367 §14), whose store raises its own: a
+    caller checking a call against lines can catch a fault of this store without
+    catching another store's.
+
+    **It is raised only for a store fault**, never for a making or a removal the store
+    declines: a repeated making is a :class:`~ai_assistant.core.types.LineMaking` that
+    says ``unchanged``, a removal of nothing a
+    :class:`~ai_assistant.core.types.LineRemoval` that says ``not_standing``, and a
+    malformed *argument* is a ``ValueError``.
+    """
+
+
 class PersonModelOffError(AssistantError):
     """The person model is not switched on on this hub (ADR-0338 §8:1, §11:2).
 

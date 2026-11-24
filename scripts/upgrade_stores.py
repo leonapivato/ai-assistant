@@ -49,13 +49,16 @@ from pydantic import BaseModel
 
 from ai_assistant.app.composition import (
     IDENTITIES_FILENAME,
+    PERMISSION_LINES_FILENAME,
     PERSON_MODEL_FILENAME,
     PROFILE_FIELD_CHARS,
     telegram_intake_path,
 )
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
+    ANYONE_GROUP_ID,
     MAX_STORY_PAGE,
+    OWN_CHAT_CONNECTION,
     OWNER_PERSON_ID,
     Account,
     ActionRequest,
@@ -89,11 +92,13 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     EvaluationTrace,
     FindingAnnotations,
+    GrantHow,
     GrantScope,
     Idempotency,
     InputPart,
     InputSender,
     JoinedInput,
+    LineParts,
     LinkAct,
     LinkActHow,
     Memory,
@@ -117,6 +122,7 @@ from ai_assistant.core.types import (
     OccurrencePush,
     OccurrenceState,
     PermissionDecision,
+    PermissionLineKind,
     PermissionOutcome,
     PermissionRuling,
     PersonActHow,
@@ -197,6 +203,7 @@ from ai_assistant.memory.person_model_store import SqlitePersonModelStore
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.permissions import (
     SqliteAuditTrail,
+    SqlitePermissionLineStore,
     SqliteSourceGrantStore,
     SqliteSourceReadTrail,
 )
@@ -2181,6 +2188,86 @@ async def _read_identities(directory: Path) -> Records:
         store.close()
 
 
+# --- permission_lines.db -------------------------------------------------------------
+
+#: The identifiers the writer mints, in order, so the reader can read every line back by
+#: its identifier, the removed ones included: the store lists only the standing lines.
+_LINE_IDS: Final = tuple(f"line:upgrade-{number}" for number in range(1, 5))
+
+
+def _permission_lines(directory: Path, *, minted: Sequence[str] = ()) -> SqlitePermissionLineStore:
+    ids = iter(minted)
+    return SqlitePermissionLineStore(
+        path=directory / PERMISSION_LINES_FILENAME, new_id=lambda: next(ids)
+    )
+
+
+async def _write_permission_lines(directory: Path, moment: Moment) -> None:
+    del moment  # the store stamps its own instants
+    store = _permission_lines(directory, minted=_LINE_IDS)
+    try:
+        # A grant with every part, a grant with none of its optional ones, and a limit
+        # on one account; then one more grant, removed, which the store keeps.
+        await store.record_making(
+            LineParts(
+                kind=PermissionLineKind.GRANT,
+                who=OWNER_PERSON_ID,
+                action="send_text",
+                thing="telegram:upgrade-line",
+                how=GrantHow.WITH_APPROVAL,
+                bar=Sureness.NORMAL,
+                condition=OWN_CHAT_CONNECTION,
+            ),
+            by=OWNER_PERSON_ID,
+        )
+        await store.record_making(
+            LineParts(
+                kind=PermissionLineKind.GRANT,
+                who=ANYONE_GROUP_ID,
+                action="search_memories",
+                how=GrantHow.ALLOWED,
+                bar=Sureness.WEAK,
+            ),
+            by=OWNER_PERSON_ID,
+        )
+        await store.record_making(
+            LineParts(
+                kind=PermissionLineKind.LIMIT,
+                who=OWNER_PERSON_ID,
+                action="send_email",
+                thing="account:conn-mail-upgrade",
+            ),
+            by=OWNER_PERSON_ID,
+        )
+        removed = await store.record_making(
+            LineParts(
+                kind=PermissionLineKind.GRANT,
+                who=OWNER_PERSON_ID,
+                action="report_current_time",
+                how=GrantHow.ALLOWED,
+                bar=Sureness.NONE,
+            ),
+            by=OWNER_PERSON_ID,
+        )
+        await store.record_removal(removed.line.id, by=OWNER_PERSON_ID)
+    finally:
+        store.close()
+
+
+async def _read_permission_lines(directory: Path) -> Records:
+    store = _permission_lines(directory)
+    try:
+        records: Records = {}
+        for line_id in _LINE_IDS:
+            line = await store.line(line_id)
+            if line is not None:
+                records[f"line/{line.id}"] = to_json(line)
+        records["standing"] = [one.id for one in await store.standing()]
+        return records
+    finally:
+        store.close()
+
+
 # --- devices.db -----------------------------------------------------------------------
 
 
@@ -2266,6 +2353,12 @@ STORES: Final[tuple[Store, ...]] = (
     Store("bookings", ("bookings.db",), _write_bookings, _read_bookings),
     Store("person_model", (PERSON_MODEL_FILENAME,), _write_person_model, _read_person_model),
     Store("identities", (IDENTITIES_FILENAME,), _write_identities, _read_identities),
+    Store(
+        "permission_lines",
+        (PERMISSION_LINES_FILENAME,),
+        _write_permission_lines,
+        _read_permission_lines,
+    ),
     Store("devices", (ENROLMENTS_FILENAME,), _write_devices, _read_devices),
 )
 

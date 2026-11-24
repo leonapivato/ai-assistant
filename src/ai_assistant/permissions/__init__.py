@@ -14,7 +14,15 @@ Contracts: :class:`~ai_assistant.core.protocols.ActionPolicy` and
 by the one :class:`~ai_assistant.permissions.grants.SqliteSourceGrantStore`; and
 :class:`~ai_assistant.core.protocols.SourceReadRecorder` and
 :class:`~ai_assistant.core.protocols.SourceReadTrail` (ADR-0185), both satisfied
-by the one :class:`~ai_assistant.permissions.reads.SqliteSourceReadTrail`.
+by the one :class:`~ai_assistant.permissions.reads.SqliteSourceReadTrail`; and
+:class:`~ai_assistant.core.protocols.PermissionLineStore` (ADR-0367 §3:6, ADR-0376
+§4:8), the lines people make, implemented by
+:class:`~ai_assistant.permissions.lines.SqlitePermissionLineStore`.
+
+**Lines are not source grants** (ADR-0367 §14). A line says who may do what, how
+and at what bar; a source grant lets a reader read a source for a use. The line
+store records lines and decides nothing: whether a line covers a call is the
+check's (ADR-0367 §4), and nothing reads the store yet.
 
 **ADR-0004 §7's other half, for source access.** ADR-0097 built the *gate* — "is
 this source granted for this use" — and ADR-0185 builds the *record of the access
@@ -52,6 +60,7 @@ from __future__ import annotations
 
 from ai_assistant.permissions.audit import SqliteAuditTrail
 from ai_assistant.permissions.grants import SqliteSourceGrantStore
+from ai_assistant.permissions.lines import SqlitePermissionLineStore
 from ai_assistant.permissions.policy import (
     ConfiguredForecastDestination,
     ConfiguredSearchDestination,
@@ -63,6 +72,7 @@ __all__ = [
     "ConfiguredForecastDestination",
     "ConfiguredSearchDestination",
     "SqliteAuditTrail",
+    "SqlitePermissionLineStore",
     "SqliteSourceGrantStore",
     "SqliteSourceReadTrail",
     "ThresholdActionPolicy",

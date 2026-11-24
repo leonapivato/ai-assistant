@@ -59,6 +59,7 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
     NotificationOutboxError,
     NotificationStoreError,
+    PermissionLineStoreError,
     PersonModelStoreError,
     PlanningError,
     StoryStoreError,
@@ -76,11 +77,13 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     Idempotency,
     LabelBounds,
+    LineParts,
     Memory,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
     PermissionDecision,
+    PermissionLineKind,
     PermissionOutcome,
     PermissionRuling,
     PersonActHow,
@@ -161,6 +164,7 @@ from ai_assistant.orchestration.understanding import RecentEpisodes
 from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.permissions import (
     SqliteAuditTrail,
+    SqlitePermissionLineStore,
 )
 from ai_assistant.planning import (
     InMemoryPlanStore,
@@ -186,6 +190,7 @@ from ai_assistant.testing import (
     FakeNotificationPolicy,
     FakeNotificationStore,
     FakeNotificationWriter,
+    FakePermissionLineStore,
     FakePersonModelStore,
     FakePlanStore,
     FakeReader,
@@ -869,6 +874,25 @@ async def _sqlite_identity_store(now: Clock) -> None:
         SqliteIdentityStore(path=Path(directory) / "identities.db", now=now).close()
 
 
+#: A line to make, so a making reads the store's clock (ADR-0376 §4:8).
+_LIMIT: Final = LineParts(kind=PermissionLineKind.LIMIT, who=OWNER_PERSON_ID, action="send_email")
+
+
+async def _fake_permission_line_store(now: Clock) -> None:
+    """A making stamps the line from the store's own clock (ADR-0376 §4:8)."""
+    await FakePermissionLineStore(now=now).record_making(_LIMIT, by=OWNER_PERSON_ID)
+
+
+async def _sqlite_permission_line_store(now: Clock) -> None:
+    """A making stamps the line from the store's own clock (ADR-0376 §4:8)."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqlitePermissionLineStore(path=Path(directory) / "permission_lines.db", now=now)
+        try:
+            await store.record_making(_LIMIT, by=OWNER_PERSON_ID)
+        finally:
+            store.close()
+
+
 async def _sqlite_story_store(now: Clock) -> None:
     """A create stamps the story and its log lines from the store's own clock."""
     with tempfile.TemporaryDirectory() as directory:
@@ -999,6 +1023,8 @@ SEAMS = [
     Seam("SqlitePersonModelStore", _sqlite_person_model_store, PersonModelStoreError),
     Seam("FakeIdentityStore", _fake_identity_store, IdentityStoreError),
     Seam("SqliteIdentityStore", _sqlite_identity_store, IdentityStoreError),
+    Seam("FakePermissionLineStore", _fake_permission_line_store, PermissionLineStoreError),
+    Seam("SqlitePermissionLineStore", _sqlite_permission_line_store, PermissionLineStoreError),
     Seam("SqliteStoryStore", _sqlite_story_store, StoryStoreError),
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
     Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),

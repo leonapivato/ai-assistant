@@ -1202,6 +1202,10 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # store's reason exactly: an entry holds the same candidate, so it holds
             # the same free text a producer wrote to be shown to a person.
             "outbox.db",
+            # ADR-0367 §3:6's line store: the lines people make, grants and limits,
+            # each making and removal kept, opened on every hub and empty until a line
+            # is made.
+            "permission_lines.db",
             "plans.db",
             # ADR-0185 §4's source-read trail, the eleventh and the tenth that is
             # Tier 1: a row names the source a read was about and the grant it ran
