@@ -29,7 +29,6 @@ from importlib.resources import files
 from typing import TYPE_CHECKING, Final, assert_never
 
 import structlog
-from pydantic import ValidationError
 
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
@@ -895,11 +894,13 @@ def held_things(settings: Settings, *, sources: Sequence[Reader | None]) -> tupl
     is none of these and is not here (§2:3): its link in the identity store names its
     person (:func:`configured_accounts`).
 
-    **A thing no record can name is left out, and the start goes on.** ``Settings`` takes
-    a reference verbatim, so one with surrounding whitespace is a connection no key
-    spells (:class:`~ai_assistant.core.types.ThingKey` refuses rather than strips). Left
-    out, it has no record and is no one's, which can only refuse (ADR-0381 §5); refusing
-    the start instead would stop a hub that runs today over a record nothing reads yet.
+    **A thing no record can name refuses the start** (§2:1, §4:1): every thing the hub
+    holds is recorded before it admits work, so one that cannot be is a configuration
+    the hub does not build through. ``Settings`` takes a reference verbatim, so one with
+    surrounding whitespace is a connection no key spells
+    (:class:`~ai_assistant.core.types.ThingKey` refuses rather than strips); no
+    connection record can carry it either, since a stored reference is stripped
+    (ADR-0151 §4), so such an account was never one a call could act through.
 
     Args:
         settings: The loaded settings.
@@ -908,6 +909,9 @@ def held_things(settings: Settings, *, sources: Sequence[Reader | None]) -> tupl
 
     Returns:
         The things' keys, each once.
+
+    Raises:
+        ConfigurationError: If a thing the hub holds is not one a record can name.
     """
     connections = [OWN_CHAT_CONNECTION]
     if settings.telegram_connection is not None and settings.telegram_user_id is not None:
@@ -922,9 +926,13 @@ def held_things(settings: Settings, *, sources: Sequence[Reader | None]) -> tupl
     for kind, identifier in things:
         try:
             keys[ThingKey(kind=kind, identifier=identifier)] = None
-        except ValidationError:
-            # Neither the identifier nor why: a reference is the owner's configuration.
-            _log.warning("thing_not_recordable", kind=kind.value)
+        except ValueError as exc:
+            msg = (
+                f"a {kind.value} this hub holds has no spelling a record of whose it is "
+                "can name (ADR-0381 §3:2): a configured reference or a reader's identity "
+                "carries surrounding whitespace"
+            )
+            raise ConfigurationError(msg) from exc
     return tuple(keys)
 
 
@@ -1251,6 +1259,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # build before any store is written.
     facet_reader = _build_calendar_reader(settings)
     upcoming_reader = _build_calendar_reader(settings)
+    # Every thing this hub holds, as the start records it (ADR-0381 §4:1): derived here,
+    # above the data directory, so a thing no record can name fails the build before any
+    # store is written (#372).
+    held = held_things(settings, sources=(facet_reader, upcoming_reader))
     # Construct the embedder here too — above the data directory — so a missing or
     # unbuildable model fails as a ConfigurationError before any disk is touched
     # (ADR-0006 §2 default, #372's above-disk contract; see :func:`_build_embedder`).
@@ -1434,7 +1446,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # no other store and no store reads it.
         thing_records = SqliteThingRecordStore(
             path=directory / THING_RECORDS_FILENAME,
-            held=held_things(settings, sources=(facet_reader, upcoming_reader)),
+            held=held,
             now=_utcnow,
         )
         opened.append(thing_records.close)

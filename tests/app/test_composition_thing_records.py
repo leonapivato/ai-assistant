@@ -24,6 +24,7 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.app.composition import THING_RECORDS_FILENAME, held_things
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
     APPROVALS_CONNECTION,
     OWN_CHAT_CONNECTION,
@@ -137,20 +138,23 @@ def test_no_account_linked_to_identify_its_person_is_held() -> None:
     assert identifiers == {one.identifier for one in (*_ALWAYS, _LINE)}
 
 
-async def test_a_reference_no_key_can_spell_is_left_out_and_the_hub_starts(
+def test_a_reference_no_record_can_name_refuses_the_start_before_any_file(
     tmp_path: Path,
 ) -> None:
-    """``Settings`` takes a reference verbatim; a thing no key spells is no one's (§5)."""
+    """ADR-0381 §4:1: every thing held is recorded before work, so one that cannot be is
+    a configuration the hub does not build through, refused above the data directory."""
     settings = Settings(
         embedder=EmbedderKind.HASHING,
         send_email_connection=f" {_MAIL}",
         send_email_endpoint=_MAIL_ENDPOINT,
     )
+    directory = tmp_path / "data"
 
-    assert held_things(settings, sources=()) == _ALWAYS
-    engine = build_engine(settings, data_dir=tmp_path)
-    await engine.aclose()
-    assert _keys(await _records(tmp_path)) == list(_ALWAYS)
+    with pytest.raises(ConfigurationError, match="ADR-0381"):
+        held_things(settings, sources=())
+    with pytest.raises(ConfigurationError, match="ADR-0381"):
+        build_engine(settings, data_dir=directory)
+    assert not directory.exists()
 
 
 async def test_the_store_is_opened_on_every_hub_owner_only_naming_the_owner(
