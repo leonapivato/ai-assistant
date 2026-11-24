@@ -1,6 +1,6 @@
 # 376. A line names the owner or anyone, one capability and at most one connection, and the owner lists, makes and removes lines through four engine members
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 - Scope: the first decision lane, D1, of milestone 21, "Every call checked" (acceptance
   [#3678](https://github.com/leonapivato/ai-assistant/issues/3678), lanes
