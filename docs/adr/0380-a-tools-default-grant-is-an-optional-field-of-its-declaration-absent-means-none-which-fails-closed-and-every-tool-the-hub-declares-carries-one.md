@@ -1,6 +1,6 @@
 # 380. A tool's default grant is an optional field of its declaration: absent means none, which fails closed, and every tool the hub declares carries one
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 - Scope: decision D5 of milestone 21, "Every call checked" (acceptance
   [#3678](https://github.com/leonapivato/ai-assistant/issues/3678), lanes
