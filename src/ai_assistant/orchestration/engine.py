@@ -8617,6 +8617,9 @@ class Engine:
                     if state is None
                     else persons_work(state.work_facts, state.held_senders),
                     place_name=named,
+                    # ADR-0375 §4:1, §4:2: each message the pass took in, by its own party
+                    # and sender, where the trigger records none, as the hub chat's.
+                    input_messages=() if state is None else state.input_messages,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the

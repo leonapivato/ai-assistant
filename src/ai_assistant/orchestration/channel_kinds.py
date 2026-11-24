@@ -558,19 +558,23 @@ def account_of(channel_type: str | None, sender: InputSender | None, person: str
 def _grouped(inputs: Sequence[SentInput]) -> list[tuple[InputSender, _Sent]]:
     """Each distinct sender of ``inputs``, in ``canonical_senders``' order, with what it sent.
 
+    A sender is distinct by its person, level and whether the links were read, and by the
+    kind it came by, so no part of the line claims of one input what only another's
+    record shows (ADR-0375 §2:1, §5:2): a person's Telegram message and a message
+    written on the system's own machine are two parts. Senders of one person stand in
+    the order they were first taken in.
+
     A recorded message is its own sender's, or its input's one sender's where it records
     none; an input that records no messages is each of its senders', counted by its
     recorded party where it has one sender, and as ``core`` declares a sender's words
     otherwise (ADR-0351 §3:2).
     """
-    found: list[InputSender] = []
-    sent: dict[str | None, _Sent] = {}
+    sent: dict[tuple[InputSender, str | None], _Sent] = {}
 
     def add(
         sender: InputSender, channel_type: str | None, party: SupportHolder | None, *, count: int
     ) -> None:
-        found.append(sender)
-        held = sent.setdefault(sender.person, _Sent(channel_type=channel_type))
+        held = sent.setdefault((sender, channel_type), _Sent(channel_type=channel_type))
         held.count += count
         if party is None or party.kind not in {HolderKind.PERSON, HolderKind.UNKNOWN}:
             # A forward's party is its original sender, claimed (ADR-0351 §2:7).
@@ -593,7 +597,10 @@ def _grouped(inputs: Sequence[SentInput]) -> list[tuple[InputSender, _Sent]]:
         for sender in one.senders:
             party = recorded[0] if recorded is not None and sole else sender_party(sender)
             add(sender, one.channel_type, party, count=one.count if sole else 1)
-    return [(one, sent[one.person]) for one in canonical_senders(found)]
+    # ADR-0375 §5:2: in ``canonical_senders``' order, which orders by person alone.
+    order = {one.person: at for at, one in enumerate(canonical_senders(key[0] for key in sent))}
+    keys = sorted(sent, key=lambda key: order[key[0].person])
+    return [(key[0], sent[key]) for key in keys]
 
 
 def _whose(
@@ -697,7 +704,13 @@ def _upper(words: str) -> str:
     return words[:1].upper() + words[1:]
 
 
-def sender_line(inputs: Sequence[SentInput], *, named: Callable[[str], str], origin: str) -> str:
+def sender_line(
+    inputs: Sequence[SentInput],
+    *,
+    named: Callable[[str], str],
+    origin: str,
+    taken_in: bool = False,
+) -> str:
     """The situation's sender line (ADR-0375 §5), for the inputs a stimulus section renders.
 
     By what each input came, how strong a sign that is of who sent it and whom the system
@@ -714,13 +727,16 @@ def sender_line(inputs: Sequence[SentInput], *, named: Callable[[str], str], ori
         named: A person the system serves, named in words, as the lines between the tags
             name them.
         origin: The trigger's origin, by its name, for an input no person sent.
+        taken_in: Whether the inputs were taken in after the work was briefed, as
+            planning's news says of them (ADR-0375 §2:2): the line says so.
 
     Returns:
         The line, with its leading ``- ``.
     """
     groups = _grouped(inputs)
+    of = " of what was taken in" if taken_in else ""
     if not groups:
-        return f"- The sender: {_unrecorded(inputs, named, origin)}"
+        return f"- The sender{of}: {_unrecorded(inputs, named, origin)}"
     several = len(groups) > 1
     parts: list[str] = []
     for sender, sent in groups:
@@ -734,7 +750,7 @@ def sender_line(inputs: Sequence[SentInput], *, named: Callable[[str], str], ori
         part = _part(sender, sent, named, subject=subject, plural=plural)
         parts.append(part if not parts else _upper(part))
     heading = "The senders" if several else "The sender"
-    return f"- {heading}: {' '.join(parts)}"
+    return f"- {heading}{of}: {' '.join(parts)}"
 
 
 def _unrecorded(inputs: Sequence[SentInput], named: Callable[[str], str], origin: str) -> str:

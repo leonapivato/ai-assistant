@@ -209,3 +209,23 @@ async def test_a_person_the_system_knows_but_does_not_serve_is_never_named() -> 
     for text in (heard.content, work.briefing):
         assert "sam" not in text.lower()
     _no_hub(heard.content, work.briefing)
+
+
+async def test_one_input_from_the_owners_device_and_an_unlinked_one_is_told_apart() -> None:
+    """§4:1, §4:2, §5:2: one start wait takes in both, and understanding tells each apart.
+
+    The engine hands understanding the messages the pass took in, each with its own
+    sender, since the chat's trigger records none.
+    """
+    async with Household(people=await _people()) as home:
+        mine = await home.device(home.owner, "home-pc")
+        stranger = await home.device(None, "tablet")
+        work = await home.say_together((mine, "Is the lake warm?"), (stranger, "And the canoe?"))
+
+    heard = _heard(work)
+    assert [(one.name, one.get("from"), one.text) for one in heard.tags("The stimulus")] == [
+        ("said", "a device linked to Maren", "Is the lake warm?"),
+        ("received", "an unknown sender", "And the canoe?"),
+    ]
+    assert heard.section("The situation").split("\n")[3].startswith("- The senders: ")
+    _no_hub(heard.content, work.briefing)

@@ -1022,6 +1022,7 @@ class UnderstandingStage:
         received_at: datetime | None = None,
         person_id: str | None = None,
         place_name: str | None = None,
+        input_messages: Sequence[RecordedInputMessage] = (),
     ) -> ActivationUnderstanding:
         """Read one input against its context, and record what it was understood to mean.
 
@@ -1075,6 +1076,10 @@ class UnderstandingStage:
                 (ADR-0375 §6:3, §6:4): they are named so where it says whose place it is,
                 whose account an input came by and who wrote an earlier item. ``None``
                 names them in ADR-0353 §4:1's words.
+            input_messages: The trigger's messages as the pass took them in, each with
+                its own party and sender, where the trigger records none, as the hub
+                chat's does not: each of its messages is attributed by its own record
+                (ADR-0375 §4:1, §4:2).
 
         Returns:
             The recorded understanding.
@@ -1099,6 +1104,7 @@ class UnderstandingStage:
             received_at=received_at or moment,
             profiled=person is not None,
             relayed=relayed,
+            input_messages=input_messages,
         ).brief(
             self._prompt,
             text,
@@ -1280,7 +1286,7 @@ def _naming(
 class _Renderer:
     """One call's message: its sections in order, its labels minted as they render."""
 
-    def __init__(  # noqa: PLR0913 — the bound, the zone and whose it is, the naming, the origin, the two instants, whether a profile is held, and the relay mark
+    def __init__(  # noqa: PLR0913 — the bound, the zone and whose it is, the naming, the origin, the two instants, whether a profile is held, the relay mark and the input's messages
         self,
         *,
         excerpt_chars: int,
@@ -1292,8 +1298,11 @@ class _Renderer:
         received_at: datetime,
         profiled: bool,
         relayed: bool = False,
+        input_messages: Sequence[RecordedInputMessage] = (),
     ) -> None:
         self._profiled = profiled
+        # The trigger's messages as the pass took them in, where it records none.
+        self._input_messages = tuple(input_messages)
         # ADR-0351 §5:9: an earlier version's relay mark on the trigger's input.
         self._relayed = relayed
         self._excerpt_chars = excerpt_chars
@@ -1534,7 +1543,7 @@ class _Renderer:
             SentInput(
                 channel_type=self._channel.channel_type,
                 senders=() if trigger is None else trigger.senders,
-                messages=() if trigger is None else trigger.messages,
+                messages=self._messages_of(trigger),
                 parties=parties,
                 count=count,
             ),
@@ -1548,6 +1557,18 @@ class _Renderer:
                 for one in joined
             ),
         ]
+
+    def _messages_of(
+        self, trigger: RecordedChannelTrigger | None
+    ) -> tuple[RecordedInputMessage, ...]:
+        """The trigger's messages, each with its party and sender, where any are held.
+
+        Its own record's, or, for a trigger that records none, as the hub chat's does
+        not, those the pass took in (ADR-0375 §4:1, §4:2).
+        """
+        if trigger is not None and trigger.messages:
+            return trigger.messages
+        return self._input_messages
 
     @staticmethod
     def _supplied_reply(window: ChannelWindow) -> str | None:
@@ -1672,7 +1693,7 @@ class _Renderer:
         recorded = next(
             (
                 one
-                for one in (() if trigger is None else trigger.messages)
+                for one in self._messages_of(trigger)
                 if one.position == message.position and one.forwarded_from is None
             ),
             None,
