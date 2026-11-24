@@ -87,12 +87,14 @@ that returned on the round limit, the loop guard or an undelivered last message 
 ``failed / processing_failed`` (ADR-0317 §3:5). The activation's messages, joined by a
 blank line, are the episode's ``outcome`` at the freeze (ADR-0307 §10).
 
-**A work's exchange, and each call's entry** (ADR-0356 §4:3, §5, §8). Every round of
-every activation is offered one tool set, in one fixed order (:meth:`PhasePath._offered`):
-the registry's capabilities, the person model's, the Task Scheduler's and the calls on
-running work where each is attached, and ``text`` last. A call whose condition for
-running does not hold comes back refused before authorizing, saying why
-(:meth:`PhasePath._not_here`). The working set holds the work's exchange,
+**A work's exchange, and each call's entry** (ADR-0356 §4:3, §5, §8). The hub offers one
+tool set, in one fixed order (:meth:`PhasePath._offered`): the registry's capabilities,
+the person model's, the Task Scheduler's and the calls on running work where each is
+attached, and ``text`` last. Each work is offered only those its authority could use,
+fixed when its first round is briefed, and shown only the connections it could use
+(ADR-0368 §8, :meth:`PhasePath._narrowed`); every call is still checked when made. A call
+whose condition for running does not hold comes back refused before authorizing, saying
+why (:meth:`PhasePath._not_here`). The working set holds the work's exchange,
 :class:`~ai_assistant.orchestration.planning.PlanningWork`, in memory alone, and hands it
 to each round. Each call's entry is appended to the episode once what came of it is
 known, before the next round's request, and every call still without one gets one at
@@ -283,6 +285,7 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EpisodicMemory,
     ForecastRefusal,
+    GrantHow,
     LabelKind,
     Memory,
     MemoryKind,
@@ -290,6 +293,7 @@ from ai_assistant.core.types import (
     MessageAuthor,
     Modality,
     NewMessage,
+    PermissionLineKind,
     PlanningLabel,
     ProfileField,
     ProjectedCall,
@@ -308,6 +312,8 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     StoryRelation,
     Sureness,
+    ThingKey,
+    ThingKind,
     ToolDefinition,
     ToolFailure,
     ToolFailureKind,
@@ -350,7 +356,14 @@ from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
 )
 from ai_assistant.orchestration.candidates import pending_candidates
-from ai_assistant.orchestration.channel_kinds import place_channel, place_of, served, takes_text
+from ai_assistant.orchestration.channel_kinds import (
+    FORECAST_ACCOUNT_KIND,
+    SEARCH_ACCOUNT_KIND,
+    place_channel,
+    place_of,
+    served,
+    takes_text,
+)
 from ai_assistant.orchestration.chat import couldnt_finish
 from ai_assistant.orchestration.controller import (
     Stage,
@@ -359,6 +372,13 @@ from ai_assistant.orchestration.controller import (
     recall_digest_due,
 )
 from ai_assistant.orchestration.conversations import conversation_channel
+from ai_assistant.orchestration.could_use import (
+    CouldUse,
+    WorkAuthority,
+    capabilities_it_could_use,
+    connection_key,
+    connections_it_could_use,
+)
 from ai_assistant.orchestration.defects import ToleratedStageError, is_defect, log_defect
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
@@ -489,9 +509,11 @@ if TYPE_CHECKING:
         DiagnosticSink,
         Forecaster,
         MemoryStore,
+        PermissionLineStore,
         PlanStore,
         StoryStore,
         StructuredCompleter,
+        ThingRecordStore,
         ToolCallingCompleter,
         ToolInvoker,
         ToolRegistry,
@@ -505,6 +527,7 @@ if TYPE_CHECKING:
         JoinedInput,
         MemoryRecord,
         MessageReceipt,
+        PermissionLine,
         PlanningRound,
         RecordedChannelTrigger,
         RequestedCall,
@@ -1996,6 +2019,18 @@ def _input_places(state: ActivationState | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(held))
 
 
+def _own_places(state: ActivationState | None, working: PhaseWorking) -> tuple[str, ...]:
+    """Every place one of the work's own inputs came from, which it could use (ADR-0368 §8).
+
+    :func:`_input_places`, and, for a pass no lifecycle state holds, its trigger's place.
+    """
+    held = _input_places(state)
+    trigger = working.trigger
+    if held or trigger is None or trigger.channel is None:
+        return held
+    return (place_of(trigger.channel),)
+
+
 def _taken_places(state: ActivationState | None, own: str | None) -> tuple[str, ...]:
     """The places inputs this activation took by a take came from (ADR-0361 §7:3).
 
@@ -2211,6 +2246,12 @@ class PhaseWorking:
         # round, and the writer of each that takes a text message, by place (§9:3).
         self.connections: tuple[ConnectionShown, ...] = ()
         self.connection_targets: Mapping[str, PlaceTarget] = {}
+        # ADR-0368 §8:2: of those, what the section shows this round, only what the
+        # work's authority could use; and what a connections search may find, ``None``
+        # where nothing narrows it. ``connections`` stays whole: what the hub has is
+        # what the check reads (:func:`had_connections`), whatever a work is shown.
+        self.shown_connections: tuple[ConnectionShown, ...] = ()
+        self.could_show: CouldUse | None = None
         # ADR-0349 §7:28: how the waits on an older activation move the pass's deadline,
         # which the engine hands in with the pass; ``None`` moves nothing.
         self.move_deadline: Callable[[float], None] | None = None
@@ -3861,6 +3902,8 @@ class PhasePath:
         timezone: str = "UTC",
         new_effect_id: Callable[[], str] = _new_effect_id,
         diagnostics: DiagnosticSink | None = None,
+        lines: PermissionLineStore | None = None,
+        things: ThingRecordStore | None = None,
     ) -> None:
         """Wire the path.
 
@@ -3917,6 +3960,12 @@ class PhasePath:
             diagnostics: The diagnostic record's write seam, handed on to planning
                 and digesting, which this path builds (ADR-0314 §4:4); ``None`` where
                 the record is off. The path itself writes no entry (§4:2).
+            lines: The line store, the **same** one the authorizer's check reads: what a
+                work is offered and shown is narrowed to what its authority could use
+                (ADR-0368 §8). ``None`` where no check is wired, which narrows nothing.
+            things: The store of whose each thing is, read for the Connections section
+                as ADR-0381 §6:3 has it; ``None`` reads every connection as having no
+                record (§5:1).
 
         Raises:
             ValueError: If ``round_limit`` is below 1, ``round_wait`` or
@@ -3970,6 +4019,8 @@ class PhasePath:
         self._recall_cap = recall_cap
         self._recall_digest_wait = recall_digest_wait
         self._story_reads = story_reads
+        self._lines = lines
+        self._things = things
         self._label_arguments: dict[str, Mapping[str, LabelKinds]] = {
             name: dict(arguments) for name, arguments in (label_arguments or {}).items()
         }
@@ -4713,10 +4764,13 @@ class PhasePath:
         if stories is not None:
             working.notes.update((one.note_id, one) for one in _shown_notes(stories))
         _hold_given(given, working, active_state())
-        # ADR-0356 §4:3: every capability on every round, in one fixed order; §4:4-§4:6:
-        # each whose condition does not hold here comes back refused, saying why.
+        # ADR-0356 §4:3: the hub's capabilities, in one fixed order; §4:4-§4:6: each
+        # whose condition does not hold here comes back refused, saying why.
         offered = await self._offered()
         tickets = await self._held_tickets(state)
+        # ADR-0368 §8: what the work is offered, fixed at its first round, and shown, each
+        # only what its authority could use.
+        could_use = await self._narrowed(given, working, state, offered, tickets)
         not_here = self._not_here(
             offered,
             person=person is not None,
@@ -4745,6 +4799,7 @@ class PhasePath:
             labels=working.labels.labels,
             outcomes=outcomes,
             capabilities=offered,
+            could_use=could_use,
             label_arguments=self._label_arguments,
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
@@ -4754,7 +4809,7 @@ class PhasePath:
             not_taken=working.not_taken(),
             person=person,
             places=None if working.scheduling is None else working.scheduling.places,
-            connections=working.connections,
+            connections=working.shown_connections,
             offers=offers,
             waiting=waiting,
             declined=() if state is None else state.declined,
@@ -5207,14 +5262,14 @@ class PhasePath:
             )
 
     async def _offered(self) -> tuple[ToolDefinition, ...]:
-        """The declarations every round offers planning (ADR-0306 §2:7), the clock apart.
+        """The declarations the hub offers planning (ADR-0306 §2:7), the clock apart.
 
-        ADR-0356 §4:3: every capability planning may call, on every round of every
-        activation, in one fixed order, from the hub's start until it stops: the
-        registry's, the person model's calls where they are attached, the Task
-        Scheduler's and the calls on running work where each is wired, and ``text``
-        last. No round, activation, person or condition adds one or removes one; a call
-        whose condition does not hold comes back refused (:meth:`_not_here`).
+        ADR-0356 §4:3: every capability planning may call, in one fixed order, from the
+        hub's start until it stops: the registry's, the person model's calls where they
+        are attached, the Task Scheduler's and the calls on running work where each is
+        wired, and ``text`` last. A work is offered only those its authority could use
+        (ADR-0368 §8:1, :meth:`_narrowed`); a call whose condition does not hold comes
+        back refused (:meth:`_not_here`).
 
         Planning's input carries ``now``, so the clock's call would only spend a round
         on what it has (#2942): it is left out of the offer, and stays registered.
@@ -5276,6 +5331,149 @@ class PhasePath:
             for name in sorted(names - {STOP_ACTIVATION_CAPABILITY, TEXT_CAPABILITY}):
                 why.setdefault(name, WAITING_ROUND)
         return why
+
+    async def _narrowed(
+        self,
+        given: PhasePass,
+        working: PhaseWorking,
+        state: ActivationState | None,
+        offered: Sequence[ToolDefinition],
+        tickets: Sequence[Ticket],
+    ) -> frozenset[str] | None:
+        """Narrow what the work is shown to what its authority could use (ADR-0368 §8).
+
+        Each round, the Connections section's connections and what a connections search
+        may find, to those its authority could use (§8:2, ADR-0381 §6:3): read from the
+        standing lines, and the records a grant that asks would read, over the
+        connections the hub has, which stay whole for the check (:func:`had_connections`).
+        At its first round, the capabilities it is offered (§8:1), which planning then
+        keeps for the rest of the work. Whom the check runs for, at what level, and whose
+        work it is are read as the authorizer is handed them (ADR-0368 §7). Where no line
+        store is wired, nothing is narrowed, as the authorizer then checks nothing.
+
+        Returns:
+            At the first round, the capabilities it could use, by name; ``None`` on a
+            later round, and where nothing narrows the offer.
+        """
+        working.shown_connections = working.connections
+        working.could_show = None
+        if self._lines is None:
+            return None
+        try:
+            async with asyncio.timeout_at(given.deadline):
+                lines = await self._lines_now()
+                whose = await self._records(lines, offered, working.connections)
+                accounts = await self._accounts_acting()
+        except TimeoutError:
+            raise ModelTimeoutError(_PLANNING_EXPIRED) from None
+        authority = WorkAuthority(
+            lines=lines,
+            subject=working.check_subject(
+                None if self._connections is None else had_connections(working.connections)
+            ),
+            person=None if state is None else persons_work(state.work_facts, state.held_senders),
+        )
+        own = _own_places(state, working)
+        could = connections_it_could_use(
+            authority,
+            working.connections,
+            declarations=offered,
+            accounts=accounts,
+            own=own,
+            whose=whose,
+        )
+        working.could_show = could
+        working.shown_connections = tuple(
+            one for one in working.connections if could.shows(one.place)
+        )
+        if working.work is not None:
+            return None
+        usable = capabilities_it_could_use(
+            authority, offered, had=working.connections, own_place=bool(own), tickets=tickets
+        )
+        # Counts alone, so how much a filter left out can be read without a briefing.
+        _log.info(
+            "could_use_narrowed",
+            stage="planning",
+            capabilities=len({str(one.capability) for one in offered}),
+            could_use=len(usable),
+            connections=len(working.connections),
+            shown=len(working.shown_connections),
+        )
+        return usable
+
+    async def _lines_now(self) -> tuple[PermissionLine, ...] | None:
+        """The standing lines, or ``None`` where they cannot be read.
+
+        A read that fails is logged under a fixed event name with a code-owned reason
+        alone, and read as the check not running: no call it reaches could be done.
+        """
+        if self._lines is None:
+            return None
+        try:
+            return tuple(await self._lines.standing())
+        except Exception:  # a fault in the read is the check not running, never a line
+            _log.warning("could_use_unread", stage="planning", reason="lines_unread")
+            return None
+
+    async def _records(
+        self,
+        lines: Sequence[PermissionLine] | None,
+        offered: Sequence[ToolDefinition],
+        had: Sequence[ConnectionShown],
+    ) -> dict[str, str]:
+        """Whose each connection a call's thing can be is, by its record (ADR-0381 §6:3).
+
+        Read only where a grant that asks could cover a call, since only that outcome
+        reads a record (§6:1): a standing made grant, or a declared default, that allows
+        with approval. A record that cannot be read is read as none (§5:1).
+        """
+        if self._things is None or lines is None:
+            return {}
+        asks = any(
+            one.kind is PermissionLineKind.GRANT and one.how is not GrantHow.ALLOWED
+            for one in lines
+        ) or any(
+            one.default_grant is not None and one.default_grant.how is not GrantHow.ALLOWED
+            for one in offered
+        )
+        if not asks:
+            return {}
+        keys = dict.fromkeys(
+            (
+                OWN_CHAT_CONNECTION,
+                *(connection_key(one.place) for one in had),
+            )
+        )
+        whose: dict[str, str] = {}
+        for key in keys:
+            try:
+                record = await self._things.whose(
+                    ThingKey(kind=ThingKind.CONNECTION, identifier=key)
+                )
+            except ValueError:
+                continue
+            except Exception:  # §5:1: a record the store cannot read is read as none
+                _log.warning("thing_record_unread", stage="planning", reason="store")
+                continue
+            if record is not None:
+                whose[key] = str(record.person)
+        return whose
+
+    async def _accounts_acting(self) -> dict[str, str]:
+        """Each account kind whose calls carry no thing, and the capability they are made under.
+
+        The search account's is the configured search's, and the forecast provider's the
+        configured forecast read's, each read from its own proposal (ADR-0364 §3:3).
+        """
+        acting: dict[str, str] = {}
+        search = await self._tools.search_declaration()
+        if search is not None:
+            acting[SEARCH_ACCOUNT_KIND] = str(search.capability)
+        forecast = await self._tools.forecast_declaration()
+        if forecast is not None:
+            acting[FORECAST_ACCOUNT_KIND] = str(forecast.capability)
+        return acting
 
     async def _entries(
         self, working: PhaseWorking, started: Sequence[PlanningStory] | None = None
@@ -5958,7 +6156,11 @@ class PhasePath:
                 self._peers(working, acted, caller)
                 return acted
             with self._look_ups.scope(
-                audience=given.supply, owner_records=working.owner_records, older=working.older
+                audience=given.supply,
+                owner_records=working.owner_records,
+                older=working.older,
+                # ADR-0368 §8:2: a connections search finds only what the work could use.
+                shows=None if working.could_show is None else working.could_show.shows,
             ) as scope:
                 ran: ActedRound | None = None
                 try:
