@@ -1,6 +1,6 @@
 # 377. A card's tap and the line's `/stop` are read through the link they arrived by, a tap answers only at the level its call needs, and an answer records who tapped and how sure
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0378 (§2:4, for a tap that came through a device other than its requesting device)
 - Date: 2026-11-24
 - Scope: decision D2 of milestone 21, "Every call checked" (acceptance
   [#3678](https://github.com/leonapivato/ai-assistant/issues/3678), lanes
@@ -29,6 +29,7 @@
   (§8:1, §8:4, §8:5 and §8:6) and
   [ADR-0361](0361-approvals-are-cards-the-person-taps-and-a-yes-is-a-one-time-ticket-for-the-exact-call.md)
   (§4:8 and §4:9), each in the scope §7 names.
+- Partially superseded: 2026-11-24 by [ADR-0378](0378-only-a-gateway-the-owner-marked-names-a-device-a-naming-reaches-only-a-browser-device-and-makes-no-link-and-nothing-is-surer-than-the-device-it-came-through.md) — §2:4, for a tap on the hub page whose request came through a device other than its requesting device: it is read from both devices' hub chat accounts, as ADR-0378 reads such a message, the identity both links tie at the lower level, and no identified person, at none, otherwise (ADR-0378 §4:7). Every other clause stands. This replacement takes effect on ratification of ADR-0378. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
