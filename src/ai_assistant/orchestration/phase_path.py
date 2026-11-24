@@ -5097,16 +5097,17 @@ class PhasePath:
     ) -> frozenset[str]:
         """Which calls on running work this round is offered (§4:6, §6:1, §7:20).
 
-        The stop call where the input carries the user's authority, and the look-up,
-        each to an activation whose author its place establishes, the one viewer running
-        work is shown to; the answer call where an offer is open to it.
+        The stop call where the work carries the user's authority, now or in advance, as
+        a task's work carries its author's (ADR-0368 §9:1, §10); the look-up to an
+        activation whose author its place establishes, the one viewer running work is
+        shown to; and the answer call where an offer is open to it. ADR-0361 §6:4: an
+        approval's input is offered by code's link to its asking work, a scheduled task's
+        included, which answers it as any offer.
         """
         standing = None if state is None else state.standing
-        if standing is None or standing.author is None:
-            # ADR-0361 §6:4: an approval's input is offered by code's link to its asking
-            # work, a scheduled task's included, which answers it as any offer.
-            return frozenset({ANSWER_OFFER_CAPABILITY}) if offers else frozenset()
-        names = {LOOK_UP_ACTIVATION_CAPABILITY}
+        names: set[str] = set()
+        if standing is not None and standing.author is not None:
+            names.add(LOOK_UP_ACTIVATION_CAPABILITY)
         if working.authority is not None:
             names.add(STOP_ACTIVATION_CAPABILITY)
         if offers:
