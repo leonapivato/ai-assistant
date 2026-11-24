@@ -160,6 +160,7 @@ from ai_assistant.permissions import (
     ConfiguredForecastDestination,
     ConfiguredSearchDestination,
     SqliteAuditTrail,
+    SqlitePermissionLineStore,
     SqliteSourceGrantStore,
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
@@ -629,6 +630,10 @@ PROFILE_FIELD_CHARS: Final = 200
 #: identities and the accounts linked to them, opened on every hub, whatever the
 #: person-model switch says, since an identity is not a person model (§2:6).
 IDENTITIES_FILENAME: Final = "identities.db"
+
+#: The line store's file under the data directory (ADR-0367 §3:6, ADR-0376 §4:8): the
+#: lines people make, grants and limits, with each making and removal, opened on every hub.
+PERMISSION_LINES_FILENAME: Final = "permission_lines.db"
 
 #: The hub chat's channel type (ADR-0292), whose accounts are the devices it is written
 #: from (ADR-0293 §4:1).
@@ -1342,6 +1347,17 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             now=_utcnow,
         )
         opened.append(identities.close)
+        # **ADR-0367 §3:6's line store, on its own file, on every hub.** The lines people
+        # make, grants and limits, each under an identifier never reused, keeping every
+        # making and removal (§3:5). It starts empty: no line is seeded, and a tool's
+        # default line is its declaration's, never the store's (ADR-0376 §3:3). Nothing
+        # reads it yet: no call is checked against a line until the lanes that build the
+        # check, and no member makes or removes one until the owner's acts are built. It
+        # reads no other store, and it is not ADR-0097's source grants (ADR-0367 §14).
+        permission_lines = SqlitePermissionLineStore(
+            path=directory / PERMISSION_LINES_FILENAME, now=_utcnow
+        )
+        opened.append(permission_lines.close)
         # **The sole reader of ADR-0194 §1's four spend settings, and of the fifth
         # this mechanism depends on** (ADR-0194 §5, §11). The store takes explicit
         # values and never a `Settings` read, so this is the one place the two
@@ -2456,6 +2472,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # And the identity store: no store reads it and it reads none, and
                 # nothing in the façade reads it yet.
                 _as_async(identities.close),
+                # And the line store: no store reads it and it reads none, and nothing in
+                # the façade reads it yet.
+                _as_async(permission_lines.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
                 # The grant store joins the same ordered shutdown as the other

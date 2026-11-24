@@ -80,6 +80,7 @@ from ai_assistant.testing.notifications import (
     FakeNotificationStore,
     FakeNotificationWriter,
 )
+from ai_assistant.testing.permission_lines import FakePermissionLineStore
 from ai_assistant.testing.permissions import (
     FakeActionPolicy,
     FakeAuditTrail,
@@ -249,6 +250,7 @@ __all__ = [
     "FakeNotificationStore",
     "FakeNotificationWriter",
     "FakeOutboundTransport",
+    "FakePermissionLineStore",
     "FakePersonModelStore",
     "FakePlanStore",
     "FakeReader",

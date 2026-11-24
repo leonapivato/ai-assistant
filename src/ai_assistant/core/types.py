@@ -25602,6 +25602,314 @@ def sureness_level(value: object) -> Sureness:
     raise ValueError(msg)
 
 
+# --- permission lines, and the store that keeps the made ones (ADR-0367 §3, ADR-0376 §2) --
+#
+# What a person may do is **lines** (ADR-0367 §3): a **grant** says who may do what, how and
+# at what bar; a **limit** is the same line saying no, at every level. ADR-0376 §2 names what
+# a line names today: a who of the owner's identity or anyone, an action of exactly one
+# capability, a thing of one connection or none, and, on a grant alone, a condition of one
+# connection or none. Here are the line a person makes, as the line store keeps it, and the
+# two spellings ADR-0376 §4 leaves to the implementing lane: anyone, and a connection.
+#
+# Nothing here is ADR-0097's source grant (`SourceGrant`), which ADR-0367 §14 keeps apart:
+# neither is read, cited or checked as the other. Nothing here is a tool's default line
+# either, which its declaration holds and no store keeps (ADR-0376 §3:3). Whether a line
+# covers a call, and which of several decides, are the check's, not these types'.
+
+#: The built-in group every person is in, identified or not (ADR-0367 §2:3), as a line's
+#: ``who`` names it. Spelled like :data:`OWNER_PERSON_ID`, a kind and a name, so a group's
+#: identifier never reads as a person's; stable, and never another group's.
+ANYONE_GROUP_ID: Final = "group:anyone"
+
+#: Who a line may name in this milestone: the owner's identity or anyone, and nothing else
+#: until a decision for milestone 5 adds groups and other people (ADR-0376 §2:1).
+LINE_WHO: Final = frozenset({OWNER_PERSON_ID, ANYONE_GROUP_ID})
+
+#: The system's own chat, named as **one** connection (ADR-0376 §2:4): its channel type
+#: alone, with no conversation, since a line never names one of its conversations.
+OWN_CHAT_CONNECTION: Final = "conversation"
+
+#: The channel types of the schedule and the approvals, which no line names (ADR-0376
+#: §2:4). ``core.channel_validation`` declares them as ``TASK_SCHEDULER`` and ``APPROVALS``;
+#: it imports this module, so they are spelled again here and a test holds the two equal.
+_NAMED_BY_NO_LINE: Final = frozenset({"task_scheduler", "approvals"})
+
+#: What separates a connection's kind from its name, as an ``L`` label's place spells it.
+_CONNECTION_SEPARATOR: Final = ":"
+
+
+def _line_connection(value: str) -> str:
+    """Refuse what is not a connection a line may name, returning it **unchanged**.
+
+    A line names a connection by what an ``L`` label names (ADR-0376 §2:4, ADR-0364 §3:3),
+    spelled as the system already spells it, so a line's connection and a call's compare as
+    text: a place as ``<channel type>:<instance id>``, as an effect record names it (such as
+    ``telegram:line``); an account connection as ``account:`` and its reference; and the
+    system's own chat as :data:`OWN_CHAT_CONNECTION` alone. Held verbatim, never
+    normalised: a value whose kind or name carries surrounding whitespace is refused rather
+    than stripped, since a stripped spelling would name a connection the caller did not.
+
+    Whether the hub has the connection named is not the type's to say (ADR-0376 §4:5).
+
+    Raises:
+        ValueError: If it is none of those spellings, names one of the system's own chat's
+            conversations, or names the schedule or the approvals.
+    """
+    if value == OWN_CHAT_CONNECTION:
+        return value
+    kind, separator, name = value.partition(_CONNECTION_SEPARATOR)
+    if not separator or not kind.strip() or not name.strip():
+        msg = "a line names a connection as <kind>:<name>, or the system's own chat as one"
+        raise ValueError(msg)
+    if kind != kind.strip() or name != name.strip():
+        msg = "a connection a line names carries no surrounding whitespace"
+        raise ValueError(msg)
+    if kind == OWN_CHAT_CONNECTION:
+        msg = "a line names the system's own chat as one connection, never by a conversation"
+        raise ValueError(msg)
+    if kind in _NAMED_BY_NO_LINE:
+        msg = "no line names the schedule or the approvals"
+        raise ValueError(msg)
+    return value
+
+
+type LineConnection = Annotated[NonBlankEncodableText, AfterValidator(_line_connection)]
+"""A connection as a line names it, as its thing or its condition (ADR-0376 §2:4).
+
+One place, as ``<channel type>:<instance id>``; one account connection, as ``account:`` and
+its reference (ADR-0151 §3); or the system's own chat, as :data:`OWN_CHAT_CONNECTION`. Stable
+for as long as what it names is, and compared as given.
+"""
+
+
+def _line_who(value: str) -> str:
+    """Refuse a who that is neither the owner's identity nor anyone (ADR-0376 §2:1).
+
+    Raises:
+        ValueError: If it names anyone else.
+    """
+    if value not in LINE_WHO:
+        msg = "a line's who is the owner's identity or anyone (ADR-0376 §2:1)"
+        raise ValueError(msg)
+    return value
+
+
+type LineWho = Annotated[NonBlankEncodableText, AfterValidator(_line_who)]
+"""Who a line names: :data:`OWNER_PERSON_ID` or :data:`ANYONE_GROUP_ID` (ADR-0376 §2:1)."""
+
+
+class PermissionLineKind(StrEnum):
+    """Whether a line is a grant or a limit (ADR-0367 §3:1, §3:2). Closed, never renamed."""
+
+    GRANT = "grant"
+    """It allows: who may do its action on its thing, how, and at what bar."""
+    LIMIT = "limit"
+    """It says no: no how, no bar and no condition, and it holds at every level."""
+
+
+class GrantHow(StrEnum):
+    """How a grant allows its call (ADR-0367 §3:1). Closed, never renamed."""
+
+    ALLOWED = "allowed"
+    """The call is allowed."""
+    WITH_APPROVAL = "with_approval"
+    """The call is allowed with approval: it needs a yes (ADR-0367 §5:6)."""
+
+
+class LineParts(BaseModel):
+    """What a line says, without who made it or when: the parts a making names (ADR-0376 §4).
+
+    Two lines of the same kind with exactly the same parts say the same thing, so a making
+    that repeats a standing line's parts makes no second line (ADR-0376 §4:5).
+
+    Attributes:
+        kind: Grant or limit.
+        who: The owner's identity or anyone (ADR-0376 §2:1).
+        action: Exactly one capability, by its ``capability`` value (§2:2).
+        thing: The one connection it is about, or ``None`` for a line that covers a call
+            whatever the call's thing (§2:5).
+        how: For a grant, how it allows; ``None`` for a limit.
+        bar: For a grant, the least level it accepts (ADR-0366 §5:1); ``None`` for a limit.
+        condition: For a grant, the one connection its work's senders' inputs must all have
+            come by (§2:6, ADR-0368 §4:2), or ``None``; always ``None`` for a limit.
+
+    Raises:
+        ValueError: If a grant lacks its how or its bar, or a limit carries a how, a bar or
+            a condition.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: PermissionLineKind
+    who: LineWho
+    action: VisibleIdentifier
+    thing: LineConnection | None = None
+    how: GrantHow | None = None
+    bar: Sureness | None = None
+    condition: LineConnection | None = None
+
+    @model_validator(mode="after")
+    def _shaped_as_its_kind(self) -> Self:
+        _check_line_shape(self.kind, how=self.how, bar=self.bar, condition=self.condition)
+        return self
+
+
+def _check_line_shape(
+    kind: PermissionLineKind,
+    *,
+    how: GrantHow | None,
+    bar: Sureness | None,
+    condition: str | None,
+) -> None:
+    """Refuse parts that do not fit their kind (ADR-0367 §3:1, §3:2; ADR-0376 §2:6).
+
+    Raises:
+        ValueError: If a grant lacks its how or its bar, or a limit carries a how, a bar or
+            a condition.
+    """
+    if kind is PermissionLineKind.GRANT and (how is None or bar is None):
+        msg = "a grant says how it allows and its bar"
+        raise ValueError(msg)
+    if kind is PermissionLineKind.LIMIT and (how, bar, condition) != (None, None, None):
+        msg = "a limit has no how, no bar and no condition"
+        raise ValueError(msg)
+
+
+class PermissionLine(BaseModel):
+    """One line a person made, as the line store keeps it (ADR-0367 §3, ADR-0376 §4:8).
+
+    It stands from when it is made until it is removed, and is kept, removed, afterwards,
+    so that an identifier a ruling names still resolves to its line (ADR-0367 §3:6, §4:6).
+    Its identifier is stable and never another line's, a removed one's included. A tool's
+    default line is not one of these: its declaration holds it (ADR-0376 §3:3).
+
+    Attributes:
+        id: Its identifier, never reused.
+        kind: Grant or limit.
+        who: The owner's identity or anyone.
+        action: Exactly one capability.
+        thing: Its one connection, or ``None``.
+        how: For a grant, how it allows; ``None`` for a limit.
+        bar: For a grant, its bar; ``None`` for a limit.
+        condition: For a grant, its one connection condition, or ``None``.
+        made_by: The person whose act made it, by their identity's id.
+        made_at: When the store recorded the making.
+        removed_by: The person whose act removed it, or ``None`` while it stands.
+        removed_at: When the store recorded the removal, or ``None`` while it stands.
+
+    Raises:
+        ValueError: If its parts do not fit its kind, or it records a remover without a
+            removal's instant or the other way round.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: NonBlankEncodableText
+    kind: PermissionLineKind
+    who: LineWho
+    action: VisibleIdentifier
+    thing: LineConnection | None = None
+    how: GrantHow | None = None
+    bar: Sureness | None = None
+    condition: LineConnection | None = None
+    made_by: NonBlankEncodableText
+    made_at: UtcInstant
+    removed_by: NonBlankEncodableText | None = None
+    removed_at: UtcInstant | None = None
+
+    @model_validator(mode="after")
+    def _shaped_and_removed_whole(self) -> Self:
+        _check_line_shape(self.kind, how=self.how, bar=self.bar, condition=self.condition)
+        if (self.removed_by is None) != (self.removed_at is None):
+            msg = "a removed line records both who removed it and when"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def standing(self) -> bool:
+        """Whether it stands: made and not removed."""
+        return self.removed_at is None
+
+    @property
+    def parts(self) -> LineParts:
+        """What it says, without who made or removed it, or when."""
+        return LineParts(
+            kind=self.kind,
+            who=self.who,
+            action=self.action,
+            thing=self.thing,
+            how=self.how,
+            bar=self.bar,
+            condition=self.condition,
+        )
+
+
+class LineMakingKind(StrEnum):
+    """What recording a making did in the line store. Closed, added to, never renamed."""
+
+    MADE = "made"
+    """It recorded a new line, under a new identifier."""
+    UNCHANGED = "unchanged"
+    """A standing line of the same kind with exactly the same parts was already held, so
+    nothing was written and no second line made (ADR-0376 §4:5)."""
+
+
+class LineMaking(BaseModel):
+    """What recording a making did, with the line it names (ADR-0376 §4:3 to §4:5).
+
+    Attributes:
+        kind: What it did.
+        line: The line it recorded, or the standing line it repeated.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: LineMakingKind
+    line: PermissionLine
+
+    @model_validator(mode="after")
+    def _a_standing_line(self) -> Self:
+        if not self.line.standing:
+            msg = "a making names a line that stands"
+            raise ValueError(msg)
+        return self
+
+
+class LineRemovalKind(StrEnum):
+    """What recording a removal did in the line store. Closed, added to, never renamed."""
+
+    REMOVED = "removed"
+    """It recorded the removal of a standing line, which is kept, removed."""
+    NOT_STANDING = "not_standing"
+    """No standing line has that identifier, because none was made or it was already
+    removed, so nothing was written (ADR-0376 §4:6)."""
+
+
+class LineRemoval(BaseModel):
+    """What recording a removal did (ADR-0376 §4:6).
+
+    Attributes:
+        kind: What it did.
+        line: The line as the store now keeps it, its removal recorded; set exactly where
+            it was removed.
+
+    Raises:
+        ValueError: If the line does not fit the outcome.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: LineRemovalKind
+    line: PermissionLine | None = None
+
+    @model_validator(mode="after")
+    def _a_removed_line_exactly_when_removed(self) -> Self:
+        removed = self.kind is LineRemovalKind.REMOVED
+        if removed != (self.line is not None):
+            msg = "a removal names its line exactly when it removed one"
+            raise ValueError(msg)
+        if self.line is not None and self.line.standing:
+            msg = "a removal names the line with its removal recorded"
+            raise ValueError(msg)
+        return self
+
+
 # --- the person model as the panels read and edit it (ADR-0338 §8:1-§8:3) ----------
 #
 # What ``AssistantEngine``'s person-model members carry: a read of one person's model

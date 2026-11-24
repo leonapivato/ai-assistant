@@ -174,6 +174,9 @@ if TYPE_CHECKING:
         Identifier,
         Identity,
         IdentityExport,
+        LineMaking,
+        LineParts,
+        LineRemoval,
         Link,
         LinkAct,
         LinkedAccount,
@@ -205,6 +208,7 @@ if TYPE_CHECKING:
         OfferedTool,
         PendingCandidate,
         PermissionDecision,
+        PermissionLine,
         PermissionRuling,
         PersonModel,
         PersonModelAct,
@@ -14699,5 +14703,126 @@ class IdentityStore(Protocol):
 
         Raises:
             IdentityStoreError: If the store cannot be read, or a stored row is corrupt.
+        """
+        ...
+
+
+@runtime_checkable
+class PermissionLineStore(Protocol):
+    """The lines people make, kept under identifiers never reused (ADR-0367 §3:5, §3:6).
+
+    **What it holds**: each line a person made by their own act (ADR-0376 §4, §6:3), a
+    grant or a limit, under a stable identifier never another line's, with who made it and
+    when; and each removal, by whom and when, keeping the removed line's record, so that an
+    identifier a ruling names resolves to its line after the line is removed (ADR-0376
+    §4:8). It records; it does not decide. Nothing here says whether a line covers a call or
+    which of several decides (the check's, ADR-0367 §4), and nothing here validates that a
+    line's action is a capability the hub declares, that its connections exist, or that the
+    person acting may make or remove it (the acts', ADR-0376 §4:5, §6). Nothing here is
+    ADR-0097's source grant (ADR-0367 §14), and no tool's default line is held here: a
+    default line is its tool's declaration's (ADR-0376 §3:3).
+
+    **It starts empty.** No line is seeded, on creation or on any opening.
+
+    **A making that repeats a standing line makes no second one** (ADR-0376 §4:5): where a
+    standing line of the same kind with exactly the same parts is held, :meth:`record_making`
+    writes nothing and answers ``unchanged`` with that line. The store holds this rule, not
+    its caller, because only the step that writes can decide it against every other writer:
+    a caller that listed and then made could race another making between the two. Who made
+    the standing line is not one of its parts. A line removed and then made again is a new
+    line, under a new identifier.
+
+    **Each member that writes does so in one atomic step**, observing the store, deciding
+    and writing against every other member, across processes as well as coroutines; a
+    making that repeats a line, or a removal of nothing, writes nothing. **Every read
+    returns a detached snapshot**: the exchanged types are frozen pydantic models.
+
+    **Listing is the check's read on every call** (ADR-0367 §4:1), so it returns the
+    standing lines alone, without the removed ones' history.
+
+    Every member raises :class:`~ai_assistant.core.errors.PermissionLineStoreError` for a
+    store fault, a stored row that is not a line included. A malformed argument is a
+    ``ValueError``, raised before anything is read; a model argument is validated again
+    whole, since ``model_copy`` and ``model_construct`` skip validation. Cancelling any
+    member is governed by this module's cancellation clause (ADR-0060). Every argument is
+    immutable, so input observation (ADR-0065) asks nothing further of it.
+
+    A store of ``permissions/`` under ADR-0326 in the hub's data directory (ADR-0367 §3:6).
+
+    **A BREAKING contract change under golden rule 5**, named by ADR-0367 §16's first
+    bullet and ADR-0376 §9, landing with its conformance suite, its canonical fake in
+    :mod:`ai_assistant.testing` and its store (``CONTRIBUTING.md`` → "Adding a Protocol",
+    ADR-0137 §2).
+    """
+
+    async def standing(self) -> tuple[PermissionLine, ...]:
+        """Every line that stands: made and not removed, in the order made.
+
+        Returns:
+            The standing lines; none on a store that holds none.
+
+        Raises:
+            PermissionLineStoreError: If the store cannot be read, or a stored row is
+                corrupt.
+        """
+        ...
+
+    async def line(self, line_id: str) -> PermissionLine | None:
+        """Read one line by its identifier, standing or removed (ADR-0376 §4:8).
+
+        Args:
+            line_id: The line's identifier, as given.
+
+        Returns:
+            The line, with its removal where it was removed; ``None`` where no line was
+            ever made under ``line_id``.
+
+        Raises:
+            ValueError: If ``line_id`` is not a non-blank ``str``.
+            PermissionLineStoreError: If the store cannot be read, or a stored row is
+                corrupt.
+        """
+        ...
+
+    async def record_making(self, parts: LineParts, *, by: str) -> LineMaking:
+        """Record a line with ``parts``, made by ``by``'s act, in one step (ADR-0376 §4:3, §4:4).
+
+        The line is made at the store's clock's reading, standing, under an identifier no
+        line the store holds or held carries.
+
+        Args:
+            parts: What the line says.
+            by: The person whose act made it, by their identity's id.
+
+        Returns:
+            ``made`` with the new line; or ``unchanged`` with the standing line where one
+            of the same kind with exactly the same parts is held, so repeating the making
+            makes no second line (§4:5).
+
+        Raises:
+            ValueError: If ``parts`` is not a valid ``LineParts``, or ``by`` is not a
+                non-blank ``str``.
+            PermissionLineStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def record_removal(self, line_id: str, *, by: str) -> LineRemoval:
+        """Record the removal of the standing line ``line_id``, by ``by``'s act, in one step.
+
+        ADR-0376 §4:6, §4:8: the line is kept, removed at the store's clock's reading, and
+        stands no more; its identifier still reads it.
+
+        Args:
+            line_id: The line's identifier.
+            by: The person whose act removed it, by their identity's id.
+
+        Returns:
+            ``removed`` with the line as now kept, its removal recorded; or
+            ``not_standing`` where no standing line has that identifier, because none was
+            made or it was already removed, having written nothing.
+
+        Raises:
+            ValueError: If ``line_id`` or ``by`` is not a non-blank ``str``.
+            PermissionLineStoreError: If the store cannot be read or written.
         """
         ...
