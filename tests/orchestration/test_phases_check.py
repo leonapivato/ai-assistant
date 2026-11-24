@@ -11,8 +11,9 @@ records (ADR-0368 §6:1, §7's fifth row), though the work's own facts still car
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+import pytest
 from exchange_support import text_call
 from phases_support import PHONE, open_conversation, phases_harness, said, until, written
 from task_support import seams
@@ -58,7 +59,12 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.channel_kinds import ACCOUNT_KINDS, CONNECTION_KINDS
 from ai_assistant.orchestration.permission_check import CheckSubject
-from ai_assistant.orchestration.phase_path import PhaseWorking, Scheduling, had_connections
+from ai_assistant.orchestration.phase_path import (
+    PhasePath,
+    PhaseWorking,
+    Scheduling,
+    had_connections,
+)
 from ai_assistant.orchestration.planning import ConnectionShown, PlaceWindow
 from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.testing import FakeIdentityStore, FakePermissionLineStore
@@ -326,3 +332,51 @@ def test_the_hub_has_its_own_chat_though_no_conversation_is_listed() -> None:
         ConnectionShown(place="account:conn-a", kind=ACCOUNT_KINDS["email"], account="email"),
     )
     assert had_connections(listed) == {OWN_CHAT_CONNECTION, "telegram:line", "account:conn-a"}
+
+
+@pytest.mark.parametrize(
+    ("by_the_person", "offered"),
+    [(True, frozenset({"stop_work"})), (False, frozenset())],
+    ids=["set by the owner", "set by the assistant"],
+)
+def test_a_tasks_work_is_offered_the_stop_call_where_it_carries_its_authors_authority(
+    by_the_person: bool, offered: frozenset[str]
+) -> None:
+    """ADR-0349 §4:6 read by ADR-0368 §9:1, as §10 has it: a task's work carrying its
+    author's authority in advance is offered the stop call; one carrying none is not. The
+    look-up stays with a work whose input's author its place establishes."""
+    task = ScheduledTask(
+        id="t-1",
+        person=OWNER_PERSON_ID,
+        author=ScheduledTaskAuthor.PERSON if by_the_person else ScheduledTaskAuthor.ASSISTANT,
+        author_person=OWNER_PERSON_ID if by_the_person else None,
+        setting_level=Sureness.NORMAL if by_the_person else Sureness.NONE,
+        setting_connection=None,
+        when=DueNow(),
+        instruction="water the plants",
+        parent="act-0",
+        set_in=ChannelIdentity(channel_type="conversation", instance_id="c"),
+        set_at=AT,
+        chain_length=1,
+        occurrences=(ScheduledOccurrence(number=1, due_at=AT),),
+    )
+    occurrence = admit_channel(
+        ChannelInput(target=SCHEDULE, payload=TextChannelPayload(text="it is time")),
+        None,
+        clock=lambda: AT,
+        id_factory=lambda: "7d0f3c0e-3c4a-4c39-9a52-6f0a1d2b3c4d",
+        task=task,
+    )
+    working = PhaseWorking(
+        activation_id="activation",
+        place=PlaceWindow(takes_message=True),
+        conversation_id=None,
+        trigger=occurrence.trigger,
+        owner_records=True,
+        round_limit=3,
+        activation=occurrence,
+    )
+
+    running = PhasePath._running_calls(cast("PhasePath", None), occurrence, working, offers=False)
+
+    assert running == offered

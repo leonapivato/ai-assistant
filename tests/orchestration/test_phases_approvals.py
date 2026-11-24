@@ -650,13 +650,15 @@ async def test_an_outcome_marked_pushed_and_never_admitted_is_pushed_again_at_st
 
 
 def test_work_no_author_established_for_answers_an_offer_code_linked_to_it() -> None:
-    """§6:4: a scheduled task's work, which sees no running work, still answers the offer."""
-    offered = PhasePath._running_calls(
-        cast("PhasePath", None), None, cast("Any", None), offers=True
-    )
+    """§6:4: a scheduled task's work, which sees no running work, still answers the offer.
+
+    One carrying no one's authority, so it is offered no stop call either (ADR-0368 §9:1).
+    """
+    working = cast("Any", SimpleNamespace(authority=None))
+    offered = PhasePath._running_calls(cast("PhasePath", None), None, working, offers=True)
     assert offered == frozenset({"answer_offer"})
     assert (
-        PhasePath._running_calls(cast("PhasePath", None), None, cast("Any", None), offers=False)
+        PhasePath._running_calls(cast("PhasePath", None), None, working, offers=False)
         == frozenset()
     )
 
