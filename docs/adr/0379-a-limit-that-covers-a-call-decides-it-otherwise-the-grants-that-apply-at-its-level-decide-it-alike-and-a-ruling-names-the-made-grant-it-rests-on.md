@@ -1,6 +1,6 @@
 # 379. A limit that covers a call decides it, otherwise the grants that apply at its level decide it alike, and a ruling names the made grant it rests on
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 - Scope: decision D4 of milestone 21, "Every call checked" (acceptance
   [#3678](https://github.com/leonapivato/ai-assistant/issues/3678), lanes
