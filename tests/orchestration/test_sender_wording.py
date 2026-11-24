@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -30,15 +30,18 @@ from understanding_support import Rendered
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
+    CallOutcomeKind,
     ChannelContext,
     ChannelIdentity,
     ClaimedAuthor,
     InputSender,
+    JoinedInput,
     MessageAuthor,
     PersonActHow,
     PersonModelAct,
     Profile,
     ProfileField,
+    ProposedCall,
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
@@ -58,6 +61,7 @@ from ai_assistant.orchestration.person_block import PersonBlock, PersonBlocks
 from ai_assistant.orchestration.phase_path import place_name
 from ai_assistant.orchestration.planning import (
     PLANNING_PROMPT,
+    CallOutcome,
     PlaceAuthor,
     PlaceItem,
     PlaceWindow,
@@ -656,3 +660,166 @@ def test_only_a_person_the_system_serves_is_named() -> None:
     assert not channel_kinds.served(None)
     assert channel_kinds.sender_unknown([_sender(SAM)])
     assert not channel_kinds.sender_unknown([_sender(OWNER_PERSON_ID, Sureness.WEAK)])
+
+
+# --- review round 1: per-message attribution, distinct senders, and later rounds --------
+
+
+async def test_a_chat_batch_of_two_senders_attributes_each_message_by_its_own_record() -> None:
+    """§4:1, §4:2, §5:2: the owner's message and an unlinked device's, in one input.
+
+    The chat's trigger records no messages, so understanding is handed the messages the
+    pass took in, each with its own party and sender, and attributes each by it: one
+    ``said`` from the owner's device, the other ``received`` from an unknown sender, and a
+    sender line with a part for each.
+    """
+    owners, strangers = _sender(OWNER_PERSON_ID), _sender(None, Sureness.NONE)
+    row = Row(
+        CHAT,
+        (owners, strangers),
+        (OWNER, UNKNOWN),
+        (),
+        None,
+        ("", ""),
+        ("", "", True),
+        "",
+    )
+    taken = (
+        RecordedInputMessage(
+            text="Is the lake warm?", sent_at=AT, position=1, party=OWNER, sender=owners
+        ),
+        RecordedInputMessage(
+            text="And the canoe?", sent_at=AT, position=2, party=UNKNOWN, sender=strangers
+        ),
+    )
+    window = TranscriptWindow(
+        CHAT,
+        (),
+        input_messages=tuple(
+            TranscriptMessage(
+                conversation_id="c-1",
+                position=one.position or 1,
+                author=MessageAuthor.USER,
+                text=one.text,
+                written_at=AT,
+                device_id=f"device-{one.position}",
+                message_id=f"m-{one.position}",
+            )
+            for one in taken
+        ),
+    )
+    model = FakeStructuredCompleter(json.dumps({"understanding": "Asks about the lake."}))
+    stage = UnderstandingStage(
+        model=model, excerpt_chars=2000, prompt=default_prompt(UNDERSTANDING_PROMPT)
+    )
+    await stage.understand(
+        "Is the lake warm?\n\nAnd the canoe?",
+        channel=CHAT,
+        window=window,
+        audience=BOUNDED,
+        episodes=(),
+        version=1,
+        now=lambda: AT,
+        deadline=asyncio.get_running_loop().time() + 60,
+        trigger=_trigger(row),
+        zone=NEW_YORK,
+        received_at=AT,
+        place_name=MAREN,
+        input_messages=taken,
+    )
+    heard = Rendered(model.calls[0].messages[1].content)
+    assert [(one.name, one.attributes["from"]) for one in heard.tags("The stimulus")] == [
+        ("said", "a device linked to Maren"),
+        ("received", "an unknown sender"),
+    ]
+    assert (
+        "- The senders: some of the messages came by a device linked to Maren, which is a "
+        "strong sign that Maren sent them. The system counts them as Maren's. Some of the "
+        "messages came by a device the system cannot tie to anyone, so who or what sent them "
+        "is unknown. The system counts them as an unknown sender's, whatever their text says."
+    ) in heard.section("The situation").split("\n")
+
+
+def test_each_distinct_sender_and_kind_is_its_own_part() -> None:
+    """§2:1, §5:2: one person's message by Telegram and one on the system's own machine.
+
+    Each is told by its own record: no part says of the Telegram message that it was
+    written on the system's own machine.
+    """
+    line = channel_kinds.sender_line(
+        [
+            channel_kinds.SentInput(
+                "conversation", (_sender(OWNER_PERSON_ID, unread=True),), parties=(OWNER,)
+            ),
+            channel_kinds.SentInput(
+                "telegram",
+                (_sender(OWNER_PERSON_ID),),
+                messages=(_line_message(_sender(OWNER_PERSON_ID)),),
+            ),
+        ],
+        named=lambda _: MAREN,
+        origin="the system's own chat",
+    )
+    assert line == (
+        "- The senders: the system could not read its record of linked accounts when some of "
+        "the messages arrived. Some of the messages were written on the system's own machine, "
+        "which the system counts as Maren's. Some of the messages came by the Telegram "
+        "account linked to Maren, which is a strong sign that Maren sent them. The system "
+        "counts them as Maren's."
+    )
+
+
+async def test_a_later_round_names_the_sender_of_an_input_taken_in_since() -> None:
+    """§2:2: in each of planning's rounds, the joined input's sender, its weak link told."""
+    row = ROWS["a link at its kind's most"]
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "list_tasks"),)), RoundResponse(), RoundResponse()
+    )
+    ids = iter(("round:1", "round:2"))
+    stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT),
+        completer=completer,
+        recorder=_Recorder(),
+        excerpt_chars=300,
+        now=lambda: AT,
+        timezone="America/New_York",
+        new_id=lambda: next(ids),
+    )
+    given = PlanningInputs(
+        activation_id="now",
+        place=PlaceWindow(takes_message=True),
+        trigger=_trigger(row),
+        received_at=AT,
+        person=_block(),
+        person_id=OWNER_PERSON_ID,
+        owner_records=True,
+        stories=PlanningStories(),
+    )
+    planned = await stage.plan(given)
+    weak = _sender(OWNER_PERSON_ID, Sureness.WEAK)
+    joined = JoinedInput(
+        joined_at=AT,
+        channel=CHAT,
+        messages=(
+            RecordedInputMessage(text="for four", sent_at=AT, position=9, party=OWNER, sender=weak),
+        ),
+    )
+    later = replace(
+        given,
+        work=planned.work,
+        rounds=(planned.round,),
+        labels=planned.labels,
+        outcomes=(CallOutcome(round_id=planned.round.id, call_id="c1", kind=CallOutcomeKind.DONE),),
+        joined=(joined,),
+    )
+    await stage.plan(later)
+    news = completer.last_call.exchange.steps[-1].report.news
+    assert (
+        "- The sender of what was taken in: the message came by a device linked to Maren that "
+        "is marked as less reliable, which is a weak sign that Maren sent it. The system still "
+        "counts it as Maren's."
+    ) in news.split("\n")
+
+
+def _call(call_id: str, name: str) -> ProposedCall:
+    return ProposedCall(call_id=call_id, name=name, arguments={})

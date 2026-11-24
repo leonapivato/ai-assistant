@@ -1587,6 +1587,8 @@ class NewsShown:
             so a connection whose state changes is shown again under its label (§3:3).
         zone: The zone its briefing's situation named, in which every time of the work is
             written, whatever the person sets meanwhile (ADR-0360 §2:3).
+        joined: How many of the inputs taken in after the trigger it showed, whose senders
+            the news names once each (ADR-0375 §2:2).
     """
 
     offers: frozenset[str] = frozenset()
@@ -1603,6 +1605,7 @@ class NewsShown:
     zone: str | None = None
     connections: frozenset[str] = frozenset()
     connection_states: Mapping[str, str | None] = field(default_factory=dict)
+    joined: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2763,6 +2766,7 @@ class _Request:
             zone=self._zone.key,
             connections=frozenset(self._entries),
             connection_states=dict(self._states),
+            joined=len(inputs.joined),
         )
 
     def _running_shown(self) -> frozenset[str]:
@@ -4407,6 +4411,7 @@ class _Request:
                     else _profile_of(inputs.person_now.profile)
                 ),
                 zone=shown.zone,
+                joined=max(shown.joined, len(inputs.joined)),
             ),
         )
 
@@ -4462,6 +4467,34 @@ class _Request:
                 return frozenset(one.story_id for one in fresh)
         return frozenset()
 
+    def _joined_senders(self, shown: NewsShown) -> list[str]:
+        """The sender line of each input taken in since the exchange last showed one.
+
+        ADR-0375 §2:2: by what it came, how strong a sign that is, and whom the system
+        counts it as, in the round that first reports it, as the briefing's situation
+        says of the inputs it showed (§5).
+        """
+        fresh = self._inputs.joined[shown.joined :]
+        if not fresh:
+            return []
+        held = [
+            SentInput(
+                channel_type=one.channel.channel_type,
+                senders=one.senders,
+                messages=one.messages,
+                parties=_known_parties(one.messages),
+            )
+            for one in fresh
+        ]
+        return [
+            sender_line(
+                held,
+                named=lambda person: _line(self._naming.in_words(person)),
+                origin=_line(_origin_name(fresh[0].channel)),
+                taken_in=True,
+            )
+        ]
+
     def _news(
         self, shown: NewsShown, evidence: Sequence[DigestedEvidence], round_id: str
     ) -> list[str]:
@@ -4490,6 +4523,7 @@ class _Request:
             # A stimulus taken in, with its meaning (ADR-0332 §3:12).
             news.append("- A stimulus was taken in, and understood again:")
             news.extend(self._understood_lines(understanding))
+        news.extend(self._joined_senders(shown))
         for item in inputs.place.items:
             if item not in shown.items:
                 news.extend(self._item(replace(item, is_input=False)))
