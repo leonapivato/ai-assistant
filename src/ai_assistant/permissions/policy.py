@@ -17,6 +17,12 @@ recipient grants retired (ADR-0321 §7:1), and with them that seam and the
 supersession of ADR-0021 §3's purity sentences it carried, so every ruling is the
 pure function those sentences describe.
 
+**A grant the person made reaches it on the request, and moves neither sentence either**
+(ADR-0367 §4:6, §16). The line a call rests on is ``ActionRequest.rests_on``, set by the
+authorizer from the check's outcome (ADR-0379 §4:1), so the policy reads no store and an
+``ALLOW`` resting on that grant names it in ``authorised_by``. That meets ADR-0021 §5's
+disclosure floor, which bars an ``ALLOW`` naming nothing, and lifts no other rule.
+
 **A ``ConfiguredSearchDestination`` moves neither sentence** (ADR-0247 §2). It is
 two recorded values compared against the request's own binding — no store, no
 seam, no clock and no await — so a policy holding one is exactly as pure as a
@@ -162,6 +168,15 @@ _CONFIGURED_SEARCH_PROVIDER = (
 _CONFIGURED_FORECAST_PROVIDER = (
     "this deployment's owner configured this forecast provider, so reading it is "
     "the destination they chose and the recipient they granted"
+)
+
+#: The ground an ``ALLOW`` resting on a grant the person made is rendered with, where the
+#: disclosure floor alone stood in its way (ADR-0367 §4:6, ADR-0379 §4). It names the
+#: basis and no line: which grant is the ``authorised_by`` an auditor reads, never a
+#: sentence (ADR-0367 §3:7).
+_MADE_GRANT = (
+    "a permission you made allows this call, so what it may disclose off-device needs no "
+    "further yes"
 )
 
 #: ADR-0181 §5's ground, worded at the strength the recorded predicate carries
@@ -582,12 +597,14 @@ class ThresholdActionPolicy:
     async def decide(self, request: ActionRequest) -> PermissionRuling:
         """Rule on ``request`` by the table in the class docstring.
 
-        Reads ``request.tool`` and — for ADR-0181 §5's clause and route (c) alone —
-        ``request.egress_binding``. ``parameters`` is carried on the request for the
-        invocation contract's future per-call gating (ADR-0021 §3) and no rule here
-        consults it, so nothing derived from a payload reaches the ``reason`` a user
-        is shown. Neither does the egress clause: its ground names the selection this
-        system made and quotes nothing of the call.
+        Reads ``request.tool``, ``request.rests_on`` — the grant the person made that the
+        call rests on, where it rests on one (ADR-0367 §4:6, ADR-0379 §4:1) — and, for
+        ADR-0181 §5's clause and route (c) alone, ``request.egress_binding``.
+        ``parameters`` is carried on the request for the invocation contract's future
+        per-call gating (ADR-0021 §3) and no rule here consults it, so nothing derived
+        from a payload reaches the ``reason`` a user is shown. Neither does the egress
+        clause: its ground names the selection this system made and quotes nothing of the
+        call.
 
         **It awaits nothing**, so the whole ruling is one observation of the
         request (ADR-0065): with no grant seam left (ADR-0321 §7:1) there is no
@@ -638,16 +655,27 @@ class ThresholdActionPolicy:
         derivation §6 requires. This policy adds no check for that limb and takes
         none away.
 
+        **A request resting on a grant the person made** (ADR-0367 §4:6, ADR-0379 §4).
+        Every ``ALLOW`` on it names that grant in ``authorised_by``: one no rule stood in
+        the way of, and one only the disclosure floor stood in the way of, the grant
+        meeting that floor, which bars only an ``ALLOW`` naming nothing (ADR-0021 §5).
+        Where the outside-content clause or any other clause fired, the grant changes
+        nothing (ADR-0367 §4:5). Route (c) is taken before it, so a request at its kind's
+        configured provider names its configuration as before, whether or not it rests
+        on a grant too: the trail admits either, and ADR-0247 §2's route stays the one
+        its row is read by.
+
         Returns:
             The ruling. A route-(c) ``ALLOW`` sets ``authorised_by`` to the
             binding's own ``account.reference`` and leaves ``authorised_subject``
-            unset, on either kind (ADR-0247 §2, ADR-0260 §6). Every other ruling
-            leaves both unset, which is ADR-0021 §3's requirement of a policy with no
-            authorisation source; ADR-0247 §2 supersedes that requirement in the limb
-            reaching a request at the configured provider, and in no other. **No
-            ruling sets** ``authorised_subject`` (ADR-0321 §7:7).
+            unset, on either kind (ADR-0247 §2, ADR-0260 §6). Every other ``ALLOW`` on
+            a request resting on a grant sets it to that grant, ``request.rests_on``.
+            Every other ruling leaves both unset, which is ADR-0021 §3's requirement of
+            a policy with no authorisation source: a request carrying no grant is one.
+            **No ruling sets** ``authorised_subject`` (ADR-0321 §7:7).
         """
         tool = request.tool
+        line = request.rests_on
         fired = self._fired(tool)
         grounds = [(rule.outcome, rule.because(tool)) for rule in fired]
         external = _planned_with_external_content(request)
@@ -660,6 +688,7 @@ class ThresholdActionPolicy:
                     f"no rule applies: {tool.risk_level} risk, {tool.reversibility}, "
                     f"discloses nothing off-device, at a {tool.cost.basis} cost"
                 ),
+                authorised_by=line,
             )
         outcome = max(ruled for ruled, _ in grounds)
         at_configured = _at_configured_provider(
@@ -677,6 +706,15 @@ class ThresholdActionPolicy:
                 outcome=PermissionOutcome.ALLOW,
                 reason=at_configured.ground,
                 authorised_by=at_configured.binding.account.reference,
+            )
+        if line is not None and fired == [_DISCLOSURE_FLOOR] and not external:
+            # **A grant the person made** (ADR-0367 §4:6, ADR-0379 §4). It meets the
+            # disclosure floor, which bars an ``ALLOW`` naming nothing (ADR-0021 §5), and
+            # nothing else: every other clause that fired, the outside-content one
+            # included, still asks (ADR-0367 §4:5). The pointer is the one the request
+            # carries, which the trail resolves to the line's record.
+            return PermissionRuling(
+                outcome=PermissionOutcome.ALLOW, reason=_MADE_GRANT, authorised_by=line
             )
         reasons = [reason for ruled, reason in grounds if ruled is outcome]
         return PermissionRuling(outcome=outcome, reason="; ".join(reasons))

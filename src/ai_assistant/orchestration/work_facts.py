@@ -46,8 +46,11 @@ rows today's inputs produce:
   the lowest of its senders' (§4:1).
 - **An input no person sent** (no senders): an event a connected source pushes, a task's
   occurrence or an approval's outcome. For whoever its connection or its record names,
-  carrying no authority, at none (§3:5, the fourth and fifth rows). A task's work carries
-  its author's authority only once ADR-0368 §6 is built, which is milestone 2's.
+  carrying no authority, at none (§3:5, the fourth and fifth rows), save a task's
+  occurrence.
+- **A task's occurrence** (its task handed in): its author's authority in advance, at the
+  level the task records of the work that set it (§6:1, §6:3); none, at none, where the
+  assistant set it, its task recording no person.
 - **A kind with no row**: for no one, carrying no authority, at none (§3:7's row).
 
 **Every connection belongs to the owner** until milestone 2 records whose each is
@@ -68,7 +71,8 @@ authority, so whom the work is for does not move.
 senders its inputs record (:func:`held_senders`), read apart from its authority, and
 carries the authority of no more than one person. Whose authority it carries
 (:func:`persons_authority`, §9:1): the one identified person whose authority it carries,
-now or in advance. Two inputs carry the same authority where they carry the same
+now or in advance, a relay mark taking away only authority carried now, which an input
+brings (ADR-0351 §6:5). Two inputs carry the same authority where they carry the same
 people's (§9:2, :func:`authority_persons`). A work with no facts, because deciding them
 failed, is no person's and carries no one's authority: **recording fails closed**.
 
@@ -92,8 +96,8 @@ task's work the one its task records. A task records it of the work that set it 
 nothing reads it yet, and it is no fact of the work (§2:4).
 
 **Whom the check runs for** (:func:`check_runs_for`, ADR-0368 §7): read from the work's
-facts, its task's recorded author and level, and what makes it carry none, and handed to
-the authorizer, which decides none of it.
+facts, a task's work's included, and what makes it carry none, and handed to the
+authorizer, which decides none of it.
 
 **One line per recording** (:func:`log_facts`): ``work_facts_recorded``, with what was
 decided as codes and levels alone, never a person's identifier or an input's words, which
@@ -157,6 +161,7 @@ __all__ = [
     "LINKS_UNREAD",
     "NO_LINK",
     "authority_persons",
+    "carries_in_advance",
     "chat_account",
     "chat_sender_of",
     "chat_senders_of",
@@ -479,15 +484,36 @@ def _whom(senders: Sequence[InputSender]) -> WorkFor:
     return _its_owner()
 
 
-def started(trigger: RecordedChannelTrigger) -> WorkFacts:
+def _in_advance(task: ScheduledTask) -> WorkFacts:
+    """A task's work's facts (ADR-0368 §6:1, §6:3, §7's fifth row).
+
+    For whoever the task belongs to, carrying its author's authority in advance, at the
+    level the task records of the work that set it; carrying none, at none, where the task
+    records no person, as one the assistant set does.
+    """
+    author = task.author_person
+    if author is None:
+        return WorkFacts(for_whom=_its_owner(), authority=WorkAuthority.none(), level=Sureness.NONE)
+    return WorkFacts(
+        for_whom=_its_owner(),
+        authority=WorkAuthority(kind=AuthorityKind.IN_ADVANCE, persons=(author,)),
+        level=task.setting_level,
+    )
+
+
+def started(trigger: RecordedChannelTrigger, *, task: ScheduledTask | None = None) -> WorkFacts:
     """The three facts a work starts with, from its recorded trigger (ADR-0368 §2, §3).
 
     Args:
         trigger: The work's recorded trigger, with its senders.
+        task: For a task's occurrence, the task its input names, whose recorded author and
+            level its work carries (§6:1, §6:3); ``None`` for every other input.
 
     Returns:
         Whom it is for, whose authority it carries and its level.
     """
+    if task is not None and _kind(trigger) == TASK_SCHEDULER and not trigger.senders:
+        return _in_advance(task)
     senders = trigger.senders
     level = senders_level(senders)
     if level is not None:
@@ -608,6 +634,22 @@ def authority_persons(facts: WorkFacts | None) -> tuple[str, ...]:
     return facts.authority.persons
 
 
+def carries_in_advance(facts: WorkFacts | None) -> bool:
+    """Whether a work carries a person's authority in advance, as a task's work does (§6:1).
+
+    Such authority is the task's, not an input's: nothing an input says or is marked as,
+    whether its words are its sender's own or whether it is relayed, gives or takes it away
+    (ADR-0368 §2:4, ADR-0351 §6:5).
+
+    Args:
+        facts: The work's facts, or ``None`` where none were recorded.
+
+    Returns:
+        Whether its authority is in advance.
+    """
+    return facts is not None and facts.authority.kind is AuthorityKind.IN_ADVANCE
+
+
 def persons_authority(
     facts: WorkFacts | None, senders: Iterable[InputSender], *, relayed: bool = False
 ) -> str | None:
@@ -616,9 +658,11 @@ def persons_authority(
     What every earlier decision's "the input carries the user's authority" reads: the
     work carries the authority of one identified person, now or in advance, and no
     unidentified sender's beside it (§2:2), no input it holds has an unidentified sender,
-    and no input it holds is relayed (ADR-0351 §6:5), which no fact records (§2:4) and
-    the caller hands in. Where it names the user, it names this person. A person the hub
-    does not admit carries none here (:data:`_ADMITTED`).
+    and, for authority carried now, no input it holds is relayed (ADR-0351 §6:5), which no
+    fact records (§2:4) and the caller hands in: a relay mark takes away what an input
+    brought, and authority in advance is no input's (:func:`carries_in_advance`). Where it
+    names the user, it names this person. A person the hub does not admit carries none
+    here (:data:`_ADMITTED`).
 
     Args:
         facts: The work's facts as they stand, or ``None`` where none were recorded.
@@ -630,7 +674,7 @@ def persons_authority(
         The person's id, or ``None`` where the work carries no person's authority.
     """
     persons = authority_persons(facts)
-    if relayed or _with_an_unidentified(senders):
+    if (relayed and not carries_in_advance(facts)) or _with_an_unidentified(senders):
         return None
     if len(persons) != 1 or persons[0] not in _ADMITTED:
         return None
@@ -697,27 +741,23 @@ def _admitted(person: str | None, level: Sureness) -> CheckedFor:
 
 
 def check_runs_for(
-    facts: WorkFacts | None,
-    *,
-    own_input: bool,
-    relayed: bool,
-    task: ScheduledTask | None = None,
+    facts: WorkFacts | None, *, own_input: bool, relayed: bool
 ) -> tuple[CheckedFor, ...]:
     """Whom the check runs for in a work, and at what level (ADR-0368 §7's table).
 
-    Read from what the work records, and decided nowhere else (ADR-0367 §4:1):
+    Read from what the work's facts record, and decided nowhere else (ADR-0367 §4:1):
 
-    - **A task's work** (``task``): its task's recorded author, at the level the task
-      records of the work that set it (§6:1, §6:3), whatever the work's own facts say,
-      which record none until the check decides (§7's fifth row). A task the assistant
-      authored, recording no person, carries none.
+    - **A work carrying authority in advance**, as a task's work does: its author, at the
+      level its facts record, the level the task records of the work that set it (§6:1,
+      §6:3, §7's fifth row), whatever its input's words are or are marked as
+      (:func:`carries_in_advance`). A task the assistant set carries none.
     - **A sender's work**: each identified person whose authority it carries, at the
       work's level, and a member of anyone alone, at none, where it carries an
-      unidentified sender's (§7:1 to §7:3). In advance, its author, at its level.
+      unidentified sender's (§7:1 to §7:3).
     - **A work that carries none** (§7:5): no one, at none. So is a work with no facts,
-      one whose input is not its senders' own words (``own_input``, ADR-0321 §3:3), and
-      one holding a relayed input (ADR-0351 §6:5), whatever its facts say (ADR-0368
-      §9:1), as :func:`persons_authority` reads it.
+      and a sender's work whose input is not its senders' own words (``own_input``,
+      ADR-0321 §3:3) or that holds a relayed input (ADR-0351 §6:5), whatever its facts
+      say (ADR-0368 §9:1), as :func:`persons_authority` reads it.
 
     A person the hub does not admit is read as no one (:data:`_ADMITTED`).
 
@@ -725,17 +765,16 @@ def check_runs_for(
         facts: The work's facts as they stand, or ``None`` where none were recorded.
         own_input: Whether every message the work's input took in is its sender's own.
         relayed: Whether any input the work holds is relayed.
-        task: The task whose occurrence started it, where it is a task's work.
 
     Returns:
         Each one the check runs for, in order, no one repeated; at least one.
     """
-    if task is not None:
-        return (_admitted(task.author_person, task.setting_level),)
-    if facts is None or not own_input or relayed:
+    if facts is None:
         return (CheckedFor.no_one(),)
     authority = facts.authority
-    if authority.kind is AuthorityKind.NONE:
+    if authority.kind is AuthorityKind.IN_ADVANCE:
+        return (_admitted(authority.persons[0], facts.level),)
+    if not own_input or relayed or authority.kind is AuthorityKind.NONE:
         return (CheckedFor.no_one(),)
     runs = [_admitted(one, facts.level) for one in authority.persons]
     if authority.unidentified:
@@ -822,7 +861,10 @@ def _logged(
 
 
 def record_started(
-    trigger: RecordedChannelTrigger, *, activation_id: str | None
+    trigger: RecordedChannelTrigger,
+    *,
+    activation_id: str | None,
+    task: ScheduledTask | None = None,
 ) -> WorkFacts | None:
     """The facts a work starts with, logged; ``None`` on a defect.
 
@@ -834,12 +876,13 @@ def record_started(
     Args:
         trigger: The work's recorded trigger.
         activation_id: The work's activation.
+        task: For a task's occurrence, its task (:func:`started`).
 
     Returns:
         The facts, or ``None`` where they could not be decided.
     """
     try:
-        facts = started(trigger)
+        facts = started(trigger, task=task)
     except Exception:  # fails closed: no facts are no person's and carry no authority
         _log.warning("work_facts_unrecorded", at="start", reason="defect")
         return None

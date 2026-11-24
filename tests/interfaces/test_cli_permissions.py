@@ -123,7 +123,6 @@ def test_the_listing_shows_each_made_line_and_each_default(
         "  Only when every message the work acts on came by: conversation",
         *_TEXT_DEFAULT,
         line_inspection.HOW_TO_ACT,
-        line_inspection.NOT_YET_DECIDING,
     ]
     assert engine.calls[-1] == ("permission_lines", {})
 
@@ -135,7 +134,6 @@ def test_a_listing_with_no_line_says_so(monkeypatch: pytest.MonkeyPatch, output:
 
     assert output.getvalue().splitlines() == [
         line_inspection.NO_LINES,
-        line_inspection.NOT_YET_DECIDING,
     ]
 
 
@@ -155,7 +153,6 @@ def test_a_grant_sends_what_the_owner_typed_and_shows_the_line(
         "  Who: you",
         "  Action: send_text",
         "  How: allowed, at weak or above",
-        line_inspection.NOT_YET_DECIDING,
     ]
     assert engine.calls == [
         (
@@ -202,7 +199,6 @@ def test_a_limit_names_who_the_action_and_its_connection(
         "  Who: anyone",
         "  Action: send_text",
         f"  On: {_LINE_PLACE}",
-        line_inspection.NOT_YET_DECIDING,
     ]
     assert engine.calls == [
         ("make_limit", {"who": ANYONE_GROUP_ID, "action": "send_text", "thing": _LINE_PLACE})
@@ -238,7 +234,6 @@ def test_a_refused_making_says_why_and_exits_non_zero(
 
     assert output.getvalue().splitlines() == [
         f"Refused: {said}. Nothing was changed.",
-        line_inspection.NOT_YET_DECIDING,
     ]
     assert asyncio.run(lines.standing()) == ()
 
@@ -317,13 +312,16 @@ def test_a_store_fault_is_rendered_not_dumped(
     assert not isinstance(result.exception, PermissionLineStoreError)
 
 
-@pytest.mark.parametrize("args", [(), ("list",), ("grant",), ("limit",)])
-def test_the_help_says_lines_do_not_decide_calls_yet(args: tuple[str, ...]) -> None:
-    """The brief's one line: lines do not decide calls until the switch (ADR-0367 §4:5)."""
+@pytest.mark.parametrize("args", [(), ("list",), ("grant",), ("limit",), ("remove",)])
+def test_the_help_no_longer_says_lines_do_not_decide_calls(args: tuple[str, ...]) -> None:
+    """The check decides (ADR-0367 §4:5): no help says a line decides no call yet."""
     result = CliRunner().invoke(cli.app, ["permissions", *args, "--help"], terminal_width=600)
 
     assert result.exit_code == 0
-    assert " ".join(result.output.split()).count(line_inspection.NOT_YET_DECIDING) >= 1
+    said = " ".join(result.output.split())
+    assert "today's rules" not in said
+    assert "do not decide" not in said
+    assert not hasattr(line_inspection, "NOT_YET_DECIDING")
 
 
 def test_a_value_from_the_engine_cannot_pose_as_a_line(output: StringIO) -> None:

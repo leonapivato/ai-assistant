@@ -33,6 +33,7 @@ from recipient_builders import (
     binding,
     forecast_binding,
     origin_unrecorded,
+    request,
     route_b_decision,
     route_c_decision,
     search_binding,
@@ -46,6 +47,8 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    OWNER_PERSON_ID,
+    ActionRequest,
     Approval,
     ApprovalEnd,
     ApprovalGiven,
@@ -54,26 +57,30 @@ from ai_assistant.core.types import (
     CostBasis,
     CoverageUnrecordedBinding,
     EgressBinding,
+    GrantHow,
     Idempotency,
+    LineParts,
     OriginUnrecordedBinding,
     PermissionDecision,
+    PermissionLineKind,
     PermissionOutcome,
     QuestionPart,
     RiskLevel,
     SpanCoverage,
+    Sureness,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
     YesToQuestion,
 )
+from ai_assistant.testing import FakePermissionLineStore
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
 
-    from ai_assistant.core.protocols import AuditTrail
-    from ai_assistant.core.types import ActionRequest
+    from ai_assistant.core.protocols import AuditTrail, PermissionLineStore
     from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 
@@ -111,6 +118,24 @@ async def _resolved(
     }
     fields.update(overrides)
     return decision(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+
+
+def _resting_on(
+    line_id: str, bound: EgressBinding | None, *, capability: str = "send_email"
+) -> PermissionDecision:
+    """A non-resolving ``ALLOW`` naming ``line_id``, as the policy rules one (ADR-0367 §4:6)."""
+    declared = TOOL.model_copy(update={"id": capability, "capability": capability})
+    asked = (
+        ActionRequest(tool=declared, rests_on=line_id)
+        if bound is None
+        else request(bound, tool=declared, rests_on=line_id)
+    )
+    return PermissionDecision.from_request(
+        asked,
+        ruling(PermissionOutcome.ALLOW, authorised_by=line_id),
+        id=f"d-{capability}-{line_id}",
+        decided_at=AT,
+    )
 
 
 async def _refuses(
@@ -366,7 +391,16 @@ class AuditTrailContract:
 
     @pytest.fixture
     def trail(self) -> AuditTrail:
-        """Return an empty trail under test."""
+        """Return an empty trail under test, constructed with no line store."""
+        raise NotImplementedError
+
+    def trail_over(self, lines: PermissionLineStore) -> AuditTrail:
+        """Return an empty trail under test that resolves a grant's name in ``lines``.
+
+        ADR-0367 §4:6: a ruling resting on a grant a person made names it, resolvable to
+        its record in the line store (§3:6). An implementation is constructed with the
+        store it reads; this is how a case hands it one.
+        """
         raise NotImplementedError
 
     # --- ADR-0321 §7:7: nothing sets a fingerprint, and the trail refuses one ---
@@ -457,22 +491,93 @@ class AuditTrailContract:
         assert await trail.record(answered) == "d-answer"
         assert await trail.get("d-answer") == answered
 
-    async def test_a_decision_with_no_binding_and_no_fingerprint_is_recorded(
+    async def test_a_standing_row_with_no_binding_names_a_grant_or_is_refused(
         self, trail: AuditTrail
     ) -> None:
-        """The scope pin: no rule here is a general rule about ``authorised_by``.
+        """ADR-0367 §4:6 opens ADR-0021 §6's standing grants for every action.
 
-        A non-resolving ``ALLOW`` whose ``egress_binding`` is ``None`` is **not an
-        egress call**, so ADR-0021 §6's standing grants for other actions fall
-        outside the standing-row invariant rather than needing an exception inside
-        it. What §7:7 refuses is the digest, and this row carries none.
+        A non-resolving ``ALLOW`` whose ``egress_binding`` is ``None`` and which names an
+        authorisation rests on a grant a person made, resolvable in the line store; a
+        trail given none resolves nothing, and refuses it, writing nothing.
         """
-        recorded = decision(
-            "d-standing",
-            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="g-1"),
+        await _refuses(
+            trail,
+            decision("d-standing", ruled=ruling(PermissionOutcome.ALLOW, authorised_by="g-1")),
+            InvalidAuthorisationError,
         )
 
-        assert await trail.record(recorded) == "d-standing"
+    # --- ADR-0367 §4:6, ADR-0379 §4: a ruling resting on a grant a person made ---
+    #
+    # A non-resolving ``ALLOW`` naming an authorisation that is not route (c)'s is
+    # accepted only where its pointer names, in the line store, a grant that allows, for
+    # the decision's capability, made by the ruling's moment and standing when read.
+
+    async def _grant(
+        self, lines: FakePermissionLineStore, *, how: GrantHow = GrantHow.ALLOWED
+    ) -> str:
+        made = await lines.record_making(
+            LineParts(
+                kind=PermissionLineKind.GRANT,
+                who=OWNER_PERSON_ID,
+                action="send_email",
+                how=how,
+                bar=Sureness.NORMAL,
+            ),
+            by=OWNER_PERSON_ID,
+        )
+        return str(made.line.id)
+
+    @pytest.mark.parametrize(
+        "bound",
+        [
+            pytest.param(None, id="no egress call"),
+            pytest.param(binding(ALICE), id="an email's binding, of no configured kind"),
+        ],
+    )
+    async def test_a_row_naming_a_grant_the_owner_made_is_recorded(
+        self, bound: EgressBinding | None
+    ) -> None:
+        """The grant that allows, for the call's capability, resolves: the row is kept."""
+        lines = FakePermissionLineStore(now=lambda: AT - timedelta(minutes=1))
+        line_id = await self._grant(lines)
+        trail = self.trail_over(lines)
+        recorded = _resting_on(line_id, bound)
+
+        assert await trail.record(recorded) == recorded.id
+        assert await trail.get(recorded.id) == recorded
+        held = await lines.line(str(recorded.ruling.authorised_by))
+        assert held is not None
+        assert held.id == line_id
+
+    @pytest.mark.parametrize(
+        "case",
+        ["unknown", "limit", "asks", "another action", "made after", "removed", "unread"],
+    )
+    async def test_a_row_naming_no_grant_that_allows_it_is_refused(self, case: str) -> None:
+        """Each way the pointer is not the grant the row rests on refuses it, writing nothing."""
+        lines = FakePermissionLineStore(now=lambda: AT - timedelta(minutes=1))
+        line_id = await self._grant(
+            lines, how=GrantHow.WITH_APPROVAL if case == "asks" else GrantHow.ALLOWED
+        )
+        if case == "limit":
+            made = await lines.record_making(
+                LineParts(kind=PermissionLineKind.LIMIT, who=OWNER_PERSON_ID, action="send_email"),
+                by=OWNER_PERSON_ID,
+            )
+            line_id = str(made.line.id)
+        if case == "removed":
+            await lines.record_removal(line_id, by=OWNER_PERSON_ID)
+        recorded = _resting_on(line_id, binding(ALICE))
+        if case == "unknown":
+            recorded = _resting_on("line:none", binding(ALICE))
+        if case == "another action":
+            recorded = _resting_on(line_id, binding(ALICE), capability="fetch_url")
+        if case == "made after":
+            recorded = recorded.model_copy(update={"decided_at": AT - timedelta(minutes=2)})
+        if case == "unread":
+            lines.fail_next()  # ADR-0193 §6:19's reading: a read with no answer resolves nothing
+
+        await _refuses(self.trail_over(lines), recorded, InvalidAuthorisationError)
 
     # --- ADR-0247 §2: the configured-provider route, read off the row alone ---
     #

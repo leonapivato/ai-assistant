@@ -467,6 +467,7 @@ from ai_assistant.orchestration.task_scheduler import (
 )
 from ai_assistant.orchestration.understanding import WrittenBy, fetch_held
 from ai_assistant.orchestration.work_facts import (
+    carries_in_advance,
     check_runs_for,
     met_connection,
     persons_authority,
@@ -2422,29 +2423,32 @@ class PhaseWorking:
         ADR-0368 §9:1: what every earlier decision's "the input carries the user's
         authority" reads (ADR-0292 §5:5, ADR-0351 §6:1, §6:5, §8:5), read from the work's
         three facts as they stand, never from the channel type it came by: the one
-        identified person whose authority it carries, and only while every message it
-        took in is its sender's own and no input the activation holds is relayed, so an
-        activation holding a relayed input acts with no authority from the version, or
-        the append, that brings the relay mark. ``None`` where it carries no person's.
+        identified person whose authority it carries, and, for authority its senders'
+        input carries now, only while every message it took in is its sender's own and no
+        input the activation holds is relayed, so an activation holding a relayed input
+        acts with no authority from the version, or the append, that brings the relay
+        mark. Authority in advance, a task's work's, is no input's, so neither takes it
+        away (ADR-0368 §6:1, :func:`~ai_assistant.orchestration.work_facts.
+        carries_in_advance`). ``None`` where it carries no person's.
         """
-        if not self._own_input:
-            return None
         state = self._activation
         if state is None:
             return None
-        return persons_authority(state.work_facts, state.held_senders, relayed=self.relayed)
+        facts = state.work_facts
+        if not self._own_input and not carries_in_advance(facts):
+            return None
+        return persons_authority(facts, state.held_senders, relayed=self.relayed)
 
     def check_subject(self, has: Collection[str] | None = None) -> CheckSubject:
         """Whom the check runs for in this work, at what level, and where a condition is met.
 
         ADR-0368 §7's table, read from what the work records (:func:`~ai_assistant.
-        orchestration.work_facts.check_runs_for`): a task's work for its task's recorded
-        author at the level it records, though the work's own facts record none until the
-        check decides; a sender's work from its facts as they stand, read as carrying none
-        where :attr:`authority` would; and the one connection every one of its senders'
-        inputs came by, or its task records (§4:2, §6:4), which a task's work meets
-        whether or not it holds an activation's state. Handed to the authorizer, which
-        decides none of it.
+        orchestration.work_facts.check_runs_for`): a task's work for its task's author at
+        the level the task records, as its facts record them in advance (§6:1, §6:3); a
+        sender's work from its facts as they stand, read as carrying none where
+        :attr:`authority` would; and the one connection every one of its senders' inputs
+        came by, or its task records (§4:2, §6:4). Handed to the authorizer, which decides
+        none of it.
 
         Args:
             has: The connections the hub has, as a line names them, where they are known:
@@ -2468,7 +2472,6 @@ class PhaseWorking:
                 None if state is None else state.work_facts,
                 own_input=self._own_input,
                 relayed=self.relayed,
-                task=task,
             ),
             met=met,
         )
@@ -4345,9 +4348,11 @@ class PhasePath:
         Its place is the schedule, whose window is its task's lineage (§6:5), and its
         messages go into the places on its place list it names, each by its label
         (§6:7): the engine attaches :class:`Scheduling` before the first round, and each
-        round's list says whether it may write a message at all (§5:7). Its input never
-        carries the person's authority: a scheduled task authorizes nothing (§3:9), so
-        no yes is read from it and no call needing the person runs.
+        round's list says whether it may write a message at all (§5:7). Its input's words
+        never carry the person's authority, so no yes is read from them (§3:9); its work
+        carries its task's author's in advance, as the activation's facts record it
+        (ADR-0368 §6:1), which the check runs for (§7) and every reader of whose
+        authority it carries reads (§9:1).
 
         Args:
             activation_id: The activation.
@@ -4370,6 +4375,7 @@ class PhasePath:
             owner_records=True,
             round_limit=self._round_limit,
             labels=labels,
+            activation=active_state(),
         )
 
     def begin_approval(

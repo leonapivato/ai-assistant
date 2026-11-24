@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     CallCheckKind,
     CallOutcomeKind,
     ChannelIdentity,
+    ChannelInput,
     CheckedFor,
     CheckOutcome,
     CheckOutcomeKind,
@@ -52,11 +53,14 @@ from ai_assistant.core.types import (
     ScheduledTask,
     ScheduledTaskAuthor,
     Sureness,
+    TextChannelPayload,
 )
+from ai_assistant.orchestration.activation_state import admit_channel
 from ai_assistant.orchestration.channel_kinds import ACCOUNT_KINDS, CONNECTION_KINDS
 from ai_assistant.orchestration.permission_check import CheckSubject
 from ai_assistant.orchestration.phase_path import PhaseWorking, Scheduling, had_connections
 from ai_assistant.orchestration.planning import ConnectionShown, PlaceWindow
+from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.testing import FakeIdentityStore, FakePermissionLineStore
 from ai_assistant.testing.tool_calling import FakeToolCallingCompleter
 
@@ -259,7 +263,9 @@ async def test_a_check_made_before_authorizing_fails_is_kept_on_the_entry() -> N
 
 def test_a_condition_naming_a_connection_the_hub_no_longer_has_is_met_for_no_work() -> None:
     """ADR-0376 §2:8: a task records where it was set; once the hub no longer has that
-    connection, a condition naming it is met for none of its work's calls."""
+    connection, a condition naming it is met for none of its work's calls. The check runs
+    for the task's author at the level it records, as its work's facts record it in
+    advance (ADR-0368 §6:1, §6:3)."""
     task = ScheduledTask(
         id="t-1",
         person=OWNER_PERSON_ID,
@@ -279,13 +285,22 @@ def test_a_condition_naming_a_connection_the_hub_no_longer_has_is_met_for_no_wor
     async def nothing_listed() -> Any:
         return (), {}
 
+    # ADR-0368 §6:1: the occurrence's admission records the task's author in advance.
+    occurrence = admit_channel(
+        ChannelInput(target=SCHEDULE, payload=TextChannelPayload(text="it is time")),
+        None,
+        clock=lambda: AT,
+        id_factory=lambda: "7d0f3c0e-3c4a-4c39-9a52-6f0a1d2b3c4d",
+        task=task,
+    )
     working = PhaseWorking(
         activation_id="activation",
         place=PlaceWindow(takes_message=True),
         conversation_id=None,
-        trigger=None,
+        trigger=occurrence.trigger,
         owner_records=True,
         round_limit=3,
+        activation=occurrence,
     )
     working.scheduling = Scheduling(
         person=OWNER_PERSON_ID, set_in=task.set_in, build=nothing_listed, task=task

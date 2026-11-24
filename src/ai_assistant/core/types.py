@@ -3374,8 +3374,8 @@ class AuthorityKind(StrEnum):
     SENDERS = "senders"
     """Its senders' now, each identified or not (§3)."""
     IN_ADVANCE = "in_advance"
-    """A person's in advance: a task's or a standing rule's author (§6). Expressible, and
-    recorded by no work until §6 is built (milestone 2)."""
+    """A person's in advance: a task's or a standing rule's author (§6), at the level the
+    task records, which a task's work records when it starts."""
     NONE = "none"
     """None."""
 
@@ -5638,10 +5638,11 @@ class CallCheckKind(StrEnum):
 class CallCheck(BaseModel):
     """What the check made of one call, as its episode's entry keeps it (ADR-0379 §3:2).
 
-    Recorded beside what was decided, whether the check decides or, as when it is first
-    built, is recorded beside today's rules (ADR-0367 §4:5). An entry with none records a
-    call the check never reached: one recorded before the check was built, or one refused
-    before any check, by planning's own check, by selection or by its tool's own checks.
+    Recorded beside what was decided, whether the check decides or, as when it was first
+    built, was recorded beside the rules that then decided (ADR-0367 §4:5). An entry with
+    none records a call the check never reached: one recorded before the check was built,
+    or one refused before any check, by planning's own check, by selection or by its
+    tool's own checks.
 
     Attributes:
         kind: Whether it ran, stayed outside it, or did not run, and why.
@@ -17384,9 +17385,10 @@ class ActionRequest(BaseModel):
             "The line the call rests on (ADR-0367 §4:6, §16): the made grant the check's "
             "outcome names, by its identifier in the line store (ADR-0379 §4:1), so a "
             "policy reads no store and stays a function of its argument (ADR-0021 §3). "
-            "``None`` where the outcome names none. The authorizer sets it; until the "
-            "check decides (ADR-0367 §4:5) it is left unset on every request, so what a "
-            "recorded decision and a held ticket compare equal to is unchanged."
+            "``None`` where the outcome names none. The authorizer sets it from the "
+            "check's outcome, and the policy names it in ``PermissionRuling."
+            "authorised_by`` on an ``ALLOW`` (§4:6). No decision, request or ticket "
+            "records it, so nothing compares unequal for it."
         ),
     )
 

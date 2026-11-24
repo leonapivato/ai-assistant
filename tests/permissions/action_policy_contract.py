@@ -242,7 +242,8 @@ async def _ruling_for(policy: ActionPolicy, request: ActionRequest) -> Permissio
     * ``decide`` is a function of its argument, so a second call on the same
       request must produce an identical ruling — including ``reason``, which is
       what the user is shown.
-    * a fresh ruling may not name an authorisation. ``authorised_by`` is a
+    * a fresh ruling may not name an authorisation but the grant its request rests on
+      (ADR-0367 §4:6), and none where it rests on none. ``authorised_by`` is a
       ``str`` a policy could fabricate, and the disclosure floor is written as
       "``ALLOW`` **with ``authorised_by`` unset**" — so a policy inventing a
       pointer for exactly the requests the floor covers would auto-grant a
@@ -273,9 +274,9 @@ async def _ruling_for(policy: ActionPolicy, request: ActionRequest) -> Permissio
     again = await policy.decide(request)
 
     assert ruled == again, f"decide is not a function of its argument: {ruled} then {again}"
-    assert ruled.authorised_by is None, (
-        f"decide invented an authorisation ({ruled.authorised_by!r}); standing grants are "
-        f"deferred, so no policy today has a source for one"
+    assert ruled.authorised_by in {None, request.rests_on}, (
+        f"decide invented an authorisation ({ruled.authorised_by!r}); the one source a "
+        f"policy has is the grant the request rests on ({request.rests_on!r})"
     )
     assert request.model_dump(mode="json") == untouched, (
         "decide mutated the request it was given; the decision would then be "
@@ -449,6 +450,45 @@ class ActionPolicyContract:
             ruled = await policy.decide(request)
 
             assert ruled.authorised_by is None, f"invented an authorisation for {request.tool}"
+
+    async def test_a_request_resting_on_a_grant_is_named_by_nothing_else(
+        self, policy: ActionPolicy
+    ) -> None:
+        """ADR-0367 §4:6, §16: the grant a request rests on is the one source it carries.
+
+        Over every axis the contract varies, a ruling on a request carrying
+        ``rests_on`` names that grant or nothing, and only on an ``ALLOW``; its outcome
+        is never one a request resting on nothing would have ruled more strictly than
+        a confirm, since a grant only meets the disclosure floor and lifts no deny.
+        """
+        varied = (
+            [tool(risk_level=level) for level in _RISK_LADDER]
+            + [tool(reversibility=level) for level in _REVERSIBILITY_LADDER]
+            + [tool(discloses=tiers) for tiers in _REACHES]
+            + [tool(cost=ToolCost(basis=basis)) for basis in (CostBasis.FREE, CostBasis.UNKNOWN)]
+        )
+
+        for declared in varied:
+            bare = await _ruling_for(policy, action(tool=declared))
+            resting = await _ruling_for(policy, action(tool=declared, rests_on="line:granted"))
+
+            assert resting.authorised_by in {None, "line:granted"}, declared
+            if resting.outcome is not PermissionOutcome.ALLOW:
+                assert resting.authorised_by is None, declared
+            if bare.outcome is PermissionOutcome.DENY:
+                assert resting.outcome is PermissionOutcome.DENY, declared
+
+    async def test_a_grant_never_lifts_the_external_content_clause(
+        self, policy: ActionPolicy
+    ) -> None:
+        """ADR-0367 §4:5: a grant never lifts the outside-content stand-in (ADR-0181 §5)."""
+        ruled = await _ruling_for(
+            policy,
+            action(egress_binding=_planned_over_external(marked=True), rests_on="line:granted"),
+        )
+
+        assert ruled.outcome is not PermissionOutcome.ALLOW
+        assert ruled.authorised_by is None
 
     # --- resolving a confirmation ----------------------------------------
 
