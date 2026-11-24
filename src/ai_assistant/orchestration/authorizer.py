@@ -1884,7 +1884,8 @@ class AuthorizingStage:
         not the ruling needs the person: planning may narrow what runs freely, never widen
         it. ``request_approval`` itself never needs the person and the stand-in never
         applies to it, so its own decision is an allow resting on that ruling, naming the
-        effect record its write claims.
+        effect record its write claims, and the grant the owner made that its own check
+        rests on, where it rests on one (ADR-0367 §4:6).
         """
         call = one.call
         nested = nested_call(call.arguments)
@@ -1942,7 +1943,11 @@ class AuthorizingStage:
             )
             return
         try:
-            request = ActionRequest(tool=own.tool, parameters=own.parameters)
+            # ADR-0367 §4:6: where its own check rests on a grant the owner made, its own
+            # request and ruling name that grant, which the trail resolves.
+            request = ActionRequest(
+                tool=own.tool, parameters=own.parameters, rests_on=asking.rests_on
+            )
             requested = RequestedCall(
                 tool=ruled.request.tool,
                 values=ruled.request.parameters,
@@ -1958,7 +1963,11 @@ class AuthorizingStage:
             state.verdicts.append(_not_done(call, _MALFORMED))
             return
         effect_id = self._new_effect_id()
-        ruling = PermissionRuling(outcome=PermissionOutcome.ALLOW, reason=_RULED_BY_ITS_CALL)
+        ruling = PermissionRuling(
+            outcome=PermissionOutcome.ALLOW,
+            reason=_RULED_BY_ITS_CALL,
+            authorised_by=asking.rests_on,
+        )
         state.note(call, "request", Verdict.ALLOWED.value, None)
         decision = await self._recorded(request, ruling, effect_id)
         state.verdicts.append(_ruled_verdict(call, Verdict.ALLOWED, None, decision))
