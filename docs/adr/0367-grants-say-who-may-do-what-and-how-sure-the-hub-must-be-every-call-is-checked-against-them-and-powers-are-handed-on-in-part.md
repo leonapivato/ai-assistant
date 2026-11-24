@@ -1,6 +1,6 @@
 # 367. Grants say who may do what and how sure the hub must be, every call is checked against them, and powers are handed on in part
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0382 (§4:7, in the addition alone: in an approval's work, a message into a place an input of the asking activation came from also stays outside the check)
 - Date: 2026-11-22
 - Scope: lane 3 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into

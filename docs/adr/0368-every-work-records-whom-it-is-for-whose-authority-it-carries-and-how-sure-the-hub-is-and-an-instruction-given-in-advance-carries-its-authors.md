@@ -1,6 +1,6 @@
 # 368. Every work records whom it is for, whose authority it carries and how sure the hub is, and an instruction given in advance carries its author's
 
-- Status: Partially superseded by ADR-0370 (§6:3, in the addition alone: a task also records the mark its setting work carried) and ADR-0371 (§6:1, §6:3 and §7:1, each in the addition alone: the check runs at, and a task records, the level of the work's context)
+- Status: Partially superseded by ADR-0370 (§6:3, in the addition alone: a task also records the mark its setting work carried) and ADR-0371 (§6:1, §6:3 and §7:1, each in the addition alone: the check runs at, and a task records, the level of the work's context) and ADR-0382 (§7:5, in the addition alone: its exception also reaches an approval's work's message into a place an input of the asking activation came from)
 - Date: 2026-11-22
 - Scope: lane 4 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
