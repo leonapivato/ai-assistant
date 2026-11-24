@@ -1446,8 +1446,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # work, each thing this hub holds that has no record is recorded as the owner's,
         # so the start after the upgrade that builds it writes every one. Nothing asks
         # the owner anything (§4:3). The authorizer reads it for whose yes a call covered
-        # only by a grant that asks needs (§6:1); the Connections section's filter is the
-        # later lane that reads it (§6:3). It reads no other store and no store reads it.
+        # only by a grant that asks needs (§6:1), and the Connections section's filter
+        # reads it as that outcome turns (§6:3); the engine writes an event's place, which
+        # the hub comes to hold while running (§4:2). It reads no other store and no
+        # store reads it.
         thing_records = SqliteThingRecordStore(
             path=directory / THING_RECORDS_FILENAME,
             held=held,
@@ -2411,6 +2413,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # as it starts (ADR-0381 §2:1), less the schedule and the approvals (§2:4).
             lines=permission_lines,
             held_things=held,
+            # ADR-0381 §4:2: the **same** store the start wrote; an event's place, which
+            # the hub comes to hold while running, is recorded as the owner's before the
+            # event is read. The engine reads no record (§6:4).
+            things=thing_records,
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
             observer=observer,
@@ -3140,6 +3146,11 @@ def _build_phase_path(
         recall_cap=RECALL_SECOND_RUN_CAP,
         recall_digest_wait=PHASES_RECALL_DIGEST_DEADLINE,
         story_reads=story_reads,
+        # ADR-0368 §8, ADR-0381 §6:3: what each work is offered and shown is narrowed to
+        # what its authority could use, read from the **same** line store the
+        # authorizer's check reads, and, for the Connections section, the same records.
+        lines=seams.lines,
+        things=seams.things,
         now=_utcnow,
         # #2964: planning tells the time in the user's zone, the one `Settings.timezone`
         # the spend and notification policies read, validated at load.

@@ -144,7 +144,7 @@ from ai_assistant.orchestration.planning import (
 from ai_assistant.orchestration.story_calls import STORY_ARGUMENT
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from ai_assistant.core.protocols import ConversationStore, MemoryStore
     from ai_assistant.core.types import FrozenJson, ToolCall
@@ -569,8 +569,21 @@ class ConnectionSearch:
         self._scan = scan
         self._page_size = page_size
 
-    async def search(self, query: str, page: int) -> ConnectionsFound:
+    async def search(
+        self, query: str, page: int, *, shows: Callable[[str], bool] | None = None
+    ) -> ConnectionsFound:
         """One page of the conversations ``query`` matches, best first.
+
+        Args:
+            query: What to match.
+            page: Which page, the first 1.
+            shows: Whether a place may be found at all, by its place: a work is found
+                only connections its authority could use (ADR-0368 §8:2), and one it may
+                not be shown is passed over before its transcript is read. ``None`` for
+                any.
+
+        Returns:
+            The page.
 
         Raises:
             ConversationStoreError: If the store cannot be read.
@@ -580,11 +593,13 @@ class ConnectionSearch:
         scored: list[tuple[int, int, ConnectionShown]] = []
         order = 0
         async for conversation in self._every_conversation():
+            place = place_of(conversation_channel(conversation))
+            if shows is not None and not shows(place):
+                continue
             texts = [kind.is_a, kind.group or "", kind.can, *await self._texts(conversation)]
             held = " ".join(texts).casefold()
             score = sum(1 for word in words if word in held)
             if score:
-                place = place_of(conversation_channel(conversation))
                 scored.append((-score, order, ConnectionShown(place=place, kind=kind)))
             order += 1
         scored.sort(key=lambda one: (one[0], one[1]))
@@ -677,6 +692,8 @@ class LookUpScope:
         older: Where the activation's place window came from, which its older history
             is read from (ADR-0358 §9:2); ``None`` for a place with no window.
         found: What the round's episode look-ups read, by the deciding decision's id.
+        shows: Whether a connections search may find a place, by the place: only one the
+            work's authority could use (ADR-0368 §8:2); ``None`` where nothing narrows it.
     """
 
     audience: TurnSupply
@@ -684,6 +701,7 @@ class LookUpScope:
     views: dict[str, PlanningStory] = field(default_factory=dict)
     older: OlderSource | None = None
     found: dict[str, EpisodeLookedUp] = field(default_factory=dict)
+    shows: Callable[[str], bool] | None = None
 
 
 #: The scope a round's look-ups run under, opened by :meth:`LookUps.scope` around acting.
@@ -737,7 +755,11 @@ class LookUps:
     @staticmethod
     @contextlib.contextmanager
     def scope(
-        *, audience: TurnSupply, owner_records: bool, older: OlderSource | None = None
+        *,
+        audience: TurnSupply,
+        owner_records: bool,
+        older: OlderSource | None = None,
+        shows: Callable[[str], bool] | None = None,
     ) -> Iterator[LookUpScope]:
         """Open the scope a round's look-ups run under, around acting.
 
@@ -745,12 +767,15 @@ class LookUps:
             audience: The pass's audience posture.
             owner_records: Whether a record placed for the owner alone may be shown.
             older: Where the place window came from, which the older history reads.
+            shows: Whether a connections search may find a place; ``None`` for any.
 
         Yields:
             The scope, whose ``views`` hold the story views read inside it, and whose
             ``found`` holds what the episode look-ups read.
         """
-        opened = LookUpScope(audience=audience, owner_records=owner_records, older=older)
+        opened = LookUpScope(
+            audience=audience, owner_records=owner_records, older=older, shows=shows
+        )
         token = _SCOPE.set(opened)
         try:
             yield opened
@@ -938,7 +963,7 @@ class LookUps:
             found = ConnectionsFound(page=page)
         else:
             try:
-                found = await self._connections.search(query, page)
+                found = await self._connections.search(query, page, shows=scope.shows)
             except ConversationStoreError:
                 _log.warning("look_up_not_done", stage="acting", reason="unreadable")
                 return _not_done(ToolFailureKind.UNAVAILABLE, "the records could not be read")

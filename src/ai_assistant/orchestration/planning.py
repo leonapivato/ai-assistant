@@ -1323,6 +1323,10 @@ class PlanningInputs:
         labels: The labels already assigned in this activation, as recorded.
         outcomes: What came of the earlier rounds' calls.
         capabilities: The tool declarations the offered capabilities come from.
+        could_use: The capabilities the work's authority could use, by name, the only
+            ones its first round is offered (ADR-0368 §8:1); ``None`` where nothing
+            narrows the offer. A call to one it leaves out is still judged and handed to
+            authorizing, whose check decides it (§8:5).
         label_arguments: For a capability, which of its arguments name things by
             label, and what kind of thing each names.
         evidence: Digested evidence from earlier rounds' results.
@@ -1430,6 +1434,7 @@ class PlanningInputs:
     labels: tuple[PlanningLabel, ...] = ()
     outcomes: tuple[CallOutcome, ...] = ()
     capabilities: tuple[ToolDefinition, ...] = ()
+    could_use: frozenset[str] | None = None
     label_arguments: Mapping[str, Mapping[str, LabelKinds]] = field(default_factory=dict)
     evidence: tuple[DigestedEvidence, ...] = ()
     outside_content_read: bool = False
@@ -6602,7 +6607,12 @@ class PlanningStage:
         offered = offered_tools(inputs.capabilities, inputs.label_arguments)
         work = inputs.work
         if work is None:
-            offered_here = offered
+            # ADR-0368 §8:1: only what the work's authority could use, fixed for the work.
+            offered_here = (
+                offered
+                if inputs.could_use is None
+                else tuple(one for one in offered if one.name in inputs.could_use)
+            )
             if inputs.approvals and all(one.name != RUN_APPROVED_TOOL for one in offered_here):
                 # ADR-0361 §5:2, ADR-0356 §4:3: offered on every round of every work, and
                 # refused, saying why, where its label names no ticket this round was shown.
@@ -6668,14 +6678,18 @@ class PlanningStage:
         )
         labels = tuple(book.minted)
         recorded = await self._record(planning_round, labels)
-        declarations = _offered_declarations(inputs.capabilities, offered_here)
+        # ADR-0368 §8:5: a call to a capability the offer left out is judged as any is,
+        # and handed to authorizing, whose check decides it whatever was offered.
+        named = {one.name for one in offered_here}
+        judged_tools = (*offered_here, *(one for one in offered if one.name not in named))
+        declarations = _offered_declarations(inputs.capabilities, judged_tools)
         judge = _Judge(
             offered=declarations,
             label_arguments=inputs.label_arguments,
             book=book,
             capabilities=inputs.capabilities,
             not_here=inputs.not_here,
-            schemas={one.name: one.parameters for one in offered_here},
+            schemas={one.name: one.parameters for one in judged_tools},
             tickets={
                 one.request_id: one
                 for one in inputs.tickets

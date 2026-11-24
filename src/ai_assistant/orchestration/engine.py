@@ -81,6 +81,7 @@ from ai_assistant.core.errors import (
     PlanningError,
     SpeechError,
     StoryStoreError,
+    ThingRecordStoreError,
     TraceStoreError,
     UnderstandingError,
 )
@@ -150,6 +151,8 @@ from ai_assistant.core.types import (
     StoryOutcome,
     SupportPart,
     TextChannelPayload,
+    ThingKey,
+    ThingKind,
     WholeTextReply,
     approval_choice,
     belief_summary,
@@ -274,7 +277,7 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
-from ai_assistant.orchestration.permission_check import level_needed
+from ai_assistant.orchestration.permission_check import level_needed, place_connection
 from ai_assistant.orchestration.person_block import person_zone, still_held
 from ai_assistant.orchestration.person_calls import recorded_wording
 from ai_assistant.orchestration.phase_path import (
@@ -368,6 +371,7 @@ if TYPE_CHECKING:
         SpeechTranscriber,
         SpendLedger,
         StoryStore,
+        ThingRecordStore,
         TraceRetention,
         TraceSink,
     )
@@ -426,7 +430,6 @@ if TYPE_CHECKING:
         StorySummaryView,
         StoryView,
         Sureness,
-        ThingKey,
         ToolDefinition,
         TranscriptPage,
         UserMessage,
@@ -1706,6 +1709,7 @@ class Engine:
         identities: IdentityStore | None = None,
         lines: PermissionLineStore | None = None,
         held_things: Sequence[ThingKey] = (),
+        things: ThingRecordStore | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -2120,6 +2124,10 @@ class Engine:
                 keyed (ADR-0381 §2:1): the connections among them that a line may name
                 are those a line's thing or condition may name (ADR-0376 §2:4, §4:5).
                 None by default, where no connection may be named.
+            things: The store of whose each thing is (ADR-0381 §3), the **same** one the
+                start wrote: an event's place, which the hub comes to hold while running,
+                has its record written naming the owner before the event is admitted
+                (§4:2). The engine reads no record (§6:4). ``None`` writes none.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2365,6 +2373,9 @@ class Engine:
         # ADR-0376 §4: the line store and the connections a line may name that the hub has.
         self._lines = lines
         self._line_connections = owners_lines.nameable_connections(held_things)
+        # ADR-0381 §4:2: an event's place, recorded as the owner's before it is read.
+        self._things = things
+        self._places_recorded: set[str] = set()
         if self._phases is not None:
             # ADR-0349 §4:6, §6:1, §7:20: planning's stop call, its findings look-up and
             # its answer to an offer, and the waits acting and planning hold (§7:12,
@@ -3066,6 +3077,10 @@ class Engine:
             # ADR-0309 §2:6, ADR-0313 §4:3: an event runs through the phases, and the
             # event-summary stage runs no more.
             raise ConfigurationError("informational event processing is not wired")
+        # ADR-0381 §4:2: the event's place is a connection the hub comes to hold while
+        # running (ADR-0364 §3:2), so its record is written before the hub reads it.
+        if isinstance(accepted.target, ChannelIdentity):
+            await self._place_recorded(accepted.target)
         deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
         state = admit_channel(
             accepted,
@@ -7708,6 +7723,32 @@ class Engine:
     def _wake_sensor(self) -> None:
         if self._task_sensor is not None:
             self._task_sensor.wake()
+
+    async def _place_recorded(self, channel: ChannelIdentity) -> None:
+        """Record a place the hub comes to hold while running as the owner's (ADR-0381 §4:2).
+
+        Written where no record stands, the store's own atomic step deciding (§3:4), once
+        per place while the hub runs. A write that fails leaves the place with no record,
+        which belongs to no one (§5:1), so nothing is let through by it: it is logged under
+        a fixed event name with a code-owned reason alone, and the input goes on.
+        """
+        if self._things is None:
+            return
+        connection = place_connection(place_of(channel))
+        if connection is None or connection in self._places_recorded:
+            return
+        try:
+            await self._things.record_whose(
+                ThingKey(kind=ThingKind.CONNECTION, identifier=connection),
+                person=OWNER_PERSON_ID,
+            )
+        except ValueError:
+            _log.warning("thing_record_unwritten", stage="receive", reason="malformed")
+            return
+        except ThingRecordStoreError:
+            _log.warning("thing_record_unwritten", stage="receive", reason="store")
+            return
+        self._places_recorded.add(connection)
 
     async def _line_connected(self) -> bool:
         """Whether the line's connection is active (ADR-0350 §5:8, ADR-0323 §3:7)."""

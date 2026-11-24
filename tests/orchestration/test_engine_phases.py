@@ -203,7 +203,12 @@ from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import ActionPolicy, EgressBinder, PermissionLineStore
+    from ai_assistant.core.protocols import (
+        ActionPolicy,
+        EgressBinder,
+        PermissionLineStore,
+        ThingRecordStore,
+    )
     from ai_assistant.core.types import (
         ActionRequest,
         ActivationUnderstanding,
@@ -365,6 +370,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     authorizing: type[AuthorizingStage] = AuthorizingStage,
     round_limit: int = 3,
     lines: PermissionLineStore | None = None,
+    things: ThingRecordStore | None = None,
 ) -> Callable[[Harness], PhasePath]:
     """The thin path as the composition root builds it, over the harness's own stores.
 
@@ -378,7 +384,10 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     memory, story and conversation stores, every score kept. ``path`` and
     ``authorizing`` are the classes built, which a case may vary. ``round_limit`` is the
     most rounds an activation runs. ``lines`` is the line store the check reads, where a
-    case records what it makes of each call (ADR-0379 §3:2).
+    case records what it makes of each call (ADR-0379 §3:2), and which narrows what each
+    work is offered and shown to what its authority could use, as the composition root
+    hands the path the same store (ADR-0368 §8); ``things`` is the store of whose each
+    thing is, which the authorizer and that narrowing read (ADR-0381 §6).
     """
 
     def build(harness: Harness) -> PhasePath:
@@ -471,6 +480,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 registered_search=registered_search,
                 registered_forecast=registered_forecast,
                 lines=lines,
+                things=things,
                 now=lambda: AT,
                 diagnostics=diagnostics,
             ),
@@ -519,6 +529,8 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             story_reads=reads,
             now=lambda: AT,
             diagnostics=diagnostics,
+            lines=lines,
+            things=things,
         )
 
     return build

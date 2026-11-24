@@ -115,6 +115,7 @@ if TYPE_CHECKING:
         IdentityStore,
         SourceReadTrail,
         StoryStore,
+        ThingRecordStore,
     )
     from ai_assistant.core.types import (
         EvaluationTrace,
@@ -354,6 +355,9 @@ class Harness:
         # hub links them; `None` is an engine with none wired, whose every message is
         # read as ADR-0374 rules for links that cannot be read.
         identities: IdentityStore | None | _Default = _DEFAULT,
+        # ADR-0381's store of whose each thing is, which the engine writes an event's
+        # place into (§4:2). `None` is every other case's deployment: nothing is written.
+        things: ThingRecordStore | None = None,
     ) -> None:
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
         # half a pipeline. Defaulted to the canonical fakes, and kept on the harness so
@@ -484,6 +488,7 @@ class Harness:
             task_scheduler=task_scheduler,
             approvals=approvals,
             identities=owners_identities() if isinstance(identities, _Default) else identities,
+            things=things,
         )
 
 
