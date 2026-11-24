@@ -1,6 +1,6 @@
 # 375. A model is told what the system knows of who sent its input, and never that a person typed it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 - Scope: lane L5a of milestone 20, "The hub knows who is speaking" (acceptance
   [#3642](https://github.com/leonapivato/ai-assistant/issues/3642), lanes
