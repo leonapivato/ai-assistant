@@ -68,6 +68,8 @@ from ai_assistant.core.types import (
     CapabilityResult,
     CostBasis,
     DataTier,
+    DefaultGrant,
+    GrantHow,
     Idempotency,
     LabelKind,
     PersonActHow,
@@ -77,6 +79,7 @@ from ai_assistant.core.types import (
     ProfileField,
     Reversibility,
     RiskLevel,
+    Sureness,
     TapOnCard,
     ToolCost,
     ToolDefinition,
@@ -181,6 +184,7 @@ def _declared(capability: str, description: str, schema: dict[str, FrozenJson]) 
         result=CapabilityResult.NO_OUTSIDE_TEXT,
         outcome_can_be_unknown=False,
         safe_to_repeat=True,
+        default_grant=DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.WEAK),
         parameters_schema=schema,
     )
 

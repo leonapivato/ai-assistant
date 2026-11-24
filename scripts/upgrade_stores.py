@@ -82,6 +82,7 @@ from ai_assistant.core.types import (
     ControllerStage,
     CostBasis,
     DataTier,
+    DefaultGrant,
     DeviceAccess,
     DeviceRole,
     DueAfterTasks,
@@ -1192,6 +1193,9 @@ def _tool(**overrides: object) -> ToolDefinition:
         "discloses": (),
         "cost": ToolCost(basis=CostBasis.FREE),
         "idempotency": Idempotency.NONE,
+        # ADR-0380 §4:1: the hub's declarations carry one, so the audit trail and the plan
+        # store a later head reads back hold a declaration with its default grant.
+        "default_grant": DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.NORMAL),
     }
     fields.update(overrides)
     return ToolDefinition(**with_phase_declaration(fields))  # type: ignore[arg-type]

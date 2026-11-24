@@ -97,10 +97,13 @@ from ai_assistant.core.types import (
     CapabilityResult,
     CostBasis,
     DataTier,
+    DefaultGrant,
     DestinationProtocol,
+    GrantHow,
     Idempotency,
     Reversibility,
     RiskLevel,
+    Sureness,
     ToolCost,
     ToolDefinition,
 )
@@ -202,6 +205,7 @@ EMAIL: Final = ToolDefinition(
     result=CapabilityResult.NO_OUTSIDE_TEXT,
     outcome_can_be_unknown=True,
     safe_to_repeat=False,
+    default_grant=DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.NORMAL),
     parameters_schema={
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

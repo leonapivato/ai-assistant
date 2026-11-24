@@ -40,9 +40,12 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     CostBasis,
     DataTier,
+    DefaultGrant,
+    GrantHow,
     Idempotency,
     Reversibility,
     RiskLevel,
+    Sureness,
     TicketState,
     ToolCost,
     ToolDefinition,
@@ -233,6 +236,7 @@ REQUEST_APPROVAL: Final = ToolDefinition(
     result=CapabilityResult.NO_OUTSIDE_TEXT,
     outcome_can_be_unknown=False,
     safe_to_repeat=False,
+    default_grant=DefaultGrant(how=GrantHow.ALLOWED, bar=Sureness.WEAK),
     parameters_schema=_REQUEST_APPROVAL_SCHEMA,
 )
 
