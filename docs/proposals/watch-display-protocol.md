@@ -1,0 +1,356 @@
+# Proposal: the watch display protocol
+
+**The question:** what do a watch and the hub side say to each other so that the
+assistant owns the watch's screen, hears its microphone and speaks through it?
+
+This is a proposal, not a decision. The owner's own rulings are listed first;
+everything after that section is the author's recommendation.
+
+## What the owner has ruled
+
+- The assistant owns the watch and draws on its screen (#3672).
+- The first watch is a LilyGo T-Watch Ultra (ESP32-S3, 410 x 502 AMOLED). No
+  Pebble.
+- The watch reaches the hub over Wi-Fi or a phone hotspot. Bluetooth is not
+  used for the hub link.
+- Battery life does not matter for this proof of concept.
+- The watch should be able to show anything, "likely through different
+  methods".
+- Everyday screens follow one designed style; the assistant draws freely only
+  when it has something special to show.
+- Video is not important. Some animation is wanted. Where motion costs
+  something, sharpness is given up first.
+- The screen is off when the assistant has nothing to say.
+- The assistant should guess what the owner wants next and put it one tap away.
+- This is for the watch only for now, not for other screens.
+- Display works in three layers: pictures rendered on the hub side, a few
+  helpers the watch runs itself, and animation (built-in effects, then
+  flipbooks, with vector animation later).
+- Five optimizations are in: an image format of our own, a cache on the watch,
+  instant navigation on a press, layers that the watch can move, and a
+  black-background style.
+
+## Baseline
+
+- #3672, the watch design note. It still says the owner wants two watches; that
+  line is out of date.
+- ADR-0094 §1 and §2: a spoke reaches the hub across a process boundary, and the
+  edge always dials out. §10 defers all `core` surface for spokes until a second
+  spoke exists.
+- ADR-0292 §2, §4, §7 and §8: spokes, channels and places; one connection per
+  device; output goes through an actuator; a spoke reports its hardware limits
+  as facts.
+- ADR-0205: delivery is a fact the device reports, never assumed.
+- ADR-0084 §3: one protocol version, matched exactly, refused at connect.
+
+No wiki page was read for this proposal. To the author's knowledge none
+describes a watch.
+
+## Scope
+
+The protocol runs between the watch and a **watch gateway**, a small program
+beside the hub. The gateway speaks this protocol on one side and the hub's
+existing local API on the other, as the browser and Telegram gateways do. The
+hub's own wire does not change.
+
+```mermaid
+flowchart LR
+    W[Watch firmware] -- "this protocol (WebSocket over TLS)" --> G[Watch gateway]
+    F[Fake watch in a browser] -- "this protocol" --> G
+    G -- "existing local API" --> H[Hub]
+```
+
+The gateway also renders screens. A screen is written as HTML or SVG, turned
+into an image on the hub side, and sent to the watch as that image. The watch
+never sees HTML or SVG.
+
+A fake watch that runs in a browser speaks the same protocol. It is the first
+client and stays as the test double.
+
+## 1. Connection
+
+- The watch opens one WebSocket over TLS to the gateway and keeps it open. The
+  gateway never dials the watch.
+- Text frames carry JSON messages. Every message has a `type`.
+- Binary frames carry image and audio data. Each starts with an 8-byte header:
+  one byte for the kind (1 image, 2 audio), one byte of flags, two reserved
+  bytes, and a four-byte id, little-endian. The data follows.
+- Either side may send `ping`; the other answers `pong`. A watch that hears
+  nothing for a set time treats the link as down.
+
+## 2. Starting a session
+
+The watch sends `hello` first:
+
+```json
+{"type": "hello", "version": 1, "device": "watch-7f3a",
+ "screen": {"w": 410, "h": 502, "depth": 16, "byte_order": "big"},
+ "images": ["wi1", "jpeg"], "max_image_bytes": 262144,
+ "max_layers": 4, "cache_bytes": 4194304,
+ "max_staged": 4, "max_flipbook_bytes": 2097152,
+ "effects": ["fade", "slide-left", "slide-right", "slide-up", "slide-down"],
+ "buttons": ["side"], "audio": ["pcm16-16k-mono"],
+ "has": ["mic", "speaker", "buzz", "wrist"]}
+```
+
+Everything after `device` is the watch stating what its hardware can do. These
+are facts, not permission (ADR-0292 §8).
+
+The gateway answers `welcome` with the current time and the owner's time zone
+(`time_ms` and `tz_offset_min`), or `refused` with a reason. The watch needs
+the time zone to show local time. A version that does not match exactly is refused.
+
+How the watch proves which device it is, and how it was admitted, is left open
+below.
+
+## 3. Screens (layer 1)
+
+A screen is a short stack of layers, each one image, plus what the watch should
+do with them.
+
+```json
+{"type": "screen", "id": 41,
+ "effect": "slide-up", "sleep_after_s": 20,
+ "layers": [
+   {"id": "back", "image": "3fa9c1d2e07b4a66", "x": 0, "y": 0},
+   {"id": "body", "image": "b81e55f0a2c94d13", "x": 0, "y": 60,
+    "pan": "vertical"}
+ ],
+ "regions": [
+   {"id": "call", "layer": "body", "x": 20, "y": 340, "w": 370, "h": 80,
+    "feedback": "highlight"}
+ ],
+ "overlays": [
+   {"kind": "clock", "x": 20, "y": 16, "glyphs": "0c4d2e9a71b35f88"}
+ ]}
+```
+
+- Layers are drawn bottom to top. An upper layer may have see-through parts.
+  A layer may carry a starting `opacity` from 0 to 1, so it can begin hidden
+  and fade in.
+- An image is named by a hash of its content. If the watch already holds that
+  image, nothing is sent. If not, the watch answers `need` with the hashes it
+  lacks and the gateway sends them. While a message waits for an image, the
+  watch holds every later message behind it, so order is kept.
+- Before each image's binary frame the gateway sends `{"type": "image",
+  "id": 9001, "hash": "b81e55f0a2c94d13", "format": "wi1", "w": 410, "h": 900,
+  "bytes": 6120, "keep": false}`.
+- `keep: true` asks the watch to store the image in flash, so it survives a
+  restart. Backgrounds, icons and the fixed parts of everyday screens are kept.
+  The watch drops the least recently used images when the cache is full.
+- `update` changes one rectangle of one layer. It is how text appears as it
+  arrives, and how small changes avoid a full resend.
+- `update`, `flipbook` and `move` each name the screen they change. The watch
+  may have moved to another screen by itself (section 4), so "the current
+  screen" is not a safe target.
+- `stage` sends a screen without showing it. `show` shows a staged screen.
+  The watch keeps a few staged screens ready, so a screen can appear the moment
+  the wrist rises, with no network wait. This is what makes "one tap away"
+  quick.
+- `stage` with `"wake": true` marks the screen to show when the wrist rises.
+  The newest one marked wins.
+- `clear` turns the screen off.
+
+Everyday screens use a black background. On this kind of display black pixels
+are switched off, black costs almost nothing to send, and it wears the screen
+less.
+
+### The image format
+
+Sharp images use a format of our own, called `wi1` here. Photos use JPEG.
+
+- Pixels are stored in the display's own 16-bit colour format and byte order, so
+  decoded pixels go to the display with no conversion.
+- The hub side reduces the colours and smooths gradients, since it holds the
+  full-colour original.
+- The image is cut into horizontal strips. Each strip decodes alone, so the
+  watch can decode one strip and push it while the next arrives.
+- Inside a strip there are four instructions: these exact pixels; repeat the
+  last pixel N times; reuse a recently seen colour; and skip N pixels.
+- "Skip" means "see-through" in a layer image and "unchanged" in an `update` or
+  a flipbook frame. A frame can therefore carry only what differs from the one
+  before.
+- A pixel is either solid or skipped; there is no partial see-through. Smooth
+  edges of text and shapes therefore have to be drawn against the colour that
+  will be behind them. That is free on a black background. A layer laid over a
+  photo would show rough edges.
+
+This is close to the published QOI format, changed to fit a 16-bit display and
+given the skip instruction. The exact byte layout is left to be settled by
+measuring it on the chip.
+
+## 4. Helpers the watch runs itself (layer 2)
+
+- **Regions.** A tap inside a region shows its feedback at once and is reported.
+  The watch does not know what the region means.
+- **Instant navigation.** A region may carry `"on_press": {"show": 42,
+  "effect": "slide-left"}`. The watch then shows staged screen 42 at once and
+  reports the press, saying it did so. If screen 42 is not staged, the watch
+  only reports the press.
+- **Panning.** When a layer's image is larger than the display, the watch
+  scrolls it locally. `pan` is `none`, `vertical` or `both`.
+- **Overlays.** Things the watch draws on top and keeps current alone: a
+  `clock`, a `timer` that counts down to an instant the gateway gives, and a
+  `presence` mark.
+- **Digits.** The watch holds no font. A clock or timer names a `glyphs` image
+  the hub drew: eleven equal cells, the digits 0 to 9 and then a colon. The
+  watch builds the time from those cells, so the digits match the screen's own
+  typeface.
+- **Presence.** `{"type": "presence", "state": "listening"}` switches a built-in
+  animation: `idle`, `listening`, `thinking` or `speaking`.
+- **Fallback.** `fallback` is a screen the watch stores in flash and shows when
+  the link is down, with an offline mark.
+
+## 5. Animation (layer 3)
+
+- **Effects.** A `screen` or `show` names one effect from the list the watch
+  reported. The watch runs it alone.
+- **Moves.** `{"type": "move", "screen": 41, "layer": "body", "to": {"x": 0, "y": -200},
+  "opacity": 1.0, "ms": 300, "ease": "out"}` slides or fades a layer. The watch
+  runs it alone, so nothing is decoded or sent while it plays. Most animation
+  should be a move.
+- **Flipbooks.** `flipbook` gives a screen, a layer, a frame rate and whether
+  it loops. The frames follow as images, each carrying only what
+  changed from the one before. Small flipbooks are kept decoded and play at
+  full speed. Full-screen ones stay compressed; how fast they play depends on
+  how much changes per frame and is not yet measured.
+- **Later:** vector animation files (Lottie), and a live stream of JPEG frames
+  for a camera or a moving map. Neither is in version 1.
+
+## 6. Input
+
+The watch reports what happened, never what it means.
+
+```json
+{"type": "input", "screen": 41, "kind": "press", "region": "call",
+ "at_ms": 1532, "did": {"show": 42}}
+```
+
+`did` is present only when the watch acted on the press itself (section 4).
+
+- Kinds: `press`, `long-press`, `tap` (outside any region, with x and y),
+  `pan-end` (with the offset), `button` (which one, and short, long or double),
+  `wrist-up`, `wrist-down`.
+- Every input names the screen it was made on. The gateway can then refuse a
+  press that was made on a screen it has already replaced.
+- A press made while the link is down is dropped, not queued. A late approval
+  is worse than a lost one.
+
+## 7. Audio
+
+- `audio-start` opens a stream with an id and a format. Chunks follow as binary
+  audio frames. `audio-end` closes it.
+- Both directions use the same three messages.
+- Version 1 has one format: 16 kHz, 16-bit, mono, uncompressed.
+- `audio-stop` from either side cuts a stream short, so the owner can talk over
+  a reply.
+- The watch does not record while the link is down.
+
+## 8. Reports
+
+- `shown`: this screen is on the display now.
+- `played`: this audio stream finished, or was cut short.
+- `status`: battery, charging, signal strength, on the wrist or not.
+
+`shown` and `played` exist because the hub treats delivery as something the
+device reports (ADR-0205).
+
+## 9. The rest
+
+- `buzz`: vibrate, with a pattern name.
+- `text`: plain text with no image. It is the fallback when rendering fails and
+  the form a slow link such as LoRa could carry. It is the one message that
+  needs a font on the watch, which nothing else does.
+- `act`: reserved for the watch acting on other things (typing on a nearby
+  machine, infrared, LoRa). Not specified here.
+- `error`: either side reports a message it could not use, naming it. An
+  unknown `type` is reported and otherwise ignored.
+
+## Tried in a prototype
+
+The protocol was built twice against this text in a separate local project
+(`~/projects/assistant-watch`), outside this repo: first as a fake watch
+written for a browser, then as the watch's own screen engine and image decoder
+in C, which the fake watch now runs. A test gateway plays a fixed demo in place
+of the hub.
+
+Screens, the image format, the cache, regions, instant navigation, panning,
+updates, flipbooks, moves, effects, overlays, the wake screen and the offline
+fallback all ran. Audio, TLS, admission, JPEG and the `text` message were not
+built.
+
+Eight points in the text above came from those builds: the wake mark, a
+layer's starting opacity, naming the screen in `update`, `flipbook` and `move`,
+the limit on see-through, digits sent as an image, the time zone in `welcome`,
+keeping order while waiting for an image, and the font that `text` needs.
+
+One thing the engine does is not protocol but shapes it: the watch frees a
+screen's decoded pixels when it leaves the screen, unless an update or a
+flipbook changed them, because those cannot be rebuilt from the stored image.
+
+## Options considered
+
+| Option | Why not, or why |
+| --- | --- |
+| Pictures rendered on the hub side | Chosen as the base: shows anything, simplest firmware, the fake watch matches exactly |
+| Helpers on the watch | Chosen: touch feels instant |
+| Flipbooks, moves and built-in effects | Chosen for animation |
+| Our own image format | Chosen over PNG: no colour conversion on the chip, cheap to decode, frames can carry only changes |
+| PNG | Dropped: slow to decode on this chip, and nothing needs it once the fake watch reads our format |
+| A stream of JPEG frames | Later; same decoder, the owner ranked video low |
+| H.264 video | The chip decodes it only at about 320 x 192 |
+| Remote desktop (VNC) | Built for desktops; no audio, no regions; 6 to 20 frames a second in hobby projects |
+| SVG or Lottie drawn on the watch | Slow full-screen, partial SVG support; kept for later small animations |
+| A widget list (openHASP, LVGL XML, A2UI) | The watch would own the layout |
+| A drawing-command list of our own | Pictures cover it without a new format to teach models |
+| Programs sent to the watch (JavaScript, WebAssembly) | A large build and a safety question; not needed yet |
+| Existing assistant firmware (xiaozhi) | Fixed text-and-emoji screen |
+
+Figures behind the table, none measured on this watch: JPEG decode of about
+13 frames a second at 640 x 480 (Espressif); H.264 at 23 to 27 frames a second
+at 320 x 192 (Espressif); about 32 frames a second pushed to a similar
+466 x 466 screen (Waveshare).
+
+## What this leaves open
+
+1. **What a press proves.** It shows someone holds the watch, not that the owner
+   is wearing it. Until that is settled the watch should not approve anything.
+2. **Admission.** How the watch is enrolled and proves which device it is
+   (ADR-0292 §4 keeps ADR-0124's admission in front of every device).
+3. **The route from campus.** The hub is reachable only on the tailnet, and the
+   chip has no Tailscale client.
+4. **Channels.** Which channel the watch's microphone, speaker and screen attach
+   to, and who the audience of a wrist screen is (ADR-0292 §2 and §9).
+5. **`core` surface.** Whether the watch is the second spoke that fires
+   ADR-0094 §10, and what that owes.
+6. **Where the gateway and the renderer live** in the tree, and which renderer
+   (HTML needs a headless browser; SVG needs only a small library).
+7. **Who writes a screen.** The templates for everyday screens, and how the
+   assistant asks for a free drawing.
+8. **Predicted shortcuts.** What decides the staged screens. This is the
+   assistant's work, not the protocol's.
+9. **Measurement.** Decode speed, screen push rate and Wi-Fi throughput on the
+   real watch. The claim that our image format decodes much faster than PNG is
+   an estimate; a bare ESP32-S3 board can time it before the watch arrives.
+10. **Later parts:** the `act` family, the JPEG stream, vector animation,
+    compressed audio, a LoRa text path.
+
+## Sources
+
+- Espressif JPEG component:
+  <https://docs.espressif.com/projects/esp-techpedia/en/latest/esp-friends/solution-introduction/multimedia/component-description/esp-new-jpeg.html>
+- Espressif H.264 component:
+  <https://docs.espressif.com/projects/esp-techpedia/en/latest/esp-friends/solution-introduction/multimedia/component-description/esp-h264.html>
+- Waveshare AMOLED guide and benchmark:
+  <https://docs.waveshare.com/ESP32-Peripheral-Tutorials/Display/AMOLED>,
+  <https://files.waveshare.com/wiki/common/Performance.pdf>
+- T-Watch Ultra: <https://wiki.lilygo.cc/products/t-watch-series/t-watch-ultra/>
+- VNC on ESP32: <https://github.com/moononournation/ArduinoVNC>
+- Vector animation on ESP32-S3:
+  <https://wiki.seeedstudio.com/round_display_animation_workshop/>
+- openHASP: <https://haswitchplate.github.io/openHASP-docs/0.6/design/objects>
+- LVGL XML: <https://docs.lvgl.io/9.3/details/auxiliary-modules/xml/intro.html>
+- A2UI:
+  <https://developers.googleblog.com/a2ui-10-build-delightful-fast-reliable-agentic-experiences/>
+- xiaozhi-esp32: <https://github.com/78/xiaozhi-esp32>
+- QOI image format (cited from memory, not re-read): <https://qoiformat.org/>
