@@ -1,6 +1,6 @@
 # 381. Each connection and source records whose it is in a store of its own, the hub writes the owner at every start, and a thing with no record is no one's
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 - Scope: decision D6 of milestone 21, "Every call checked" (acceptance
   [#3678](https://github.com/leonapivato/ai-assistant/issues/3678), lanes
