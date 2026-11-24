@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
     WorkAuthority,
     WorkFacts,
     WorkFor,
+    canonical_senders,
     forward_party,
 )
 from ai_assistant.orchestration import channel_kinds
@@ -884,3 +885,58 @@ async def test_an_approval_taken_in_is_framed_as_no_ones_words_in_both() -> None
         .split("\n")[3]
         .endswith("What came from the approvals no person sent.")
     )
+
+
+async def test_a_message_deleted_before_planning_lends_its_sender_to_no_other() -> None:
+    """§2:1, §4:1: the survivor of a two-sender batch is told by its own record alone.
+
+    The pass took in a message written on the system's own machine, its links unread,
+    and one by the owner's phone; the first was deleted before planning, so the place
+    window holds the second alone (ADR-0349 §6:6), and planning tells it by the phone.
+    """
+    machine, phone = _sender(OWNER_PERSON_ID, unread=True), _sender(OWNER_PERSON_ID)
+    taken = (
+        RecordedInputMessage(
+            text="Lights off.", sent_at=AT, position=1, party=OWNER, sender=machine
+        ),
+        RecordedInputMessage(
+            text="And lock up.", sent_at=AT, position=2, party=OWNER, sender=phone
+        ),
+    )
+    # The trigger records the batch's one sender, as admission does: the owner, marked.
+    (both,) = canonical_senders((machine, phone))
+    row = Row(CHAT, (both,), (OWNER,), (), OWNER_PERSON_ID, ("", ""), ("", "", False), "")
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(), RoundResponse())
+    stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT),
+        completer=completer,
+        recorder=_Recorder(),
+        excerpt_chars=300,
+        now=lambda: AT,
+        timezone="America/New_York",
+        new_id=lambda: "round:1",
+    )
+    survivor = PlaceItem(
+        author=PlaceAuthor.USER, text="And lock up.", at=AT, is_input=True, referent_id="message:2"
+    )
+    await stage.plan(
+        PlanningInputs(
+            activation_id="now",
+            place=PlaceWindow(takes_message=True, items=(survivor,)),
+            trigger=_trigger(row),
+            received_at=AT,
+            person=_block(),
+            person_id=OWNER_PERSON_ID,
+            owner_records=True,
+            stories=PlanningStories(),
+            input_messages=taken,
+        )
+    )
+    briefing = completer.last_call.exchange.briefing
+    (told,) = tags(section(briefing, "# The stimulus"))
+    assert (told.name, told.get("from"), told.text) == (
+        "said",
+        "a device linked to P1",
+        "And lock up.",
+    )
+    assert "the system's own machine" not in briefing
