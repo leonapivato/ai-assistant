@@ -78,6 +78,7 @@ from person_model_contract import (
 )
 from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 
+from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.errors import (
     ConversationStoreError,
     OversizedValueError,
@@ -85,6 +86,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    HUB_DEVICE_ID,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
     Attestation,
@@ -113,6 +115,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     ProcessingStatus,
+    RequestingDevice,
     SpanCoverage,
     TranscriptMessage,
     UserMessage,
@@ -1301,3 +1304,31 @@ async def test_a_reply_the_store_refuses_leaves_its_episode_without_an_outcome()
     authors = [one.author for one in page.entries if isinstance(one, TranscriptMessage)]
     assert authors == [MessageAuthor.USER]
     assert (await _episode(engine)).outcome is None
+
+
+async def test_a_message_records_the_device_it_came_through() -> None:
+    """ADR-0378 §4:2: the fake records the requesting device's connecting device, as the
+    engine does (``test_phases_came_through``): through a gateway that named the phone,
+    through ``hub`` for a message the local socket wrote under the phone's name, and
+    through the phone where it wrote as itself."""
+    engine = FakeAssistantEngine(chat_reader=False)
+    phone = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+    await engine.set_my_devices([phone])
+    conversation = (await engine.start_conversation()).id
+
+    def said(message_id: str) -> UserMessage:
+        return UserMessage(device_id="phone", message_id=message_id, text="hello")
+
+    with serving_device(RequestingDevice(device_id="phone", connecting_device_id="gateway-1")):
+        await engine.write_message(conversation, message=said("m-1"))
+    await engine.write_message(conversation, message=said("m-2"))
+    with serving_device(RequestingDevice(device_id="phone")):
+        await engine.write_message(conversation, message=said("m-3"))
+
+    page = await engine.transcript(conversation)
+    assert page is not None
+    assert [
+        (one.device_id, one.came_through)
+        for one in page.entries
+        if isinstance(one, TranscriptMessage)
+    ] == [("phone", "gateway-1"), ("phone", HUB_DEVICE_ID), ("phone", "phone")]

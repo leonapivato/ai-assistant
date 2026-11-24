@@ -20,6 +20,8 @@ from ai_assistant.core.types import (
 from ai_assistant.wire.errors import ProtocolError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from rich.console import Console
 
     from ai_assistant.core.protocols import AssistantEngine
@@ -33,6 +35,8 @@ if TYPE_CHECKING:
         EpisodeProcessingRecord,
         EpisodeSummary,
         InputSender,
+        RecordedInputMessage,
+        RecordedMessageDevices,
         StoryHeader,
         WorkAuthority,
         WorkFacts,
@@ -285,7 +289,9 @@ def _facts_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
     Whom the work is for, whose authority it carries and its level, as recorded when it
     started (#3642, "Inspecting a work shows the three facts"), and again as they stand
     where an input that joined it recorded them (§2:4); then each input, the trigger and
-    each joined one in order, with who sent it and at what level (§2:6). Each reads
+    each joined one in order, with who sent it and at what level (§2:6), and below it
+    each of its messages that came through a device other than the one it is written
+    from, with both devices (ADR-0378 §7:2). Each reads
     ``none recorded`` where the record holds none: a work recorded before the facts were,
     or one built without them. Today's path still decides who a work is for (ADR-0368
     §1:3); these are the facts recorded beside it.
@@ -301,14 +307,35 @@ def _facts_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
         if now is not started:
             lines.append(f"Facts as they stand: {_work_facts_text(now, processing)}")
     lines.append("Inputs:")
-    lines.append(
-        f"  The one it started from: {_senders_text(processing.trigger.senders, processing)}"
-    )
-    lines.extend(
-        f"  Joined {one.joined_at.isoformat()} by {_channel(one.channel)}: "
-        f"{_senders_text(one.senders, processing)}"
-        for one in processing.joined
-    )
+    trigger = processing.trigger
+    lines.append(f"  The one it started from: {_senders_text(trigger.senders, processing)}")
+    lines.extend(_came_through_lines((*trigger.message_devices, *trigger.messages)))
+    for one in processing.joined:
+        lines.append(
+            f"  Joined {one.joined_at.isoformat()} by {_channel(one.channel)}: "
+            f"{_senders_text(one.senders, processing)}"
+        )
+        lines.extend(_came_through_lines(one.messages))
+    return lines
+
+
+def _came_through_lines(
+    messages: Iterable[RecordedMessageDevices | RecordedInputMessage],
+) -> list[str]:
+    """Each message that came through a device other than its own, as recorded (ADR-0378 §7:2).
+
+    A message recording neither device, as any but a hub chat message, and one recorded
+    before they were, shows nothing: it came through the device it is written from.
+    """
+    lines: list[str] = []
+    for one in messages:
+        if one.device_id is None or one.came_through is None or one.came_through == one.device_id:
+            continue
+        which = "A message" if one.position is None else f"Message {one.position}"
+        lines.append(
+            f"    {which} came through {_quoted(one.came_through)}, "
+            f"written from {_quoted(one.device_id)}"
+        )
     return lines
 
 

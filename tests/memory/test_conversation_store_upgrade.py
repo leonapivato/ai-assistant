@@ -69,7 +69,8 @@ def _rows(path: Path) -> dict[str, list[tuple[Any, ...]]]:
     """Every row of every table the previous release kept, read out of band.
 
     Each table's columns are the ones the previous release wrote, so a column the
-    upgrade adds is not among them.
+    upgrade adds is not among them: ``effect_id``, and ``came_through``, which the next
+    label's upgrade adds and sets (ADR-0378 §8:2).
     """
     with sqlite3.connect(path) as conn:
         held: dict[str, list[tuple[Any, ...]]] = {}
@@ -77,7 +78,7 @@ def _rows(path: Path) -> dict[str, list[tuple[Any, ...]]]:
             columns = [
                 str(row[1])
                 for row in conn.execute(f"PRAGMA table_info({table})")
-                if row[1] != "effect_id"
+                if row[1] not in {"effect_id", "came_through"}
             ]
             held[table] = conn.execute(
                 f"SELECT {', '.join(columns)} FROM {table} ORDER BY {key}"  # noqa: S608 — names read from the file's own schema
@@ -128,7 +129,7 @@ async def test_the_file_is_upgraded_in_place(legacy: Path) -> None:
     _open(legacy).close()
 
     assert _label(legacy) == CONVERSATION_RECORD_FORMAT
-    assert _columns(legacy, "messages")[-1] == "effect_id"
+    assert "effect_id" in _columns(legacy, "messages")
     assert _rows(legacy) == before
     with sqlite3.connect(legacy) as conn:
         claims = conn.execute("SELECT effect_id FROM messages").fetchall()

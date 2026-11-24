@@ -178,7 +178,7 @@ FACTS_RECORD_FORMAT: Final[int] = 24
 #: would not read (ADR-0326 §5:3).
 UNREAD_RECORD_FORMAT: Final[int] = 25
 
-#: The memory store's own label, the one this build writes. It advances to 26 for
+#: The memory store's label for ADR-0379 §3:2's record. It advances to 26 for
 #: ADR-0379 §3:2's record: each ``RecordedCall`` gains ``check``, what the check made of
 #: the call beside what was decided, a ``CallCheck`` holding a ``CheckRun`` for each one
 #: it ran for, with its ``CheckedFor`` and ``CheckOutcome`` and the closed
@@ -188,7 +188,20 @@ UNREAD_RECORD_FORMAT: Final[int] = 25
 #: place by the label alone, since an entry written at 25 validates unchanged as one the
 #: check never reached, and an older build, which serves 12 to 25, refuses a file at 26,
 #: whose episodes it would not read (ADR-0326 §5:3).
-MEMORY_RECORD_FORMAT: Final[int] = 26
+CHECKED_RECORD_FORMAT: Final[int] = 26
+
+#: The memory store's own label, the one this build writes. It advances to 27 for
+#: ADR-0378 §7:1's record: each ``RecordedInputMessage``, a trigger's and a joined
+#: input's, gains ``device_id`` and ``came_through``, a hub chat message's device it is
+#: written from and device it came through, and each ``RecordedChannelTrigger`` gains
+#: ``message_devices``, the two for each message of an input whose trigger records no
+#: messages, as a ``RecordedMessageDevices``: fields of ``core`` models the store
+#: serialises in every episode with a processing record (ADR-0326 §2:3). A file at 26 is
+#: upgraded in place by the label alone, since a record written at 26 validates
+#: unchanged with neither, which reads as each message having come through the device it
+#: is written from (ADR-0378 §8:2), and an older build, which serves 12 to 26, refuses a
+#: file at 27, whose episodes it would not read (ADR-0326 §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 27
 
 #: The memory store's labels a build opens: its own, and each it upgrades from, in
 #: order (ADR-0326 §4:5, §5:1).
@@ -208,23 +221,33 @@ MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
         SHOWED_RECORD_FORMAT,
         FACTS_RECORD_FORMAT,
         UNREAD_RECORD_FORMAT,
+        CHECKED_RECORD_FORMAT,
         MEMORY_RECORD_FORMAT,
     }
 )
 
-#: The conversation store's own label, the one this build writes, in the
+#: The conversation store's label for ADR-0350 §12:9's record, in the
 #: ``episode_record_format`` table of ``conversations.db`` alone. It held
 #: :data:`EPISODE_RECORD_FORMAT` until ADR-0350 §12:9 advanced it to 13 for the
 #: ``effect_id`` column of its ``messages`` table, the effect record an assistant's
 #: message was claimed under (ADR-0326 §2:3). A file at 12 is upgraded in place by
 #: adding the column, every message it holds carried with no effect id (§4:1, §4:4), and
 #: an older build, which serves 12 alone, refuses a file at 13 (ADR-0326 §5:3).
-CONVERSATION_RECORD_FORMAT: Final[int] = 13
+CLAIMED_CONVERSATION_RECORD_FORMAT: Final[int] = 13
 
-#: The conversation store's labels a build opens: its own, and the one it upgrades
-#: from (ADR-0326 §4:5, §5:1).
+#: The conversation store's own label, the one this build writes. It advances to 14 for
+#: ADR-0378 §8:2's ``came_through`` column of its ``messages`` table, the device a user's
+#: message came through (ADR-0326 §2:3). A file at 13 is upgraded in place by adding the
+#: column and setting it, on each standing user's message, to the device it is written
+#: from, so a message from before reads as having come through that device (ADR-0378
+#: §8:2, ADR-0326 §4:4); an older build, which serves 12 and 13, refuses a file at 14
+#: (ADR-0326 §5:3).
+CONVERSATION_RECORD_FORMAT: Final[int] = 14
+
+#: The conversation store's labels a build opens: its own, and each it upgrades from,
+#: in order (ADR-0326 §4:5, §5:1).
 CONVERSATION_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
-    {EPISODE_RECORD_FORMAT, CONVERSATION_RECORD_FORMAT}
+    {EPISODE_RECORD_FORMAT, CLAIMED_CONVERSATION_RECORD_FORMAT, CONVERSATION_RECORD_FORMAT}
 )
 
 

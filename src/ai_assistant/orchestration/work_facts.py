@@ -15,6 +15,18 @@ its reader's to name: the hub chat's is the device a message was written from
 at none. No other kind's input is sent by a person: an event a connected source pushes, a
 task's occurrence and an approval's outcome record no sender.
 
+**A hub chat message that came through another device** (:func:`chat_senders_of`,
+ADR-0378 §4:3 to §4:6): where the device it came through is not the one it is written
+from, both devices' links are read, each by :func:`sender_of`, and the message is from
+the identity both tie, at the lower of the two levels, lowering included (ADR-0373
+§2:9); from no identified person, at none, where either has no standing link or the two
+tie different identities; and, where either read got no answer, one whose links cannot
+be read, which ADR-0374 rules as written (:func:`unread`'s sender for the device it is
+written from). A message that came through the device it is written from is read from
+that device's link alone, as before. The same read serves a tap on the hub page through
+another device (ADR-0378 §4:7). No signal raises such a sender (§4:4): nothing combines
+signals under ADR-0366 §5:4 yet, so the lower level is the whole of the bound.
+
 **Where the links cannot be read** (ADR-0374): the store raised, the read failed in any
 other way, or no store is wired (§2:1). No fault is read as a link: the message is an
 unidentified sender's, at none (:data:`LINKS_UNREAD`, §2:2), save one written on the
@@ -146,6 +158,8 @@ __all__ = [
     "NO_LINK",
     "authority_persons",
     "chat_account",
+    "chat_sender_of",
+    "chat_senders_of",
     "check_runs_for",
     "held_senders",
     "joined",
@@ -287,11 +301,102 @@ def unread(account: Account, *, stage: str, reason: str) -> InputSender:
         The sender, marked.
     """
     _log.warning("input_sender_unread", reader=stage, reason=reason)
+    return _unread_sender(account)
+
+
+def _unread_sender(account: Account | None) -> InputSender:
+    """:func:`unread`'s sender for a message arriving by ``account``, unlogged.
+
+    ADR-0374 §2:2, §3:2: the owner's for the hub's own machine, and otherwise no one's.
+    """
     if account == HUB_MACHINE:
         return InputSender(
             person=OWNER_PERSON_ID, level=most_sureness(CHAT_ACCOUNT_KIND), links_unread=True
         )
     return LINKS_UNREAD
+
+
+def _through(written: InputSender, through: InputSender, *, account: Account | None) -> InputSender:
+    """Who sent a hub chat message read from both devices' links (ADR-0378 §4:3 to §4:5).
+
+    Args:
+        written: What the link of the device it is written from found.
+        through: What the link of the device it came through found.
+        account: The account of the device it is written from.
+
+    Returns:
+        The identity both links tie, at the lower level; no identified person, at none,
+        where either has no standing link or they tie different identities; and where
+        either read got no answer, ADR-0374's sender for the device it is written from.
+    """
+    if written.links_unread or through.links_unread:
+        return _unread_sender(account)
+    if written.person is None or written.person != through.person:
+        return NO_LINK
+    return InputSender(person=written.person, level=min(written.level, through.level))
+
+
+async def chat_senders_of[K: Hashable](
+    identities: IdentityStore | None,
+    devices: Mapping[K, tuple[str | None, str | None]],
+    *,
+    stage: str,
+) -> dict[K, InputSender]:
+    """Who sent each hub chat message, by the device written from and the one come through.
+
+    ADR-0378 §4:3 to §4:6: a message that came through the device it is written from, or
+    that names no device it came through, is read from that device's link alone, as
+    :func:`senders_of` reads it; one that came through another is read from both links,
+    by :func:`_through`. Each account is read once.
+
+    Args:
+        identities: The identity store, or ``None`` where none is wired.
+        devices: Each message's device it is written from and device it came through, by
+            the key its reader holds it under.
+        stage: The reader asking.
+
+    Returns:
+        Each message's sender, under its key.
+    """
+    found: dict[Account | None, InputSender] = {}
+
+    async def read(account: Account | None) -> InputSender:
+        if account not in found:
+            found[account] = await sender_of(identities, account, stage=stage)
+        return found[account]
+
+    senders: dict[K, InputSender] = {}
+    for key, (device_id, came_through) in devices.items():
+        account = chat_account(device_id)
+        written = await read(account)
+        if came_through is None or came_through == device_id:
+            senders[key] = written
+            continue
+        through = await read(chat_account(came_through))
+        senders[key] = _through(written, through, account=account)
+    return senders
+
+
+async def chat_sender_of(
+    identities: IdentityStore | None,
+    device_id: str | None,
+    came_through: str | None,
+    *,
+    stage: str,
+) -> InputSender:
+    """Who sent one hub chat message or tap, as :func:`chat_senders_of` reads each.
+
+    Args:
+        identities: The identity store, or ``None`` where none is wired.
+        device_id: The device it is written from, or the tap's requesting device.
+        came_through: The device it came through: the request's connecting device.
+        stage: The reader asking.
+
+    Returns:
+        The sender.
+    """
+    found = await chat_senders_of(identities, {0: (device_id, came_through)}, stage=stage)
+    return found[0]
 
 
 async def senders_of[K: Hashable](

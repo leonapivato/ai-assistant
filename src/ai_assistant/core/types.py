@@ -3536,9 +3536,16 @@ class RecordedInputMessage(BaseModel):
             arrived by (ADR-0366 §4:1, §5:6; ADR-0368 §2:6), or ``None`` where no
             person sent it, as for an input the hub states. A forward's is who forwarded
             it, whose account it arrived by; its party is still its original sender.
+        device_id: For a hub chat message, the device it is written from, as the
+            transcript records it (ADR-0298 §2:7, §2:8); ``None`` for any other kind's,
+            and on a record from before it was kept.
+        came_through: For a hub chat message, the device it came through, as the
+            transcript records it (ADR-0378 §4:2, §7:1), fixed as its sender is;
+            ``None`` where ``device_id`` is.
 
     Raises:
-        ValueError: If a forward carries a party other than its sender's (§2:7).
+        ValueError: If a forward carries a party other than its sender's (§2:7), or
+            it records one of its two devices without the other.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -3549,6 +3556,19 @@ class RecordedInputMessage(BaseModel):
     forwarded_from: ClaimedAuthor | None = None
     party: SupportHolder | None = None
     sender: InputSender | None = None
+    # Left out of a dump where absent, as every message but a hub chat message's is, so
+    # such a record dumps exactly as it did before the two existed (ADR-0326 §4:4).
+    device_id: Identifier | None = Field(default=None, exclude_if=lambda held: held is None)
+    came_through: Identifier | None = Field(default=None, exclude_if=lambda held: held is None)
+
+    @model_validator(mode="after")
+    def _both_devices_or_neither(self) -> Self:
+        # ADR-0378 §7:1: a hub chat message records the device it came through beside
+        # the device it is written from; any other message records neither.
+        if (self.device_id is None) != (self.came_through is None):
+            msg = "a message records the device it came through beside the one it is written from"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _a_forward_carries_its_senders_words(self) -> Self:
@@ -3559,6 +3579,33 @@ class RecordedInputMessage(BaseModel):
             msg = "a forward's party is its sender, claimed, or unknown (ADR-0351 §2:7)"
             raise ValueError(msg)
         return self
+
+
+class RecordedMessageDevices(BaseModel):
+    """A hub chat message's two devices, for an input whose trigger records no messages.
+
+    ADR-0378 §7:1 has the episode record, for each hub chat message an input holds, the
+    device it came through beside the device it is written from, fixed as its sender
+    is. The hub chat's trigger records no messages, so its senders are fixed on the
+    input (ADR-0368 §2:6), and so are these: one for each of its messages, by position.
+
+    Attributes:
+        position: The message's position in its conversation (ADR-0293 §4:4).
+        device_id: The device it is written from (ADR-0298 §2:7, §2:8).
+        came_through: The device it came through: the connecting device of the request
+            that wrote it, ``hub`` on the local socket (ADR-0378 §4:2).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    position: int = Field(strict=True, ge=0, lt=_MEDIUM_ID_CEILING)
+    device_id: Identifier
+    came_through: Identifier
+
+    @property
+    def is_named(self) -> bool:
+        """Whether it came through a device other than the one it is written from."""
+        return self.came_through != self.device_id
 
 
 class RecordedChannelTrigger(BaseModel):
@@ -3594,6 +3641,14 @@ class RecordedChannelTrigger(BaseModel):
     says, and fixed on the episode. Where the trigger records messages, its senders are
     exactly theirs, and either every message records its sender or none does.
 
+    **Its messages' devices** (ADR-0378 §7:1): for an input whose trigger records no
+    messages, as the hub chat's does, ``message_devices`` holds each message's device it
+    came through beside the device it is written from, by position, fixed as its
+    senders are (ADR-0368 §2:6); empty for every other kind, and on a record from
+    before it was kept, which reads as each message having come through the device it
+    is written from (ADR-0378 §8:2). A trigger that records messages records the two
+    devices on each of them instead.
+
     **It checks no combination per channel type** (§3:2). Which payloads, reply
     shapes and options a channel accepts is checked at admission, by
     :mod:`ai_assistant.core.channel_validation`'s one dispatch table; the trigger
@@ -3604,7 +3659,9 @@ class RecordedChannelTrigger(BaseModel):
     Raises:
         ValueError: If its channel is not its target, a party repeats, its messages'
             parties are not its own, its parties mix a person and the assistant's
-            statement alone, or its senders are not canonical or not its messages'.
+            statement alone, its senders are not canonical or not its messages', or
+            its messages' devices are not in ascending position or sit beside messages
+            it records.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3617,6 +3674,24 @@ class RecordedChannelTrigger(BaseModel):
     parties: tuple[SupportHolder, ...] | None
     messages: tuple[RecordedInputMessage, ...] = ()
     senders: tuple[InputSender, ...] = ()
+    # Left out of a dump where empty, as on every trigger but a hub chat input's, so such
+    # a trigger dumps exactly as it did before the field existed (ADR-0326 §4:4).
+    message_devices: tuple[RecordedMessageDevices, ...] = Field(
+        default=(), exclude_if=lambda held: not held
+    )
+
+    @model_validator(mode="after")
+    def _the_devices_are_one_per_message(self) -> Self:
+        # ADR-0378 §7:1: one entry per message, by position, and only where the trigger
+        # records no messages, whose own records then carry the devices.
+        positions = [one.position for one in self.message_devices]
+        if any(later <= earlier for earlier, later in pairwise(positions)):
+            msg = "an input's messages' devices are one per message, in ascending position"
+            raise ValueError(msg)
+        if self.message_devices and self.messages:
+            msg = "a trigger that records messages records their devices on them (ADR-0378 §7:1)"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _the_senders_are_its_messages(self) -> Self:
@@ -13328,37 +13403,53 @@ HUB_REQUESTING_DEVICE: Final = RequestingDevice(
 )
 
 
-def _check_message_shape(
+def _check_message_shape(  # noqa: PLR0913 — §5:2's table row by row, and the device it came through
     author: MessageAuthor,
     *,
     cut_off: bool,
     device_id: str | None,
     message_id: str | None,
     options: tuple[str, ...],
+    came_through: str | None = None,
 ) -> None:
     """ADR-0293 §5:2's table, row by row, for a message new or recorded.
 
     *Cut off* is the assistant's only, and *message id, device* the user's only and
-    then both required (§4:1). Options may not repeat, since an answer names one
-    (§6:14).
+    then both required (§4:1), as is the device it came through (ADR-0378 §4:2).
+    Options may not repeat, since an answer names one (§6:14).
 
     Raises:
         ValueError: If a property is present on the author that may not carry it, or
             absent on the one that must.
     """
     if author is MessageAuthor.USER:
-        if device_id is None or message_id is None:
-            msg = "a user's message carries the device it came from and that device's message id"
+        if device_id is None or message_id is None or came_through is None:
+            msg = (
+                "a user's message carries the device it came from, the device it came "
+                "through and that device's message id"
+            )
             raise ValueError(msg)
         if cut_off:
             msg = "only the assistant's message can be cut off (ADR-0293 §5:2)"
             raise ValueError(msg)
-    elif device_id is not None or message_id is not None:
+    elif device_id is not None or message_id is not None or came_through is not None:
         msg = "an assistant message carries no device and no message id (ADR-0293 §5:2)"
         raise ValueError(msg)
     if len(set(options)) != len(options):
         msg = "a question's options must be distinct, since an answer names one"
         raise ValueError(msg)
+
+
+def _came_through_itself(data: object) -> object:
+    """Default a user's message's ``came_through`` to the device it is written from.
+
+    ADR-0378 §8:2: a message from before the field, and one built without it, reads as
+    having come through the device it is written from. Only where the key is absent: a
+    ``None`` given for a user's message is refused by the shape's check.
+    """
+    if isinstance(data, dict) and "came_through" not in data and data.get("device_id") is not None:
+        return {**data, "came_through": data["device_id"]}
+    return data
 
 
 def _check_message_claim(author: MessageAuthor, effect_id: str | None) -> None:
@@ -13393,6 +13484,11 @@ class NewMessage(BaseModel):
     no message a device reads: :class:`TranscriptMessage` has no such member, and only
     the store's export (:class:`ExportedMessage`) carries it. ``None`` on a user's
     message, and on an assistant's message written under no claim.
+
+    ``came_through`` (ADR-0378 §4:2) is, for a user's message alone, the device it came
+    through, which the engine sets from the requesting device's connecting device
+    (:meth:`UserMessage.as_new_message`); built without it, the device it is written
+    from.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -13421,6 +13517,14 @@ class NewMessage(BaseModel):
         default=None,
         description="The user's only: the id the device chose, unique per device (§4:1).",
     )
+    came_through: Identifier | None = Field(
+        default=None,
+        description=(
+            "The user's only: the device it came through, the connecting device of the "
+            "request that wrote it (ADR-0378 §4:2); the device it is written from where "
+            "none is given."
+        ),
+    )
     # Left out of a dump where it is absent, so an unclaimed message dumps exactly as it
     # did before the member existed, and a caller spreading that dump into a
     # ``TranscriptMessage`` — which never carries the claim — goes on building one.
@@ -13433,6 +13537,11 @@ class NewMessage(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _came_through_itself(cls, data: object) -> object:
+        return _came_through_itself(data)
+
     @model_validator(mode="after")
     def _the_shape_is_its_authors(self) -> Self:
         _check_message_shape(
@@ -13441,6 +13550,7 @@ class NewMessage(BaseModel):
             device_id=self.device_id,
             message_id=self.message_id,
             options=self.options,
+            came_through=self.came_through,
         )
         _check_message_claim(self.author, self.effect_id)
         return self
@@ -13459,6 +13569,14 @@ class TranscriptMessage(BaseModel):
     (ADR-0350 §12:9, the row §15 adds to ADR-0293 §5:2's table): that id is shown on no
     message a device reads, and this is the message every device read and change
     carries. :class:`ExportedMessage`, the export's message, carries it.
+
+    **A user's message records the device it came through** (ADR-0378 §4:2): the
+    connecting device of the request that wrote it, ``hub`` on the local socket, which
+    the engine takes from the requesting device the wire server set and never from the
+    request. It differs from ``device_id`` only where a gateway named the device it is
+    written from, or where the local socket wrote under another device's name (ADR-0298
+    §2:8). A message built without it, or recorded before it was kept, came through the
+    device it is written from (§8:2). The assistant's message carries none.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -13473,6 +13591,12 @@ class TranscriptMessage(BaseModel):
     cut_off: bool = Field(default=False, strict=True)
     device_id: Identifier | None = None
     message_id: Identifier | None = None
+    came_through: Identifier | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _came_through_itself(cls, data: object) -> object:
+        return _came_through_itself(data)
 
     @model_validator(mode="after")
     def _the_shape_is_its_authors(self) -> Self:
@@ -13482,6 +13606,7 @@ class TranscriptMessage(BaseModel):
             device_id=self.device_id,
             message_id=self.message_id,
             options=self.options,
+            came_through=self.came_through,
         )
         if self.replies_to is not None and self.replies_to >= self.position:
             msg = "a message replies only to an earlier message (ADR-0293 §4:5)"
@@ -13722,6 +13847,10 @@ class UserMessage(BaseModel):
 
     A message answering a question names the question and its option (§4:6); question
     messages and their answers are not built (ADR-0293 §11:5), so this carries neither.
+
+    **It cannot say what device it came through** (ADR-0378 §4:2): that is the engine's,
+    from the requesting device the wire server set, so a ``came_through`` arriving in it
+    is refused with every other member it does not have.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -13739,14 +13868,24 @@ class UserMessage(BaseModel):
         description="The position of an earlier message in the same conversation (§4:5).",
     )
 
-    def as_new_message(self) -> NewMessage:
-        """The message as the conversation store writes it: the user's, from its device."""
+    def as_new_message(self, *, came_through: str | None = None) -> NewMessage:
+        """The message as the conversation store writes it: the user's, from its device.
+
+        Args:
+            came_through: The device it came through: the connecting device of the
+                request that wrote it, which the engine takes from the requesting device
+                (ADR-0378 §4:2); ``None`` for the device it is written from.
+
+        Returns:
+            The message to write.
+        """
         return NewMessage(
             author=MessageAuthor.USER,
             text=self.text,
             replies_to=self.replies_to,
             device_id=self.device_id,
             message_id=self.message_id,
+            came_through=self.device_id if came_through is None else came_through,
         )
 
 

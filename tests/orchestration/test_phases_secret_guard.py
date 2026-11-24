@@ -461,7 +461,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     Who sent an input or a message (ADR-0368 §2:6), ``InputSender``, is an identity's id
     and a closed level; the three facts on a work and on a joined input (§2:1 to §2:3),
     ``WorkFacts`` with ``WorkFor`` and ``WorkAuthority``, are closed values and identities'
-    ids: identifiers, with no carrier.
+    ids: identifiers, with no carrier. The devices a hub chat message is written from
+    and came through (ADR-0378 §7:1), on a ``RecordedInputMessage`` and, for the hub
+    chat's trigger, as ``RecordedMessageDevices``, are a position and two device ids:
+    identifiers, with no carrier.
     An in-progress entry (ADR-0349 §5:6), ``InProgressEntry``, and its planning-side
     ``RunningShown``, are an identifier, the ``ChannelIdentity`` that caused it, its input
     in brief read through the peer view, a flag and a closed origin, with when it arrived
@@ -622,6 +625,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "RecordedCandidate",
         "RecordedChannelTrigger",
         "RecordedInputMessage",
+        "RecordedMessageDevices",
         "RecordedSpeechInput",
         "RecordedTextInput",
         "RefusedCall",

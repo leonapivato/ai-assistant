@@ -16,6 +16,7 @@ from phases_support import PHONE, answered, frozen, open_conversation, phases_ha
 from structlog.testing import capture_logs
 
 from ai_assistant.core.types import (
+    HUB_DEVICE_ID,
     OWNER_PERSON_ID,
     Account,
     AuthorityKind,
@@ -51,8 +52,13 @@ async def _one_frozen(harness: Harness) -> EpisodicMemory:
 async def test_a_message_from_a_linked_device_records_the_owner_and_their_facts() -> None:
     """ADR-0368 §2:6, §3:1, §3:2: the owner sent it, at normal; the work is theirs and
     carries their authority; the reply is as it always was."""
+    # The phone, and the hub's own machine its message came through on the local socket
+    # (ADR-0378 §6:1), each linked as the hub's start links it.
     linked = FakeIdentityStore(
-        configured=[Account(kind="conversation", identifier=PHONE.device_id)]
+        configured=[
+            Account(kind="conversation", identifier=PHONE.device_id),
+            Account(kind="conversation", identifier=HUB_DEVICE_ID),
+        ]
     )
     harness = phases_harness(identities=linked)
     conversation = await open_conversation(harness)

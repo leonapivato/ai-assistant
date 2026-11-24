@@ -86,6 +86,7 @@ from ai_assistant.memory._channel_reads import (
 from ai_assistant.memory._continuing_upgrade import continuing_episode
 from ai_assistant.memory._episode_format import (
     CALLED_RECORD_FORMAT,
+    CHECKED_RECORD_FORMAT,
     CONTINUING_RECORD_FORMAT,
     EPISODE_RECORD_FORMAT,
     FACTS_RECORD_FORMAT,
@@ -607,6 +608,7 @@ class SqliteMemoryStore:
             self._upgrade_to_facts(conn, existing_format)
             self._upgrade_to_unread(conn, existing_format)
             self._upgrade_to_checked(conn, existing_format)
+            self._upgrade_to_came_through(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -1651,6 +1653,30 @@ class SqliteMemoryStore:
         ``None`` where it is absent: an entry recorded before the check was built reads
         as one the check never reached, which it was. So every record a file at 25 holds
         validates unchanged, and none is rewritten (§4:4).
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        if found is None or found >= CHECKED_RECORD_FORMAT:
+            return
+        conn.execute("UPDATE episode_record_format SET version = ?", (CHECKED_RECORD_FORMAT,))
+
+    @staticmethod
+    def _upgrade_to_came_through(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0378 §7:1's record, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_checked` has carried a file to 26, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+
+        **The label alone moves.** Each recorded message gains ``device_id`` and
+        ``came_through``, and each trigger ``message_devices``, which read as absent and
+        empty: a message recorded before them records neither of its devices, which
+        reads as its having come through the device it is written from (ADR-0378 §8:2).
+        So every record a file at 26 holds validates unchanged, and none is rewritten
+        (§4:4).
 
         Args:
             conn: The connection, inside :meth:`_setup`'s transaction.

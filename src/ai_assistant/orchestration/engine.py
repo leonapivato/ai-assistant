@@ -135,6 +135,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     RecallOutcome,
     RecordedInputMessage,
+    RecordedMessageDevices,
     RecordedTextInput,
     ReplyCapability,
     SpokenAudioFormat,
@@ -340,10 +341,10 @@ from ai_assistant.orchestration.understanding import (
     place_window_links,
 )
 from ai_assistant.orchestration.work_facts import (
-    chat_account,
+    chat_sender_of,
+    chat_senders_of,
     line_account,
     persons_work,
-    sender_of,
     senders_of,
 )
 
@@ -4981,8 +4982,10 @@ class Engine:
         check_arguments(
             "write_message", max_bytes=self._max_payload_bytes, conversation_id=named, message=sent
         )
-        check_message_fits(named, sent, max_bytes=self._max_payload_bytes)
         device = current_requesting_device()
+        check_message_fits(
+            named, sent, max_bytes=self._max_payload_bytes, came_through=device.connecting_device_id
+        )
         return await self._tracked(
             self._written(device, named, sent), "write_message", checked=True
         )
@@ -5001,9 +5004,15 @@ class Engine:
         machine writes only under its own id, and only as an end for writing. The
         activation the reader starts does not run as this device: the reader's read
         is started in a context of its own (:meth:`_spawn_read`, §2:6).
+
+        The message records the device it came through: the requesting device's
+        connecting device, which the wire server set from the connection, never a value
+        the request or the message carries (ADR-0378 §4:2).
         """
         await self._device_checks.writing_message(device, conversation_id, message)
-        receipt = await self._conversations.write(conversation_id, message)
+        receipt = await self._conversations.write(
+            conversation_id, message, came_through=device.connecting_device_id
+        )
         if receipt.position is not None and self._chat_reader is not None:
             self._chat_reader.notice(conversation_id)
         return receipt
@@ -6521,12 +6530,13 @@ class Engine:
         assert reader is not None  # noqa: S101 — only the reader calls this
         place = ChannelIdentity(channel_type="conversation", instance_id=taken.conversation_id)
         # ADR-0366 §4:1, ADR-0368 §2:6: who sent each message, by the device it was
-        # written from, which decides whose work it is (ADR-0368 §9).
+        # written from, which decides whose work it is (ADR-0368 §9); and where it came
+        # through another device, by both devices' links (ADR-0378 §4:3).
         taken = replace(
             taken,
-            senders=await senders_of(
+            senders=await chat_senders_of(
                 self._identities,
-                {one.position: chat_account(one.device_id) for one in taken.messages},
+                {one.position: (one.device_id, one.came_through) for one in taken.messages},
                 stage="chat_reader",
             ),
         )
@@ -6540,6 +6550,15 @@ class Engine:
             id_factory=lambda: taken.activation_id,
             stage_limit=self._stage_record_limit,
             senders=tuple(taken.senders.values()),
+            # ADR-0378 §7:1: each message's two devices, fixed on the input beside its
+            # senders, as the hub chat's trigger records no messages.
+            message_devices=tuple(
+                RecordedMessageDevices(
+                    position=one.position, device_id=one.device_id, came_through=one.came_through
+                )
+                for one in taken.messages
+                if one.device_id is not None and one.came_through is not None
+            ),
         )
         marked: list[int] = []
 
@@ -6819,6 +6838,9 @@ class Engine:
                         "conversation", None, sender := taken.senders.get(one.position)
                     ),
                     sender=sender,
+                    # ADR-0378 §7:1: carried into any input that holds it.
+                    device_id=one.device_id,
+                    came_through=one.came_through,
                 )
                 for one in taken.messages
             )
@@ -9520,7 +9542,10 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
         if choice is ApprovalChoice.APPROVE
         else ApprovalRequestState.DENIED
     )
-    tapper = await sender_of(identities, chat_account(device.device_id), stage="approval_panel")
+    # ADR-0378 §4:7: through another device, from both devices' hub chat accounts.
+    tapper = await chat_sender_of(
+        identities, device.device_id, device.connecting_device_id, stage="approval_panel"
+    )
     step = await plans.answer_approval_request(
         request_id,
         state,

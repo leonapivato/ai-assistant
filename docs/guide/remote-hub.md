@@ -200,29 +200,97 @@ ai-assistant-device list
 ```text
 Hub: n33u2icoEW11CNTRL
 Devices:
-  nLAPTOP1CNTRL  hub_device  commands
+  nLAPTOP1CNTRL  hub_device  commands  gateway
   nPHONE22CNTRL  browser_device  no role
+Gateways:
+  hub  the hub's own machine, by rule
+  nLAPTOP1CNTRL  marked 2026-10-05T12:02:00+00:00
 Enrolments:
   nLAPTOP1CNTRL  enrolled 2026-10-05T12:00:00+00:00  live
 Registrations:
-  nPHONE22CNTRL  under hub  registered 2026-10-05T12:04:10+00:00  live
+  nPHONE22CNTRL  under nLAPTOP1CNTRL  registered 2026-10-05T12:04:10+00:00  live
 ```
 
-The listing has three sections:
+The listing has four sections:
 
-- **Devices** shows each machine, its kind and its roles. A *hub device* is a
-  machine you enrolled. A *browser device* is a machine a gateway named.
+- **Devices** shows each machine, its kind and its roles, and `gateway` beside an
+  enrolled machine you marked as one. A *hub device* is a machine you enrolled. A
+  *browser device* is a machine a gateway named.
+- **Gateways** shows which machines may name browser devices: `hub`, the hub's own
+  machine, always, and each enrolled machine you marked, with when.
 - **Enrolments** shows every enrolment the hub has made, revoked ones included.
 - **Registrations** shows every machine each gateway has named, and which
   gateway named it. `hub` is a gateway on the hub's own machine.
 
-A gateway registers a machine the first time it names that machine. Nothing is
-enrolled for it. A gateway names the browsers it serves only once it relays each
-request for the browser it came from. Until then, a gateway's browsers act as the
-gateway's own device: `hub` for a gateway on the hub's machine, and the enrolled
-machine for a gateway elsewhere. A browser device starts with no role, like an
-enrolled one. Its first request is refused, and it then appears in the listing
-so that you can give it a role.
+### Which gateways may name a browser
+
+A gateway serves browsers that have no connection of their own, and names the
+browser each request comes from. **Only two kinds of machine may name one**:
+
+- **the hub's own machine**, through its local socket, which needs no act of
+  yours;
+- **an enrolled machine you marked as a gateway**, at the hub:
+
+  ```bash
+  ai-assistant-device mark-gateway <the gateway machine's overlay identity>
+  ```
+
+Any other machine that names a browser on a request is refused, before anything
+is registered. Only a machine whose enrolment is live can be marked. Revoking its
+enrolment ends the mark, and a machine enrolled again is no gateway until you mark
+it again. `ai-assistant-device unmark-gateway <identity>` withdraws the mark: the
+machine's later requests that name a browser are refused, and every change stream
+it holds open for a browser it named is ended. Its registrations stay, unusable
+until you mark it again. The mark is not a role: a marked machine's own requests
+act with its own roles.
+
+**A gateway names only a browser device.** It may not name `hub`, the hub's own
+overlay identity, or any machine enrolled at the hub, whether that enrolment is
+live or revoked. An enrolled machine always reaches the hub through its own
+connection, so a browser on it is served by a gateway on that machine. Enrolling a
+machine that a gateway used to name ends every change stream that gateway holds
+open for it. Each naming the hub refuses is logged as `device_naming_refused`,
+with the gateway, the name and the reason.
+
+A gateway registers a browser the first time it names it. Nothing is enrolled for
+it. A browser device starts with no role, like an enrolled one. Its first request
+is refused, and it then appears in the listing so that you can give it a role.
+
+### What links a browser device to you
+
+**A browser device is yours only while it holds a role you gave it at the hub**
+and its registration is live. Giving it a role with `ai-assistant-device assign`
+links it to you, and its link ends when it holds no role or its registration is
+revoked. Being named by a gateway links nothing, and neither does adding it to
+your devices or to a conversation. Until you give it a role, what it writes is
+read as an unidentified sender's.
+
+### What a message through a gateway is read as
+
+Each message records the device it is written from and the device it **came
+through**: the machine whose connection carried it. `hub` is what the hub's own
+machine's local socket carries. A message a browser wrote through a gateway is
+written from the browser device and came through the gateway. One the hub's own
+machine wrote under another device's name came through `hub`.
+
+Where the two are the same device, the message is read from that device's link,
+as yours at that link's level. Where they differ, **both links are read**:
+
+- where both tie you, the message is yours, at the lower of the two levels;
+- where either has no link, or the two tie different people, it is an
+  unidentified sender's;
+- where either cannot be read, it is an unidentified sender's, and the work says
+  that the links could not be read.
+
+So lowering a gateway's link lowers every message that comes through it, and a
+browser served by the gateway on the hub's own machine is yours at the lower of
+its own link and `hub`'s. A tap on the hub page's approvals panel is read the same
+way. Inspecting a work shows, for each message that came through a device other
+than its own, both devices:
+
+```text
+    Message 3 came through "nLAPTOP1CNTRL", written from "nPHONE22CNTRL"
+```
 
 The acts:
 
@@ -246,7 +314,10 @@ The acts:
   way to bring back a registration you revoked. A device that nothing else
   admitted comes back with no role.
 - **`ai-assistant-device assign <identity> <role>`** and **`withdraw`** give and
-  take one role (step 3).
+  take one role (step 3). For a browser device, giving its first role links it to
+  you, and taking its last ends the link.
+- **`ai-assistant-device mark-gateway <identity>`** and **`unmark-gateway`** let an
+  enrolled machine's gateway name browser devices, and stop it.
 
 `assistant device unenrol`, run on the *client*, removes that machine's copy of
 both values. The two acts are independent and you usually want both: revoking at
@@ -283,16 +354,16 @@ Do these on the hub's own machine, with the new hub running:
    ai-assistant-device assign <its overlay identity> commands
    ```
 
-3. **Give each remote gateway's device its role.** A gateway on another machine
-   needs `commands` on its enrolled identity for the requests it makes as
-   itself.
+3. **Give each remote gateway's device its role, and mark it.** A gateway on
+   another machine needs `commands` on its enrolled identity for the requests it
+   makes as itself, and the mark before it may name the browsers it serves:
 
-   A gateway that does not yet name its browsers sends every browser's request
-   as its own. A message from a browser on such a gateway's remote listener
-   names that browser, not the gateway, so the hub refuses it. If you write from
-   a phone through a gateway on another machine, keep the old hub running until
-   that gateway names its browsers, or run the gateway on the hub's machine,
-   whose local socket keeps the device a message names.
+   ```bash
+   ai-assistant-device assign <its overlay identity> commands
+   ai-assistant-device mark-gateway <its overlay identity>
+   ```
+
+   A gateway on the hub's own machine needs neither.
 4. **Give each browser device its role.** Open the page once from each browser a
    gateway names. The first request is refused, and the browser is now
    registered. Find it under *Registrations*, check that the gateway named there
@@ -306,8 +377,9 @@ Do these on the hub's own machine, with the new hub running:
 reasons:
 
 - `not_accepted`: the device's registration was revoked, it named the hub's own
-  machine, its gateway already holds as many registrations as the hub accepts,
-  or you are revoking it at that moment.
+  machine, it named a machine enrolled at the hub, its gateway is not marked, its
+  gateway already holds as many registrations as the hub accepts, or you are
+  revoking it at that moment.
 - `no_role`: the device holds no role at all.
 - `not_allowed`: its roles do not allow that request.
 

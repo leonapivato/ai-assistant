@@ -1898,6 +1898,59 @@ class ConversationStoreContract:
         assert [one.position for one in page.entries] == [1]
         assert (await store.changes(after=before.next_after)).changes == ()
 
+    async def test_a_message_keeps_the_device_it_came_through_on_every_read(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0378 §4:2, §8:2: the device a message came through is recorded and read back.
+
+        Beside the device it is written from, on the transcript, the change stream, a
+        device's changes, the messages waiting and the export; one written without it
+        came through the device it is written from.
+        """
+        conversation = await _chat(store)
+        named = NewMessage(
+            author=MessageAuthor.USER,
+            text="through the gateway",
+            device_id="phone",
+            message_id="m-1",
+            came_through="gateway",
+        )
+        await store.append_message(conversation, named)
+        await store.append_message(conversation, _said("from itself", message_id="m-2"))
+
+        page = await store.transcript(conversation)
+        assert page is not None
+        written = [one for one in page.entries if isinstance(one, TranscriptMessage)]
+        assert [(one.device_id, one.came_through) for one in written] == [
+            ("phone", "gateway"),
+            ("phone", "phone"),
+        ]
+        added = [one.message for one in await _all_changes(store) if one.kind == "message_added"]
+        assert [one.came_through for one in added] == ["gateway", "phone"]
+        seen = [
+            one.change.message
+            for one in await _entries_seen_by(store, "phone")
+            if isinstance(one.change, MessageAddedChange)
+        ]
+        assert [one.came_through for one in seen] == ["gateway", "phone"]
+        waiting = await store.untaken_messages(conversation)
+        assert [one.came_through for one in waiting] == ["gateway", "phone"]
+        exported = await store.export()
+        assert [one.came_through for one in exported.messages] == ["gateway", "phone"]
+
+    async def test_an_assistants_message_comes_through_no_device(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0378 §4:2: only a user's message records a device it came through."""
+        conversation = await _chat(store)
+        await store.append_message(conversation, _answered("Hello."))
+
+        page = await store.transcript(conversation)
+        assert page is not None
+        (entry,) = page.entries
+        assert isinstance(entry, TranscriptMessage)
+        assert entry.came_through is None
+
     async def test_a_late_repeat_of_a_deleted_message_does_not_come_back(
         self, store: ConversationStore
     ) -> None:

@@ -426,6 +426,7 @@ def _widest_records(
         cut_off=message.cut_off,
         device_id=message.device_id,
         message_id=message.message_id,
+        came_through=message.came_through,
     )
     added = MessageAddedChange(seq=_WIDEST_NUMBER, message=recorded)
     return (
@@ -435,7 +436,9 @@ def _widest_records(
     )
 
 
-def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes: int) -> None:
+def check_message_fits(
+    conversation_id: str, message: UserMessage, *, max_bytes: int, came_through: str | None = None
+) -> None:
     """Refuse a message whose own record could not be read back within the limit.
 
     A message is accepted only where a page holding it alone — the transcript's and
@@ -445,12 +448,16 @@ def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes:
     would be one no read could return, and a device's cursor would stop at it for
     good: :func:`fit_transcript` and :func:`fit_changes` can shorten a page to one
     entry and no further, and a chunk carries one change. Shared by the engine and the
-    canonical fake engine.
+    canonical fake engine. ``came_through`` is the device the message would record it
+    came through (ADR-0378 §4:2), which the record carries; ``None`` for the device it
+    is written from.
 
     Raises:
         OversizedValueError: If any of the three would exceed ``max_bytes``.
     """
-    page, changes, chunk = _widest_records(conversation_id, message.as_new_message())
+    page, changes, chunk = _widest_records(
+        conversation_id, message.as_new_message(came_through=came_through)
+    )
     check_payload(
         page,
         max_bytes=max_bytes,
@@ -892,14 +899,19 @@ class ConversationLifecycle:
         """
         return await self._conversations.device_changes(device_id, after=after, limit=limit)
 
-    async def write(self, conversation_id: str, message: UserMessage) -> MessageReceipt:
+    async def write(
+        self, conversation_id: str, message: UserMessage, *, came_through: str
+    ) -> MessageReceipt:
         """Record the user's message and answer for it (ADR-0293 §4).
 
         The store answers *received*, a repeat, a device that is not an end for
         writing and a reply to nothing; it starts no activation, which is the
-        reader's (§6).
+        reader's (§6). ``came_through`` is the device the message came through, the
+        request's connecting device, which the engine alone supplies (ADR-0378 §4:2).
         """
-        return await self._conversations.append_message(conversation_id, message.as_new_message())
+        return await self._conversations.append_message(
+            conversation_id, message.as_new_message(came_through=came_through)
+        )
 
     async def delete_message(self, conversation_id: str, position: int) -> bool:
         """Delete one message, leaving its marker (ADR-0293 §5:8, §5:12)."""
