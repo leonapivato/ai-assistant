@@ -1,6 +1,6 @@
 # 382. An approval's work may tell its outcome where the request was asked, outside the check, and holds no grant for anything else
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 - Scope: decision D7 of milestone 21, "Every call checked" (acceptance
   [#3678](https://github.com/leonapivato/ai-assistant/issues/3678), lanes
