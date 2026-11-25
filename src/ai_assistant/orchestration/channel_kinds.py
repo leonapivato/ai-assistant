@@ -90,7 +90,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
     from ai_assistant.core.channel_validation import OriginKind
-    from ai_assistant.core.types import ApprovalGiver, RecordedInputMessage, SupportHolder
+    from ai_assistant.core.types import (
+        ApprovalGiver,
+        JoinedInput,
+        RecordedChannelTrigger,
+        RecordedInputMessage,
+        SupportHolder,
+    )
 
 __all__ = [
     "ACCOUNT_KINDS",
@@ -115,6 +121,7 @@ __all__ = [
     "connection_kind",
     "place_channel",
     "place_of",
+    "places_inputs_came_from",
     "sender_line",
     "sender_unknown",
     "served",
@@ -306,6 +313,23 @@ def place_of(channel: ChannelIdentity) -> str:
     hub chat, and the line's chat, by the line's instance, for Telegram.
     """
     return f"{channel.channel_type}{_PLACE_SEPARATOR}{channel.instance_id}"
+
+
+def places_inputs_came_from(
+    trigger: RecordedChannelTrigger | None, joined: Iterable[JoinedInput]
+) -> tuple[str, ...]:
+    """Every place an activation's inputs came from (ADR-0367 §4:7, ADR-0332 §3:16).
+
+    Its trigger's, the channel it came on or else the place it targets, and each joined
+    input's, an absorbed or a taken one's alike, each once in order, as its running state
+    or its episode records them.
+    """
+    held: list[str] = []
+    came_by = None if trigger is None else trigger.channel or trigger.target
+    if isinstance(came_by, ChannelIdentity):
+        held.append(place_of(came_by))
+    held.extend(place_of(one.channel) for one in joined)
+    return tuple(dict.fromkeys(held))
 
 
 # --- what a connection is (ADR-0364 §3:3) ---------------------------------------------

@@ -56,12 +56,20 @@ from ai_assistant.orchestration.channel_kinds import (
     Direction,
     Reach,
     WindowSource,
+    places_inputs_came_from,
+    takes_text,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from datetime import datetime
 
-    from ai_assistant.core.types import ApprovalRequest, FrozenJson
+    from ai_assistant.core.types import (
+        ApprovalRequest,
+        FrozenJson,
+        JoinedInput,
+        RecordedChannelTrigger,
+    )
 
 __all__ = [
     "ALREADY_ON_A_CARD",
@@ -80,8 +88,10 @@ __all__ = [
     "RUN_APPROVED_TOOL",
     "THE_APPROVALS",
     "WHY_ARGUMENT",
+    "AskedFrom",
     "Ticket",
     "approval_input",
+    "asked_from",
     "nested_call",
     "ticket_of",
 ]
@@ -328,6 +338,54 @@ def ticket_of(request: ApprovalRequest, *, at: datetime) -> Ticket | None:
     if request.ticket is not TicketState.HELD or at >= request.expires_at:
         return None
     return Ticket(request=request)
+
+
+# --- where the request was asked (ADR-0382 §2, §4) -----------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AskedFrom:
+    """Where an approval's request was asked, as the approval's work holds it (ADR-0382 §2).
+
+    Read by code from the asking activation the request names, not one it was followed
+    forward to, from its running state where it runs and its episode otherwise, as the
+    approval's place list is built (§2:2); no model and nothing the approval's input says
+    adds a place. Kept apart from the work's own input places, which are the approvals'.
+
+    Attributes:
+        places: Each place an input of the asking activation came from, its trigger's or
+            one that joined it by an absorption or a take, whose kind takes a message
+            (§4:2), each once in order. A text from the approval's work into one stays
+            outside the check (§2:1), and the work is shown it (§2:5); it widens no place
+            a message may go into, which the place list still rules (§2:3).
+        read: Whether the asking activation could be read. Where it could not, no place
+            is held, and a text the place list allows is not done, its reason saying so
+            (§4:4).
+
+    Raises:
+        ValueError: If an asking activation that could not be read holds a place.
+    """
+
+    places: tuple[str, ...] = ()
+    read: bool = True
+
+    def __post_init__(self) -> None:
+        """An asking activation that could not be read holds no place (§4:4)."""
+        if self.places and not self.read:
+            msg = "where the request was asked could not be read, so no place is held"
+            raise ValueError(msg)
+
+
+def asked_from(trigger: RecordedChannelTrigger | None, joined: Iterable[JoinedInput]) -> AskedFrom:
+    """Where a request was asked: its asking activation's input places (ADR-0382 §2:1-§2:2).
+
+    Its trigger's place and each joined input's, as its running state or its episode
+    records them, each where its kind takes a message (§4:2): so none for an activation
+    the Task Scheduler started from its schedule (§4:3), nor the approvals.
+    """
+    return AskedFrom(
+        places=tuple(one for one in places_inputs_came_from(trigger, joined) if takes_text(one))
+    )
 
 
 # --- the approval's input (ADR-0361 §6:1-§6:2) ---------------------------------------------

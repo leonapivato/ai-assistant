@@ -201,8 +201,10 @@ from ai_assistant.orchestration.approval_sensor import ApprovalsSensor
 from ai_assistant.orchestration.approvals import (
     REQUEST_APPROVAL_CAPABILITY,
     THE_APPROVALS,
+    AskedFrom,
     Ticket,
     approval_input,
+    asked_from,
     ticket_of,
 )
 from ai_assistant.orchestration.candidates import held_candidates
@@ -1250,6 +1252,25 @@ class _TaskPass(_EventPass):
     def informational_event(self) -> bool:
         """Never: a scheduled task's activation is no event's."""
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class _ApprovalBrings:
+    """What an approval's input brings with it, read before its activation is admitted.
+
+    Attributes:
+        context: The request as its card shows it, linked to the asking activation's
+            episode (ADR-0361 §6:2).
+        linked: That episode's address where it has frozen, which the episode window
+            shows by its short view (ADR-0356 §9).
+        suggests: The places the asking work's place list suggests (ADR-0361 §6:7).
+        asked: Where the request was asked (ADR-0382 §2:2).
+    """
+
+    context: PlaceItem
+    linked: tuple[str, ...]
+    suggests: tuple[str, ...]
+    asked: AskedFrom
 
 
 def _taken_channels(state: ActivationState) -> tuple[ChannelIdentity, ...]:
@@ -7385,8 +7406,8 @@ class Engine:
                 answer = await self._plans.mark_approval_outcome_pushed(str(request.id), pushed_to)
                 if answer is not ApprovalOutcomePush.PUSHED:
                     return
-            context, linked, suggests = await self._approval_context(request)
-            self._admit_approval(request, pushed_to, context, linked, suggests)
+            brings = await self._approval_context(request)
+            self._admit_approval(request, pushed_to, brings)
         except RuntimeError:
             # The engine began closing: left pushed, the next start pushes it again.
             if not self._closing:
@@ -7394,16 +7415,17 @@ class Engine:
         finally:
             self._approval_pushing.discard(pushed_to)
 
-    async def _approval_context(
-        self, request: ApprovalRequest
-    ) -> tuple[PlaceItem, tuple[str, ...], tuple[str, ...]]:
+    async def _approval_context(self, request: ApprovalRequest) -> _ApprovalBrings:
         """What an approval's input brings with it, and where its asking work spoke (§6:2, §6:7).
 
         The request as its card shows it, linked to the asking activation's episode; that
         episode's address where it has frozen, which the episode window shows by its short
-        view (ADR-0356 §9); and the places the asking work's place list suggests: the place
+        view (ADR-0356 §9); the places the asking work's place list suggests: the place
         its input came from where it takes a message, or, for an activation the Task
-        Scheduler started, its task's suggested places.
+        Scheduler started, its task's suggested places; and where the request was asked
+        (ADR-0382 §2:2): each place an input of the asking activation the request names
+        came from, read from its running state where it runs and its episode otherwise, or
+        none, said so, where neither can be read (§4:4).
         """
         asking = str(request.activation_id)
         address = f"activation:{asking}"
@@ -7414,13 +7436,22 @@ class Engine:
             record = await self._memory.get(address)
         except MemoryStoreError:
             record = None
-        if isinstance(record, EpisodicMemory) and record.processing_record is not None:
-            trigger = record.processing_record.trigger
+        processing = record.processing_record if isinstance(record, EpisodicMemory) else None
+        if processing is not None:
+            trigger = processing.trigger
             if place is None:
                 target = trigger.channel or trigger.target
                 place = target if isinstance(target, ChannelIdentity) else None
-            if not record.processing_record.is_open:
+            if not processing.is_open:
                 linked = (address,)
+        if running is not None:
+            asked = asked_from(running.trigger, running.joined)
+        elif processing is not None:
+            asked = asked_from(processing.trigger, processing.joined)
+        else:
+            # §4:4: no place is kept outside, and a text the list allows says why.
+            _log.warning("approval_asking_unread", stage="approvals")
+            asked = AskedFrom(read=False)
         suggests: tuple[str, ...] = ()
         if place is not None and place.channel_type in {"conversation", TELEGRAM.channel_type}:
             suggests = (place_of(place),)
@@ -7440,15 +7471,16 @@ class Engine:
             f"system said when it asked: {request.why} It was asked {where}, and is now "
             f"{request.state.value}."
         )
-        return (
-            PlaceItem(
+        return _ApprovalBrings(
+            context=PlaceItem(
                 author=PlaceAuthor.APPROVALS,
                 text=text,
                 at=request.written_at,
                 episode_id=address,
             ),
-            linked,
-            suggests,
+            linked=linked,
+            suggests=suggests,
+            asked=asked,
         )
 
     async def _task_places(self, activation_id: str) -> tuple[str, ...]:
@@ -7466,9 +7498,7 @@ class Engine:
         self,
         request: ApprovalRequest,
         activation_id: str,
-        context: PlaceItem,
-        linked: tuple[str, ...],
-        suggests: tuple[str, ...],
+        brings: _ApprovalBrings,
     ) -> None:
         """Admit the activation an outcome starts, in one synchronous step (ADR-0361 §6).
 
@@ -7491,9 +7521,7 @@ class Engine:
         deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
         work = self._activation_task(
             ActivationScope(state),
-            lambda: self._approval_turn(
-                activation_id, deadline, context=context, linked=linked, suggests=suggests
-            ),
+            lambda: self._approval_turn(activation_id, deadline, brings),
             seam="approvals",
             check_output=_unchecked,
             deadline=deadline,
@@ -7522,10 +7550,7 @@ class Engine:
         self,
         activation_id: str,
         deadline: float,
-        *,
-        context: PlaceItem,
-        linked: tuple[str, ...],
-        suggests: tuple[str, ...],
+        brings: _ApprovalBrings,
     ) -> None:
         """An activation an approval's outcome started, planned by the phases (ADR-0361 §6).
 
@@ -7534,8 +7559,10 @@ class Engine:
         code sets what it continues and the matter it belongs to (§6:3), so the takeover
         stage offers it to the asking work where that work still runs (§6:4); otherwise
         it plans with its input, after any wait the offer leaves (§6:5). Its messages go
-        only into places on its place list (§6:7).
+        only into places on its place list (§6:7), and a text into a place its request
+        was asked from stays outside the check (ADR-0382 §2:1).
         """
+        context = brings.context
         phases = self._phases
         assert phases is not None  # noqa: S101 — the Approvals channel is wired only beside them
         state = active_state()
@@ -7555,9 +7582,12 @@ class Engine:
             ),
         )
         working_phases = phases.begin_approval(
-            activation_id=activation_id, trigger=trigger, context=(context,)
+            activation_id=activation_id,
+            trigger=trigger,
+            context=(context,),
+            asked_from=brings.asked,
         )
-        scheduling = self._approval_scheduling(state, suggests)
+        scheduling = self._approval_scheduling(state, brings.suggests)
         if scheduling is not None:
             scheduling.places, scheduling.targets = await scheduling.build()
             working_phases.place = replace(
@@ -7577,7 +7607,7 @@ class Engine:
             story_links_wired=self._story_links is not None,
             phases=working_phases,
             activation=state,
-            linked=linked,
+            linked=brings.linked,
         )
         stages: list[ControllerStageRun[_EventPass]] = [
             Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),

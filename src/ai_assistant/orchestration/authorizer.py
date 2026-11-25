@@ -176,6 +176,7 @@ from ai_assistant.orchestration.approvals import (
     CALL_ARGUMENT,
     NESTED_REPEAT_KEY,
     REQUEST_APPROVAL_CAPABILITY,
+    AskedFrom,
     nested_call,
 )
 from ai_assistant.orchestration.message_tools import (
@@ -411,6 +412,9 @@ _TAPPED_SHORT: Final = (
 )
 #: ADR-0367 §5:6: a ticket whose tap is not the yes its call needs.
 _NOT_THEIR_YES: Final = "the yes that approved this call is not the yes it needs, so it is not done"
+#: ADR-0382 §4:4: an approval's work whose asking activation could not be read keeps no
+#: place outside the check, so a text its place list allows is not done, and says why.
+_ASKED_UNREAD: Final = "where the request was asked could not be read, so this message is not sent"
 
 
 def _check_word(made: CallCheck) -> str:
@@ -449,6 +453,36 @@ def _refused_by(made: CallCheck) -> str | None:
     if CheckOutcomeKind.NOT_DONE_NO_GRANT in kinds:
         return _NOT_GRANTED
     return None
+
+
+def _outside_the_check(snapshot: RoundToAuthorize, place: str | None) -> bool:
+    """Whether a ``text`` call into ``place`` stays outside the check.
+
+    A place one of the work's own inputs came from (ADR-0367 §4:7), or, in an approval's
+    work, one an input of the asking activation came from (ADR-0382 §2:1).
+    """
+    if place is None:
+        return False
+    own = (snapshot.input_place, *snapshot.taken_places, *snapshot.input_places)
+    return place in own or _asked_there(snapshot, place)
+
+
+def _asked_there(snapshot: RoundToAuthorize, place: str | None) -> bool:
+    """Whether ``place`` is where an approval's work's request was asked (ADR-0382 §2:1)."""
+    asked = snapshot.asked_from
+    return place is not None and asked is not None and place in asked.places
+
+
+def _asked_unread(snapshot: RoundToAuthorize, place: str | None) -> bool:
+    """Whether a text no grant allows goes where §4:4 of ADR-0382 says why it is not done.
+
+    An approval's work whose asking activation could not be read, writing into a place on
+    its place list.
+    """
+    asked = snapshot.asked_from
+    if asked is None or asked.read or place is None:
+        return False
+    return snapshot.places is not None and place in snapshot.places
 
 
 def _needs_a_yes(made: CallCheck) -> frozenset[CheckOutcomeKind]:
@@ -607,6 +641,11 @@ class RoundToAuthorize:
             and each joined input's, an absorbed or a taken one's included: a ``text``
             call into one stays outside the check (ADR-0367 §4:7). It widens no place a
             message may go into.
+        asked_from: For an approval's work, where its request was asked (ADR-0382 §2:2):
+            a ``text`` call into one of its places stays outside the check as one into
+            ``input_places`` does (§2:1), and, where it could not be read, a text the
+            place list allows is not done, saying so (§4:4). It widens no place a message
+            may go into (§2:3). ``None`` for every other work, which nothing here changes.
         check_sink: Where each call's check is written as it is made, by call id, so a
             round whose authorizing then fails or is cancelled keeps what the check made
             of the calls it reached (ADR-0379 §3:2); ``None`` where no one keeps them.
@@ -636,6 +675,7 @@ class RoundToAuthorize:
     check_for: CheckSubject = field(default_factory=CheckSubject)
     input_places: tuple[str, ...] = ()
     check_sink: MutableMapping[str, CallCheck] | None = None
+    asked_from: AskedFrom | None = None
 
     def __post_init__(self) -> None:
         """Each call is one the round proposed, once."""
@@ -1103,6 +1143,12 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
         ),
         input_places=tuple(str(one) for one in given.input_places),
         check_sink=given.check_sink,
+        asked_from=None
+        if given.asked_from is None
+        else AskedFrom(
+            places=tuple(str(one) for one in given.asked_from.places),
+            read=bool(given.asked_from.read),
+        ),
     )
 
 
@@ -2396,15 +2442,15 @@ class AuthorizingStage:
 
         A text into a place one of the work's own inputs came from, its trigger's or one
         that joined it by an absorption or a take, stays outside the check, checked by its
-        place alone (ADR-0306 §4:7). A text into any other connection passes the check as
-        every call does, its thing the connection it goes into. The round's own message
-        is no call.
+        place alone (ADR-0306 §4:7); so does one from an approval's work into a place an
+        input of the asking activation came from (ADR-0382 §2:1). A text into any other
+        connection passes the check as every call does, its thing the connection it goes
+        into. The round's own message is no call.
         """
         call_id = message.call_id
         if call_id is None or self._lines is None:
             return None
-        own = (snapshot.input_place, *snapshot.taken_places, *snapshot.input_places)
-        if message.place is not None and message.place in own:
+        if _outside_the_check(snapshot, message.place):
             outside = CallCheck(kind=CallCheckKind.OUTSIDE)
             state.checked(call_id, TEXT_CAPABILITY, outside)
             state.note_call(call_id, "check", outside.kind.value, None)
@@ -2426,6 +2472,8 @@ class AuthorizingStage:
             refused = _refused_by(made)
             if refused is None and _needs_a_yes(made):
                 refused = _MESSAGE_NOT_ASKED if state.person is not None else _NO_ONE_ASKED
+            if refused == _NOT_GRANTED and _asked_unread(snapshot, message.place):
+                refused = _ASKED_UNREAD
         if refused is not None:
             _log.info("authorizing_message_not_allowed", stage="authorizing")
             if message.call_id is not None:
@@ -2437,7 +2485,12 @@ class AuthorizingStage:
                 call_id=message.call_id,
                 check=made,
             )
-        return replace(self._message(snapshot, message), check=made)
+        verdict = self._message(snapshot, message)
+        outside = made is not None and made.kind is CallCheckKind.OUTSIDE
+        if verdict.allowed and outside and _asked_there(snapshot, message.place):
+            # ADR-0382 §2:1: an approval's outcome, told where the request was asked.
+            _log.info("approval_outcome_outside", stage="authorizing")
+        return replace(verdict, check=made)
 
     def _message(self, snapshot: RoundToAuthorize, message: RoundMessage) -> MessageVerdict:
         """A message's place, and nothing else, checked (§4:7).
