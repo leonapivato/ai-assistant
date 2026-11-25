@@ -4814,6 +4814,8 @@ class PhasePath:
             connections=working.shown_connections,
             # ADR-0368 §8:2: a list's place, or one an item names, only where it may be shown.
             shows=None if working.could_show is None else working.could_show.shows,
+            # ADR-0382 §2:5: an approval's work is shown where its request was asked.
+            asked=() if working.asked_from is None else working.asked_from.places,
             offers=offers,
             waiting=waiting,
             declined=() if state is None else state.declined,

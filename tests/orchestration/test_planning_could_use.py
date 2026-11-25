@@ -83,3 +83,29 @@ async def test_a_place_the_work_may_not_be_shown_is_left_out_of_connections() ->
             shows=CouldUse(connections=frozenset({OWN_CHAT_CONNECTION}), own=frozenset()).shows
         )
     )
+
+
+async def test_where_an_approvals_request_was_asked_is_shown_though_the_hub_did_not_hand_it() -> (
+    None
+):
+    """ADR-0382 §2:5: a place an input of the asking activation came from, such as one
+    that joined it and is no longer among the hub chat's recent conversations, has an
+    entry of its own, once, and only where the work may be shown it (ADR-0368 §8:2)."""
+    older = "conversation:c-older"
+    approvals = CouldUse(
+        connections=frozenset(), own=frozenset({"approvals:approvals"}), asked=frozenset({older})
+    )
+
+    async def shown(**fields: object) -> list[str]:
+        stage, completer = _stage(RoundResponse())
+        await stage.plan(_inputs(**fields))
+        briefing = completer.last_call.exchange.briefing
+        return [one.text or "" for one in tags(section(briefing, "## Connections"), "connection")]
+
+    # The hub's connections as the phases hand them after narrowing: none it could use.
+    assert await shown(connections=(), asked=(older,), shows=approvals.shows) == [
+        "a conversation in the system's own chat"
+    ]
+    assert await shown(asked=("conversation:c-two",)) == await shown(), "once, as handed"
+    hidden = CouldUse(connections=frozenset(), own=frozenset({"approvals:approvals"}))
+    assert await shown(connections=(), asked=(older,), shows=hidden.shows) == []

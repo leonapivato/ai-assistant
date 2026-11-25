@@ -1332,6 +1332,10 @@ class PlanningInputs:
             that it may not be shown is left out of Connections, and an item from such a
             place carries no ``where``, as an item whose place no kind declares carries
             none; ``None`` where nothing narrows what is shown.
+        asked: For an approval's work, each place an input of the asking activation came
+            from, which its Connections section shows where the hub did not hand it
+            (ADR-0382 §2:5); it widens no place a message may go into (§2:3). Empty for
+            every other work.
         label_arguments: For a capability, which of its arguments name things by
             label, and what kind of thing each names.
         evidence: Digested evidence from earlier rounds' results.
@@ -1441,6 +1445,7 @@ class PlanningInputs:
     capabilities: tuple[ToolDefinition, ...] = ()
     could_use: frozenset[str] | None = None
     shows: Callable[[str], bool] | None = None
+    asked: tuple[str, ...] = ()
     label_arguments: Mapping[str, Mapping[str, LabelKinds]] = field(default_factory=dict)
     evidence: tuple[DigestedEvidence, ...] = ()
     outside_content_read: bool = False
@@ -3367,7 +3372,8 @@ class _Request:
         """The connections the section shows, before those items name (§3:5).
 
         The hub's, in its order, with the origin first where the hub did not hand it,
-        and each place the work's task suggests, marked suggested (§3:9).
+        each place the work's task suggests, marked suggested (§3:9), and, in an approval's
+        work, each place its request was asked from (ADR-0382 §2:5).
         """
         entries = list(self._inputs.connections)
         held = {one.place for one in entries}
@@ -3388,6 +3394,12 @@ class _Request:
                 built = self._built_entry(one.place)
                 if built is not None:
                     extra.append(replace(built, suggested=one.suggested))
+        for place in self._inputs.asked:
+            if not self._may_show(place) or place in held or place in {x.place for x in extra}:
+                continue
+            built = self._built_entry(place)
+            if built is not None:
+                extra.append(built)
         return [*extra, *entries]
 
     def _may_show(self, place: str) -> bool:
