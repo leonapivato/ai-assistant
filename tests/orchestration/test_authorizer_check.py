@@ -63,7 +63,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.orchestration import authorizer
-from ai_assistant.orchestration.approvals import REQUEST_APPROVAL
+from ai_assistant.orchestration.approvals import REQUEST_APPROVAL, AskedFrom
 from ai_assistant.orchestration.authorizer import (
     AuthorizingStage,
     CallToAuthorize,
@@ -233,6 +233,7 @@ _REASONS: Final = (
     authorizer._MESSAGE_NOT_ASKED,
     authorizer._TAPPED_SHORT,
     authorizer._NOT_THEIR_YES,
+    authorizer._ASKED_UNREAD,
 )
 
 
@@ -850,6 +851,154 @@ async def test_a_text_into_an_absorbed_inputs_place_stays_outside() -> None:
     assert into_line.allowed
 
 
+# --- ADR-0382: an approval's work, where its request was asked --------------------------------
+
+#: Where an approval's request was asked, and a second place the asking work's inputs came
+#: from: each a conversation of the hub chat, each on the approval's work's place list.
+_ASKED: Final = "conversation:asked"
+_ALSO_ASKED: Final = "conversation:also-asked"
+_THE_APPROVALS: Final = "approvals:approvals"
+
+
+def _approvals_texts(
+    *places: str, asked: AskedFrom | None, listed: tuple[str, ...] = (_ASKED, _LINE)
+) -> RoundToAuthorize:
+    """An approval's work's round, a ``send_text`` into each of ``places``, as the phases
+    build it: its place list, its own input's place the approvals', the person its request
+    is for, and the check run for no one (ADR-0368 §7's table)."""
+    calls = tuple(
+        ProposedCall(call_id=f"t{number}", name="send_text", arguments={"words": "booked"})
+        for number, _ in enumerate(places, 1)
+    )
+    return RoundToAuthorize(
+        activation_id="act-approval",
+        round=PlanningRound(id="round:1", recorded_at=_AT, calls=calls),
+        working=WorkingRecord(),
+        call_messages=tuple(
+            RoundMessage("booked", place, f"t{number}") for number, place in enumerate(places, 1)
+        ),
+        places=listed,
+        person=OWNER_PERSON_ID,
+        input_places=(_THE_APPROVALS,),
+        asked_from=asked,
+    )
+
+
+_NO_ONE_NO_GRANT: Final = _ran((CheckedFor.no_one(), _outcome(CheckOutcomeKind.NOT_DONE_NO_GRANT)))
+
+
+async def test_an_approvals_text_where_its_request_was_asked_stays_outside() -> None:
+    """ADR-0382 §2:1, §3:3: into the place its request was asked from, outside the check
+    and sent; into the line's chat, on its place list too but where the request was not
+    asked, checked for no one and not done."""
+    hub = _Hub(lines=FakePermissionLineStore(now=_now))
+
+    with capture_logs() as logs:
+        decided = await hub.authorize(
+            _approvals_texts(_ASKED, _LINE, asked=AskedFrom(places=(_ASKED,)))
+        )
+
+    told, elsewhere = decided.call_messages
+    assert told.check == CallCheck(kind=CallCheckKind.OUTSIDE)
+    assert told.allowed
+    assert told.effect_id is not None
+    assert elsewhere.check == _NO_ONE_NO_GRANT
+    assert (elsewhere.allowed, elsewhere.reason) == (False, authorizer._NOT_GRANTED)
+    assert [one["event"] for one in logs].count("approval_outcome_outside") == 1
+
+
+async def test_without_the_asking_places_the_same_text_is_not_done() -> None:
+    """ADR-0368 §7:5 as it stood: the place it was asked from is not one of the approval's
+    work's own inputs' places, so without §2:1 the text passes the check, for no one."""
+    hub = _Hub(lines=FakePermissionLineStore(now=_now))
+
+    decided = await hub.authorize(_approvals_texts(_ASKED, asked=None))
+
+    (told,) = decided.call_messages
+    assert told.check == _NO_ONE_NO_GRANT
+    assert (told.allowed, told.reason) == (False, authorizer._NOT_GRANTED)
+
+
+async def test_several_asking_places_each_stay_outside_alike() -> None:
+    """ADR-0382 §4:1: none is preferred; each on the place list is sent."""
+    hub = _Hub(lines=FakePermissionLineStore(now=_now))
+
+    decided = await hub.authorize(
+        _approvals_texts(
+            _ASKED,
+            _ALSO_ASKED,
+            asked=AskedFrom(places=(_ASKED, _ALSO_ASKED)),
+            listed=(_ASKED, _ALSO_ASKED, _LINE),
+        )
+    )
+
+    assert [(one.check, one.allowed) for one in decided.call_messages] == [
+        (CallCheck(kind=CallCheckKind.OUTSIDE), True),
+        (CallCheck(kind=CallCheckKind.OUTSIDE), True),
+    ]
+
+
+async def test_an_asking_place_off_the_place_list_stays_refused_by_its_place() -> None:
+    """ADR-0382 §2:3: §2:1 widens no place; one off the list is refused by the list."""
+    hub = _Hub(lines=FakePermissionLineStore(now=_now))
+
+    with capture_logs() as logs:
+        decided = await hub.authorize(
+            _approvals_texts(_ALSO_ASKED, asked=AskedFrom(places=(_ASKED, _ALSO_ASKED)))
+        )
+
+    (off,) = decided.call_messages
+    assert off.check == CallCheck(kind=CallCheckKind.OUTSIDE)
+    assert (off.allowed, off.reason) == (False, authorizer._OFF_THE_LIST)
+    assert "approval_outcome_outside" not in [one["event"] for one in logs]
+
+
+async def test_a_tasks_request_keeps_no_place_outside_so_its_suggested_place_is_not_done() -> None:
+    """ADR-0382 §4:3: an asking activation the Task Scheduler started holds no place its
+    input came from that takes a message, so a text into its task's suggested place,
+    which its place list holds, passes the check for no one and is not done."""
+    hub = _Hub(lines=FakePermissionLineStore(now=_now))
+
+    decided = await hub.authorize(_approvals_texts(_ASKED, asked=AskedFrom()))
+
+    (suggested,) = decided.call_messages
+    assert suggested.check == _NO_ONE_NO_GRANT
+    assert (suggested.allowed, suggested.reason) == (False, authorizer._NOT_GRANTED)
+
+
+async def test_an_asking_activation_that_could_not_be_read_says_so() -> None:
+    """ADR-0382 §4:4, ADR-0379 §3:1: no place is kept outside; a text the place list
+    allows is not done, *no grant covers it*, its reason saying where the request was
+    asked could not be read; one off the list keeps the check's own reason."""
+    hub = _Hub(lines=FakePermissionLineStore(now=_now))
+
+    decided = await hub.authorize(
+        _approvals_texts(_LINE, _ASKED, asked=AskedFrom(read=False), listed=(_LINE,))
+    )
+
+    listed, off = decided.call_messages
+    assert listed.check == _NO_ONE_NO_GRANT
+    assert (listed.allowed, listed.reason) == (False, authorizer._ASKED_UNREAD)
+    assert off.check == _NO_ONE_NO_GRANT
+    assert (off.allowed, off.reason) == (False, authorizer._NOT_GRANTED)
+
+
+async def test_lines_that_cannot_be_read_still_leave_an_asking_place_outside() -> None:
+    """ADR-0382 §2:1 with ADR-0379 §3:2: the check never reaches a text it keeps outside,
+    so a read that would fail is not needed for it; any other text is not done."""
+    lines = FakePermissionLineStore(now=_now)
+    lines.fail_next()
+    hub = _Hub(lines=lines)
+
+    decided = await hub.authorize(
+        _approvals_texts(_ASKED, _LINE, asked=AskedFrom(places=(_ASKED,)))
+    )
+
+    told, elsewhere = decided.call_messages
+    assert (told.check, told.allowed) == (CallCheck(kind=CallCheckKind.OUTSIDE), True)
+    assert (elsewhere.allowed, elsewhere.reason) == (False, authorizer._CHECK_UNREAD)
+
+
 # --- an email, request_approval and a ticket -------------------------------------------------
 
 
@@ -1035,7 +1184,11 @@ async def _answered(plans: FakePlanStore, tap: ApprovalTap) -> ApprovalRequest:
 
 
 async def _run_ticket(
-    stage: AuthorizingStage, plans: FakePlanStore, tap: ApprovalTap
+    stage: AuthorizingStage,
+    plans: FakePlanStore,
+    tap: ApprovalTap,
+    *,
+    asked: AskedFrom | None = None,
 ) -> RoundAuthorization:
     request = await _answered(plans, tap)
     running = CallToAuthorize(
@@ -1056,6 +1209,7 @@ async def _run_ticket(
             person=OWNER_PERSON_ID,
             tickets=frozenset({str(request.id)}),
             check_for=CheckSubject(),
+            asked_from=asked,
         )
     )
 
@@ -1096,6 +1250,28 @@ async def test_a_tickets_call_runs_only_where_the_check_allows_it_for_its_tapper
     tapper = CheckedFor.for_person(OWNER_PERSON_ID, tap_level or Sureness.NONE)
     assert one.check == _ran((tapper, expected))
     assert (one.verdict, one.reason) == (verdict, reason)
+
+
+@pytest.mark.parametrize("level", [Sureness.NORMAL, Sureness.WEAK], ids=["normal", "weak"])
+async def test_an_approvals_ticket_is_checked_for_its_tapper_wherever_it_was_asked(
+    level: Sureness,
+) -> None:
+    """ADR-0382 §3:2: where the request was asked changes nothing for the ticket's call,
+    checked for the tapper at the level the tap came by, as without it."""
+    stage, plans = _ticket_hub(FakePermissionLineStore(now=_now))
+    other, other_plans = _ticket_hub(FakePermissionLineStore(now=_now))
+
+    asked = await _run_ticket(
+        stage, plans, _tap(level), asked=AskedFrom(places=("conversation:asked",))
+    )
+    plain = await _run_ticket(other, other_plans, _tap(level))
+
+    (one,) = asked.verdicts
+    (before,) = plain.verdicts
+    assert (one.verdict, one.reason, one.check) == (before.verdict, before.reason, before.check)
+    tapper = CheckedFor.for_person(OWNER_PERSON_ID, level)
+    assert one.check is not None
+    assert [run.checked_for for run in one.check.runs] == [tapper]
 
 
 async def test_a_tickets_call_a_limit_covers_is_not_done() -> None:

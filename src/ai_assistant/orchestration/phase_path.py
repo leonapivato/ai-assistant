@@ -339,6 +339,7 @@ from ai_assistant.orchestration.approvals import (
     CALL_ARGUMENT,
     REQUEST_APPROVAL,
     REQUEST_APPROVAL_CAPABILITY,
+    AskedFrom,
     Ticket,
     nested_call,
 )
@@ -359,6 +360,7 @@ from ai_assistant.orchestration.channel_kinds import (
     SEARCH_ACCOUNT_KIND,
     place_channel,
     place_of,
+    places_inputs_came_from,
     served,
     takes_text,
 )
@@ -2008,13 +2010,7 @@ def _input_places(state: ActivationState | None) -> tuple[str, ...]:
     """
     if state is None:
         return ()
-    held: list[str] = []
-    trigger = state.trigger
-    came_by = None if trigger is None else trigger.channel or trigger.target
-    if isinstance(came_by, ChannelIdentity):
-        held.append(place_of(came_by))
-    held.extend(place_of(one.channel) for one in state.joined)
-    return tuple(dict.fromkeys(held))
+    return places_inputs_came_from(state.trigger, state.joined)
 
 
 def _own_places(state: ActivationState | None, working: PhaseWorking) -> tuple[str, ...]:
@@ -2250,6 +2246,9 @@ class PhaseWorking:
         # what the check reads (:func:`had_connections`), whatever a work is shown.
         self.shown_connections: tuple[ConnectionShown, ...] = ()
         self.could_show: CouldUse | None = None
+        # ADR-0382 §2:2: for an approval's work, where its request was asked, as code read
+        # it from the asking activation; ``None`` for every other work.
+        self.asked_from: AskedFrom | None = None
         # ADR-0349 §7:28: how the waits on an older activation move the pass's deadline,
         # which the engine hands in with the pass; ``None`` moves nothing.
         self.move_deadline: Callable[[float], None] | None = None
@@ -4433,6 +4432,7 @@ class PhasePath:
         activation_id: str,
         trigger: RecordedChannelTrigger | None,
         context: Sequence[PlaceItem],
+        asked_from: AskedFrom,
         labels: Sequence[PlanningLabel] = (),
     ) -> PhaseWorking:
         """Start the working set of an activation an approval's outcome started (ADR-0361 §6).
@@ -4442,18 +4442,20 @@ class PhasePath:
         into the places on its place list it names, each by its label (§6:7): the engine
         attaches :class:`Scheduling` before the first round. Its input carries no
         authority (§6:1), so no yes is read from it and no call needing the person runs
-        but under its ticket.
+        but under its ticket. A text into a place its request was asked from stays outside
+        the check, and it is shown those places (ADR-0382 §2:1, §2:5).
 
         Args:
             activation_id: The activation.
             trigger: The activation's recorded trigger, whose parties are empty.
             context: The context its input brings, as place items.
+            asked_from: Where its request was asked, as the engine read it (ADR-0382 §2:2).
             labels: The labels the episode already records.
 
         Returns:
             The working set, which the engine holds on the pass.
         """
-        return PhaseWorking(
+        working = PhaseWorking(
             activation_id=activation_id,
             place=PlaceWindow(
                 takes_message=False, description=APPROVALS_DESCRIPTION, items=tuple(context)
@@ -4464,6 +4466,8 @@ class PhasePath:
             round_limit=self._round_limit,
             labels=labels,
         )
+        working.asked_from = asked_from
+        return working
 
     async def written(
         self, conversation_id: str, activation_ids: Sequence[str], positions: Sequence[int]
@@ -5395,6 +5399,9 @@ class PhasePath:
             own=own,
             whose=whose,
             tickets=tickets,
+            # ADR-0382 §2:5: in an approval's work, where its request was asked, kept
+            # apart from its own places, so what it is offered stays as it is.
+            asked=() if working.asked_from is None else working.asked_from.places,
         )
         working.could_show = could
         working.shown_connections = tuple(
@@ -5801,6 +5808,7 @@ class PhasePath:
                 None if self._connections is None else had_connections(working.connections)
             ),
             input_places=_input_places(state),
+            asked_from=working.asked_from,
             check_sink=latest.checks,
             taken_places=() if places is not None else _taken_places(state, place),
             # ADR-0364 §9:3: a work that keeps no list may send a text into any connection

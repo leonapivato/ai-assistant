@@ -27,7 +27,10 @@ check allows it or the tap is the yes a grant that asks needs, as the authorizer
 
 **What the check would not reach** (ADR-0367 §4:7): a message into a place one of the work's
 own inputs came from. So ``send_text`` is one a work could use wherever it has such a place,
-and that place is a connection it could use (ADR-0368 §8, its closing note).
+and that place is a connection it could use (ADR-0368 §8, its closing note). In an approval's
+work, so is a place an input of the asking activation came from (ADR-0382 §2:1, §2:5), held
+apart from the work's own: it is shown, and changes nothing the work is offered, since that
+work's own input, the approvals', already offers it ``send_text``.
 
 **Which calls are on a connection** (:func:`connections_it_could_use`). A connection a call's
 thing can be (ADR-0376 §2:3) is weighed with that thing: a place that takes a text message by
@@ -357,7 +360,8 @@ class CouldUse:
     """The connections a work's authority could use, read for the section and the search.
 
     A place is shown only on positive evidence (ADR-0368 §8:2): one of the work's own
-    inputs came from it, or it is in a connection the work could use. A place outside the
+    inputs came from it, in an approval's work an input of the asking activation came from
+    it (ADR-0382 §2:5), or it is in a connection the work could use. A place outside the
     connections weighed, such as one an item names by ``where`` that the hub no longer
     lists, is weighed when it is asked about by the same rules: a place that takes a text
     message by ``send_text`` into it, which no record bears on, since a message is never
@@ -369,17 +373,21 @@ class CouldUse:
             check would make of a call into it (ADR-0367 §4:7).
         weighed: Each connection, by key, already weighed into ``connections``.
         authority: What the work's calls are checked against, for a place not weighed;
-            ``None`` weighs none, so only ``connections`` and ``own`` are shown.
+            ``None`` weighs none, so only ``connections``, ``own`` and ``asked`` are shown.
+        asked: In an approval's work, each place an input of the asking activation came
+            from, which it could use as it could ``own`` (ADR-0382 §2:1, §2:5); empty for
+            every other work.
     """
 
     connections: frozenset[str]
     own: frozenset[str]
     weighed: frozenset[str] = frozenset()
     authority: WorkAuthority | None = None
+    asked: frozenset[str] = frozenset()
 
     def shows(self, place: str) -> bool:
         """Whether the place may be shown to the work."""
-        if place in self.own:
+        if place in self.own or place in self.asked:
             return True
         key = connection_key(place)
         if key in self.connections:
@@ -417,6 +425,7 @@ def connections_it_could_use(  # noqa: PLR0913 — the authority, what the hub h
     own: Collection[str],
     whose: Mapping[str, str],
     tickets: Sequence[Ticket] = (),
+    asked: Collection[str] = (),
 ) -> CouldUse:
     """The connections a work's authority could use (ADR-0368 §8:2, ADR-0381 §6:3).
 
@@ -424,7 +433,8 @@ def connections_it_could_use(  # noqa: PLR0913 — the authority, what the hub h
     (:func:`could_allow`), or which a ticket it holds could run its call on
     (:func:`ticket_could_run`), each record read as ``whose`` hands it in; the system's own
     chat weighed whether or not a conversation of it is listed, since a search finds them;
-    and each place its own input came from.
+    each place its own input came from; and, in an approval's work, each place an input of
+    the asking activation came from (ADR-0382 §2:5).
 
     Args:
         authority: What the work's calls are checked against.
@@ -436,6 +446,8 @@ def connections_it_could_use(  # noqa: PLR0913 — the authority, what the hub h
         whose: The person each connection's record names, as read; a connection missing
             from it has no record (ADR-0381 §5:1).
         tickets: The tickets the work holds.
+        asked: In an approval's work, each place an input of the asking activation came
+            from (ADR-0382 §2:1); empty for every other work.
 
     Returns:
         What the work could use, and what it may not be shown.
@@ -466,6 +478,7 @@ def connections_it_could_use(  # noqa: PLR0913 — the authority, what the hub h
         own=frozenset(own),
         weighed=frozenset(acted_on),
         authority=authority,
+        asked=frozenset(asked),
     )
 
 

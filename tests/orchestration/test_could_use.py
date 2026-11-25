@@ -453,3 +453,43 @@ async def test_a_connections_search_finds_only_what_the_work_could_use() -> None
 
     assert [one.place for one in narrowed.connections] == [own_place]
     assert {one.place for one in whole.connections} == {own_place, f"conversation:{second.id}"}
+
+
+def test_an_approvals_work_is_shown_where_its_request_was_asked_apart_from_its_own() -> None:
+    """ADR-0382 §2:5: a work carrying no authority is shown the places its request was
+    asked from, as it is its own input's, and no other; the places stay apart from its own,
+    and what it is offered is its own input's alone."""
+    authority = _no_ones(CheckedFor.no_one())
+
+    could = connections_it_could_use(
+        authority,
+        _HAD,
+        declarations=_DECLARED,
+        accounts=_ACCOUNTS,
+        own=(APPROVALS_CONNECTION,),
+        whose={},
+        asked=(_HERE, _LINE),
+    )
+
+    assert _shown(could) == [_HERE, _LINE, APPROVALS_CONNECTION]
+    assert could.own == {APPROVALS_CONNECTION}
+    assert could.asked == {_HERE, _LINE}
+    assert could.connections == frozenset()
+    assert not could.shows(_OTHER)
+    assert _connections(authority, own=(APPROVALS_CONNECTION,)).shows(_HERE) is False
+
+
+async def test_a_connections_search_finds_where_an_approvals_request_was_asked() -> None:
+    """ADR-0382 §2:5: ``search_connections`` finds it, and no other conversation."""
+    store = FakeConversationStore()
+    asked = await store.start()
+    await store.start()
+    search = ConnectionSearch(conversations=store, scan=10, page_size=5)
+    place = f"conversation:{asked.id}"
+    approvals = CouldUse(
+        connections=frozenset(), own=frozenset({APPROVALS_CONNECTION}), asked=frozenset({place})
+    )
+
+    found = await search.search("text messages", 1, shows=approvals.shows)
+
+    assert [one.place for one in found.connections] == [place]
