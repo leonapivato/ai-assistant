@@ -8,12 +8,17 @@
   approval's work stays outside the check (§2), that nothing else of that work changes (§3), and
   its edges (§4). §5 records what it does to earlier decisions, §6 what building it needs, and §7
   what it leaves to others.
-- Authorization: the coordinator's proposal, not the owner's ruling. The owner has ruled nothing
-  here; the coordinator is putting the question to them beside this lane. #3678 records, among what
-  the owner accepted, "A work that carries no one's authority can only answer in its place (ADR-0368
-  §3:2, §7:5): a message the owner only forwards, what an approval's work does beyond running its
-  ticket, and a signal no rule covers." The coordinator assigned 0382 and ratifies it, under the
-  owner's delegation, once the owner has answered and its reviews are green.
+- Authorization: the owner's answer to one question, with the clauses' detail the coordinator's.
+  The coordinator asked, 2026-11-25: "After you answer a card, may the assistant tell you the result
+  where you asked: "Yes, it may" or "No, it may not"?" The owner answered, 2026-11-25: "Yes, it
+  may". Just before, by the coordinator's account, the owner had asked whether the assistant chooses
+  to tell the result, with nothing forced, and the coordinator had answered that this decision only
+  permits the message. The owner's answer is to that question alone. Which places, the edges in §4
+  and the records in §5 are the coordinator's, told to the owner in outline; the owner ruled no
+  edge. #3678 records, among what the owner accepted, "A work that carries no one's authority can
+  only answer in its place (ADR-0368 §3:2, §7:5): a message the owner only forwards, what an
+  approval's work does beyond running its ticket, and a signal no rule covers." The coordinator
+  assigned 0382 and ratifies it under the owner's delegation.
 - **Contract-surface decision; a decision only.** This document changes no Protocol, type, field
   or code. It amends who the check exempts, so it takes the adversarial and the architecture review.
 - **Partially supersedes**
