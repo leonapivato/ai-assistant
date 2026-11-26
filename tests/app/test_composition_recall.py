@@ -37,9 +37,10 @@ async def test_the_engine_is_built_with_recall_over_its_store_at_its_embedders_t
     try:
         recall = engine._recall
         assert isinstance(recall, RecallStage)
-        assert recall._memory is engine._memory
-        # ADR-0300 §7:1: the one story store, the engine surface's and the candidates'.
-        assert recall._stories is engine._stories
+        # ADR-0383 §9:1: through the holder, over the engine's own memory store and
+        # (ADR-0300 §7:1) the one story store, the engine surface's and the candidates'.
+        assert recall._stores._memory is engine._memory
+        assert recall._stores._stories is engine._stories
         assert recall._threshold == RECALL_THRESHOLDS[kind]
         assert recall._limit == RECALL_ITEM_LIMIT
         assert recall._budget == RECALL_BUDGET.total_seconds()

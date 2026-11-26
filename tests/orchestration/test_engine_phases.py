@@ -41,6 +41,7 @@ from understanding_support import (
     EXCERPT_CHARS,
     STATED_PROPOSAL,
     TextAsStructured,
+    bound_stores,
     recall_stage,
     understanding_stage,
 )
@@ -216,6 +217,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ActionPolicy,
         EgressBinder,
+        MemoryStore,
         PermissionLineStore,
         ThingRecordStore,
     )
@@ -1409,7 +1411,7 @@ async def test_an_activation_whose_every_message_the_place_refused_reads_couldnt
 _DENTIST: Final = "dentist appointment Elm Street"
 
 
-async def _no_episode_window(_: frozenset[str]) -> tuple[EpisodicMemory, ...]:
+async def _no_episode_window(_m: MemoryStore, _: frozenset[str]) -> tuple[EpisodicMemory, ...]:
     """An episode selector that selects nothing, so recall alone brings an episode."""
     return ()
 
@@ -1482,7 +1484,7 @@ async def _recalling_harness(
         understanding=understanding_stage(model=understanding),
         tools=(_BOOK,),
         memory=store,
-        windows=WindowsStage(episodes=_no_episode_window),
+        windows=WindowsStage(episodes=_no_episode_window, stores=bound_stores(store)),
         recall=recall_stage(store),
         phases=_phases(
             completer,

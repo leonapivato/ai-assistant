@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from understanding_support import OWNERS_SIGHT, bound_stores
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
@@ -30,7 +31,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
 )
 from ai_assistant.orchestration.recall import RecallStage
-from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
+from ai_assistant.testing import FakeMemoryStore
 from ai_assistant.testing.memories import memory_in_band
 
 if TYPE_CHECKING:
@@ -104,9 +105,7 @@ class _Scripted(FakeMemoryStore):
 def _stage(
     memory: FakeMemoryStore, *, limit: int = 3, budget: timedelta = timedelta(seconds=2)
 ) -> RecallStage:
-    return RecallStage(
-        memory=memory, stories=FakeStoryStore(), threshold=0.5, limit=limit, budget=budget
-    )
+    return RecallStage(stores=bound_stores(memory), threshold=0.5, limit=limit, budget=budget)
 
 
 async def _again(  # noqa: PLR0913 — one knob per argument a case varies
@@ -122,6 +121,7 @@ async def _again(  # noqa: PLR0913 — one knob per argument a case varies
     return await stage.recall_again(
         meaning,
         gaps,
+        sight=OWNERS_SIGHT,
         audience=audience,
         deadline=deadline,
         passed_over=passed_over,

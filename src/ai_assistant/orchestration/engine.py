@@ -347,7 +347,6 @@ from ai_assistant.orchestration.understanding import (
     ChannelWindow,
     SuppliedWindow,
     TranscriptWindow,
-    fetch_held,
     place_window_links,
 )
 from ai_assistant.orchestration.upkeep import RECONSIDERED
@@ -426,6 +425,7 @@ if TYPE_CHECKING:
         RulePush,
         ScheduledTask,
         SecretValue,
+        Sight,
         SourceGrant,
         SourceReadRecord,
         SpendTotal,
@@ -1169,6 +1169,23 @@ class _ActivationPass:
     def deadline_passed(self) -> bool:
         """The pass's deadline has passed, on the running loop's clock."""
         return self.deadline <= asyncio.get_running_loop().time()
+
+    @property
+    def sight(self) -> Sight:
+        """The sight the pass's work carries, which binds every read its stages make.
+
+        ADR-0383 §6:6, §7:7, §9:2: made with the work's facts and read here, by no stage
+        made or changed.
+
+        Raises:
+            RuntimeError: For a pass no channel admitted, whose work has no sight: no
+                read of a store is made for it (ADR-0383 §6:3).
+        """
+        sight = None if self.activation is None else self.activation.sight
+        if sight is None:
+            msg = "a pass reads a store only by its work's sight (ADR-0383 §7:7)"
+            raise RuntimeError(msg)
+        return sight
 
 
 @dataclass(slots=True)
@@ -8755,7 +8772,7 @@ class Engine:
                     assert isinstance(working, _EventPass)  # noqa: S101 — the two pass kinds
                     channel = SuppliedWindow(working.input.context)
                 windows = await self._windows.assemble(
-                    channel, audience=working.supply, episodes=True
+                    channel, sight=working.sight, audience=working.supply, episodes=True
                 )
         except TimeoutError:
             late = _windows_expired(working)
@@ -8782,8 +8799,9 @@ class Engine:
         a decision that kept none adds none.
         """
         recalled = working.recalled
-        fetched = await fetch_held(
-            self._memory,
+        assert self._windows is not None  # noqa: S101 — the engine refuses understanding without it
+        fetched = await self._windows.fetch(
+            sight=working.sight,
             episode_ids=windows.episode_ids,
             recalled_ids=()
             if recalled is None
@@ -9116,6 +9134,7 @@ class Engine:
         assert windows is not None  # noqa: S101 — the windows row precedes recall's wherever it is wired
         recalled = await self._recall.recall(
             working.text,
+            sight=working.sight,
             audience=working.supply,
             deadline=working.deadline,
             # ADR-0282 §4: what the windows already hold is not recalled again.

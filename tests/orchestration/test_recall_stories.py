@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from story_support import AT, activation, address, episode, failing, memory_of
+from understanding_support import OWNERS_SIGHT, bound_stores
 
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
@@ -86,11 +87,11 @@ def _stage(
     *,
     budget: timedelta = timedelta(seconds=2),
 ) -> RecallStage:
-    return RecallStage(memory=memory, stories=stories, threshold=0.5, limit=3, budget=budget)
+    return RecallStage(stores=bound_stores(memory, stories), threshold=0.5, limit=3, budget=budget)
 
 
 async def _recall(stage: RecallStage, *, deadline: float = math.inf) -> Recalled:
-    return await stage.recall(CUE, audience=BOUNDED, deadline=deadline)
+    return await stage.recall(CUE, sight=OWNERS_SIGHT, audience=BOUNDED, deadline=deadline)
 
 
 def _by_id(recalled: Recalled) -> dict[str, RecalledItem]:

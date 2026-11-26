@@ -331,7 +331,12 @@ from ai_assistant.orchestration.acting import (
     AuthorizedRound,
     ResultRoute,
 )
-from ai_assistant.orchestration.activation_state import CaptureFacts, Commitment, active_state
+from ai_assistant.orchestration.activation_state import (
+    CaptureFacts,
+    Commitment,
+    active_state,
+    work_sight,
+)
 from ai_assistant.orchestration.approval_calls import ApprovalAsker, ApprovalCalls, asking
 from ai_assistant.orchestration.approvals import (
     APPROVAL_CAPABILITIES,
@@ -5697,6 +5702,8 @@ class PhasePath:
         recalled = await recall.recall_again(
             understanding.meaning,
             tuple(one.gap for one in understanding.unclear),
+            # ADR-0383 §7:7: the second run reads by the sight the work carries.
+            sight=work_sight(),
             audience=given.supply,
             deadline=given.deadline,
             passed_over=windows.shared | frozenset(windows.episode_ids or ()) | frozenset(kept),

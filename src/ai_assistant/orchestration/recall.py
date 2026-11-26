@@ -1,12 +1,12 @@
 """The recall stage: long-term memory searched before understanding (ADR-0281).
 
 One orchestration-local stage, of the kind
-:class:`~ai_assistant.orchestration.understanding.UnderstandingStage` is: it holds an
-injected ``MemoryStore`` and ``StoryStore`` and the composition root's threshold, limit
-and budget, and it is **not a Protocol**. It calls no model and interprets nothing — it
-does not decide that a memory answers anything, is out of date, is relevant or settles
-a reference (§3). What it keeps it holds as ids, and the understanding phase fetches
-them in the same pass (ADR-0282 §4, §5).
+:class:`~ai_assistant.orchestration.understanding.UnderstandingStage` is: it holds the
+composition root's :class:`~ai_assistant.orchestration.bound_stores.BoundStores` and its
+threshold, limit and budget, and it is **not a Protocol**. It calls no model and
+interprets nothing — it does not decide that a memory answers anything, is out of date,
+is relevant or settles a reference (§3). What it keeps it holds as ids, and the
+understanding phase fetches them in the same pass (ADR-0282 §4, §5).
 
 **One cue, per band** (§3). The activation's input text, exactly as the pass holds it,
 is the query of one :meth:`~ai_assistant.core.protocols.MemoryStore.search` per band —
@@ -27,6 +27,11 @@ stage's two windows — filters what the searches returned before anything is ke
 on a pass whose audience posture is unbounded the searches ask for memories
 alone, so no episode reaches the pass through recall. The posture is read off the
 pass's :data:`~ai_assistant.orchestration.disclosure.TurnSupply` and nothing else.
+
+**Through the work's sight** (ADR-0383 §7:7). Each run reads the memory and story stores
+bound to the sight its pass carries, which it is handed and never makes (§9:2): what a
+search finds and a story lookup gives back is what that sight sees, and in the counting
+build every read answers as before and writes its count (§11:1).
 
 **The stories of what it keeps** (ADR-0300 §7). For each episode it keeps whose stored
 id is an activation's episode, recall reads ``StoryStore.stories_of`` for that
@@ -112,7 +117,8 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.protocols import DiagnosticSink, MemoryStore, StoryStore
-    from ai_assistant.core.types import EpisodeProcessingRecord, MemoryRecord
+    from ai_assistant.core.types import EpisodeProcessingRecord, MemoryRecord, Sight
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = ["RecallStage", "Recalled", "RecalledRecord"]
@@ -184,11 +190,10 @@ class Recalled:
 class RecallStage:
     """Search long-term memory with the activation's input (ADR-0281 §3, §4, §5)."""
 
-    def __init__(  # noqa: PLR0913 — two stores, three composition-root values and the diagnostic sink
+    def __init__(
         self,
         *,
-        memory: MemoryStore,
-        stories: StoryStore,
+        stores: BoundStores,
         threshold: float,
         limit: int,
         budget: timedelta,
@@ -197,9 +202,9 @@ class RecallStage:
         """Wire the stage to its stores, and to the values the composition root sets.
 
         Args:
-            memory: The store recall searches.
-            stories: The story store the kept episodes' stories are looked up in
-                (ADR-0300 §7:1).
+            stores: The holder that gives the memory store recall searches and the story
+                store the kept episodes' stories are looked up in (ADR-0300 §7:1), each
+                bound to the sight a run is handed (ADR-0383 §9:1).
             threshold: The recall threshold, set for the embedder the composition
                 root wires, because a score's scale belongs to its embedder (§3).
             limit: ``RECALL_ITEM_LIMIT``: how many records recall keeps at most.
@@ -221,8 +226,7 @@ class RecallStage:
         if budget.total_seconds() <= 0:
             msg = "recall's budget must be positive (ADR-0281 §5)"
             raise ValueError(msg)
-        self._memory = memory
-        self._stories = stories
+        self._stores = stores
         self._threshold = threshold
         self._limit = limit
         self._budget = budget.total_seconds()
@@ -232,6 +236,7 @@ class RecallStage:
         self,
         text: str,
         *,
+        sight: Sight,
         audience: TurnSupply,
         deadline: float,
         shown: frozenset[str] = frozenset(),
@@ -240,6 +245,7 @@ class RecallStage:
 
         Args:
             text: The activation's input, exactly as the pass holds it — the one cue.
+            sight: The sight the pass carries, which binds every read (ADR-0383 §7:7).
             audience: The pass's audience posture: its predicate filters what the
                 searches return, and an unbounded one searches memories alone.
             deadline: The pass's deadline on the running loop's clock, which caps
@@ -257,18 +263,22 @@ class RecallStage:
         """
         finds = _Finds(noting=self._diagnostics is not None)
         await self._given("first", {text: list(_CUES)})
+        memory = self._stores.memory(sight)
 
         async def kept() -> tuple[_Kept, ...]:
-            found = await self._search(text, audience, shown, finds)
+            found = await self._search(memory, text, audience, shown, finds)
             return tuple(_Kept(record, _CUES, score) for record, _, score in found)
 
-        return await self._decided(kept, cues=_CUES, deadline=deadline, finds=finds)
+        return await self._decided(
+            kept, self._stores.stories(sight), cues=_CUES, deadline=deadline, finds=finds
+        )
 
-    async def recall_again(  # noqa: PLR0913 — the two kinds of cue, the audience, the deadline, what is passed over and the cap
+    async def recall_again(  # noqa: PLR0913 — the two kinds of cue, the sight, the audience, the deadline, what is passed over and the cap
         self,
         meaning: str,
         gaps: Sequence[str],
         *,
+        sight: Sight,
         audience: TurnSupply,
         deadline: float,
         passed_over: frozenset[str],
@@ -280,6 +290,7 @@ class RecallStage:
             meaning: The latest understanding's ``meaning``.
             gaps: The ``gap`` of each of its unclear points, in the order understanding
                 recorded them (ADR-0353 §14:3).
+            sight: The sight the pass carries, as for the first run (ADR-0383 §7:7).
             audience: The pass's audience posture, as for the first run (§2:6).
             deadline: The pass's deadline on the running loop's clock, which caps
                 recall's budget, computed as the first run's is (§2:7).
@@ -314,15 +325,18 @@ class RecallStage:
 
         finds = _Finds(noting=self._diagnostics is not None)
         await self._given("second", cues)
+        memory = self._stores.memory(sight)
 
         async def kept() -> tuple[_Kept, ...]:
             found = [
-                (tuple(kinds), await self._search(text, audience, passed_over, finds))
+                (tuple(kinds), await self._search(memory, text, audience, passed_over, finds))
                 for text, kinds in cues.items()
             ]
             return _capped(found, cap)
 
-        return await self._decided(kept, cues=searched, deadline=deadline, finds=finds)
+        return await self._decided(
+            kept, self._stores.stories(sight), cues=searched, deadline=deadline, finds=finds
+        )
 
     async def _given(self, run: str, cues: Mapping[str, Sequence[RecallCue]]) -> None:
         """Write which run this is and its cues, before its searches (ADR-0314 §4)."""
@@ -371,6 +385,7 @@ class RecallStage:
     async def _decided(
         self,
         kept_by: Callable[[], Awaitable[tuple[_Kept, ...]]],
+        stories: Bound[StoryStore],
         *,
         cues: tuple[RecallCue, ...],
         deadline: float,
@@ -383,7 +398,7 @@ class RecallStage:
                 started. That is the pass's deadline, not recall's budget (§5).
         """
         try:
-            decided = await self._deciding(kept_by, cues=cues, deadline=deadline)
+            decided = await self._deciding(kept_by, stories, cues=cues, deadline=deadline)
         except Exception as exc:
             await self._returned(finds, None, exc)
             raise
@@ -393,6 +408,7 @@ class RecallStage:
     async def _deciding(
         self,
         kept_by: Callable[[], Awaitable[tuple[_Kept, ...]]],
+        stories: Bound[StoryStore],
         *,
         cues: tuple[RecallCue, ...],
         deadline: float,
@@ -412,7 +428,7 @@ class RecallStage:
         try:
             async with budget:
                 kept = await kept_by()
-                stories = [await self._stories_of(one.record) for one in kept]
+                found = [await _stories_of(stories, one.record) for one in kept]
         except MemoryStoreError as error:
             _log.warning("recall_failed", stage="recall", reason="memory_store_error")
             return Recalled(_decision(RecallOutcome.FAILED, cues=cues), error=error)
@@ -430,13 +446,18 @@ class RecallStage:
             return Recalled(_decision(RecallOutcome.NOTHING_FOUND, cues=cues))
         items = tuple(
             _item(one.record, of, found_by=one.found_by)
-            for one, of in zip(kept, stories, strict=True)
+            for one, of in zip(kept, found, strict=True)
         )
         scores = tuple(one.score for one in kept)
         return Recalled(_decision(RecallOutcome.FOUND, items, cues=cues), scores=scores)
 
     async def _search(
-        self, text: str, audience: TurnSupply, shown: frozenset[str], finds: _Finds
+        self,
+        memory: Bound[MemoryStore],
+        text: str,
+        audience: TurnSupply,
+        shown: frozenset[str],
+        finds: _Finds,
     ) -> tuple[tuple[RecalledRecord, BeliefBand, float], ...]:
         """§3's band-scoped searches, kept in band order until the limit is filled.
 
@@ -453,7 +474,7 @@ class RecallStage:
         )
         kept: dict[str, tuple[RecalledRecord, BeliefBand, float]] = {}
         for band in _BANDS:
-            found = await self._memory.search(text, limit=limit, kinds=kinds, bands=(band,))
+            found = await memory.search(text, limit=limit, kinds=kinds, bands=(band,))
             admitted = admitted_to_understanding(audience, found.records)
             finds.note(text, band, found.records, admitted)
             for record in admitted:
@@ -472,22 +493,23 @@ class RecallStage:
                     return tuple(kept.values())
         return tuple(kept.values())
 
-    async def _stories_of(self, record: RecalledRecord) -> tuple[str, ...]:
-        """The stories a kept episode belongs to directly, as the store returns them.
 
-        ADR-0300 §7:1: read only for an episode whose stored id is its activation's
-        episode — the activation read off its processing record and its address
-        compared with the id, never parsed out of it. A memory, and an
-        episode recording no activation or stored at another address, belong to no story,
-        so nothing is read for them.
-        """
-        if not isinstance(record, EpisodicMemory):
-            return ()
-        activation = activation_of(record)
-        if activation is None or record.id != episode_address(activation):
-            return ()
-        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
-        return tuple(header.story_id for header in await self._stories.stories_of(member))
+async def _stories_of(stories: Bound[StoryStore], record: RecalledRecord) -> tuple[str, ...]:
+    """The stories a kept episode belongs to directly, as the bound store returns them.
+
+    ADR-0300 §7:1: read only for an episode whose stored id is its activation's
+    episode — the activation read off its processing record and its address
+    compared with the id, never parsed out of it. A memory, and an
+    episode recording no activation or stored at another address, belong to no story,
+    so nothing is read for them.
+    """
+    if not isinstance(record, EpisodicMemory):
+        return ()
+    activation = activation_of(record)
+    if activation is None or record.id != episode_address(activation):
+        return ()
+    member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
+    return tuple(header.story_id for header in await stories.stories_of(member))
 
 
 class _Finds:

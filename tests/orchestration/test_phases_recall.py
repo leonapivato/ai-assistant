@@ -18,8 +18,10 @@ from structlog.testing import capture_logs
 from test_engine import AT
 from understanding_support import (
     ON_DEVICE_RECALL_THRESHOLD,
+    OWNERS_SIGHT,
     STATED_PROPOSAL,
     Tag,
+    bound_stores,
     recall_stage,
     rendered,
     understanding_stage,
@@ -50,7 +52,6 @@ from ai_assistant.orchestration.understanding import WindowsStage
 from ai_assistant.testing import (
     FakeMemoryStore,
     FakeModelProvider,
-    FakeStoryStore,
     FakeTraceSink,
 )
 from ai_assistant.testing.memories import memory as memory_record
@@ -60,6 +61,7 @@ from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 if TYPE_CHECKING:
     from test_engine import Harness
 
+    from ai_assistant.core.protocols import MemoryStore
     from ai_assistant.core.types import EpisodeProcessingRecord, MemoryRecord
 
 _BUDGET: Final = timedelta(seconds=10)
@@ -151,7 +153,7 @@ async def _forgetting(*forgotten: str) -> _ForgetsAfterSearch:
     return memory
 
 
-async def _no_episodes(_shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
+async def _no_episodes(_memory: MemoryStore, _shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
     """An episode selector choosing none, so every stored episode is past the windows."""
     return ()
 
@@ -255,8 +257,7 @@ async def test_a_store_failure_is_tolerated_and_understanding_runs() -> None:
 
 async def test_recalls_own_budget_running_out_is_tolerated_and_understanding_runs() -> None:
     recall = RecallStage(
-        memory=_Slow(),
-        stories=FakeStoryStore(),
+        stores=bound_stores(_Slow()),
         threshold=0.5,
         limit=3,
         budget=timedelta(milliseconds=20),
@@ -285,7 +286,10 @@ async def test_an_event_recalls_under_a_bounded_audience() -> None:
         occurred_at=AT,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
     )
-    harness = _harness(await _seeded(episode), windows=WindowsStage(episodes=_no_episodes))
+    harness = _harness(
+        await _seeded(episode),
+        windows=WindowsStage(episodes=_no_episodes, stores=bound_stores(FakeMemoryStore())),
+    )
     _, captured = await event(harness)
     record = processing(captured)
     assert _entries(record)[:3] == [
@@ -348,14 +352,14 @@ async def test_an_understood_event_is_found_by_a_later_activation_that_shares_it
             if isinstance(episode, EpisodicMemory) and episode.processing_record is not None
         }
         recall = RecallStage(
-            memory=store,
-            stories=FakeStoryStore(),
+            stores=bound_stores(store),
             threshold=ON_DEVICE_RECALL_THRESHOLD,
             limit=3,
             budget=_BUDGET,
         )
         later = await recall.recall(
             "Is the north trail at Pine Flat open again?",
+            sight=OWNERS_SIGHT,
             audience=BoundedAudienceSupply(speakable_attested_sources=frozenset()),
             deadline=asyncio.get_running_loop().time() + 30,
         )

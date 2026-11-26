@@ -25,6 +25,7 @@ from understanding_support import (
     STATED_PROPOSAL,
     Container,
     Rendered,
+    bound_stores,
     recall_stage,
     rendered,
     understanding_stage,
@@ -35,6 +36,7 @@ from ai_assistant.core.types import (
     ControllerStage,
     RecallOutcome,
     RecordHome,
+    Sight,
     StageOutcome,
     StoryActor,
     StoryChange,
@@ -146,14 +148,17 @@ class _ForgetsWhatItChose(WindowsStage):
     """A windows stage whose chosen episodes are deleted before understanding fetches them."""
 
     def __init__(self, memory: FakeMemoryStore) -> None:
-        super().__init__(episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT))
+        super().__init__(
+            episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT).walk,
+            stores=bound_stores(memory),
+        )
         self._memory = memory
         self.chosen: list[tuple[str, ...] | None] = []
 
     async def assemble(
-        self, channel: ChannelWindow, *, audience: TurnSupply, episodes: bool
+        self, channel: ChannelWindow, *, sight: Sight, audience: TurnSupply, episodes: bool
     ) -> Windows:
-        windows = await super().assemble(channel, audience=audience, episodes=episodes)
+        windows = await super().assemble(channel, sight=sight, audience=audience, episodes=episodes)
         self.chosen.append(windows.episode_ids)
         for episode_id in windows.episode_ids or ():
             await self._memory.delete(episode_id)
@@ -483,7 +488,9 @@ def _recalling(
     return phases_harness(
         memory=memory,
         understanding=understanding_stage(model=model),
-        windows=WindowsStage(episodes=RecentEpisodes(memory=memory, limit=1)),
+        windows=WindowsStage(
+            episodes=RecentEpisodes(memory=memory, limit=1).walk, stores=bound_stores(memory)
+        ),
         recall=recall_stage(memory, stories=stories if recall_stories is None else recall_stories),
         stories=stories,
         story_candidates=StoryCandidates(

@@ -55,7 +55,9 @@ async def test_the_observer_is_wired_over_the_roots_own_stores_and_the_windows_s
         observer = _observer(engine)
         windows = engine._windows
         assert windows is not None
-        assert observer._episodes is windows._episodes, "the window it tests is the one shown"
+        # ADR-0383 §9:1: the windows stage walks the same selector over its pass's store.
+        shown = getattr(windows._episodes, "__self__", None)
+        assert observer._episodes is shown, "the window it tests is the one shown"
         assert observer._memory is engine._memory
         assert observer._plans is engine._plans
         assert observer._reader._stories is engine._stories

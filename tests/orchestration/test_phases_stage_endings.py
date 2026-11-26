@@ -31,6 +31,7 @@ from test_engine import AT
 from understanding_support import (
     EPISODE_LIMIT,
     STATED_PROPOSAL,
+    bound_stores,
     recall_stage,
     understanding_stage,
 )
@@ -44,6 +45,7 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     RecallOutcome,
+    Sight,
     StageOutcome,
     UnderstandingOmission,
 )
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
 
     from test_engine import Harness
 
+    from ai_assistant.core.protocols import MemoryStore
     from ai_assistant.core.types import Message
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.understanding import ChannelWindow, Windows
@@ -239,11 +242,15 @@ async def test_an_episode_selection_outlasting_the_deadline_times_the_windows_st
     """
     model = FakeModelProvider(STATED_PROPOSAL)
 
-    async def hangs(shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
+    async def hangs(memory: MemoryStore, shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
         await asyncio.sleep(10)
         return ()
 
-    harness, completer = _built(model, windows=WindowsStage(episodes=hangs), budget=_SHORT)
+    harness, completer = _built(
+        model,
+        windows=WindowsStage(episodes=hangs, stores=bound_stores(FakeMemoryStore())),
+        budget=_SHORT,
+    )
 
     episode = await _ended(harness)
 
@@ -261,16 +268,19 @@ class _UnyieldingWindows(WindowsStage):
     """A windows stage that holds the loop past a short deadline, then returns."""
 
     async def assemble(
-        self, channel: ChannelWindow, *, audience: TurnSupply, episodes: bool
+        self, channel: ChannelWindow, *, sight: Sight, audience: TurnSupply, episodes: bool
     ) -> Windows:
         time.sleep(0.06)  # noqa: ASYNC251 — the point: no timer can fire while it runs
-        return await super().assemble(channel, audience=audience, episodes=episodes)
+        return await super().assemble(channel, sight=sight, audience=audience, episodes=episodes)
 
 
 async def test_windows_that_cross_the_deadline_without_yielding_are_the_expiry() -> None:
     """ADR-0280 §5: assembly that returned past the deadline is the stage's timeout."""
     memory = FakeMemoryStore(now=lambda: AT)
-    windows = _UnyieldingWindows(episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT))
+    windows = _UnyieldingWindows(
+        episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT).walk,
+        stores=bound_stores(memory),
+    )
     harness, completer = _built(memory=memory, windows=windows, budget=_SHORT)
 
     episode = await _ended(harness)

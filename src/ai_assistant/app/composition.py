@@ -95,6 +95,7 @@ from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapabilit
 from ai_assistant.orchestration.approval_calls import ApprovalsSeams
 from ai_assistant.orchestration.approvals import THE_APPROVALS
 from ai_assistant.orchestration.authorizer import AuthorizingStage
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.channel_kinds import (
     EMAIL_ACCOUNT_KIND,
     FORECAST_ACCOUNT_KIND,
@@ -2070,8 +2071,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # ADR-0276 §4's episode selector, **one object** handed to the windows stage that
         # shows understanding the episode window and to the observer that tests which
         # episodes have left it (ADR-0329 §15:3), so the window the observer tests is the
-        # window understanding is shown. Swapping the method is a change on this line.
+        # window understanding is shown, by one method. Swapping the method is a change on
+        # this line. The windows stage walks it over the store bound to its pass's sight
+        # (ADR-0383 §7:7), the observer over the store it holds until B9 binds that read.
         episode_selector = RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT)
+        # ADR-0383 §9:1: the one holder that binds stores for a pass, over the very stores
+        # every other reader holds. A converted stage holds it and never a store, and asks
+        # it for a store only for the sight its pass carries; whether a bound store
+        # withholds or counts is each store's construction (§7:10), not the holder's.
+        pass_stores = BoundStores(memory=memory, stories=stories)
         # ADR-0329's observer, memory's one writer (§2:1): a background stage over its two
         # routes, the commit step's carrying framing and placement (ADR-0346 §10:2), the
         # one memory store, the write stage over the writer persisting to that store
@@ -2256,17 +2264,17 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 diagnostics=diagnostics,
             ),
             understanding_version_limit=UNDERSTANDING_VERSION_LIMIT,
-            # ADR-0282's windows stage, holding the initial episode selector over the
-            # one memory store. The selector is the method ADR-0276 §4 makes a wiring
-            # choice: swapping it is a change on this line and nowhere else.
-            windows=WindowsStage(episodes=episode_selector),
+            # ADR-0282's windows stage, holding the initial episode selector, walked over
+            # the one memory store bound to its pass's sight (ADR-0383 §7:7). The selector
+            # is the method ADR-0276 §4 makes a wiring choice: swapping it is a change on
+            # this line and nowhere else.
+            windows=WindowsStage(episodes=episode_selector.walk, stores=pass_stores),
             # ADR-0281's recall stage, over the same memory store, with the threshold
             # chosen for the embedder that store was built with, and the one story
             # store, where it looks up the stories of the episodes it keeps (ADR-0300
-            # §7).
+            # §7), each bound to its pass's sight (ADR-0383 §7:7).
             recall=RecallStage(
-                memory=memory,
-                stories=stories,
+                stores=pass_stores,
                 threshold=RECALL_THRESHOLDS[settings.embedder],
                 limit=RECALL_ITEM_LIMIT,
                 budget=RECALL_BUDGET,

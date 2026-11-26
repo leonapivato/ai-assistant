@@ -39,7 +39,7 @@ from test_engine_phases import (
     _settled,
 )
 from test_planning import _episode as _past_episode
-from understanding_support import recall_stage, understanding_stage
+from understanding_support import bound_stores, recall_stage, understanding_stage
 
 from ai_assistant.core.types import (
     EpisodicMemory,
@@ -92,7 +92,7 @@ async def _harness(completer: FakeToolCallingCompleter) -> Harness:
         understanding=understanding_stage(model=understanding),
         tools=(_BOOK,),
         memory=store,
-        windows=WindowsStage(episodes=_no_episode_window),
+        windows=WindowsStage(episodes=_no_episode_window, stores=bound_stores(store)),
         recall=recall_stage(store),
         phases=_phases(completer, digests=FakeModelProvider(reply=_NOTHING_DIGESTED)),
     )

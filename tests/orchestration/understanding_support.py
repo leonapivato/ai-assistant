@@ -12,7 +12,21 @@ from pydantic import BaseModel
 
 from ai_assistant.core.protocols import StructuredCompleter
 from ai_assistant.core.reply_shapes import read_reply, reply_shape_version
-from ai_assistant.core.types import ReplyExchange, ReplyFailure, ReplyMode, StructuredReply
+from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    AuthorityKind,
+    InputSender,
+    ReplyExchange,
+    ReplyFailure,
+    ReplyMode,
+    Sight,
+    StructuredReply,
+    Sureness,
+    WorkAuthority,
+    WorkFacts,
+    WorkFor,
+)
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
@@ -46,6 +60,19 @@ FAKE_RECALL_THRESHOLD: Final = 0.5
 #: The root's threshold for the vendored on-device embedder, restated for the suite that
 #: recalls over it; ``tests/app`` pins that the root wires this same one.
 ON_DEVICE_RECALL_THRESHOLD: Final = 0.58
+
+#: The sight of the owner's own message at normal, as admission makes it (ADR-0383 §6's
+#: first row): the owner's domain and the shared things. For suites that run a stage on
+#: its own, with no admitted work to carry one.
+OWNERS_SIGHT: Final = Sight.of_work(
+    WorkFacts(
+        for_whom=WorkFor.for_person(OWNER_PERSON_ID),
+        authority=WorkAuthority(kind=AuthorityKind.SENDERS, persons=(OWNER_PERSON_ID,)),
+        level=Sureness.NORMAL,
+    ),
+    (InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL),),
+    activation="00000000-0000-4000-8000-000000000000",
+)
 
 #: The smallest well-formed proposal: a meaning grounded in the input alone.
 STATED_PROPOSAL: Final = json.dumps({"understanding": "The input means what it says."})
@@ -102,9 +129,20 @@ def understanding_stage(
     )
 
 
+def bound_stores(memory: MemoryStore, stories: StoryStore | None = None) -> BoundStores:
+    """The holder the composition root builds, over ``memory`` and ``stories``.
+
+    An empty story store where none is named.
+    """
+    return BoundStores(memory=memory, stories=FakeStoryStore() if stories is None else stories)
+
+
 def windows_stage(memory: MemoryStore) -> WindowsStage:
     """The windows stage the composition root builds, its selector over ``memory``."""
-    return WindowsStage(episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT))
+    return WindowsStage(
+        episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT).walk,
+        stores=bound_stores(memory),
+    )
 
 
 def recall_stage(
@@ -118,8 +156,7 @@ def recall_stage(
     An empty story store where none is named, so every kept episode belongs to no story.
     """
     return RecallStage(
-        memory=memory,
-        stories=FakeStoryStore() if stories is None else stories,
+        stores=bound_stores(memory, stories),
         threshold=threshold,
         limit=RECALL_LIMIT,
         budget=RECALL_BUDGET,
