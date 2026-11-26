@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
-    from ai_assistant.core.types import ChannelIdentity
+    from ai_assistant.core.types import ChannelIdentity, EpisodicMemory
     from ai_assistant.testing import FakeMemoryStore
 
 _BUDGET: Final = timedelta(seconds=10)
@@ -1193,3 +1193,146 @@ def test_its_bounds_are_positive_and_its_threshold_finite(
             threshold=threshold,
             prompt=default_prompt(STORY_TIDY_UP_PROMPT),
         )
+
+
+# --- the domain a run tends (ADR-0384 §4, §5) ------------------------------------------
+
+_OWNERS: Final = RecordHome.owners()
+_SHARED: Final = RecordHome.shared()
+
+
+def _of(home: RecordHome, record: EpisodicMemory) -> EpisodicMemory:
+    """``record`` landed in ``home``: the shared things' where a work for no one wrote it."""
+    return record.model_copy(update={"home": home})
+
+
+async def _story_in(stories: FakeStoryStore, home: RecordHome, *activations: str) -> str:
+    created = await stories.create(
+        [activation(a) for a in activations], home=home, actor=StoryActor.UNDERSTANDING
+    )
+    assert created.story_id is not None
+    return created.story_id
+
+
+@pytest.mark.parametrize(
+    ("tends", "result"),
+    [(_SHARED, TidyUpResult.WRITTEN), (_OWNERS, TidyUpResult.NO_STORY)],
+    ids=["its-own-domain", "another-domain"],
+)
+async def test_a_story_of_another_domain_is_absent_to_a_run(
+    tends: RecordHome, result: TidyUpResult
+) -> None:
+    """§5:2: absent as a story the store does not hold, so no completion and no write."""
+    stories = _stories()
+    memory = await memory_of(_of(_SHARED, episode("s-1")))
+    ours = await _story_in(stories, _SHARED, "s-1")
+    await _note(stories, ours, "The house's boiler service.")
+    model = FakeModelProvider(_reply(["The boiler service."]))
+
+    outcome = await _tidy_up(model, stories, memory).run(ours, tends=tends)
+
+    assert outcome.result is result
+    if result is TidyUpResult.NO_STORY:
+        assert model.calls == []
+        assert await _summary(stories, ours) is None
+        state = await stories.current_summary(ours)
+        assert state is not None
+        assert (len(state.pending_notes), state.pending_episodes) == (1, ("s-1",))
+
+
+async def test_a_member_episode_of_another_home_is_not_taken_in_and_stays_pending() -> None:
+    """The paragraph under §5:3, ADR-0383 §4:7: as a member the store no longer holds.
+
+    It is neither shown nor recorded as taken in; the member of the run's own domain
+    beside it is taken in as it always was.
+    """
+    stories = _stories()
+    memory = await memory_of(
+        episode("a-1", text=_USER_INPUT), _of(_SHARED, episode("s-1", text="The boiler."))
+    )
+    trip = await _story_in(stories, _OWNERS, "a-1", "s-1")
+    model = FakeModelProvider(_reply(["A camping trip."]))
+
+    outcome = await _tidy_up(model, stories, memory).run(trip, tends=_OWNERS)
+
+    assert outcome.result is TidyUpResult.WRITTEN
+    assert outcome.version is not None
+    assert outcome.version.took_in_episodes == ("a-1",)
+    shown = _shown(model)["episodes"]
+    assert [episode["the_users_own_input"] for episode in shown] == [_USER_INPUT]
+    state = await stories.current_summary(trip)
+    assert state is not None
+    assert state.pending_episodes == ("s-1",)
+
+
+async def test_planning_s_call_hands_no_domain_and_takes_in_as_it_always_has() -> None:
+    """ADR-0384 §6 is the lane's that owns planning's call: until then nothing changes."""
+    stories = _stories()
+    memory = await memory_of(episode("a-1"), _of(_SHARED, episode("s-1")))
+    trip = await _story_in(stories, _OWNERS, "a-1", "s-1")
+    ours = await _story_in(stories, _SHARED, "s-1")
+    await _note(stories, ours, "The house's boiler service.")
+    model = FakeModelProvider.scripted(_reply(["A camping trip."]), _reply(["The boiler."]))
+    tidy_up = _tidy_up(model, stories, memory)
+
+    mixed = await tidy_up.run(trip)
+    shared = await tidy_up.run(ours)
+
+    assert mixed.version is not None
+    assert mixed.version.took_in_episodes == ("a-1", "s-1")
+    assert shared.result is TidyUpResult.WRITTEN
+
+
+async def test_a_member_of_another_home_is_not_taken_for_outside() -> None:
+    """ADR-0303 §5:8 read as a member the store no longer holds is: the run starts."""
+    stories = _stories()
+    memory = await memory_of(
+        episode("a-1", text=_REPORT_INPUT, channel=EVENTS),
+        _of(_SHARED, episode("s-1", text=_REPORT_INPUT, channel=EVENTS)),
+    )
+    story = await _story_in(stories, _OWNERS, "a-1", "s-1")
+    model = FakeModelProvider.scripted(_reply(["A parks report."]), _reply(["A parks report."]))
+    tidy_up = _tidy_up(model, stories, memory)
+
+    assert (await tidy_up.run(story)).result is TidyUpResult.OUTSIDE_ONLY
+    tended = await tidy_up.run(story, tends=_OWNERS)
+
+    assert tended.result is TidyUpResult.WRITTEN
+    assert tended.version is not None
+    assert tended.version.took_in_episodes == ("a-1",)
+
+
+@pytest.mark.parametrize(
+    ("home", "result"),
+    [(_OWNERS, TidyUpResult.WRITTEN), (_SHARED, TidyUpResult.REFUSED)],
+    ids=["its-own-domain", "another-domain"],
+)
+async def test_a_flag_naming_a_story_of_another_domain_refuses_the_output(
+    home: RecordHome, result: TidyUpResult
+) -> None:
+    """§4:2: a change naming a record of another domain is refused, and nothing written.
+
+    The other story is still shown, since what a run reads is unchanged until the filter
+    decides reads (§1:2); only the change naming it is refused.
+    """
+    stories, memory, trip = await _trip()
+    other = await _story_in(stories, home, "a-1")
+    model = FakeModelProvider(
+        _reply(["A camping trip."], flags=[{"kind": "like_another", "story": "S1"}])
+    )
+
+    outcome = await _tidy_up(model, stories, memory).run(trip, tends=_OWNERS)
+
+    assert outcome.result is result
+    assert [shown["label"] for shown in _shown(model)["other_stories"]] == ["S1"]
+    if result is TidyUpResult.WRITTEN:
+        assert outcome.version is not None
+        assert outcome.version.flags == (StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other),)
+    else:
+        assert outcome.problem == (
+            "a like-another flag names a story of another domain than the run tends"
+        )
+        assert await _summary(stories, trip) is None
+        state = await stories.current_summary(trip)
+        assert state is not None
+        assert (len(state.pending_notes), state.pending_episodes) == (1, ("a-1",))

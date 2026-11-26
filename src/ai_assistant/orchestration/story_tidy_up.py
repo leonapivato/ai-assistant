@@ -80,6 +80,19 @@ is marked (ADR-0304 §3).
 :mod:`~ai_assistant.orchestration.story_privacy`: it reads the story's summary and notes,
 and the other stories' first lines, whatever a reader would be shown of them.
 
+**The domain a run tends** (ADR-0384 §4, §5). A run the scheduled tidy-up starts is
+handed the domain it tends (:mod:`~ai_assistant.orchestration.upkeep`), and writes only
+there: a story of another domain is absent to it, answered ``no_story`` as a story the
+store does not hold is (§5:2); a member episode of another home is not taken in, as a
+member the memory store no longer holds is not (the paragraph under §5:3, ADR-0383
+§4:7), so it is neither shown nor recorded as taken in, and stays pending; and a
+*looks like another story* flag naming a story of another domain is a change naming a
+record of another domain, so the output is refused whole and nothing of it is written
+(§4:2). What the run reads is unchanged until ADR-0369 §10's filter decides reads
+(§1:2): the other stories it is shown for its flag and the decisions it is shown are
+read as before. Planning's tidy-up call hands no domain and runs as it always has; its
+bound and its refusal are ADR-0384 §6's, for the lane that owns that call.
+
 **The write** goes through ``StoryStore.write_summary`` with the ``as_of`` of the read
 it was built on, taking in exactly the pending notes and episodes it read, so a run
 that lost a race is refused by the store and writes nothing (ADR-0300 §3:10).
@@ -106,6 +119,13 @@ pending first, a story whose last run in this process wrote nothing after every 
 whose has not (§4:4), and stops at its bound on tidy-ups started or its budget (§4:3).
 It is background maintenance of the assistant's own records (§4:7): it starts no
 activation, records no episode and tells nobody.
+
+**A run for each domain** (ADR-0384 §5:1, §10). One firing of the row runs once for each
+domain :data:`~ai_assistant.orchestration.upkeep.UPKEEP_DOMAINS` names, the owner's
+first, and hands each tidy-up its run's domain. A run finds due only the stories of its
+domain, so it starts no tidy-up of another's. The runs share one budget and each keeps
+its own bound on tidy-ups started (:class:`~ai_assistant.orchestration.upkeep.FiringBudget`);
+the firing's report and its one log line are the runs' counts added together.
 """
 
 from __future__ import annotations
@@ -138,6 +158,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     MemoryKind,
     Message,
+    RecordHome,
     ReplyFailure,
     Role,
     StoryFlag,
@@ -164,6 +185,7 @@ from ai_assistant.orchestration.story_flags import (
     recorded_decisions,
 )
 from ai_assistant.orchestration.story_privacy import activation_of
+from ai_assistant.orchestration.upkeep import UPKEEP_DOMAINS, FiringBudget
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -215,7 +237,9 @@ class TidyUpResult(StrEnum):
     so no completion was made and nothing was written. What is pending stays pending."""
 
     NO_STORY = "no_story"
-    """The store holds no such story, or it is merged: nothing is pending on it."""
+    """The store holds no such story, or it is merged: nothing is pending on it. For a
+    run that tends a domain, also a story of another domain, which is absent to it
+    (ADR-0384 §5:2)."""
 
     REFUSED = "refused"
     """The completion failed to parse or a check, so it was refused whole (§5:6)."""
@@ -426,6 +450,7 @@ class _Other:
 
     story_id: str
     first_line: StorySummaryLine | None
+    home: RecordHome
     written: bool = False
     outside: bool = False
     found_by_search: bool = False
@@ -453,7 +478,11 @@ class _Other:
 
 @dataclass(frozen=True, slots=True)
 class _Reading:
-    """Everything one run read, under the labels it renders."""
+    """Everything one run read, under the labels it renders.
+
+    ``tends`` is the domain the run tends, or ``None`` for planning's call, which hands
+    none (ADR-0384 §6 is that call's lane's).
+    """
 
     story_id: str
     state: StorySummaryState
@@ -461,6 +490,7 @@ class _Reading:
     episodes: dict[str, _Episode]
     others: dict[str, _Other]
     decisions: tuple[tuple[RecordedDecision, tuple[str, ...]], ...] = ()
+    tends: RecordHome | None = None
 
     def summary(self) -> dict[str, object] | str:
         """The summary, as the tidy-up's and marked or not (ADR-0303 §3:7)."""
@@ -640,11 +670,16 @@ class StoryTidyUp:
         """
         return self._failed.get(story_id)
 
-    async def run(self, story_id: str) -> TidyUpOutcome:
+    async def run(self, story_id: str, *, tends: RecordHome | None = None) -> TidyUpOutcome:
         """Tidy one story's summary, unless a run on it is already running.
 
         Args:
             story_id: The story whose summary is tidied.
+            tends: The domain the run tends (ADR-0384 §4, §5), handed by the scheduled
+                tidy-up. A story of another domain is then absent to the run, a member
+                episode of another home is not taken in, and a flag naming a story of
+                another domain refuses the output. ``None``, planning's call, runs as
+                it always has.
 
         Returns:
             What the run did. A store or provider error, and the budget expiring, are
@@ -656,7 +691,7 @@ class StoryTidyUp:
         self._running.add(story_id)
         try:
             async with asyncio.timeout(self._budget.total_seconds()):
-                outcome = await self._run(story_id)
+                outcome = await self._run(story_id, tends)
         except (StoryStoreError, MemoryStoreError, ModelError, TimeoutError) as exc:
             outcome = TidyUpOutcome(TidyUpResult.FAILED, error=exc)
         finally:
@@ -680,19 +715,24 @@ class StoryTidyUp:
         )
         return outcome
 
-    async def _run(self, story_id: str) -> TidyUpOutcome:
+    async def _run(self, story_id: str, tends: RecordHome | None) -> TidyUpOutcome:
         # Read before the summary, so a member re-linked between the two reads shows as
         # changed at the write, never as the same membership (#2761's guard).
         linked = await self._linked(story_id)
         state = await self._stories.current_summary(story_id)
-        if state is None or state.story.merged_into is not None:
+        if (
+            state is None
+            or state.story.merged_into is not None
+            # ADR-0384 §5:2: a story of another domain is absent to the run.
+            or (tends is not None and state.story.home != tends)
+        ):
             return TidyUpOutcome(TidyUpResult.NO_STORY)
-        episodes = await self._episodes(state.pending_episodes)
+        episodes = await self._episodes(state.pending_episodes, tends)
         if not state.pending_notes and not episodes:
             return TidyUpOutcome(TidyUpResult.NOTHING_TO_READ)
-        if await self._outside_only(story_id, state, episodes, linked):
+        if await self._outside_only(story_id, state, episodes, linked, tends):
             return TidyUpOutcome(TidyUpResult.OUTSIDE_ONLY)
-        reading = await self._reading(story_id, state, episodes, linked)
+        reading = await self._reading(story_id, state, episodes, linked, tends)
         # §5:2: exactly one completion, and no second whatever it answers.
         reply = await self._model.complete_structured(
             [
@@ -768,8 +808,13 @@ class StoryTidyUp:
                 return linked
             cursor = page.next_cursor
 
-    async def _episodes(self, pending: Sequence[str]) -> list[_Episode]:
-        """§5:2: the pending member episodes that are frozen and held, in link order."""
+    async def _episodes(self, pending: Sequence[str], tends: RecordHome | None) -> list[_Episode]:
+        """§5:2: the pending member episodes that are frozen and held, in link order.
+
+        For a run that tends a domain, an episode of another home is not taken in, as
+        one the memory store no longer holds is not (ADR-0384 §5, ADR-0383 §4:7): it is
+        not shown, the version does not record it taken in, and it stays pending.
+        """
         if not pending:
             return []
         addresses = [episode_address(activation_id) for activation_id in pending]
@@ -777,7 +822,11 @@ class StoryTidyUp:
         read: list[_Episode] = []
         for activation_id, address in zip(pending, addresses, strict=True):
             record = found.get(address)
-            if not isinstance(record, EpisodicMemory) or activation_of(record) != activation_id:
+            if (
+                not isinstance(record, EpisodicMemory)
+                or activation_of(record) != activation_id
+                or not _of(record, tends)
+            ):
                 continue
             projection = project_episode(record, excerpt_chars=self._excerpt_chars)
             read.append(_Episode(activation_id=activation_id, projection=projection))
@@ -789,13 +838,16 @@ class StoryTidyUp:
         state: StorySummaryState,
         episodes: Sequence[_Episode],
         linked: Mapping[str, int],
+        tends: RecordHome | None,
     ) -> bool:
         """ADR-0303 §5:8: whether nothing but outside content has come to the story.
 
         Every activation member's trigger's input is outside, by its episode's
         record, open or frozen, and every note the story holds is marked. A member
         whose episode the store no longer holds, or whose trigger's input is not outside
-        by its parties and relay mark, is not established as outside, so the run starts. The
+        by its parties and relay mark, is not established as outside, so the run starts. A
+        member of another home than the domain a run tends is read as one the store no
+        longer holds (ADR-0384 §5). The
         cheap tests run first: an episode or a note already read answers most stories
         without a further read.
         """
@@ -803,9 +855,13 @@ class StoryTidyUp:
             return False
         if any(not note.outside for note in state.pending_notes):
             return False
-        return await self._every_note_marked(story_id) and await self._every_member_outside(linked)
+        return await self._every_note_marked(story_id) and await self._every_member_outside(
+            linked, tends
+        )
 
-    async def _every_member_outside(self, linked: Mapping[str, int]) -> bool:
+    async def _every_member_outside(
+        self, linked: Mapping[str, int], tends: RecordHome | None
+    ) -> bool:
         """Whether every activation member's trigger's input is outside, by record.
 
         The trigger is read off the stored processing record itself, never through
@@ -818,7 +874,11 @@ class StoryTidyUp:
         found = await self._memory.get_many(list(addresses.values()))
         for activation_id, address in addresses.items():
             record = found.get(address)
-            if not isinstance(record, EpisodicMemory) or activation_of(record) != activation_id:
+            if (
+                not isinstance(record, EpisodicMemory)
+                or activation_of(record) != activation_id
+                or not _of(record, tends)
+            ):
                 return False
             processing = record.processing_record
             if processing is None or not parties_are_outside(
@@ -846,6 +906,7 @@ class StoryTidyUp:
         state: StorySummaryState,
         episodes: list[_Episode],
         linked: Mapping[str, int],
+        tends: RecordHome | None,
     ) -> _Reading:
         """The pending notes, the episodes and the other stories, labelled for rendering."""
         others = await self._others(story_id, state, episodes, linked)
@@ -856,6 +917,7 @@ class StoryTidyUp:
             episodes={f"E{index}": episode for index, episode in enumerate(episodes, start=1)},
             others={f"S{index}": other for index, other in enumerate(others, start=1)},
             decisions=await self._recorded(story_id),
+            tends=tends,
         )
 
     async def _recorded(
@@ -912,6 +974,7 @@ class StoryTidyUp:
                 _Other(
                     story_id=other_id,
                     first_line=summary.lines[0] if summary is not None and summary.lines else None,
+                    home=other.story.home,
                     written=summary is not None,
                     outside=summary is not None and summary.outside,
                     found_by_search=found_by_search,
@@ -1032,9 +1095,10 @@ class ScheduledTidyUp:
                 (ADR-0358 §4:2).
             quiet: How long ago the newest of what is pending must have come for a
                 story with anything pending to be due (§4:2).
-            per_run: The most tidy-ups one run starts (§4:3).
-            budget: The run's budget, ``scheduler_run_budget``: once it has passed, no
-                further tidy-up starts, as the matters pass's run is bounded (§4:3).
+            per_run: The most tidy-ups one run starts (§4:3), each domain's run its own.
+            budget: The firing's budget, ``scheduler_run_budget``, shared by its run for
+                each domain: once it has passed, no further tidy-up starts but each
+                run's first, as the matters pass's run is bounded (§4:3).
             now: The clock the quiet period is measured on.
 
         Raises:
@@ -1052,43 +1116,32 @@ class ScheduledTidyUp:
         self._now = checked_clock(now, owner="ScheduledTidyUp")
 
     async def run(self) -> ScheduledTidyUpReport:
-        """Tidy the stories due, one bounded run (ADR-0358 §4).
+        """Tidy the stories due, a bounded run for each domain (ADR-0358 §4, ADR-0384 §5:1).
 
-        **Discovery, then tidying**, as the matters pass runs: every story's header,
-        its summary state and, where an episode is pending on it, its view are read,
-        and only then does the budget start, so the first due story is always tried.
+        One run for each of :data:`~ai_assistant.orchestration.upkeep.UPKEEP_DOMAINS`,
+        in that order, each tending its domain alone. **Discovery, then tidying**, as
+        the matters pass runs: every story's header, and for a story of the run's domain
+        its summary state and, where an episode is pending on it, its view, are read,
+        and only then does the firing's budget start, so each run's first due story is
+        always tried and a run with nothing due spends none of it.
 
         Returns:
-            What the run did. Every count zero is a **successful** run over a store
-            with no story due.
+            What the runs did, their counts added together. Every count zero is a
+            **successful** firing over a store with no story due.
 
         Raises:
             StoryStoreError: If the story store cannot be read while finding what is
                 due. A tidy-up's own failure is its outcome, never raised (§5:11).
         """
-        due = sorted(await self._due(), key=_Due.order)
-        tidied = written = passed_over = 0
-        exhausted = True
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._budget.total_seconds()
-        for index, story in enumerate(due):
-            if tidied >= self._per_run or (index and loop.time() >= deadline):
-                exhausted = False
-                break
-            outcome = await self._tidy_up.run(story.story_id)
-            if outcome.result in _PASSED_OVER:
-                passed_over += 1
-                continue
-            tidied += 1
-            if outcome.result is TidyUpResult.WRITTEN:
-                written += 1
+        budget = FiringBudget(self._budget)
+        runs = [await self._tend(domain, budget) for domain in UPKEEP_DOMAINS]
         report = ScheduledTidyUpReport(
-            due=len(due),
-            tidied=tidied,
-            written=written,
-            not_written=tidied - written,
-            passed_over=passed_over,
-            exhausted=exhausted,
+            due=sum(run.due for run in runs),
+            tidied=sum(run.tidied for run in runs),
+            written=sum(run.written for run in runs),
+            not_written=sum(run.not_written for run in runs),
+            passed_over=sum(run.passed_over for run in runs),
+            exhausted=all(run.exhausted for run in runs),
         )
         _log.info(
             "scheduled_tidy_up",
@@ -1102,12 +1155,46 @@ class ScheduledTidyUp:
         )
         return report
 
-    async def _due(self) -> list[_Due]:
-        """ADR-0358 §4:2: every unmerged story whose pending count or quiet makes it due."""
+    async def _tend(self, tends: RecordHome, budget: FiringBudget) -> ScheduledTidyUpReport:
+        """One run, tending ``tends``: its due stories, under the firing's budget.
+
+        Its own bound on tidy-ups started (§4:3), and its first due story always tried.
+        """
+        due = sorted(await self._due(tends), key=_Due.order)
+        if due:
+            budget.start()
+        tidied = written = passed_over = 0
+        exhausted = True
+        for index, story in enumerate(due):
+            if tidied >= self._per_run or (index and budget.spent()):
+                exhausted = False
+                break
+            outcome = await self._tidy_up.run(story.story_id, tends=tends)
+            if outcome.result in _PASSED_OVER:
+                passed_over += 1
+                continue
+            tidied += 1
+            if outcome.result is TidyUpResult.WRITTEN:
+                written += 1
+        return ScheduledTidyUpReport(
+            due=len(due),
+            tidied=tidied,
+            written=written,
+            not_written=tidied - written,
+            passed_over=passed_over,
+            exhausted=exhausted,
+        )
+
+    async def _due(self, tends: RecordHome) -> list[_Due]:
+        """ADR-0358 §4:2: each unmerged story of ``tends`` its pending count or quiet makes due.
+
+        A story of another domain is passed over on its header, before anything more of
+        it is read (ADR-0384 §5:1).
+        """
         quiet_since = self._now() - self._quiet
         found: list[_Due] = []
         for story_id, header in (await read_headers(self._stories)).items():
-            if header.merged_into is not None:
+            if header.merged_into is not None or header.home != tends:
                 continue
             state = await self._stories.current_summary(story_id)
             if state is None or state.story.merged_into is not None:
@@ -1173,6 +1260,11 @@ def _checked(proposal: TidyUpReply, reading: _Reading) -> StorySummaryDraft:
         raise _Refused(msg) from exc
 
 
+def _of(record: EpisodicMemory, tends: RecordHome | None) -> bool:
+    """Whether ``record`` is of the domain a run tends; any record for planning's call."""
+    return tends is None or record.home == tends
+
+
 def _line(text: str) -> StorySummaryLine:
     """One line of the new summary.
 
@@ -1204,6 +1296,11 @@ def _flags(proposal: TidyUpReply, reading: _Reading) -> tuple[StoryFlag, ...]:
         other = None if proposed.story is None else reading.others.get(proposed.story)
         if other is None:
             msg = "a like-another flag names no story this run showed"
+            raise _Refused(msg)
+        if reading.tends is not None and other.home != reading.tends:
+            # ADR-0384 §4:2: a change naming a record of another domain is refused, and
+            # nothing of it is written.
+            msg = "a like-another flag names a story of another domain than the run tends"
             raise _Refused(msg)
         flags.setdefault(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other.story_id))
     return tuple(flags)

@@ -46,6 +46,7 @@ from ai_assistant.orchestration.matters_pass import (
     MATTERS_PASS_PROMPT,
     MattersPass,
     MattersPassReply,
+    MattersPassReport,
 )
 from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt, prompt_from
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import MemoryStore
-    from ai_assistant.core.types import StoryOutcome
+    from ai_assistant.core.types import EpisodicMemory, StoryOutcome
 
 _BUDGET: Final = timedelta(seconds=10)
 _LEAVE: Final = json.dumps({"decision": "leave"})
@@ -1267,3 +1268,148 @@ def test_its_bounds_are_positive(bounds: dict[str, Any]) -> None:
             prompt=default_prompt(MATTERS_PASS_PROMPT),
             **arguments,
         )
+
+
+# --- a run for each domain (ADR-0384 §4, §5) -------------------------------------------
+
+_OWNERS: Final = RecordHome.owners()
+_SHARED: Final = RecordHome.shared()
+
+
+def _of(home: RecordHome, record: EpisodicMemory) -> EpisodicMemory:
+    """``record`` landed in ``home``: the shared things' where a work for no one wrote it."""
+    return record.model_copy(update={"home": home})
+
+
+async def _story_in(stories: FakeStoryStore, home: RecordHome, *activations: str) -> str:
+    created = await stories.create(
+        [activation(a) for a in activations], home=home, actor=StoryActor.OWNER
+    )
+    assert created.story_id is not None
+    return created.story_id
+
+
+@pytest.mark.parametrize("home", [_OWNERS, _SHARED], ids=["owners", "shared"])
+async def test_a_story_a_grouping_mints_lands_in_the_domain_the_run_tends(
+    home: RecordHome,
+) -> None:
+    """§4:1, ADR-0383 §4:5: the shared things' flag is decided in their run, and its
+    grouping lands there; the owner's, as it always has, in the owner's.
+    """
+    stories = _stories()
+    memory = await memory_of(_of(home, episode("a-1")), _of(home, episode("b-1")))
+    trip = await _story_in(stories, home, "a-1")
+    other = await _story_in(stories, home, "b-1")
+    flag = await _raise(stories, trip, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other))
+    model = FakeModelProvider(
+        json.dumps({"decision": "group", "stories": ["S1", "S2"], "under": None})
+    )
+
+    report = await _pass(model, stories, memory).run()
+
+    assert (report.flags, report.decided) == (1, 1)
+    (header,) = await stories.stories_of(story(trip))
+    assert header.home == home
+    assert await _decisions(stories, trip) == [
+        (flag, StoryDecision.GROUPED, StoryActor.MATTERS_PASS)
+    ]
+
+
+@pytest.mark.parametrize("raised_by", ["owners", "shared"])
+async def test_a_flag_whose_stories_are_of_two_domains_is_decided_by_no_run(
+    raised_by: str,
+) -> None:
+    """§5:3: no completion for it and nothing written for it, by either domain's run.
+
+    No ``decided`` or ``not_applied`` line and no flag left, on either story: a record
+    already in error is met, and the pass does not compound it.
+    """
+    stories = _stories()
+    memory = await memory_of(episode("a-1"), _of(_SHARED, episode("s-1")))
+    mine = await _story_in(stories, _OWNERS, "a-1")
+    ours = await _story_in(stories, _SHARED, "s-1")
+    raiser, named = (mine, ours) if raised_by == "owners" else (ours, mine)
+    await _raise(stories, raiser, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=named))
+    model = FakeModelProvider(
+        json.dumps({"decision": "group", "stories": ["S1", "S2"], "under": None})
+    )
+    before = {story_id: await _log(stories, story_id) for story_id in (mine, ours)}
+
+    report = await _pass(model, stories, memory).run()
+
+    assert model.calls == []
+    assert report == MattersPassReport()
+    assert {story_id: await _log(stories, story_id) for story_id in (mine, ours)} == before
+    assert len((await stories.stories(limit=100)).stories) == 2
+
+
+async def test_each_domain_s_flags_are_decided_in_its_own_run_the_owners_first() -> None:
+    """§5:1, §10: one firing, a run for each domain, each its own bound on completions."""
+    stories = _stories()
+    memory = await memory_of(
+        episode("a-1", text="Mine."), _of(_SHARED, episode("s-1", text="Ours."))
+    )
+    ours = await _story_in(stories, _SHARED, "s-1")
+    ours_flag = await _raise(stories, ours, _TWO)
+    mine = await _story_in(stories, _OWNERS, "a-1")
+    mine_flag = await _raise(stories, mine, _TWO)
+    model = FakeModelProvider(_LEAVE)
+
+    report = await _pass(model, stories, memory, flags_per_run=1).run()
+
+    assert (report.flags, report.decided, report.exhausted) == (2, 2, True)
+    # The shared flag was raised first, and still the owner's run decides first.
+    shown = [_shown(model, call)["episodes"][0]["the_users_own_input"] for call in (0, 1)]
+    assert shown == ["Mine.", "Ours."]
+    assert await _decisions(stories, mine) == [
+        (mine_flag, StoryDecision.LEFT, StoryActor.MATTERS_PASS)
+    ]
+    assert await _decisions(stories, ours) == [
+        (ours_flag, StoryDecision.LEFT, StoryActor.MATTERS_PASS)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("named", "decided"),
+    [("E1", True), ("E2", False)],
+    ids=["its-own-domain", "another-home"],
+)
+@pytest.mark.parametrize("decision", ["split", "move"])
+async def test_a_change_naming_an_episode_of_another_home_is_refused_and_writes_nothing(
+    decision: str, named: str, *, decided: bool
+) -> None:
+    """§4:2: refused before the write, as a check refuses a reply, with nothing written.
+
+    The episode is still shown, since what a run reads is unchanged until the filter
+    decides reads (§1:2). ADR-0303 §8's ``not_applied`` records a change the store
+    refused, so the pass's own refusal is no decision and nothing is recorded.
+    """
+    stories = _stories()
+    memory = await memory_of(episode("a-1"), _of(_SHARED, episode("s-1")), episode("b-1"))
+    trip = await _story_in(stories, _OWNERS, "a-1", "s-1")
+    other = await _story_in(stories, _OWNERS, "b-1")
+    if decision == "split":
+        await _raise(stories, trip, _TWO)
+        reply = {"decision": "split", "story": "S1", "episodes": [named]}
+    else:
+        await _raise(stories, trip, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other))
+        reply = {"decision": "move", "from": "S1", "to": "S2", "episodes": [named]}
+    before = await _log(stories, trip)
+    model = FakeModelProvider(json.dumps(reply))
+
+    with capture_logs() as logs:
+        report = await _pass(model, stories, memory).run()
+
+    assert [shown["label"] for shown in _shown(model)["episodes"]][:2] == ["E1", "E2"]
+    if decided:
+        assert (report.decided, report.refused) == (1, 0)
+        assert await _members(stories, trip) == ["s-1"]
+        return
+    assert (report.decided, report.refused) == (0, 1)
+    assert await _log(stories, trip) == before
+    assert await _members(stories, trip) == ["a-1", "s-1"]
+    (refused,) = [entry for entry in logs if entry["event"] == "matters_pass_refused"]
+    assert (refused["failed"], refused["problem"]) == (
+        "check",
+        "the reply names an episode of another domain than the run tends",
+    )

@@ -344,6 +344,66 @@ async def test_a_run_with_nothing_due_rules_nothing_and_terminates() -> None:
     assert await engine.reconsider_notifications() == 0
 
 
+# --- the run tends the owner's domain alone (ADR-0384 §3:4) ------------------
+
+
+async def test_a_held_notification_of_another_domain_is_left_as_it_is() -> None:
+    """§3:4: not re-ruled, not dropped, not handed off; the owner's beside it is re-ruled.
+
+    It stays due: whom it goes to is a later decision's, and nothing here rules it.
+    """
+    store = FakeNotificationStore(now=lambda: AT)
+    policy = FakeNotificationPolicy()
+    engine = _wired(Harness(), store, policy)
+    ours = await store.admit(
+        _candidate("k1", expires=AT + timedelta(days=1)), home=RecordHome.shared(), policy=policy
+    )
+    mine = await store.admit(
+        _candidate("k2", expires=AT + timedelta(days=1)), home=RecordHome.owners(), policy=policy
+    )
+    assert ours.notification_id is not None
+    assert mine.notification_id is not None
+    await engine.set_notification_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class=_CLASS, reach=NotificationReach.INTERRUPT),)
+        )
+    )
+    held = await store.get(ours.notification_id)
+
+    assert await engine.reconsider_notifications() == 1
+
+    assert await store.get(ours.notification_id) == held
+    assert [record.id for record in await store.due()] == [ours.notification_id]
+    reached = await store.get(mine.notification_id)
+    assert reached is not None
+    assert reached.kind is NotificationDispositionKind.INTERRUPT
+
+
+async def test_the_drain_reads_past_a_page_of_another_domain_s_records() -> None:
+    """A page of them alone is progress, so the owner's behind them are still reached."""
+    store = FakeNotificationStore(now=lambda: AT)
+    policy = FakeNotificationPolicy()
+    engine = _wired(Harness(), store, policy)
+    for key, home in (
+        ("k1", RecordHome.shared()),
+        ("k2", RecordHome.shared()),
+        ("k3", RecordHome.owners()),
+        ("k4", RecordHome.shared()),
+        ("k5", RecordHome.owners()),
+    ):
+        await store.admit(_candidate(key), home=home, policy=policy)
+    await engine.set_notification_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class=_CLASS, reach=NotificationReach.INTERRUPT),)
+        )
+    )
+
+    ruled = await engine.reconsider_notifications(page=2)
+
+    assert ruled == 2
+    assert [record.home for record in await store.due()] == [RecordHome.shared()] * 3
+
+
 # --- the sweep runs inside an operation, so its ruling is correlated ---------
 
 
