@@ -970,8 +970,10 @@ class StoryCalls:
         """Run the tidy-up on a story; what it wrote is in the story's version log (§7).
 
         **Only on a story of the domain this work's records land in** (ADR-0384 §6:2).
-        The run is handed that domain as the one it tends, so a story of another domain
-        answers ``no_story`` and nothing is written, and an episode of another home is
+        A story of another domain is not tidied, answered as ``no_story``, before the run
+        is asked, since a run already on the story would answer ``busy`` first; the run
+        is handed the domain as the one it tends, so nothing of another domain is written
+        should the story's standing change between, and an episode of another home is
         not taken in nor a flag naming a story of another domain written (§4, §5). The
         tidy-up runs in a task of its own that inherits no work's state (ADR-0307 §7:2),
         so the domain is read off this activation's episode, which the hub fills and
@@ -980,9 +982,17 @@ class StoryCalls:
         """
         if self._tidy_up is None:
             raise _NotDone(ToolFailureKind.UNAVAILABLE, "no tidy-up is wired", reason="no_tidy_up")
-        story = await self._current(_text(parameters, STORY_ARGUMENT))
+        header = await self._current_header(_text(parameters, STORY_ARGUMENT))
         tends = await self._work_home(self._activation(parameters))
-        outcome = await self._tidy_up.run(story, tends=tends)
+        if header.home != tends:
+            # Judged here first: a run already on the story answers busy before it reads
+            # the domain it is handed, which would report a story of another domain done.
+            raise _NotDone(
+                ToolFailureKind.REFUSED,
+                f"the tidy-up wrote nothing: {TidyUpResult.NO_STORY.value}",
+                reason=f"tidy_up_{TidyUpResult.NO_STORY.value}",
+            )
+        outcome = await self._tidy_up.run(str(header.story_id), tends=tends)
         if outcome.result not in _TIDIED:
             raise _NotDone(
                 ToolFailureKind.REFUSED,

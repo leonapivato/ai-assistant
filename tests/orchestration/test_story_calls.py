@@ -10,6 +10,7 @@ naming any note on a pass that may not show the owner's records.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import replace
@@ -1688,7 +1689,11 @@ async def test_a_move_still_carries_an_episode_forgotten_since() -> None:
 
 
 def _tidying(model: FakeModelProvider, stories: FakeStoryStore, memory: Any) -> StoryCalls:
-    tidy_up = StoryTidyUp(
+    return StoryCalls(stories=stories, memory=memory, tidy_up=_tidy_up_of(model, stories, memory))
+
+
+def _tidy_up_of(model: FakeModelProvider, stories: FakeStoryStore, memory: Any) -> StoryTidyUp:
+    return StoryTidyUp(
         model=structured(model),
         stories=stories,
         memory=memory,
@@ -1699,7 +1704,6 @@ def _tidying(model: FakeModelProvider, stories: FakeStoryStore, memory: Any) -> 
         threshold=0.0,
         prompt=default_prompt(STORY_TIDY_UP_PROMPT),
     )
-    return StoryCalls(stories=stories, memory=memory, tidy_up=tidy_up)
 
 
 def _tidy_reply(lines: list[str], flags: list[dict[str, str]] | None = None) -> str:
@@ -1822,3 +1826,42 @@ async def test_a_tidy_up_writes_no_flag_naming_a_story_of_another_domain() -> No
     versions = await stories.summary_versions(trip)
     assert versions is not None
     assert versions.versions == ()
+
+
+class _HeldModel(FakeModelProvider):
+    """A provider whose completion waits until released, so a run stays on its story."""
+
+    def __init__(self, reply: str) -> None:
+        super().__init__(reply=reply)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def complete(self, messages: Any, *, model: str | None = None) -> Any:
+        self.entered.set()
+        await self.release.wait()
+        return await super().complete(messages, model=model)
+
+
+async def test_a_tidy_up_of_another_domain_is_not_done_while_a_run_is_on_that_story() -> None:
+    """§6:2: a scheduled run tending the shared things is on their story; an owner's work's
+    call on it is not done, and is never reported done as a busy run would be."""
+    stories = FakeStoryStore(now=_now)
+    memory = await story_memory_of(story_episode(_ACTIVATION), _shared(story_episode("s-1")))
+    shared = await stories.create(
+        [_activation_member("s-1")], home=RecordHome.shared(), actor=StoryActor.OWNER
+    )
+    assert shared.story_id is not None
+    story_id = str(shared.story_id)
+    await stories.append_note(story_id, "The boiler.", author=StoryNoteAuthor.OWNER)
+    model = _HeldModel(_tidy_reply(["The boiler."]))
+    tidy_up = _tidy_up_of(model, stories, memory)
+    calls = StoryCalls(stories=stories, memory=memory, tidy_up=tidy_up)
+    running = asyncio.create_task(tidy_up.run(story_id, tends=RecordHome.shared()))
+    await model.entered.wait()
+
+    result = await calls.run(_call(TIDY_STORY, {STORY_ARGUMENT: story_id}))
+
+    model.release.set()
+    await running
+    _not_done_with(result, ToolFailureKind.REFUSED, "the tidy-up wrote nothing: no_story")
+    assert len(model.calls) == 1, "only the scheduled run made a completion"
