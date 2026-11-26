@@ -69,6 +69,29 @@ keeps the home it had (§4:6). An episode whose first read fails, with no record
 leaves no home at hand, so nothing is recorded of that attempt: the episode stays due
 and is read again by the next run, with no backoff and no count toward stuck.
 
+**Each episode is read through its own sight** (ADR-0383 §6:7, §7:7). For each episode a
+run takes, code makes the producer's sight, once, from the facts and senders that episode
+records (:func:`_sight_of`, :meth:`~ai_assistant.core.types.Sight.of_producer`): the
+bounds its work's facts and senders give, with no activation, so nothing is its own; an
+anyone bound alone, which sees nothing, where it records no facts. Every read the run
+makes for the episode, the episode itself, its observation record, what the reading
+follows, retrieval, the person's fields and the writer's own reads, and every write, the
+observation record and each finding's, is of a store the composition root's
+:class:`~ai_assistant.orchestration.bound_stores.BoundStores` binds to that sight. No
+step of the run makes or changes it.
+
+**What stays unbound, and why** (§7:12, §8:5). The finding of what is due, the window it
+tests, the episodes it pages and their observation records, reads unbound, by occurrence,
+state and recorded facts and senders alone, and hands a run nothing of them but which
+episode is due and its record's state and revision (:class:`Due`); the facts and senders
+it reads reach the run only as the sight made from them. The calls made in the last 24
+hours are a store-wide figure that counts writes (§8:5), read unbound. The pin pass reads
+every person's pins and is tied to no one ended work, so §6:7 gives it no sight; it reads
+and writes unbound until a decision gives it one (milestone 22's B9). Whether a bound
+store withholds or only counts is its construction (§7:10): where it withholds, an
+episode its sight does not see is read as one never written, and nothing is recorded of
+it; setting such an episode aside is §7:13's, not built here.
+
 **It logs stage and code-owned reasons only** (§15:7): counts, states and the names of
 the steps, never a fact, a wording, a claim or an identifier that may carry personal
 data.
@@ -101,7 +124,7 @@ import asyncio
 import functools
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, NamedTuple
 from uuid import uuid4
 
 import structlog
@@ -137,8 +160,10 @@ from ai_assistant.core.types import (
     ProposedSuggestion,
     RecordHome,
     ReplyFailure,
+    Sight,
     SuggestionKind,
 )
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.observer.entries import Diagnosed, ObserverEntries
 from ai_assistant.orchestration.observer.framing import (
     framed,
@@ -176,6 +201,8 @@ from ai_assistant.orchestration.observer.writing import (
     outcome_of,
 )
 from ai_assistant.orchestration.remembering import is_remember
+from ai_assistant.orchestration.work_facts import held_senders
+from ai_assistant.orchestration.writes import MemoryWriteStage
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -199,15 +226,15 @@ if TYPE_CHECKING:
         ObservationFinding,
         PersonModelWrite,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
     from ai_assistant.orchestration.observer.framing import Framing
     from ai_assistant.orchestration.observer.person import PersonFields
     from ai_assistant.orchestration.observer.placement import PlacementView
     from ai_assistant.orchestration.observer.reading import Reading
     from ai_assistant.orchestration.observer.writing import Written
     from ai_assistant.orchestration.understanding import EpisodeSelector
-    from ai_assistant.orchestration.writes import MemoryWriteStage
 
-__all__ = ["Observer", "ObserverLimits", "RunOutcome"]
+__all__ = ["Due", "DueRecord", "Observer", "ObserverLimits", "RunOutcome"]
 
 _log = structlog.get_logger(__name__)
 
@@ -295,6 +322,33 @@ class RunOutcome:
     pinned: int = 0
 
 
+class DueRecord(NamedTuple):
+    """What the finding of what is due hands a run of an episode's observation record.
+
+    Its state and revision, and nothing else of it (ADR-0383 §7:12): the run reads the
+    record itself through the plan store bound to the episode's sight.
+
+    Attributes:
+        state: The record's state.
+        revision: The revision it was read at.
+    """
+
+    state: ObservationState
+    revision: int
+
+
+class Due(NamedTuple):
+    """One episode the finding of what is due hands a run (ADR-0383 §7:12).
+
+    Attributes:
+        episode: Which episode is due.
+        record: Its observation record's state and revision, where it has one.
+    """
+
+    episode: str
+    record: DueRecord | None
+
+
 class _Held(Exception):  # noqa: N818 — a control-flow signal: the budget, not a failure
     """The daily budget would be exceeded by the next model call (§16:9)."""
 
@@ -311,16 +365,44 @@ class _Unparsed(Exception):  # noqa: N818 — a control-flow signal with a code-
         self.step = step
 
 
+class _Unread(Exception):  # noqa: N818 — a control-flow signal with a code-owned reason
+    """An episode's run read nothing it could record: it stays due (ADR-0383 §4:2, §7:2)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class _Seen:
+    """What one episode's run reads and writes through: the stores bound to its sight.
+
+    Made once for each episode a run takes, from the sight :func:`_sight_of` makes for it
+    (ADR-0383 §6:7), by the composition root's holder (§7:1); the reader and the writer
+    are built over the same bound stores, so every read and write of the run is theirs.
+    ``people`` is ``None`` where no person-model store is wired (ADR-0338 §11:2).
+    """
+
+    memory: Bound[MemoryStore]
+    plans: Bound[PlanStore]
+    people: Bound[PersonModelStore] | None
+    reader: EpisodeReader
+    writer: FindingWriter
+
+
 @dataclass(slots=True)
 class _Attempt:
     """One attempt's record as it is built, and the revision it was last written at.
 
-    ``diagnosed`` is where its diagnostic entries go (ADR-0333 §2:8): set once the episode
-    is read, and ``None`` before then or where the episode has no processing record.
+    ``seen`` is the stores bound to the episode's sight, which every read and write of the
+    attempt goes through. ``diagnosed`` is where its diagnostic entries go (ADR-0333
+    §2:8): set once the episode is read, and ``None`` before then or where the episode has
+    no processing record.
     """
 
     record: ObservationRecord
     started_at: datetime
+    seen: _Seen
     calls: list[ObserverCall] = field(default_factory=list)
     diagnosed: Diagnosed | None = None
 
@@ -341,6 +423,10 @@ class Observer:
     the plan store, the story store and the episode selector (ADR-0329 §15:1, §15:3), the
     person-model store where one is wired (ADR-0338 §9:8), and every bound as
     :class:`ObserverLimits`. The composition root builds it; nothing here reads a setting.
+
+    **The stores it holds unbound are the due-finding's, the budget's and the pin pass's**
+    (ADR-0383 §7:12, §8:5; module docstring). A run reads and writes for each episode only
+    through the stores the holder binds to that episode's sight.
     """
 
     def __init__(  # noqa: PLR0913 — §15:1 names every collaborator the stage holds
@@ -351,35 +437,38 @@ class Observer:
         memory: MemoryStore,
         writes: MemoryWriteStage,
         plans: PlanStore,
-        stories: StoryStore,
         episodes: EpisodeSelector,
         limits: ObserverLimits,
         scout_prompt: PromptTemplate,
         framing_prompt: PromptTemplate,
         placement_prompt: PromptTemplate,
         now: Callable[[], datetime],
+        stories: StoryStore | None = None,
         mint: Callable[[], str] | None = None,
         diagnostics: DiagnosticSink | None = None,
         person_model: PersonModelStore | None = None,
+        stores: BoundStores | None = None,
     ) -> None:
         """Wire the observer.
 
-        ``writes`` must write to the ``memory`` store this reads from, and ``episodes``
-        must be the selector the composition root wires into understanding, so the
-        window it tests is the window understanding is shown (§15:3). The type system
-        cannot express either, so both are composition-root obligations.
+        ``writes`` must write to the ``memory`` store this reads from, ``stores`` must
+        hold these same stores and that same writer, and ``episodes`` must be the
+        selector the composition root wires into understanding, so the window it tests is
+        the window understanding is shown (§15:3). The type system cannot express any of
+        them, so all are composition-root obligations.
 
         Args:
             scout: The scout's model route (ADR-0329 §9:9), as its structured seam
                 (ADR-0354 §6:2).
             commit: The commit step's model route, which framing and placement ride
                 (ADR-0346 §10:2), likewise.
-            memory: The memory store episodes and memories are read from.
-            writes: The write stage every write goes through (ADR-0329 §12:1).
-            plans: The plan store observation and effect records are read from and
-                written to (§16).
-            stories: The story store a story's summaries and notes are read from
-                (ADR-0347 §4).
+            memory: The memory store the finding of what is due pages episodes from
+                (ADR-0383 §7:12), and the pin pass reads memories from.
+            writes: The write stage over the unbound writer (ADR-0329 §12:1), which the
+                pin pass writes through; a run writes through one over the writer the
+                holder binds to its episode's sight.
+            plans: The plan store the finding of what is due reads observation records
+                from (§7:12), and the daily budget counts calls in (§8:5).
             episodes: ADR-0276 §4's episode selector (§7:1, §15:3).
             limits: Every bound, budget and instant.
             scout_prompt: The template of ``OBSERVER_SCOUT_PROMPT``, default or
@@ -387,16 +476,25 @@ class Observer:
             framing_prompt: The template of ``OBSERVER_FRAMING_PROMPT``, likewise.
             placement_prompt: The template of ``OBSERVER_PLACEMENT_PROMPT``, likewise.
             now: The clock every record, call and write is stamped from.
+            stories: The story store a story's summaries and notes are read from
+                (ADR-0347 §4), for the holder built where ``stores`` is not handed.
             mint: Mints the fresh part of a new memory's id; a random one where
                 ``None``.
             diagnostics: The diagnostic record's write seam (ADR-0333 §2:7), or ``None``
                 where ``diagnostic_record`` is false and no entry is built.
             person_model: The person-model store (ADR-0338 §9:8), which must hold the
                 pins of memories ``memory`` holds; ``None`` where ``person_model`` is
-                off, and then nothing of the person model is read or written.
+                off, and then nothing of the person model is read or written. The pin
+                pass reads it unbound; a run, through the holder.
+            stores: The composition root's holder that binds stores for a pass (ADR-0383
+                §9:1), over these same stores, the story store, the person-model store
+                where one is wired, and the writer ``writes`` writes through. ``None``
+                for a caller that builds the observer outside the composition root: one
+                is then built over the stores handed here, so the binding is the same.
 
         Raises:
-            ValueError: If a prompt is not a template of its step's prompt.
+            ValueError: If a prompt is not a template of its step's prompt, or no holder
+                is handed and no story store to build one over.
         """
         for template, declaration in (
             (scout_prompt, OBSERVER_SCOUT_PROMPT),
@@ -411,34 +509,43 @@ class Observer:
             ObserverStep.FRAMING: framing_prompt,
             ObserverStep.PLACEMENT: placement_prompt,
         }
+        if stores is None:
+            if stories is None:
+                msg = "the observer reads stories through a holder or over a story store"
+                raise ValueError(msg)
+            # As `PersonBlocks` and the engine build theirs: one holder over the very
+            # stores and writer handed here, so each episode is bound as the root's is.
+            stores = BoundStores(
+                memory=memory,
+                stories=stories,
+                people=person_model,
+                plans=plans,
+                writer=writes.writer,
+            )
         self._scout = scout
         self._commit = commit
+        # ADR-0383 §7:12: the finding of what is due reads these two unbound, and §8:5
+        # the budget's figure; a run reads only through `_stores`.
         self._memory = memory
         self._plans = plans
+        self._stores = stores
         self._episodes = episodes
         self._limits = limits
         self._now = checked_clock(now, owner="Observer")
         self._mint = mint or _random_id
         self._entries = ObserverEntries(diagnostics, now=self._now)
-        self._reader = EpisodeReader(memory=memory, plans=plans, stories=stories)
         self._people = person_model
+        # ADR-0338 §9:6: tied to no one ended work, so no sight bounds it yet (B9).
         self._pins = (
             None
             if person_model is None
             else PinConfirmations(people=person_model, memory=memory, writes=writes, now=self._now)
         )
-        self._writer = FindingWriter(
-            writes=writes,
-            memory=memory,
-            plans=plans,
-            now=self._now,
-            limits=WriteLimits(
-                threshold=limits.relevance,
-                bound=limits.retrieved,
-                recent=limits.recent_supports,
-                stale_retries=limits.stale_retries,
-            ),
-            pins=self._pins,
+        self._write_limits = WriteLimits(
+            threshold=limits.relevance,
+            bound=limits.retrieved,
+            recent=limits.recent_supports,
+            stale_retries=limits.stale_retries,
         )
         self._lock = asyncio.Lock()
         # A finding as this process last built it, while the plan store has not taken
@@ -480,12 +587,13 @@ class Observer:
     async def _run(self) -> RunOutcome:
         # ADR-0338 §9:6: before the episodes, with no model call and against no budget.
         pinned = 0 if self._pins is None else await self._pins.run_pass()
+        # ADR-0383 §7:12: the window the due-finding tests, read unbound (§15:3).
         window = await self._episodes(frozenset())
         queue = await self.due(window)
         outcome = RunOutcome(pinned=pinned)
-        for episode, held in queue[: self._limits.per_run]:
+        for due in queue[: self._limits.per_run]:
             try:
-                state = await self._attempted(episode, held)
+                state = await self._observed(due)
             except _Held:
                 return replace(outcome, waiting=outcome.waiting + 1, held=True)
             except _NotRecorded:
@@ -493,19 +601,29 @@ class Observer:
                 # backstop) or the store failed. Nothing more is attempted this run.
                 _log.info("observer_run", stage="record", result="not_written")
                 return outcome
+            except _Unread as unread:
+                # Nothing recorded of it: it stays due for the next run (ADR-0383 §4:2,
+                # §7:2), and later episodes proceed.
+                _log.info(
+                    "observer_attempt", stage="attempt", result="unrecorded", reason=unread.reason
+                )
+                continue
             outcome = _counted(outcome, state)
         return outcome
 
-    async def due(
-        self, window: Sequence[EpisodicMemory]
-    ) -> list[tuple[str, ObservationRecord | None]]:
-        """The queue: the episodes due now, oldest first, each with its record (§16:2).
+    async def due(self, window: Sequence[EpisodicMemory]) -> list[Due]:
+        """The queue: the episodes due now, oldest first (§16:2).
+
+        **Unbound, by ADR-0383 §7:12**: it reads episodes and observation records by
+        occurrence and state alone, and hands a run nothing of them but which episode is
+        due and its record's state and revision.
 
         Args:
             window: The episodes the selector returns, run as for the next activation.
 
         Returns:
-            Each due episode's id, and its observation record where it has one.
+            Each due episode, with its observation record's state and revision where it
+            has one.
 
         Raises:
             MemoryStoreError: If the episodes cannot be enumerated.
@@ -538,28 +656,111 @@ class Observer:
             ):
                 queue.append((occurred_at, episode, held))
         queue.sort(key=lambda one: (one[0], one[1]))
-        return [(episode, held) for _, episode, held in queue]
+        return [
+            Due(
+                episode=episode,
+                record=None
+                if held is None
+                else DueRecord(state=held.state, revision=held.revision),
+            )
+            for _, episode, held in queue
+        ]
 
-    async def _attempted(
-        self, episode_id: str, held: ObservationRecord | None
-    ) -> ObservationState | None:
-        """One attempt at one episode, recorded as it goes; its state, or ``None`` if gone."""
+    async def _observed(self, due: Due) -> ObservationState | None:
+        """The episode's sight made, then one attempt through the stores bound to it.
+
+        The episode's facts and senders are read unbound, as the due-finding reads them
+        (ADR-0383 §7:12), and reach the attempt only as the sight made from them (§6:7):
+        the attempt reads the episode again, through the store bound to that sight.
+
+        Raises:
+            _Unread: Where nothing of the attempt can be recorded.
+        """
         started = self._now()
         try:
-            episode = await self._memory.get(episode_id)
+            recorded = await self._memory.get(due.episode)
         except MemoryStoreError as exc:
-            if held is None:
+            if due.record is None:
                 # ADR-0383 §4:2: the record takes the observed episode's home, never one
                 # made again, and with the episode unread and no record held there is
                 # none at hand. Nothing is written; the episode stays due for the next run.
-                _log.info(
-                    "observer_attempt", stage="attempt", result="unrecorded", reason=_reason(exc)
-                )
-                return None
+                raise _Unread(_reason(exc)) from exc
+            # Its facts cannot be read, so its sight is that of an episode recording none:
+            # an anyone bound alone, which sees nothing (§6:7). The failure is recorded
+            # through the plan store bound to it: as today where stores only count.
+            seen = self._bound(_sight_of(None))
+            held = await self._held(due, seen)
+            if held is None:  # pragma: no cover - `_held` raises: the due-finding read one
+                raise _Unread("unseen") from exc
             # A read that fails is the attempt's failure, recorded and backed off (§16:4).
-            return await self._failed(await self._open(episode_id, held, started, held.home), exc)
-        if not isinstance(episode, EpisodicMemory):
+            return await self._failed(
+                await self._open(seen, due.episode, held, started, held.home), exc
+            )
+        if not isinstance(recorded, EpisodicMemory):
             return None  # deleted since it was queued: nothing left to read
+        return await self._attempted(due, self._bound(_sight_of(recorded)), started)
+
+    def _bound(self, sight: Sight) -> _Seen:
+        """The stores one episode's run reads and writes through, each bound to ``sight``."""
+        memory = self._stores.memory(sight)
+        plans = self._stores.plans(sight)
+        return _Seen(
+            memory=memory,
+            plans=plans,
+            people=None if self._people is None else self._stores.people(sight),
+            reader=EpisodeReader(memory=memory, plans=plans, stories=self._stores.stories(sight)),
+            writer=FindingWriter(
+                writes=MemoryWriteStage(writer=self._stores.writer(sight)),
+                memory=memory,
+                plans=plans,
+                now=self._now,
+                limits=self._write_limits,
+                pins=self._pins,
+            ),
+        )
+
+    async def _held(self, due: Due, seen: _Seen) -> ObservationRecord | None:
+        """The episode's observation record, read through the plan store bound to its sight.
+
+        The due-finding hands the run only the record's state and revision (ADR-0383
+        §7:12), so the run reads the record itself. A record the due-finding read and the
+        bound store does not give back is one the sight does not see (§7:2): nothing of
+        the episode is recorded.
+
+        Raises:
+            _Unread: Where the record cannot be read, or the sight does not see it.
+        """
+        try:
+            found = await seen.plans.observations([due.episode])
+        except PlanningError as exc:
+            raise _Unread(_reason(exc)) from exc
+        held = next(iter(found), None)
+        if held is None and due.record is not None:
+            raise _Unread("unseen")
+        return held
+
+    async def _attempted(self, due: Due, seen: _Seen, started: datetime) -> ObservationState | None:
+        """One attempt at one episode, recorded as it goes; its state, or ``None`` if gone.
+
+        Raises:
+            _Unread: Where nothing of the attempt can be recorded.
+        """
+        episode_id = due.episode
+        held = await self._held(due, seen)
+        try:
+            episode = await seen.memory.get(episode_id)
+        except MemoryStoreError as exc:
+            if held is None:
+                # ADR-0383 §4:2, as in `_observed`: no home at hand, nothing written.
+                raise _Unread(_reason(exc)) from exc
+            # A read that fails is the attempt's failure, recorded and backed off (§16:4).
+            return await self._failed(
+                await self._open(seen, due.episode, held, started, held.home), exc
+            )
+        if not isinstance(episode, EpisodicMemory):
+            # Gone since the due-finding read it, or, where stores withhold, one its sight
+            # does not see, which reads as never written (ADR-0383 §7:2).
+            raise _Unread("unseen")
         if _nothing_to_read(episode) and (
             held is None or (held.call_count() == 0 and not held.findings)
         ):
@@ -573,7 +774,9 @@ class Observer:
                     ObservationAttempt(started_at=started, end=ObservationAttemptEnd.FINISHED),
                 ),
             )
-            await self._record(skipped, expected_revision=0 if held is None else held.revision)
+            await self._record(
+                seen, skipped, expected_revision=0 if held is None else held.revision
+            )
             await self._entries.ended(
                 Diagnosed.of(episode, started),
                 ObservationAttemptEnd.FINISHED,
@@ -581,7 +784,7 @@ class Observer:
                 skipped=True,
             )
             return ObservationState.SKIPPED
-        attempt = await self._open(episode_id, held, started, episode.home)
+        attempt = await self._open(seen, episode_id, held, started, episode.home)
         attempt.diagnosed = Diagnosed.of(episode, started)
         try:
             await self._processed(episode, attempt)
@@ -614,6 +817,7 @@ class Observer:
 
     async def _open(
         self,
+        seen: _Seen,
         episode_id: str,
         held: ObservationRecord | None,
         started: datetime,
@@ -622,7 +826,8 @@ class Observer:
         """Start an attempt: the episode waits, its attempt open, recorded (§16:1).
 
         ``home`` is the observed episode's (ADR-0383 §4:2), which a first record takes; a
-        record held keeps its own (§4:6).
+        record held keeps its own (§4:6). The record is written through the plan store
+        bound to the episode's sight (§7:5), as every later write of the attempt is.
         """
         attempts = () if held is None else _closed(held.attempts)
         record = ObservationRecord(
@@ -633,8 +838,10 @@ class Observer:
             findings=() if held is None else held.findings,
             declines=() if held is None else held.declines,
         )
-        stored = await self._record(record, expected_revision=0 if held is None else held.revision)
-        attempt = _Attempt(record=stored, started_at=started)
+        stored = await self._record(
+            seen, record, expected_revision=0 if held is None else held.revision
+        )
+        attempt = _Attempt(record=stored, started_at=started, seen=seen)
         # What this process built of a finding that the plan store never took is where
         # this attempt starts from, before anything can fail it (§16:1).
         for one in stored.findings:
@@ -649,11 +856,12 @@ class Observer:
         A pending finding whose supply is not recorded is proposed again over this
         attempt's reading, and those with an outcome stay as recorded (§16:4).
         """
-        reading = await self._reader.read(episode)
+        seen = attempt.seen
+        reading = await seen.reader.read(episode)
         # ADR-0338 §2:5, §7:4: the leaving episode's person's fields, read once per attempt
-        # and given to the scout and framing; none where no store is wired or it is no
-        # person's.
-        person = None if self._people is None else await person_of(self._people, episode)
+        # through the store bound to its sight and given to the scout and framing; none
+        # where no store is wired or it is no person's.
+        person = None if seen.people is None else await person_of(seen.people, episode)
         findings = attempt.record.findings
         unknown = any(one.outcome is None and one.supply is None for one in findings)
         if not findings or unknown:
@@ -742,7 +950,9 @@ class Observer:
         if person is not None and isinstance(reply_read, PersonScoutReply):
             proposals = person_proposals(reply_read, reading, numbered_from=numbered_from)
             restating = frozenset(proposals.restating)
-            await self._suggested(person, proposals.to_record, home=attempt.record.home)
+            await self._suggested(
+                person, proposals.to_record, home=attempt.record.home, seen=attempt.seen
+            )
             not_kept = FindingOutcome(at=self._now(), unwritten=FindingUnwritten.NOT_KEPT)
             findings = tuple(
                 _updated(one, outcome=not_kept) if one.id in restating else one for one in findings
@@ -769,6 +979,7 @@ class Observer:
         suggestions: Sequence[ProposedSuggestion],
         *,
         home: RecordHome,
+        seen: _Seen,
     ) -> None:
         """Record each suggestion as pending, unless the store says it changes nothing.
 
@@ -788,6 +999,8 @@ class Observer:
             person: Whose suggestions they are.
             suggestions: The suggestions, each resting on the leaving episode.
             home: The leaving episode's home.
+            seen: The stores bound to the episode's sight, which every read and write
+                here goes through (ADR-0383 §7:5, §7:7).
 
         Raises:
             PersonModelStoreError: If the store cannot be written: the attempt fails, and
@@ -795,14 +1008,16 @@ class Observer:
             MemoryStoreError: If a pin suggestion's memory cannot be read: the attempt
                 fails, as above.
         """
-        people = self._people
+        people = seen.people
         if people is None:  # pragma: no cover - called only with a person
             return
         if suggestions and home != _domain(person):
             _not_written(stage="suggestion", count=len(suggestions))
             return
-        foreign = await self._of_another_home(
-            person, [one.memory_id for one in suggestions if one.memory_id is not None]
+        foreign = await _of_another_home(
+            seen.memory,
+            person,
+            [one.memory_id for one in suggestions if one.memory_id is not None],
         )
         for one in suggestions:
             if one.memory_id in foreign:
@@ -810,30 +1025,6 @@ class Observer:
                 continue
             written = await people.record_suggestion(person.person_id, one)
             _refusal_logged(written, stage="suggestion")
-
-    async def _of_another_home(self, person: PersonFields, memory_ids: Sequence[str]) -> set[str]:
-        """The memories of ``memory_ids`` the store holds of another home than the person's.
-
-        Read through the history read, which answers every memory the store holds,
-        whatever its status and whether its validity window is open or closed (ADR-0342
-        §2): a mark or a pin suggestion names a memory however it stands, so a live read,
-        which leaves out one whose window has closed, would let one of another home pass.
-        A memory the store no longer holds is not judged, and is left to the
-        person-model store as before (ADR-0383 §4:8 is the bound stores').
-
-        Raises:
-            MemoryStoreError: If the memories cannot be read.
-        """
-        wanted = list(dict.fromkeys(memory_ids))
-        if not wanted:
-            return set()
-        found = await self._memory.get_history(wanted)
-        domain = _domain(person)
-        return {
-            one
-            for one in wanted
-            if (record := found.get(one)) is not None and record.home != domain
-        }
 
     async def _committed(
         self, finding_id: str, reading: Reading, attempt: _Attempt, person: PersonFields | None
@@ -881,7 +1072,7 @@ class Observer:
         if earlier and not finding.framed:
             # A finding the plan store held before ``framed``: its replacement's create
             # may be on the record without what it retired (§16:1).
-            earlier = await self._recovered(earlier)
+            earlier = await _recovered(attempt.seen.memory, earlier)
         framing: Framing | None = None
         records = finding.framed
         if not records:
@@ -932,7 +1123,7 @@ class Observer:
             return _placement_read(reply, shown, set_aside)
 
         annotations = finding.annotations
-        written = await self._writer.write(
+        written = await attempt.seen.writer.write(
             records,
             texts={one: read.text for one in finding.rests_on if (read := reading.at(one))},
             supply=finding.supply or Placement(),
@@ -945,50 +1136,14 @@ class Observer:
             # fails fails the attempt, and the retry resumes from the record, every
             # memory done, and marks again, which the store keeps once.
             await self._marked(
-                person, written.framed, episode=attempt.record.episode, home=attempt.record.home
+                person,
+                written.framed,
+                episode=attempt.record.episode,
+                home=attempt.record.home,
+                seen=attempt.seen,
             )
         outcome = outcome_of(written.framed, _joined(earlier, written.writes), at=self._now())
         return _Decided(outcome=outcome, decided=_decided(framing, written, set_aside))
-
-    async def _recovered(
-        self, written: tuple[ObservationWrite, ...]
-    ) -> tuple[ObservationWrite, ...]:
-        """``written``, with what each replacement on it retired, read off the store (§16:1).
-
-        The writer before ADR-0346 put a supersession's create on the record before it
-        read what that create retired, so a finding the plan store held from then may
-        carry the create alone. A replacement's create names each memory it replaces
-        (ADR-0328 §5:6), and each names it as successor in the retiring operation, so
-        those operations are read off the store, each once, beside what is recorded.
-
-        Raises:
-            MemoryStoreError: Where they cannot be read: the attempt fails, and the
-                retry reads them again.
-        """
-        created = [one.memory for one in written if MemoryOperationKind.CREATE in one.operations]
-        if not created:
-            return written
-        held = await self._memory.get_history(created)
-        replaced = {
-            retired: memory_id
-            for memory_id, memory in held.items()
-            for retired in memory.operations[0].replaces
-        }
-        recorded = {
-            one.memory for one in written if RETIRING_OPERATIONS.intersection(one.operations)
-        }
-        wanted = [one for one in replaced if one not in recorded]
-        if not wanted:
-            return written
-        retired = await self._memory.get_history(wanted)
-        found = [
-            ObservationWrite(memory=memory_id, operations=(operation.kind,))
-            for memory_id in wanted
-            if (memory := retired.get(memory_id)) is not None
-            for operation in memory.operations
-            if operation.successor == replaced[memory_id]
-        ]
-        return _joined(written, found)
 
     async def _framing(
         self,
@@ -1031,6 +1186,7 @@ class Observer:
         *,
         episode: str,
         home: RecordHome,
+        seen: _Seen,
     ) -> None:
         """The style marks and pin suggestions framing asked for (ADR-0338 §9:4-§9:5).
 
@@ -1050,6 +1206,7 @@ class Observer:
             framed_memories: The framed memories, as the writer left them.
             episode: The leaving episode, which a pin suggestion rests on.
             home: The leaving episode's home.
+            seen: The stores bound to the episode's sight (ADR-0383 §7:5, §7:7).
 
         Raises:
             PersonModelStoreError: If the store cannot be written: the attempt fails, and
@@ -1057,11 +1214,11 @@ class Observer:
             MemoryStoreError: If a marked memory cannot be read: the attempt fails, and the
                 retry marks again.
         """
-        people = self._people
+        people = seen.people
         if people is None:  # pragma: no cover - called only with a person
             return
         styled = [memory_id for one in framed_memories if one.style for memory_id in one.kept]
-        foreign = await self._of_another_home(person, styled)
+        foreign = await _of_another_home(seen.memory, person, styled)
         for one in framed_memories:
             if not (one.style or one.pin):
                 continue
@@ -1075,7 +1232,7 @@ class Observer:
                     suggestion = ProposedSuggestion(
                         kind=SuggestionKind.PIN, memory_id=memory_id, episode_id=episode
                     )
-                    await self._suggested(person, [suggestion], home=home)
+                    await self._suggested(person, [suggestion], home=home, seen=seen)
 
     async def _call[T: BaseModel](  # noqa: PLR0913 — step, route, request, shape, finding, flag
         self,
@@ -1109,6 +1266,7 @@ class Observer:
         instruction = template.rendered(flags=flags)
         messages = request(instruction)
         at = self._now()
+        # ADR-0383 §8:5: a store-wide figure counting writes, answered alike bound or not.
         made = await self._plans.observer_calls_since(at - _A_DAY)
         if made >= self._limits.daily_calls:
             raise _Held
@@ -1169,19 +1327,25 @@ class Observer:
         record when the attempt began, or as it was built, so once a record built from
         those findings is written none is unsaved any more.
         """
-        attempt.record = await self._record(record, expected_revision=attempt.record.revision)
+        attempt.record = await self._record(
+            attempt.seen, record, expected_revision=attempt.record.revision
+        )
         self._forget(record.episode)
 
     async def _record(
-        self, record: ObservationRecord, *, expected_revision: int
+        self, seen: _Seen, record: ObservationRecord, *, expected_revision: int
     ) -> ObservationRecord:
         """Write the observation record, conditionally (§16:1, §16:6).
+
+        Through the plan store bound to the episode's sight (ADR-0383 §7:5): the record
+        carries the episode's home (§4:2), and one the sight does not see is refused as a
+        record the store does not hold.
 
         Raises:
             _NotRecorded: Where the plan store refused or failed the write.
         """
         try:
-            return await self._plans.write_observation(record, expected_revision=expected_revision)
+            return await seen.plans.write_observation(record, expected_revision=expected_revision)
         except PlanningError as exc:
             raise _NotRecorded from exc
 
@@ -1217,6 +1381,23 @@ class Observer:
             failures=failures,
         )
         return state
+
+
+def _sight_of(episode: EpisodicMemory | None) -> Sight:
+    """The producer's sight for one observed episode (ADR-0383 §6:7, §6:10, §9:2).
+
+    The one place under the observer a sight is made: by code, from the facts and senders
+    the episode records, as its processing record holds them (the facts as they stand,
+    and every sender of every input its work held), with no activation, so nothing is its
+    own. An episode that records no facts, one with no processing record, or one whose
+    record could not be read (``None``), has an anyone bound alone, which sees nothing.
+    """
+    processing = None if episode is None else episode.processing_record
+    if processing is None:
+        return Sight.of_producer(None, ())
+    return Sight.of_producer(
+        processing.facts_now, held_senders(processing.trigger, processing.joined)
+    )
 
 
 @functools.cache
@@ -1296,6 +1477,72 @@ def _framed_memory(held: Memory) -> dict[str, object]:
         "marks": [one.value for one in held.marks],
         "valid_until": None if end is None else end.isoformat(),
     }
+
+
+async def _of_another_home(
+    memory: Bound[MemoryStore], person: PersonFields, memory_ids: Sequence[str]
+) -> set[str]:
+    """The memories of ``memory_ids`` the store holds of another home than the person's.
+
+    Read through the history read, which answers every memory the store holds, whatever
+    its status and whether its validity window is open or closed (ADR-0342 §2): a mark or
+    a pin suggestion names a memory however it stands, so a live read, which leaves out
+    one whose window has closed, would let one of another home pass. A memory the store
+    no longer holds is not judged, and is left to the person-model store as before
+    (ADR-0383 §4:8 is the bound stores'). ``memory`` is bound to the episode's sight
+    (§7:7), so a memory that sight does not see is one it no longer holds.
+
+    Raises:
+        MemoryStoreError: If the memories cannot be read.
+    """
+    wanted = list(dict.fromkeys(memory_ids))
+    if not wanted:
+        return set()
+    found = await memory.get_history(wanted)
+    domain = _domain(person)
+    return {
+        one for one in wanted if (record := found.get(one)) is not None and record.home != domain
+    }
+
+
+async def _recovered(
+    store: Bound[MemoryStore], written: tuple[ObservationWrite, ...]
+) -> tuple[ObservationWrite, ...]:
+    """``written``, with what each replacement on it retired, read off the store (§16:1).
+
+    The writer before ADR-0346 put a supersession's create on the record before it
+    read what that create retired, so a finding the plan store held from then may
+    carry the create alone. A replacement's create names each memory it replaces
+    (ADR-0328 §5:6), and each names it as successor in the retiring operation, so
+    those operations are read off ``store``, each once, beside what is recorded: the memory
+    store bound to the episode's sight (ADR-0383 §7:7).
+
+    Raises:
+        MemoryStoreError: Where they cannot be read: the attempt fails, and the
+            retry reads them again.
+    """
+    created = [one.memory for one in written if MemoryOperationKind.CREATE in one.operations]
+    if not created:
+        return written
+    held = await store.get_history(created)
+    replaced = {
+        retired: memory_id
+        for memory_id, memory in held.items()
+        for retired in memory.operations[0].replaces
+    }
+    recorded = {one.memory for one in written if RETIRING_OPERATIONS.intersection(one.operations)}
+    wanted = [one for one in replaced if one not in recorded]
+    if not wanted:
+        return written
+    retired = await store.get_history(wanted)
+    found = [
+        ObservationWrite(memory=memory_id, operations=(operation.kind,))
+        for memory_id in wanted
+        if (memory := retired.get(memory_id)) is not None
+        for operation in memory.operations
+        if operation.successor == replaced[memory_id]
+    ]
+    return _joined(written, found)
 
 
 def _refusal_logged(written: PersonModelWrite, *, stage: str) -> None:

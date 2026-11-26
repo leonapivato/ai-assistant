@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import PersonModelStore
-    from ai_assistant.core.types import Message, PersonModel
+    from ai_assistant.core.types import Message, PersonModel, Sight
 
 _PANEL = PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID)
 _CLAIM = "The user prefers window seats."
@@ -238,10 +238,17 @@ async def test_a_store_that_cannot_be_read_fails_the_attempt_before_any_call() -
 
 
 class _FailingReads:
-    """The fake person-model store, whose ``read`` alone fails as a store fault would."""
+    """The fake person-model store, whose ``read`` alone fails as a store fault would.
+
+    Bound to a sight, it fails the same way (ADR-0383 §7:1): the observer reads a person's
+    fields through the store bound to the episode's sight.
+    """
 
     def __init__(self, store: FakePersonModelStore) -> None:
         self._store = store
+
+    def bound(self, sight: Sight) -> _FailingReads:
+        return _FailingReads(self._store.bound(sight))
 
     async def read(self, person_id: str) -> PersonModel | None:
         msg = "the person-model store cannot be read"
@@ -628,15 +635,22 @@ async def test_a_pin_made_since_the_runs_pass_is_confirmed_before_its_memory_is_
 
 
 class _FailingMarksOnce:
-    """The fake person-model store, whose first style mark fails as a store fault would."""
+    """The fake person-model store, whose first style mark fails as a store fault would.
 
-    def __init__(self, store: FakePersonModelStore) -> None:
+    Bound to a sight, it shares whether it has failed with the store it was bound from
+    (ADR-0383 §7:1), so one mark fails across every binding.
+    """
+
+    def __init__(self, store: FakePersonModelStore, failed: list[bool] | None = None) -> None:
         self._store = store
-        self._failed = False
+        self._failed = [False] if failed is None else failed
+
+    def bound(self, sight: Sight) -> _FailingMarksOnce:
+        return _FailingMarksOnce(self._store.bound(sight), self._failed)
 
     async def add_style_mark(self, person_id: str, memory_id: str) -> PersonModelWrite:
-        if not self._failed:
-            self._failed = True
+        if not self._failed[0]:
+            self._failed[0] = True
             msg = "the person-model store cannot be written"
             raise PersonModelStoreError(msg)
         return await self._store.add_style_mark(person_id, memory_id)

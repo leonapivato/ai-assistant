@@ -443,10 +443,11 @@ class RecentEpisodes:
     under its ``H`` label, and the walk continues until ``limit`` *other* episodes
     are held or the store has no more.
 
-    **One method, two stores** (ADR-0383 §9:1). Called, it walks the store it holds, as
-    the observer reads it (milestone 22's B9 binds that read); :meth:`walk` is the same
-    walk over a store it is handed, which the windows stage hands it bound to its pass's
-    sight.
+    **One method, two stores** (ADR-0383 §9:1). Called, it walks the store it holds,
+    unbound: that is the observer's finding of what is due, which tests whether an
+    episode has left the window (ADR-0329 §7:1, §15:3) and reads episodes unbound by
+    occurrence (ADR-0383 §7:12). :meth:`walk` is the same walk over a store it is handed,
+    which the windows stage hands it bound to its pass's sight.
     """
 
     def __init__(self, *, memory: MemoryStore, limit: int) -> None:
@@ -467,7 +468,7 @@ class RecentEpisodes:
         self._limit = limit
 
     async def __call__(self, shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
-        """The window's episodes from the store it holds: :meth:`walk` over it.
+        """The window's episodes from the store it holds, unbound (§7:12): :meth:`walk` over it.
 
         Args:
             shared: The channel window's item identifiers.

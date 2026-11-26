@@ -127,6 +127,7 @@ if TYPE_CHECKING:
         SupportPart,
         UnderstandingReferent,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
 
 __all__ = [
     "ORIGIN_WORDS",
@@ -709,10 +710,22 @@ def _referents(understood: ActivationUnderstanding) -> tuple[UnderstandingRefere
 
 
 class EpisodeReader:
-    """Reads what ADR-0346 §2:1 names of one leaving episode, from the stores it holds."""
+    """Reads what ADR-0346 §2:1 names of one leaving episode, from the stores it holds.
 
-    def __init__(self, *, memory: MemoryStore, plans: PlanStore, stories: StoryStore) -> None:
-        """Wire the reader to its stores.
+    **Through the episode's sight** (ADR-0383 §6:7, §7:7). The observer builds one for each
+    episode it reads, over the stores the composition root's holder binds to the sight the
+    producer's constructor makes from that episode's recorded facts and senders, so every
+    read below is a bound store's: what the sight does not see is read as never written.
+    """
+
+    def __init__(
+        self,
+        *,
+        memory: Bound[MemoryStore],
+        plans: Bound[PlanStore],
+        stories: Bound[StoryStore],
+    ) -> None:
+        """Wire the reader to its stores, each bound to the episode's sight.
 
         Args:
             memory: The memory store episodes and memories are read from.
@@ -1189,7 +1202,7 @@ def _asked(
 
 
 async def _shown_notes(
-    stories: StoryStore, wanted: Set[str], activations: Sequence[str]
+    stories: Bound[StoryStore], wanted: Set[str], activations: Sequence[str]
 ) -> tuple[StoryNote, ...]:
     """The story notes whose ids ``wanted`` names, as the story store holds them.
 
@@ -1225,7 +1238,7 @@ async def _shown_notes(
 
 
 async def _stories_to_search(
-    stories: StoryStore, activations: Sequence[str]
+    stories: Bound[StoryStore], activations: Sequence[str]
 ) -> AsyncGenerator[str]:
     """The stories ``activations`` belong to, then every story, newest first, by id."""
     for activation_id in dict.fromkeys(activations):
@@ -1242,7 +1255,7 @@ async def _stories_to_search(
         cursor = page.next_cursor
 
 
-async def _story_notes(stories: StoryStore, story_id: str) -> list[StoryNote]:
+async def _story_notes(stories: Bound[StoryStore], story_id: str) -> list[StoryNote]:
     """Every note a story holds now, every page read; none where it holds no such story."""
     held: list[StoryNote] = []
     cursor: int | None = None

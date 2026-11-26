@@ -434,7 +434,7 @@ def test_the_observer_refuses_another_prompts_template(field: str) -> None:
             memory=harness.memory,
             writes=harness.writes,
             plans=harness.plans,
-            stories=harness.stories,
+            stores=harness.stores(),
             episodes=RecentEpisodes(memory=harness.memory, limit=2),
             limits=limits(),
             now=harness.clock,

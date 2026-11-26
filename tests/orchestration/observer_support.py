@@ -49,11 +49,13 @@ from ai_assistant.core.types import (
     RecordedInputMessage,
     RecordedTextInput,
     RecordHome,
+    SightMode,
     ToolOutcome,
     UnderstandingOmission,
     WholeTextReply,
 )
 from ai_assistant.orchestration.authorizer import values_digest
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
 from ai_assistant.orchestration.observer.prompts import (
     OBSERVER_FRAMING_PROMPT,
@@ -386,12 +388,15 @@ class Harness:
     """The canonical fakes, wired as the composition root would wire them.
 
     ``labels`` are what the writer's reconciler answers, keyed by stored memory id;
-    none by default, which is ADR-0336 §6's floor.
+    none by default, which is ADR-0336 §6's floor. ``sight_mode`` is whether a store bound
+    to a sight withholds or only counts (ADR-0383 §7:10), counting by default as the
+    composition root builds them today.
     """
 
     clock: Clock = field(default_factory=Clock)
     ruling: MemoryDecisionKind = MemoryDecisionKind.ACCEPT
     labels: Mapping[str, ConflictRelation] | None = None
+    sight_mode: SightMode = SightMode.COUNT
     memory: FakeMemoryStore = field(init=False)
     plans: FakePlanStore = field(init=False)
     stories: FakeStoryStore = field(init=False)
@@ -401,9 +406,9 @@ class Harness:
     mint: Minter = field(default_factory=Minter)
 
     def __post_init__(self) -> None:
-        self.memory = FakeMemoryStore(now=self.clock)
-        self.plans = FakePlanStore(now=self.clock)
-        self.stories = FakeStoryStore(now=self.clock)
+        self.memory = FakeMemoryStore(now=self.clock, sight_mode=self.sight_mode)
+        self.plans = FakePlanStore(now=self.clock, sight_mode=self.sight_mode)
+        self.stories = FakeStoryStore(now=self.clock, sight_mode=self.sight_mode)
         self.policy = FakeMemoryPolicy(self.ruling)
         self.writer = FakeMemoryWriter(
             store=self.memory,
@@ -421,6 +426,16 @@ class Harness:
             [MemoryWrite(record=one, mode=MemoryWriteMode.INSERT_IF_ABSENT) for one in records]
         )
 
+    def stores(self, person_model: PersonModelStore | None = None) -> BoundStores:
+        """The holder over these fakes and the writer, as the root builds its own."""
+        return BoundStores(
+            memory=self.memory,
+            stories=self.stories,
+            people=person_model,
+            plans=self.plans,
+            writer=self.writer,
+        )
+
     def observer(
         self,
         *,
@@ -434,7 +449,9 @@ class Harness:
         """The observer over these fakes, its routes scripted, writing to ``diagnostics``.
 
         ``person_model`` is the person-model store the root wires where the switch is on
-        (ADR-0338 §9:8); none by default, as on every hub where it is off.
+        (ADR-0338 §9:8); none by default, as on every hub where it is off. It is handed the
+        holder over these same fakes and the writer, as the root hands it its own
+        (ADR-0383 §9:1).
         """
         return Observer(
             scout=structured(scout or FakeModelProvider.scripted()),
@@ -442,7 +459,7 @@ class Harness:
             memory=self.memory,
             writes=self.writes,
             plans=self.plans,
-            stories=self.stories,
+            stores=self.stores(person_model),
             episodes=RecentEpisodes(memory=self.memory, limit=window),
             limits=limits(**bounds),
             scout_prompt=default_prompt(OBSERVER_SCOUT_PROMPT),

@@ -86,25 +86,28 @@ NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
     # poll, the engine's start's (`_after_restart`). Its window reads through the holder
     # (§7:9, B8b).
     "telegram.py:TelegramReader": "§7:8",
+    # §7:12: called, it walks the store it holds for the observer's finding of what is
+    # due, the window an episode must have left (ADR-0329 §7:1, §15:3); the windows
+    # stage walks it bound (`walk`).
+    "understanding.py:RecentEpisodes": "§7:12",
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
 #: B8d the plan store's users, authorizing, acting, tasks, approvals and the holders
-#: ADR-0387 names, B9 the observer and the upkeep runs, B10 the owner's own acts
-#: (ADR-0385); B8b's windows, B8c's stories and B8e's look-ups, person block and matters
-#: are converted, save the parts named here for a later lane. A holder more than one lane
-#: converts names the last of them. **Only shrinks.** A holder whose last unbound read is
-#: one §7:8, §7:12 or §7:13 names moves to :data:`NAMED_BY_THE_DECISION` in the lane that
-#: converts the rest: the observer's finding of what is due (§7:12, §7:13), the engine's
-#: start and ADR-0384 §2's unchanged jobs (§7:8).
+#: ADR-0387 names, B9 the observer's pin pass, B9b the upkeep runs and a tidy-up a work
+#: asks for, B10 the owner's own acts (ADR-0385); B8b's windows, B8c's stories, B8e's
+#: look-ups, person block and matters and B9a's observer reads are converted, save the
+#: parts named here for a later lane. A holder more than one lane converts names the
+#: last of them. **Only shrinks.** A holder whose last unbound read is one §7:8, §7:12 or
+#: §7:13 names moves to :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest:
+#: the observer's finding of what is due (§7:12, §7:13), the engine's start and ADR-0384
+#: §2's unchanged jobs (§7:8).
 NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "acting.py:ActingStage": "B8d",
     # The work's own episode (B8d, ADR-0387); closing open episodes is §7:8's.
     "activation_writer.py:ActivationWriter": "B8d",
     "approval_calls.py:ApprovalCalls": "B8d",
     "authorizer.py:AuthorizingStage": "B8d",
-    # Authorizing's (B8d) and the observer's reading's (B9).
-    "authorizer.py:read_outside_content": "B9",
     # The phases' pending candidates (B8d) and the owner's (B10).
     "candidates.py:pending_candidates": "B10",
     "candidates.py:held_candidates": "B10",
@@ -128,24 +131,22 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "engine.py:approval_panel": "B10",
     "engine.py:episode_card_facts": "B10",
     "engine.py:tap_on_approval_panel": "B10",
-    "matters_pass.py:MattersPass": "B9",
+    "matters_pass.py:MattersPass": "B9b",
     # The upcoming-event producer's writer and the reconsideration's policy.
-    "notifications.py:NotificationWriteStage": "B9",
-    "notifications.py:RulingPolicy": "B9",
+    "notifications.py:NotificationWriteStage": "B9b",
+    "notifications.py:RulingPolicy": "B9b",
+    # The pin pass (ADR-0338 §9:6) reads every person's pins, tied to no one ended work,
+    # so ADR-0383 §6:7 gives it no sight; it writes through a stage over the unbound
+    # writer, which `writes.py:MemoryWriteStage` marks `Bound`.
     "observer/person.py:PinConfirmations": "B9",
-    "observer/person.py:person_of": "B9",
-    "observer/placement.py:compacted": "B9",
-    "observer/placement.py:retrieved": "B9",
-    "observer/reading.py:EpisodeReader": "B9",
-    "observer/reading.py:_shown_notes": "B9",
-    "observer/reading.py:_stories_to_search": "B9",
-    "observer/reading.py:_story_notes": "B9",
-    # Its runs' reads (B9); its finding of what is due is §7:12's.
+    # Its runs read and write through the holder, bound to each episode's sight (B9a).
+    # What it holds unbound: the finding of what is due (§7:12), the budget's figure
+    # (§8:5), the pin pass's stores and write stage (B9), and the stores a holder is
+    # built over where none is handed.
     "observer/stage.py:Observer": "B9",
-    "observer/writing.py:FindingWriter": "B9",
     # A work's block, pins and person-model reads and writes are bound (B8e); the owner's
     # panel's pins, unpins and walks, and the unbound stores handed to the zone pickers
-    # (`RulingPolicy` B9, `PersonZones` B8d), are the person panel's (B10).
+    # (`RulingPolicy` B9b, `PersonZones` B8d), are the person panel's (B10).
     "person_block.py:PersonBlocks": "B10",
     # Its four `fetch_held` calls (`_found`, `_searched`, `_digest_recall`, `_digested`)
     # still pass its unbound memory store to a parameter marked `Bound`: B8d binds them.
@@ -159,16 +160,16 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "stories.py:_all_notes": "B10",
     # Every story call reads and writes through the holder by its work's sight (B8c) but
     # the tidy-up, which runs in a task no work's sight reaches and reads the story and
-    # its episode unbound, handing them to its parameters marked `Bound`: B9 gives a
+    # its episode unbound, handing them to its parameters marked `Bound`: B9b gives a
     # work's tidy-up its sight (ADR-0383 §6:8).
-    "story_calls.py:StoryCalls": "B9",
-    # The matters pass, the scheduled tidy-up and a work's tidy-up (B9).
-    "story_flags.py:read_headers": "B9",
-    "story_flags.py:read_log": "B9",
-    "story_flags.py:read_records": "B9",
-    "story_flags.py:read_versions": "B9",
-    "story_flags.py:recorded_decisions": "B9",
-    "story_flags.py:reread": "B9",
+    "story_calls.py:StoryCalls": "B9b",
+    # The matters pass, the scheduled tidy-up and a work's tidy-up (B9b).
+    "story_flags.py:read_headers": "B9b",
+    "story_flags.py:read_log": "B9b",
+    "story_flags.py:read_records": "B9b",
+    "story_flags.py:read_versions": "B9b",
+    "story_flags.py:recorded_decisions": "B9b",
+    "story_flags.py:reread": "B9b",
     # The phases' story views hand these stores bound to the work's sight (B8c); the
     # engine's story standing (B10) unbound ones.
     "story_standing.py:story_standing": "B10",
@@ -176,20 +177,17 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "story_standing.py:_done": "B10",
     "story_standing.py:_related": "B10",
     "story_standing.py:_member_count": "B10",
-    "story_tidy_up.py:StoryTidyUp": "B9",
-    "story_tidy_up.py:ScheduledTidyUp": "B9",
+    "story_tidy_up.py:StoryTidyUp": "B9b",
+    "story_tidy_up.py:ScheduledTidyUp": "B9b",
     "task_manager.py:PlaceLists": "B8d",
     "task_manager.py:TaskManager": "B8d",
     "task_rules.py:PersonZones": "B8d",
     # The line's cards: a work's approval (B8d) and the owner's tap (B10); the line's
     # window reads them through the stores it is handed bound (B8b).
     "telegram.py:TelegramCards": "B10",
-    # The observer's use of the one selector; the windows stage walks it bound.
-    "understanding.py:RecentEpisodes": "B9",
-    "writes.py:MemoryWriteStage": "B9",
 }
 
-_LANES: Final = frozenset({"B8d", "B9", "B10"})
+_LANES: Final = frozenset({"B8d", "B9", "B9b", "B10"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
@@ -436,6 +434,28 @@ def test_the_story_stages_hold_no_store() -> None:
         "story_links.py:admitted_episodes",
         "phase_path.py:StoryReads",
         "story_calls.py:_Held",
+    ):
+        assert converted not in held
+        assert converted not in NOT_YET_CONVERTED
+
+
+def test_the_observer_s_reads_for_an_ended_work_hold_no_store() -> None:
+    """The observer's reading, placement, writing and person reads, and the write stage
+    (milestone 22's B9a), take the stores the holder binds to an episode's sight alone;
+    the observer itself keeps the due-finding's, the budget's and the pin pass's."""
+    held = unbound_holders()
+    for converted in (
+        "authorizer.py:read_outside_content",
+        "observer/person.py:person_of",
+        "observer/placement.py:compacted",
+        "observer/placement.py:retrieved",
+        "observer/reading.py:EpisodeReader",
+        "observer/reading.py:_shown_notes",
+        "observer/reading.py:_stories_to_search",
+        "observer/reading.py:_story_notes",
+        "observer/stage.py:_Seen",
+        "observer/writing.py:FindingWriter",
+        "writes.py:MemoryWriteStage",
     ):
         assert converted not in held
         assert converted not in NOT_YET_CONVERTED

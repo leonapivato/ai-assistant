@@ -25,7 +25,7 @@ from ai_assistant.app.composition import (
 )
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError, ModelError, ModelUnavailableError
-from ai_assistant.core.types import Message, Role
+from ai_assistant.core.types import Message, Role, Sight
 from ai_assistant.memory import MemoryIngestor
 from ai_assistant.models import RetryingProvider, RoutingProvider
 from ai_assistant.orchestration.observer import Observer
@@ -60,10 +60,17 @@ async def test_the_observer_is_wired_over_the_roots_own_stores_and_the_windows_s
         assert observer._episodes is shown, "the window it tests is the one shown"
         assert observer._memory is engine._memory
         assert observer._plans is engine._plans
-        assert observer._reader._stories is engine._stories
-        writer = observer._writer._writes._writer
+        # ADR-0383 §9:1: each episode's reads and writes through the root's one holder,
+        # over these same stores and the writer persisting to that memory store (§7:6).
+        stores = observer._stores
+        assert stores is engine._matters._stores, "the root's one holder"
+        assert stores._memory is engine._memory
+        assert stores._plans is engine._plans
+        assert stores._stories is engine._stories
+        writer = stores._writer
         assert isinstance(writer, MemoryIngestor)
         assert writer._store is engine._memory, "what it writes is what it reads"
+        assert observer._pins is None or observer._pins._writes.writer is writer
     finally:
         await engine.aclose()
 
@@ -75,7 +82,7 @@ async def test_the_observer_holds_the_person_model_store_only_where_the_switch_i
     off = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path / "off")
     try:
         observer = _observer(off)
-        assert (observer._people, observer._pins, observer._writer._pins) == (None, None, None)
+        assert (observer._people, observer._pins, observer._stores._people) == (None, None, None)
     finally:
         await off.aclose()
     on = build_engine(
@@ -86,9 +93,13 @@ async def test_the_observer_holds_the_person_model_store_only_where_the_switch_i
         blocks = on._person_blocks
         assert blocks is not None
         assert observer._people is blocks._store, "the one store, read and written"
+        assert observer._stores._people is blocks._store, "a run reads it bound, the same one"
         assert observer._pins is not None
-        assert observer._writer._pins is observer._pins, "the guard runs the run's own pass"
         assert observer._pins._memory is on._memory
+        # The pin pass writes through the stage over the unbound writer (B9).
+        assert observer._pins._writes.writer is observer._stores._writer
+        seen = observer._bound(Sight.of_producer(None, ()))
+        assert seen.writer._pins is observer._pins, "the guard runs the run's own pass"
     finally:
         await on.aclose()
 

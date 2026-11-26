@@ -21,6 +21,12 @@ an equal suggestion pending or dismissed, a memory already pinned, marked or who
 was removed — so the observer never decides those itself. It writes no field, no pin and
 no change-log entry.
 
+**Whose sight** (ADR-0383 §6:7, §7:7). The fields are read through the person-model store
+bound to the sight the observer reads the leaving episode by. The pin pass is not: it reads
+every person's pins and is tied to no one ended work, so §6:7 gives it no sight, and it is
+none of ADR-0384's three upkeep jobs. It reads and writes unbound, through a write stage over
+the unbound writer, until a decision gives it a sight (milestone 22's B9; §9:1's list).
+
 **The pin pass** (§9:6) adds a ``pinned`` support (§4:4) for every pin a person made on
 their own profile, removed since or not, whose memory the memory store holds, and which
 no support of that memory points at yet. A pin is held keyed by its person, whose domain
@@ -64,6 +70,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryStore, PersonModelStore
     from ai_assistant.core.types import EpisodicMemory, FrozenJson, Memory, Pin, Profile
+    from ai_assistant.orchestration.bound_stores import Bound
     from ai_assistant.orchestration.writes import MemoryWriteStage
 
 __all__ = ["PIN_NOTE", "PersonFields", "PinConfirmations", "person_of", "pinned_support"]
@@ -95,11 +102,12 @@ class PersonFields:
         return {one.value: self.profile.value(one) for one in ProfileField}
 
 
-async def person_of(store: PersonModelStore, episode: EpisodicMemory) -> PersonFields | None:
+async def person_of(store: Bound[PersonModelStore], episode: EpisodicMemory) -> PersonFields | None:
     """The fields of the person ``episode`` is for, or ``None`` where it is no person's.
 
     Args:
-        store: The person-model store.
+        store: The person-model store, bound to the sight the observer reads the
+            episode by (ADR-0383 §6:7, §7:7).
         episode: The leaving episode, as stored.
 
     Returns:
