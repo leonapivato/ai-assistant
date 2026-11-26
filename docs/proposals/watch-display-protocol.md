@@ -377,6 +377,20 @@ signs a certificate for each watch and admits only on both. The C engine ran
 against the gateway over a real TLS socket. The chip's own TLS client is not
 written.
 
+The engine was built seventh as real firmware for the ESP32-S3 (ESP-IDF 5.5)
+and run in Espressif's emulator with the watch's 8 MB of external memory. It
+was admitted by the test gateway, drew the demo's screens and carried an
+approval through the PIN, with touches typed on a console. Measured there: the
+engine is 23 KB of code and 29 KB of fixed memory; the whole firmware with
+Wi-Fi is 927 KB; the demo peaked at 2.2 MB of external memory, 1.7 MB of it
+four whole frames the engine always holds. A cache grown to the 4 MB that
+`hello` advertises would leave about 1 MB of the 8, which is too tight beside
+a private network client, so `cache_bytes` or the frames held must come down.
+The emulator has the chip's memory and not its speed: decode time, display
+push rate and Wi-Fi throughput are still unmeasured (item 9). The watch's own
+board file compiles and has never run; its power chip, touch and buzzer are
+not written.
+
 One thing the engine does is not protocol but shapes it: the watch frees a
 screen's decoded pixels when it leaves the screen, unless an update or a
 flipbook changed them, because those cannot be rebuilt from the stored image.
