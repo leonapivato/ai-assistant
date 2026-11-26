@@ -23,10 +23,14 @@ no change-log entry.
 
 **The pin pass** (§9:6) adds a ``pinned`` support (§4:4) for every pin a person made on
 their own profile, removed since or not, whose memory the memory store holds, and which
-no support of that memory points at yet. Each pin's memory is read through the history
-read, whatever its status, and the support is added to the memory that read returned,
-conditionally on the revision it returned (ADR-0342 §5:4, §5:6), by the write stage's
-operation member, one add support each (ADR-0328 §11:3). It makes no model call and
+no support of that memory points at yet. A pin is held keyed by its person, whose domain
+is its home (ADR-0383 §5:2), and a support naming it is an evidence pointer into another
+store file, so none is added to a memory of another home than the pin's person's domain
+(§4:7): it is logged as not written, under a code-owned reason, and the next is tried.
+Each pin's memory is read through the history read, whatever its status, and the support
+is added to the memory that read returned, conditionally on the revision it returned
+(ADR-0342 §5:4, §5:6), by the write stage's operation member, one add support each
+(ADR-0328 §11:3). It makes no model call and
 counts toward no budget (ADR-0329 §16:9). A write that fails is left for the next run,
 which tries it again: the pass is a query over what the two stores hold, never a queue.
 """
@@ -48,6 +52,7 @@ from ai_assistant.core.types import (
     PinPart,
     ProfileField,
     ReadingCertainty,
+    RecordHome,
     SupportDirection,
     SupportOrigin,
 )
@@ -224,6 +229,12 @@ class PinConfirmations:
             if current is None:
                 return added  # forgotten since: a pin on it is shown nowhere (§4:10)
             if current.support_at(part) is not None:
+                continue
+            if current.home != RecordHome.person(pin.person_id):
+                # ADR-0383 §4:7: a support naming a pin of another home is an evidence
+                # pointer across two homes, refused with nothing written; never retried
+                # into being, since neither home ever changes (§4:6).
+                _log.info("observer_pins", stage="pin", result="not_written", reason="another_home")
                 continue
             now = self._now()
             change = MemoryChange(

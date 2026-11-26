@@ -172,3 +172,43 @@ async def test_the_request_form_resolves_to_the_requests_statement_or_gone() -> 
         part_content(part, episodes={held.id: held}, effects={}, carried=None, requests={}) is None
     ), "a request the store no longer holds is gone"
     assert part_content(part, episodes={}, effects={}, carried=None, requests={}) is None
+
+
+@pytest.mark.parametrize(
+    "shared",
+    ["taker", "appr"],
+    ids=["the-leaving-episode-of-another-home", "the-approvals-episode-of-another-home"],
+)
+async def test_a_request_or_approval_of_another_home_confirms_nothing(shared: str) -> None:
+    """ADR-0383 §4:7: a memory from the leaving episode takes its home (§4:2), and its
+    confirmation would point at the request, the owner's (§5:2), and the approval's
+    episode; where either is of another home, the candidate is given no confirmation."""
+    harness = Harness()
+    request = await _approved(harness)
+    run = PlanningRound(
+        id="r-run",
+        recorded_at=_TAPPED,
+        calls=(ProposedCall(call_id="c1", name="run_approved", arguments={"ticket": "A1"}),),
+    )
+    held = [
+        episode("ask", at=_WRITTEN),
+        episode("appr", at=_TAPPED),
+        episode("taker", at=_WRITTEN, rounds=(run,)),
+    ]
+    await harness.hold(
+        *(
+            one.model_copy(update={"home": RecordHome.shared()})
+            if one.id == address(shared)
+            else one
+            for one in held
+        )
+    )
+    await _ran(harness, request, "taker")
+
+    leaving = await harness.memory.get(address("taker"))
+    assert isinstance(leaving, EpisodicMemory)
+    reading = await EpisodeReader(
+        memory=harness.memory, plans=harness.plans, stories=harness.stories
+    ).read(leaving)
+
+    assert [one for one in reading.hints if one.confirmation is not None] == []

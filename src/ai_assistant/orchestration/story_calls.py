@@ -96,6 +96,16 @@ work's state as it stands (``ActivationState.home``), as its episode's is; a cal
 outside any work has no home to carry and starts nothing. A split's new story takes the
 home of the story it is split from, in the store, and no other call sets one.
 
+**An episode of another home is never written into a story** (ADR-0383 §4:7). A story
+names an episode in another store file, so this runner, the code that writes the name,
+refuses a start, a link, a move or a split that would put an activation member whose
+episode is held and of another home into a story: the story started (this work's home),
+the story linked to, the story moved to, or the story split from, whose home the new
+story takes. Nothing is written, and planning is told so in code-owned words. An episode
+with no record is passed over, so a move or a split still carries one forgotten since,
+and a start or a link still refuses one with no record as it did. A story member of
+another home is the story store's to refuse, in its own file.
+
 **Planning still writes on an owner-only pass.** On a pass that may not show a record
 placed for the owner alone, planning can still write notes and change stories (ADR-0307
 §6:5); only a move or a split is held to members alone there, as above.
@@ -134,10 +144,15 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
+    home_may_be_written,
 )
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.remembering import EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT
-from ai_assistant.orchestration.stories import episode_address, unknown_activation
+from ai_assistant.orchestration.stories import (
+    episode_address,
+    of_another_home,
+    unknown_activation,
+)
 from ai_assistant.orchestration.story_tidy_up import TidyUpResult
 
 if TYPE_CHECKING:
@@ -148,6 +163,7 @@ if TYPE_CHECKING:
         FrozenJson,
         ProposedCall,
         RecordHome,
+        StoryHeader,
         StoryOutcome,
         ToolCall,
     )
@@ -860,6 +876,9 @@ class StoryCalls:
         own = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
         home = self._home()
         await self._episode_held(own)
+        if home_may_be_written(home):
+            # A home no write may carry is the store's to refuse first (ADR-0383 §2:3).
+            await self._same_home([own], home)
         created = await self._stories.create(
             [own], home=home, actor=StoryActor.PLANNING, trigger=activation
         )
@@ -928,11 +947,13 @@ class StoryCalls:
         (ADR-0289 §4); an unlinked one's is not, since a member whose episode is
         forgotten may still be removed.
         """
-        story = await self._current(_text(parameters, STORY_ARGUMENT))
+        header = await self._current_header(_text(parameters, STORY_ARGUMENT))
+        story = str(header.story_id)
         activation = self._activation(parameters)
         member = await self._member(parameters, activation)
         if link:
             await self._episode_held(member)
+            await self._same_home([member], header.home)
             outcome = await self._stories.link(
                 story, [member], actor=StoryActor.PLANNING, trigger=activation
             )
@@ -983,7 +1004,8 @@ class StoryCalls:
     async def _move(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryOutcome:
         """Move activation members, notes, or both, to another story (ADR-0303 §6)."""
         source = await self._current(_text(parameters, STORY_ARGUMENT))
-        target = await self._current(_text(parameters, TO_ARGUMENT))
+        going_to = await self._current_header(_text(parameters, TO_ARGUMENT))
+        target = str(going_to.story_id)
         episodes = _episode_members(parameters)
         notes = _note_ids(parameters)
         if not episodes and not notes:
@@ -994,17 +1016,21 @@ class StoryCalls:
                 "a move goes from one story to another; these are one story now",
                 reason="same_story",
             )
+        await self._same_home(episodes, going_to.home)
         return await self._stories.move(
             source, target, episodes, actor=StoryActor.PLANNING, trigger=activation, notes=notes
         )
 
     async def _split(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryOutcome:
         """Split members off a story into a new one, with the notes named (ADR-0303 §6)."""
-        source = await self._current(_text(parameters, STORY_ARGUMENT))
+        split_from = await self._current_header(_text(parameters, STORY_ARGUMENT))
+        source = str(split_from.story_id)
         members = [*_episode_members(parameters), *await self._story_members(parameters)]
         notes = _note_ids(parameters)
         if not members:
             raise _malformed("a split names the episodes or the stories that leave")
+        # The new story takes the home of the story it is split from, in the store.
+        await self._same_home(members, split_from.home)
         return await self._stories.split(
             source, members, actor=StoryActor.PLANNING, trigger=activation, notes=notes
         )
@@ -1191,8 +1217,24 @@ class StoryCalls:
                 reason="unknown_activation",
             )
 
+    async def _same_home(self, members: Sequence[StoryMember], home: RecordHome) -> None:
+        """Refuse an activation member whose episode is of another home (ADR-0383 §4:7).
+
+        A story names an episode in another store file, so this runner, the code that
+        writes the name, is the writer that refuses it, before anything is written.
+        ``home`` is the home of the story the members would be written into. An episode
+        with no record is passed over (:func:`~ai_assistant.orchestration.stories.
+        of_another_home`), so a move or a split still carries one forgotten since.
+        """
+        if await of_another_home(self._memory, members, home) is not None:
+            raise _NotDone(ToolFailureKind.REFUSED, _ANOTHER_HOME, reason="another_home")
+
     async def _current(self, story_id: str) -> str:
-        """The story ``story_id`` names as it stands now, followed through its merges.
+        """The story ``story_id`` names as it stands now, followed through its merges."""
+        return str((await self._current_header(story_id)).story_id)
+
+    async def _current_header(self, story_id: str) -> StoryHeader:
+        """The header of the story ``story_id`` names as it stands now, through its merges.
 
         Followed to the story that is not merged, however many merges that takes: the
         store bounds no chain. A merged story is never a merge target (ADR-0289 §3), so
@@ -1211,10 +1253,16 @@ class StoryCalls:
                     reason="unknown_story",
                 )
             if header.merged_into is None:
-                return current
+                return header
             current = str(header.merged_into)
         msg = "the story store's merges do not end"
         raise StoryStoreError(msg)
+
+
+#: What planning is told of a call refused for naming an episode of another home than the
+#: story it would be written into (ADR-0383 §4:7): code-owned words, in the runner's own
+#: pattern for a name it cannot honour.
+_ANOTHER_HOME: Final = "the episode named is of another home than the story, so nothing was written"
 
 
 def _refused(message: str) -> _NotDone:

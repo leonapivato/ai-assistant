@@ -82,7 +82,11 @@ as only restating a field, which is not committed (§9:2-§9:3), and framing say
 memory whether it states how the person wants to be spoken to and whether it matters in
 every conversation, which code records as a style mark and a pin suggestion on the
 memory it is held at (§9:4-§9:5). Where no store is wired, or the episode is no person's,
-the flag is false and nothing is read from or written to the person model (§11:2).
+the flag is false and nothing is read from or written to the person model (§11:2). A
+suggestion or a mark is held keyed by its person, whose domain is its home (ADR-0383
+§5:2), and names an episode or a memory in another store file, so the stage writes none
+naming a record of another home than the person's domain (§4:7): it is logged as not
+written, under a code-owned reason, and nothing of it reaches the store.
 
 **What it shows the owner goes to the diagnostic record** (ADR-0333 §2), where the record
 is on: each call's request and reply, the scout's findings and declines, each finding's
@@ -131,6 +135,7 @@ from ai_assistant.core.types import (
     PersonModelWriteKind,
     Placement,
     ProposedSuggestion,
+    RecordHome,
     ReplyFailure,
     SuggestionKind,
 )
@@ -193,7 +198,6 @@ if TYPE_CHECKING:
         Message,
         ObservationFinding,
         PersonModelWrite,
-        RecordHome,
     )
     from ai_assistant.orchestration.observer.framing import Framing
     from ai_assistant.orchestration.observer.person import PersonFields
@@ -738,7 +742,7 @@ class Observer:
         if person is not None and isinstance(reply_read, PersonScoutReply):
             proposals = person_proposals(reply_read, reading, numbered_from=numbered_from)
             restating = frozenset(proposals.restating)
-            await self._suggested(person, proposals.to_record)
+            await self._suggested(person, proposals.to_record, home=attempt.record.home)
             not_kept = FindingOutcome(at=self._now(), unwritten=FindingUnwritten.NOT_KEPT)
             findings = tuple(
                 _updated(one, outcome=not_kept) if one.id in restating else one for one in findings
@@ -760,7 +764,11 @@ class Observer:
                 await self._entries.outcome(attempt.diagnosed, one, one.outcome)
 
     async def _suggested(
-        self, person: PersonFields, suggestions: Sequence[ProposedSuggestion]
+        self,
+        person: PersonFields,
+        suggestions: Sequence[ProposedSuggestion],
+        *,
+        home: RecordHome,
     ) -> None:
         """Record each suggestion as pending, unless the store says it changes nothing.
 
@@ -769,16 +777,59 @@ class Observer:
         field's value as it validates a field's (§3:2): a refusal is logged under its
         code-owned reason, never the value (ADR-0329 §15:7), and the next is recorded.
 
+        **None names a record of another home** (ADR-0383 §4:7). A suggestion is held
+        keyed by its person, whose domain is its home (§5:2), and names the episode it
+        rests on, the leaving one of ``home``, and a pin suggestion its memory, each in
+        another store file; so none is recorded where that episode, or that memory where
+        the store holds it, is of another home than the person's domain. Each is logged
+        as not written, under a code-owned reason, and the next is recorded.
+
+        Args:
+            person: Whose suggestions they are.
+            suggestions: The suggestions, each resting on the leaving episode.
+            home: The leaving episode's home.
+
         Raises:
             PersonModelStoreError: If the store cannot be written: the attempt fails, and
                 the episode stays to be retried (ADR-0329 §16:4).
+            MemoryStoreError: If a pin suggestion's memory cannot be read: the attempt
+                fails, as above.
         """
         people = self._people
         if people is None:  # pragma: no cover - called only with a person
             return
+        if suggestions and home != _domain(person):
+            _not_written(stage="suggestion", count=len(suggestions))
+            return
+        foreign = await self._of_another_home(
+            person, [one.memory_id for one in suggestions if one.memory_id is not None]
+        )
         for one in suggestions:
+            if one.memory_id in foreign:
+                _not_written(stage="suggestion", count=1)
+                continue
             written = await people.record_suggestion(person.person_id, one)
             _refusal_logged(written, stage="suggestion")
+
+    async def _of_another_home(self, person: PersonFields, memory_ids: Sequence[str]) -> set[str]:
+        """The memories of ``memory_ids`` the store holds of another home than the person's.
+
+        One live read; a memory the store no longer holds is not judged, and is left to
+        the person-model store as before (ADR-0383 §4:8 is the bound stores').
+
+        Raises:
+            MemoryStoreError: If the memories cannot be read.
+        """
+        wanted = list(dict.fromkeys(memory_ids))
+        if not wanted:
+            return set()
+        found = await self._memory.get_many(wanted)
+        domain = _domain(person)
+        return {
+            one
+            for one in wanted
+            if (record := found.get(one)) is not None and record.home != domain
+        }
 
     async def _committed(
         self, finding_id: str, reading: Reading, attempt: _Attempt, person: PersonFields | None
@@ -889,7 +940,9 @@ class Observer:
             # On the memory each write left, before the outcome is recorded: a store that
             # fails fails the attempt, and the retry resumes from the record, every
             # memory done, and marks again, which the store keeps once.
-            await self._marked(person, written.framed, episode=attempt.record.episode)
+            await self._marked(
+                person, written.framed, episode=attempt.record.episode, home=attempt.record.home
+            )
         outcome = outcome_of(written.framed, _joined(earlier, written.writes), at=self._now())
         return _Decided(outcome=outcome, decided=_decided(framing, written, set_aside))
 
@@ -968,7 +1021,12 @@ class Observer:
         )
 
     async def _marked(
-        self, person: PersonFields, framed_memories: Sequence[FramedMemory], *, episode: str
+        self,
+        person: PersonFields,
+        framed_memories: Sequence[FramedMemory],
+        *,
+        episode: str,
+        home: RecordHome,
     ) -> None:
         """The style marks and pin suggestions framing asked for (ADR-0338 §9:4-§9:5).
 
@@ -977,25 +1035,43 @@ class Observer:
         or whose mark the person removed, unmarked again, and records no pin suggestion
         for a memory pinned or one equal to a pending or dismissed one.
 
+        **No mark names a memory of another home** (ADR-0383 §4:7). A mark is held keyed
+        by its person, whose domain is its home (§5:2), and names its memory in another
+        store file, so none is written on a memory the store holds of another home than
+        the person's domain; it is logged as not written, under a code-owned reason. A pin
+        suggestion is judged where it is recorded (:meth:`_suggested`).
+
+        Args:
+            person: Whose marks and suggestions they are.
+            framed_memories: The framed memories, as the writer left them.
+            episode: The leaving episode, which a pin suggestion rests on.
+            home: The leaving episode's home.
+
         Raises:
             PersonModelStoreError: If the store cannot be written: the attempt fails, and
                 the retry, resuming from the record, marks again.
+            MemoryStoreError: If a marked memory cannot be read: the attempt fails, and the
+                retry marks again.
         """
         people = self._people
         if people is None:  # pragma: no cover - called only with a person
             return
+        styled = [memory_id for one in framed_memories if one.style for memory_id in one.kept]
+        foreign = await self._of_another_home(person, styled)
         for one in framed_memories:
             if not (one.style or one.pin):
                 continue
             for memory_id in one.kept:
-                if one.style:
+                if one.style and memory_id in foreign:
+                    _not_written(stage="mark", count=1)
+                elif one.style:
                     marked = await people.add_style_mark(person.person_id, memory_id)
                     _refusal_logged(marked, stage="mark")
                 if one.pin:
                     suggestion = ProposedSuggestion(
                         kind=SuggestionKind.PIN, memory_id=memory_id, episode_id=episode
                     )
-                    await self._suggested(person, [suggestion])
+                    await self._suggested(person, [suggestion], home=home)
 
     async def _call[T: BaseModel](  # noqa: PLR0913 — step, route, request, shape, finding, flag
         self,
@@ -1227,6 +1303,18 @@ def _refusal_logged(written: PersonModelWrite, *, stage: str) -> None:
             result="refused",
             reason=None if written.refusal is None else written.refusal.value,
         )
+
+
+def _domain(person: PersonFields) -> RecordHome:
+    """The person's domain: the home of what the person model holds of them (§5:2)."""
+    return RecordHome.person(person.person_id)
+
+
+def _not_written(*, stage: str, count: int) -> None:
+    """Log person-model writes not made for naming a record of another home (§4:7)."""
+    _log.info(
+        "observer_person", stage=stage, result="not_written", reason="another_home", count=count
+    )
 
 
 def _updated(finding: ObservationFinding, **fields: object) -> ObservationFinding:

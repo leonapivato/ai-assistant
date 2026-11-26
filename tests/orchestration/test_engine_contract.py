@@ -82,7 +82,13 @@ from person_model_contract import (
     person_model_stores,
 )
 from phases_support import phase_path
-from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
+from story_surface_contract import (
+    STORY_LIMIT,
+    STORY_SURFACE_AT,
+    StorySurfaceSubject,
+    act,
+    episode,
+)
 from understanding_support import VERSION_LIMIT, understanding_stage, windows_stage
 
 from ai_assistant.core.device_context import serving_device
@@ -108,11 +114,14 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    RecordHome,
     RequestingDevice,
     Reversibility,
     RiskLevel,
+    StoryActor,
     StoryMember,
     StoryMemberKind,
+    StoryRefusalReason,
     ToolCost,
     ToolDefinition,
     Validity,
@@ -1159,3 +1168,53 @@ async def test_a_composing_signal_needs_the_conversations_end_for_writing() -> N
             assert refused.value.reason is reason
     finally:
         await built.aclose()
+
+
+# --- an episode of another home, through the owner's story surface (ADR-0383 §4:7) -------
+#
+# The production engine's alone: the canonical fake engine shares ``unknown_activation``
+# and not this check, so it stays out of the shared surface contract until the fake has it.
+
+
+async def test_the_owner_creating_a_story_of_an_episode_of_another_home_creates_nothing() -> None:
+    """§4:5, §4:7: the owner's story is the owner's; an episode of the shared things."""
+    memory = FakeMemoryStore(now=lambda: STORY_SURFACE_AT)
+    stories = FakeStoryStore(now=lambda: STORY_SURFACE_AT)
+    await memory.add(episode("a1").model_copy(update={"home": RecordHome.shared()}))
+    built = _wire(memory=memory, max_payload_bytes=STORY_LIMIT, stories=stories)
+    await built.start()
+    try:
+        outcome = await built.create_story([act("a1")])
+    finally:
+        await built.aclose()
+
+    assert outcome.story_id is None
+    assert outcome.refusal is not None
+    assert outcome.refusal.reason is StoryRefusalReason.ANOTHER_HOME
+    assert outcome.refusal.story_id is None
+    assert (await stories.stories()).stories == ()
+
+
+async def test_the_owner_linking_an_episode_into_a_story_of_another_home_links_nothing() -> None:
+    """§4:7: the owner's episode, a story of the shared things; the refusal names the story."""
+    memory = FakeMemoryStore(now=lambda: STORY_SURFACE_AT)
+    stories = FakeStoryStore(now=lambda: STORY_SURFACE_AT)
+    await memory.add(episode("a1"))
+    shared = await stories.create([act("a0")], home=RecordHome.shared(), actor=StoryActor.OWNER)
+    assert shared.story_id is not None
+    built = _wire(memory=memory, max_payload_bytes=STORY_LIMIT, stories=stories)
+    await built.start()
+    try:
+        outcome = await built.link_story(shared.story_id, [act("a1")])
+        same_home = await built.create_story([act("a1")])
+    finally:
+        await built.aclose()
+
+    assert outcome.refusal is not None
+    assert outcome.refusal.reason is StoryRefusalReason.ANOTHER_HOME
+    assert outcome.refusal.story_id == shared.story_id
+    view = await stories.view(shared.story_id)
+    assert view is not None
+    assert [entry.member for entry in view.entries] == [act("a0")]
+    # The same episode into a story of its own home is written as before.
+    assert same_home.refusal is None

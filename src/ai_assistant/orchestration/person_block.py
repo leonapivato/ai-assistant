@@ -59,6 +59,7 @@ from ai_assistant.core.types import (
     Memory,
     MemoryStatus,
     PersonModelWriteKind,
+    RecordHome,
     SuggestionKind,
 )
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
@@ -213,7 +214,8 @@ class PinRefusal(StrEnum):
     """Why a pin was refused before any write (ADR-0338 §4:2, §6:3)."""
 
     NOT_CURRENT = "not_current"
-    """Only a current memory may be pinned (§4:2)."""
+    """Only a current memory may be pinned (§4:2), and only one of the person's domain
+    (ADR-0383 §4:7, §5:2): a memory of another home answers as one not held does."""
     OVER_BUDGET = "over_budget"
     """The pins' wordings, with the new one's, would exceed the slot's budget (§6:3)."""
     UNKNOWN_PERSON = "unknown_person"
@@ -309,6 +311,11 @@ class PersonBlocks:
         its caller, against the memory store, before the write (§4:2, §6:3):
 
         - the memory is read live, and pinned only where it is current;
+        - and only where it is of the person's domain: the person-model store holds a pin
+          keyed by its person, whose domain is the pin's home (ADR-0383 §5:2), and it
+          names the memory in another store file, so this is the writer that refuses a
+          memory of another home (§4:7), with nothing written, answering as for a memory
+          it does not hold;
         - the wordings of the memories the person's standing pins show in the slot, each
           once, at its chain's current end and not resting on outside content (§4:8,
           §6:4), together with the new one's where it is not among them already, must
@@ -341,6 +348,9 @@ class PersonBlocks:
             model = await self._store.read(person_id)
             if model is None:
                 return Pinned(refused=PinRefusal.UNKNOWN_PERSON)
+            if record.home != RecordHome.person(person_id):
+                _log.info("person_pin_refused", stage="person_block", reason="another_home")
+                return Pinned(refused=PinRefusal.NOT_CURRENT)
             ends = await self._reached(pin.memory_id for pin in model.standing_pins)
             shown = {end.id: end for end in ends.values() if not end.rests_on_outside_content}
             shown.setdefault(record.id, record)

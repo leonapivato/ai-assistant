@@ -33,7 +33,10 @@ is linked into every story a linked earlier episode belongs to by then; and the 
 episodes that belong to no story by then start one new story, holding them and the
 activation. One activation's links are recorded at a time, so two activations linking
 the same unstoried episode start one story, not two. It is failure-tolerant: a
-``StoryStoreError`` records the decision ``failed``. What it records is bookkeeping, as
+``StoryStoreError`` records the decision ``failed``. A link into a standing story of
+another home than the activation's, which its work gives, writes nothing and is recorded
+as an ``another_home`` refusal (ADR-0383 §4:7): the story names the episode in another
+store file, so the stage is the writer that refuses it. What it records is bookkeeping, as
 the hub records understanding's own record, and not an action planning chooses (§6:14).
 
 Neither is saved with the episode (§12:3): the candidates are the understanding phase's
@@ -59,6 +62,7 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryMember,
     StoryMemberKind,
+    StoryRefusal,
     StoryRefusalReason,
 )
 from ai_assistant.orchestration.disclosure import admits_owner_placed, admitted_to_understanding
@@ -73,7 +77,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         RecordHome,
         StoryNote,
-        StoryRefusal,
         StorySummaryLine,
         StorySummaryState,
     )
@@ -577,6 +580,11 @@ class _Writes:
         refusal: StoryRefusal | None = None
         while target not in followed:
             followed.add(target)
+            if await self._of_another_home(target):
+                self.refused.append(
+                    StoryRefusal(reason=StoryRefusalReason.ANOTHER_HOME, story_id=target)
+                )
+                return
             outcome = await self._stories.link(
                 target,
                 [self._activation],
@@ -594,6 +602,19 @@ class _Writes:
             target = refusal.merged_into
         if refusal is not None:
             self.refused.append(refusal)
+
+    async def _of_another_home(self, story_id: str) -> bool:
+        """Whether ``story_id`` is a standing story of another home than this activation's.
+
+        The activation's episode has the home its work gives (ADR-0383 §4:1), which this
+        run was handed, and a story names that episode in another store file, so the
+        stage, the code that writes the name, refuses the link (§4:7) and writes nothing.
+        A story not there, or merged, is left to the store's own refusal, which the link
+        loop reads and follows; a merge never joins two homes, so the story it went into
+        is judged when the loop reaches it.
+        """
+        header = await self._stories.header(story_id)
+        return header is not None and header.merged_into is None and header.home != self._home
 
     async def start(self, members: Sequence[StoryMember]) -> None:
         """Start one story holding the earlier episodes in no story, and the activation."""
