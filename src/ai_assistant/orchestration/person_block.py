@@ -49,14 +49,17 @@ makes, and the person-model store a work reads or writes otherwise, are each of 
 stores the composition root's :class:`~ai_assistant.orchestration.bound_stores.BoundStores`
 binds to the sight the work carries, handed to each call and never made here (§9:2): a
 person, or a memory, its sight does not see is one the store does not hold (§7:2, §8:2).
-The owner's panel (ADR-0385, milestone 22's B10) still pins, unpins and walks chains over
-the unbound stores, a call that names no sight, and :attr:`PersonBlocks.store` still
-hands the unbound person-model store to the zone pickers (B8d, B9).
+The owner's panel is the owner's own act (ADR-0385 §3:1): the engine reads and writes it
+through :meth:`PersonBlocks.bound`, these blocks over the two stores bound to the owner's
+sight. What reads unbound is :attr:`PersonBlocks.store`, handed to the zone picker the Task
+Scheduler sensor's push reads (ADR-0383 §7:8), and the calls with no sight of blocks never
+bound, which the canonical fake engine makes over its fakes.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
@@ -270,12 +273,14 @@ class Unpinned:
 class PersonBlocks:
     """Assemble an activation's person block, with no model call (ADR-0338 §7:1).
 
-    **Bound for a work, unbound for the owner's panel** (ADR-0383 §7:7, §9:1). Every call
-    that takes a ``sight`` reads and writes the stores the holder binds to it: the
-    block's assembly, :meth:`still_held`, :meth:`people`, and a pin, an unpin or a walk a
-    work makes. The same calls with no sight, and :attr:`store` and :attr:`memory`, are
-    the unbound stores the owner's panel (milestone 22's B10) and the zone pickers (B8d,
-    B9) still read, until their lanes bind them.
+    **Bound for a work and for the owner's panel** (ADR-0383 §7:7, §9:1; ADR-0385 §3:1).
+    Every call that takes a ``sight`` reads and writes the stores the holder binds to it:
+    the block's assembly, :meth:`still_held`, :meth:`people`, and a pin, an unpin or a walk
+    a work makes. The owner's panel reads and writes through :meth:`bound`, these blocks
+    over the same two stores bound to the owner's sight, so its calls with no sight, and
+    its :attr:`store` and :attr:`memory`, are bound. On blocks never bound, those are the
+    unbound stores: the person-model store the zone picker of the Task Scheduler sensor's
+    push reads (ADR-0383 §7:8), and the canonical fake engine's panel over its fakes.
     """
 
     def __init__(
@@ -314,17 +319,42 @@ class PersonBlocks:
         self._suggestions = suggestions
         self._pinning: dict[str, asyncio.Lock] = {}
 
+    def bound(self, sight: Sight) -> PersonBlocks:
+        """These blocks, every read and write of theirs through stores bound to ``sight``.
+
+        The owner's panel's (ADR-0385 §3:1, §4:1): its :attr:`store` and :attr:`memory`,
+        and each call it makes with no sight, read and write the person-model store and
+        the memory store the holder binds to ``sight``, so a person or a memory that sight
+        does not see is one not held (ADR-0383 §8:2). A copy sharing the holder, the bounds
+        and the pinning locks by reference, so a pin on the panel and a pin a work makes
+        are still checked under one lock per person.
+
+        Args:
+            sight: The owner's sight, made for the one act these blocks serve.
+
+        Returns:
+            The bound blocks.
+        """
+        view = copy.copy(self)
+        view._store = self._stores.people(sight)
+        view._memory = self._stores.memory(sight)
+        return view
+
     @property
     def store(self) -> PersonModelStore:
-        """The person-model store, unbound: the owner's panel's and the zone pickers'.
+        """The person-model store: bound where :meth:`bound` made these blocks.
 
-        A work reads and writes it through :meth:`people` (ADR-0383 §7:5, §7:7).
+        Unbound otherwise: what the zone picker of the Task Scheduler sensor's push reads
+        (ADR-0383 §7:8). A work reads and writes it through :meth:`people` (§7:5, §7:7).
         """
         return self._store
 
     @property
     def memory(self) -> MemoryStore:
-        """The memory store the slot's memories are read from, unbound: the panel's."""
+        """The memory store the slot's memories are read from.
+
+        Bound where :meth:`bound` made these blocks, the owner's panel's.
+        """
         return self._memory
 
     def people(self, sight: Sight) -> Bound[PersonModelStore]:
@@ -337,7 +367,10 @@ class PersonBlocks:
         return self._stores.people(sight)
 
     def _stores_for(self, sight: Sight | None) -> tuple[PersonModelStore, MemoryStore]:
-        """The two stores bound to a work's ``sight``; the unbound ones for the owner's act."""
+        """The two stores bound to a work's ``sight``; with none, the two these blocks hold.
+
+        Those are the owner's sight's where :meth:`bound` made these blocks.
+        """
         if sight is None:
             return self._store, self._memory
         return self._stores.people(sight), self._stores.memory(sight)
@@ -381,7 +414,7 @@ class PersonBlocks:
                 and the write (ADR-0383 §7:5, §7:7): a memory it does not see is one
                 not held, refused ``not_current``, and a person it does not see is
                 ``unknown_person``. ``None`` for the owner's own act on the panel,
-                which reads unbound until milestone 22's B10 binds it.
+                which reads through the stores of :meth:`bound` blocks.
 
         Returns:
             The store's write, or why the pin was refused before any write.
@@ -426,7 +459,7 @@ class PersonBlocks:
             memory_id: The memory, by id.
             sight: The sight of the work whose call unpins it, which binds every read
                 and write (ADR-0383 §7:5, §7:7); ``None`` for the owner's own act on the
-                panel, unbound until milestone 22's B10.
+                panel, through the stores of :meth:`bound` blocks.
 
         Returns:
             How many pins showed the memory, how many were removed, and the store's
@@ -474,7 +507,8 @@ class PersonBlocks:
         Args:
             memory_ids: The memories pins or marks were made on.
             sight: The sight of the work that walks them, which binds every read
-                (ADR-0383 §7:7); ``None`` for the owner's panel, unbound until B10.
+                (ADR-0383 §7:7); ``None`` for the owner's panel, through the stores of
+                :meth:`bound` blocks.
 
         Returns:
             Each one's current end, by the memory it starts from.
@@ -655,8 +689,8 @@ class PersonBlocks:
         A live read returning a memory whose status is not current, a state the writer
         never builds (a retired memory's window is closed, ADR-0328 §3:4, §5:9), is
         taken as a miss, so even then no retired memory is shown as current (ADR-0342
-        §5:1). ``memory`` is the store bound to a work's sight, or the owner's panel's
-        unbound one (:meth:`PersonBlocks.current_ends`).
+        §5:1). ``memory`` is the store bound to a work's sight, or the one the owner's
+        panel's :meth:`PersonBlocks.bound` blocks hold (:meth:`PersonBlocks.current_ends`).
         """
         at = {start: start for start in dict.fromkeys(starts)}
         reached: dict[str, Memory] = {}
