@@ -30,8 +30,10 @@ from ai_assistant.core.types import (
     MemoryWriterName,
     PersonActHow,
     PersonModelAct,
+    PersonModelWriteKind,
     ProfileField,
     ProposedSuggestion,
+    RecordHome,
     SuggestionKind,
     SupportOrigin,
     Validity,
@@ -41,6 +43,7 @@ from ai_assistant.orchestration.person_block import (
     KEPT_IN_MIND_CHARS,
     PLANNING_SUGGESTIONS,
     PersonBlocks,
+    PinRefusal,
     still_held,
 )
 from ai_assistant.testing import FakeMemoryStore, FakePersonModelStore
@@ -794,3 +797,28 @@ async def test_an_assembled_block_is_logged_by_its_counts_alone() -> None:
         0,
     )
     assert "Eats no meat." not in repr(logs)
+
+
+# --- a pin names a memory of its person's domain alone (ADR-0383 §4:7, §5:2) ---------------
+
+
+async def test_a_pin_on_a_memory_of_another_home_is_refused_and_writes_nothing() -> None:
+    """The pin's home is its person's domain; a current memory of the shared things is
+    refused as one not held is, and the same-home memory beside it is pinned."""
+    world = _World()
+    await world.held(
+        _fact("m:shared", "The hub's wifi is downstairs.", home=RecordHome.shared()),
+        _fact("m:diet", "Eats no meat."),
+    )
+
+    with capture_logs() as logs:
+        refused = await world.blocks.pin(OWNER_PERSON_ID, "m:shared", act=PANEL)
+    pinned = await world.blocks.pin(OWNER_PERSON_ID, "m:diet", act=PANEL)
+
+    assert (refused.write, refused.refused) == (None, PinRefusal.NOT_CURRENT)
+    assert [one for one in logs if one.get("reason") == "another_home"]
+    assert pinned.write is not None
+    assert pinned.write.kind is PersonModelWriteKind.WRITTEN
+    model = await world.people.read(OWNER_PERSON_ID)
+    assert model is not None
+    assert [pin.memory_id for pin in model.standing_pins] == ["m:diet"]

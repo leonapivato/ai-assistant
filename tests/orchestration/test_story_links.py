@@ -737,3 +737,45 @@ async def test_a_story_store_error_is_a_failed_decision_carrying_it() -> None:
 
     assert decision.outcome is StageOutcome.FAILED
     assert isinstance(decision.error, StoryStoreError)
+
+
+async def test_a_link_into_a_story_of_another_home_is_refused_and_the_rest_goes_on() -> None:
+    """ADR-0383 §4:7: a work for no one's episode is the shared things'; an owner's story is
+    not its home, whether named or reached through an earlier episode, and gets nothing."""
+    stories = _stories()
+    owners = await _story(stories, activation("a-1"))
+    shared = await stories.create(
+        [activation("a-2")], home=RecordHome.shared(), actor=StoryActor.OWNER
+    )
+    assert shared.story_id is not None
+
+    decision = await StoryLinksStage(stories=stories).record(
+        [story(owners), activation("a-1"), story(shared.story_id)],
+        home=RecordHome.shared(),
+        activation_id="now",
+    )
+
+    assert decision.outcome is StageOutcome.DONE
+    assert [(one.reason, one.story_id) for one in decision.refused] == [
+        (StoryRefusalReason.ANOTHER_HOME, owners),
+        (StoryRefusalReason.ANOTHER_HOME, owners),
+    ]
+    assert decision.linked == (shared.story_id,)
+    assert [entry.member for entry in (await _view(stories, owners)).entries] == [activation("a-1")]
+
+
+async def test_a_link_to_a_merged_story_is_judged_where_it_went() -> None:
+    """A merged story is followed through the store's refusal, and its target judged."""
+    stories = _stories()
+    absorbed = await _story(stories, activation("a-1"))
+    into = await _story(stories, activation("a-2"))
+    await stories.merge(absorbed, into, actor=StoryActor.OWNER)
+
+    decision = await StoryLinksStage(stories=stories).record(
+        [story(absorbed)], home=RecordHome.shared(), activation_id="now"
+    )
+
+    assert [(one.reason, one.story_id) for one in decision.refused] == [
+        (StoryRefusalReason.ANOTHER_HOME, into)
+    ]
+    assert decision.linked == ()

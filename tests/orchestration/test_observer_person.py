@@ -30,6 +30,7 @@ from observer_support import (
     reply,
     said,
 )
+from structlog.testing import capture_logs
 
 from ai_assistant.core.errors import PersonModelStoreError
 from ai_assistant.core.types import (
@@ -51,6 +52,7 @@ from ai_assistant.core.types import (
     PinPart,
     ProfileField,
     ReadingCertainty,
+    RecordHome,
     SuggestionKind,
     SupportDirection,
     SupportOrigin,
@@ -678,3 +680,57 @@ async def test_a_mark_the_store_failed_is_made_when_the_retry_adds_to_the_memory
     model = await _model(store)
     assert [one.memory_id for one in model.style_marks] == [created.id]
     assert [one.proposed.memory_id for one in model.suggestions] == [created.id]
+
+
+# --- names of another home (ADR-0383 §4:7, §5:2) --------------------------------------------
+
+
+async def test_an_episode_of_another_home_than_its_persons_writes_no_suggestion_or_mark() -> None:
+    """A suggestion and a mark are their person's domain's, and name the leaving episode
+    and a memory written from it, here of the shared things: none is written, and the
+    episode is processed all the same."""
+    harness = Harness()
+    store = _store(harness)
+    await _three(harness)
+    one = await harness.memory.get(address("one"))
+    assert one is not None
+    await harness.memory.delete(address("one"))
+    await harness.hold(one.model_copy(update={"home": RecordHome.shared()}))
+    scout = FakeModelProvider.scripted(
+        reply(
+            findings=[{"claim": _CLAIM, "rests_on": ["P1"]}],
+            suggestions=[{"field": "time_zone", "value": "Europe/Lisbon", "part": "P1"}],
+        )
+    )
+    commit = FakeModelProvider.scripted(_create(style=True, pin=True))
+    observer = harness.observer(scout=scout, commit=commit, person_model=store)
+
+    with capture_logs() as logs:
+        outcome = await observer.run()
+
+    assert outcome.processed == 1
+    (created,) = [one for one in await harness.memory.export() if isinstance(one, Memory)]
+    assert created.home == RecordHome.shared()
+    model = await _model(store)
+    assert (model.style_marks, model.suggestions) == ((), ())
+    assert {one["stage"] for one in logs if one.get("reason") == "another_home"} == {
+        "suggestion",
+        "mark",
+    }
+
+
+async def test_a_pin_on_a_memory_of_another_home_earns_no_support() -> None:
+    """§4:7: the support would point at the owner's pin from a memory of the shared things."""
+    harness = Harness()
+    store = _store(harness)
+    await _pinned(
+        harness, store, memory("m-wifi", "The wifi is downstairs.", home=RecordHome.shared())
+    )
+    await _pinned(harness, store, memory("m-veg", "The user is vegetarian."))
+    observer = harness.observer(person_model=store)
+
+    outcome = await observer.run()
+
+    assert outcome.pinned == 1
+    assert len((await _held(harness, "m-wifi")).supports) == 1
+    assert len((await _held(harness, "m-veg")).supports) == 2

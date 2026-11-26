@@ -150,6 +150,8 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StoryNoteId,
     StoryOutcome,
+    StoryRefusal,
+    StoryRefusalReason,
     SupportPart,
     TextChannelPayload,
     ThingKey,
@@ -303,6 +305,7 @@ from ai_assistant.orchestration.speech import (
 from ai_assistant.orchestration.stories import (
     DEFAULT_STORY_SUMMARY_VIEW_NOTES,
     fitted,
+    of_another_home,
     owner_summary,
     resolved_view,
     unknown_activation,
@@ -3487,12 +3490,32 @@ class Engine:
     async def _linked_story(
         self, stories: StoryStore, story_id: str | None, members: tuple[StoryMember, ...]
     ) -> StoryOutcome:
-        """Check each activation member's record, then create or link (ADR-0289 §4)."""
+        """Check each activation member's record, then create or link (ADR-0289 §4).
+
+        A member whose episode is of another home than the story's is refused
+        ``another_home``, with nothing written (ADR-0383 §4:7): the story and the episode
+        are in two store files, so this is the code that writes the name. The story's
+        home is the owner's domain for a story the owner creates (§4:5), and the stored
+        one for a story linked to; a story not there, or merged, is left to the store's
+        own refusal, which comes before a home is judged.
+        """
         if members and (refusal := await unknown_activation(self._memory, members)):
             return StoryOutcome(refusal=refusal)
         if story_id is None:
             # The owner's own act outside a work: the owner's domain (ADR-0383 §4:5).
-            return await stories.create(members, home=RecordHome.owners(), actor=StoryActor.OWNER)
+            home = RecordHome.owners()
+            if members and await of_another_home(self._memory, members, home) is not None:
+                return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.ANOTHER_HOME))
+            return await stories.create(members, home=home, actor=StoryActor.OWNER)
+        header = await stories.header(story_id) if members else None
+        if (
+            header is not None
+            and header.merged_into is None
+            and await of_another_home(self._memory, members, header.home) is not None
+        ):
+            return StoryOutcome(
+                refusal=StoryRefusal(reason=StoryRefusalReason.ANOTHER_HOME, story_id=story_id)
+            )
         return await stories.link(story_id, members, actor=StoryActor.OWNER)
 
     async def unlink_story(

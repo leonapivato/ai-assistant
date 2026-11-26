@@ -1,6 +1,6 @@
 """The engine's side of the story surface (ADR-0289 §4).
 
-Four things the engine adds to the story store, and nothing else:
+Five things the engine adds to the story store, and nothing else:
 
 * **The existence check** (:func:`unknown_activation`). Before a create or a link
   naming an activation member, each activation's record is read at
@@ -10,6 +10,11 @@ Four things the engine adds to the story store, and nothing else:
   checks nothing: each moves members a story already holds, so an activation whose
   episode has since been forgotten moves with the rest. The story store itself reads
   no other store (§1).
+* **The home check** (:func:`of_another_home`, ADR-0383 §4:7). A story and the episode
+  it names as a member are in two store files, so the code that writes the name refuses
+  an activation member whose episode is held and of another home than the story's. An
+  episode with no record is passed over, so the rule above still holds for a merge, a
+  split or a move.
 * **The resolved view** (:func:`resolved_view`). Each activation member is resolved
   to its episode's ``EpisodeSummary``, or marked forgotten where no record is there
   any more; each story member to its id and its current member count, one level deep.
@@ -53,7 +58,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
-    from ai_assistant.core.types import StoryNote, StorySummaryState
+    from ai_assistant.core.types import RecordHome, StoryNote, StorySummaryState
 
 
 def episode_address(activation_id: str) -> str:
@@ -85,6 +90,44 @@ async def unknown_activation(
     for member in activations:
         if not isinstance(found.get(episode_address(member.id)), EpisodicMemory):
             return StoryRefusal(reason=StoryRefusalReason.UNKNOWN_ACTIVATION, member=member)
+    return None
+
+
+async def of_another_home(
+    memory: MemoryStore, members: Sequence[StoryMember], home: RecordHome
+) -> StoryMember | None:
+    """The first activation member whose episode is held and of another home than ``home``.
+
+    A story names an episode as a member, and the two are in two store files, so the
+    code that writes the name is the writer that refuses a member of another home
+    (ADR-0383 §4:7, its third item and its last sentence). ``home`` is the home of the
+    story the member would be written into: the home a story being minted is created
+    with, or the stored home of the story linked, moved to or split from.
+
+    Only an episode the memory store holds is judged: one with no record is passed
+    over, so that a merge, a split or a move still carries an activation whose episode
+    has since been forgotten (ADR-0289 §4:3), and a create or a link refuses one with no
+    record through :func:`unknown_activation`, as it did. Read through
+    :meth:`~ai_assistant.core.protocols.MemoryStore.get_many`, so a whole member list is
+    judged against one state of the memory store.
+
+    Args:
+        memory: The memory store the episodes are read from.
+        members: The members the write names; story members are the story store's to
+            judge, in its own file.
+        home: The home of the story the members would be written into.
+
+    Returns:
+        The first activation member of another home, or ``None``.
+    """
+    activations = [member for member in members if member.kind is StoryMemberKind.ACTIVATION]
+    if not activations:
+        return None
+    found = await memory.get_many([episode_address(member.id) for member in activations])
+    for member in activations:
+        record = found.get(episode_address(member.id))
+        if isinstance(record, EpisodicMemory) and record.home != home:
+            return member
     return None
 
 

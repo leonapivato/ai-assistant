@@ -83,6 +83,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     RecordedTextInput,
+    RecordHome,
     RoundMessagePart,
     StoryMember,
     StoryMemberKind,
@@ -970,7 +971,7 @@ class EpisodeReader:
         answer pointers name whose round is that part's round: the question the input
         answers, which ADR-0346 §2:1 names among what the record points at.
         """
-        hints = await self._ticketed(processing, effects, shown, labels)
+        hints = await self._ticketed(processing, effects, shown, labels, home=leaving.home)
         approved = [
             one
             for one in effects
@@ -1017,6 +1018,8 @@ class EpisodeReader:
         effects: Sequence[ActivationEffect],
         shown: _Shown,
         labels: _Labels,
+        *,
+        home: RecordHome,
     ) -> list[Hint]:
         """The candidates recorded under a ticket in the leaving episode (ADR-0361 §5:10).
 
@@ -1029,6 +1032,13 @@ class EpisodeReader:
         request's recorded statement, never the episode's, so an approval still freezing
         after its taker confirms all the same. A request whose approval's episode is not
         held at all confirms nothing.
+
+        **Nor does one of another home** (ADR-0383 §4:7). A memory written from the
+        leaving episode takes its home, ``home`` (§4:2), and a confirmation is an evidence
+        pointer to the request, held in another store file keyed by its person, whose
+        domain is its home (§3:1, §5:2), and to the approval's episode. Where either is of
+        another home than ``home``, the candidate is given no confirmation, as one whose
+        approval's episode is not held is not, so nothing written names them.
         """
         ticketed = [
             one
@@ -1062,6 +1072,8 @@ class EpisodeReader:
             own = held.get(address)
             fact = _requested_fact(request)
             if not isinstance(own, EpisodicMemory) or fact is None:
+                continue
+            if own.home != home or RecordHome.person(request.person) != home:
                 continue
             confirmation = shown.confirmation(
                 ConfirmationPart(

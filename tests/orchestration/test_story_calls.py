@@ -1524,3 +1524,133 @@ async def test_a_group_with_an_empty_list_of_notes_groups_and_writes_none() -> N
 
     assert isinstance(result, ToolResult)
     assert result.outcome is ToolOutcome.SUCCEEDED
+
+
+# --- an episode of another home (ADR-0383 §4:7) --------------------------------------------
+
+
+def _shared_episode(episode_id: str) -> EpisodicMemory:
+    return _episode(episode_id).model_copy(update={"home": RecordHome.shared()})
+
+
+async def _stores_with_shared(*shared: str) -> tuple[FakeStoryStore, FakeMemoryStore]:
+    """The stores, with each of ``shared`` an episode of the shared things, every other the
+    owner's."""
+    stories = FakeStoryStore(now=_now)
+    memory = FakeMemoryStore(now=_now)
+    for episode_id in (_EPISODE, "activation:act-0"):
+        held = _shared_episode(episode_id) if episode_id in shared else _episode(episode_id)
+        await memory.add(held)
+    for episode_id in shared:
+        if episode_id not in {_EPISODE, "activation:act-0"}:
+            await memory.add(_shared_episode(episode_id))
+    return stories, memory
+
+
+def _refused_as_another_home(result: ToolResult) -> None:
+    assert result.outcome is ToolOutcome.FAILED
+    assert result.failure is not None
+    assert result.failure.kind is ToolFailureKind.REFUSED
+    assert result.failure.message == (
+        "the episode named is of another home than the story, so nothing was written"
+    )
+
+
+async def test_a_start_whose_episode_is_of_another_home_starts_nothing() -> None:
+    """ADR-0383 §4:7: the story would be the work's home, its member's episode another."""
+    stories, memory = await _stores_with_shared(_EPISODE)
+    calls = StoryCalls(stories=stories, memory=memory)
+
+    result = await calls.run(_call(START_STORY, {NOTES_ARGUMENT: ["A camping trip."]}))
+
+    _refused_as_another_home(result)
+    assert (await stories.stories()).stories == ()
+
+
+async def test_a_link_into_a_story_of_another_home_links_nothing() -> None:
+    """ADR-0383 §4:7: this work's episode is the owner's, the story the shared things'."""
+    stories, memory = await _stores()
+    shared = await stories.create(
+        [_activation_member("act-9")], home=RecordHome.shared(), actor=StoryActor.OWNER
+    )
+    assert shared.story_id is not None
+    calls = StoryCalls(stories=stories, memory=memory)
+
+    result = await calls.run(_call(LINK_STORY, {STORY_ARGUMENT: str(shared.story_id)}))
+
+    _refused_as_another_home(result)
+    assert await _members(stories, str(shared.story_id)) == [_activation_member("act-9")]
+
+
+async def test_a_link_of_an_episode_of_another_home_links_nothing() -> None:
+    """ADR-0383 §4:7: an earlier episode of the shared things into an owner's story."""
+    stories, memory = await _stores_with_shared("activation:act-7")
+    trip = await _story(stories)
+    calls = StoryCalls(stories=stories, memory=memory)
+
+    result = await calls.run(
+        _call(LINK_STORY, {STORY_ARGUMENT: trip, MEMBER_EPISODE_ARGUMENT: "activation:act-7"})
+    )
+
+    _refused_as_another_home(result)
+    assert await _members(stories, trip) == [_activation_member("act-0")]
+
+
+async def test_a_move_of_an_episode_of_another_home_moves_nothing() -> None:
+    """ADR-0383 §4:7: the story moved to is the owner's, the episode the shared things'."""
+    stories, memory = await _stores_with_shared("activation:act-0")
+    trip, other = await _two_stories(stories)
+    calls = StoryCalls(stories=stories, memory=memory)
+
+    result = await calls.run(
+        _call(
+            MOVE_STORY,
+            {STORY_ARGUMENT: trip, TO_ARGUMENT: other, EPISODES_ARGUMENT: ["activation:act-0"]},
+        )
+    )
+
+    _refused_as_another_home(result)
+    assert await _members(stories, trip) == [
+        _activation_member("act-0"),
+        _activation_member(_ACTIVATION),
+    ]
+    assert await _members(stories, other) == [_activation_member("act-2")]
+
+
+async def test_a_split_of_an_episode_of_another_home_splits_nothing() -> None:
+    """ADR-0383 §4:7: the new story takes the owner's story's home; the episode is another."""
+    stories, memory = await _stores_with_shared("activation:act-0")
+    trip, _ = await _two_stories(stories)
+    calls = StoryCalls(stories=stories, memory=memory)
+
+    result = await calls.run(
+        _call(SPLIT_STORY, {STORY_ARGUMENT: trip, EPISODES_ARGUMENT: ["activation:act-0"]})
+    )
+
+    _refused_as_another_home(result)
+    assert await _members(stories, trip) == [
+        _activation_member("act-0"),
+        _activation_member(_ACTIVATION),
+    ]
+    assert len((await stories.stories()).stories) == 2
+
+
+async def test_a_move_still_carries_an_episode_forgotten_since() -> None:
+    """ADR-0289 §4:3: an episode with no record is not judged, and moves with the rest."""
+    stories, memory = await _stores()
+    trip = await _story(stories, _activation_member("act-0"), _activation_member("act-gone"))
+    other = await _story(stories, _activation_member("act-2"))
+    calls = StoryCalls(stories=stories, memory=memory)
+
+    result = await calls.run(
+        _call(
+            MOVE_STORY,
+            {STORY_ARGUMENT: trip, TO_ARGUMENT: other, EPISODES_ARGUMENT: ["activation:act-gone"]},
+        )
+    )
+
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    assert await _members(stories, other) == [
+        _activation_member("act-2"),
+        _activation_member("act-gone"),
+    ]
