@@ -55,6 +55,7 @@ from ai_assistant.core.types import (
     ApprovalWriteAnswer,
     ChannelIdentity,
     RecordedDelivery,
+    RecordHome,
     TicketState,
     ToolOutcome,
     ToolResult,
@@ -303,7 +304,7 @@ class ApprovalCalls:
         del call
         return NotDone(reason=_UNRULED)
 
-    async def run_claiming(  # noqa: PLR0911 — each answer the write gives is a return of its own
+    async def run_claiming(  # noqa: C901, PLR0911 — each answer the write gives is a return of its own
         self,
         call: ToolCall,
         effect: ActivationEffect,
@@ -348,8 +349,9 @@ class ApprovalCalls:
             # Its bound on ``why`` (core's APPROVAL_WHY_MAX_CHARS), or a call the store
             # could not hold: nothing is written.
             return Unwritten(reason=_MALFORMED)
-        # ADR-0383 §7:7: read after the clock, through the store bound to the work's sight.
-        plans = self._stores.plans(work_sight())
+        plans = self._writing(request)
+        if plans is None:
+            return Unwritten(reason=_NOT_OFFERED)
         try:
             answer = await plans.write_approval_request(
                 request,
@@ -385,6 +387,20 @@ class ApprovalCalls:
             outcome=ToolOutcome.SUCCEEDED,
             output={"card": _CARD_WORDS[card], "expires": _instant(written.expires_at)},
         )
+
+    def _writing(self, request: ApprovalRequest) -> Bound[PlanStore] | None:
+        """The plan store ``request`` is written through, or ``None`` where it is not made.
+
+        ADR-0383 §7:7: read after the clock, through the store bound to the work's sight.
+        ADR-0388 §6:2: the store checks the write for an equal request already waiting, a
+        figure of the requests it holds (§6:1), so it is made only where the work's
+        sight, as it stands at the write, sees the request's home, its person's domain;
+        ``None`` otherwise, and the call is answered as where it is not offered.
+        """
+        sight = work_sight()
+        if not sight.sees(RecordHome.person(request.person)):
+            return None
+        return self._stores.plans(sight)
 
     async def _card(
         self, request: ApprovalRequest, asker: ApprovalAsker, plans: Bound[PlanStore]

@@ -176,6 +176,15 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
+
+class _NotOffered(Exception):  # noqa: N818 — a control-flow signal inside this module, never raised out
+    """A work's spawn whose sight, at the write, does not see the task's home (ADR-0388 §6:2).
+
+    Raised by :meth:`TaskManager.spawn` before anything is written, and answered by
+    :meth:`ScheduledTaskCalls.run_claiming` as the call is where it is not offered.
+    """
+
+
 #: How much of a text the listing shows of it in brief.
 _BRIEF_CHARS: Final = 160
 
@@ -1232,12 +1241,23 @@ class TaskManager:
 
         A work's write, through the plan store bound to its sight (ADR-0383 §7:5).
 
+        **Made only where that sight, as it stands at the write, sees the home the task
+        lands in** (ADR-0388 §6:2), its person's domain: the store checks the write
+        against the chain and pending limits, the replace and the wait, which are figures
+        of the tasks the bound store holds (§6:1), so a work that does not see that home
+        is not made the write. The sight is read here, at the write, not at the offer.
+
         Raises:
             ClaimStopped: If the store holds a stop record for the spawner.
             PlanningError: If the spawn does not validate or the store fails.
+            _NotOffered: If the work's sight does not see the task's home: nothing is
+                written, and the call is answered as one not offered to the work.
         """
+        sight = self._sight()
+        if not sight.sees(RecordHome.person(spawner.person)):
+            raise _NotOffered
         return await self._spawned(
-            self._work_plans(),
+            self._stores.plans(sight),
             spawner,
             instruction=instruction,
             when=when,
@@ -1676,6 +1696,9 @@ class ScheduledTaskCalls:
             )
         except ValueError:
             return Unwritten(reason=_MALFORMED)
+        except _NotOffered:
+            # ADR-0388 §6:2: as where spawn is not offered to this work; nothing written.
+            return Unwritten(reason=_NOT_OFFERED)
         refused = _refused(written)
         if refused is not None:
             return refused

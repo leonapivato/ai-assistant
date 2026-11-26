@@ -543,22 +543,15 @@ class _FailsAfterCreate:
         return await self.inner.link(story_id, members, **kwargs)
 
 
-@pytest.mark.parametrize(
-    "stories",
-    [
-        pytest.param(_FailsAfterCreate(note_at=1), id="the-first-note"),
-        pytest.param(_FailsAfterCreate(note_at=2), id="between-the-notes"),
-        pytest.param(_FailsAfterCreate(link=True), id="placing-it-inside"),
-    ],
-)
-async def test_a_start_that_made_its_story_is_never_reported_not_done(
-    stories: _FailsAfterCreate,
-) -> None:
+async def test_a_start_that_made_its_story_is_never_reported_not_done() -> None:
     """ADR-0306 §5:6, §5:11: its record stays unfinished, so a repeat is already done.
 
     Reported not done, the backstop would let an identical start make a second story;
-    reported done, it would claim what was not all written.
+    reported done, it would claim what was not all written. Its first notes are written
+    with the story, in its one create (ADR-0388 §3:1), so only its place, written after,
+    can leave it so.
     """
+    stories = _FailsAfterCreate(link=True)
     memory = FakeMemoryStore(now=_now)
     await memory.add(_episode(_EPISODE))
     await memory.add(_episode("activation:act-0"))

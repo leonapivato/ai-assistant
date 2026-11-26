@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     DeliveryStatus,
     GrantHow,
     Idempotency,
+    InputSender,
     LineParts,
     PermissionDecision,
     PermissionLine,
@@ -231,8 +232,15 @@ class _Rig:
             requested={f"decision:{n}": RequestedCall(tool=tool, values={"date": date})},
             read_outside=read_outside,
         )
-        # ADR-0383 §7:7: the runner reads and writes by the asking work's sight.
-        with in_a_work(at=self.clock()), asking(asker):
+        # ADR-0383 §7:7: the runner reads and writes by the asking work's sight; ADR-0388
+        # §6:2: a request is written only where that sight sees its person's domain, so
+        # another person's request is asked by a work that person sent.
+        senders = (
+            ()
+            if person == OWNER_PERSON_ID
+            else (InputSender(person=person, level=Sureness.NORMAL),)
+        )
+        with in_a_work(*senders, at=self.clock()), asking(asker):
             answer = await self.runner.run_claiming(
                 ToolCall(request=request, decision=decision),
                 effect,

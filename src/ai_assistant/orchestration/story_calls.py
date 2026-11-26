@@ -58,13 +58,18 @@ never compares either (ADR-0306 §2:10), so two identical starts are one start's
 
 **Start is not safe to repeat** (ADR-0306 §3:1). Its call gets an effect record, and
 acting's duplicate backstop refuses a second identical start in the matter as already
-done (§5:9). It creates the story with this activation as its member (ADR-0300 §10:3),
-writes its first notes, and, where it names one, links it into the story it sits inside.
-Everything it names is checked first, so a start naming a story that is not there
+done (§5:9). **It makes the story and its first notes in one write** (ADR-0388 §3:1):
+one create through the work's bound story store, the story holding this activation as
+its member (ADR-0300 §10:3) and carrying its notes, after which it reads nothing of the
+story back; where it names one, it then links the story into the story it sits inside,
+which it read first, so a work that does not see the home its story lands in names
+none. Everything it names is checked first, so a start naming a story that is not there
 starts nothing. **A start is not reported not done once its story exists**: where its
-first notes or its place cannot then be written, the runner raises
-:class:`StartUnfinishedError` and acting leaves its effect record unfinished, which the
-backstop counts as done and nobody reports as done (§5:6, §5:11).
+place cannot then be written, the runner raises :class:`StartUnfinishedError` and acting
+leaves its effect record unfinished, which the backstop counts as done and nobody
+reports as done (§5:6, §5:11). A first note refused refuses the start, and nothing is
+written; it is answered as one refused when it was written after the story, unfinished,
+so what the work is told of it is what it was told before the two were one write.
 
 **Merged stories are followed, never written** (ADR-0289 §3). A story a call names that
 has been merged since planning was shown it is followed to the story it was merged into,
@@ -157,6 +162,7 @@ from ai_assistant.core.types import (
     RiskLevel,
     Sight,
     StoryActor,
+    StoryFirstNote,
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
@@ -776,6 +782,11 @@ class StartUnfinishedError(StoryStoreError):
     effect record it was claimed under unfinished: counted as done by the backstop and
     never reported as done (ADR-0306 §5:6, §5:11). A ``StoryStoreError``, since what
     it means is that the store did not take what it had just admitted.
+
+    **A start's first note refused** raises it too, though a start makes its story and
+    its notes in one write and so writes nothing (ADR-0388 §3:1): such a note was
+    refused after the story was made when the two were two writes, and the work is told
+    of it what it was told then.
     """
 
 
@@ -821,6 +832,35 @@ def _first_notes(value: object) -> tuple[str, ...]:
     ):
         return tuple(str(one) for one in value)
     return ()
+
+
+def _planning_notes(
+    notes: Sequence[str], activation: str, *, outside: bool
+) -> tuple[StoryFirstNote, ...]:
+    """A start's first notes as its one create writes them (ADR-0388 §3:1, §3:3).
+
+    Each by ``planning``, written during this activation, with the hub's mark, as
+    :meth:`~ai_assistant.core.protocols.StoryStore.append_note` wrote them when the start
+    was two writes (ADR-0303 §4:7, §9:3).
+
+    Raises:
+        StartUnfinishedError: If a note is one the store would refuse, before anything
+            is written: a refused note refuses the start (§3:1), and is answered as it
+            was when it was refused after the story was made.
+    """
+    try:
+        return tuple(
+            StoryFirstNote(
+                text=note,
+                author=StoryNoteAuthor.PLANNING,
+                written_during=activation,
+                outside=outside,
+            )
+            for note in notes
+        )
+    except ValueError as exc:
+        msg = "a start's first note was refused, so nothing was written"
+        raise StartUnfinishedError(msg) from exc
 
 
 def _activation_of_episode(episode_id: str) -> str | None:
@@ -881,12 +921,13 @@ class StoryCalls:
             refused it or could not be reached, and nothing was written.
 
         Raises:
-            StartUnfinishedError: If a start or a group created its story and then
-                could not write all its first notes, or a start could not place it
-                inside the larger one. Acting then leaves the call's effect record
-                unfinished, which the duplicate backstop counts as done and which is
-                never reported as done (ADR-0306 §5:6, §5:11), so an identical call
-                is not made again.
+            StartUnfinishedError: If a group created its story and then could not
+                write all its first notes, a start could not place its story inside the
+                larger one, or a start's first note was refused, which refuses the
+                start and writes nothing (ADR-0388 §3:1). Acting then leaves the call's
+                effect record unfinished, which the duplicate backstop counts as done
+                and which is never reported as done (ADR-0306 §5:6, §5:11), so an
+                identical call is not made again.
         """
         try:
             await self._dispatch(call)
@@ -967,7 +1008,15 @@ class StoryCalls:
     # --- the calls ---
 
     async def _start(self, held: _Held, call: ToolCall) -> None:
-        """Start a story with this activation and its first notes (ADR-0300 §10:3)."""
+        """Start a story with this activation and its first notes (ADR-0300 §10:3).
+
+        **One write** (ADR-0388 §3:1): the create carries the first notes, so the story
+        and its notes are written together or not at all, and nothing of the story is
+        read back after it. A work whose sight does not see the home its story lands in
+        (ADR-0383 §4:1, §4:4) starts it whole all the same, and sees nothing of it
+        afterwards (ADR-0388 §3:2). Only a start inside a larger story then writes again,
+        the link, and only a work that saw the larger story first makes it.
+        """
         parameters = call.request.parameters
         notes = _first_notes(parameters.get(NOTES_ARGUMENT))
         if not notes:
@@ -983,50 +1032,36 @@ class StoryCalls:
             # A home no write may carry is the store's to refuse first (ADR-0383 §2:3).
             await self._same_home(held, [own], home)
         created = await held.stories.create(
-            [own], home=home, actor=StoryActor.PLANNING, trigger=activation
+            [own],
+            home=home,
+            actor=StoryActor.PLANNING,
+            trigger=activation,
+            notes=_planning_notes(notes, activation, outside=outside),
         )
         if created.story_id is None:
             raise _refused("the story store refused the start")
-        started = str(created.story_id)
+        if larger is None:
+            return
         try:
-            await self._started(held, started, notes, activation, outside=outside, larger=larger)
+            await self._placed(held, str(created.story_id), larger, activation)
         except (_NotDone, StoryStoreError, MemoryStoreError, ValueError) as exc:
             # The story exists, so the start happened, though not whole: never reported
             # as not done, which the duplicate backstop would let an identical start
             # repeat, and never as done (ADR-0306 §5:6, §5:11).
-            msg = "a story was started, but its first notes or its place were not all written"
+            msg = "a story was started, but its place was not written"
             raise StartUnfinishedError(msg) from exc
 
-    async def _started(  # noqa: PLR0913 — the stores, the story, its notes, the activation, the mark and its place
-        self,
-        held: _Held,
-        started: str,
-        notes: Sequence[FrozenJson],
-        activation: str,
-        *,
-        outside: bool,
-        larger: str | None,
-    ) -> None:
-        """Write a started story's first notes, then place it inside the larger one."""
-        for note in notes:
-            written = await held.stories.append_note(
-                started,
-                str(note),
-                author=StoryNoteAuthor.PLANNING,
-                written_during=activation,
-                outside=outside,
-            )
-            if written.note is None:
-                raise _refused("a first note was refused")
-        if larger is not None:
-            linked = await held.stories.link(
-                larger,
-                [StoryMember(kind=StoryMemberKind.STORY, id=started)],
-                actor=StoryActor.PLANNING,
-                trigger=activation,
-            )
-            if linked.story_id is None:
-                raise _refused("the story was not placed inside the larger one")
+    @staticmethod
+    async def _placed(held: _Held, started: str, larger: str, activation: str) -> None:
+        """Place a started story inside the larger one its start named."""
+        linked = await held.stories.link(
+            larger,
+            [StoryMember(kind=StoryMemberKind.STORY, id=started)],
+            actor=StoryActor.PLANNING,
+            trigger=activation,
+        )
+        if linked.story_id is None:
+            raise _refused("the story was not placed inside the larger one")
 
     async def _note(self, held: _Held, parameters: Mapping[str, FrozenJson]) -> None:
         """Write a note by ``planning`` on a story, with its mark (ADR-0303 §9:3)."""

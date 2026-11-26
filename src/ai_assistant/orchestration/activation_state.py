@@ -651,28 +651,35 @@ class ActivationState:
         :attr:`held_senders` and the activation, as the meet of the sight it had, so it
         never widens within the work (§6:6).
 
-        **A work whose facts were not recorded, or whose activation id was not minted**,
-        has no work's sight: ``of_work`` takes recorded facts and an activation, and both
-        paths are defects already logged (``work_facts_unrecorded``,
-        ``activation_capture_degraded``). Such a work reads by
-        :meth:`~ai_assistant.core.types.Sight.of_producer`'s sight of what it records:
-        with no facts an anyone bound alone, which sees nothing (§6:7, §6:3); with facts
-        and no activation, the bounds its facts and senders give, with nothing its own,
-        as it has no activation to name. ``work_sight_degraded`` says which. These two
-        paths read by the producer's constructor because ``Sight.of_work`` takes recorded
-        facts and an activation, so their count events (§11:1) carry the reader code
-        ``producer``, not ``work``.
+        **A work whose facts were not recorded** (ADR-0368 §2:4, a defect already logged
+        as ``work_facts_unrecorded``) has a work's sight all the same (ADR-0388 §5:1):
+        ``of_work`` given no facts makes an anyone bound alone and its activation, so it
+        holds its own records, its episode, its effects and the requests it asked
+        (ADR-0383 §7:4), and sees nothing else; its count events (§11:1) carry the
+        reader code ``work``. Made again once its facts are recorded, it is the meet of
+        the two, so it never widens (ADR-0388 §5:2). ``work_sight_degraded`` still says
+        so, with the reason ``facts``: its sight is narrower than any its facts give.
+
+        **A work whose activation id was not minted** (``activation_capture_degraded``)
+        has no work's sight, since nothing can be its own: it reads by
+        :meth:`~ai_assistant.core.types.Sight.of_producer`'s sight, the bounds its facts
+        and senders give, or an anyone bound alone where it has no facts either, with
+        nothing its own (§6:7, §6:3), and its count events carry ``producer``.
+        ``work_sight_degraded`` says so, with the reason ``identifier``, or ``facts``
+        where it has no facts either.
         """
         facts = self.work_facts
         had = self._sight
-        if facts is not None and self.activation_id is not None:
+        if facts is None:
+            _log.warning("work_sight_degraded", at=at, reason="facts")
+        if self.activation_id is not None:
+            # ADR-0388 §5:1, §5:3: given no facts, a work's sight of an anyone bound alone.
             self._sight = Sight.of_work(
                 facts, self.held_senders, activation=self.activation_id, had=had
             )
             return
-        _log.warning(
-            "work_sight_degraded", at=at, reason="facts" if facts is None else "identifier"
-        )
+        if facts is not None:
+            _log.warning("work_sight_degraded", at=at, reason="identifier")
         made = Sight.of_producer(facts, () if facts is None else self.held_senders)
         if had is None:
             self._sight = made
