@@ -3477,9 +3477,11 @@ def owners_act_may_name(domain: RecordHome) -> bool:
     The owner's domain, the person home of :data:`OWNER_PERSON_ID`, and the hub's shared
     things (ADR-0369 §12:1, §12:2, §2:8), and no other. Any other value, a group's domain
     or another person's included, is refused from the value alone, before any store is
-    read, and alike whatever any store holds (ADR-0385 §2:2). A value built round the
-    type's validation is refused unless each field is exactly of its declared type, so
-    a kind given as bare text is refused rather than compared equal to the enumeration.
+    read, and alike whatever any store holds (ADR-0385 §2:2). The value is judged by
+    its stored fields alone, each name, type and value exactly as one of the two holds
+    it, and no attribute of it is read: so a value built round the type's validation,
+    with a field missing, added or of another type (a kind given as bare text among
+    them), is refused rather than read or compared equal to the enumeration.
 
     Args:
         domain: The domain an owner's act names.
@@ -3487,11 +3489,34 @@ def owners_act_may_name(domain: RecordHome) -> bool:
     Returns:
         Whether the act may name it.
     """
-    if type(domain) is not RecordHome or type(domain.kind) is not RecordHomeKind:
+    if type(domain) is not RecordHome:
         return False
-    if domain.id is not None and type(domain.id) is not str:
-        return False
-    return domain in (RecordHome.owners(), RecordHome.shared())
+    held = _exactly(domain)
+    return held is not None and held in {
+        _exactly(RecordHome.owners()),
+        _exactly(RecordHome.shared()),
+    }
+
+
+def _exactly(home: RecordHome) -> frozenset[tuple[str, type, object]] | None:
+    """A home's stored fields, each by its name, its exact type and its value.
+
+    ``None`` where the instance holds no field dictionary, or a name or a value of a type
+    no valid home holds, as only a value built round validation can: so nothing of the
+    caller's own is hashed or compared.
+    """
+    fields = getattr(home, "__dict__", None)
+    if type(fields) is not dict:
+        return None
+    if not all(
+        type(name) is str and type(value) in _HOME_FIELD_TYPES for name, value in fields.items()
+    ):
+        return None
+    return frozenset((name, type(value), value) for name, value in fields.items())
+
+
+#: The exact types a valid home's stored fields hold: its kind, its id, or no id.
+_HOME_FIELD_TYPES: Final = frozenset({RecordHomeKind, str, type(None)})
 
 
 class AuthorityKind(StrEnum):
