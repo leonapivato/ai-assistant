@@ -39,13 +39,18 @@ from structured_support import structured
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
+    CandidateDecline,
     EpisodicMemory,
+    FindingOutcome,
+    FindingUnwritten,
+    InputPart,
     InputSender,
     LabelKind,
     Memory,
     MemoryOperationKind,
     ObservationAttempt,
     ObservationAttemptEnd,
+    ObservationFinding,
     ObservationRecord,
     ObservationState,
     ObserverCall,
@@ -249,6 +254,17 @@ async def test_withholding_a_record_the_sight_does_not_see_is_set_aside_whole() 
     harness = Harness(sight_mode=SightMode.WITHHOLD)
     await _seeded(harness, stranger=True)
     calls = (ObserverCall(step=ObserverStep.SCOUT, at=AT - timedelta(hours=2)),)
+    decided = ObservationFinding(
+        id="f1",
+        episode=_SUBJECT,
+        claim=_CLAIM,
+        rests_on=(InputPart(episode=_SUBJECT),),
+        outcome=FindingOutcome(at=AT - timedelta(hours=2), unwritten=FindingUnwritten.NOT_KEPT),
+    )
+    pending = ObservationFinding(
+        id="f2", episode=_SUBJECT, claim="The user flies often.", rests_on=decided.rests_on
+    )
+    declined = CandidateDecline(candidate="effect-x", reason="Trivia.")
     earlier = await harness.plans.write_observation(
         ObservationRecord(
             episode=_SUBJECT,
@@ -262,6 +278,8 @@ async def test_withholding_a_record_the_sight_does_not_see_is_set_aside_whole() 
                 ),
                 ObservationAttempt(started_at=AT - timedelta(hours=1)),
             ),
+            findings=(decided, pending),
+            declines=(declined,),
         ),
         expected_revision=0,
     )
@@ -282,7 +300,8 @@ async def test_withholding_a_record_the_sight_does_not_see_is_set_aside_whole() 
         (AT - timedelta(hours=1), (), ObservationAttemptEnd.FAILED),
     ]
     assert record.call_count() == earlier.call_count() == 1, "the budget counts it as before"
-    assert (record.findings, record.declines) == (earlier.findings, earlier.declines)
+    assert record.findings == (decided, pending), "a decided and a pending finding, kept"
+    assert record.declines == (declined,)
 
 
 async def test_withholding_a_record_moved_since_it_was_queued_is_not_set_aside() -> None:
