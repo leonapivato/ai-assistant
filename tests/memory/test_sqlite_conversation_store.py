@@ -52,6 +52,7 @@ from ai_assistant.testing.cancellation import (
     ThreadSuspension,
     worker_finished_before_the_first_check,
 )
+from sight_equivalence import SIGHTS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
@@ -2056,3 +2057,31 @@ def _keep_only(store: ConversationStore, sight: Sight) -> None:
     conn.execute("DELETE FROM conversation_devices")
     conn.execute("DELETE FROM chat_devices")
     conn.execute("COMMIT")
+
+
+async def test_a_bound_stores_claim_read_validates_nothing_it_does_not_hold() -> None:
+    """ADR-0383 §8:2: a claimed message the sight does not see is one never written.
+
+    Its row is altered outside the store, so validated it would be a fault; bound to a
+    sight that does not see its home, the store answers ``None`` before reading anything
+    of it but its home columns, and unbound it is the fault it always was.
+    """
+    store = SqliteConversationStore(path=":memory:", now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        conversation = (await store.start(home=RecordHome.owners())).id
+        await store.append_message(
+            conversation,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="shared",
+                effect_id="effect-1",
+                home=RecordHome.shared(),
+            ),
+        )
+        store._conn.execute("UPDATE messages SET author = 'user' WHERE effect_id = 'effect-1'")
+        bound = store.bound(SIGHTS["run-over-the-owners-domain"])
+        assert await bound.effect_position(conversation, "effect-1") is None
+        with pytest.raises(ConversationStoreError):
+            await store.effect_position(conversation, "effect-1")
+    finally:
+        store.close()
