@@ -29,13 +29,17 @@ from phases_support import (
     open_conversation,
     phases_harness,
     said,
+    until,
     working,
 )
 from sight_support import OWNER_WEAK, UNIDENTIFIED
 from story_support import address, episode, work_of
 from structlog.testing import capture_logs
+from task_support import activation as task_activation
 from task_support import seams as task_seams
+from task_support import write_task
 from test_engine import AT, Harness
+from test_phases_task_scheduler import _responder, _silent
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -45,6 +49,8 @@ from ai_assistant.core.types import (
     ApprovalRequest,
     ApprovalRequestState,
     ApprovalTap,
+    EpisodicMemory,
+    OccurrenceState,
     RecordHome,
     RequestedCall,
     RoundResponse,
@@ -95,8 +101,8 @@ class _Kept(FakePlanStore):
 
 def _engine(mode: SightMode) -> Harness:
     """An engine whose memory and plan stores are built in ``mode``, with the Task
-    Scheduler wired, so a stop of an activation not running asks whether it was pushed
-    (ADR-0350 §9:10) before it reads the episode."""
+    Scheduler wired, so the owner's stop of an activation not running asks whether it was
+    pushed (ADR-0350 §9:10) before it reads the episode, and a work's never does."""
     return phases_harness(
         memory=FakeMemoryStore(now=lambda: AT, sight_mode=mode),
         plans=FakePlanStore(now=lambda: AT, sight_mode=mode),
@@ -196,8 +202,8 @@ async def test_in_the_counting_build_a_works_stop_answers_as_today_and_counts_ea
 ) -> None:
     """§11:1: each episode read writes its count, the reader a work; nothing is withheld.
 
-    Two reads each: whether the activation was pushed (ADR-0350 §9:10) reads its episode,
-    and so does the answer.
+    One read each: a work's stop of an activation not running never asks whether it was
+    pushed (ADR-0350 §9:10), so the answer's read is its only one.
     """
     harness = _engine(SightMode.COUNT)
     await _ended(harness)
@@ -209,7 +215,7 @@ async def test_in_the_counting_build_a_works_stop_answers_as_today_and_counts_ea
 
     assert (ended, never) == (ActivationStop.ALREADY_ENDED, ActivationStop.NO_SUCH_ACTIVATION)
     assert await _held(harness) == before
-    assert _counted(logs) == [("memory", "get", "work")] * 4
+    assert _counted(logs) == [("memory", "get", "work")] * 2
 
 
 @pytest.mark.parametrize("mode", [SightMode.WITHHOLD, SightMode.COUNT])
@@ -240,6 +246,101 @@ async def test_a_works_stop_of_a_running_activation_writes_its_record_through_th
     assert plans.stops == [(stopping.sight, running)]
     assert (await harness.plans.export()).stopped_activations == (running,)
     assert _counted(logs) == []
+
+
+class _HeldAdmission(FakePlanStore):
+    """A plan store, built in ``mode``, whose admission read is held right after the
+    pushed write (ADR-0350 §9:10), so an occurrence stays pushed and not admitted."""
+
+    def __init__(self, mode: SightMode) -> None:
+        super().__init__(now=lambda: AT, sight_mode=mode)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.asked: list[str] = []
+
+    async def stopped_activations(self, activation_ids: Sequence[str], /) -> tuple[str, ...]:
+        if not self.entered.is_set():
+            self.asked.extend(activation_ids)
+            self.entered.set()
+            await self.release.wait()
+        return await super().stopped_activations(activation_ids)
+
+
+async def _occurrence_state(plans: FakePlanStore, task_id: str) -> OccurrenceState | None:
+    held = await plans.scheduled_tasks([task_id])
+    return held[0].occurrences[0].state if held else None
+
+
+@pytest.mark.parametrize("sender", [OWNER_SENDER, UNIDENTIFIED], ids=["owners", "unseen"])
+async def test_a_works_stop_of_a_pushed_occurrence_is_as_one_never_written(
+    sender: InputSender,
+) -> None:
+    """ADR-0349 §4:8, ADR-0383 §8:2: a work names only running work, so its stop of an
+    occurrence of the owner's pushed and not admitted, whether its sight sees the task or
+    not, sets no mark, writes no record, answers as for an activation never written, and
+    the occurrence is admitted and runs to its end."""
+    plans = _HeldAdmission(SightMode.WITHHOLD)
+    harness = phases_harness(
+        _responder(_silent, _silent),
+        memory=FakeMemoryStore(now=lambda: AT, sight_mode=SightMode.WITHHOLD),
+        plans=plans,
+        task_scheduler=task_seams(),
+    )
+    await write_task(plans, task_activation())
+    await harness.engine.start()
+    try:
+        await asyncio.wait_for(plans.entered.wait(), SETTLE)
+        (pushed,) = plans.asked
+        assert harness.engine._pushed.get(pushed) is False, "pushed, not admitted"
+
+        stopped = await _works_stop(harness, sender, pushed)
+        never = await _works_stop(harness, sender, _NEVER)
+
+        assert stopped is never is ActivationStop.NO_SUCH_ACTIVATION
+        assert harness.engine._pushed.get(pushed) is False, "no mark is set"
+        assert (await plans.export()).stopped_activations == ()
+        plans.release.set()
+
+        async def ran() -> bool:
+            ran = await harness.memory.get(address(pushed))
+            if not isinstance(ran, EpisodicMemory) or ran.processing_record is None:
+                return False
+            return not ran.processing_record.is_open
+
+        await until(ran, what="the occurrence's activation to run and end")
+        assert (await plans.export()).stopped_activations == ()
+    finally:
+        plans.release.set()
+        await harness.engine.aclose()
+
+
+async def test_the_owners_own_stop_of_a_pushed_occurrence_still_stops_it() -> None:
+    """ADR-0350 §9:10 as today: the owner's act marks it and writes its record, unbound."""
+    plans = _HeldAdmission(SightMode.WITHHOLD)
+    harness = phases_harness(
+        _responder(_silent, _silent),
+        memory=FakeMemoryStore(now=lambda: AT, sight_mode=SightMode.WITHHOLD),
+        plans=plans,
+        task_scheduler=task_seams(),
+    )
+    task = await write_task(plans, task_activation())
+    await harness.engine.start()
+    try:
+        await asyncio.wait_for(plans.entered.wait(), SETTLE)
+        (pushed,) = plans.asked
+
+        assert await harness.engine.stop_activation(pushed) is ActivationStop.STOPPED
+        assert (await plans.export()).stopped_activations == (pushed,)
+        plans.release.set()
+
+        async def ended() -> bool:
+            return await _occurrence_state(plans, task.id) in {None, OccurrenceState.STOPPED}
+
+        await until(ended, what="the occurrence to end stopped")
+        assert await harness.memory.get(address(pushed)) is None
+    finally:
+        plans.release.set()
+        await harness.engine.aclose()
 
 
 async def test_a_works_stop_outside_any_work_reads_nothing() -> None:
