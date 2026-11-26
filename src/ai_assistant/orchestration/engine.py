@@ -113,6 +113,8 @@ from ai_assistant.core.types import (
     ChannelResult,
     ControllerStage,
     ConversationSummary,
+    DomainExport,
+    DomainExportResult,
     DueAfterTasks,
     DueOnRule,
     EpisodeCaptureReport,
@@ -130,6 +132,7 @@ from ai_assistant.core.types import (
     OccurrencePush,
     OccurrenceState,
     PendingCandidate,
+    PersonModelExport,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -170,6 +173,8 @@ from ai_assistant.core.types import (
     describe_untrusted,
     episode_summary,
     episode_view,
+    named_domain,
+    owners_act_may_name,
     part_episode,
     person_model_lists,
     profile_field,
@@ -6697,6 +6702,75 @@ class Engine:
             _ordered_invocations(self._trail.export_invocations()),
             "export_invocations",
             checked=True,
+        )
+
+    # --- the export of one domain (ADR-0385 §6) ---------------------------
+
+    async def export_domain(self, domain: RecordHome, /) -> DomainExportResult:
+        """Export everything the stores hold of one domain, whole (ADR-0385 §6).
+
+        The domain is checked well-formed before anything else (§6:9), and one an
+        owner's act may not name is refused from the value alone, reading nothing
+        (§2:2). Otherwise the owner's sight is made once, from that domain, and each
+        part is its store's own export through the holder bound to it (§6:3): one read
+        after another, none filtered against another, and any failure raising with
+        nothing returned. The whole is measured against the contract limit as every
+        result is, so an export too large is ``OversizedValueError`` and no artifact
+        (§6:7).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``domain`` is not a well-formed home.
+            MemoryStoreError: If the memory store cannot be read, or the clock's
+                reading for the export's instant is not a conforming one.
+            StoryStoreError: If the story store cannot be read.
+            ConversationStoreError: If the conversation store cannot be read.
+            PlanningError: If the plan store cannot be read.
+            PersonModelStoreError: If the person-model store cannot be read.
+            NotificationStoreError: If the notification store cannot be read.
+            OversizedValueError: If the export exceeds the contract limit.
+            ConfigurationError: If no story store or no notification store is wired.
+        """
+        self._reject_if_closing()
+        named = named_domain(domain)
+        return await self._tracked(self._domain_export(named), "export_domain", checked=True)
+
+    async def _domain_export(self, domain: RecordHome) -> DomainExportResult:
+        """Read each part through the stores bound to the owner's sight from ``domain``.
+
+        A hub with the person model's switch off keeps no person-model store, so that
+        part is empty (ADR-0338 §11:2). An engine built with no story or notification
+        store refuses as the seeing members of those stores refuse, rather than
+        answering as though the store held nothing.
+        """
+        if not owners_act_may_name(domain):
+            return DomainExportResult.not_offered()
+        sight = self._owners_sight(domain)
+        try:
+            began = self._clock()
+        except ClockReadingError as exc:
+            raise MemoryStoreError(str(exc)) from exc
+        memory = await self._stores.memory(sight).export()
+        stories = await self._story_store(sight).export()
+        conversations = await self._stores.conversations(sight).export()
+        plans = await self._stores.plans(sight).export()
+        people = (
+            PersonModelExport()
+            if self._person_blocks is None
+            else await self._stores.people(sight).export()
+        )
+        notifications = await self._notifications_seen(sight).export()
+        return DomainExportResult.exported(
+            DomainExport(
+                domain=domain,
+                exported_at=began,
+                memory=tuple(memory),
+                stories=stories,
+                conversations=conversations,
+                plans=plans,
+                person_model=people,
+                notifications=tuple(notifications),
+            )
         )
 
     # --- what the world has cost (ADR-0194 §6) -----------------------------

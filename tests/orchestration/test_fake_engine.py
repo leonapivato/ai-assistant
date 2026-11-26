@@ -62,6 +62,12 @@ from chat_surface_contract import (
     ChatReaderSubject,
     ChatSurfaceSubject,
 )
+from domain_export_contract import (
+    EXPORT_LIMIT,
+    SMALL_EXPORT_LIMIT,
+    DomainExportSubject,
+    fake_domain_export,
+)
 from episode_inspection_contract import (
     INSPECTION_AT,
     INSPECTION_LIMIT,
@@ -304,6 +310,16 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def permission_lines_storeless(self) -> AssistantEngine:
         """The canonical fake with no line store, as it is built."""
         return _lines(store=False).engine
+
+    @pytest.fixture
+    def domain_export_subject(self) -> DomainExportSubject:
+        """The canonical fake over its own six stores."""
+        return fake_domain_export(EXPORT_LIMIT)
+
+    @pytest.fixture
+    def domain_export_small(self) -> DomainExportSubject:
+        """The same, at the small limit."""
+        return fake_domain_export(SMALL_EXPORT_LIMIT)
 
     @pytest.fixture
     def engine(self) -> AssistantEngine:

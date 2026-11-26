@@ -28442,3 +28442,134 @@ class ApprovalPanelTap(BaseModel):
             msg = "a tap answered as landed or already answered shows its request answered"
             raise ValueError(msg)
         return self
+
+
+# --- the export of one domain (ADR-0385 §6) -----------------------------------------
+
+
+def named_domain(domain: object) -> RecordHome:
+    """The domain an owner's act names, refused where it is no well-formed home (§6:9).
+
+    The check before any I/O that ADR-0385 §6:9 rules, in one place for the engine, the
+    canonical fake and the wire client alike. A value that is not exactly a
+    :class:`RecordHome`, or one built round its validation (a field missing, added or of
+    another type, a kind given as bare text, an id on the shared things), is malformed.
+    A well-formed home of any domain passes, and whether an act may name it is
+    :func:`owners_act_may_name`'s (§2:1, §2:2). The value given back is ``core``'s own,
+    validated anew, never the caller's instance.
+
+    Args:
+        domain: The value an act was handed as its domain.
+
+    Returns:
+        The same domain, as a home validated here.
+
+    Raises:
+        ValueError: If ``domain`` is not a well-formed home.
+    """
+    msg = "a domain is a record home: a person's, a group's, or the hub's shared things"
+    if type(domain) is not RecordHome:
+        raise ValueError(msg)
+    held = _exactly(domain)
+    if held is None:
+        raise ValueError(msg)
+    try:
+        checked = RecordHome.model_validate(dict(domain.__dict__), strict=True)
+    except ValueError:  # pydantic's refusal is one
+        raise ValueError(msg) from None
+    if _exactly(checked) != held:
+        raise ValueError(msg)
+    return checked
+
+
+class DomainExportOutcome(StrEnum):
+    """What ``export_domain`` did (ADR-0385 §6:2). Closed: exactly these two."""
+
+    EXPORTED = "exported"
+    """The domain is one an owner's act may name, and its export is carried whole."""
+    REFUSED = "refused"
+    """The domain is not one an owner's act may name, and nothing was read (§2:2)."""
+
+
+class DomainExportRefusal(StrEnum):
+    """Why ``export_domain`` refused (ADR-0385 §6:2). Closed: exactly this one."""
+
+    NOT_OFFERED = "not_offered"
+    """The domain is neither the owner's nor the hub's shared things: another person's
+    or a group's (§2:1, §2:2). The refusal is the same whatever any store holds."""
+
+
+class DomainExport(BaseModel):
+    """Everything the stores hold of one domain, whole (ADR-0385 §6:3 to §6:8).
+
+    Each part is exactly what its store's own export gives back, bound to the owner's
+    sight from the domain named (§6:5), so it carries and omits what that store's
+    contract says: no expired memory, no deleted conversation, no embedding, no walk
+    position, and no stop record. Nothing of a store with no home is carried (§6:6). The
+    parts are read one after another, so an export is an account taken over an interval,
+    begun at ``exported_at``.
+
+    Attributes:
+        domain: The domain the export was made for.
+        exported_at: The instant the export was begun.
+        memory: The memory records, episodes and memories, ``MemoryStore.export`` gives
+            back, in its order.
+        stories: What ``StoryStore.export`` gives back: every story with its members,
+            notes, summary versions and log lines.
+        conversations: What ``ConversationStore.export`` gives back: the conversations
+            and their standing messages.
+        plans: What ``PlanStore.export`` gives back: the effects, observations,
+            scheduled tasks and approval requests, and no stop record.
+        person_model: What ``PersonModelStore.export`` gives back.
+        notifications: The held notifications ``NotificationStore.export`` gives back,
+            in its order.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    domain: RecordHome
+    exported_at: UtcInstant
+    memory: tuple[MemoryRecord, ...] = ()
+    stories: StoryExport = StoryExport()
+    conversations: ConversationExport
+    plans: PlanExport
+    person_model: PersonModelExport = PersonModelExport()
+    notifications: tuple[HeldNotification, ...] = ()
+
+
+class DomainExportResult(BaseModel):
+    """What ``export_domain`` did, with the export where it made one (ADR-0385 §6:2).
+
+    Attributes:
+        outcome: What it did.
+        export: The domain's export; set exactly where it was exported.
+        refusal: Why it was refused; set exactly where it was.
+
+    Raises:
+        ValueError: If the fields do not fit the outcome.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    outcome: DomainExportOutcome
+    export: DomainExport | None = None
+    refusal: DomainExportRefusal | None = None
+
+    @model_validator(mode="after")
+    def _the_fields_fit_the_outcome(self) -> Self:
+        refused = self.outcome is DomainExportOutcome.REFUSED
+        if refused != (self.refusal is not None):
+            msg = "an export names its refusal exactly when it was refused"
+            raise ValueError(msg)
+        if refused != (self.export is None):
+            msg = "an export carries the domain's export exactly when it was not refused"
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def exported(cls, export: DomainExport) -> DomainExportResult:
+        """The domain, exported whole."""
+        return cls(outcome=DomainExportOutcome.EXPORTED, export=export)
+
+    @classmethod
+    def not_offered(cls) -> DomainExportResult:
+        """A domain no owner's act may name, refused from the value alone (§2:2)."""
+        return cls(outcome=DomainExportOutcome.REFUSED, refusal=DomainExportRefusal.NOT_OFFERED)

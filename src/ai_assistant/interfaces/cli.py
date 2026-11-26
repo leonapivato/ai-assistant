@@ -296,6 +296,7 @@ from ai_assistant.core.types import (
     ReadingCertainty,
     ReadOutcome,
     RecordedInvocation,
+    RecordHome,
     SecretScope,
     SendOutcome,
     SourceGrant,
@@ -4139,6 +4140,32 @@ def export_decisions() -> None:
     raise typer.Exit(code)
 
 
+class _DomainName(Enum):
+    """The two spellings of a domain ``export-domain`` takes (ADR-0385 §2:1)."""
+
+    MINE = "mine"
+    SHARED = "shared"
+
+
+#: Each spelling's domain: the owner's own, and the hub's shared things.
+_DOMAINS: Final[Mapping[_DomainName, RecordHome]] = {
+    _DomainName.MINE: RecordHome.owners(),
+    _DomainName.SHARED: RecordHome.shared(),
+}
+
+
+_DOMAIN_ARGUMENT = typer.Argument(
+    ..., help="mine for your own records, or shared for the hub's shared things."
+)
+
+
+@app.command("export-domain")
+def export_domain(domain: _DomainName = _DOMAIN_ARGUMENT) -> None:
+    """Write everything the assistant holds of one domain to standard output, as JSON."""
+    code = asyncio.run(_export_domain(_DOMAINS[domain]))
+    raise typer.Exit(code)
+
+
 @app.command()
 def reads(
     limit: int = typer.Option(
@@ -5442,6 +5469,24 @@ async def _export_decisions() -> int:
         return await _drive_export_decisions(engine, artifact=artifact)
 
 
+async def _export_domain(domain: RecordHome) -> int:
+    """Obtain a client, export one domain, and write the document (ADR-0385 §6:10).
+
+    :func:`_export_decisions`' claim on standard output, for the same reason and by the
+    same means: the stream is claimed for the document before anything else runs, and
+    everything in between prints to standard error.
+    """
+    artifact = sys.stdout
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            engine = await _open_engine()
+        except (AssistantError, TransportError) as exc:
+            _render_error(exc, to_stderr=True)
+            return _EXIT_ERROR
+
+        return await _drive_export_domain(engine, domain, artifact=artifact)
+
+
 async def _list_reads(*, limit: int) -> int:
     """Obtain a client, read the bounded listing, and render it (ADR-0186 §10).
 
@@ -6286,6 +6331,32 @@ async def _drive_export_decisions(engine: AssistantEngine, *, artifact: TextIO) 
         _render_error(exc, to_stderr=True)
         return _EXIT_ERROR
     artifact.write(_decisions_artifact(recorded))
+    artifact.flush()
+    return _EXIT_OK
+
+
+async def _drive_export_domain(
+    engine: AssistantEngine, domain: RecordHome, *, artifact: TextIO
+) -> int:
+    """Export ``domain`` and write its document to ``artifact``, or say why not.
+
+    **Whole or nothing** (ADR-0385 §6:7): an error, the oversized export among them, and
+    a refusal are each written to standard error with no document, and a non-zero exit.
+    The document is the export's own JSON projection, adding, removing and renaming no
+    key, so it validates back into the export it came from.
+    """
+    try:
+        result = await engine.export_domain(domain)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc, to_stderr=True)
+        return _EXIT_ERROR
+    if result.export is None:
+        _print(
+            "[red]That domain cannot be exported:[/] only yours and the shared things can.",
+            to=error_console,
+        )
+        return _EXIT_ERROR
+    artifact.write(json.dumps(result.export.model_dump(mode="json"), indent=2) + "\n")
     artifact.flush()
     return _EXIT_OK
 

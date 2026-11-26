@@ -2927,7 +2927,17 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     which ``add_story_note`` answers. A peer at 141 cannot decode the value, so a
 #:     frame carrying it is invalid for it. No model gains a field, and the method set
 #:     does not move.
-PROTOCOL_VERSION: Final[int] = 142
+#: 143: ADR-0385 §8:1 advances the version in the change that adds ``export_domain``, on
+#:     the method-set limb: ``AssistantEngine`` gains it (§6:1), taking a ``RecordHome``
+#:     and answering a ``DomainExportResult`` with the closed ``DomainExportOutcome`` and
+#:     ``DomainExportRefusal``, and the ``DomainExport`` it carries, whose parts are the
+#:     stores' own exports: ``StoryExport``, ``ConversationExport``, ``PlanExport`` and
+#:     ``PersonModelExport``, which no frame carried before, and the memory records and
+#:     held notifications, which frames already carried. A hub at 142 answers the method
+#:     as unknown (ADR-0124 §9:2's method-set limb). No type a frame already carried
+#:     changes. A gateway calls it never, but it speaks the wire, so it is upgraded with
+#:     the hub (ADR-0385 §8).
+PROTOCOL_VERSION: Final[int] = 143
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

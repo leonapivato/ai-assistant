@@ -79,6 +79,7 @@ from chat_surface_contract import (
     ChatSurfaceContract,
     ChatSurfaceSubject,
 )
+from domain_export_contract import DomainExportContract
 from episode_inspection_contract import EpisodeInspectionContract
 from linked_accounts_contract import LinkedAccountsContract
 from pending_candidates_contract import PendingCandidatesContract
@@ -1202,6 +1203,7 @@ class AssistantEngineContract(
     ApprovalsPanelContract,
     LinkedAccountsContract,
     PermissionLinesContract,
+    DomainExportContract,
     ABC,
 ):
     """What every ``AssistantEngine`` implementation must do."""

@@ -130,6 +130,10 @@ class Route(StrEnum):
 #: line, level or lowering gates them** (§6:5): this row alone admits a call, and the
 #: hub's own machine, which holds every role (ADR-0298 §3:2), reaches the listing and the
 #: removal whatever lines stand.
+#:
+#: ADR-0385 §7:2 places ``export_domain``, the owner's export of one domain, in the
+#: command-or-query row, as §10:1 records against ADR-0298 §5:1's table, so a request from
+#: a device without the command role is refused before dispatch.
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
@@ -149,6 +153,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "episode_chunk",
             "episodes",
             "export_decisions",
+            "export_domain",
             "export_invocations",
             "export_reads",
             "forget",

@@ -77,6 +77,7 @@ from ai_assistant.core.types import (
     checked_chat_devices,
     grant_bar,
     grant_how,
+    named_domain,
     person_model_lists,
     profile_field,
     profile_value,
@@ -137,6 +138,7 @@ if TYPE_CHECKING:
         ConnectionAct,
         ConversationDigest,
         ConversationSummary,
+        DomainExportResult,
         EncodableText,
         GrantableSource,
         GrantHow,
@@ -161,6 +163,7 @@ if TYPE_CHECKING:
         ProfileChange,
         ProfileField,
         RecordedInvocation,
+        RecordHome,
         RemoveLineResult,
         SecretValue,
         SourceGrant,
@@ -2105,6 +2108,27 @@ class HubClient:
                 published to this client.
         """
         return await self._call("export_invocations")  # type: ignore[no-any-return]
+
+    async def export_domain(self, domain: RecordHome, /) -> DomainExportResult:
+        """Relay an export of one domain, whole (ADR-0385 §6).
+
+        **The client relays and decides nothing** but the argument's form: whether the
+        domain is one an owner's act may name, and everything read, is the hub's. The
+        result crosses whole, as one frame, or the hub refuses it with
+        ``OversizedValueError`` (§6:7, §6:10).
+
+        Args:
+            domain: The domain to export.
+
+        Returns:
+            What the hub did, with the export where it made one.
+
+        Raises:
+            ValueError: If ``domain`` is not a well-formed home, refused here before
+                anything is sent, as the engine refuses it (ADR-0085 §9).
+        """
+        named = named_domain(domain)
+        return await self._call("export_domain", domain=named)  # type: ignore[no-any-return]
 
     async def spend_totals(self) -> tuple[SpendTotal, ...]:
         """What each calendar period has cost, in ``SpendPeriod``'s fixed order.

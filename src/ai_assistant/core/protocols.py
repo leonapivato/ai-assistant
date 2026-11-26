@@ -158,6 +158,7 @@ if TYPE_CHECKING:
         DeviceChanges,
         DeviceConversation,
         DiagnosticEntry,
+        DomainExportResult,
         DurableIdentifier,
         EgressBinding,
         Embedding,
@@ -13442,6 +13443,62 @@ class AssistantEngine(Protocol):
             AuditError: If the trail cannot be read, or holds a row it could not
                 pair with the decision that row names.
             OversizedValueError: If the whole trail exceeds the contract limit.
+        """
+        ...
+
+    # --- the export of one domain (ADR-0385 §6) ----------------------------
+
+    async def export_domain(self, domain: RecordHome, /) -> DomainExportResult:
+        """Export everything the stores hold of one domain, whole (ADR-0385 §6).
+
+        **The one member for the data rights** (§6:1), and the owner's own act (§7:3):
+        no tool, capability or plan step binds it, and no model-authored value becomes
+        its argument (§7:1). Only the ``assistant`` command line calls it (§7:4).
+
+        **Which domains** (§6:2, §2). Where
+        :func:`~ai_assistant.core.types.owners_act_may_name` allows ``domain``, the owner's
+        domain or the hub's shared things, it answers ``exported`` with the domain's
+        export. Any other home, another person's or a group's, is answered ``refused``
+        with ``not_offered``, from the value alone and having read nothing, the same
+        whatever any store holds (§2:2).
+
+        **What it reads** (§6:3 to §6:6). Each part by that store's own export, through
+        the store bound to the owner's sight from ``domain``
+        (:meth:`~ai_assistant.core.types.Sight.of_owners_act`): the memory records, every
+        story whole, the conversations and their standing messages, the plan store's
+        effects, observations, tasks and approval requests with no stop record, the
+        person model, and the held notifications. Each part is exactly that store's
+        export, carrying and omitting what its contract says; no part is filtered against
+        another, and no record is read that the sight does not see, so a record of
+        another home and a record with no home are in no part. Nothing of a store with
+        no home is carried: the trails, the grants, the identities and the rest (§6:6).
+        A domain the stores hold nothing of is ``exported`` with every part empty, and a
+        store the hub does not keep (the person model with its switch off) holds nothing,
+        so its part is empty.
+
+        **Whole or refused** (§6:7, §6:9): never truncated, sampled or split, and never
+        returned in part. A store that cannot be read raises the error its contract
+        declares.
+
+        Args:
+            domain: The domain to export, with no default (§2:3).
+
+        Returns:
+            ``exported`` with the export, carrying ``domain`` and the instant it was
+            begun; or ``refused`` with ``not_offered``.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``domain`` is not a well-formed home
+                (:func:`~ai_assistant.core.types.named_domain`), before any I/O.
+            MemoryStoreError: If the memory store cannot be read.
+            StoryStoreError: If the story store cannot be read.
+            ConversationStoreError: If the conversation store cannot be read.
+            PlanningError: If the plan store cannot be read.
+            PersonModelStoreError: If the person-model store cannot be read.
+            NotificationStoreError: If the notification store cannot be read.
+            OversizedValueError: If the export's encoding exceeds the contract limit
+                (ADR-0085 §8c).
         """
         ...
 
