@@ -20,6 +20,7 @@ from test_engine import Harness
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import RecordHome, StoryActor, StoryNoteAuthor
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.story_tidy_up import (
     STORY_TIDY_UP_PROMPT,
     ScheduledTidyUp,
@@ -41,8 +42,7 @@ def _scheduled(
 ) -> ScheduledTidyUp:
     tidy_up = StoryTidyUp(
         model=structured(model),
-        stories=stories,
-        memory=memory,
+        stores=BoundStores(memory=memory, stories=stories),
         excerpt_chars=2000,
         other_stories=0,
         decisions=0,
@@ -52,7 +52,7 @@ def _scheduled(
     )
     return ScheduledTidyUp(
         tidy_up=tidy_up,
-        stories=stories,
+        stores=BoundStores(memory=memory, stories=stories),
         threshold=1,
         quiet=timedelta(hours=24),
         per_run=10,

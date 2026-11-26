@@ -110,7 +110,7 @@ class _World:
         self.candidates = StoryCandidates(stores=stores, limit=5, lines=3, notes=2, episodes=2)
         self.links = StoryLinksStage(stores=stores)
         self.reads = StoryReads(stores=stores, short_views=self.candidates, episodes=2)
-        self.calls = StoryCalls(stores=stores, stories=self.stories, memory=self.memory)
+        self.calls = StoryCalls(stores=stores)
         self.trip = ""
 
     async def seed(self) -> None:

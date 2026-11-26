@@ -476,6 +476,7 @@ from ai_assistant.orchestration.story_calls import (
     MEMBER_WRITTEN,
     STORY_CALL_CAPABILITIES,
     TIDY_STORY_CAPABILITY,
+    tidy_up_asked_by,
 )
 from ai_assistant.orchestration.story_links import admitted_episodes
 from ai_assistant.orchestration.story_privacy import SummaryVisibility
@@ -6587,7 +6588,9 @@ class PhasePath:
         """Start the round's tidy-ups as work nobody waits on, unless shutdown has begun.
 
         A tidy-up not started loses nothing: what it would have taken in stays pending
-        on the story for a later run (ADR-0300 §5).
+        on the story for a later run (ADR-0300 §5). The work's home and its sight are
+        read here, in the work, and carried into the task they run in, which inherits
+        no work's state (ADR-0307 §7:2, ADR-0383 §6:8).
         """
         if self._closing():
             _log.info("phase_tidy_up_not_started", stage="acting", reason="closing")
@@ -6614,10 +6617,14 @@ class PhasePath:
         Nobody awaits this coroutine, so an unexpected error is logged here by its class
         alone, never its message, which could carry a story's words (ADR-0275 §8).
         ``home`` and ``sight`` are the work's, read when the tidy-ups start, since they
-        run in a context of their own (ADR-0383 §4:1, §7:7).
+        run in a context of their own (ADR-0383 §4:1, §7:7): acting claims their effect
+        records by the sight, and each tidy-up call reads the story it names through it
+        and makes its tidy-up's sight from it (§6:8, :func:`~ai_assistant.orchestration.
+        story_calls.tidy_up_asked_by`).
         """
         try:
-            await self._acting.act(tidies, held=working.held, home=home, sight=sight)
+            with tidy_up_asked_by(sight):
+                await self._acting.act(tidies, held=working.held, home=home, sight=sight)
         except Exception as exc:
             _log.error("phase_tidy_up_crashed", stage="acting", error=type(exc).__name__)
 

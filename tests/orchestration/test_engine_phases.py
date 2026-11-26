@@ -412,12 +412,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             harness.memory, stories, conversations=harness.conversation_store, plans=harness.plans
         )
         calls = (
-            StoryCalls(
-                stores=holder,
-                stories=stories,
-                memory=harness.memory,
-                tidy_up=None if tidy_up is None else tidy_up(harness),
-            )
+            StoryCalls(stores=holder, tidy_up=None if tidy_up is None else tidy_up(harness))
             if story_calls and stories is not None
             else None
         )
@@ -2964,8 +2959,7 @@ def _tidy_up(
     def build(harness: Harness) -> StoryTidyUp:
         return StoryTidyUp(
             model=structured(provider),
-            stories=stories,
-            memory=harness.memory,
+            stores=bound_stores(harness.memory, stories),
             excerpt_chars=200,
             other_stories=0,
             decisions=0,

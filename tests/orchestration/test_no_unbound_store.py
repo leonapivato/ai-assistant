@@ -110,15 +110,15 @@ OWN_TURN_HOLDERS: Final[dict[str, str]] = {
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
-#: B9 the observer's pin pass, B9b the upkeep runs and a tidy-up a work asks for, B10 the
-#: owner's own acts (ADR-0385); B8b's windows, B8c's stories, B8d's authorizing, acting,
-#: approvals and tasks, B8e's look-ups, person block and matters, B8f's writes of a
-#: work's own turn and B9a's observer reads are converted, save the parts named here for
-#: a later lane. A holder more than one lane converts names the last of them. **Only
-#: shrinks.** A holder whose last unbound read is one §7:8, §7:12 or §7:13 names moves to
-#: :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest: the observer's
-#: finding of what is due (§7:12, §7:13), the engine's start and ADR-0384 §2's unchanged
-#: jobs (§7:8).
+#: B9 the observer's pin pass and the upcoming-event producer's writes, B10 the owner's
+#: own acts (ADR-0385); B8b's windows, B8c's stories, B8d's authorizing, acting, approvals
+#: and tasks, B8e's look-ups, person block and matters, B8f's writes of a work's own turn,
+#: B9a's observer reads and B9b's upkeep runs and a tidy-up a work asks for are converted,
+#: save the parts named here for a later lane. A holder more than one lane converts names
+#: the last of them. **Only shrinks.** A holder whose last unbound read is one §7:8, §7:12
+#: or §7:13 names moves to :data:`NAMED_BY_THE_DECISION` in the lane that converts the
+#: rest: the observer's finding of what is due (§7:12, §7:13), the engine's start and
+#: ADR-0384 §2's unchanged jobs (§7:8).
 NOT_YET_CONVERTED: Final[dict[str, str]] = {
     # The phases hand it the plan store bound to the work's sight (B8d); the owner's
     # (B10) an unbound one.
@@ -143,10 +143,14 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "engine.py:approval_panel": "B10",
     "engine.py:episode_card_facts": "B10",
     "engine.py:tap_on_approval_panel": "B10",
-    "matters_pass.py:MattersPass": "B9b",
-    # The upcoming-event producer's writer and the reconsideration's policy.
-    "notifications.py:NotificationWriteStage": "B9b",
-    "notifications.py:RulingPolicy": "B9b",
+    # The upcoming-event producer's writes (ADR-0132): it reads a source, not a store, so
+    # ADR-0384 §2's table makes it no upkeep run, and no clause yet gives it a sight. It
+    # reads the owner's zone from the person-model store and rules into the notification
+    # store unbound, as the pin pass beside it awaits a decision (B9).
+    "notifications.py:NotificationWriteStage": "B9",
+    # The producer's zone pick, built by the write stage over its unbound person-model
+    # store; the reconsideration picks through the store bound to its run's sight (B9b).
+    "notifications.py:RulingPolicy": "B9",
     # The pin pass (ADR-0338 §9:6) reads every person's pins, tied to no one ended work,
     # so ADR-0383 §6:7 gives it no sight; it writes through a stage over the unbound
     # writer, which `writes.py:MemoryWriteStage` marks `Bound`.
@@ -157,9 +161,9 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     # built over where none is handed.
     "observer/stage.py:Observer": "B9",
     # A work's block, pins and person-model reads and writes are bound (B8e); the owner's
-    # panel's pins, unpins and walks, and the unbound stores handed to the zone pickers
-    # (`RulingPolicy` B9b, `PersonZones`' reads outside a work), are the person panel's
-    # (B10).
+    # panel's pins, unpins and walks, and the unbound store handed to the zone picker
+    # (`PersonZones`' reads outside a work), are the person panel's (B10); the
+    # reconsideration reads the zone through the holder (B9b).
     "person_block.py:PersonBlocks": "B10",
     # A work's story calls and story links hand these a store bound to the work's sight
     # (B8c); the engine's story methods (B10) and the canonical fake engine an unbound one.
@@ -168,18 +172,6 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "stories.py:resolved_view": "B10",
     "stories.py:owner_summary": "B10",
     "stories.py:_all_notes": "B10",
-    # Every story call reads and writes through the holder by its work's sight (B8c) but
-    # the tidy-up, which runs in a task no work's sight reaches and reads the story and
-    # its episode unbound, handing them to its parameters marked `Bound`: B9b gives a
-    # work's tidy-up its sight (ADR-0383 §6:8).
-    "story_calls.py:StoryCalls": "B9b",
-    # The matters pass, the scheduled tidy-up and a work's tidy-up (B9b).
-    "story_flags.py:read_headers": "B9b",
-    "story_flags.py:read_log": "B9b",
-    "story_flags.py:read_records": "B9b",
-    "story_flags.py:read_versions": "B9b",
-    "story_flags.py:recorded_decisions": "B9b",
-    "story_flags.py:reread": "B9b",
     # The phases' story views hand these stores bound to the work's sight (B8c); the
     # engine's story standing (B10) unbound ones.
     "story_standing.py:story_standing": "B10",
@@ -187,8 +179,6 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "story_standing.py:_done": "B10",
     "story_standing.py:_related": "B10",
     "story_standing.py:_member_count": "B10",
-    "story_tidy_up.py:StoryTidyUp": "B9b",
-    "story_tidy_up.py:ScheduledTidyUp": "B9b",
     # A work's task calls read and write through the holder (B8d); `tidy` and
     # `parent_ended`, removing finished tasks, are §7:8's (ADR-0384 §2's table), and the
     # operations from outside (ADR-0350 §10), the owner's own acts, are B10's.
@@ -202,7 +192,7 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "telegram.py:TelegramCards": "B10",
 }
 
-_LANES: Final = frozenset({"B9", "B9b", "B10"})
+_LANES: Final = frozenset({"B9", "B10"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
@@ -557,6 +547,36 @@ def test_the_observer_s_reads_for_an_ended_work_hold_no_store() -> None:
     ):
         assert converted not in held
         assert converted not in NOT_YET_CONVERTED
+
+
+def test_the_upkeep_runs_and_a_works_tidy_up_hold_no_store() -> None:
+    """The matters pass, the scheduled tidy-up, the tidy-up itself, the readers of
+    ``story_flags`` and the story calls (milestone 22's B9b) take the holder or a store it
+    bound to a run's or a work's sight alone; the reconsideration reads through the engine's
+    holder, and ``RulingPolicy`` keeps the upcoming-event producer's unbound store (B9)."""
+    held = unbound_holders()
+    for converted in (
+        "matters_pass.py:MattersPass",
+        "matters_pass.py:_apply",
+        "matters_pass.py:_held_notes",
+        "matters_pass.py:_members",
+        "matters_pass.py:_settled",
+        "story_calls.py:StoryCalls",
+        "story_flags.py:read_headers",
+        "story_flags.py:read_log",
+        "story_flags.py:read_records",
+        "story_flags.py:read_versions",
+        "story_flags.py:recorded_decisions",
+        "story_flags.py:reread",
+        "story_tidy_up.py:ScheduledTidyUp",
+        "story_tidy_up.py:StoryTidyUp",
+        "story_tidy_up.py:_linked_at",
+        "upkeep.py:UpkeepRun",
+        "upkeep.py:upkeep_run",
+    ):
+        assert converted not in held
+        assert converted not in NOT_YET_CONVERTED
+    assert not any(lane == "B9b" for lane in NOT_YET_CONVERTED.values())
 
 
 def test_the_reading_sees_every_shape_a_store_is_held_in(tmp_path: Path) -> None:

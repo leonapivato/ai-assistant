@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     StorySummaryDraft,
     StorySummaryLine,
 )
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.matters_pass import (
     MATTERS_PASS_PROMPT,
     MattersPass,
@@ -50,8 +51,7 @@ def _pass(
 ) -> MattersPass:
     return MattersPass(
         model=structured(model),
-        stories=stories,
-        memory=memory,
+        stores=BoundStores(memory=memory, stories=stories),
         excerpt_chars=1000,
         flags_per_run=10,
         decisions=5,

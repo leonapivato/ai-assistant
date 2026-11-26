@@ -47,9 +47,12 @@ async def test_planning_s_tidy_up_tidies_over_the_one_story_store_on_consolidati
         assert isinstance(calls, StoryCalls)
         tidy_up = calls._tidy_up
         assert isinstance(tidy_up, StoryTidyUp)
-        # One story store and one memory store: the engine surface's and the loop's.
-        assert tidy_up._stories is engine._stories
-        assert tidy_up._memory is engine._memory
+        # One story store and one memory store, the engine surface's and the loop's,
+        # through the one holder every pass reads by, bound to each run's sight
+        # (ADR-0383 §9:1, ADR-0384 §7:1).
+        assert tidy_up._stores is calls._stores
+        assert tidy_up._stores._stories is engine._stories
+        assert tidy_up._stores._memory is engine._memory
         # The route the deployment names for background work over its own records,
         # the one the matters pass rides too (ADR-0328 §14:4).
         assert engine._matters_pass is not None
@@ -87,7 +90,7 @@ async def test_the_scheduled_tidy_up_runs_planning_s_one_tidy_up(tmp_path: Path)
         calls = engine._phases._story_calls
         assert calls is not None
         assert scheduled._tidy_up is calls._tidy_up
-        assert scheduled._stories is engine._stories
+        assert scheduled._stores is calls._stores
         assert (scheduled._threshold, scheduled._quiet, scheduled._per_run) == (
             SCHEDULED_TIDY_UP_THRESHOLD,
             SCHEDULED_TIDY_UP_QUIET,

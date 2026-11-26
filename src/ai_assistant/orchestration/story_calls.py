@@ -110,23 +110,31 @@ another home is the story store's to refuse, in its own file.
 placed for the owner alone, planning can still write notes and change stories (ADR-0307
 §6:5); only a move or a split is held to members alone there, as above.
 
-**Through the work's sight** (ADR-0383 §7:5, §7:7, §9:1). Every call but the tidy-up, and
-the hub's check before authorizing, reads and writes through the stores
+**Through the work's sight** (ADR-0383 §7:5, §7:7, §9:1). Every call, and the hub's check
+before authorizing, reads and writes through the stores
 :class:`~ai_assistant.orchestration.bound_stores.BoundStores` binds to the sight of the
 work it runs in, read off that work and never made (§9:2). A story or an episode that
 sight does not see is one the stores do not hold: a call naming it is told what a call
 naming one never written is told (§8:2), and a write changing a story the bound store
 does not give back is refused as one to a story it does not hold (§7:5). A call run
-outside any work has no sight, reads nothing and is not done. **The tidy-up apart**: it
-runs in a task of its own that inherits no work's state, so no work's sight reaches it,
-and it reads the story it is handed and this activation's episode unbound, as it always
-has, until the lane that gives a work's tidy-up its own sight (ADR-0383 §6:8).
+outside any work has no sight, reads nothing and is not done.
+
+**The tidy-up a work asks for** (ADR-0383 §6:8, ADR-0384 §6). It runs in a task of its
+own that inherits no work's state (ADR-0307 §7:2), so the phases' glue carries the
+asking work's sight into that task (:func:`tidy_up_asked_by`), and the call reads the
+story it names and this activation's episode through the stores bound to that sight. A
+story the work does not see is not there, as for every other call. The tidy-up itself
+reads by the sight made here, once, from the work's and the story's home
+(:meth:`~ai_assistant.core.types.Sight.of_tidy_up`): as every read of the work does, and
+of that only records of the story's domain.
 
 **It logs stage and code-owned reason only**, never a note or a story (ADR-0275 §8).
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -147,6 +155,7 @@ from ai_assistant.core.types import (
     LabelKind,
     Reversibility,
     RiskLevel,
+    Sight,
     StoryActor,
     StoryMember,
     StoryMemberKind,
@@ -170,14 +179,13 @@ from ai_assistant.orchestration.stories import (
 from ai_assistant.orchestration.story_tidy_up import TidyUpResult
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.core.types import (
         FrozenJson,
         ProposedCall,
         RecordHome,
-        Sight,
         StoryHeader,
         StoryOutcome,
         ToolCall,
@@ -223,9 +231,39 @@ __all__ = [
     "UNLINK_STORY_CAPABILITY",
     "StartUnfinishedError",
     "StoryCalls",
+    "tidy_up_asked_by",
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: The sight of the work that asked for the tidy-up running here (ADR-0383 §6:8), carried
+#: into the task the tidy-up runs in, which inherits no work's state (ADR-0307 §7:2).
+#: Read by the tidy-up call alone, and set by nothing but :func:`tidy_up_asked_by`.
+_TIDY_UP_ASKED_BY: Final[contextvars.ContextVar[Sight | None]] = contextvars.ContextVar(
+    "tidy_up_asked_by", default=None
+)
+
+
+@contextlib.contextmanager
+def tidy_up_asked_by(sight: Sight | None) -> Iterator[None]:
+    """Run a work's tidy-up calls here under the sight of the work that asked for them.
+
+    The phases' glue starts a round's tidy-ups in a task of its own, in a fresh context,
+    so no work's state reaches them (ADR-0307 §7:2); it carries the asking work's sight,
+    as that work held it when the tidy-ups started, into that task by this, and the
+    tidy-up call reads it (ADR-0384 §6:1). It carries the sight and nothing else, and
+    makes none (ADR-0383 §9:2).
+
+    Args:
+        sight: The asking work's sight, or ``None`` where no work was running, where a
+            tidy-up call is then not done.
+    """
+    token = _TIDY_UP_ASKED_BY.set(sight)
+    try:
+        yield
+    finally:
+        _TIDY_UP_ASKED_BY.reset(token)
+
 
 #: The capabilities, renamed by ADR-0364 §8:1: "story" is "matter" wherever planning sees
 #: it. Each declaration keeps its id, the name it was first declared under (:data:`_IDS`).
@@ -816,34 +854,19 @@ class StoryCalls:
     a code-owned kind otherwise, never ``indeterminate``.
     """
 
-    def __init__(
-        self,
-        *,
-        stores: BoundStores,
-        stories: StoryStore,
-        memory: MemoryStore,
-        tidy_up: StoryTidyUp | None = None,
-    ) -> None:
+    def __init__(self, *, stores: BoundStores, tidy_up: StoryTidyUp | None = None) -> None:
         """Wire the runner to the stores it writes and reads, and to the tidy-up.
 
         Args:
-            stores: The holder giving the story store every call but the tidy-up writes,
-                and the memory store an activation member's episode is checked in before
-                a create or a link (ADR-0289 §4), each bound to the sight of the work
-                the call runs in (ADR-0383 §7:7).
-            stories: The story store a tidy-up call reads the story it names in,
-                **unbound**: the tidy-up runs in a task that inherits no work's state,
-                so no work's sight reaches it (ADR-0307 §7:2), and the sight
-                ADR-0383 §6:8 gives it is a later lane's.
-            memory: The memory store a tidy-up call reads this activation's episode in,
-                unbound, for the same reason.
+            stores: The holder giving the story store every call writes, and the memory
+                store an activation member's episode is checked in before a create or a
+                link (ADR-0289 §4), each bound to the sight of the work the call runs in
+                (ADR-0383 §7:7), or, for a tidy-up, of the work that asked for it.
             tidy_up: The tidy-up operation, the one the deployment holds, so at most
                 one run is on a story at a time (ADR-0300 §5:10); ``None`` where none
                 is wired, and a tidy-up call is then not done.
         """
         self._stores = stores
-        # Unbound, handed to the parameters marked `Bound` by the tidy-up call alone.
-        self._tidy_reads = _Held(stories=stories, memory=memory)
         self._tidy_up = tidy_up
 
     async def run(self, call: ToolCall) -> ToolResult:
@@ -886,8 +909,9 @@ class StoryCalls:
     async def _dispatch(self, call: ToolCall) -> None:
         """Run the call its capability names; a capability no story call has is not done.
 
-        Every call but the tidy-up reads and writes through the stores bound to the
-        sight of the work it runs in (ADR-0383 §7:7); the tidy-up reads as it always has.
+        Every call reads and writes through the stores bound to the sight of the work
+        it runs in (ADR-0383 §7:7); the tidy-up, through those bound to the sight of the
+        work that asked for it.
         """
         capability = str(call.request.tool.capability)
         parameters = call.request.parameters
@@ -913,6 +937,16 @@ class StoryCalls:
     def _held(self, sight: Sight) -> _Held:
         """The stores a call reads and writes, bound to ``sight`` (ADR-0383 §7:7)."""
         return _Held(stories=self._stores.stories(sight), memory=self._stores.memory(sight))
+
+    @classmethod
+    def _asking_sight(cls) -> Sight:
+        """The sight of the work that asked for a tidy-up, read and never made (§9:2).
+
+        The one carried into the task the tidy-up runs in, or, where it runs inside a
+        work, that work's. Outside any work it is not done, writing nothing.
+        """
+        carried = _TIDY_UP_ASKED_BY.get()
+        return cls._sight() if carried is None else carried
 
     @staticmethod
     def _sight() -> Sight:
@@ -1039,24 +1073,31 @@ class StoryCalls:
     async def _tidy(self, parameters: Mapping[str, FrozenJson]) -> None:
         """Run the tidy-up on a story; what it wrote is in the story's version log (§7).
 
+        **By the sight of the work that asked for it** (ADR-0383 §6:8, ADR-0384 §6:1).
+        The tidy-up runs in a task of its own that inherits no work's state (ADR-0307
+        §7:2), so the phases' glue carries the asking work's sight into it
+        (:func:`tidy_up_asked_by`); where it runs inside a work, it is that work's. The
+        story named is read through the story store bound to it, so a story the work
+        does not see is not there, as for every other call (ADR-0383 §8:2); and the
+        tidy-up's own sight is made here, once, from that sight and the story's home
+        (:meth:`~ai_assistant.core.types.Sight.of_tidy_up`): every read of the run is
+        bound by it. A tidy-up asked for outside any work is not done, reading nothing.
+
         **Only on a story of the domain this work's records land in** (ADR-0384 §6:2).
         A story of another domain is not tidied, answered as ``no_story``, before the run
         is asked, since a run already on the story would answer ``busy`` first; the run
         is handed the domain as the one it tends, so nothing of another domain is written
         should the story's standing change between, and an episode of another home is
         not taken in nor a flag naming a story of another domain written (§4, §5). The
-        tidy-up runs in a task of its own that inherits no work's state (ADR-0307 §7:2),
-        so the domain is read off this activation's episode, which the hub fills and
-        which carries the home its work gives (ADR-0383 §4:1, §4:6). An episode not held,
-        or of a home no write may carry, leaves the tidy-up not done, writing nothing.
-
-        **Read unbound** (ADR-0383 §6:8): no work's sight reaches the task it runs in, so
-        the story and the episode are read as they always were, and what it is handed is
-        the story's id as it stands through its merges and the home its episode carries.
+        domain is read off this activation's episode, its own record (ADR-0383 §7:4),
+        which the hub fills and which carries the home its work gives (§4:1, §4:6). An
+        episode not held, or of a home no write may carry, leaves the tidy-up not done,
+        writing nothing.
         """
         if self._tidy_up is None:
             raise _NotDone(ToolFailureKind.UNAVAILABLE, "no tidy-up is wired", reason="no_tidy_up")
-        reads = self._tidy_reads
+        asking = self._asking_sight()
+        reads = self._held(asking)
         header = await self._current_header(reads, _text(parameters, STORY_ARGUMENT))
         tends = await self._work_home(reads, self._activation(parameters))
         if header.home != tends:
@@ -1067,7 +1108,9 @@ class StoryCalls:
                 f"the tidy-up wrote nothing: {TidyUpResult.NO_STORY.value}",
                 reason=f"tidy_up_{TidyUpResult.NO_STORY.value}",
             )
-        outcome = await self._tidy_up.run(str(header.story_id), tends=tends)
+        # ADR-0383 §6:8: the asking work's sight, with a one-domain bound for the story's.
+        sight = Sight.of_tidy_up(asking, header.home)
+        outcome = await self._tidy_up.run(str(header.story_id), sight=sight, tends=tends)
         if outcome.result not in _TIDIED:
             raise _NotDone(
                 ToolFailureKind.REFUSED,

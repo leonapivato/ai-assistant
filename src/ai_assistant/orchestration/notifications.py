@@ -28,7 +28,10 @@ is for, and in ``Settings.timezone`` where theirs is empty. A policy's zone stay
 construction-time property of the instance, as ``NotificationPolicy`` requires, so what
 varies is *which* instance a ruling is handed: :class:`RulingPolicy` reads the zone just
 before each ruling and picks the hub's policy or one built for that zone. Both ruling
-paths, this stage's and the engine's reconsideration, pick through it.
+paths, this stage's and the engine's reconsideration, pick through it: this stage reads
+the zone from the person-model store it holds, as it always has (ADR-0384 §2 makes the
+upcoming-event producer no upkeep run), and the reconsideration through the person-model
+store bound to its run's sight (:meth:`RulingPolicy.pick_through`, ADR-0384 §7:1).
 
 Nothing concrete is imported: the store, the policy and the outbox all arrive by
 injection and are seen only through their Protocols (CLAUDE.md golden rule 1).
@@ -55,6 +58,7 @@ if TYPE_CHECKING:
         PersonModelStore,
     )
     from ai_assistant.core.types import NotificationCandidate, NotificationDisposition
+    from ai_assistant.orchestration.bound_stores import Bound
 
 _log = structlog.get_logger(__name__)
 
@@ -92,6 +96,12 @@ class RulingPolicy:
 
     **Inert unwired.** With no person-model store, or no factory, every ruling is handed
     the hub's policy, exactly as before the person model.
+
+    **Which store the zone is read through.** :meth:`pick` reads the store it was built
+    with: the upcoming-event producer's, unbound, since no clause yet gives that producer
+    a sight (ADR-0384 §2's table). The reconsideration, an upkeep run, reads it through
+    the person-model store bound to its run's sight instead (:meth:`pick_through`,
+    ADR-0383 §7:7, ADR-0384 §7:1), and is built with none of its own.
     """
 
     def __init__(
@@ -121,7 +131,7 @@ class RulingPolicy:
         return self._default
 
     async def pick(self) -> NotificationPolicy:
-        """The policy the next ruling is handed: its person's zone, or the hub's.
+        """The policy the next ruling is handed, the zone read from the store held.
 
         Returns:
             A policy built for the owner's zone where their profile sets one that
@@ -132,10 +142,29 @@ class RulingPolicy:
                 its ``PersonModelStoreError``. Nothing has been ruled, and the caller
                 rules nothing.
         """
-        if self._people is None or self._policy_for is None:
+        return await self.pick_through(self._people)
+
+    async def pick_through(self, people: Bound[PersonModelStore] | None) -> NotificationPolicy:
+        """The policy the next ruling is handed, the zone read through ``people``.
+
+        Args:
+            people: The person-model store the owner's zone is read through: for the
+                reconsideration, the one bound to its run's sight (ADR-0384 §7:1), and
+                ``None`` where the person model is off, where the hub's policy is handed.
+
+        Returns:
+            A policy built for the owner's zone where their profile sets one that
+            resolves, and the hub's policy otherwise, or where nothing is wired.
+
+        Raises:
+            NotificationStoreError: If the person-model store cannot be read, chained to
+                its ``PersonModelStoreError``. Nothing has been ruled, and the caller
+                rules nothing.
+        """
+        if people is None or self._policy_for is None:
             return self._default
         try:
-            model = await self._people.read(OWNER_PERSON_ID)
+            model = await people.read(OWNER_PERSON_ID)
         except PersonModelStoreError as exc:
             _log.warning("notification_zone_unread", stage="notifications", reason="store_fault")
             msg = (
