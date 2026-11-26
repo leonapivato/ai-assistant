@@ -1,6 +1,6 @@
 # 289. A story store holds which experiences belong to the same matter
 
-- Status: Partially superseded by ADR-0300 (§2:1's *no text*, for the page alone; §3:14's reads, in the additions alone; §4:4, for writes the hub makes outside the engine surface; §4:6 whole)
+- Status: Partially superseded by ADR-0300 (§2:1's *no text*, for the page alone; §3:14's reads, in the additions alone; §4:4, for writes the hub makes outside the engine surface; §4:6 whole) and ADR-0386 (§2:1, §3:1, §3:10 and §3:14, each in the addition alone: a story also carries its home, which every header read gives; `create` takes it as a required input; a split's story takes its source's home)
 - Date: 2026-10-04
 - Scope: [M40](https://github.com/leonapivato/ai-assistant/milestone/7), the story capability.
 - Dependency: ADR-0286 and ADR-0287, implemented at `032b30d1`.
@@ -16,6 +16,7 @@
   them. Every other clause stands, §2:6 included. These scoped replacements take effect
   on ratification of ADR-0300. This reciprocal header record accompanies the numbered
   draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-11-26 by [ADR-0386](0386-a-records-home-joins-the-fields-the-reads-and-the-minting-members-earlier-decisions-closed.md) — §2:1 and §3:14, each in the addition alone: a story also carries its home, which is not the owner §2:1 rules out, and the header every read gives back also gives it. §3:1, in the addition alone: `create` also takes, as a required input with no default, the home of the story it mints. §3:10, in the addition alone: the story a split mints takes the home of the story it is split from, with no new argument (ADR-0386 §2). Every other clause stands. These replacements take effect on ratification of ADR-0386. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 

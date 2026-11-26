@@ -1,6 +1,6 @@
 # 215. A dismissed notification keeps suppressing its own key until the fact it named perishes
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0386 (§7:1's *no field*, in the addition alone: `HeldNotification` also carries its home)
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0130](0130-a-notification-is-a-proposal-and-only-a-perishable-one-earns-an-interruption.md)
@@ -40,6 +40,7 @@
   stood at this ADR's base, `2ba14572`, not to its status on any later day. Where
   a later ADR moves one of the clauses quoted here, this decision is read against
   the text quoted, and the reconciliation is that ADR's to record.
+- Partially superseded: 2026-11-26 by [ADR-0386](0386-a-records-home-joins-the-fields-the-reads-and-the-minting-members-earlier-decisions-closed.md) — §7:1's *no field*, in the addition alone: `HeldNotification` also carries its home, ADR-0383 §3's (ADR-0386 §3). Every other clause stands. These replacements take effect on ratification of ADR-0386. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
