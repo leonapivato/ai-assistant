@@ -423,14 +423,28 @@ def test_the_holders_b8d_converted_hold_no_store() -> None:
 
 #: The methods of each holder that keeps a store unbound for reads outside a work, which
 #: alone may reach it (B8d): every other method is a work's, and reads through the holder.
-_OUTSIDE_A_WORK: Final[dict[tuple[str, str], tuple[str, frozenset[str]]]] = {
-    # §7:8: removing finished tasks (ADR-0384 §2's table); B10: the owner's replace.
+_OUTSIDE_A_WORK: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]]] = {
+    # §7:8: removing finished tasks (ADR-0384 §2's table); B10: the operations from
+    # outside (ADR-0350 §10), the owner's own acts.
     ("task_manager.py", "TaskManager"): (
-        "_plans",
-        frozenset({"__init__", "tidy", "parent_ended", "replace"}),
+        frozenset({"_plans", "_memory"}),
+        frozenset(
+            {
+                "__init__",
+                "tidy",
+                "parent_ended",
+                "replace",
+                "scheduled_outside_a_work",
+                "recent_outside_a_work",
+                "cancel_outside_a_work",
+            }
+        ),
     ),
     # §7:8: the task sensor's push; B10: the owner's replace.
-    ("task_rules.py", "PersonZones"): ("_people", frozenset({"__init__", "outside_a_work"})),
+    ("task_rules.py", "PersonZones"): (
+        frozenset({"_people"}),
+        frozenset({"__init__", "outside_a_work"}),
+    ),
 }
 
 
@@ -438,7 +452,7 @@ def test_a_works_task_calls_reach_no_store_unbound() -> None:
     """§7:7: the Task Manager's and the zones' methods a work reaches read through the
     holder; the unbound store is reached only by the reads made outside a work (B8d)."""
     reaches: dict[str, list[str]] = {}
-    for (module, holder), (attribute, outside) in _OUTSIDE_A_WORK.items():
+    for (module, holder), (attributes, outside) in _OUTSIDE_A_WORK.items():
         tree = _parsed(_ROOT / module)
         (cls,) = (one for one in tree.body if isinstance(one, ast.ClassDef) and one.name == holder)
         methods = {
@@ -455,7 +469,7 @@ def test_a_works_task_calls_reach_no_store_unbound() -> None:
                 isinstance(inner, ast.Attribute)
                 and isinstance(inner.value, ast.Name)
                 and inner.value.id == "self"
-                and inner.attr == attribute
+                and inner.attr in attributes
                 for inner in ast.walk(node)
             )
         )

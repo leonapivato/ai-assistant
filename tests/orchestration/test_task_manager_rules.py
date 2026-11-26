@@ -99,6 +99,7 @@ class _World:
             # for removing finished tasks (§7:8) and the owner's replace.
             stores=holder(plans=self.plans, memory=self.memory),
             plans=self.plans,
+            memory=self.memory,
             running=lambda: (),
             is_running=lambda _one: False,
             starting=lambda _one: False,
@@ -639,8 +640,7 @@ async def test_a_task_the_assistant_set_renders_in_the_persons_zone_everywhere()
 
     with in_a_work(at=NOW), spawning(_spawner()):
         listed = await world.calls.run(_call(LIST_TASKS, {}))
-    with in_a_work(at=NOW):
-        scheduled = await world.manager.scheduled(OWNER_PERSON_ID)
+    scheduled = await world.manager.scheduled_outside_a_work(OWNER_PERSON_ID)
 
     assert spawned.author == "assistant"
     assert spawned.falls_due == "at Sat 24 Oct 2026 08:00 (America/New_York)"

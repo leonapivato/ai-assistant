@@ -7819,9 +7819,11 @@ class Engine:
         self._lateness_grace = seams.lateness_grace
         self._task_manager = TaskManager(
             # ADR-0383 §7:7: a work's task calls read and write through the holder; the
-            # unbound store is for removing finished tasks (§7:8) and the owner's replace.
+            # unbound stores are for removing finished tasks (§7:8) and the operations
+            # from outside, the owner's own acts (B10).
             stores=self._stores,
             plans=plans,
+            memory=memory,
             running=lambda: (one.state for one in self._running if one.state is not None),
             # §7:8: a task is kept while its parent, the activation that spawned it, runs.
             is_running=lambda one: self._running_state(one) is not None,

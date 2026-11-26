@@ -647,9 +647,13 @@ class TaskManager:
     work's task calls reach, and the stop call's read of what it set up, reads and writes
     through the stores the holder binds to the calling work's sight
     (:func:`~ai_assistant.orchestration.activation_state.work_sight`), read as each store
-    is reached. Three keep the plan store unbound: :meth:`tidy` and :meth:`parent_ended`,
-    removing finished tasks, which ADR-0384 §2's table leaves unchanged (§7:8), and
-    :meth:`replace`, the owner's own command and no work's (§10:5), milestone 22's B10.
+    is reached, and fails where no work runs. The same operations from outside (§10:1,
+    §10:2), :meth:`scheduled_outside_a_work`, :meth:`recent_outside_a_work`,
+    :meth:`cancel_outside_a_work` and :meth:`replace`, are the owner's own acts and no
+    work's (§10:5): they run with one implementation each, shared with a work's (§10:4),
+    over the stores unbound, as the owner's acts do until milestone 22's B10 binds them
+    (ADR-0385). :meth:`tidy` and :meth:`parent_ended`, removing finished tasks, which
+    ADR-0384 §2's table leaves unchanged, read unbound too (§7:8).
     """
 
     def __init__(  # noqa: PLR0913 — the holder, the store, the engine's three seams, the sensor's wake, the bounds, the zones, the clock and the id source
@@ -657,6 +661,7 @@ class TaskManager:
         *,
         stores: BoundStores,
         plans: PlanStore,
+        memory: MemoryStore,
         running: Callable[[], Iterable[ActivationState]],
         is_running: Callable[[str], bool],
         starting: Callable[[str], bool],
@@ -674,8 +679,10 @@ class TaskManager:
                 from (§7:9): every read and write a work makes through this goes through
                 them, bound to its sight (§7:7).
             plans: The same plan store, which holds the Task Scheduler's content, read
-                unbound by :meth:`tidy` and :meth:`parent_ended` (§7:8) and by
-                :meth:`replace`, the owner's command, alone.
+                unbound by :meth:`tidy` and :meth:`parent_ended` (§7:8) and by the
+                operations from outside, the owner's acts, alone.
+            memory: The same memory store, read unbound by the operations from outside
+                alone.
             running: The activations the engine holds as running.
             is_running: Whether an activation is running, admitted or pushed.
             starting: Whether an occurrence was pushed to an activation that is not yet
@@ -690,6 +697,7 @@ class TaskManager:
         """
         self._stores = stores
         self._plans = plans
+        self._memory = memory
         self._running = running
         self._is_running = is_running
         self._starting = starting
@@ -811,13 +819,41 @@ class TaskManager:
         Their times are told in ``zone``, or in ``person``'s, read here, where it is
         ``None`` (ADR-0340 §6:1).
 
+        A work's query, by its sight (ADR-0383 §7:7).
+
+        Raises:
+            PlanningError: If the plan store cannot be read.
+            RuntimeError: Where no admitted work is running here.
+        """
+        return await self._scheduled(
+            self._work_plans(), self._work_memory(), person, zone, self.zone_of
+        )
+
+    async def scheduled_outside_a_work(
+        self, person: str, *, zone: ZoneInfo | None = None
+    ) -> tuple[TaskEntry, ...]:
+        """:meth:`scheduled`, asked from outside, the owner's own act (§10:2, §10:5).
+
         Raises:
             PlanningError: If the plan store cannot be read.
         """
-        held = await self._work_plans().person_scheduled_tasks(person, [OccurrenceState.PENDING])
-        told = await self.zone_of(person) if zone is None else zone
+        return await self._scheduled(
+            self._plans, self._memory, person, zone, self._zones.outside_a_work
+        )
+
+    async def _scheduled(
+        self,
+        plans: PlanStore,
+        memory: MemoryStore,
+        person: str,
+        zone: ZoneInfo | None,
+        read_zone: Callable[[str], Awaitable[ZoneInfo]],
+    ) -> tuple[TaskEntry, ...]:
+        """The one implementation of the pending query, over ``plans`` and ``memory``."""
+        held = await plans.person_scheduled_tasks(person, [OccurrenceState.PENDING])
+        told = await read_zone(person) if zone is None else zone
         shown = held[: self._limits.listing_bound]
-        parents = await self.parents(shown)
+        parents = await self._parents(memory, shown)
         return tuple(self.entry(one, told, parent=parents.get(one.parent)) for one in shown)
 
     async def still_live(
@@ -951,15 +987,21 @@ class TaskManager:
         model (ADR-0286 §6:4). A parent still running, one whose episode is not held or
         came from no place, and every one where the episodes cannot be read, is left
         out, and its task is then described from where and when it was set, which is its
-        parent's own unless a replace wrote it.
+        parent's own unless a replace wrote it. A work's read, by its sight (§7:7).
         """
+        return await self._parents(self._work_memory(), tasks)
+
+    async def _parents(
+        self, memory: MemoryStore, tasks: Sequence[ScheduledTask]
+    ) -> dict[str, TaskParent]:
+        """The one implementation of :meth:`parents`, over ``memory``."""
         found: dict[str, TaskParent] = {}
         rest = sorted({one.parent for one in tasks})
         if not rest:
             return found
         try:
             read = without_open_episodes(
-                await self._work_memory().get_many([f"activation:{one}" for one in rest])
+                await memory.get_many([f"activation:{one}" for one in rest])
             )
         except MemoryStoreError:
             _log.warning("task_parent_unread", stage="task_scheduler", reason="store_failed")
@@ -988,13 +1030,40 @@ class TaskManager:
         where its messages went, read from their effect records (ADR-0350 §12:8), or
         nothing of it where those cannot be read.
 
+        A work's query, by its sight (ADR-0383 §7:7).
+
+        Raises:
+            MemoryStoreError: If the episodes cannot be read.
+            RuntimeError: Where no admitted work is running here.
+        """
+        told = await self.zone_of(person) if zone is None else zone
+        return await self._recent(
+            self._work_plans(), self._work_memory(), person, supply=supply, zone=told
+        )
+
+    async def recent_outside_a_work(
+        self, person: str, *, supply: TurnSupply | None, zone: ZoneInfo | None = None
+    ) -> tuple[ActivationEntry, ...]:
+        """:meth:`recent`, asked from outside, the owner's own act (§10:2, §10:5).
+
         Raises:
             MemoryStoreError: If the episodes cannot be read.
         """
-        told = await self.zone_of(person) if zone is None else zone
-        page = await self._work_memory().channel_episodes(
-            SCHEDULE, limit=self._limits.listing_bound
-        )
+        told = await self._zones.outside_a_work(person) if zone is None else zone
+        return await self._recent(self._plans, self._memory, person, supply=supply, zone=told)
+
+    async def _recent(
+        self,
+        plans: PlanStore,
+        memory: MemoryStore,
+        person: str,
+        *,
+        supply: TurnSupply | None,
+        zone: ZoneInfo,
+    ) -> tuple[ActivationEntry, ...]:
+        """The one implementation of the ran-lately query, over ``plans`` and ``memory``."""
+        told = zone
+        page = await memory.channel_episodes(SCHEDULE, limit=self._limits.listing_bound)
         shown: list[ActivationEntry] = []
         for row in reversed(page.entries):
             record = row.record
@@ -1025,10 +1094,10 @@ class TaskManager:
                     outside=outside,
                 )
             )
-        return await self._where_written(shown)
+        return await self._where_written(plans, shown)
 
     async def _where_written(
-        self, entries: Sequence[ActivationEntry]
+        self, plans: PlanStore, entries: Sequence[ActivationEntry]
     ) -> tuple[ActivationEntry, ...]:
         """``entries``, each with where its messages went, from their effect records.
 
@@ -1039,9 +1108,7 @@ class TaskManager:
         if not entries:
             return ()
         try:
-            effects = await self._work_plans().activation_effects(
-                [one.activation_id for one in entries]
-            )
+            effects = await plans.activation_effects([one.activation_id for one in entries])
         except PlanningError:
             _log.warning("task_messages_unread", stage="task_scheduler", reason="store_failed")
             return tuple(entries)
@@ -1229,16 +1296,36 @@ class TaskManager:
     ) -> ScheduledTaskCancel:
         """Cancel what is pending of a task (§9:5); it stops nothing running.
 
-        ``person`` and ``spawned_by`` are §4:4's checks for planning's cancel; the Task
-        Manager's command gives neither. A work's write, through the plan store bound to
-        its sight (ADR-0383 §7:5): a task it does not see is cancelled as one never written.
+        ``person`` and ``spawned_by`` are §4:4's checks for planning's cancel. A work's
+        write, through the plan store bound to its sight (ADR-0383 §7:5): a task it does
+        not see is cancelled as one never written.
+
+        Raises:
+            PlanningError: If the store fails.
+            RuntimeError: Where no admitted work is running here.
+        """
+        return await self._cancel(self._work_plans(), task_id, person=person, spawned_by=spawned_by)
+
+    async def cancel_outside_a_work(self, task_id: str) -> ScheduledTaskCancel:
+        """The Task Manager's cancel command, from outside, the owner's own act (§10:2).
+
+        A structured act naming one operation (§10:5), with neither of §4:4's checks.
 
         Raises:
             PlanningError: If the store fails.
         """
-        cancelled = await self._work_plans().cancel_scheduled_task(
-            task_id, person=person, spawned_by=spawned_by
-        )
+        return await self._cancel(self._plans, task_id, person=None, spawned_by=None)
+
+    async def _cancel(
+        self,
+        plans: PlanStore,
+        task_id: str,
+        *,
+        person: str | None,
+        spawned_by: str | None,
+    ) -> ScheduledTaskCancel:
+        """The one implementation of the cancel, through ``plans``."""
+        cancelled = await plans.cancel_scheduled_task(task_id, person=person, spawned_by=spawned_by)
         if cancelled.task is not None:
             self._wake()
             await self.tidy([task_id])
