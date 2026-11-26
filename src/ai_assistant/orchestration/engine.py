@@ -3345,9 +3345,14 @@ class Engine:
         ``sight`` is the sight of the work whose stop call this is (:meth:`_work_stop`),
         and every store it reads or writes is bound to it (ADR-0383 §7:7): an episode
         that sight does not see answers as one never written (§8:2), and a stop record,
-        which carries no home, is written whatever it sees (§3:3, §7:11). ``None`` is a
-        caller that is not a work, which reads and writes unbound: the owner's
-        :meth:`stop_activation` and the chat reader's ``/stop`` (:meth:`_stop_line`).
+        which carries no home, is written whatever it sees (§3:3, §7:11). **A work's stop
+        reaches only a running activation**: a work names only what it was shown as
+        running (ADR-0349 §4:8), which a pushed, not admitted activation never is, so for
+        one not running it answers from the bound episode read alone, sets no mark and
+        writes nothing, and never reaches :meth:`_stop_pushed`. ``None`` is a caller that
+        is not a work, which reads and writes unbound and stops a pushed one as today: the
+        owner's :meth:`stop_activation` and the chat reader's ``/stop``
+        (:meth:`_stop_line`).
         """
         running = self._running_state(activation_id)
         if running is not None:
@@ -3356,7 +3361,11 @@ class Engine:
             # §3:4: only once the mark is set is the record written.
             await self._stop_plans(sight).record_stop(activation_id)
             return ActivationStop.STOPPED
-        if self._task_manager is not None and await self._stop_pushed(activation_id, sight=sight):
+        if (
+            sight is None
+            and self._task_manager is not None
+            and await self._stop_pushed(activation_id)
+        ):
             return ActivationStop.STOPPED
         episode = await self._stop_memory(sight).get(f"activation:{activation_id}")
         return (
@@ -3393,7 +3402,7 @@ class Engine:
             None,
         )
 
-    async def _stop_pushed(self, activation_id: str, *, sight: Sight | None) -> bool:
+    async def _stop_pushed(self, activation_id: str) -> bool:
         """Stop an activation the Task Scheduler pushed and has not admitted (ADR-0350 §9:10).
 
         Its stop record is written, so admission refuses it, and the sensor's admission
@@ -3404,8 +3413,8 @@ class Engine:
         still read pushed while its outcome is written: it ran, so a stop naming it once
         it has ended changes nothing (ADR-0295 §1:6), and this writes nothing for it.
 
-        The episode is read, and the record written, through the stores bound to a work's
-        ``sight``, as :meth:`_stop` reads (ADR-0383 §7:7); ``None`` reads unbound.
+        No work's stop reaches it (:meth:`_stop`): it is the owner's and the reader's
+        alone, which read and write unbound.
 
         Returns:
             Whether an occurrence was pushed to it, not yet admitted.
@@ -3414,12 +3423,12 @@ class Engine:
         if not pending and (
             activation_id in self._admitted
             or activation_id in self._unwritten
-            or await self._stop_memory(sight).get(f"activation:{activation_id}") is not None
+            or await self._memory.get(f"activation:{activation_id}") is not None
         ):
             return False
         if pending:
             self._pushed[activation_id] = True
-        pushed = await self._stop_plans(sight).stop_pushed_activation(activation_id)
+        pushed = await self._plans.stop_pushed_activation(activation_id)
         return pending or pushed
 
     async def _still_live(
