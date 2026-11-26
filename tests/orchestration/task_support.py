@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     RecordHome,
     ScheduledTaskAuthor,
+    Sight,
     Sureness,
     TaskSpawn,
     TaskWriteAnswer,
@@ -47,6 +48,10 @@ LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="line-ref/42"
 
 #: Generous bounds, which a case about a limit narrows.
 LIMITS: Final = TaskManagerLimits(chain_limit=10, pending_limit=50, listing_bound=20)
+
+#: The owner's sight from none, which the Task Manager's operations from outside are
+#: handed, as an owner's act's caller makes it (ADR-0385 §3:3).
+OWNERS_SIGHT: Final = Sight.of_owners_act(None)
 
 
 def seams(**changes: object) -> TaskSchedulerSeams:

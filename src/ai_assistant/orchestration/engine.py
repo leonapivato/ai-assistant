@@ -54,6 +54,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from functools import partial
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Final, TypeVar, cast
 from zoneinfo import ZoneInfo
@@ -1013,7 +1014,7 @@ async def _newest_recorded_first(
 
 
 async def _written_preferences(
-    store: NotificationStore, preferences: NotificationPreferences
+    store: Bound[NotificationStore], preferences: NotificationPreferences
 ) -> NotificationPreferences:
     """Write the standing settings and read back what the store now holds.
 
@@ -1022,7 +1023,9 @@ async def _written_preferences(
     what it was handed would otherwise have the two silently disagree.
 
     Args:
-        store: Where the settings live.
+        store: Where the settings live, bound to the owner's sight (ADR-0385 §3:1). The
+            settings are no domain's record and read alike bound or not; the write's
+            re-arming reaches the held notifications that sight sees.
         preferences: What to hold from now on.
 
     Returns:
@@ -4168,7 +4171,7 @@ class Engine:
             limit=limit,
             offset=offset,
         )
-        blocks = person_panel.wired(self._person_blocks)
+        blocks = self._panel_blocks()
         return await self._tracked(
             person_panel.person_model_view(
                 blocks,
@@ -4209,7 +4212,7 @@ class Engine:
             limit=limit,
             offset=offset,
         )
-        blocks = person_panel.wired(self._person_blocks)
+        blocks = self._panel_blocks()
         return await self._tracked(
             person_panel.profile_changes(blocks, named, limit=limit, offset=offset),
             "profile_changes",
@@ -4242,7 +4245,7 @@ class Engine:
             field=which,
             value=held,
         )
-        blocks = person_panel.wired(self._person_blocks)
+        blocks = self._panel_blocks()
         return await self._tracked(
             person_panel.set_profile_field(blocks, named, which, held),
             "set_profile_field",
@@ -4262,7 +4265,7 @@ class Engine:
             MemoryStoreError: If the memory store cannot be read.
         """
         named, memory = self._person_ids("pin_memory", person_id, memory_id=memory_id)
-        blocks = person_panel.wired(self._person_blocks)
+        blocks = self._panel_blocks()
         return await self._tracked(
             person_panel.pin_memory(blocks, named, memory), "pin_memory", checked=True
         )
@@ -4280,7 +4283,7 @@ class Engine:
             MemoryStoreError: If the memory store cannot be read.
         """
         named, memory = self._person_ids("unpin_memory", person_id, memory_id=memory_id)
-        blocks = person_panel.wired(self._person_blocks)
+        blocks = self._panel_blocks()
         return await self._tracked(
             person_panel.unpin_memory(blocks, named, memory), "unpin_memory", checked=True
         )
@@ -4297,7 +4300,7 @@ class Engine:
             PersonModelStoreError: If the store cannot be read or written.
         """
         named, mark = self._person_ids("remove_style_mark", person_id, mark_id=mark_id)
-        blocks = person_panel.wired(self._person_blocks)
+        blocks = self._panel_blocks()
         return await self._tracked(
             person_panel.remove_style_mark(blocks, named, mark), "remove_style_mark", checked=True
         )
@@ -4317,7 +4320,7 @@ class Engine:
         named, suggestion = self._person_ids(
             "accept_person_suggestion", person_id, suggestion_id=suggestion_id
         )
-        blocks = person_panel.wired(self._person_blocks)
+        blocks = self._panel_blocks()
         return await self._tracked(
             person_panel.accept_suggestion(blocks, named, suggestion),
             "accept_person_suggestion",
@@ -4338,12 +4341,25 @@ class Engine:
         named, suggestion = self._person_ids(
             "dismiss_person_suggestion", person_id, suggestion_id=suggestion_id
         )
-        blocks = person_panel.wired(self._person_blocks)
+        blocks = self._panel_blocks()
         return await self._tracked(
             person_panel.dismiss_suggestion(blocks, named, suggestion),
             "dismiss_person_suggestion",
             checked=True,
         )
+
+    def _panel_blocks(self) -> PersonBlocks:
+        """The person block's assembly, bound to the owner's sight from none (ADR-0385 §3:1).
+
+        Each of the eight panel members is the owner's own act: the person-model store and
+        the memory store it reads and writes are bound to that sight, made for this call,
+        so a person or a memory the sight does not see is one not held (§4:1, ADR-0383
+        §8:2).
+
+        Raises:
+            PersonModelOffError: If no person-model store is wired.
+        """
+        return person_panel.wired(self._person_blocks).bound(self._owners_sight(None))
 
     def _person_ids(self, method: str, person_id: str, **record: str) -> tuple[str, str]:
         """A person-model write's two ids, validated verbatim and measured (ADR-0338 §10:4).
@@ -4553,7 +4569,7 @@ class Engine:
         check_arguments(
             "notifications", max_bytes=self._max_payload_bytes, limit=limit, offset=offset
         )
-        store = self._notification_surface()
+        store = self._notifications_seen(self._owners_sight(None))
         return await self._tracked(
             _as_tuple(store.held(limit=limit, offset=offset)), "notifications", checked=True
         )
@@ -4591,12 +4607,12 @@ class Engine:
             max_bytes=self._max_payload_bytes,
             notification_id=named,
         )
-        store = self._notification_surface()
+        store = self._notifications_seen(self._owners_sight(None))
         return await self._tracked(
             self._dismiss(store, named), "dismiss_notification", checked=True
         )
 
-    async def _dismiss(self, store: NotificationStore, notification_id: str) -> bool:
+    async def _dismiss(self, store: Bound[NotificationStore], notification_id: str) -> bool:
         """End the record's actionability, then give up its outbox entry (§3, §3a).
 
         **A dismissal reaches the outbox, and the seam cannot notice it by
@@ -4619,12 +4635,28 @@ class Engine:
 
         Falling through to the store is for the ordinary case where the record was
         never offered, so the outbox holds no entry and has nothing to withdraw.
+
+        **Only a record ``store`` gives back is withdrawn** (ADR-0385 §5:2, §5:3). The
+        outbox dismisses through the notification store it was built over, which judges
+        no home, so a record the owner's sight does not see is answered before the
+        outbox is reached, as one never written: ``False``, with nothing marked,
+        withdrawn or dismissed (:meth:`_withdrawable`).
         """
-        if self._notification_outbox is not None and await self._notification_outbox.withdraw(
-            notification_id
+        if await self._withdrawable(store, notification_id) and (
+            await self._delivery_surface().withdraw(notification_id)
         ):
             return True
         return await store.dismiss(notification_id)
+
+    async def _withdrawable(self, store: Bound[NotificationStore], notification_id: str) -> bool:
+        """Whether an outbox is wired and ``store``, the owner's bound one, holds the record.
+
+        A record's home never changes (ADR-0383 §4:6), so a record seen here is one the
+        withdrawal after it may give up.
+        """
+        return (
+            self._notification_outbox is not None and await store.get(notification_id) is not None
+        )
 
     async def forget_notification(self, notification_id: Identifier) -> bool:
         """Destroy one notification (§9, ADR-0004 §6).
@@ -4658,10 +4690,10 @@ class Engine:
             max_bytes=self._max_payload_bytes,
             notification_id=named,
         )
-        store = self._notification_surface()
+        store = self._notifications_seen(self._owners_sight(None))
         return await self._tracked(self._forget(store, named), "forget_notification", checked=True)
 
-    async def _forget(self, store: NotificationStore, notification_id: str) -> bool:
+    async def _forget(self, store: Bound[NotificationStore], notification_id: str) -> bool:
         """Withdraw the record's outbox entry, then destroy the record (§3a).
 
         **The order is forced and only one of the two is safe.** ADR-0131 §3a: an
@@ -4682,9 +4714,13 @@ class Engine:
 
         An engine with no outbox wired withdraws nothing, which is the CLI's case:
         it serves no poll, so no entry can exist to be delivered.
+
+        **Only a record ``store`` gives back is withdrawn and destroyed** (ADR-0385
+        §5:2, §5:3): one the owner's sight does not see is answered ``False``, as one
+        never written, before the outbox, which judges no home, is reached.
         """
-        if self._notification_outbox is not None:
-            await self._notification_outbox.withdraw(notification_id)
+        if await self._withdrawable(store, notification_id):
+            await self._delivery_surface().withdraw(notification_id)
         return await store.delete(notification_id)
 
     async def notification_preferences(self) -> NotificationPreferences:
@@ -4704,7 +4740,7 @@ class Engine:
         """
         self._reject_if_closing()
         check_arguments("notification_preferences", max_bytes=self._max_payload_bytes)
-        store = self._notification_surface()
+        store = self._notifications_seen(self._owners_sight(None))
         return await self._tracked(store.preferences(), "notification_preferences", checked=True)
 
     async def set_notification_preferences(
@@ -4738,7 +4774,7 @@ class Engine:
             max_bytes=self._max_payload_bytes,
             preferences=preferences,
         )
-        store = self._notification_surface()
+        store = self._notifications_seen(self._owners_sight(None))
         return await self._tracked(
             _written_preferences(store, preferences),
             "set_notification_preferences",
@@ -4975,6 +5011,19 @@ class Engine:
             )
             raise ConfigurationError(msg)
         return self._notifications
+
+    def _notifications_seen(self, sight: Sight) -> Bound[NotificationStore]:
+        """The wired notification store, bound to an owner's act's ``sight`` (ADR-0385 §3:1).
+
+        Through the holder, so a held notification that sight does not see is one the
+        store does not hold: listed by no page, counted by no total, and dismissed or
+        destroyed as one never written (§4:1, §5:3).
+
+        Raises:
+            ConfigurationError: If none is wired, as :meth:`_notification_surface`.
+        """
+        self._notification_surface()
+        return self._stores.notifications(sight)
 
     async def recent_conversations(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
@@ -7348,6 +7397,11 @@ class Engine:
         with none wired holds no request, and shows none. The person is the owner, whom
         every device admitted under ADR-0124 carries (§4:8, ADR-0124 §5).
 
+        The owner's own act (ADR-0385 §3:1, §4:1): the requests, and the episodes their
+        cards' facts are read from, through the plan store and the memory store bound to
+        the owner's sight from none, so a request that sight does not see is listed and
+        counted nowhere, and an episode it does not see shows a card's cautious facts.
+
         Raises:
             RuntimeError: If the engine is shutting down.
             ValueError: If ``limit`` is out of range.
@@ -7357,10 +7411,11 @@ class Engine:
         self._reject_if_closing()
         page_argument(limit, name="limit")
         check_arguments("approvals", max_bytes=self._max_payload_bytes, limit=limit)
+        sight = self._owners_sight(None)
         return await self._tracked(
             approval_panel(
-                self._plans,
-                self._approval_facts,
+                self._stores.plans(sight),
+                partial(self._approval_facts, self._stores.memory(sight)),
                 person=OWNER_PERSON_ID,
                 now=self._now(),
                 limit=limit,
@@ -7378,6 +7433,11 @@ class Engine:
         A command, never perceived: nothing here admits an activation. The sensor, woken
         once the store step has landed, pushes the outcome (§3:4), and the line's reader
         edits the card (§4:5).
+
+        The owner's own act (ADR-0385 §3:1): the request is read and marked through the
+        plan store bound to the owner's sight from none, so a request that sight does not
+        see is answered ``unknown`` and marked nowhere, as one never written (§8:2). Who
+        may answer it is read as before (ADR-0377 §3).
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -7401,9 +7461,10 @@ class Engine:
     async def _tap_approval(
         self, request_id: str, choice: ApprovalChoice, device: RequestingDevice
     ) -> ApprovalPanelTap:
+        sight = self._owners_sight(None)
         tapped, landed = await tap_on_approval_panel(
-            self._plans,
-            self._approval_facts,
+            self._stores.plans(sight),
+            partial(self._approval_facts, self._stores.memory(sight)),
             request_id,
             choice,
             lines=self._lines,
@@ -7565,11 +7626,14 @@ class Engine:
             owners_lines.remove_line(self._lines, named), "remove_line", checked=True
         )
 
-    async def _approval_facts(self, requests: Sequence[ApprovalRequest]) -> dict[str, CardFacts]:
+    async def _approval_facts(
+        self, memory: Bound[MemoryStore], requests: Sequence[ApprovalRequest]
+    ) -> dict[str, CardFacts]:
         """What each request's card shows beside it, read from the activation that asked.
 
         From the running activation where this engine still runs it, and otherwise from
-        its frozen episode (:func:`episode_card_facts`).
+        its frozen episode (:func:`episode_card_facts`), read through ``memory``, the
+        memory store bound to the owner's sight of the panel's act (ADR-0385 §3:1).
         """
         facts: dict[str, CardFacts] = {}
         unread: list[ApprovalRequest] = []
@@ -7580,7 +7644,7 @@ class Engine:
             else:
                 facts[str(one.id)] = approval_card_facts(one, state.trigger, state.call_records)
         if unread:
-            facts.update(await episode_card_facts(self._memory, unread))
+            facts.update(await episode_card_facts(memory, unread))
         return facts
 
     def _approval_live(self, activation_id: str) -> bool:
@@ -7958,12 +8022,12 @@ class Engine:
         )
         self._lateness_grace = seams.lateness_grace
         self._task_manager = TaskManager(
-            # ADR-0383 §7:7: a work's task calls read and write through the holder; the
-            # unbound stores are for removing finished tasks (§7:8) and the operations
-            # from outside, the owner's own acts (B10).
+            # ADR-0383 §7:7: a work's task calls read and write through the holder, and
+            # the operations from outside, the owner's own acts, through it bound to the
+            # sight their caller hands (ADR-0385 §3:1); the unbound plan store is for
+            # removing finished tasks alone (§7:8).
             stores=self._stores,
             plans=plans,
-            memory=memory,
             running=lambda: (one.state for one in self._running if one.state is not None),
             # §7:8: a task is kept while its parent, the activation that spawned it, runs.
             is_running=lambda one: self._running_state(one) is not None,
@@ -9716,7 +9780,7 @@ def approval_card_facts(
 
 
 async def episode_card_facts(
-    memory: MemoryStore, requests: Sequence[ApprovalRequest]
+    memory: Bound[MemoryStore], requests: Sequence[ApprovalRequest]
 ) -> dict[str, CardFacts]:
     """What each request's card shows beside it, from the asking activation's episode.
 
@@ -9725,7 +9789,8 @@ async def episode_card_facts(
     and answer the request, whose call and ``why`` are the request's own.
 
     Args:
-        memory: The memory store the episodes are held in.
+        memory: The memory store the episodes are held in, bound to the sight of the act
+            that reads them: an episode it does not see is one not held.
         requests: The requests.
 
     Returns:
@@ -9780,7 +9845,7 @@ def _ended_at(request: ApprovalRequest) -> datetime:
 
 
 async def approval_panel(  # noqa: PLR0913 — the store, the reader, and one knob per bound
-    plans: PlanStore,
+    plans: Bound[PlanStore],
     facts_of: Callable[[Sequence[ApprovalRequest]], Awaitable[Mapping[str, CardFacts]]],
     *,
     person: str,
@@ -9797,7 +9862,8 @@ async def approval_panel(  # noqa: PLR0913 — the store, the reader, and one kn
     can approve it now (§3:5), whether or not the sensor has ended it.
 
     Args:
-        plans: The plan store, which holds the Approvals channel's content.
+        plans: The plan store, which holds the Approvals channel's content, bound to the
+            sight of the act that reads it (ADR-0385 §3:1).
         facts_of: Reads what each request's card shows beside it.
         person: The person whose requests are shown.
         now: The instant the panel is read at.
@@ -9911,7 +9977,7 @@ def _cut_entry(
 
 
 async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the tap, the lines, link, device, instant and bound
-    plans: PlanStore,
+    plans: Bound[PlanStore],
     facts_of: Callable[[Sequence[ApprovalRequest]], Awaitable[Mapping[str, CardFacts]]],
     request_id: str,
     choice: ApprovalChoice,
@@ -9945,7 +10011,8 @@ async def tap_on_approval_panel(  # noqa: PLR0913 — the store, the reader, the
     the request's state.
 
     Args:
-        plans: The plan store.
+        plans: The plan store, bound to the sight of the act that taps (ADR-0385 §3:1): a
+            request it does not see is answered as one never written.
         facts_of: Reads what the request's card shows beside it.
         request_id: The request tapped.
         choice: Approve or Deny.

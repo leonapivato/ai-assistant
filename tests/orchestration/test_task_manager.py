@@ -19,6 +19,7 @@ from task_support import (
     CHAT,
     LIMITS,
     LINE,
+    OWNERS_SIGHT,
     activation,
     message,
     pushed,
@@ -122,11 +123,11 @@ class _World:
         self.starting: set[str] = set()
         self.woken = 0
         self.manager = TaskManager(
-            # ADR-0383 §9:1: a work's calls read through the holder; the store itself is
-            # for removing finished tasks (§7:8) and the owner's replace.
+            # ADR-0383 §9:1: a work's calls read through the holder, and the owner's
+            # operations from outside through it by the owner's sight (ADR-0385 §3:1); the
+            # store itself is for removing finished tasks (§7:8).
             stores=holder(plans=self.plans, memory=self.memory),
             plans=self.plans,
-            memory=self.memory,
             running=lambda: tuple(self.states),
             is_running=lambda one: one in self.running,
             starting=lambda one: one in self.starting,
@@ -496,7 +497,7 @@ async def test_a_task_is_kept_while_a_task_below_it_is_pending() -> None:
     await world.manager.tidy([task.id])
     assert await world.held(task.id) is OccurrenceState.DONE
 
-    await world.manager.cancel_outside_a_work(below.id)
+    await world.manager.cancel_outside_a_work(below.id, sight=OWNERS_SIGHT)
     assert await world.held(below.id) is None
     assert await world.held(task.id) is None
 
@@ -768,10 +769,10 @@ async def test_a_cancel_and_a_push_racing_are_decided_by_whichever_lands_first()
     cancelled_first = await write_task(world.plans, activation())
     pushed_first = await write_task(world.plans, activation())
 
-    await world.manager.cancel_outside_a_work(cancelled_first.id)
+    await world.manager.cancel_outside_a_work(cancelled_first.id, sight=OWNERS_SIGHT)
     late_push = await world.plans.mark_occurrence_pushed(cancelled_first.id, 1, activation())
     started = await pushed(world.plans, pushed_first)
-    late_cancel = await world.manager.cancel_outside_a_work(pushed_first.id)
+    late_cancel = await world.manager.cancel_outside_a_work(pushed_first.id, sight=OWNERS_SIGHT)
 
     assert late_push.value == "not_pending"
     assert late_cancel.task is None
@@ -1279,7 +1280,10 @@ async def test_the_task_managers_replace_records_the_person_at_none_and_no_conne
 
     replaced = [
         await world.manager.replace(
-            one.id, instruction="the bins", when=DueAt(at=AT + timedelta(hours=2))
+            one.id,
+            sight=OWNERS_SIGHT,
+            instruction="the bins",
+            when=DueAt(at=AT + timedelta(hours=2)),
         )
         for one in (persons, assistants)
     ]

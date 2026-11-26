@@ -21,7 +21,7 @@ import pytest
 from phases_support import chat_turn
 from sight_support import OWNER_WEAK, UNIDENTIFIED, holder, in_a_work, sight_of
 from structlog.testing import capture_logs
-from task_support import CHAT, LIMITS, activation, pushed, write_task
+from task_support import CHAT, LIMITS, OWNERS_SIGHT, activation, pushed, write_task
 from test_authorizer_ticket_rules import (
     _PLACE,
     _REQUEST,
@@ -477,7 +477,6 @@ def _manager(plans: FakePlanStore, memory: FakeMemoryStore) -> TaskManager:
     return TaskManager(
         stores=holder(plans=plans, memory=memory),
         plans=plans,
-        memory=memory,
         running=lambda: (),
         is_running=lambda _one: False,
         starting=lambda _one: False,
@@ -535,12 +534,13 @@ async def test_the_owners_task_calls_read_and_write_as_today(senders: tuple[Any,
 
 async def test_the_task_managers_operations_from_outside_run_with_no_work() -> None:
     """ADR-0350 §10:1-§10:4: the queries and the cancel serve from outside too, one
-    implementation each, as the owner's own acts over the stores unbound (B10); a work's
-    forms, with no work running, read nothing and fail (ADR-0383 §7:7)."""
+    implementation each, as the owner's own acts through the stores bound to the sight
+    they are handed (ADR-0385 §3:1); a work's forms, with no work running, read nothing
+    and fail (ADR-0383 §7:7)."""
     manager, _, task_id = await _tasks_world()
 
-    scheduled = await manager.scheduled_outside_a_work(OWNER_PERSON_ID)
-    recent = await manager.recent_outside_a_work(OWNER_PERSON_ID, supply=None)
+    scheduled = await manager.scheduled_outside_a_work(OWNER_PERSON_ID, sight=OWNERS_SIGHT)
+    recent = await manager.recent_outside_a_work(OWNER_PERSON_ID, sight=OWNERS_SIGHT, supply=None)
     for works in (
         manager.scheduled(OWNER_PERSON_ID),
         manager.recent(OWNER_PERSON_ID, supply=None),
@@ -549,7 +549,7 @@ async def test_the_task_managers_operations_from_outside_run_with_no_work() -> N
     ):
         with pytest.raises(RuntimeError, match="sight"):
             await works
-    cancelled = await manager.cancel_outside_a_work(task_id)
+    cancelled = await manager.cancel_outside_a_work(task_id, sight=OWNERS_SIGHT)
 
     assert [one.task_id for one in scheduled] == [task_id]
     assert recent == ()

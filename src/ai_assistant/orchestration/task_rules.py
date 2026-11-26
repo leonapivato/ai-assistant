@@ -221,12 +221,12 @@ def rule_push(rule: DueOnRule, due_at: datetime, zone: ZoneInfo, *, now: datetim
 class PersonZones:
     """The person's zone, read for the person a task is for (§3:3, ADR-0338 §3:6).
 
-    Two reads, each its own call, so a work's caller that forgets its sight fails rather
-    than reading unbound: :meth:`of`, a work's, through the person-model store the holder
-    binds to that work's sight (ADR-0383 §7:7); and :meth:`outside_a_work`, read where no
-    work runs, unbound: the Task Scheduler sensor's push of a due occurrence, before its
-    work is admitted, as a sensor's finding of what is due reads (§7:8), and the Task
-    Manager's replace command, an owner's own act (ADR-0385, milestone 22's B10).
+    Two reads, each its own call, so a caller that forgets its sight fails rather than
+    reading unbound: :meth:`of`, through the person-model store the holder binds to the
+    sight it is handed, a work's (ADR-0383 §7:7) or an owner's act's, the Task Manager's
+    operations from outside (ADR-0385 §3:1); and :meth:`outside_a_work`, read by no sight,
+    unbound: the Task Scheduler sensor's push of a due occurrence, before its work is
+    admitted, as a sensor's finding of what is due reads (ADR-0383 §7:8), and nothing else.
     """
 
     def __init__(
@@ -264,11 +264,11 @@ class PersonZones:
         return self._default
 
     async def of(self, person: str, *, sight: Sight) -> ZoneInfo:
-        """``person``'s zone, read for a work: their profile's, and the hub's otherwise.
+        """``person``'s zone, read by a sight: their profile's, and the hub's otherwise.
 
-        Through the person-model store bound to ``sight``, the work's (ADR-0383 §7:7): a
-        profile the sight does not see is read as one never written, so the hub's zone
-        governs (§8:2).
+        Through the person-model store bound to ``sight``, a work's (ADR-0383 §7:7) or the
+        owner's for an operation from outside (ADR-0385 §3:1): a profile the sight does
+        not see is read as one never written, so the hub's zone governs (§8:2).
 
         A store that cannot be read is no answer that the profile sets none, so nothing
         is guessed: the read raises, and the caller writes or says nothing that rests on
@@ -284,11 +284,11 @@ class PersonZones:
     async def outside_a_work(self, person: str) -> ZoneInfo:
         """``person``'s zone, read where no work runs, so by no sight, unbound.
 
-        Two callers. The Task Scheduler sensor's push of a due occurrence (ADR-0383 §7:8),
+        One caller: the Task Scheduler sensor's push of a due occurrence (ADR-0383 §7:8),
         before its work is admitted: the zone its rule's successor and skipped instants
         are computed and written in, in the push's store step, and its input is told in.
-        And the Task Manager's replace command, an owner's own act and no work's
-        (ADR-0350 §10:5), which milestone 22's B10 binds (ADR-0385).
+        The Task Manager's operations from outside read :meth:`of` by the owner's sight
+        (ADR-0385 §3:1).
 
         Raises:
             PersonModelStoreError: If the person-model store cannot be read.

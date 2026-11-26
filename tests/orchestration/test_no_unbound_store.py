@@ -94,6 +94,24 @@ NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
     # §7:8: the restart's close of the episodes a dead process left open, the engine's
     # start's (ADR-0286 §7), which ADR-0387 §7 leaves as it is.
     "activation_writer.py:OpenEpisodes": "§7:8",
+    # §7:8: the person-model store handed to the zone picker the Task Scheduler sensor's
+    # push reads. A work's block, pins and reads go through the holder (B8e), and the
+    # owner's panel through `bound` blocks, the owner's sight's (ADR-0385 §3:1, B10f);
+    # calls with no sight on blocks never bound are the canonical fake engine's alone.
+    "person_block.py:PersonBlocks": "§7:8",
+    # §7:8: removing finished tasks, `tidy` and `parent_ended` (ADR-0384 §2's table). A
+    # work's task calls read through the holder (B8d), and the operations from outside,
+    # the owner's own acts (ADR-0350 §10), through it by the sight handed them (B10f).
+    "task_manager.py:TaskManager": "§7:8",
+    # §7:8: `outside_a_work`, the Task Scheduler sensor's push of a due occurrence; `of`
+    # reads by a work's sight (B8d) or the owner's (B10f).
+    "task_rules.py:PersonZones": "§7:8",
+    # §7:8: the line's reader's own reads, a sensor's, which no owner's act reaches: the
+    # cards' edits after each poll and its first read after a start (`refresh`,
+    # `_settle`), and a tap arriving on the line (`tap`), answered by the check. A work's
+    # card is recorded through the plan store bound to its sight (`post`, B8d), and the
+    # line's window reads the cards bound (`on_line`, B8b).
+    "telegram.py:TelegramCards": "§7:8",
 }
 
 #: The holders that make ADR-0387 §3's writes of a work's own turn and answer its §4:2,
@@ -111,11 +129,12 @@ OWN_TURN_HOLDERS: Final[dict[str, str]] = {
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
 #: B9 the observer's pin pass and the upcoming-event producer's writes, B10e the owner's
-#: own acts on conversations, notifications, the profile, the approvals panel and tasks
-#: (ADR-0385); B8b's windows, B8c's stories, B8d's authorizing, acting, approvals and
-#: tasks, B8e's look-ups, person block and matters, B8f's writes of a work's own turn,
-#: B9a's observer reads, B9b's upkeep runs and a tidy-up a work asks for, and B10b's owner's
-#: acts on memory and stories are converted, save the parts named here for a later lane.
+#: own acts on conversations (ADR-0385); B8b's windows, B8c's stories, B8d's authorizing,
+#: acting, approvals and tasks, B8e's look-ups, person block and matters, B8f's writes of
+#: a work's own turn, B9a's observer reads, B9b's upkeep runs and a tidy-up a work asks
+#: for, B10b's owner's acts on memory and stories, and B10f's on notifications, the
+#: profile, the approvals panel and tasks are converted, save the parts named here for a
+#: later lane.
 #: A holder more than one lane converts names the last of them. **Only shrinks.** A holder
 #: whose last unbound read is one §7:8, §7:12 or §7:13 names moves to
 #: :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest: the observer's finding
@@ -134,12 +153,9 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "conversations.py:_judged": "B10e",
     "conversations.py:_last_taker": "B10e",
     # Every lane from B8b to B10e converts a use; its start is §7:8's. The owner's acts on
-    # memory and stories read through the holder, bound to the owner's sight (B10b).
+    # memory and stories (B10b), and on notifications, the profile and the approvals panel
+    # (B10f), read through the holder, bound to the owner's sight.
     "engine.py:Engine": "B10e",
-    "engine.py:_written_preferences": "B10e",
-    "engine.py:approval_panel": "B10e",
-    "engine.py:episode_card_facts": "B10e",
-    "engine.py:tap_on_approval_panel": "B10e",
     # The upcoming-event producer's writes (ADR-0132): it reads a source, not a store, so
     # ADR-0384 §2's table makes it no upkeep run, and no clause yet gives it a sight. It
     # reads the owner's zone from the person-model store and rules into the notification
@@ -157,22 +173,6 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     # (§8:5), the pin pass's stores and write stage (B9), and the stores a holder is
     # built over where none is handed.
     "observer/stage.py:Observer": "B9",
-    # A work's block, pins and person-model reads and writes are bound (B8e); the owner's
-    # panel's pins, unpins and walks, and the unbound store handed to the zone picker
-    # (`PersonZones`' reads outside a work), are the person panel's (B10e); the
-    # reconsideration reads the zone through the holder (B9b).
-    "person_block.py:PersonBlocks": "B10e",
-    # A work's task calls read and write through the holder (B8d); `tidy` and
-    # `parent_ended`, removing finished tasks, are §7:8's (ADR-0384 §2's table), and the
-    # operations from outside (ADR-0350 §10), the owner's own acts, are B10e's.
-    "task_manager.py:TaskManager": "B10e",
-    # A work's read of a person's zone is bound (`of`, B8d); `outside_a_work` is the task
-    # sensor's push (§7:8) and the owner's replace (B10e).
-    "task_rules.py:PersonZones": "B10e",
-    # The line's cards: a work's approval card is recorded through the plan store bound to
-    # its sight, handed to `post` (B8d), and the line's window reads them through the
-    # stores it is handed bound (B8b); the owner's tap and the cards' refresh are B10e's.
-    "telegram.py:TelegramCards": "B10e",
 }
 
 _LANES: Final = frozenset({"B9", "B10e"})
@@ -397,23 +397,14 @@ def test_the_holders_b8d_converted_hold_no_store() -> None:
 #: The methods of each holder that keeps a store unbound for reads outside a work, which
 #: alone may reach it (B8d): every other method is a work's, and reads through the holder.
 _OUTSIDE_A_WORK: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]]] = {
-    # §7:8: removing finished tasks (ADR-0384 §2's table); B10e: the operations from
-    # outside (ADR-0350 §10), the owner's own acts.
+    # §7:8: removing finished tasks (ADR-0384 §2's table). The operations from outside
+    # (ADR-0350 §10), the owner's own acts, read through the holder by the sight handed
+    # them (B10f).
     ("task_manager.py", "TaskManager"): (
-        frozenset({"_plans", "_memory"}),
-        frozenset(
-            {
-                "__init__",
-                "tidy",
-                "parent_ended",
-                "replace",
-                "scheduled_outside_a_work",
-                "recent_outside_a_work",
-                "cancel_outside_a_work",
-            }
-        ),
+        frozenset({"_plans"}),
+        frozenset({"__init__", "tidy", "parent_ended"}),
     ),
-    # §7:8: the task sensor's push; B10e: the owner's replace.
+    # §7:8: the task sensor's push; the owner's replace reads `of` by its sight (B10f).
     ("task_rules.py", "PersonZones"): (
         frozenset({"_people"}),
         frozenset({"__init__", "outside_a_work"}),
@@ -587,6 +578,29 @@ def test_the_helpers_of_the_owners_acts_on_memory_and_stories_hold_no_store() ->
         assert converted not in held
         assert converted not in NOT_YET_CONVERTED
     assert "B10" not in NOT_YET_CONVERTED.values()
+
+
+def test_the_owners_acts_on_notifications_the_profile_approvals_and_tasks_hold_no_store() -> None:
+    """The written preferences, the approvals panel's read, tap and card facts (milestone
+    22's B10f) take stores the holder bound to the owner's sight alone (ADR-0385 §3:1);
+    the person block, the Task Manager, the zones and the line's cards keep only §7:8's."""
+    held = unbound_holders()
+    for converted in (
+        "engine.py:_written_preferences",
+        "engine.py:approval_panel",
+        "engine.py:episode_card_facts",
+        "engine.py:tap_on_approval_panel",
+    ):
+        assert converted not in held
+        assert converted not in NOT_YET_CONVERTED
+    for left in (
+        "person_block.py:PersonBlocks",
+        "task_manager.py:TaskManager",
+        "task_rules.py:PersonZones",
+        "telegram.py:TelegramCards",
+    ):
+        assert NAMED_BY_THE_DECISION[left] == "§7:8"
+    assert held["task_manager.py:TaskManager"] == frozenset({"PlanStore"})
 
 
 def test_the_reading_sees_every_shape_a_store_is_held_in(tmp_path: Path) -> None:

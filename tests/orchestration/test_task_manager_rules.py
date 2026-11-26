@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from sight_support import holder, in_a_work
-from task_support import CHAT, LIMITS, LINE, activation, spawn_effect
+from task_support import CHAT, LIMITS, LINE, OWNERS_SIGHT, activation, spawn_effect
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
@@ -95,11 +95,11 @@ class _World:
         self.plans = FakePlanStore(now=lambda: self.now)
         self.memory = FakeMemoryStore(now=lambda: self.now)
         self.manager = TaskManager(
-            # ADR-0383 §9:1: a work's calls read through the holder; the store itself is
-            # for removing finished tasks (§7:8) and the owner's replace.
+            # ADR-0383 §9:1: a work's calls read through the holder, and the owner's
+            # operations from outside through it by the owner's sight (ADR-0385 §3:1); the
+            # store itself is for removing finished tasks (§7:8).
             stores=holder(plans=self.plans, memory=self.memory),
             plans=self.plans,
-            memory=self.memory,
             running=lambda: (),
             is_running=lambda _one: False,
             starting=lambda _one: False,
@@ -462,6 +462,7 @@ async def test_the_task_managers_replace_computes_a_rules_first_occurrence() -> 
 
     written = await world.manager.replace(
         one_off.id,
+        sight=OWNERS_SIGHT,
         instruction="the bins",
         when=DueOnRule(repeats=TaskRuleKind.WEEKDAYS, time_of_day=time(7, 0)),
     )
@@ -478,7 +479,10 @@ async def test_the_task_managers_replace_is_claimed_in_the_owners_domain() -> No
     one_off = (await _spawn(world, at="2026-10-23T20:00"), await _only_task(world))[1]
 
     written = await world.manager.replace(
-        one_off.id, instruction="the bins", when=DueAt(at=datetime(2026, 10, 30, tzinfo=UTC))
+        one_off.id,
+        sight=OWNERS_SIGHT,
+        instruction="the bins",
+        when=DueAt(at=datetime(2026, 10, 30, tzinfo=UTC)),
     )
 
     assert written.answer is TaskWriteAnswer.WRITTEN
@@ -498,6 +502,7 @@ async def test_the_task_managers_replace_refuses_a_rule_with_no_occurrence_left(
     with pytest.raises(PlanningError, match="no occurrence later than now"):
         await world.manager.replace(
             one_off.id,
+            sight=OWNERS_SIGHT,
             instruction="the bins",
             when=DueOnRule(
                 repeats=TaskRuleKind.DAILY,
@@ -515,6 +520,7 @@ async def test_the_task_managers_replace_refuses_a_zone_that_does_not_resolve() 
     with pytest.raises(PlanningError, match="not an IANA zone name"):
         await world.manager.replace(
             one_off.id,
+            sight=OWNERS_SIGHT,
             instruction="the bins",
             when=DueOnRule(
                 repeats=TaskRuleKind.DAILY, time_of_day=time(7, 0), zone="Mars/Olympus_Mons"
@@ -640,7 +646,7 @@ async def test_a_task_the_assistant_set_renders_in_the_persons_zone_everywhere()
 
     with in_a_work(at=NOW), spawning(_spawner()):
         listed = await world.calls.run(_call(LIST_TASKS, {}))
-    scheduled = await world.manager.scheduled_outside_a_work(OWNER_PERSON_ID)
+    scheduled = await world.manager.scheduled_outside_a_work(OWNER_PERSON_ID, sight=OWNERS_SIGHT)
 
     assert spawned.author == "assistant"
     assert spawned.falls_due == "at Sat 24 Oct 2026 08:00 (America/New_York)"

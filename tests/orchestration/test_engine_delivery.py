@@ -76,6 +76,21 @@ def _records() -> FakeNotificationStore:
     return FakeNotificationStore(now=lambda: NOW)
 
 
+async def _held(store: FakeNotificationStore, key: str = "k1") -> str:
+    """A held record the store holds as the owner's, never offered: its id.
+
+    A disposal reaches the outbox only for a record the owner's sight sees, which a
+    record the store holds as the owner's is (ADR-0385 §5:2, §5:3).
+    """
+    ruled = await store.admit(
+        _candidate(key).model_copy(update={"expires_at": NOW + timedelta(hours=2)}),
+        home=RecordHome.owners(),
+        policy=FakeNotificationPolicy(),
+    )
+    assert ruled.notification_id is not None
+    return ruled.notification_id
+
+
 def _candidate(key: str = "k1") -> NotificationCandidate:
     """One candidate, with everything a case is not about held constant."""
     return NotificationCandidate(
@@ -966,13 +981,14 @@ class TestForgettingWithdrawsBeforeItDeletes:
         outbox = RecordingOutbox()
         harness = Harness()
         store = _records()
+        held = await _held(store)
         engine = _wired(
             harness, outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
 
-        await engine.forget_notification("a-record")
+        await engine.forget_notification(held)
 
-        assert outbox.calls == ["withdraw:a-record"]
+        assert outbox.calls == [f"withdraw:{held}"]
 
     async def test_a_forgotten_notification_is_no_longer_delivered(self) -> None:
         """The end-to-end property, through a real outbox rather than a recorder.
@@ -1125,13 +1141,14 @@ class TestADisposalWithdrawsBeforeItCommits:
         """
         outbox = RecordingOutbox()
         store = _records()
+        held = await _held(store)
         engine = _wired(
             Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
 
-        assert await engine.dismiss_notification("a-record") is True
+        assert await engine.dismiss_notification(held) is True
 
-        assert outbox.calls == ["withdraw:a-record"]
+        assert outbox.calls == [f"withdraw:{held}"]
 
     async def test_a_failing_withdrawal_dismisses_nothing(self) -> None:
         """§3a: the record is not reported dismissed when the outbox refused.
@@ -1143,25 +1160,44 @@ class TestADisposalWithdrawsBeforeItCommits:
         outbox = RecordingOutbox()
         outbox.withdrawal_fails = True
         store = _records()
+        held = await _held(store)
         engine = _wired(
             Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
 
         with pytest.raises(NotificationOutboxError):
-            await engine.dismiss_notification("a-record")
+            await engine.dismiss_notification(held)
+        (record,) = await store.held(limit=1)
+        assert record.dismissed_at is None
 
     async def test_a_record_with_no_entry_falls_through_to_the_store(self) -> None:
         """The ordinary case: never offered, so there is nothing to withdraw."""
         outbox = RecordingOutbox()
         outbox.withdrew = False
         store = _records()
+        held = await _held(store)
         engine = _wired(
             Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
 
-        assert await engine.dismiss_notification("never-offered") is False
+        assert await engine.dismiss_notification(held) is True
 
-        assert outbox.calls == ["withdraw:never-offered"]
+        assert outbox.calls == [f"withdraw:{held}"]
+
+    async def test_an_id_the_store_does_not_hold_reaches_no_outbox(self) -> None:
+        """ADR-0385 §5:2, §5:3: the outbox judges no home, so only a record the owner's
+        sight sees is withdrawn; any other id is answered as one never written, and the
+        outbox is not reached."""
+        outbox = RecordingOutbox()
+        store = _records()
+        engine = _wired(
+            Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        assert await engine.dismiss_notification("never-written") is False
+        assert await engine.forget_notification("never-written") is False
+
+        assert outbox.calls == []
 
     async def test_a_failing_withdrawal_destroys_nothing(self) -> None:
         """§3a: "No lane may delete a record whose entry it has not already
@@ -1169,12 +1205,14 @@ class TestADisposalWithdrawsBeforeItCommits:
         outbox = RecordingOutbox()
         outbox.withdrawal_fails = True
         store = _records()
+        held = await _held(store)
         engine = _wired(
             Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
 
         with pytest.raises(NotificationOutboxError):
-            await engine.forget_notification("a-record")
+            await engine.forget_notification(held)
+        assert await store.get(held) is not None
 
 
 class TestTheFakeEngineDisposesLikeTheRealOne:
