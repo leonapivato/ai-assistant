@@ -97,6 +97,7 @@ if TYPE_CHECKING:
         MemorySupport,
         SupportPart,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
 
 __all__ = [
     "RECHECK_HELD",
@@ -298,8 +299,8 @@ class PlacementView:
 async def retrieved(  # noqa: PLR0913 — the memory, the stores, and the root's three numbers
     framed: Memory,
     *,
-    memory: MemoryStore,
-    plans: PlanStore,
+    memory: Bound[MemoryStore],
+    plans: Bound[PlanStore],
     threshold: float,
     bound: int,
     recent: int,
@@ -318,9 +319,10 @@ async def retrieved(  # noqa: PLR0913 — the memory, the stores, and the root's
 
     Args:
         framed: The memory as framed.
-        memory: The memory store.
+        memory: The memory store, bound to the sight the observer reads the episode
+            by (ADR-0383 §6:7, §7:7).
         plans: The plan store a remember call's effect record is read from, for a
-            support's content.
+            support's content, bound to the same sight.
         threshold: The least relevance a memory is retrieved at by its wording alone.
         bound: The most memories retrieved.
         recent: The most recent supports each is shown with in full.
@@ -357,14 +359,20 @@ async def retrieved(  # noqa: PLR0913 — the memory, the stores, and the root's
 
 
 async def compacted(
-    memories: Sequence[Memory], *, memory: MemoryStore, plans: PlanStore, recent: int
+    memories: Sequence[Memory],
+    *,
+    memory: Bound[MemoryStore],
+    plans: Bound[PlanStore],
+    recent: int,
 ) -> tuple[Retrieved, ...]:
     """Each memory with its open questions labelled and its recent supports resolved.
 
     Args:
         memories: The stored memories, as read.
-        memory: The memory store the episodes their supports point into are read from.
-        plans: The plan store a remember call's effect record is read from.
+        memory: The memory store the episodes their supports point into are read from,
+            bound to the sight the observer reads the episode by (ADR-0383 §7:7).
+        plans: The plan store a remember call's effect record is read from, bound to
+            the same sight.
         recent: The most recent supports each is shown with in full.
 
     Returns:

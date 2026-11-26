@@ -117,6 +117,7 @@ if TYPE_CHECKING:
         ProposedNarrowing,
         SupportPart,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
     from ai_assistant.orchestration.observer.person import PinConfirmations
     from ai_assistant.orchestration.observer.placement import Retrieved
     from ai_assistant.orchestration.writes import MemoryWriteStage
@@ -204,14 +205,22 @@ class _Ledger:
 
 
 class FindingWriter:
-    """Places and proposes each memory a framing kept, through the write stage (§12:1)."""
+    """Places and proposes each memory a framing kept, through the write stage (§12:1).
+
+    **Through the episode's sight** (ADR-0383 §6:7, §7:6, §7:7). The observer builds one for
+    each episode it reads, over the stores, and a write stage over the writer, that the
+    composition root's holder binds to the sight it reads that episode by: retrieval, the
+    reads again and the writer's own reads for a write are all bound stores'. The pin pass
+    it runs before each retrieval (ADR-0338 §9:9) is not: it reads every person's pins, and
+    no sight bounds it yet (milestone 22's B9).
+    """
 
     def __init__(  # noqa: PLR0913 — the stores, the clock, the bounds and the pin pass
         self,
         *,
         writes: MemoryWriteStage,
-        memory: MemoryStore,
-        plans: PlanStore,
+        memory: Bound[MemoryStore],
+        plans: Bound[PlanStore],
         now: Callable[[], datetime],
         limits: WriteLimits,
         pins: PinConfirmations | None = None,
@@ -219,9 +228,12 @@ class FindingWriter:
         """Wire the writer.
 
         Args:
-            writes: The write stage every write goes through.
-            memory: The memory store memories are retrieved and read again from.
-            plans: The plan store a retrieved support's content is read from.
+            writes: The write stage every write goes through, over the writer bound to
+                the episode's sight.
+            memory: The memory store memories are retrieved and read again from, bound
+                to the episode's sight.
+            plans: The plan store a retrieved support's content is read from, bound
+                likewise.
             now: The clock a proposed narrowing is stamped from.
             limits: The composition root's numbers (ADR-0346 §6).
             pins: The pin pass run strictly before each retrieval (ADR-0338 §9:9),

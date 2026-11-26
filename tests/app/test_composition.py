@@ -230,7 +230,7 @@ async def test_build_engine_wires_one_memory_store_into_both_the_engine_and_the_
 def _memory_writer(engine: Engine) -> MemoryIngestor:
     """The one :class:`MemoryIngestor` the root builds, as the engine holds it.
 
-    Reached through the observer's write stage, its one holder since ``remember``
+    Reached through the holder the observer writes by, since ``remember``
     records candidates and the observer is memory's one writer (ADR-0329 §2:1, §12:1).
 
     Args:
@@ -241,7 +241,7 @@ def _memory_writer(engine: Engine) -> MemoryIngestor:
     """
     observer = engine._observer
     assert observer is not None
-    writer = observer._writer._writes._writer
+    writer = observer._stores._writer
     assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
     return writer
 

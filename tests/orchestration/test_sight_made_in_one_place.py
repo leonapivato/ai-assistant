@@ -1,12 +1,13 @@
 """ADR-0383 §9:2's named test: a sight is made under ``orchestration/`` in one place.
 
 **What it fails on.** A module under ``src/ai_assistant/orchestration/`` that constructs
-a sight outside the places that hold one by §6:4 to §6:8. Today there is one: the work's
-sight, made when its facts are first recorded and made again each time they are recorded
-again (§6:4 to §6:6), in :meth:`ActivationState._see
-<ai_assistant.orchestration.activation_state.ActivationState>`. A producer's sight
-(§6:7), a run's and a tidy-up's (§6:8) are made where milestone 22's B9 and B8c put them,
-each adding its place here.
+a sight outside the places that hold one by §6:4 to §6:8: the work's sight, made when its
+facts are first recorded and made again each time they are recorded again (§6:4 to §6:6),
+in :meth:`ActivationState._see
+<ai_assistant.orchestration.activation_state.ActivationState>`; and the producer's sight,
+made by the observer's run once for each episode it reads, from the facts and senders that
+episode records (§6:7), in ``observer/stage.py``'s ``_sight_of``. A run's and a tidy-up's
+(§6:8) are made where milestone 22's B9b and B8c put them, each adding its place here.
 
 **How it reads "constructs".** Any reference to ``Sight`` or ``SightBound`` outside an
 annotation, by its own name or as an attribute (``Sight(...)``, ``Sight.of_work``,
@@ -35,7 +36,14 @@ _MAKING_MEMBERS: Final = frozenset({"meet", "of_tidy_up"})
 _HELD_IN: Final = "_sight"
 
 #: The places that hold one by §6:4 to §6:8, as ``<module path>:<qualified name>``.
-PLACES: Final = frozenset({"activation_state.py:ActivationState._see"})
+PLACES: Final = frozenset(
+    {
+        # §6:4 to §6:6: a work's.
+        "activation_state.py:ActivationState._see",
+        # §6:7: a producer's, the observer's for an ended work.
+        "observer/stage.py:_sight_of",
+    }
+)
 
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 

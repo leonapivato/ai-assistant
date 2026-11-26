@@ -410,12 +410,12 @@ def test_an_uninstalled_consolidation_vendor_stops_the_build(tmp_path: Path) -> 
 def _reconciler_of(engine: Engine) -> ModelBackedReconciler:
     """The reconciler the composed engine's writer holds.
 
-    Reached through the observer's write stage, the one writer's holder since the
+    Reached through the holder the observer writes by, the one writer's holder since the
     observer is memory's one writer (ADR-0329 §2:1, §12:1).
     """
     observer = engine._observer
     assert observer is not None
-    writer = observer._writer._writes._writer
+    writer = observer._stores._writer
     assert isinstance(writer, MemoryIngestor)
     reconciler = writer._reconciler
     assert isinstance(reconciler, ModelBackedReconciler)

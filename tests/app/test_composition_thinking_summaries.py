@@ -55,7 +55,7 @@ def _keeps(engine: Engine) -> dict[str, list[bool]]:
     story_calls = phases._story_calls
     assert story_calls is not None
     assert story_calls._tidy_up is not None
-    writer = observer._writer._writes._writer
+    writer = observer._stores._writer
     assert isinstance(writer, MemoryIngestor)
     reconciler = writer._reconciler
     assert isinstance(reconciler, ModelBackedReconciler)

@@ -24,6 +24,14 @@ which carries a creation and a proposal that retires a stored memory alike
 ``MemoryWriter.apply`` (§12:3) and one track-record entry through to
 ``MemoryWriter.record_use`` (§14:4). Both add nothing to what the writer does: they are
 the route, not a second write path.
+
+**Over the writer bound to its producer's sight** (ADR-0383 §7:6, §9:1). The writer it is
+handed is the one :meth:`~ai_assistant.orchestration.bound_stores.BoundStores.writer`
+gives for the sight the producer reads an ended work by, so every read the writer makes
+for a write is of the memory store bound to that sight. The observer builds one for each
+episode it reads. Its pin pass, which reads every person's pins and is tied to no one
+ended work, so no sight bounds it yet (ADR-0338 §9:6), is the one caller handed a stage
+over the unbound writer; its entry on §9:1's list says so.
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ if TYPE_CHECKING:
         MemoryUpdateProposal,
         TrackRecordEntry,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
 
 _log = structlog.get_logger(__name__)
 
@@ -76,7 +85,7 @@ class MemoryWriteStage:
     resolution, the policy's ruling and the write.
     """
 
-    def __init__(self, *, writer: MemoryWriter) -> None:
+    def __init__(self, *, writer: Bound[MemoryWriter]) -> None:
         """Wire the stage from the memory write path.
 
         ``writer`` must persist to the ``MemoryStore`` the producers read from.
@@ -85,10 +94,16 @@ class MemoryWriteStage:
 
         Args:
             writer: The ratified memory write path: conflicts, the policy's ruling
-                and persistence in one call. It holds the policy; this stage does
-                not, and reads a ruling only to see whether it deferred.
+                and persistence in one call, bound to the sight its producer reads by
+                (ADR-0383 §7:6). It holds the policy; this stage does not, and reads
+                a ruling only to see whether it deferred.
         """
         self._writer = writer
+
+    @property
+    def writer(self) -> Bound[MemoryWriter]:
+        """The write path this stage puts every proposal and operation through."""
+        return self._writer
 
     async def write(self, proposal: MemoryUpdateProposal) -> WriteOutcome:
         """Ingest ``proposal``, logging the ruling if the policy deferred it.

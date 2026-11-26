@@ -2073,20 +2073,23 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # episodes have left it (ADR-0329 §15:3), so the window the observer tests is the
         # window understanding is shown, by one method. Swapping the method is a change on
         # this line. The windows stage walks it over the store bound to its pass's sight
-        # (ADR-0383 §7:7), the observer over the store it holds until B9 binds that read.
+        # (ADR-0383 §7:7); the observer's finding of what is due walks it over the store it
+        # holds, unbound (§7:12).
         episode_selector = RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT)
         # ADR-0383 §9:1: the one holder that binds stores for a pass, over the very stores
         # every other reader holds. A converted stage holds it and never a store, and asks
         # it for a store only for the sight its pass carries; whether a bound store
         # withholds or counts is each store's construction (§7:10), not the holder's. The
-        # person-model store is in it where the switch is on. The channels' readers read
-        # a work's window through it (§7:9).
+        # person-model store is in it where the switch is on, and the writer persisting to
+        # that memory store, which a producer writes by bound to its sight (§7:6). The
+        # channels' readers read a work's window through it (§7:9).
         pass_stores = BoundStores(
             memory=memory,
             stories=stories,
             people=person_model,
             conversations=conversations,
             plans=plans,
+            writer=writer,
         )
         # ADR-0329's observer, memory's one writer (§2:1): a background stage over its two
         # routes, the commit step's carrying framing and placement (ADR-0346 §10:2), the
@@ -2094,7 +2097,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # (§12:1, ADR-0028 §4), the one plan store its observation records live in
         # (§16:1), the story store and the selector above (§15:1, §15:3). The engine
         # starts a run on every frozen episode and the scheduler's row runs it on a timer
-        # (§7:6).
+        # (§7:6). It reads and writes for each episode through the holder above, bound to
+        # the sight it makes from that episode's facts and senders (ADR-0383 §6:7, §7:7);
+        # what it holds unbound is the finding of what is due's (§7:12), the budget's
+        # (§8:5), and the pin pass's, through the write stage over the unbound writer.
         observer = Observer(
             # ADR-0354 §6:2: each route handed as its `StructuredCompleter`, its retry
             # policy and its absence of a fallback unchanged.
@@ -2103,7 +2109,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             memory=memory,
             writes=MemoryWriteStage(writer=writer),
             plans=plans,
-            stories=stories,
+            stores=pass_stores,
             episodes=episode_selector,
             limits=ObserverLimits(
                 since=OBSERVER_SINCE,

@@ -234,6 +234,7 @@ if TYPE_CHECKING:
         PermissionLine,
         ToolDefinition,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
 
 __all__ = [
     "AllowedCall",
@@ -877,7 +878,7 @@ def _note_is_marked(label_id: str, notes: Sequence[StoryNote]) -> bool:
 
 
 async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grounds, in order, each able to end the read
-    memory: MemoryStore,
+    memory: Bound[MemoryStore],
     activation_id: str,
     *,
     working: WorkingRecord,
@@ -917,7 +918,9 @@ async def read_outside_content(  # noqa: C901, PLR0911, PLR0912 — §4:5's grou
     a round, a digest or a label held twice is counted once, by its identity.
 
     Args:
-        memory: The memory store the episodes are read from.
+        memory: The memory store the episodes are read from, bound to its reader's
+            sight (ADR-0383 §7:7): the observer's, the producer's for the episode it
+            reads (§6:7). Authorizing still hands its unbound store (milestone 22's B8d).
         activation_id: The activation.
         working: What the working set holds of the activation's record.
         grounds: Where given, collects every ground that held, in order.
