@@ -7782,10 +7782,12 @@ class ConversationStore(Protocol):
           :meth:`taken_in`'s ``{}``, :meth:`record_turn`'s ``None``,
           :meth:`stamp_deleted`'s and :meth:`drop_if_eligible`'s ``False``, and
           ``UnknownConversationError`` from :meth:`mark_active`,
-          :meth:`effect_position`, :meth:`delete_message`,
+          :meth:`append_message`, :meth:`effect_position`, :meth:`delete_message`,
           :meth:`set_conversation_devices` and :meth:`take_in`. :meth:`recent`,
           :meth:`stamped_conversation_ids`, :meth:`conversations_awaiting` and
-          :meth:`export` list none of it.
+          :meth:`export` list none of it. So a work whose sight does not see its own
+          input's conversation cannot write its turn there through its bound store;
+          how a work's turn reaches its own input's place is not this store's.
         * In a conversation it holds, a message it does not hold is absent from
           :meth:`transcript`, :meth:`untaken_messages`, :meth:`taken_in`,
           :meth:`changes`, :meth:`export` and every count, its marker with it:

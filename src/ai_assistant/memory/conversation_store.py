@@ -2139,9 +2139,9 @@ class SqliteConversationStore:
 
     def _append_message_sync(self, conversation_id: str, message: NewMessage) -> MessageReceipt:
         with self._transaction("write a message") as conn:
-            # What a bound store answers for a conversation its sight does not see is held
-            # for the coordinator's ruling (M22-B7c; ADR-0383 §7:5 against §7:11); until
-            # then it is refused as one never started, as every member naming it is.
+            # Bound and withholding, a conversation it does not hold is one never
+            # started, for an append as for every member naming it (ADR-0383 §8:2, §7:2):
+            # whether it stands is no write's own check (§7:11).
             if self._standing(conn, conversation_id) is None:
                 raise self._unknown(conversation_id)
             if message.author is MessageAuthor.USER:

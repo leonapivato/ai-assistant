@@ -3780,7 +3780,8 @@ class ConversationStoreContract:
     ) -> None:
         """§7:5, §8:2: a write naming a record the sight does not see is refused as unknown.
 
-        A conversation it does not hold is one never started; in one it holds, a message
+        A conversation it does not hold is one never started, an append into it
+        included; in one it holds, a message
         it does not hold is one never written: not deleted, passed over by ``take_in``,
         and a reply to it is ``NO_SUCH_REPLY`` (§4:8). A conversation keeping a message
         it does not hold is neither stamped nor dropped. Nothing is written, and the
@@ -3803,6 +3804,8 @@ class ConversationStoreContract:
             await bound.take_in(_A, positions=[1], activation_id="a-later")
         with pytest.raises(UnknownConversationError):
             await bound.effect_position(_A, "effect-a2")
+        with pytest.raises(UnknownConversationError):
+            await bound.append_message(_A, _shared_answer("into a place not held"))
         # In the shared conversation it holds, the owner's message at 2 it does not.
         assert await bound.delete_message(_B, 2) is False
         assert await bound.take_in(_B, positions=[2], activation_id="a-later") == ()
