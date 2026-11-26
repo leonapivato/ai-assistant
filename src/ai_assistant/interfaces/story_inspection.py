@@ -149,7 +149,7 @@ def flag_text(flag: StoryFlagName) -> str:
     return f"{kind} raised by version {flag.version} of story {quoted(flag.story or '')}"
 
 
-def refusal_text(refusal: StoryRefusal) -> str:  # noqa: C901 — one arm per member of the closed StoryRefusalReason, so `assert_never` proves the match total
+def refusal_text(refusal: StoryRefusal) -> str:  # noqa: C901, PLR0912 — one arm per member of the closed StoryRefusalReason, so `assert_never` proves the match total
     """Say why a write was refused, naming the reason and what it was refused over."""
     story = "the story" if refusal.story_id is None else f"story {quoted(refusal.story_id)}"
     match refusal.reason:
@@ -181,6 +181,8 @@ def refusal_text(refusal: StoryRefusal) -> str:  # noqa: C901 — one arm per me
             detail = f"{story} holds none of the notes named"
         case StoryRefusalReason.NOTE_NOT_HELD:
             detail = f"{story} does not hold a note named"
+        case StoryRefusalReason.ANOTHER_HOME:
+            detail = f"{story} is of another home"
         case _:  # pragma: no cover — exhaustive over a closed enumeration
             assert_never(refusal.reason)
     return f"Refused ({refusal.reason.value}): {detail}."

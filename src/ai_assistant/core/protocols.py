@@ -6743,7 +6743,9 @@ class ConversationStore(Protocol):
     domain each landed in. :meth:`start` takes the conversation's as a required input
     and writes it, and each message carries its own as a required field of the
     ``NewMessage`` :meth:`append_message` is handed, which gains no argument for it; a
-    message's home is its own and need not be its conversation's. The caller sets each
+    message's home is its own and need not be its conversation's, though a reply is of
+    the home of the message it replies to (ADR-0383 §4:7, :meth:`append_message`). The
+    caller sets each
     by ADR-0383 §4, never a model (§4:6), and no write changes one: marking a
     conversation active, recording a turn, stamping it deleted and deleting a message
     leave every home as it was. Every read that gives back a
@@ -7236,7 +7238,12 @@ class ConversationStore(Protocol):
         4. answers ``NO_SUCH_REPLY`` and writes nothing where ``replies_to`` names a
            position the conversation never held (§4:5). A position whose message
            was deleted is one it held: a reply to it is recorded, naming it;
-        5. otherwise records the message at the next position, stamped with the
+        5. answers ``ANOTHER_HOME`` and writes nothing where the message's ``home``
+           is not that of the message ``replies_to`` names, standing or deleted
+           (ADR-0383 §4:7, "a reply"). A deleted message's marker carries no home a
+           read gives back, and the store still keeps the one it had to answer this.
+           A message of another home than its conversation is not refused for it;
+        6. otherwise records the message at the next position, stamped with the
            store's clock, with its ``effect_id`` where it carries one and its
            ``home`` (ADR-0386 §4:2), records a ``MessageAddedChange``, and answers
            ``RECORDED`` with the position, which is *received* (§4:4). The change
@@ -7703,6 +7710,16 @@ class StoryStore(Protocol):
     :func:`~ai_assistant.core.types.home_may_be_written` does not allow is a malformed
     argument, refused with ``ValueError`` before any check or write (ADR-0386 §6:2).
 
+    **A write stays in its home** (ADR-0383 §4:7). A write naming a story of another
+    home than the story it mints or writes to is refused ``another_home``, naming that
+    story, and writes nothing: a :meth:`create`, :meth:`link` or :meth:`split` naming a
+    story member of another home, a :meth:`merge` or :meth:`move` between two stories of
+    two homes, which would carry one story's members and notes into the other (§3:2).
+    So no write changes a story's home, nor a note's, which is its story's
+    (§4:6). A flag a summary raises, and a decision on one, are neither a member nor
+    any other name §4:7 lists, and are not refused for the homes of the stories they
+    name.
+
     **Members** are exactly one of two kinds, carried with the id and never inferred
     from it: an activation, named by its activation id, or another story (§2).
 
@@ -7728,7 +7745,8 @@ class StoryStore(Protocol):
     :class:`~ai_assistant.core.types.StoryRefusalReason`, and writes nothing. The
     checks are made in a fixed order — no members, then the story written to
     (unknown, then merged), then each story member named (unknown, then merged), then
-    the operation's own rule (self-merge, not a member, a note planning names that is
+    whether a story the write names is of another home (``another_home``), then the
+    operation's own rule (self-merge, not a member, a note planning names that is
     not held, a note move's notes, loop) — and the first that fails is the one
     reported.
     :class:`~ai_assistant.core.errors.StoryStoreError` is raised only where the store
@@ -7841,7 +7859,9 @@ class StoryStore(Protocol):
         Returns:
             The minted story's id, or a refusal: ``no_members`` for an empty list,
             ``unknown_story`` or ``merged_story`` for a story member that is not one
-            the store can hold, then ``unknown_flag`` or ``already_decided``.
+            the store can hold, ``another_home`` for a story member of another home
+            than ``home`` (ADR-0383 §4:7), then ``unknown_flag`` or
+            ``already_decided``.
 
         Raises:
             ValueError: If an argument is malformed, including an activation member
@@ -7876,10 +7896,12 @@ class StoryStore(Protocol):
 
         Returns:
             The story's id with the count of lines appended, or a refusal:
-            ``no_members``, ``unknown_story``, ``merged_story``, or ``loop`` where a
-            story member would make some story contain itself, naming the stories
-            forming the loop, then ``unknown_flag`` or ``already_decided``. The store
-            never merges, re-links or drops a link to resolve a loop.
+            ``no_members``, ``unknown_story``, ``merged_story``, ``another_home`` for
+            a story member of another home than the story (ADR-0383 §4:7), or
+            ``loop`` where a story member would make some story contain itself,
+            naming the stories forming the loop, then ``unknown_flag`` or
+            ``already_decided``. The store never merges, re-links or drops a link to
+            resolve a loop.
 
         Raises:
             ValueError: If an argument is malformed, including an activation member
@@ -7952,7 +7974,8 @@ class StoryStore(Protocol):
 
         Returns:
             B's id with the count of lines appended, or a refusal: ``unknown_story``
-            or ``merged_story`` for either side, ``self_merge`` where A is B, or
+            or ``merged_story`` for either side, ``another_home`` naming B where it is
+            of another home than A (ADR-0383 §4:7), ``self_merge`` where A is B, or
             ``loop`` where the result would leave some story containing itself, then
             ``unknown_flag`` or ``already_decided``.
 
@@ -8001,7 +8024,8 @@ class StoryStore(Protocol):
 
         Returns:
             C's id, or a refusal: ``no_members``, ``unknown_story``,
-            ``merged_story``, ``not_a_member`` naming a member A does not hold, or,
+            ``merged_story``, ``another_home`` for a story member of another home than
+            A (ADR-0383 §4:7), ``not_a_member`` naming a member A does not hold, or,
             for ``planning``, ``note_not_held`` naming A, then ``unknown_flag`` or
             ``already_decided``.
 
@@ -8056,6 +8080,8 @@ class StoryStore(Protocol):
             The second story's id with the count of lines appended, or a refusal:
             ``no_members`` where it names no member and no note; ``unknown_story``
             or ``merged_story`` for either side, the first story first;
+            ``another_home`` naming the second story where it is of another home
+            than the first (ADR-0383 §4:7), a note move's included;
             ``not_a_member`` naming a member the first story does not hold; for
             ``planning``, ``note_not_held`` naming the first story where it does not
             hold a note named; or, for a note move, ``no_notes`` naming the first

@@ -13,7 +13,10 @@ with the change they record (ADR-0302 §§2-4), ``left`` or ``not_applied`` wher
 changed (ADR-0303 §8), and a summary write refused over what its story does not hold
 (ADR-0302 §7). Each story carries its home (ADR-0386 §2): ``create`` writes the one it
 is handed, a split's new story takes its source's, and a home no write may carry is a
-``ValueError`` before any check or write, as the durable store refuses it (§6:2).
+``ValueError`` before any check or write, as the durable store refuses it (§6:2). A
+write naming a story of another home than the story it mints or writes, as a member or
+as the other side of a merge or a move, is refused ``another_home`` and writes nothing
+(ADR-0383 §4:7).
 
 **Atomic by construction.** Every write computes its refusal and applies its changes
 with no ``await`` in between, so on one event loop a write is never interleaved with
@@ -112,6 +115,11 @@ def _checked_write(actor: object, trigger: object) -> tuple[StoryActor, str | No
 
 def _unique[T](items: Sequence[T]) -> list[T]:
     return list(dict.fromkeys(items))
+
+
+def _story_members(members: Sequence[StoryMember]) -> list[str]:
+    """The stories ``members`` names as members, each once, in the order given."""
+    return _unique([one.id for one in members if one.kind is StoryMemberKind.STORY])
 
 
 def _checked_home(home: object) -> RecordHome:
@@ -388,6 +396,20 @@ class FakeStoryStore:
         return None
 
     @staticmethod
+    def _home_refusal(state: _State, home: RecordHome, named: Sequence[str]) -> StoryRefusal | None:
+        """Refuse a write naming a story of another home than ``home`` (ADR-0383 §4:7)."""
+        for story_id in named:
+            if state.stories[story_id].home != home:
+                return StoryRefusal(reason=StoryRefusalReason.ANOTHER_HOME, story_id=story_id)
+        return None
+
+    def _beside_refusal(
+        self, state: _State, story_id: str, named: Sequence[str]
+    ) -> StoryRefusal | None:
+        """:meth:`_home_refusal` against the home of ``story_id``, the story written to."""
+        return self._home_refusal(state, state.stories[story_id].home, named)
+
+    @staticmethod
     def _children(state: _State, story_id: str) -> list[str]:
         return [
             member.id
@@ -577,7 +599,9 @@ class FakeStoryStore:
         if not named:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
-        if refused := self._members_refusal(state, named):
+        if refused := self._members_refusal(state, named) or self._home_refusal(
+            state, checked_home, _story_members(named)
+        ):
             return StoryOutcome(refusal=refused)
         if flag is not None and (refused := self._flag_refusal(state, flag)):
             return StoryOutcome(refusal=refused)
@@ -607,7 +631,11 @@ class FakeStoryStore:
         if not named:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
-        if refused := self._story_refusal(state, target) or self._members_refusal(state, named):
+        if refused := (
+            self._story_refusal(state, target)
+            or self._members_refusal(state, named)
+            or self._beside_refusal(state, target, _story_members(named))
+        ):
             return StoryOutcome(refusal=refused)
         held = state.stories[target].entries
         fresh = [member for member in _unique(named) if member not in held]
@@ -668,8 +696,11 @@ class FakeStoryStore:
         target = _checked_id(into)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         flag = _answers(answers)
-        if refused := self._story_refusal(self._state, absorbed) or self._story_refusal(
-            self._state, target
+        # A merge moves every member and note of the absorbed story into the target.
+        if refused := (
+            self._story_refusal(self._state, absorbed)
+            or self._story_refusal(self._state, target)
+            or self._beside_refusal(self._state, absorbed, [target])
         ):
             return StoryOutcome(refusal=refused)
         if absorbed == target:
@@ -758,7 +789,12 @@ class FakeStoryStore:
         if not named:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
-        if refused := self._story_refusal(state, source) or self._members_refusal(state, named):
+        # The story a split mints takes the home of the story split (ADR-0386 §2:3).
+        if refused := (
+            self._story_refusal(state, source)
+            or self._members_refusal(state, named)
+            or self._beside_refusal(state, source, _story_members(named))
+        ):
             return StoryOutcome(refusal=refused)
         held = state.stories[source].entries
         for member in named:
@@ -809,7 +845,12 @@ class FakeStoryStore:
         if not named and not named_notes:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
-        if refused := self._story_refusal(state, source) or self._story_refusal(state, target):
+        # A move puts members and notes of one story into the other (ADR-0383 §4:7).
+        if refused := (
+            self._story_refusal(state, source)
+            or self._story_refusal(state, target)
+            or self._beside_refusal(state, source, [target])
+        ):
             return StoryOutcome(refusal=refused)
         held = state.stories[source].entries
         for member in named:

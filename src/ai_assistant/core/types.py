@@ -13909,12 +13909,16 @@ class SendOutcome(StrEnum):
             nothing was written (§7:2).
         NO_SUCH_REPLY: The message names, as the one it replies to, a position the
             conversation never held, so nothing was written (§4:5).
+        ANOTHER_HOME: The message replies to a message of another home, standing or
+            deleted, so nothing was written (ADR-0383 §4:7, "a reply"). Answered after
+            every outcome above.
     """
 
     RECORDED = "recorded"
     REPEATED = "repeated"
     NOT_AN_END = "not_an_end"
     NO_SUCH_REPLY = "no_such_reply"
+    ANOTHER_HOME = "another_home"
 
 
 class MessageReceipt(BaseModel):
@@ -23742,6 +23746,15 @@ class StoryRefusalReason(StrEnum):
     moved away meanwhile, by another call or by the matters pass, refuses it too. Every
     other actor's split or move passes such a note over (ADR-0303 §6:2). The refusal
     names the story moved from."""
+
+    ANOTHER_HOME = "another_home"
+    """The write names a story of another home than the story it writes to (ADR-0383
+    §4:7): a create, a link or a split naming a story member of another home than the
+    story minted, linked to or split, or a merge or a move between two stories of two
+    homes, which would put one story's members and notes into a story of another home
+    (§3:2, §4:6). Checked once every story the write names is known and not merged,
+    before the operation's own rule. The refusal names the story of the other home: the
+    story member, or the story merged or moved into."""
 
 
 class StoryHeader(BaseModel):

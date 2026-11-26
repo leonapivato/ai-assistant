@@ -132,6 +132,27 @@ def _answered(
     )
 
 
+def _homed(
+    author: MessageAuthor,
+    home: RecordHome,
+    message_id: str,
+    *,
+    device: str = "phone",
+    replies_to: int | None = None,
+) -> NewMessage:
+    """A message of ``author`` carrying ``home``: a user's from ``device``, or an answer."""
+    if author is MessageAuthor.USER:
+        return NewMessage(
+            author=author,
+            text="Across?",
+            device_id=device,
+            message_id=message_id,
+            replies_to=replies_to,
+            home=home,
+        )
+    return NewMessage(author=author, text="Across.", replies_to=replies_to, home=home)
+
+
 async def _chat(store: ConversationStore) -> str:
     """Put the phone and the watch in "my devices" and start a conversation on them."""
     await store.set_my_devices([_PHONE, _WATCH])
@@ -3205,6 +3226,104 @@ class ConversationStoreContract:
         assert marked.home == RecordHome.shared()
         assert recorded is not None
         assert recorded.home == RecordHome.shared()
+
+    @pytest.mark.parametrize("author", [MessageAuthor.USER, MessageAuthor.ASSISTANT])
+    async def test_a_message_of_another_home_than_its_conversation_is_recorded(
+        self, store: ConversationStore, author: MessageAuthor
+    ) -> None:
+        """ADR-0383 §3: a message carries its own home, which need not be its conversation's.
+
+        Being in a conversation is no name §4:7 or §8:3 lists, so it is recorded with
+        the home it carries, either author.
+        """
+        conversation = await _chat(store)
+
+        written = await store.append_message(
+            conversation, _homed(author, RecordHome.shared(), "m-1")
+        )
+
+        assert (written.outcome, written.position) == (SendOutcome.RECORDED, 1)
+        page = await store.transcript(conversation)
+        assert page is not None
+        (entry,) = page.entries
+        assert isinstance(entry, TranscriptMessage)
+        assert entry.home == RecordHome.shared()
+
+    @pytest.mark.parametrize(
+        ("replied", "replying"),
+        [
+            (RecordHome.owners(), RecordHome.shared()),
+            (RecordHome.shared(), RecordHome.owners()),
+        ],
+        ids=["shared-to-owners", "owners-to-shared"],
+    )
+    @pytest.mark.parametrize("deleted", [False, True], ids=["standing", "deleted"])
+    async def test_a_reply_to_a_message_of_another_home_is_refused(
+        self,
+        store: ConversationStore,
+        replied: RecordHome,
+        replying: RecordHome,
+        *,
+        deleted: bool,
+    ) -> None:
+        """ADR-0383 §4:7, "a reply": refused whether what it names stands or was deleted.
+
+        The two messages share one conversation, which holds both homes, so it is the
+        home of the message replied to that refuses the reply and nothing else. A
+        deleted message's marker carries no home a read gives back (ADR-0293 §5:12),
+        and the store still answers by the home its message had. A reply of the same
+        home as what it names is recorded, naming it (§5:8), in the same conversation.
+        """
+        conversation = await _chat(store)
+        await store.append_message(conversation, _homed(MessageAuthor.USER, replied, "m-1"))
+        if deleted:
+            assert await store.delete_message(conversation, 1) is True
+        before = await _all_changes(store)
+
+        across = await store.append_message(
+            conversation, _homed(MessageAuthor.USER, replying, "m-2", replies_to=1)
+        )
+
+        assert (across.outcome, across.position) == (SendOutcome.ANOTHER_HOME, None)
+        page = await store.transcript(conversation)
+        assert page is not None
+        assert [one.position for one in page.entries] == [1]
+        assert await _all_changes(store) == before
+        same = await store.append_message(
+            conversation, _homed(MessageAuthor.USER, replied, "m-2", replies_to=1)
+        )
+        assert (same.outcome, same.position) == (SendOutcome.RECORDED, 2)
+        alone = await store.append_message(
+            conversation, _homed(MessageAuthor.USER, replying, "m-3")
+        )
+        assert (alone.outcome, alone.position) == (SendOutcome.RECORDED, 3)
+
+    async def test_another_home_is_answered_after_every_other_outcome(
+        self, store: ConversationStore
+    ) -> None:
+        """Its place: after ``REPEATED``, ``NOT_AN_END`` and ``NO_SUCH_REPLY``.
+
+        Each send below replies across homes: a repeat is still that message, a device
+        not an end for writing still writes nothing as ever, and a reply to a position
+        never held is still ``NO_SUCH_REPLY`` (ADR-0293 §4:2, §7:2, §4:5).
+        """
+        conversation = await _chat(store)
+        first = await store.append_message(conversation, _said("hello", message_id="m-1"))
+        shared = RecordHome.shared()
+
+        repeated = await store.append_message(
+            conversation, _homed(MessageAuthor.USER, shared, "m-1", replies_to=1)
+        )
+        not_an_end = await store.append_message(
+            conversation, _homed(MessageAuthor.USER, shared, "m-2", device="watch", replies_to=1)
+        )
+        no_reply = await store.append_message(
+            conversation, _homed(MessageAuthor.USER, shared, "m-3", replies_to=5)
+        )
+
+        assert (repeated.outcome, repeated.position) == (SendOutcome.REPEATED, first.position)
+        assert (not_an_end.outcome, not_an_end.position) == (SendOutcome.NOT_AN_END, None)
+        assert (no_reply.outcome, no_reply.position) == (SendOutcome.NO_SUCH_REPLY, None)
 
     async def test_deleting_a_message_leaves_every_other_message_its_home(
         self, store: ConversationStore

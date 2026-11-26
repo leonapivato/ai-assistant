@@ -1930,3 +1930,58 @@ def test_a_devices_conversations_are_indexed_by_device(tmp_path: Path) -> None:
     finally:
         raw.close()
     assert any("conversation_devices_device" in str(row[-1]) for row in plan)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("deleted", [False, True], ids=["standing", "deleted"])
+@pytest.mark.parametrize(
+    ("kind", "home_id"),
+    [("shared", None), (None, None), ("person", "person:sam")],
+    ids=["shared", "no-home", "another-person"],
+)
+async def test_a_reply_is_compared_with_the_home_its_targets_row_keeps(
+    tmp_path: Path, *, deleted: bool, kind: str | None, home_id: str | None
+) -> None:
+    """ADR-0383 §4:7: the reply check reads the target's own row, a marker's included.
+
+    The message replied to is given another home on its row, which no write through
+    the store can do, so the reply is refused by the target's home alone, the reply and
+    the conversation being of one home; a row with no home is no one's (§5:3) and is
+    never read as the reply's.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        await store.set_my_devices([ChatDevice(device_id="phone", access=DeviceAccess.WRITE)])
+        conversation = (await store.start(home=RecordHome.owners())).id
+        said = NewMessage(
+            author=MessageAuthor.USER,
+            text="first",
+            device_id="phone",
+            message_id="m-1",
+            home=RecordHome.owners(),
+        )
+        await store.append_message(conversation, said)
+        if deleted:
+            assert await store.delete_message(conversation, 1) is True
+        raw = sqlite3.connect(path)
+        raw.execute(
+            "UPDATE messages SET home_kind = ?, home_id = ? WHERE position = 1", (kind, home_id)
+        )
+        raw.commit()
+        raw.close()
+        reply = said.model_copy(update={"message_id": "m-2", "replies_to": 1})
+
+        receipt = await store.append_message(conversation, reply)
+
+        assert (receipt.outcome, receipt.position) == (SendOutcome.ANOTHER_HOME, None)
+        raw = sqlite3.connect(path)
+        positions = raw.execute("SELECT position FROM messages ORDER BY position").fetchall()
+        raw.close()
+        assert positions == [(1,)]
+        alone = await store.append_message(
+            conversation, said.model_copy(update={"message_id": "m-3"})
+        )
+        assert (alone.outcome, alone.position) == (SendOutcome.RECORDED, 2)
+    finally:
+        store.close()
