@@ -2787,22 +2787,50 @@ class SqliteConversationStore:
             self._counted("conversations_awaiting", ())
             return []
         async with self._lock:
-            rows = await _run_to_completion(self._awaiting_sync, limit, after_id)
-            if self._sight is not None and self._sight_mode is SightMode.COUNT:
-                waiting = await _run_to_completion(self._waiting_homes_sync, rows)
-                self._counted(
-                    "conversations_awaiting",
-                    (
-                        self._awaiting_home(stored_home(*row[1:3]), homes)
-                        for row, homes in zip(rows, waiting, strict=True)
-                    ),
-                )
+            rows, waiting = await _run_to_completion(self._awaiting_sync, limit, after_id)
+        if waiting is not None:
+            self._counted(
+                "conversations_awaiting",
+                (
+                    self._awaiting_home(stored_home(*row[1:3]), homes)
+                    for row, homes in zip(rows, waiting, strict=True)
+                ),
+            )
         return [_stamped_id_of(row[0]) for row in rows]
 
-    def _waiting_homes_sync(self, rows: Sequence[Sequence[Any]]) -> list[list[Any]]:
-        """For each conversation listed, the home columns of its messages not taken in."""
-        with self._transaction("read the homes of untaken messages", immediate=False) as conn:
-            return [
+    def _awaiting_sync(
+        self, limit: int, after_id: str | None
+    ) -> tuple[list[Any], list[list[Any]] | None]:
+        """The page of conversations awaiting, and, counting, their untaken messages' homes.
+
+        Both in one deferred transaction, so the count is of the very reading the page is
+        (ADR-0383 §11:1): no write lands between the listing and its evidence.
+        """
+        held, held_params = self._seen("c.")
+        own, own_params = self._seen("m.")
+        counting = self._sight is not None and self._sight_mode is SightMode.COUNT
+        with self._transaction("list conversations awaiting the reader", immediate=False) as conn:
+            rows = self._fetch(
+                conn,
+                "list conversations awaiting the reader",
+                "SELECT c.id, c.home_kind, c.home_id FROM conversations c "  # noqa: S608 — module text; values bound
+                f"WHERE c.deleted_at IS NULL AND c.id > ? AND {held} "
+                "AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id "
+                f"AND m.deleted = 0 AND m.author = ? AND {own} "
+                "AND NOT EXISTS (SELECT 1 FROM taken_in t "
+                "WHERE t.conversation_id = m.conversation_id AND t.position = m.position)) "
+                "ORDER BY c.id ASC LIMIT ?",
+                (
+                    "" if after_id is None else after_id,
+                    *held_params,
+                    MessageAuthor.USER.value,
+                    *own_params,
+                    limit,
+                ),
+            )
+            if not counting:
+                return rows, None
+            return rows, [
                 self._fetch(
                     conn,
                     "read the homes of untaken messages",
@@ -2830,28 +2858,6 @@ class SqliteConversationStore:
         if not homes or any(self._sight.sees(home) for home in homes):
             return conversation
         return homes[0]
-
-    def _awaiting_sync(self, limit: int, after_id: str | None) -> list[Any]:
-        held, held_params = self._seen("c.")
-        own, own_params = self._seen("m.")
-        return self._fetch(
-            self._conn,
-            "list conversations awaiting the reader",
-            "SELECT c.id, c.home_kind, c.home_id FROM conversations c "  # noqa: S608 — module text; values bound
-            f"WHERE c.deleted_at IS NULL AND c.id > ? AND {held} "
-            "AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id "
-            f"AND m.deleted = 0 AND m.author = ? AND {own} "
-            "AND NOT EXISTS (SELECT 1 FROM taken_in t "
-            "WHERE t.conversation_id = m.conversation_id AND t.position = m.position)) "
-            "ORDER BY c.id ASC LIMIT ?",
-            (
-                "" if after_id is None else after_id,
-                *held_params,
-                MessageAuthor.USER.value,
-                *own_params,
-                limit,
-            ),
-        )
 
     async def taken_in(
         self, conversation_id: str, *, positions: Sequence[int]
