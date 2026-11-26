@@ -84,6 +84,10 @@ def _replies_and_stops(exchange: PlanningExchange, _tools: Sequence[OfferedTool]
     return RoundResponse(calls=(*reply.calls, stop))
 
 
+#: Why a message the place did not take is not done, as the next round is shown it.
+_NOT_WRITTEN: Final = "the place took no message: the conversation is gone or refused it"
+
+
 def _stop(work: Work) -> dict[str, Any]:
     """What the work's stop call came back with, as its next round was shown it: the
     second of its first round's two calls."""
@@ -306,8 +310,9 @@ async def test_a_second_person_writing_from_their_linked_device_fails_safe() -> 
 
     ADR-0383 §2:3, §4:1: a work for Sam would land in Sam's domain, which no write may
     carry while the hub admits the owner alone, so its episode is refused with nothing
-    written, as a work for a group's is, and the work runs and answers all the same. What
-    follows reads the record it tried to write, which the store never held."""
+    written, as a work for a group's is, and so is its reply into Sam's conversation,
+    which comes back not done; the work runs all the same. What follows reads the record
+    it tried to write, which the store never held."""
     async with Household(_replies_and_stops) as home:
         sam = home.person("sam")
         phone = await home.device(sam, "sams-phone")
@@ -319,9 +324,17 @@ async def test_a_second_person_writing_from_their_linked_device_fails_safe() -> 
     assert work.senders == (sam.at(Sureness.NORMAL),)
     assert work.facts == _theirs(sam, Sureness.NORMAL)
     assert work.record.trigger.parties == (SupportHolder.unknown(),)
-    _as_no_ones(work)
+    # _as_no_ones, but for the reply: its message is a record the work writes too, in
+    # Sam's domain, so it is refused with nothing written and comes back not done.
+    assert work.reads == (None, None)
+    assert _NO_PERSONS in work.briefing
+    assert work.replies == ()
     assert sam.id not in work.briefing
-    assert "carries the user's authority" in str(_stop(work))
+    # _stop, but for the reply's outcome, which the next round is shown as not done.
+    reply, stop = reported(work.rounds[1])
+    assert reply == {"outcome": "not done", "because": _NOT_WRITTEN}
+    assert stop["outcome"] == "refused"
+    assert "carries the user's authority" in str(stop)
 
 
 async def test_a_report_no_person_sent_is_the_owners_work_carrying_none_as_before() -> None:

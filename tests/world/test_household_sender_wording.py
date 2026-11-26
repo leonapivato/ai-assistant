@@ -198,8 +198,8 @@ async def test_a_person_the_system_knows_but_does_not_serve_is_never_named() -> 
     """§5's row for another person's device: an unknown sender's, the person unnamed.
 
     ADR-0383 §2:3, §4:1: the work is for Sam, whose domain no write may carry while the
-    hub admits the owner alone, so its episode is refused with nothing written; what both
-    models were shown is read as before."""
+    hub admits the owner alone, so its episode is refused with nothing written, and so is
+    its reply into Sam's conversation; what both models were shown is read as before."""
     async with Household(people=await _people()) as home:
         sam = home.person("sam")
         phone = await home.device(sam, "sams-phone")
@@ -207,6 +207,7 @@ async def test_a_person_the_system_knows_but_does_not_serve_is_never_named() -> 
 
     assert not work.stored
     assert work.episode.home == RecordHome.person(sam.id)
+    assert work.replies == ()
     assert work.reads == (None, None)
     heard = _heard(work)
     (words,) = heard.tags("The stimulus")

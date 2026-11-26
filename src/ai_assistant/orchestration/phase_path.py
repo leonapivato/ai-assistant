@@ -318,6 +318,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
     WorkForKind,
+    home_may_be_written,
     parties_are_outside,
 )
 from ai_assistant.orchestration.acting import (
@@ -827,7 +828,9 @@ class _ConversationWriter:
     **The message takes the home of the work writing it** (ADR-0383 §4:1, ADR-0386
     §4:2): whom the running work is for gives it, read off the work's state as it
     stands (``ActivationState.home``), as its episode's and its stories' are. Its
-    conversation's home is not read.
+    conversation's home is not read. A work whose home no write may carry, one for a
+    person the hub knows but does not admit, writes no message: it is not done, with
+    nothing written, never unknown (ADR-0383 §2:3, §4:1).
     """
 
     writer: MessageWriter
@@ -873,6 +876,11 @@ class _ConversationWriter:
             cut_off=fitted.cut_off,
             effect_id=effect_id,
         )
+        if not home_may_be_written(message.home):
+            # ADR-0383 §2:3, §4:1: the store would refuse it before any write, so it is
+            # known that nothing was written: not done, never unknown.
+            _log.info("phase_message_unwritten", stage="acting", reason="home_refused")
+            return Delivery(ToolOutcome.FAILED, reason=_GONE)
         try:
             receipt = await self.writer.send(self.conversation_id, message)
         except ConversationStoreError:

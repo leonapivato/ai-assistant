@@ -55,6 +55,7 @@ from ai_assistant.core.errors import (
     PlanningError,
 )
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActivationDigest,
     ActivationEffect,
     ActivationEnding,
@@ -91,6 +92,7 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     MessageAuthor,
+    MessageReceipt,
     NewMessage,
     PermissionOutcome,
     PermissionRuling,
@@ -109,6 +111,7 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     RoundResponse,
+    SendOutcome,
     StageOutcome,
     StoryActor,
     StoryChange,
@@ -119,12 +122,16 @@ from ai_assistant.core.types import (
     StorySummaryDraft,
     StorySummaryLine,
     SupportHolder,
+    Sureness,
     TextChannelPayload,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
     TranscriptMessage,
     UserMessage,
+    WorkAuthority,
+    WorkFacts,
+    WorkFor,
     band_of,
     parties_are_outside,
 )
@@ -151,6 +158,7 @@ from ai_assistant.orchestration.phase_path import (
     PhaseTools,
     PhaseWorking,
     StoryReads,
+    _ConversationWriter,
 )
 from ai_assistant.orchestration.planning import NOTE_REASONS, PLANNING_PROMPT, PlannedRound
 from ai_assistant.orchestration.recall import Recalled
@@ -216,7 +224,6 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         MemorySearchResult,
         Message,
-        MessageReceipt,
         OfferedTool,
         PermissionDecision,
         PlanningExchange,
@@ -1130,6 +1137,72 @@ async def test_a_message_the_place_did_not_take_is_finished_without_a_position(
     assert all(one.outcome is outcome and one.position is None for one in effects)
     assert all((one.reason is not None) is reason for one in effects)
     assert episode.outcome is None
+
+
+class _Recording:
+    """A place's writer that records every message it is handed and takes each."""
+
+    def __init__(self) -> None:
+        self.sent: list[NewMessage] = []
+
+    def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
+        del conversation_id
+        return message
+
+    async def send(self, conversation_id: str, message: NewMessage) -> MessageReceipt | None:
+        self.sent.append(message)
+        return MessageReceipt(
+            conversation_id=conversation_id, outcome=SendOutcome.RECORDED, position=1
+        )
+
+
+@pytest.mark.parametrize(
+    ("for_whom", "written"),
+    [
+        (WorkFor.for_person(OWNER_PERSON_ID), True),
+        (WorkFor.no_one(), True),
+        (WorkFor.for_person("person:sam"), False),
+    ],
+    ids=["the-owner", "no-one", "a-person-not-admitted"],
+)
+async def test_a_works_message_takes_its_home_and_one_no_write_may_carry_is_not_done(
+    for_whom: WorkFor, *, written: bool
+) -> None:
+    """ADR-0383 §2:3, §4:1; ADR-0386 §4:2: the message takes the home whom the work is for
+    gives. A work for a person the hub knows but does not admit writes nothing: the
+    writer is never reached, and the message is not done, never unknown, since it is
+    known that nothing was written."""
+    state = _admitted()
+    state.started_facts = WorkFacts(
+        for_whom=for_whom, authority=WorkAuthority.none(), level=Sureness.NONE
+    )
+    recording = _Recording()
+    writer = _ConversationWriter(recording, "c1")
+    token = CURRENT_ACTIVATION.set(ActivationScope(state))
+    try:
+        delivered = await writer.deliver(writer.fitted("Hello."), effect_id="e1")
+    finally:
+        CURRENT_ACTIVATION.reset(token)
+
+    if written:
+        assert delivered.outcome is ToolOutcome.SUCCEEDED
+        (message,) = recording.sent
+        assert message.home == RecordHome.of_work(for_whom)
+    else:
+        assert delivered.outcome is ToolOutcome.FAILED
+        assert delivered.reason is not None
+        assert delivered.written is None
+        assert recording.sent == []
+
+
+async def test_a_works_message_with_no_work_running_has_no_home_to_carry() -> None:
+    """ADR-0383 §4: outside any work there is no home to write in, and nothing is sent."""
+    recording = _Recording()
+    writer = _ConversationWriter(recording, "c1")
+
+    with pytest.raises(RuntimeError, match="no work is running"):
+        writer.fitted("Hello.")
+    assert recording.sent == []
 
 
 class _FailsOnce:

@@ -528,8 +528,10 @@ class Household:
 
         A work for a person the hub does not admit writes no episode in this milestone
         (ADR-0383 §2:3, §4:1): the store refuses the admission's write of its open
-        episode, capture ends there, and the work runs and answers all the same. The
-        :class:`Work` read back holds that refused record, as
+        episode, capture ends there, and the work runs all the same. Nor does it write
+        its reply into a conversation, a record it writes too, so this waits for the work
+        to end rather than for a reply; on the line, which keeps no record, it answers
+        as before. The :class:`Work` read back holds that refused record, as
         :class:`_WitnessedMemory` kept it: its trigger, senders and facts are what the
         work was admitted with. It is ``stored=False``.
 
@@ -554,10 +556,7 @@ class Household:
                 ]
 
             async def done() -> bool:
-                answered = len(self.bot.messages) > sent_before or (
-                    len(await self._replies()) > written_before
-                )
-                return bool(tried()) and answered and await self._idle()
+                return bool(tried()) and await self._idle()
 
             await until(done, what="the work to end")
         (episode,) = tried()
