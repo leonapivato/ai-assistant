@@ -21,6 +21,8 @@ import pytest
 from phases_support import frozen, open_conversation, phases_harness, say, until
 from sight_support import OWNER_WEAK, UNIDENTIFIED, sight_of
 from structlog.testing import capture_logs
+from task_support import schedule_episode
+from task_support import seams as task_seams
 from telegram_support import CHAT, REFERENCE, text
 from test_engine import AT
 from test_phases_telegram import _harness as _line_harness
@@ -52,6 +54,7 @@ from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.chat import ChatInput, ChatReader
+from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.orchestration.telegram import line_channel
 from ai_assistant.orchestration.understanding import WrittenBy
 from ai_assistant.testing import (
@@ -350,29 +353,63 @@ class _WatchedChat(FakeConversationStore):
         return await super().taken_in(conversation_id, positions=positions)
 
 
+class _WatchedMemory(FakeMemoryStore):
+    """A memory store that notes each read of a watched channel's episodes: the channel, its
+    page size, the sight it was bound to and the work running where it was made."""
+
+    def __init__(
+        self,
+        reads: list[tuple[ChannelIdentity, int, Sight | None, Sight | None]],
+        watched: frozenset[ChannelIdentity],
+        **knobs: Any,
+    ) -> None:
+        super().__init__(**knobs)
+        self.reads = reads
+        self.watched = watched
+
+    async def channel_episodes(
+        self, channel: ChannelIdentity, *, after: int | None = None, limit: int
+    ) -> ChannelEpisodePage:
+        if channel in self.watched:
+            state = active_state()
+            self.reads.append((channel, limit, self._sight, None if state is None else state.sight))
+        return await super().channel_episodes(channel, after=after, limit=limit)
+
+
 async def test_the_hub_chats_window_is_read_inside_the_admitted_work_by_its_sight() -> None:
     """A read of the window before admission would be unbound, with no work running: each
-    is bound, and made inside the work by the sight its admission made."""
+    is bound, and made inside the work by the sight its admission made, the Task
+    Scheduler's episodes read for a writer of its messages among them (ADR-0350 §9:1)."""
     reads: list[tuple[Sight | None, Sight | None]] = []
-    harness = phases_harness(conversation_store=_WatchedChat(reads, now=lambda: AT))
+    scheduled: list[tuple[ChannelIdentity, int, Sight | None, Sight | None]] = []
+    memory = _WatchedMemory(scheduled, frozenset({SCHEDULE}), now=lambda: AT)
+    await memory.add(schedule_episode("a-task"))
+    harness = phases_harness(
+        conversation_store=_WatchedChat(reads, now=lambda: AT),
+        memory=memory,
+        task_scheduler=task_seams(),
+    )
     conversation = await open_conversation(harness)
     await say(harness, conversation, "first")
 
     async def frozen_once() -> bool:
-        return len(await frozen(harness)) >= 1
+        return len(await frozen(harness)) >= 2
 
     await until(frozen_once, what="the first work to end")
     with capture_logs() as logs:
         await say(harness, conversation, "second", message_id="m-2")
 
         async def frozen_twice() -> bool:
-            return len(await frozen(harness)) >= 2
+            return len(await frozen(harness)) >= 3
 
         await until(frozen_twice, what="the second work to end")
     await harness.engine.aclose()
 
     assert reads, "the window was read"
     assert all(bound is not None and bound == working for bound, working in reads), reads
+    # The second window shows the first reply, so it reads the schedule for its writer.
+    assert scheduled, "the Task Scheduler's episodes were read for a writer"
+    assert all(bound is not None and bound == working for _, _, bound, working in scheduled)
     windows = [
         one for one in logs if one["event"] == "sight_counted" and one["store"] == "conversations"
     ]
@@ -380,43 +417,27 @@ async def test_the_hub_chats_window_is_read_inside_the_admitted_work_by_its_sigh
     assert all(one["reader"] == "work" and one["bounds"] == ["person_owner"] for one in windows)
 
 
-class _WatchedMemory(FakeMemoryStore):
-    """A memory store that notes each read of the line's episodes: its page size, the sight
-    it was bound to and the work running where it was made."""
-
-    def __init__(
-        self,
-        reads: list[tuple[int, Sight | None, Sight | None]],
-        channel: ChannelIdentity,
-        **knobs: Any,
-    ) -> None:
-        super().__init__(**knobs)
-        self.reads = reads
-        self.line = channel
-
-    async def channel_episodes(
-        self, channel: ChannelIdentity, *, after: int | None = None, limit: int
-    ) -> ChannelEpisodePage:
-        if channel == self.line:
-            state = active_state()
-            self.reads.append((limit, self._sight, None if state is None else state.sight))
-        return await super().channel_episodes(channel, after=after, limit=limit)
-
-
 async def test_the_lines_window_is_read_inside_the_admitted_work_by_its_sight() -> None:
     """The line's only unbound read of its episodes is the engine's start's, the chat's last
-    activation (§7:8); every read for a work's window is bound, inside the work."""
-    reads: list[tuple[int, Sight | None, Sight | None]] = []
+    activation (§7:8); every read for a work's window, the Task Scheduler's episodes
+    among them, is bound, inside the work."""
+    reads: list[tuple[ChannelIdentity, int, Sight | None, Sight | None]] = []
     line = _EngineLine()
     line.fake.hold(text(1, "What's on today?", message_id=40))
-    memory = _WatchedMemory(reads, line_channel(REFERENCE, CHAT), now=lambda: AT)
-    harness = _line_harness(line, memory=memory)
+    channel = line_channel(REFERENCE, CHAT)
+    memory = _WatchedMemory(reads, frozenset({channel, SCHEDULE}), now=lambda: AT)
+    await memory.add(schedule_episode("a-task"))
+    harness = _line_harness(line, memory=memory, task_scheduler=task_seams())
     await harness.engine.start()
     await _line_settled(harness)
     await harness.engine.aclose()
 
-    unbound = [(limit, working) for limit, bound, working in reads if bound is None]
-    assert unbound == [(1, None)], "only the start's read of the chat's last activation"
-    windows = [(bound, working) for _, bound, working in reads if bound is not None]
-    assert windows, "the window was read"
-    assert all(bound == working for bound, working in windows)
+    unbound = [(where, limit, working) for where, limit, bound, working in reads if bound is None]
+    assert unbound == [(channel, 1, None)], "only the start's read of the chat's last activation"
+    windows = {
+        where: [(bound, working) for one, _, bound, working in reads if one == where and bound]
+        for where in (channel, SCHEDULE)
+    }
+    assert windows[channel], "the line's episodes were read for the window"
+    assert windows[SCHEDULE], "the Task Scheduler's were read for a writer"
+    assert all(bound == working for each in windows.values() for bound, working in each)
