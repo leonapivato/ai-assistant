@@ -65,8 +65,8 @@ source-grant and Telegram-intake stores; `StoryStore` has none. #1502 records th
 **Words.** A **domain**, the **hub's shared things** and the **data rights** are ADR-0369's; a
 **home**, a **sight**, a **bound**, a **bound store** and a **reader** are ADR-0383's. The **seven
 stores** are the six store Protocols ADR-0383 §7:1 names and `MemoryWriter`. An **owner's act** is
-a call to a member of `AssistantEngine` other than `receive` (§3:5). The **owner's sight** is the
-sight §3:2 makes for one. A bare section reference, such as §6:2, is to this decision's own clauses.
+a call to a member of `AssistantEngine` other than `receive` (§3:6). The **owner's sight** is the
+sight §3:3 makes for one. A bare section reference, such as §6:2, is to this decision's own clauses.
 
 ## Decision
 
@@ -103,9 +103,14 @@ whole.
 
 ### 3. The owner's sight
 
-> **Normative.** Every read and write an owner's act makes of one of the seven stores is made
-> through that store bound, by ADR-0383 §7:1's binding member, to the owner's sight §3:2 makes from
-> the domain the act names, or from none where it names none, save as §5:4 says.
+> **Normative.** Every read and write an owner's act makes of a record of a kind ADR-0383 §3 gives a
+> home is made through its store bound, by ADR-0383 §7:1's binding member, to the owner's sight §3:3
+> makes from the domain the act names, or from none where it names none, save as §5:4 says.
+
+> **Normative.** An owner's act reads and writes a kind ADR-0383 §3 gives no home as it does today:
+> "my devices" and a conversation's devices (ADR-0293 §3), a stop record, and every store ADR-0383
+> §3 gives none; but no export holds one (§6:4, §6:6). ADR-0298 §5's device checks read a
+> conversation's ends as ADR-0383 §7:8 and §10:5 keep them.
 
 > **Normative.** The owner's sight is made by one `core` constructor for an owner's own act, from
 > the domain the act names or from none, and by nothing else: from none, a person bound for the
@@ -125,7 +130,7 @@ record with no home (ADR-0383 §5:3).
 > **Normative.** `receive` is not an owner's act: it runs a work, and what that work reads is by
 > the work's sight (ADR-0383 §7:7).
 
-§3:4 is why the owner's acts cannot wait for ADR-0383's switch. A store that only counts answers as
+§3:5 is why the owner's acts cannot wait for ADR-0383's switch. A store that only counts answers as
 the unbound store does (ADR-0383 §11:1), so an export of the shared things built before the switch
 would hold the owner's whole domain. With one person, the owner's sight from none withholds only a
 record with no home, which ADR-0383 §5:1 and §5:4 leave none of, so seeing gives back what it gives
@@ -134,8 +139,8 @@ back today.
 ### 4. Seeing
 
 > **Normative.** No member is added for seeing. Each member of `AssistantEngine` that gives back
-> records of the seven stores takes the arguments it takes today, names no domain, and gives back
-> only what the owner's sight from none sees (ADR-0369 §12:9).
+> records of a kind ADR-0383 §3 gives a home takes the arguments it takes today, names no domain,
+> and gives back only what the owner's sight from none sees of them (ADR-0369 §12:9).
 
 > **Normative.** No member gives back, counts or names a record with no home (ADR-0383 §5:3), and
 > no member says whether one exists.
@@ -164,10 +169,16 @@ prints a record's home is the build's.
 > reads and writes by the owner's sight from none, and changes records of that home alone (ADR-0369
 > §12:5, ADR-0383 §4:7).
 
-> **Normative.** Where the item named is one the owner's sight does not see, the member answers
-> exactly as for an item never written (ADR-0383 §8:2): `forget`, `forget_notification` and
-> `delete_conversation` return `False`; `delete_message` raises `UnknownConversationError` where
-> the conversation is not seen, and returns `False` where only the message is not.
+> **Normative.** ADR-0298 §5's device checks run first and stand (§3:2). Past them, where the item
+> named is one the owner's sight does not see, the member answers exactly as for an item never
+> written (ADR-0383 §8:2): `forget`, `forget_notification` and `delete_conversation` return
+> `False`; `delete_message` raises `UnknownConversationError` where the conversation is not seen,
+> and returns `False` where only the message is not.
+
+A device that is not an end of a conversation is refused alike whether the conversation is unseen or
+was never written. One that is an end of an unseen conversation passes the check, which reads device
+rows that are no domain's record (ADR-0383 §3), and is then answered as for one never written; it
+learns only that its own membership stands, which it already holds.
 
 > **Normative.** `forget_conversation` acts on the owner's domain alone. It reads and forgets by the
 > owner's sight from the owner's domain, so it forgets the episodes of that domain on the
@@ -280,14 +291,14 @@ version. A gateway calls `export_domain` never, but it speaks the wire, so it up
 > No other row changes.
 
 > **Normative.** This decision partially supersedes ADR-0383 §6:10, in the addition alone: a sight
-> is also made by the `core` constructor for an owner's own act (§3:2), from the domain the act
+> is also made by the `core` constructor for an owner's own act (§3:3), from the domain the act
 > names or none rather than from recorded facts.
 
 > **Normative.** This decision partially supersedes ADR-0383 §9:2, in the addition alone: the
 > engine's members make the owner's sight through that constructor, and the named test admits them.
 
 > **Normative.** This decision partially supersedes ADR-0383 §7:10, in its reach: its "the build
-> that first binds the stores counts" does not reach a store bound to the owner's sight (§3:4). Its
+> that first binds the stores counts" does not reach a store bound to the owner's sight (§3:5). Its
 > first half binds it as written.
 
 > **Normative.** This numbered draft records its replacements on ADR-0298's and ADR-0383's status
@@ -315,7 +326,7 @@ domain and leaves both); ADR-0373 §4 and ADR-0376 §6 (§7).
 Named so the build is scoped, and made by none of this decision. Golden rule 5 makes each breaking.
 
 - **`core/types.py`:** the function naming the domains an owner's act may name (§2:1); the sight's
-  constructor for an owner's own act (§3:2); the domain export, its outcome and its closed reason
+  constructor for an owner's own act (§3:3); the domain export, its outcome and its closed reason
   (§6:2, §6:8); and a story store's export: every story with each part ADR-0383 §3:2 gives it its
   home, and nothing store-wide (ADR-0383 §8:5). All are wire-carried.
 - **`core/protocols.py`:** `AssistantEngine.export_domain`, documented with its outcomes and
@@ -350,12 +361,14 @@ No store's version label moves: the story store's export reads and stores nothin
 
 Each is this decision's, not an owner ruling: the two domains an act may name and the refusal of
 any other from the value alone (§2); the owner's sight, its constructor, that it withholds from its
-first build, and that `receive` is no owner's act (§3); seeing as today's members bound to that
-sight, and a record with no home shown by no member (§4); an item delete's domain as its item's
-home, and `forget_conversation` on the owner's domain (§5); one member, `export_domain`, what it
+first build, the kinds with no home and the device checks read as today, and that `receive` is no
+owner's act (§3); seeing as today's members bound to that sight, and a record with no home shown by
+no member (§4); an item delete's domain as its item's home, the device checks first, and
+`forget_conversation` on the owner's domain (§5); one member, `export_domain`, what it
 holds store by store, nothing of the stores with no home, whole or refused, refusals as outcomes,
 and its form on standard output (§6); the member's row, listeners and the command line only (§7);
-what stands beside it (§9); and the three partial supersessions of ADR-0383 (§10).
+what stands beside it, and that the trails' exports are no export of a domain (§9); and the three
+partial supersessions of ADR-0383 (§10).
 
 Of the coordinator's readings: an export is the owner's act, bounded by ADR-0369 §12 and not §10,
 taken (§3, §7); one act composing the stores, as ADR-0074 §9 meant, taken (§6:3); seeing needs no
@@ -383,7 +396,7 @@ home is shown to the owner by no act, taken, with no rule here on the offline to
   only repeat it or name a domain the item is absent from; it adds a refusal and no protection, and
   changes five members' wire shapes.
 - **The owner's acts count before the switch, as the work's reads do.** Set aside: a counting store
-  answers as the unbound one, so an export would hold every domain until the switch (§3:4).
+  answers as the unbound one, so an export would hold every domain until the switch (§3:5).
 - **Seeing members gain a domain filter.** Set aside: §12:9 needs only that no member shows a record
   the owner may not see, which the owner's sight from none gives; a filter by domain is a feature
   no ruling asks for.
