@@ -119,10 +119,11 @@ both from one store, as the owner reads them now.
 > deletion's home, whether or not the conversation's row still stands, and withholds it where its
 > sight does not; no bound store reads the home of a deletion from the conversation's row.
 
-> **Normative.** The upgrade that adds the home writes the owner's domain into every deletion the
-> file holds, whether or not its conversation's row still stands, as ADR-0383 §5:1 writes it into
-> every conversation, and no other change row gains a home: a start's, a message's and a set's are
-> read as §2:2 and ADR-0383 §3:3 have them.
+> **Normative.** The upgrade that adds the home writes into each deletion the file holds its
+> conversation's home where the conversation's row still stands, and the owner's domain where it
+> does not, as ADR-0383 §5:1 writes the owner's domain into a record whatever its facts say. No
+> other change row gains a home: a start's, a message's and a set's are read as §2:2 and ADR-0383
+> §3:3 have them.
 
 > **Normative.** A stored deletion with no home, or with one the store cannot read, is held by no
 > bound store (ADR-0383 §5:3).
@@ -131,8 +132,10 @@ Without §3:1, a device that missed a deletion while the conversation's row stoo
 grace or after any reclaim, would list the conversation for good, against ADR-0298 §7:5; and a
 deletion given to the owner whatever its home would name another person's dropped conversation to
 the owner once another person is admitted. The home is stored whole on the same ground as ADR-0383
-§2:2: naming another person later changes no stored shape. Every deletion row a file holds today is
-the owner's, so the upgrade says so truthfully.
+§2:2: naming another person later changes no stored shape. A file at the earlier label may hold a
+deletion of a shared things' conversation since dropped, whose home nothing in the file recalls;
+§3:3 makes it the owner's, which changes nothing the owner's sight from none is given, since it
+sees both, and no other sight reads the change stream today.
 
 ### 4. What stays as it is
 
@@ -220,11 +223,13 @@ Lane B10g builds it.
 - **Format:** `chat_changes` gains `home_kind` and `home_id`, nullable as SQLite adds a column,
   set on a `conversation_deleted` row alone. `CONVERSATION_RECORD_FORMAT` advances 15 → 16, with
   ADR-0326 §4:1's upgrade: from 15, add the two columns where they are missing, a fresh file
-  included, so there is one shape; write the owner's domain into every `conversation_deleted` row;
+  included, so there is one shape; write into every `conversation_deleted` row its conversation
+  row's home where that row stands, and the owner's domain where it does not;
   leave every other byte. A build that serves 15 refuses a file at 16 (ADR-0326 §5:3). An upgrade
-  test opens a file at 15 holding a deletion with its row standing and one with it dropped, and
-  reads both as the owner's; another holds a deletion with no home after the upgrade and finds it
-  held by no bound store.
+  test opens a file at 15 holding the deletion of an owner's and of a shared things' conversation,
+  each with its row standing, and one whose row is dropped, and reads the first two by their
+  conversations' homes and the third as the owner's; another holds a deletion with no home after
+  the upgrade and finds it held by no bound store.
 - **Orchestration:** the engine's `_recent_conversations` for a device and `_chat_changes` for both
   callers read through the store bound to the owner's sight from none, the device's page through
   `device_checks.device_changes` over it; `ChangeStream._page` and `_read_conversations` read
