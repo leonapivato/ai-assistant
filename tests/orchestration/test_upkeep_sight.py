@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final
 
@@ -96,6 +96,7 @@ if TYPE_CHECKING:
 _OWNERS: Final = RecordHome.owners()
 _SHARED: Final = RecordHome.shared()
 _BUDGET: Final = timedelta(seconds=10)
+_QUIET: Final = timedelta(hours=24)
 _MODES: Final = pytest.mark.parametrize("mode", list(SightMode), ids=lambda mode: mode.value)
 _UNIDENTIFIED: Final = InputSender(person=None, level=Sureness.NONE)
 _OWNER: Final = InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL)
@@ -137,8 +138,10 @@ class _World:
 
     def __init__(self, mode: SightMode) -> None:
         ids = count(1)
+        #: The story store's clock, which a case moves to link later.
+        self.at = AT
         self.stories = FakeStoryStore(
-            now=lambda: AT, new_id=lambda: f"{next(ids)}", sight_mode=mode
+            now=lambda: self.at, new_id=lambda: f"{next(ids)}", sight_mode=mode
         )
         self.memory = FakeMemoryStore(now=lambda: AT, sight_mode=mode)
         self.stores = BoundStores(memory=self.memory, stories=self.stories)
@@ -178,15 +181,17 @@ class _World:
             prompt=default_prompt(STORY_TIDY_UP_PROMPT),
         )
 
-    def scheduled(self, model: _Model) -> ScheduledTidyUp:
+    def scheduled(
+        self, model: _Model, *, threshold: int = 1, now: datetime = AT
+    ) -> ScheduledTidyUp:
         return ScheduledTidyUp(
             tidy_up=self.tidy_up(model),
             stores=self.stores,
-            threshold=1,
-            quiet=timedelta(hours=24),
+            threshold=threshold,
+            quiet=_QUIET,
             per_run=10,
             budget=_BUDGET,
-            now=lambda: AT,
+            now=lambda: now,
         )
 
     def matters(self, model: _Model) -> MattersPass:
@@ -643,3 +648,57 @@ async def test_forgotten_members_take_no_slot_and_are_not_counted() -> None:
     shown = [one["the_users_own_input"] for one in model.shown["A trip."]["episodes"]]
     assert shown == [f"Held {one}." for one in held]
     assert (len(story["episodes"]), story["episodes_not_shown"]) == (3, 0)
+
+
+# --- the scheduled tidy-up's finding of what is due: from what the store gives back -----
+
+
+@_MODES
+async def test_a_withheld_pending_episode_does_not_reach_the_threshold(mode: SightMode) -> None:
+    """Round 3's regression (ADR-0384 §5:2): a note and an episode of the owner's are two
+    pending, under a threshold of three; a shared episode linked in error is a third only
+    where the stores count, as before."""
+    world = _World(mode)
+    await world.hold(episode("a-1"), _of(_SHARED, episode("s-1")))
+    await world.story(_OWNERS, "a-1", "s-1", note="trip")
+    model = _Model(_TIDIED, key="note")
+
+    report = await world.scheduled(model, threshold=3).run()
+
+    assert report.due == (0 if mode is SightMode.WITHHOLD else 1)
+    assert list(model.shown) == ([] if mode is SightMode.WITHHOLD else ["trip"])
+
+
+@_MODES
+async def test_a_withheld_pending_episode_does_not_keep_a_story_from_going_quiet(
+    mode: SightMode,
+) -> None:
+    """The quiet period counts from the newest of what is pending that the store gives
+    back: a shared episode linked in error an hour ago delays the story only where the
+    stores count, as before."""
+    world = _World(mode)
+    await world.hold(episode("a-1"), _of(_SHARED, episode("s-1")))
+    trip = await world.story(_OWNERS, "a-1", note="trip")
+    later = AT + _QUIET
+    world.at = later
+    assert (
+        await world.stories.link(trip, [activation("s-1")], actor=StoryActor.UNDERSTANDING)
+    ).refusal is None
+    model = _Model(_TIDIED, key="note")
+
+    report = await world.scheduled(model, threshold=10, now=later + timedelta(hours=1)).run()
+
+    assert report.due == (1 if mode is SightMode.WITHHOLD else 0)
+
+
+async def test_a_story_pending_only_an_episode_no_longer_held_is_not_due() -> None:
+    """Where every record is the owner's: a member the memory store no longer holds is
+    not taken in, so it makes nothing due (ADR-0384 §5's paragraph under §5:3)."""
+    world = _World(SightMode.COUNT)
+    await world.story(_OWNERS, "gone")
+    model = _Model(_TIDIED, key="note")
+
+    report = await world.scheduled(model, threshold=1).run()
+
+    assert (report.due, report.passed_over) == (0, 0)
+    assert model.messages == []

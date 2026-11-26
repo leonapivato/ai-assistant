@@ -106,7 +106,8 @@ def _scheduled(  # noqa: PLR0913 — one knob per bound a case varies
 ) -> ScheduledTidyUp:
     return ScheduledTidyUp(
         tidy_up=tidy_up,
-        stores=BoundStores(memory=FakeMemoryStore(), stories=stories),
+        # The tidy-up's own holder, over the same story and memory stores (ADR-0358 §4:5).
+        stores=tidy_up._stores,
         threshold=threshold,
         quiet=_QUIET,
         per_run=per_run,
@@ -279,13 +280,19 @@ async def test_a_failed_story_goes_after_every_other_and_the_oldest_failure_firs
 
 
 async def test_a_story_the_tidy_up_does_not_start_on_is_passed_over_and_not_counted() -> None:
-    """§4:6: outside content alone, a run already going, nothing it can read: not counted."""
+    """§4:6: outside content alone, a run already going, nothing it can read: not counted.
+
+    Nothing it can read is an open episode, which the store gives back and the tidy-up
+    does not read; an episode the store no longer holds makes no story due at all
+    (ADR-0384 §5's paragraph under §5:3), and its story is not counted.
+    """
     clock = _Clock()
     stories = _stories(clock)
-    memory = await _memory(episode("a-out", channel=EVENTS))
+    memory = await _memory(episode("a-out", channel=EVENTS), episode("a-open", open_=True))
     model = _Model()
     await _story(stories, members=("a-out",))
     clock.at = AT + timedelta(minutes=1)
+    await _story(stories, members=("a-open",))
     await _story(stories, members=("a-gone",))
     clock.at = AT + timedelta(minutes=2)
     held = await _story(stories, "held")

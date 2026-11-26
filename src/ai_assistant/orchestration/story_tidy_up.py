@@ -1232,7 +1232,10 @@ class ScheduledTidyUp:
 
         Its own bound on tidy-ups started (§4:3), and its first due story always tried.
         """
-        due = sorted(await self._due(run, self._stores.stories(run.sight)), key=_Due.order)
+        due = sorted(
+            await self._due(run, self._stores.stories(run.sight), self._stores.memory(run.sight)),
+            key=_Due.order,
+        )
         if due:
             budget.start()
         tidied = written = passed_over = 0
@@ -1257,14 +1260,23 @@ class ScheduledTidyUp:
             exhausted=exhausted,
         )
 
-    async def _due(self, run: UpkeepRun, stories: Bound[StoryStore]) -> list[_Due]:
+    async def _due(
+        self, run: UpkeepRun, stories: Bound[StoryStore], memory: Bound[MemoryStore]
+    ) -> list[_Due]:
         """ADR-0358 §4:2: each unmerged story of the run's domain that has come due.
 
-        Read through the story store bound to the run's sight, the finding of what is
-        due included (ADR-0384 §7:1), so where the stores withhold no story of another
+        Read through the stores bound to the run's sight, the finding of what is due
+        included (ADR-0384 §7:1), so where the stores withhold no story of another
         domain is given back. A story of another domain the store gives back, as the
         counting build's does, is passed over on its header, before anything more of it
         is read (ADR-0384 §5:1), so that build tidies what it tidied before.
+
+        **A pending episode counts only where the bound memory store gives it back.** The
+        count and the dates are made from the pending notes and from the pending
+        episodes whose episode that store holds and the run's sight sees: a member it
+        does not give back, withheld or no longer held, is one the run would not take in
+        (ADR-0384 §5's paragraph under §5:3), so it neither counts toward the threshold
+        nor dates the story (§5:2, ADR-0383 §8:2).
         """
         quiet_since = self._now() - self._quiet
         found: list[_Due] = []
@@ -1274,12 +1286,13 @@ class ScheduledTidyUp:
             state = await stories.current_summary(story_id)
             if state is None or state.story.merged_into is not None:
                 continue
-            pending = len(state.pending_notes) + len(state.pending_episodes)
+            episodes = await _given_back(memory, state.pending_episodes)
+            pending = len(state.pending_notes) + len(episodes)
             if pending == 0:
                 continue
             came = [note.written_at for note in state.pending_notes]
-            if state.pending_episodes:
-                came.extend(await _linked_at(stories, story_id, state.pending_episodes))
+            if episodes:
+                came.extend(await _linked_at(stories, story_id, episodes))
             if not came:
                 # Nothing pending could be dated: what is pending was read but its links
                 # were not, a race with an unlink. Only the count can make it due.
@@ -1289,6 +1302,23 @@ class ScheduledTidyUp:
             if pending >= self._threshold or max(came) < quiet_since:
                 found.append(_Due(story_id, min(came), self._tidy_up.last_failure(story_id)))
         return found
+
+
+async def _given_back(memory: Bound[MemoryStore], pending: Sequence[str]) -> tuple[str, ...]:
+    """Those of the ``pending`` activations whose episode the bound memory store gives back.
+
+    One ``get_many`` for a story's pending episodes, open ones included, as the count
+    has always held them; an activation whose record is not its own episode is absent.
+    """
+    if not pending:
+        return ()
+    found = await memory.get_many([episode_address(activation) for activation in pending])
+    return tuple(
+        activation
+        for activation in pending
+        if isinstance(record := found.get(episode_address(activation)), EpisodicMemory)
+        and activation_of(record) == activation
+    )
 
 
 async def _linked_at(
