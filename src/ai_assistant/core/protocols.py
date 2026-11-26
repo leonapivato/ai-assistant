@@ -8504,9 +8504,10 @@ class StoryStore(Protocol):
           ``limit`` is ``limit`` stories it holds, and a cursor's next page passes over a
           story it does not hold without counting it (§8:1).
         - A page of a story it holds is that story's whole, as unbound: its member count,
-          entries, lines, notes and versions, and the names they carry. By §4:7 no story
-          a sight sees names a story of another home, so no name it gives back is of a
-          story it does not hold (§8:3).
+          entries, lines, notes and versions, and the names they carry. That no name it
+          gives back is of a story it does not hold (§8:3) rests on §4:7's refusal of a
+          name across homes: for a summary version's flag and ``read_pages`` entry, and a
+          ``decided`` line, that refusal is lane B5f's to build (#3711).
         - :meth:`create`, :meth:`link`, :meth:`unlink`, :meth:`merge`, :meth:`split` and
           :meth:`move` refuse ``unknown_story`` for a story they name, written to or as a
           member, that it does not hold, in that refusal's place in the fixed check
