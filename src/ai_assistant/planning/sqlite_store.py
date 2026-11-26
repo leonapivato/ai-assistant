@@ -76,6 +76,7 @@ from ai_assistant.core.types import (
 from ai_assistant.planning._home_columns import (
     count_given,
     person_home,
+    register_readers,
     seen_person_sql,
     seen_sql,
 )
@@ -189,17 +190,21 @@ _OWNER_ONLY = 0o600
 _REQUEST_ASKER: Final = "CASE WHEN json_valid(data) THEN json_extract(data, '$.activation_id') END"
 
 #: A task row one of whose occurrences was pushed to the activation bound last, read from
-#: its record alone; a record that is not JSON was pushed to none.
+#: its record alone. A record that is not JSON was pushed to none, and an occurrence that
+#: is not an object holds no activation: no nested value reaches a JSON function unless
+#: ``CASE`` has found it an object, so no shape of a record is an error.
 _PUSHED_TO_TASK: Final = (
     "CASE WHEN json_valid(data) THEN EXISTS (SELECT 1 FROM json_each(data, '$.occurrences') "
-    "AS occurrence, json_each(occurrence.value, '$.activations') AS pushed "
-    "WHERE pushed.value = ?) ELSE 0 END"
+    "AS occurrence, json_each(CASE WHEN occurrence.type = 'object' THEN occurrence.value "
+    "ELSE '{}' END, '$.activations') AS pushed WHERE pushed.value = ?) ELSE 0 END"
 )
 
-#: A request row one of whose cards carries the token bound last, read from its record.
+#: A request row one of whose cards carries the token bound last, read from its record; a
+#: card that is not an object carries none, read as :data:`_PUSHED_TO_TASK` reads.
 _CARRIED_BY_A_CARD: Final = (
     "CASE WHEN json_valid(data) THEN EXISTS (SELECT 1 FROM json_each(data, '$.cards') AS card "
-    "WHERE json_extract(card.value, '$.token') = ?) ELSE 0 END"
+    "WHERE CASE WHEN card.type = 'object' THEN json_extract(card.value, '$.token') END = ?) "
+    "ELSE 0 END"
 )
 
 #: A request row whose outcome was pushed to the activation bound last, read from its record.
@@ -483,14 +488,28 @@ _EFFECT_COLUMNS = "id, activation_id, data, part_round, part_number, home_kind, 
 #: promoted columns **or** by the record itself, so a row whose columns an outside
 #: writer changed or cleared is still found, and then refused by
 #: :func:`_checked_activation_effect` rather than read as a part nobody spent
-#: (ADR-0321 §4:9). The parameters are the keys twice, once for each side. ``{seq}`` is
-#: ``"claimed_seq, "`` where the rows of several statements are merged in claim order,
-#: and empty where one statement is the whole read.
+#: (ADR-0321 §4:9). ``{seq}`` is ``"claimed_seq, "`` where the rows of several statements
+#: are merged in claim order, and empty where one statement is the whole read.
+#:
+#: **A row the store, as bound, does not hold reaches no expression of its record**
+#: (ADR-0383 §7:2): ``CASE`` evaluates ``{seen}`` first, and only a held row is matched
+#: by its record, the keys bound twice. A row not held is matched by ``{unheld}``: ``0``
+#: for a read, which gives back none, or :data:`_PART_UNHELD` for a claim's own check,
+#: which reads its record only where it is JSON, the keys bound twice more.
 _PART_ROWS = (
     "SELECT {seq}" + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only constants and placeholders are interpolated
-    "WHERE ((part_round, part_number) IN (VALUES {keys}) "
+    "WHERE CASE WHEN {seen} THEN ((part_round, part_number) IN (VALUES {keys}) "
     "OR (json_extract(data, '$.part.round'), json_extract(data, '$.part.part')) "
-    "IN (VALUES {keys})) AND {seen} ORDER BY claimed_seq ASC"
+    "IN (VALUES {keys})) ELSE {unheld} END ORDER BY claimed_seq ASC"
+)
+
+#: :data:`_PART_ROWS`' match of a row the store, as bound, does not hold, for a claim's
+#: own check over every record (ADR-0383 §7:11): its columns, or its record where that is
+#: JSON, so a record that is not JSON is never an error.
+_PART_UNHELD = (
+    "((part_round, part_number) IN (VALUES {keys}) OR CASE WHEN json_valid(data) THEN "
+    "(json_extract(data, '$.part.round'), json_extract(data, '$.part.part')) "
+    "IN (VALUES {keys}) ELSE 0 END)"
 )
 
 _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
@@ -703,8 +722,15 @@ class SqlitePlanStore:
         self._lock = asyncio.Lock()
         self._conn = self._setup()
 
-    def _setup(self) -> sqlite3.Connection:
-        """Connect, verify the version, create the schema, verify its shape."""
+    def _connect(self) -> sqlite3.Connection:
+        """Open the connection, carrying the one reading of a stored home as SQL functions.
+
+        A bound store's statements ask those functions whether a row's home is one the
+        store can read (ADR-0383 §5:3, §7:3).
+
+        Raises:
+            PlanningError: If the file cannot be opened, or a function not registered.
+        """
         try:
             conn = sqlite3.connect(self._path, check_same_thread=False)
         except (sqlite3.Error, OSError, ValueError) as exc:
@@ -716,6 +742,17 @@ class SqlitePlanStore:
             # documents (#1933; the last of the nine stores that carried the hole).
             msg = f"failed to open the plan store at {self._path!r}: {exc}"
             raise PlanningError(msg) from exc
+        try:
+            register_readers(conn)
+        except sqlite3.Error as exc:
+            conn.close()
+            msg = f"failed to open the plan store at {self._path!r}: {exc}"
+            raise PlanningError(msg) from exc
+        return conn
+
+    def _setup(self) -> sqlite3.Connection:
+        """Connect, verify the version, create the schema, verify its shape."""
+        conn = self._connect()
         # The clock's own failure in the upgrade, raised again below once no handler is
         # active, so its cause and context stay its own (ADR-0026 §2).
         clock_failure: Exception | None = None
@@ -1570,10 +1607,16 @@ class SqlitePlanStore:
         # each reconciled: a column an outside writer changed or cleared would
         # otherwise hide a spent part and let a second yes run (ADR-0321 §4:9).
         where, params = self._effects_seen()
+        part = () if record.part is None else (record.part.round, record.part.part)
         spent = record.part is not None and self._any_carries(
             conn.execute(
-                _PART_ROWS.format(keys="(?, ?)", seq=f"{where}, ", seen="1"),
-                (*params, *(record.part.round, record.part.part) * 2),
+                _PART_ROWS.format(
+                    keys="(?, ?)",
+                    seq=f"{where}, ",
+                    seen=where,
+                    unheld=_PART_UNHELD.format(keys="(?, ?)"),
+                ),
+                (*params, *params, *part, *part, *part, *part),
             ).fetchall()
         )
         # Read in slices on this transaction's own connection, so a match past
@@ -2732,12 +2775,16 @@ class SqlitePlanStore:
         book = self._book(conn)
         # Every record carrying the key, read from the record itself and reconciled, so a
         # second claim of one ticket is refused whatever the request says (§5:5).
+        # A row the store, as bound, does not hold is read for the key alone, and only
+        # where its record is JSON (ADR-0383 §7:11).
         where, params = self._effects_seen()
         carried = self._any_carries(
             conn.execute(
                 f"SELECT {where}, " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — module text and placeholders; values bound
-                "WHERE json_extract(data, '$.ticket') = ?",
-                (*params, record.ticket),
+                f"WHERE CASE WHEN {where} THEN json_extract(data, '$.ticket') = ? "
+                "ELSE coalesce(CASE WHEN json_valid(data) THEN "
+                "json_extract(data, '$.ticket') END = ?, 0) END",
+                (*params, *params, record.ticket, record.ticket),
             ).fetchall()
         )
         refused = decide_ticket(book, record, carried=carried)
@@ -3271,8 +3318,8 @@ def _part_rows(
             for row in (
                 tuple(found)
                 for found in conn.execute(
-                    _PART_ROWS.format(keys=keys, seq="claimed_seq, ", seen=where),
-                    (*values, *values, *params),
+                    _PART_ROWS.format(keys=keys, seq="claimed_seq, ", seen=where, unheld="0"),
+                    (*params, *values, *values),
                 ).fetchall()
             )
             if row not in found_rows

@@ -10,6 +10,8 @@ needs of them:
 
 - :func:`stored_home` and :func:`person_home`, **the one reading** of what a row's
   columns say its home is, which nothing else may re-spell;
+- :func:`register_readers`, which gives the store's connection those two readings as SQL
+  functions, so a statement asks whether a row's home is readable by the same code;
 - :func:`seen_sql` and :func:`seen_person_sql`, the sight expressed in the store's own
   query over those columns, a positive match against the homes the sight sees
   (:attr:`~ai_assistant.core.types.Sight.homes_seen`), or against the activation the
@@ -46,6 +48,7 @@ from pydantic import ValidationError
 from ai_assistant.core.types import RecordHome, RecordHomeKind
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Iterable
 
     from ai_assistant.core.types import Sight
@@ -58,6 +61,14 @@ STORE_CODE: Final = "plans"
 #: The event a read through a store bound in the counting mode writes (ADR-0383 §11:1),
 #: the name every bound store gives it.
 SIGHT_COUNTED: Final = "sight_counted"
+
+#: The SQL function :func:`register_readers` gives a connection: ``1`` where two home
+#: columns hold a home :func:`stored_home` reads, ``0`` otherwise.
+HOME_READER: Final = "plan_home_readable"
+
+#: The SQL function :func:`register_readers` gives a connection: ``1`` where a person
+#: column holds a person :func:`person_home` reads, ``0`` otherwise.
+PERSON_READER: Final = "plan_person_readable"
 
 
 def stored_home(kind: object, home_id: object) -> RecordHome | None:
@@ -108,24 +119,26 @@ def person_home(person: object) -> RecordHome | None:
     return home if home.id == person else None
 
 
-def _readable_home_sql(kind_column: str, id_column: str) -> str:
-    """A condition that is ``1`` where the two columns hold a home of a kind a build writes.
+def register_readers(conn: sqlite3.Connection) -> None:
+    """Give ``conn`` :data:`HOME_READER` and :data:`PERSON_READER`, the one reading in SQL.
 
-    Used only beside a made-by term, so a row of the sight's own activation whose columns
-    name no home is held by no sight (§5:3). It reads the kind exactly and the identifier
-    as text, and does not ask whether that text is blank or encodable, which SQL cannot
-    read as the model does: a row whose identifier is so is one whose columns disagree
-    with its record's valid home, which the store's decoder refuses as corrupt, so it
-    gives no reader its content.
+    A row of a sight's own activation is held only where its home is one the store can
+    read (§5:3, §7:4). Whether it is turns on whether an identifier is blank or encodable,
+    which SQL cannot decide as the model does, so the statement asks
+    :func:`stored_home` and :func:`person_home` themselves. Each is deterministic and reads
+    nothing but its arguments.
+
+    Raises:
+        sqlite3.Error: If the connection refuses a function.
     """
-    shared = RecordHomeKind.SHARED.value
-    named = ", ".join(
-        f"'{one.value}'" for one in RecordHomeKind if one is not RecordHomeKind.SHARED
+    conn.create_function(
+        HOME_READER,
+        2,
+        lambda kind, home_id: int(stored_home(kind, home_id) is not None),
+        deterministic=True,
     )
-    return (
-        f"(typeof({kind_column}) = 'text' AND "
-        f"(({kind_column} = '{shared}' AND {id_column} IS NULL) OR "
-        f"({kind_column} IN ({named}) AND typeof({id_column}) = 'text')))"
+    conn.create_function(
+        PERSON_READER, 1, lambda person: int(person_home(person) is not None), deterministic=True
     )
 
 
@@ -141,8 +154,9 @@ def seen_sql(
     **A positive match**: a row is seen where its columns hold, exactly and as text, one of
     the homes the sight sees, the shared things' identifier being ``NULL``; or, where
     ``made_by`` is given and the sight is a work's, where the row is that work's own
-    (§7:4) and its columns name a home. A row with no home, or one the store cannot read,
-    matches nothing (§5:3), and an identifier is never normalised.
+    (§7:4) and :data:`HOME_READER` reads a home in its columns. A row with no home, or one
+    the store cannot read, matches nothing (§5:3), and an identifier is never normalised.
+    The connection must carry :func:`register_readers`'s functions.
 
     The condition is ``0`` or ``1`` on every row and never ``NULL``, so its negation
     selects exactly the rows it does not. Only placeholders, the enumeration's values and
@@ -172,7 +186,7 @@ def seen_sql(
     if made_by is not None and sight.activation is not None:
         terms.append(
             f"(typeof({made_by}) = 'text' AND {made_by} = ? AND "
-            f"{_readable_home_sql(kind_column, id_column)})"
+            f"{HOME_READER}({kind_column}, {id_column}))"
         )
         params.append(sight.activation)
     if not terms:
@@ -188,8 +202,9 @@ def seen_person_sql(
 
     **A positive match**: a row is seen where its column holds, exactly and as text, a
     person whose domain is a home the sight sees; or, where ``made_by`` is given and the
-    sight is a work's, where the row is that work's own (§7:4) and its column holds text.
-    A shared or group home names no person, so no task or request is seen by it.
+    sight is a work's, where the row is that work's own (§7:4) and :data:`PERSON_READER`
+    reads a person in its column. A shared or group home names no person, so no task or
+    request is seen by it. The connection must carry :func:`register_readers`'s functions.
 
     The condition is ``0`` or ``1`` on every row and never ``NULL``.
 
@@ -212,7 +227,7 @@ def seen_person_sql(
         terms.append(f"({person_column} IN ({marks}))")
         params.extend(persons)
     if made_by is not None and sight.activation is not None:
-        terms.append(f"({made_by} = ?)")
+        terms.append(f"({made_by} = ? AND {PERSON_READER}({person_column}))")
         params.append(sight.activation)
     if not terms:
         return "0", []

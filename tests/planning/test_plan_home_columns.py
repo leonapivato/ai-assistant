@@ -16,6 +16,7 @@ import pytest
 from ai_assistant.core.types import OWNER_PERSON_ID, RecordHome
 from ai_assistant.planning._home_columns import (
     person_home,
+    register_readers,
     seen_person_sql,
     seen_sql,
     stored_home,
@@ -44,6 +45,7 @@ _HOMES: Final[list[tuple[object, object]]] = [
     ("person", 7),
     (1, None),
     ("person", ""),
+    ("person", "   "),
 ]
 
 #: Each row's activation: the sight's own, another, and values altered outside.
@@ -53,6 +55,7 @@ _MADE_BY: Final[list[object]] = [OWN_ACTIVATION, "other", None, 7, OWN_ACTIVATIO
 @pytest.fixture
 def conn() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(":memory:")
+    register_readers(connection)
     try:
         yield connection
     finally:
@@ -105,11 +108,6 @@ def test_seen_sql_answers_as_the_predicate_on_every_row(
         params,
     ).fetchall()
     for number, kind, home_id, made_by, seen in answered:
-        if (kind, home_id) == ("person", "") and made_by == OWN_ACTIVATION:
-            # The one corner SQL does not read as the model does: a blank identifier
-            # beside the own activation. The store's decoder refuses such a row as
-            # corrupt, since its columns disagree with its record's valid home.
-            continue
         expected = sight.sees(stored_home(kind, home_id), made_by=_python_made_by(made_by))
         assert seen == int(expected), (number, kind, home_id, made_by)
     held = {n for (n,) in conn.execute(f"SELECT n FROM rows WHERE {where}", params)}  # noqa: S608
@@ -133,7 +131,15 @@ def test_seen_person_sql_answers_as_the_predicate_on_every_row(
     """
     sight = SIGHTS[sight_name]
     conn.execute("CREATE TABLE rows(n INTEGER, person TEXT, data TEXT)")
-    persons: list[object] = [OWNER_PERSON_ID, "person:bob", None, 7, OWNER_PERSON_ID.encode(), ""]
+    persons: list[object] = [
+        OWNER_PERSON_ID,
+        "person:bob",
+        None,
+        7,
+        OWNER_PERSON_ID.encode(),
+        "",
+        "   ",
+    ]
     records: list[tuple[str, str | None]] = [
         (json.dumps({"activation_id": OWN_ACTIVATION}), OWN_ACTIVATION),
         (json.dumps({"activation_id": "other"}), "other"),
@@ -154,8 +160,6 @@ def test_seen_person_sql_answers_as_the_predicate_on_every_row(
     stored = dict(conn.execute("SELECT n, person FROM rows").fetchall())
     answered = dict(conn.execute(f"SELECT n, {where} FROM rows", params).fetchall())  # noqa: S608 — the module's own text
     for number, _person, _data, asker in rows:
-        if stored[number] == "" and asker == OWN_ACTIVATION:
-            continue  # the blank corner above: the decoder refuses the row as corrupt
         expected = sight.sees(person_home(stored[number]), made_by=asker)
         assert answered[number] == int(expected), (number, stored[number], asker)
     if _sees_nothing_but_its_own(sight) and sight.activation is None:

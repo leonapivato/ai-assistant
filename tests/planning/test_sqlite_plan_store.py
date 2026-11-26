@@ -2363,3 +2363,92 @@ async def test_a_bound_writes_own_checks_read_no_record_it_does_not_hold(
             await store.scheduled_tasks(["t-owner"])
     finally:
         store.close()
+
+
+async def test_a_row_of_the_own_activation_whose_home_is_unreadable_is_neither_read_nor_cleared(
+    tmp_path: Path,
+) -> None:
+    """§5:3, §7:4: a blank home id or person is no home, so the own activation holds none.
+
+    An effect whose ``home_id`` and a request whose ``person`` an outside writer blanked
+    are, to the work whose activation made them, records it does not hold: its reads do not
+    give them back or refuse them, and its ``clear`` neither removes nor counts them.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        claimed = await store.claim_activation_effect(
+            _effect("e-own", activation=OWN_ACTIVATION), match=None
+        )
+        assert claimed is ActivationEffectClaim.CLAIMED
+        await _asked(store, _request("q-own", activation=OWN_ACTIVATION))
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE activation_effects SET home_id = '' WHERE id = 'e-own'")
+            conn.execute("UPDATE approval_requests SET person = '  ' WHERE id = 'q-own'")
+        own = store.bound(SIGHTS["unidentified-senders-work"])
+        # The request's own effect record, of a home it can read, is still held.
+        held = [one.id for one in await own.activation_effects([OWN_ACTIVATION])]
+        assert held == ["ask-q-own"]
+        assert await own.approval_requests(["q-own"]) == ()
+        assert await own.clear() == 1
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("SELECT id FROM activation_effects").fetchall() == [("e-own",)]
+            assert conn.execute("SELECT id FROM approval_requests").fetchall() == [("q-own",)]
+    finally:
+        store.close()
+
+
+async def test_no_record_a_binding_does_not_hold_reaches_a_json_function_that_can_fail(
+    tmp_path: Path,
+) -> None:
+    """§7:2, §7:11: records of another home an outside writer broke stop no bound step.
+
+    A shared effect whose record is not JSON, a task of another person's whose occurrences
+    hold a string, and a request of another person's whose cards hold one: through a
+    binding over the owner's domain, a read of a part, a claim spending a part and one
+    under a ticket, a push of a task never written and a card answer as though the broken
+    records were never written. Unbound, the read of the part refuses the broken row, as
+    before.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        broken = _effect("e-broken", activation="act-s").model_copy(
+            update={"home": RecordHome.shared()}
+        )
+        assert (
+            await store.claim_activation_effect(broken, match=None) is ActivationEffectClaim.CLAIMED
+        )
+        await _asked(store, _request("q-bob", person="person:bob", hotel="the Savoy"))
+        await _approved(store, "q-owner")
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE activation_effects SET data = '{broken' WHERE id = 'e-broken'")
+            conn.execute(
+                "UPDATE approval_requests SET data = json_set(data, '$.cards', "
+                "json('[\"broken\"]')) WHERE id = 'q-bob'"
+            )
+            conn.execute(
+                "INSERT INTO scheduled_tasks(id, person, parent, written_seq, data) VALUES "
+                "('t-bob', 'person:bob', 'act-b', 1, '{\"occurrences\": [\"broken\"]}')"
+            )
+        owners = store.bound(SIGHTS["run-over-the-owners-domain"])
+        part = QuestionPart(round="q-other", part=1)
+        assert await owners.part_effects([part]) == ()
+        spends = _effect("e-spends", activation="act-o").model_copy(update={"part": part})
+        assert (
+            await owners.claim_activation_effect(spends, match=None)
+            is ActivationEffectClaim.CLAIMED
+        )
+        assert (
+            await owners.claim_ticket_call(_spending_ticket("e-ticket", "q-owner"), match=None)
+            is TicketClaim.CLAIMED
+        )
+        assert await owners.mark_occurrence_pushed("t-never", 1, "act-new") is (
+            OccurrencePush.NOT_PENDING
+        )
+        carded = await owners.record_approval_card("q-owner", _card("tok-owner"))
+        assert [card.token for card in carded.cards] == ["tok-owner"]
+        with pytest.raises(PlanningError):
+            await store.part_effects([part])
+    finally:
+        store.close()
