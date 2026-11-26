@@ -274,7 +274,8 @@ Lane B11 builds it, with the switch, or a lane cut before it.
   by the run's sight (§4); `ActivationState` makes a work's sight for a work with no facts (§5);
   the spawn and the approval request check the writer's sight against the record's home before
   they write (§6:2); the upcoming-event producer makes its run's sight once for each pass and
-  reads and writes through stores bound to it (§7). `PinConfirmations`, `NotificationWriteStage`
+  reads and writes through stores bound to it (§7); the pin pass's sight and the producer's are
+  made where every run's is, `upkeep.py:upkeep_run`. `PinConfirmations`, `NotificationWriteStage`
   and `RulingPolicy.pick` leave ADR-0383 §9:1's named test's list, and §9:2's admits the place
   that makes the producer's sight.
 - **Tests, one for each limit:** the notification cap, the notification duplicate lookup, the
