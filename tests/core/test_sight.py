@@ -6,7 +6,7 @@ ADR-0383 §6 (the value and how recorded facts make it), §7:3 (the one predicat
 
 from __future__ import annotations
 
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from pydantic import ValidationError
@@ -28,6 +28,9 @@ from ai_assistant.core.types import (
     WorkFor,
     WorkForKind,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _OTHER: Final = "person:other"
 _OWNERS: Final = RecordHome.owners()
@@ -275,6 +278,84 @@ def test_a_work_remade_meets_the_sight_it_had_so_it_never_widens() -> None:
     assert _seen(joined) == set()
     again = Sight.of_work(_owners_message(), (_OWNER_SENDS,), activation="a", had=joined)
     assert again == joined
+
+
+# --- a work whose facts were not recorded (ADR-0388 §5) -------------------------------
+
+
+def test_a_work_with_no_facts_is_an_anyone_bound_alone_and_its_activation() -> None:
+    """ADR-0388 §5:1, §5:3: a work's sight, seeing its own records and nothing else."""
+    sight = Sight.of_work(None, (), activation="a")
+    assert sight.reader is SightReader.WORK
+    assert sight.bounds == (SightBound.anyone(),)
+    assert sight.activation == "a"
+    assert _seen(sight) == set()
+    for home in _HOMES:
+        assert sight.sees(home, made_by="a")
+        assert not sight.sees(home, made_by="b")
+        assert sight.withheld(home) is WithheldReason.SEES_NOTHING
+    # A record with no home is withheld from its own activation too (ADR-0383 §5:3).
+    assert sight.withheld(None, made_by="a") is WithheldReason.NO_HOME
+
+
+class _Unread:
+    """Senders that fail the test if anything iterates them."""
+
+    def __iter__(self) -> Iterator[InputSender]:
+        pytest.fail("a work with no facts reads no sender")
+
+
+def test_a_work_with_no_facts_reads_no_sender() -> None:
+    """ADR-0388 §5:3: given none, the senders are not read, whoever they would name."""
+    sight = Sight.of_work(None, _Unread(), activation="a")
+    assert sight == Sight.of_work(None, (_OWNER_SENDS,), activation="a")
+
+
+def test_a_work_with_no_facts_is_not_a_producers_sight() -> None:
+    """Its activation's records are its own, which a producer's never are (§6:7)."""
+    work = Sight.of_work(None, (), activation="a")
+    producer = Sight.of_producer(None, ())
+    assert work.bounds == producer.bounds
+    assert producer.activation is None
+    assert not producer.sees(_OWNERS, made_by="a")
+    assert work.sees(_OWNERS, made_by="a")
+
+
+@pytest.mark.parametrize(
+    ("facts", "senders"),
+    [
+        (_owners_message(), (_OWNER_SENDS,)),
+        (_owners_task(), ()),
+        (
+            WorkFacts(
+                for_whom=WorkFor.no_one(), authority=WorkAuthority.none(), level=Sureness.NONE
+            ),
+            (),
+        ),
+    ],
+    ids=["owners-message", "owners-task", "for-no-one"],
+)
+def test_a_work_with_no_facts_never_widens_once_its_facts_are_recorded(
+    facts: WorkFacts, senders: tuple[InputSender, ...]
+) -> None:
+    """ADR-0388 §5:2, ADR-0383 §6:6: remade from recorded facts, it is the meet of the two."""
+    had = Sight.of_work(None, (), activation="a")
+    remade = Sight.of_work(facts, senders, activation="a", had=had)
+    assert SightBound.anyone() in remade.bounds
+    assert remade.activation == "a"
+    assert _seen(remade) == set()
+    assert remade.sees(_OWNERS, made_by="a")
+    assert remade == had.meet(Sight.of_work(facts, senders, activation="a"))
+
+
+def test_a_work_whose_facts_are_lost_is_narrowed_by_the_sight_it_had() -> None:
+    """ADR-0383 §6:6: made from none with the sight it had, it keeps that sight's bounds."""
+    had = Sight.of_work(_owners_message(), (_OWNER_SENDS,), activation="a")
+    narrowed = Sight.of_work(None, (_OWNER_SENDS,), activation="a", had=had)
+    assert narrowed.bounds == (SightBound.anyone(), SightBound.person(OWNER_PERSON_ID))
+    assert _seen(narrowed) == set()
+    with pytest.raises(ValueError, match="meet"):
+        Sight.of_work(None, (), activation="b", had=had)
 
 
 def test_two_sights_of_other_readers_or_activations_do_not_meet() -> None:

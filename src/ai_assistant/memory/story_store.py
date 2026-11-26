@@ -92,6 +92,7 @@ import json
 import sqlite3
 import threading
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -117,6 +118,7 @@ from ai_assistant.core.types import (
     StoryDecision,
     StoryEntry,
     StoryExport,
+    StoryFirstNote,
     StoryFlagName,
     StoryHeader,
     StoryLogLine,
@@ -153,7 +155,7 @@ from ai_assistant.memory._home_columns import count_homes, seen_sql, stored_home
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
@@ -650,6 +652,38 @@ def _note_args(
         written_at=_EPOCH,
     )
     return checked.text, checked.author, checked.written_during, checked.outside
+
+
+type _NoteArgs = tuple[str, StoryNoteAuthor, str | None, bool]
+
+
+def _first_notes(notes: object) -> tuple[_NoteArgs, ...]:
+    """Check a create's first notes, each as :func:`_note_args` checks an append's.
+
+    A snapshot of each note's fields, so a caller changing its sequence after the call
+    cannot change what the store writes (ADR-0388 §3:3).
+
+    Raises:
+        ValueError: If ``notes`` is a string or not a sequence, holds anything that is
+            not a :class:`StoryFirstNote`, or holds a note an append would refuse.
+    """
+    if isinstance(notes, str | bytes) or not isinstance(notes, Sequence):
+        msg = "a story's first notes must be a sequence of StoryFirstNote"
+        raise ValueError(msg)
+    checked: list[_NoteArgs] = []
+    for note in notes:
+        if not isinstance(note, StoryFirstNote):
+            msg = f"a story's first note must be a StoryFirstNote, got {type(note).__name__}"
+            raise ValueError(msg)
+        checked.append(
+            _note_args(
+                note.text,
+                author=note.author,
+                written_during=note.written_during,
+                outside=note.outside,
+            )
+        )
+    return tuple(checked)
 
 
 def _answers(answers: object) -> StoryFlagName | None:
@@ -1416,7 +1450,7 @@ class SqliteStoryStore:
 
     # --- writes --------------------------------------------------------------
 
-    async def create(
+    async def create(  # noqa: PLR0913 — ADR-0388 §3:3 adds the first notes as a keyword
         self,
         members: Sequence[StoryMember],
         *,
@@ -1424,24 +1458,36 @@ class SqliteStoryStore:
         actor: StoryActor,
         trigger: Identifier | None = None,
         answers: StoryFlagName | None = None,
+        notes: Sequence[StoryFirstNote] = (),
     ) -> StoryOutcome:
-        """Mint a story holding ``members``, in ``home`` (ADR-0289 §3, ADR-0386 §2:2)."""
+        """Mint a story holding ``members``, in ``home``, with its first ``notes``.
+
+        ADR-0289 §3, ADR-0386 §2:2, ADR-0388 §3:3; the Protocol states the rest.
+        """
         checked_home = _checked_home(home)
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         flag = _answers(answers)
         _grouping(named, flag)
+        first_notes = _first_notes(notes)
         return await self._locked(
-            self._create_sync, named, checked_home, checked_actor, checked_trigger, flag
+            self._create_sync,
+            named,
+            checked_home,
+            checked_actor,
+            checked_trigger,
+            flag,
+            first_notes,
         )
 
-    def _create_sync(
+    def _create_sync(  # noqa: PLR0913 — ADR-0388 §3:3 adds the first notes to a create
         self,
         members: tuple[StoryMember, ...],
         home: RecordHome,
         actor: StoryActor,
         trigger: str | None,
         flag: StoryFlagName | None,
+        notes: tuple[_NoteArgs, ...],
     ) -> StoryOutcome:
         if not members:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
@@ -1458,6 +1504,12 @@ class SqliteStoryStore:
             for member in unique:
                 self._add(conn, story_id, member, stamp)
             decided = [] if flag is None else self._decide(conn, flag, StoryDecision.GROUPED, stamp)
+            # The first notes, after the members and in the same transaction, each as an
+            # append writes one to the story just minted (ADR-0388 §3:3). The story is
+            # this write's own, so no sight it is bound to is asked whether it holds it
+            # (§3:2), and a note writes no change-log line, as an append writes none.
+            for text, author, written_during, outside in notes:
+                self._write_note(conn, story_id, text, author, written_during, outside, stamp.at)
         return StoryOutcome(story_id=story_id, logged=1 + len(unique) + len(decided))
 
     async def link(
@@ -1875,23 +1927,37 @@ class SqliteStoryStore:
         written_during: str | None,
         outside: bool,
     ) -> StoryNoteOutcome:
-        at = self._now()
+        at = _to_micros(self._now())
         with self._transaction("write a story note") as conn:
             if refused := self._summary_refusal(conn, story_id):
                 return StoryNoteOutcome(refusal=refused)
-            note_id = self._tick(conn)
-            note = _decoded(
-                lambda: StoryNote(
-                    note_id=note_id,
-                    text=text,
-                    author=author,
-                    written_during=written_during,
-                    outside=outside,
-                    written_at=_instant_from(_to_micros(at)),
-                )
-            )
-            self._insert_note(conn, story_id, note, pending=note_id)
+            note = self._write_note(conn, story_id, text, author, written_during, outside, at)
         return StoryNoteOutcome(note=note)
+
+    def _write_note(  # noqa: PLR0913 — the connection, the story, the note's four fields, its instant
+        self,
+        conn: sqlite3.Connection,
+        story_id: str,
+        text: str,
+        author: StoryNoteAuthor,
+        written_during: str | None,
+        outside: bool,
+        at: int,
+    ) -> StoryNote:
+        """Write one note to a story found standing, pending there, and return it."""
+        note_id = self._tick(conn)
+        note = _decoded(
+            lambda: StoryNote(
+                note_id=note_id,
+                text=text,
+                author=author,
+                written_during=written_during,
+                outside=outside,
+                written_at=_instant_from(at),
+            )
+        )
+        self._insert_note(conn, story_id, note, pending=note_id)
+        return note
 
     @staticmethod
     def _insert_note(
