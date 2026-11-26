@@ -37,6 +37,19 @@ _GROUPS: Final = RecordHome.group("group:house")
 #: Every kind of home, the ones no act may name included.
 _HOMES: Final = (_OWNERS, _SHARED, _THEIRS, _GROUPS)
 
+
+class _Hostile(str):
+    """Text whose hash and equality raise: no part of the refusal may hash or compare it."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        raise RuntimeError
+
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError
+
+
 #: Values of the home type no validation made, and a value of no home type at all: each
 #: is refused from the value alone (ADR-0385 §2:2, §6:9's "malformed").
 _MALFORMED: Final = (
@@ -47,6 +60,10 @@ _MALFORMED: Final = (
     RecordHome.model_construct(kind="person", id=OWNER_PERSON_ID),
     RecordHome.model_construct(kind="shared", id=None),
     RecordHome.model_construct(kind=RecordHomeKind.PERSON, id=b"person:owner"),
+    RecordHome.model_construct(),
+    RecordHome.model_construct(kind=RecordHomeKind.PERSON, id=_Hostile(OWNER_PERSON_ID)),
+    RecordHome.model_construct(id=OWNER_PERSON_ID),
+    RecordHome.model_construct(kind=RecordHomeKind.PERSON, id=[OWNER_PERSON_ID]),
     cast("RecordHome", "shared"),
     cast("RecordHome", {"kind": "shared"}),
 )
