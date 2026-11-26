@@ -74,6 +74,7 @@ from ai_assistant.core.types import (
     TicketClaim,
 )
 from ai_assistant.planning._home_columns import (
+    REQUEST_ASKER,
     count_given,
     person_home,
     register_readers,
@@ -183,11 +184,6 @@ if TYPE_CHECKING:
     )
 
 _OWNER_ONLY = 0o600
-
-#: The activation a stored approval request records as having asked it (ADR-0383 §7:4),
-#: read from the row's record; ``NULL`` where the record is not JSON, so the condition a
-#: sight makes of it is never an error.
-_REQUEST_ASKER: Final = "CASE WHEN json_valid(data) THEN json_extract(data, '$.activation_id') END"
 
 #: A task row one of whose occurrences was pushed to the activation bound last, read from
 #: its record alone. A record that is not JSON was pushed to none, and an occurrence that
@@ -496,11 +492,14 @@ _EFFECT_COLUMNS = "id, activation_id, data, part_round, part_number, home_kind, 
 #: by its record, the keys bound twice. A row not held is matched by ``{unheld}``: ``0``
 #: for a read, which gives back none, or :data:`_PART_UNHELD` for a claim's own check,
 #: which reads its record only where it is JSON, the keys bound twice more.
+_PART_MATCH = (
+    "CASE WHEN {seen} THEN ((part_round, part_number) IN (VALUES {keys}) "
+    "OR (json_extract(data, '$.part.round'), json_extract(data, '$.part.part')) "
+    "IN (VALUES {keys})) ELSE {unheld} END"
+)
 _PART_ROWS = (
     "SELECT {seq}" + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only constants and placeholders are interpolated
-    "WHERE CASE WHEN {seen} THEN ((part_round, part_number) IN (VALUES {keys}) "
-    "OR (json_extract(data, '$.part.round'), json_extract(data, '$.part.part')) "
-    "IN (VALUES {keys})) ELSE {unheld} END ORDER BY claimed_seq ASC"
+    "WHERE " + _PART_MATCH + " ORDER BY claimed_seq ASC"
 )
 
 #: :data:`_PART_ROWS`' match of a row the store, as bound, does not hold, for a claim's
@@ -1506,7 +1505,7 @@ class SqlitePlanStore:
         """The sight's condition over a request row, its person's domain or who asked it."""
         sight = self._withholding_sight()
         where, params = (
-            _EVERY_ROW if sight is None else seen_person_sql(sight, made_by=_REQUEST_ASKER)
+            _EVERY_ROW if sight is None else seen_person_sql(sight, made_by=REQUEST_ASKER)
         )
         return (where, params) if held else (f"NOT ({where})", params)
 
@@ -1609,15 +1608,11 @@ class SqlitePlanStore:
         where, params = self._effects_seen()
         part = () if record.part is None else (record.part.round, record.part.part)
         spent = record.part is not None and self._any_carries(
-            conn.execute(
-                _PART_ROWS.format(
-                    keys="(?, ?)",
-                    seq=f"{where}, ",
-                    seen=where,
-                    unheld=_PART_UNHELD.format(keys="(?, ?)"),
-                ),
-                (*params, *params, *part, *part, *part, *part),
-            ).fetchall()
+            conn,
+            _PART_MATCH.format(
+                keys="(?, ?)", seen=where, unheld=_PART_UNHELD.format(keys="(?, ?)")
+            ),
+            (*params, *part, *part, *part, *part),
         )
         # Read in slices on this transaction's own connection, so a match past
         # SQLite's bound is still read whole under the write lock (issue #3296).
@@ -1635,21 +1630,38 @@ class SqlitePlanStore:
             spent=spent,
         )
 
-    def _any_carries(self, rows: Sequence[Sequence[Any]]) -> bool:
-        """Whether any row carries a key a claim takes once (ADR-0383 §7:11).
+    def _any_carries(self, conn: sqlite3.Connection, match: str, params: Sequence[object]) -> bool:
+        """Whether any effect row ``match`` selects carries a key a claim takes once (§7:11).
 
-        Each row is ``(held, *effect columns)``. A row this store, as bound, holds is
-        decoded and reconciled with its columns, as the unbound check always did; a row
-        it does not hold carries the key all the same, and is not decoded, so nothing
-        of a record it does not hold is read but that it matched.
+        The statement fetches each matching row's rowid and whether this store, as bound,
+        holds it, and nothing else. Only a held row's columns are then fetched, decoded
+        and reconciled, as the unbound check always did; a row it does not hold carries
+        the key all the same, and not one of its columns reaches Python, so nothing of a
+        record it does not hold is read but that it matched.
+
+        Args:
+            conn: The connection, inside the caller's transaction.
+            match: The condition selecting the rows that carry the key.
+            params: Its parameters, in order.
 
         Raises:
             PlanningError: If a held row does not decode or disagrees with its columns.
         """
-        for row in rows:
-            if row[0]:
-                _checked_activation_effect(str(self._path), row[1:])
-        return bool(rows)
+        where, seen = self._effects_seen()
+        found = conn.execute(
+            f"SELECT {where}, rowid FROM activation_effects WHERE {match}",  # noqa: S608 — module text and placeholders; values bound
+            (*seen, *params),
+        ).fetchall()
+        held = [rowid for flag, rowid in found if flag]
+        for start in range(0, len(held), _IN_SLICE):
+            part = held[start : start + _IN_SLICE]
+            marks = ", ".join("?" for _ in part)
+            for row in conn.execute(
+                "SELECT " + _EFFECT_COLUMNS + f" FROM activation_effects WHERE rowid IN ({marks})",  # noqa: S608 — only placeholders are interpolated
+                part,
+            ).fetchall():
+                _checked_activation_effect(str(self._path), row)
+        return bool(found)
 
     async def finish_activation_effect(
         self,
@@ -2779,13 +2791,11 @@ class SqlitePlanStore:
         # where its record is JSON (ADR-0383 §7:11).
         where, params = self._effects_seen()
         carried = self._any_carries(
-            conn.execute(
-                f"SELECT {where}, " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — module text and placeholders; values bound
-                f"WHERE CASE WHEN {where} THEN json_extract(data, '$.ticket') = ? "
-                "ELSE coalesce(CASE WHEN json_valid(data) THEN "
-                "json_extract(data, '$.ticket') END = ?, 0) END",
-                (*params, *params, record.ticket, record.ticket),
-            ).fetchall()
+            conn,
+            f"CASE WHEN {where} THEN json_extract(data, '$.ticket') = ? "
+            "ELSE coalesce(CASE WHEN json_valid(data) THEN "
+            "json_extract(data, '$.ticket') END = ?, 0) END",
+            (*params, record.ticket, record.ticket),
         )
         refused = decide_ticket(book, record, carried=carried)
         if refused is not None:
