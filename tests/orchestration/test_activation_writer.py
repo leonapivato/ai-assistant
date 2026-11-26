@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from structlog.testing import capture_logs
@@ -49,7 +49,8 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.orchestration.activation_state import CaptureFacts, admit_channel
-from ai_assistant.orchestration.activation_writer import ActivationWriter
+from ai_assistant.orchestration.activation_writer import ActivationWriter, OpenEpisodes
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.conversations import (
     conversation_channel,
     conversation_state,
@@ -59,7 +60,7 @@ from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakeSto
 from ai_assistant.testing.parties import OWNER_SENDER
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 
     from ai_assistant.core.types import Conversation, EpisodeCaptureReport
     from ai_assistant.orchestration.activation_state import ActivationState
@@ -133,6 +134,12 @@ class TurnUnrecordable(FakeConversationStore):
         return await super().get(conversation_id)
 
 
+def _losses(logs: Sequence[MutableMapping[str, Any]]) -> list[MutableMapping[str, Any]]:
+    """The writer's own entries: each read of the episode through the store bound to the
+    work's sight writes the store's count (ADR-0383 §11:1), which is not the writer's."""
+    return [row for row in logs if row["event"] != "sight_counted"]
+
+
 class Wiring:
     """The production writer with two observable canonical stores."""
 
@@ -149,11 +156,13 @@ class Wiring:
         )
         self.stories = stories
         self.writer = ActivationWriter(
-            memory=self.memory,
             conversations=self.conversations,
+            stores=BoundStores(
+                memory=self.memory, stories=stories, conversations=self.conversations
+            ),
             retention=timedelta(days=30),
             now=lambda: _AT,
-            stories=stories,
+            reads_story_position=stories is not None,
         )
 
     async def state(
@@ -353,7 +362,7 @@ async def test_an_unknown_record_turn_outcome_leaves_a_standing_conversation_s_w
     assert report.state == "degraded"
     assert report.episode_id is None
     assert await wiring.memory.get(_ADDRESS) is not None
-    assert logs == [
+    assert _losses(logs) == [
         {
             "event": "activation_capture_degraded",
             "stage": "record_turn",
@@ -372,7 +381,7 @@ async def test_an_unreadable_conversation_cannot_claim_recorded() -> None:
     assert await wiring.memory.get(_ADDRESS) is not None
     # No fence re-read: the conversation's state decides nothing about the episode
     # (ADR-0293 §2:7).
-    assert [row["stage"] for row in logs] == ["record_turn"]
+    assert [row["stage"] for row in _losses(logs)] == ["record_turn"]
     assert all("private" not in str(row) for row in logs)
 
 
@@ -434,7 +443,7 @@ async def test_an_indeterminate_freeze_that_did_not_land_leaves_no_episode() -> 
     assert await wiring.memory.export() == []
     assert await wiring.last_turn_at(state) is None
     assert await wiring.conversations.get(str(state.conversation_id)) is not None
-    assert [(row["stage"], row["reason"]) for row in logs] == [
+    assert [(row["stage"], row["reason"]) for row in _losses(logs)] == [
         ("freeze", "failed"),
         ("freeze", "mismatch"),
     ]
@@ -588,7 +597,7 @@ async def test_a_stored_record_other_than_the_one_written_is_a_mismatch_and_leav
         await wiring.append(state)
         report = await _freeze(wiring, state)
 
-    assert [(row["stage"], row["reason"]) for row in logs] == [("append", "mismatch")]
+    assert [(row["stage"], row["reason"]) for row in _losses(logs)] == [("append", "mismatch")]
     assert report.state == "degraded"
     assert await wiring.memory.export() == []
     assert await wiring.last_turn_at(state) is None
@@ -639,11 +648,23 @@ async def test_a_cancellation_after_the_fallback_admission_commits_leaves_no_epi
 
 
 class LosesOneAppend(FakeMemoryStore):
-    """A store whose next replacing write fails without committing anything."""
+    """A store whose next replacing write fails without committing anything.
+
+    Whether it loses the next is held once, by reference, so the copy the writer binds to
+    the work's sight shares it, as it shares the records.
+    """
 
     def __init__(self) -> None:
         super().__init__(now=lambda: _AT)
-        self.lose = False
+        self._losing = [False]
+
+    @property
+    def lose(self) -> bool:
+        return self._losing[0]
+
+    @lose.setter
+    def lose(self, value: bool) -> None:
+        self._losing[0] = value
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         if self.lose and any(write.mode is MemoryWriteMode.IF_UNCHANGED for write in writes):
@@ -670,7 +691,7 @@ async def test_a_write_whose_outcome_is_unknown_and_did_not_land_is_continued_fr
     state.stages.end(ControllerRule.NOTHING_DUE, _AT)
     report = await _freeze(wiring, state)
 
-    assert [(row["stage"], row["reason"]) for row in logs] == [("append", "failed")]
+    assert [(row["stage"], row["reason"]) for row in _losses(logs)] == [("append", "failed")]
     assert report.state == "recorded"
     frozen = await wiring.memory.get(_ADDRESS)
     assert isinstance(frozen, EpisodicMemory)
@@ -746,14 +767,18 @@ async def test_a_close_puts_a_pass_that_died_unresolved_on_its_conversation() ->
     assert await episodes_on_place(wiring.memory, conversation_id) == [_ADDRESS]
 
 
-def _restarted(wiring: Wiring) -> ActivationWriter:
-    """A second process's writer over the same stores, holding no capture."""
-    return ActivationWriter(
-        memory=wiring.memory,
+def _restarted(wiring: Wiring) -> OpenEpisodes:
+    """A second process's close over the same stores, holding no capture."""
+    return OpenEpisodes(
         conversations=wiring.conversations,
-        retention=timedelta(days=30),
+        memory=wiring.memory,
         now=lambda: _AT,
-        stories=wiring.stories,
+        holds=ActivationWriter(
+            conversations=wiring.conversations,
+            stores=BoundStores(memory=wiring.memory, conversations=wiring.conversations),
+            retention=timedelta(days=30),
+            now=lambda: _AT,
+        ).holds,
     )
 
 

@@ -98,6 +98,7 @@ def _phases(
             plans=harness.plans,
             writer=ChatWriter(
                 conversations=harness.conversation_store,
+                stores=bound_stores(harness.memory, conversations=harness.conversation_store),
                 max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
             ),
             capabilities=("remember_fact", "note_reliance"),

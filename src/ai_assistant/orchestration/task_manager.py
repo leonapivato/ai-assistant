@@ -31,7 +31,10 @@ is shown: the line's chat, where the line is connected, and, for an activation t
 Scheduler started, its task's suggested places that are not gone, marked as suggested;
 for every other activation, the conversation its input came from. A conversation is gone
 once deleted, and the line's chat once the line is disconnected or the settings name
-another chat (§5:8). Nothing is cancelled because a place is gone (§5:9).
+another chat (§5:8). Nothing is cancelled because a place is gone (§5:9). Each place is
+named from what the work holds; whether one of the work's own places still stands is
+answered outside the filter, and whether any other does through the conversation store
+bound to its sight (ADR-0387 §4).
 
 **Tasks the person sets** (ADR-0340). A spawn may state a local date and time with no
 offset, read in the zone it names or in the person's zone (§3:2-§3:4), or a rule, which
@@ -154,6 +157,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.acting import ClaimingAnswer, OwnRecordsAnswer
     from ai_assistant.orchestration.activation_state import ActivationState
+    from ai_assistant.orchestration.bound_stores import BoundStores
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = [
@@ -261,24 +265,38 @@ class PlaceLists:
     It reads the conversation store for whether a conversation is gone, and asks
     ``line_connected`` whether the line is connected; the line's chat is the one the
     settings name, or none where no line is configured.
+
+    **Each place is named from what the work holds** (ADR-0387 §4:1): its input's place,
+    its task's or its asking work's suggested places, the places inputs it took came
+    from. **Whether one of the work's own places still stands is answered outside the
+    filter** (§4:2), through the chat space held unbound for that answer alone (§7:4),
+    which gives the work that answer and nothing more; **whether any other place does is
+    read through the conversation store bound to the work's sight** (§4:3), so a place it
+    does not see is not listed, as a place gone is not.
     """
 
     def __init__(
         self,
         *,
         conversations: ConversationStore,
+        stores: BoundStores,
         line: ChannelIdentity | None = None,
         line_connected: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         """Wire the builder.
 
         Args:
-            conversations: The chat space, whose conversations are places.
+            conversations: The chat space, whose conversations are places: read unbound
+                for whether one of a work's own places stands, and for nothing else
+                (ADR-0387 §4:2, §7:4).
+            stores: The holder that binds stores for a pass, whose conversation store,
+                bound to the work's sight, every other place is read through (§4:3).
             line: The line's chat, as the settings name it, or ``None`` with no line.
             line_connected: Whether the line is connected now; ``None`` reads it as
                 connected wherever it is configured.
         """
         self._conversations = conversations
+        self._stores = stores
         self._line = line
         self._line_connected = line_connected
 
@@ -288,6 +306,7 @@ class PlaceLists:
         input_place: ChannelIdentity | None,
         suggested: Sequence[str] | None,
         taken: Sequence[ChannelIdentity] = (),
+        work: ActivationState,
     ) -> tuple[ListedPlace, ...]:
         """The place list, as it stands now.
 
@@ -298,6 +317,8 @@ class PlaceLists:
                 every other activation.
             taken: The places inputs the activation took by a take came from, each of
                 which is on its list where it is not gone (ADR-0361 §7:3).
+            work: The work the list is for: its own places, decided from its inputs
+                (ADR-0387 §2:4), and its sight, which every other place is read by.
 
         Returns:
             The places, the hub chat's before the line's, each once.
@@ -307,7 +328,7 @@ class PlaceLists:
             if (
                 input_place is not None
                 and input_place.channel_type == "conversation"
-                and await self._held(input_place)
+                and await self._held(input_place, work)
             ):
                 places.append(
                     ListedPlace(
@@ -319,7 +340,7 @@ class PlaceLists:
                 channel = place_channel(one)
                 if channel is None or channel.channel_type != "conversation":
                     continue
-                if await self._held(channel):
+                if await self._held(channel, work):
                     places.append(
                         ListedPlace(channel, _HUB_CHAT, place_description(channel), suggested=True)
                     )
@@ -328,7 +349,7 @@ class PlaceLists:
             if (
                 channel.channel_type == "conversation"
                 and channel not in listed
-                and await self._held(channel)
+                and await self._held(channel, work)
             ):
                 places.append(ListedPlace(channel, _HUB_CHAT, _TAKEN_FROM))
         line = await self._connected_line()
@@ -346,18 +367,43 @@ class PlaceLists:
             )
         return tuple(places)
 
-    async def _held(self, channel: ChannelIdentity) -> bool:
+    async def _held(self, channel: ChannelIdentity, work: ActivationState) -> bool:
         """Whether a conversation is still held: one deleted is gone (§5:8).
+
+        Answered outside the filter for one of the work's own places, and through the
+        store bound to its sight for any other, which a place it does not see is gone
+        to (ADR-0387 §4:2, §4:3). Only whether it stands is read.
 
         A read that fails is no answer that it was deleted, so the conversation stays
         listed: where it is gone, the message written into it is refused, and the
         activation does not end as though it had spoken.
+
+        Raises:
+            RuntimeError: If the place is not one of the work's own and the work has no
+                sight, which a state ``admit_channel`` built always has.
         """
         try:
-            return await self._conversations.get(channel.instance_id) is not None
+            return await self._store(channel, work).get(channel.instance_id) is not None
         except ConversationStoreError:
             _log.warning("place_list_unread", stage="planning", reason="store_failed")
             return True
+
+    def _store(self, channel: ChannelIdentity, work: ActivationState) -> ConversationStore:
+        """The store whether ``channel`` stands is read through (ADR-0387 §4:2, §4:3).
+
+        The chat space for one of ``work``'s own places, and the conversation store bound
+        to its sight for any other.
+
+        Raises:
+            RuntimeError: If the place is not its own and the work has no sight.
+        """
+        if work.owns(place_of(channel)):
+            return self._conversations
+        sight = work.sight
+        if sight is None:
+            msg = "a place that is not the work's own is read only by its sight (ADR-0387 §4:3)"
+            raise RuntimeError(msg)
+        return self._stores.conversations(sight)
 
     async def _connected_line(self) -> ChannelIdentity | None:
         """The line's chat, where the line is connected (§5:11)."""

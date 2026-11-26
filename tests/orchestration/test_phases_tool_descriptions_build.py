@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Final
 
 from exchange_support import reported, section, tags, text_call
 from phases_support import open_conversation, phases_harness, say, settled, written
+from story_support import owners_work
 
 from ai_assistant.core.errors import ConnectionStoreError
 from ai_assistant.core.types import (
@@ -246,7 +247,9 @@ async def test_connections_hold_the_three_most_recent_conversations_and_an_older
     recent = [one.id for one in await harness.conversation_store.recent(limit=3)]
     origin = next(one for one in conversations if one not in recent)
 
-    shown, targets = await harness.engine._shown_connections(conversation_channel(origin))
+    # ADR-0387 §4:3: the recent conversations are read by the sight of the work shown them.
+    with owners_work():
+        shown, targets = await harness.engine._shown_connections(conversation_channel(origin))
 
     hub_chat = [one.place for one in shown if one.place.startswith("conversation:")]
     assert hub_chat == [f"conversation:{one}" for one in (origin, *recent)]

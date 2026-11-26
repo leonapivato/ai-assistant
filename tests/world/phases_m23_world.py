@@ -379,7 +379,11 @@ def build_phases_world(
         ),
         tools=tools,
         plans=plans,
-        writer=ChatWriter(conversations=chat, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES),
+        writer=ChatWriter(
+            conversations=chat,
+            stores=bound_stores(store, conversations=chat),
+            max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
+        ),
         label_arguments=EMAIL_LABEL_ARGUMENTS,
         capabilities=(SEND,) if remembers is None else (SEND, REMEMBER_CAPABILITY),
         round_limit=3,

@@ -5,6 +5,16 @@ that extends it as each stage ends (§3), and freezes it with the end entry (§4
 ``record_turn`` follows the freeze (§4:4, as ADR-0287 left it). Any capture failure
 before the freeze is confirmed ends capture and deletes the episode (§5). A restart
 closes the episodes a dead process left open (§7).
+
+**The episode is the work's own record** (ADR-0383 §7:4), so :class:`ActivationWriter`
+reads and writes it through the memory store bound to the work's sight, and reads the
+story store's position through the story store bound to it (§8:5: a store-wide figure,
+which answers alike bound or not). **Recording the turn is a write of the work's own
+turn**, made into the conversation its trigger came through outside the filter
+(ADR-0387 §3:1): the writer holds the conversation store unbound for that write alone
+(§7:4), and what it gives back reaches the work only as whether it was made (§3:4).
+**The restart's close** (:class:`OpenEpisodes`) is the engine's start's, for no work,
+and reads and writes unbound (ADR-0383 §7:8).
 """
 
 from __future__ import annotations
@@ -48,9 +58,10 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import ConversationStore, MemoryStore, StoryStore
+    from ai_assistant.core.protocols import ConversationStore, MemoryStore
     from ai_assistant.core.types import MemoryRecord
     from ai_assistant.orchestration.activation_state import ActivationState
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
 
 _log = structlog.get_logger(__name__)
 
@@ -86,31 +97,47 @@ def capture_loss(stage: str, reason: str) -> None:
 class _Writes:
     """What a frozen episode's ``record_turn`` is known to have done."""
 
-    #: ``record_turn`` returned the conversation: it stands, and it knows the turn.
+    #: ``record_turn`` was made: the conversation stands, and it knows the turn.
     verified: bool = False
 
 
 class ActivationWriter:
-    """Write one episode at its admission address, extend it, freeze it, fence it."""
+    """Write one episode at its admission address, extend it, freeze it, fence it.
+
+    Every read and write of the episode is of the memory store
+    :class:`~ai_assistant.orchestration.bound_stores.BoundStores` binds to the work's
+    sight (ADR-0383 §7:4, §7:7), which holds the episode its activation made. The
+    conversation store is held unbound for ``record_turn`` alone (ADR-0387 §3:1, §7:4).
+    """
 
     def __init__(
         self,
         *,
         conversations: ConversationStore,
-        memory: MemoryStore,
+        stores: BoundStores,
         retention: timedelta | None,
         now: Clock,
-        stories: StoryStore | None = None,
+        reads_story_position: bool = False,
     ) -> None:
         """Receive only the lifecycle's injected store contracts and capture settings.
 
-        ``stories`` is the story store whose position the admission write records
-        (ADR-0347 §4:1); with none, every episode records no position, which the
-        observer reads as it reads an episode written before the field (§4:3).
+        Args:
+            conversations: The conversation store, told unbound that the work's episode
+                landed in the conversation its trigger came through, and used for
+                nothing else (ADR-0387 §3:1, §7:4).
+            stores: The holder that binds stores for a pass: the episode is read and
+                written through its memory store, and the story store's position read
+                through its story store, each bound to the work's sight.
+            retention: The episodic horizon, ``None`` to keep forever.
+            now: The capture clock.
+            reads_story_position: Whether the holder holds the story store whose
+                position the admission write records (ADR-0347 §4:1); with none, every
+                episode records no position, which the observer reads as it reads an
+                episode written before the field (§4:3).
         """
         self._conversations = conversations
-        self._memory = memory
-        self._stories = stories
+        self._stores = stores
+        self._reads_story_position = reads_story_position
         self._retention = retention
         self._now = checked_clock(now, owner="ActivationWriter")
         #: The captures in flight, by address, from the admission write until each
@@ -153,7 +180,23 @@ class ActivationWriter:
         """Whether a capture of this process is in flight at ``address`` (ADR-0286 §7:2)."""
         return address in self._in_flight
 
-    async def admit(self, state: ActivationState, *, payload_limit: int) -> None:
+    def _episodes(self, state: ActivationState) -> Bound[MemoryStore]:
+        """The memory store bound to the work's sight, its episode among what it holds.
+
+        Raises:
+            RuntimeError: If the work has no sight, which a state
+                :func:`~ai_assistant.orchestration.activation_state.admit_channel` built
+                always has.
+        """
+        sight = state.sight
+        if sight is None:
+            msg = "a work's episode is read and written only by its sight (ADR-0383 §7:4)"
+            raise RuntimeError(msg)
+        return self._stores.memory(sight)
+
+    async def admit(  # noqa: PLR0911 — each way the admission write is not made returns
+        self, state: ActivationState, *, payload_limit: int
+    ) -> None:
         """Insert the open episode at ``activation:<activation_id>`` (ADR-0286 §2).
 
         Called once the activation is admitted and before any of its processing runs.
@@ -181,6 +224,11 @@ class ActivationWriter:
         if state.capture is not None or address is None or state.started_at is None:
             return
         try:
+            memory = self._episodes(state)
+        except RuntimeError:
+            capture_loss("admission", "sight")
+            return
+        try:
             captured_at = self._now()
         except Exception:
             capture_loss("admission", "clock")
@@ -192,7 +240,7 @@ class ActivationWriter:
         self._in_flight.setdefault(address, []).append(progress)
         # Tracked before the read awaits, so a forget landing while it is out marks this
         # capture (ADR-0293 §2:6), and the insert, the capture's next write, makes none.
-        state.stories_position = await self._stories_position()
+        state.stories_position = await self._stories_position(state)
         if progress.forgotten:
             # ADR-0286 §8:2: the next write after the mark writes nothing.
             capture_loss("admission", "forgotten")
@@ -207,7 +255,7 @@ class ActivationWriter:
         progress.uncertain = episode
         progress.possible = True
         try:
-            await self._memory.write_atomic(
+            await memory.write_atomic(
                 [MemoryWrite(record=episode, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
             )
         except MemoryStoreConflictError:
@@ -222,12 +270,17 @@ class ActivationWriter:
         progress.written = episode
         progress.uncertain = None
 
-    async def _stories_position(self) -> int | None:
-        """The story store's position for the admission write, or ``None`` (ADR-0347 §4:1)."""
-        if self._stories is None:
+    async def _stories_position(self, state: ActivationState) -> int | None:
+        """The story store's position for the admission write, or ``None`` (ADR-0347 §4:1).
+
+        Read through the story store bound to the work's sight: a store-wide figure, it
+        answers alike bound or not (ADR-0383 §8:5), and no stage shows it.
+        """
+        sight = state.sight
+        if not self._reads_story_position or sight is None:
             return None
         try:
-            return await self._stories.position()
+            return await self._stores.stories(sight).position()
         except Exception:
             _log.warning("activation.stories_position_unread")
             return None
@@ -249,16 +302,17 @@ class ActivationWriter:
         progress = state.capture
         if progress is None or progress.ended or progress.frozen:
             return
+        memory = self._episodes(state)
         progress.conversation_id = state.conversation_id
         try:
             revision = self._open(state, progress, payload_limit)
         except Exception:
             capture_loss("append", "invalid_or_oversized")
-            await self._end(progress, drain)
+            await self._end(progress, memory, drain)
             return
         if progress.uncertain is None and revision == progress.written:
             return
-        await self._replace(progress, revision, stage="append", drain=drain)
+        await self._replace(progress, memory, revision, stage="append", drain=drain)
 
     async def write(
         self,
@@ -319,11 +373,15 @@ class ActivationWriter:
             )
         finally:
             if state.capture is not None:
-                await self._finished(state.capture, conversation_id, writes, drain)
+                # A capture is held only once its admission found the work's sight.
+                await self._finished(
+                    state.capture, self._episodes(state), conversation_id, writes, drain
+                )
 
     async def _finished(
         self,
         progress: EpisodeProgress,
+        memory: Bound[MemoryStore],
         conversation_id: str | None,
         writes: _Writes,
         drain: Callable[[Awaitable[None]], Awaitable[None]],
@@ -332,12 +390,12 @@ class ActivationWriter:
         try:
             if progress.frozen:
                 if conversation_id is not None and not writes.verified:
-                    await drain(self._fence(progress))
+                    await drain(self._fence(progress, memory))
             elif not progress.ended:
                 # Cut short before the freeze was confirmed — cancelled, timed out or
                 # raised: §5:2's capture failure.
                 capture_loss("freeze", "unconfirmed")
-                await self._end(progress, drain)
+                await self._end(progress, memory, drain)
         finally:
             self._settled(progress)
 
@@ -349,93 +407,7 @@ class ActivationWriter:
         """End a capture finalization could not build a record for (ADR-0286 §5:2)."""
         progress = state.capture
         if progress is not None:
-            await self._settle(progress, drain)
-
-    async def close_open(self, *, stage_limit: int, payload_limit: int) -> None:
-        """Close every open episode no capture of this process holds (ADR-0286 §7).
-
-        Each is frozen ``interrupted`` / ``hub_stopped`` by an end entry due
-        ``hub_stopped`` with outcome ``done``, at this clock's one reading. The
-        placement and ``Provenance.derived_from_external`` stay as stored, and
-        ``record_turn`` is called only where the episode is on a
-        conversation's channel; a ``None`` from it keeps the episode (ADR-0293 §2:7,
-        superseding §7:3 in its deletion). The closed record is measured against
-        ADR-0275 §9:1's bound as every write of an episode is (§3:6), and one that
-        exceeds it is deleted by its id as a capture failure (§5:2).
-
-        Raises:
-            MemoryStoreError: If the store cannot be read or written (§7:4).
-            ConversationStoreError: If ``record_turn`` fails.
-        """
-        after: int | None = None
-        while True:
-            page = await self._memory.open_episodes(after=after, limit=_OPEN_PAGE)
-            for entry in page:
-                if not self.holds(entry.record.id):
-                    await self._close(
-                        entry.record, stage_limit=stage_limit, payload_limit=payload_limit
-                    )
-            if len(page) < _OPEN_PAGE:
-                return
-            after = page[-1].number
-
-    async def _close(self, stored: EpisodicMemory, *, stage_limit: int, payload_limit: int) -> None:
-        processing = stored.processing_record
-        if processing is None or not processing.is_open:  # pragma: no cover — the read's own
-            return
-        now = self._now()
-        # The bound is the record's own where it already bit. Otherwise it is the
-        # configured one, but never below the entries already stored: the record does
-        # not carry its limit (ADR-0280 §6:6), and under a setting lowered since the
-        # pass wrote them, a shorter bound is a revision that does not extend the
-        # stored record (§3:3), which the store refuses at every start.
-        limit = (
-            len(processing.stages)
-            if processing.stages_elided
-            else max(stage_limit, len(processing.stages))
-        )
-        stages, elided = StageRecord(list(processing.stages)).bounded(
-            limit, ending=(ControllerRule.HUB_STOPPED, now)
-        )
-        frozen = EpisodeProcessingRecord.model_validate(
-            {
-                **dict(processing),
-                "trigger": _on_its_conversation(processing.trigger),
-                "status": ProcessingStatus.INTERRUPTED,
-                "reason": ProcessingReason.HUB_STOPPED,
-                "ended_at": now,
-                "stages": stages,
-                "stages_elided": processing.stages_elided + elided,
-                "understanding_omitted": _closed_omission(processing),
-            }
-        )
-        closed = stored.model_copy(update={"processing_record": frozen})
-        closed = closed.model_copy(update={"content": episode_content(closed)})
-        try:
-            _bounded(closed, payload_limit)
-        except ValueError:
-            # §3:6 on the freezing write the close is (§7:3): a capture failure, so
-            # the episode is deleted by its id (§5:2) rather than left open for every
-            # later start to fail on again.
-            capture_loss("close", "invalid_or_oversized")
-            await self._memory.delete(stored.id)
-            return
-        await self._memory.write_atomic(
-            [
-                MemoryWrite(
-                    record=closed,
-                    mode=MemoryWriteMode.IF_UNCHANGED,
-                    expected_revision=stored.revision,
-                )
-            ]
-        )
-        channel = frozen.trigger.channel
-        if channel is None or channel.channel_type != "conversation":
-            return
-        # A ``None`` is a deleted conversation, and the episode is kept (ADR-0293 §2:7).
-        await self._conversations.record_turn(
-            channel.instance_id, episode_id=stored.id, occurred_at=stored.occurred_at
-        )
+            await self._settle(progress, self._episodes(state), drain)
 
     async def _freeze(  # noqa: PLR0913 — the capture, its record, its writes and the three seams
         self,
@@ -450,6 +422,7 @@ class ActivationWriter:
     ) -> EpisodeCaptureReport:
         if progress.ended:
             return state.degraded_report()
+        memory = self._episodes(state)
         conversation_id = state.conversation_id
         if conversation_id is not None:
             # ADR-0275 §4:5 as ADR-0283 partially supersedes it: a conversational
@@ -462,11 +435,11 @@ class ActivationWriter:
             episode = self._frozen(state, processing, progress, payload_limit)
         except Exception:
             capture_loss("preflight", "invalid_or_oversized")
-            await self._end(progress, drain)
+            await self._end(progress, memory, drain)
             return state.degraded_report()
-        confirmed = await self._replace(progress, episode, stage="freeze", drain=drain)
+        confirmed = await self._replace(progress, memory, episode, stage="freeze", drain=drain)
         if confirmed is None:
-            confirmed = await self._confirm(progress, episode, drain)
+            confirmed = await self._confirm(progress, memory, episode, drain)
         if not confirmed:
             return state.degraded_report()
         progress.frozen = True
@@ -492,6 +465,7 @@ class ActivationWriter:
     async def _replace(
         self,
         progress: EpisodeProgress,
+        memory: Bound[MemoryStore],
         revision: EpisodicMemory,
         *,
         stage: str,
@@ -507,22 +481,22 @@ class ActivationWriter:
         if progress.forgotten:
             # ADR-0286 §8:2: the next write after the mark writes nothing.
             capture_loss(stage, "forgotten")
-            await self._end(progress, drain)
+            await self._end(progress, memory, drain)
             return False
         refusal: str | None
         try:
-            stored = await self._memory.get(progress.address)
+            stored = await memory.get(progress.address)
         except Exception:
             stored, refusal = None, "read_failed"
         else:
             refusal = _refusal(stored, _expected(stored, progress), revision)
         if stored is None or refusal is not None:
             capture_loss(stage, refusal or "mismatch")
-            await self._end(progress, drain)
+            await self._end(progress, memory, drain)
             return False
         progress.uncertain = revision
         try:
-            await self._memory.write_atomic(
+            await memory.write_atomic(
                 [
                     MemoryWrite(
                         record=revision,
@@ -534,7 +508,7 @@ class ActivationWriter:
         except MemoryStoreStaleError:
             progress.uncertain = None
             capture_loss(stage, "mismatch")
-            await self._end(progress, drain)
+            await self._end(progress, memory, drain)
             return False
         except Exception:
             capture_loss(stage, "failed")
@@ -546,45 +520,52 @@ class ActivationWriter:
     async def _confirm(
         self,
         progress: EpisodeProgress,
+        memory: Bound[MemoryStore],
         episode: EpisodicMemory,
         drain: Callable[[Awaitable[None]], Awaitable[None]],
     ) -> bool:
         """Settle a freezing write whose outcome is not known, by one read (§3:5)."""
         try:
-            stored = await self._memory.get(progress.address)
+            stored = await memory.get(progress.address)
         except Exception:
             capture_loss("freeze", "read_failed")
-            await self._end(progress, drain)
+            await self._end(progress, memory, drain)
             return False
         if stored is None or not _carries(stored, episode):
             capture_loss("freeze", "mismatch")
-            await self._end(progress, drain)
+            await self._end(progress, memory, drain)
             return False
         progress.written = episode
         progress.uncertain = None
         return True
 
     async def _settle(
-        self, progress: EpisodeProgress, drain: Callable[[Awaitable[None]], Awaitable[None]]
+        self,
+        progress: EpisodeProgress,
+        memory: Bound[MemoryStore],
+        drain: Callable[[Awaitable[None]], Awaitable[None]],
     ) -> None:
         """End an unfrozen capture and stop tracking it."""
         try:
             if not progress.frozen and not progress.ended:
-                await self._end(progress, drain)
+                await self._end(progress, memory, drain)
         finally:
             self._settled(progress)
 
     async def _end(
-        self, progress: EpisodeProgress, drain: Callable[[Awaitable[None]], Awaitable[None]]
+        self,
+        progress: EpisodeProgress,
+        memory: Bound[MemoryStore],
+        drain: Callable[[Awaitable[None]], Awaitable[None]],
     ) -> None:
         """End capture, and delete the episode by its id through the drain (§5:2)."""
         progress.ended = True
         if progress.possible:
-            await drain(self._delete(progress))
+            await drain(self._delete(progress, memory))
 
-    async def _delete(self, progress: EpisodeProgress) -> None:
+    async def _delete(self, progress: EpisodeProgress, memory: Bound[MemoryStore]) -> None:
         try:
-            await self._memory.delete(progress.address)
+            await memory.delete(progress.address)
         except Exception:
             # The episode stays open, and the next restart closes it (ADR-0286 §5).
             capture_loss("compensate_episode", "failed")
@@ -598,18 +579,28 @@ class ActivationWriter:
         episode: EpisodicMemory,
         writes: _Writes,
     ) -> None:
-        """Tell the conversation its episode landed, which is the verification (§7:2)."""
+        """Tell the conversation its episode landed, which is the verification (§7:2).
+
+        ADR-0387 §3:1: a write of the work's own turn into the conversation its trigger
+        came through, ``conversation_id``, made outside the filter as the store makes it,
+        with its own checks: a conversation gone refuses it, and the episode is kept
+        (§6:1). The conversation it gives back reaches nothing: only whether the write
+        was made is read (§3:4).
+        """
         try:
-            standing = await self._conversations.record_turn(
-                conversation_id,
-                episode_id=episode.id,
-                occurred_at=episode.occurred_at,
+            made = (
+                await self._conversations.record_turn(
+                    conversation_id,
+                    episode_id=episode.id,
+                    occurred_at=episode.occurred_at,
+                )
+                is not None
             )
         except Exception:
             # Indeterminate, so the fence re-reads the conversation (§7:4's posture).
             capture_loss("record_turn", "failed")
             return
-        if standing is None:
+        if not made:
             # The conversation was deleted; the episode is kept (ADR-0293 §2:7).
             return
         writes.verified = True
@@ -624,7 +615,7 @@ class ActivationWriter:
         if not held:
             del self._in_flight[progress.address]
 
-    async def _fence(self, progress: EpisodeProgress) -> None:
+    async def _fence(self, progress: EpisodeProgress, memory: Bound[MemoryStore]) -> None:
         """Destroy a frozen episode the user forgot while it was captured (ADR-0286 §8).
 
         **A forgotten capture is destroyed whatever its conversation's state**,
@@ -636,7 +627,7 @@ class ActivationWriter:
         if not progress.forgotten:
             return
         try:
-            await self._memory.delete(progress.address)
+            await memory.delete(progress.address)
         except Exception:
             capture_loss("compensate_episode", "failed")
 
@@ -710,6 +701,124 @@ class ActivationWriter:
         episode = episode.model_copy(update={"content": episode_content(episode)})
         _bounded(episode, payload_limit)
         return episode
+
+
+class OpenEpisodes:
+    """Close the episodes a dead process left open, at the engine's start (ADR-0286 §7).
+
+    The engine's start, for no work (ADR-0383 §7:8): it walks the memory store's open
+    episodes, freezes each and tells its conversation, every read and write unbound, as
+    ADR-0387 §7 leaves the closing of open episodes. It passes over each episode a
+    capture of this process holds (``holds``, :meth:`ActivationWriter.holds`).
+    """
+
+    def __init__(
+        self,
+        *,
+        conversations: ConversationStore,
+        memory: MemoryStore,
+        now: Clock,
+        holds: Callable[[str], bool],
+    ) -> None:
+        """Wire the close to the stores the start reads unbound, and the writer's account.
+
+        Args:
+            conversations: The conversation store, told of each closed episode that is on
+                a conversation's channel.
+            memory: The memory store holding the open episodes.
+            now: The clock the close reads once per episode.
+            holds: Whether a capture of this process is in flight at an address.
+        """
+        self._conversations = conversations
+        self._memory = memory
+        self._now = checked_clock(now, owner="ActivationWriter")
+        self._holds = holds
+
+    async def close_open(self, *, stage_limit: int, payload_limit: int) -> None:
+        """Close every open episode no capture of this process holds (ADR-0286 §7).
+
+        Each is frozen ``interrupted`` / ``hub_stopped`` by an end entry due
+        ``hub_stopped`` with outcome ``done``, at this clock's one reading. The
+        placement and ``Provenance.derived_from_external`` stay as stored, and
+        ``record_turn`` is called only where the episode is on a
+        conversation's channel; a ``None`` from it keeps the episode (ADR-0293 §2:7,
+        superseding §7:3 in its deletion). The closed record is measured against
+        ADR-0275 §9:1's bound as every write of an episode is (§3:6), and one that
+        exceeds it is deleted by its id as a capture failure (§5:2).
+
+        Raises:
+            MemoryStoreError: If the store cannot be read or written (§7:4).
+            ConversationStoreError: If ``record_turn`` fails.
+        """
+        after: int | None = None
+        while True:
+            page = await self._memory.open_episodes(after=after, limit=_OPEN_PAGE)
+            for entry in page:
+                if not self._holds(entry.record.id):
+                    await self._close(
+                        entry.record, stage_limit=stage_limit, payload_limit=payload_limit
+                    )
+            if len(page) < _OPEN_PAGE:
+                return
+            after = page[-1].number
+
+    async def _close(self, stored: EpisodicMemory, *, stage_limit: int, payload_limit: int) -> None:
+        processing = stored.processing_record
+        if processing is None or not processing.is_open:  # pragma: no cover — the read's own
+            return
+        now = self._now()
+        # The bound is the record's own where it already bit. Otherwise it is the
+        # configured one, but never below the entries already stored: the record does
+        # not carry its limit (ADR-0280 §6:6), and under a setting lowered since the
+        # pass wrote them, a shorter bound is a revision that does not extend the
+        # stored record (§3:3), which the store refuses at every start.
+        limit = (
+            len(processing.stages)
+            if processing.stages_elided
+            else max(stage_limit, len(processing.stages))
+        )
+        stages, elided = StageRecord(list(processing.stages)).bounded(
+            limit, ending=(ControllerRule.HUB_STOPPED, now)
+        )
+        frozen = EpisodeProcessingRecord.model_validate(
+            {
+                **dict(processing),
+                "trigger": _on_its_conversation(processing.trigger),
+                "status": ProcessingStatus.INTERRUPTED,
+                "reason": ProcessingReason.HUB_STOPPED,
+                "ended_at": now,
+                "stages": stages,
+                "stages_elided": processing.stages_elided + elided,
+                "understanding_omitted": _closed_omission(processing),
+            }
+        )
+        closed = stored.model_copy(update={"processing_record": frozen})
+        closed = closed.model_copy(update={"content": episode_content(closed)})
+        try:
+            _bounded(closed, payload_limit)
+        except ValueError:
+            # §3:6 on the freezing write the close is (§7:3): a capture failure, so
+            # the episode is deleted by its id (§5:2) rather than left open for every
+            # later start to fail on again.
+            capture_loss("close", "invalid_or_oversized")
+            await self._memory.delete(stored.id)
+            return
+        await self._memory.write_atomic(
+            [
+                MemoryWrite(
+                    record=closed,
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=stored.revision,
+                )
+            ]
+        )
+        channel = frozen.trigger.channel
+        if channel is None or channel.channel_type != "conversation":
+            return
+        # A ``None`` is a deleted conversation, and the episode is kept (ADR-0293 §2:7).
+        await self._conversations.record_turn(
+            channel.instance_id, episode_id=stored.id, occurred_at=stored.occurred_at
+        )
 
 
 def _trigger_modality(state: ActivationState) -> Modality:

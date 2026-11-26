@@ -2,10 +2,11 @@
 
 **What it fails on.** Any class or function under ``src/ai_assistant/orchestration/``
 that takes or holds one of the six store Protocols of §7:1 or ``MemoryWriter`` unbound,
-save the holder that binds stores for a pass, the holders §7:8, §7:12 and §7:13 name, and
-a closed list of holders not yet converted, each naming the lane of milestone 22 that
-removes it. The list only shrinks: an entry that no longer holds a store fails too, so a
-lane that converts a holder takes its entry off in the same change.
+save the holder that binds stores for a pass, the holders §7:8, §7:12 and §7:13 name, the
+holders ADR-0387 §7:4 admits for the conversation store alone, and a closed list of
+holders not yet converted, each naming the lane of milestone 22 that removes it. The
+list only shrinks: an entry that no longer holds a store fails too, so a lane that
+converts a holder takes its entry off in the same change.
 
 **How it reads "takes or holds".** By annotation, which strict typing makes total: every
 parameter and return of every function and method, and every annotated name, a class's
@@ -90,13 +91,29 @@ NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
     # due, the window an episode must have left (ADR-0329 §7:1, §15:3); the windows
     # stage walks it bound (`walk`).
     "understanding.py:RecentEpisodes": "§7:12",
+    # §7:8: the restart's close of the episodes a dead process left open, the engine's
+    # start's (ADR-0286 §7), which ADR-0387 §7 leaves as it is.
+    "activation_writer.py:OpenEpisodes": "§7:8",
+}
+
+#: The holders that make ADR-0387 §3's writes of a work's own turn and answer its §4:2,
+#: which §7:4 lets hold the conversation store unbound, each for those alone and handing
+#: it to no stage. Each holds the conversation store and no other store unbound.
+OWN_TURN_HOLDERS: Final[dict[str, str]] = {
+    # §3:1: a message into one of the work's own places; every other place through the
+    # store bound to its sight (§3:2).
+    "chat.py:ChatWriter": "ADR-0387 §7:4",
+    # §3:1: recording the turn; the episode is read and written bound (ADR-0383 §7:4).
+    "activation_writer.py:ActivationWriter": "ADR-0387 §7:4",
+    # §4:2: whether one of the work's own places stands; every other place bound (§4:3).
+    "task_manager.py:PlaceLists": "ADR-0387 §7:4",
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
-#: B8d the plan store's users, authorizing, acting, tasks, approvals and the holders
-#: ADR-0387 names, B9 the observer's pin pass, B9b the upkeep runs and a tidy-up a work
-#: asks for, B10 the owner's own acts (ADR-0385); B8b's windows, B8c's stories, B8e's
-#: look-ups, person block and matters and B9a's observer reads are converted, save the
+#: B8d the plan store's users, authorizing, acting, tasks and approvals, B9 the observer's
+#: pin pass, B9b the upkeep runs and a tidy-up a work asks for, B10 the owner's own acts
+#: (ADR-0385); B8b's windows, B8c's stories, B8e's look-ups, person block and matters,
+#: B8f's writes of a work's own turn and B9a's observer reads are converted, save the
 #: parts named here for a later lane. A holder more than one lane converts names the
 #: last of them. **Only shrinks.** A holder whose last unbound read is one §7:8, §7:12 or
 #: §7:13 names moves to :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest:
@@ -104,8 +121,6 @@ NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
 #: §2's unchanged jobs (§7:8).
 NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "acting.py:ActingStage": "B8d",
-    # The work's own episode (B8d, ADR-0387); closing open episodes is §7:8's.
-    "activation_writer.py:ActivationWriter": "B8d",
     "approval_calls.py:ApprovalCalls": "B8d",
     "authorizer.py:AuthorizingStage": "B8d",
     # The phases' pending candidates (B8d) and the owner's (B10).
@@ -114,9 +129,8 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "candidates.py:_page_candidates": "B10",
     "candidates.py:_approved_candidates": "B10",
     "change_stream.py:ChangeStream": "B10",
-    # The phases' message writer, a work's turn in its own place (ADR-0387).
-    "chat.py:ChatWriter": "B8d",
-    # The surface's acts (B10); its sweeps are §7:8's.
+    # The surface's acts (B10); its sweeps are §7:8's. Its `begin`, which marks the
+    # trigger's conversation active as a work's turn begins, is admitted by ADR-0387 §7:4.
     "conversations.py:ConversationLifecycle": "B10",
     "conversations.py:conversation_state": "B10",
     "conversations.py:episodes_on_place": "B10",
@@ -179,7 +193,6 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "story_standing.py:_member_count": "B10",
     "story_tidy_up.py:StoryTidyUp": "B9b",
     "story_tidy_up.py:ScheduledTidyUp": "B9b",
-    "task_manager.py:PlaceLists": "B8d",
     "task_manager.py:TaskManager": "B8d",
     "task_rules.py:PersonZones": "B8d",
     # The line's cards: a work's approval (B8d) and the owner's tap (B10); the line's
@@ -325,7 +338,7 @@ def unbound_holders(root: Path = _ROOT) -> dict[str, frozenset[str]]:
 
 def test_no_holder_outside_the_lists_takes_or_holds_a_store_unbound() -> None:
     """§9:1: a stage holds the holder that gives a store only for a sight, never a store."""
-    allowed = {THE_HOLDER, *NAMED_BY_THE_DECISION, *NOT_YET_CONVERTED}
+    allowed = {THE_HOLDER, *NAMED_BY_THE_DECISION, *OWN_TURN_HOLDERS, *NOT_YET_CONVERTED}
     stray = {key: sorted(stores) for key, stores in unbound_holders().items() if key not in allowed}
     assert stray == {}, (
         "these take or hold a store unbound: read through the holder "
@@ -338,15 +351,29 @@ def test_every_entry_still_holds_a_store_so_the_list_only_shrinks() -> None:
     """An entry whose holder no longer holds a store comes off the list in the same change."""
     held = unbound_holders()
     gone = sorted(
-        key for key in (THE_HOLDER, *NAMED_BY_THE_DECISION, *NOT_YET_CONVERTED) if key not in held
+        key
+        for key in (THE_HOLDER, *NAMED_BY_THE_DECISION, *OWN_TURN_HOLDERS, *NOT_YET_CONVERTED)
+        if key not in held
     )
     assert gone == [], "these hold no store unbound any more: take them off the list"
 
 
 def test_every_unconverted_holder_names_a_lane_and_none_is_named_twice() -> None:
     assert set(NOT_YET_CONVERTED.values()) <= _LANES
-    assert not set(NOT_YET_CONVERTED) & set(NAMED_BY_THE_DECISION)
-    assert THE_HOLDER not in NOT_YET_CONVERTED
+    named = (set(NOT_YET_CONVERTED), set(NAMED_BY_THE_DECISION), set(OWN_TURN_HOLDERS))
+    assert all(not one & other for one in named for other in named if one is not other)
+    assert THE_HOLDER not in {*NOT_YET_CONVERTED, *OWN_TURN_HOLDERS}
+
+
+def test_the_holders_of_a_works_own_turn_hold_the_conversation_store_alone() -> None:
+    """ADR-0387 §7:4, §8: the chat writer, the episode writer and the place lists hold the
+    conversation store unbound for a work's own turn alone; every other store they read
+    is bound (B8f), and no other holder is admitted by that clause."""
+    held = unbound_holders()
+    assert {key: held.get(key) for key in OWN_TURN_HOLDERS} == dict.fromkeys(
+        OWN_TURN_HOLDERS, frozenset({"ConversationStore"})
+    )
+    assert set(OWN_TURN_HOLDERS.values()) == {"ADR-0387 §7:4"}
 
 
 def test_the_stages_this_lane_converted_hold_no_store() -> None:

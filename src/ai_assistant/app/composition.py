@@ -2493,6 +2493,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # ADR-0347 §4:1: the story store each episode's admission write reads
                 # its position from, the one every story stage writes.
                 stories=stories,
+                # ADR-0383 §7:4: the one holder, through which a work's episode is read and
+                # written, bound to its sight; the turn it records is ADR-0387 §3:1's.
+                stores=pass_stores,
             ),
             # Leg 10's upcoming-event producer (ADR-0132). **The first holder of
             # ADR-0130 §3's seam**, and the reason `notification_writer` above
@@ -3171,7 +3174,14 @@ def _build_phase_path(
         ),
         tools=tools,
         plans=seams.plans,
-        writer=ChatWriter(conversations=seams.chat, max_payload_bytes=seams.max_payload_bytes),
+        # ADR-0387 §3: a message into one of a work's own places is written through the chat
+        # space outside the filter, and into any other through the one holder, bound to the
+        # work's sight.
+        writer=ChatWriter(
+            conversations=seams.chat,
+            stores=seams.pass_stores,
+            max_payload_bytes=seams.max_payload_bytes,
+        ),
         label_arguments={
             **STORY_LABEL_ARGUMENTS,
             **LOOK_UP_LABEL_ARGUMENTS,

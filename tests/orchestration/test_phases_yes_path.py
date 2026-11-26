@@ -415,6 +415,7 @@ class _Hub:
             writer=writer
             or ChatWriter(
                 conversations=harness.conversation_store,
+                stores=bound_stores(harness.memory, conversations=harness.conversation_store),
                 max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
             ),
             capabilities=_CAPABILITIES,

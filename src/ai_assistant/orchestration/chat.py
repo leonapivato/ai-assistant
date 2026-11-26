@@ -64,6 +64,9 @@ fixed *couldn't finish* message, listing any effect that did happen
 (:func:`couldnt_finish`; ADR-0307 §3, ADR-0317 §3). A restart writes nothing (§9:2):
 an activation cancelled by a shutdown has its episode closed as interrupted and nothing
 is written for it, and the conversation's current state shows *interrupted* (§8:3).
+A message into one of the work's own places, the places its inputs came through, is
+written outside the filter; into any other, through the store bound to its sight
+(ADR-0387 §3:1, §3:2).
 
 Nothing concrete is imported: the conversation store and the holder arrive by injection,
 and each store is seen only through its Protocol (CLAUDE.md golden rule 1).
@@ -90,6 +93,8 @@ from ai_assistant.core.types import (
     NewMessage,
     TranscriptMessage,
 )
+from ai_assistant.orchestration.activation_state import active_state, work_sight
+from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.conversations import conversation_channel, fitted_message
 from ai_assistant.orchestration.understanding import TranscriptWindow, WrittenBy
 
@@ -265,17 +270,35 @@ class ChatWriter:
     It adds an assistant message to a conversation, held to the writer's rules —
     text only, and a size bound (§7:3) — and the message is *sent* once the
     conversation has recorded it, whatever devices are showing it (§6:12).
+
+    **A message of a work's own turn goes into its own place outside the filter**
+    (ADR-0387 §3:1, §8): where the conversation is one of the running work's own
+    places, as :meth:`~ai_assistant.orchestration.activation_state.ActivationState.owns`
+    decides from its inputs alone (§2:4), the message is written through the chat space
+    unbound, as the store writes it, with every check of its own (§3:3). **Into any other
+    place it goes through the store bound to the work's sight** (§3:2, ADR-0383 §7:5), so
+    a conversation that sight does not see refuses it as one never started would. The
+    chat space is held unbound for that write alone, and handed to no stage (ADR-0387
+    §7:4). A message is written only for a running work: outside one there is neither a
+    work's own place nor a sight to write through.
     """
 
-    def __init__(self, *, conversations: ConversationStore, max_payload_bytes: int) -> None:
+    def __init__(
+        self, *, conversations: ConversationStore, stores: BoundStores, max_payload_bytes: int
+    ) -> None:
         """Wire the writer to the chat space and the payload limit its reads are held to.
 
         Args:
-            conversations: The chat space.
+            conversations: The chat space, written unbound into a work's own place alone
+                (ADR-0387 §3:1, §7:4).
+            stores: The holder that binds stores for a pass, whose conversation store,
+                bound to the running work's sight, every other place is written through
+                (ADR-0387 §3:2).
             max_payload_bytes: The contract limit, so a message the writer records is
                 one a read can return (``fitted_message``).
         """
         self._conversations = conversations
+        self._stores = stores
         self._max_payload_bytes = max_payload_bytes
 
     def fitted(self, conversation_id: str, message: NewMessage) -> NewMessage:
@@ -294,17 +317,41 @@ class ChatWriter:
         """Write one assistant message into a conversation, or ``None`` where it is gone.
 
         A conversation deleted while its activation ran is not written into: deleting
-        it removed the place (§2:3), and a message is never what creates one (§2:2).
+        it removed the place (§2:3), and a message is never what creates one (§2:2). A
+        place that is not one of the running work's own and that its sight does not see
+        is gone to it alike (ADR-0383 §8:2).
+
+        The receipt is code's delivery bookkeeping: its position goes into the work's
+        effect record alone, and reaches no stage, model or surface (ADR-0387 §3:4).
 
         Raises:
             ConversationStoreError: If the store cannot be written.
+            RuntimeError: If no work is running here, whose message it would be.
         """
         fitted = self.fitted(conversation_id, message)
+        store = self._store_for(conversation_id)
         try:
-            return await self._conversations.append_message(conversation_id, fitted)
+            return await store.append_message(conversation_id, fitted)
         except UnknownConversationError:
             _log.info("chat_message_unwritten", reason="conversation_gone")
             return None
+
+    def _store_for(self, conversation_id: str) -> ConversationStore:
+        """The store a message into ``conversation_id`` is written through (ADR-0387 §3).
+
+        The chat space unbound into one of the running work's own places, and the store
+        bound to its sight into any other (§3:1, §3:2).
+
+        Raises:
+            RuntimeError: If no work is running here.
+        """
+        work = active_state()
+        if work is None:
+            msg = "a message is written only for a running work (ADR-0387 §3)"
+            raise RuntimeError(msg)
+        if work.owns(place_of(conversation_channel(conversation_id))):
+            return self._conversations
+        return self._stores.conversations(work_sight())
 
 
 class ChatReader:

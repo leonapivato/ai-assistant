@@ -153,7 +153,6 @@ from ai_assistant.orchestration.channels import (
 from ai_assistant.orchestration.chat import (
     ChatInput,
     ChatReader,
-    ChatWriter,
     couldnt_finish,
 )
 from ai_assistant.orchestration.conversations import (
@@ -164,6 +163,7 @@ from ai_assistant.orchestration.conversations import (
     episodes_on_place,
     fit_changes,
     fit_transcript,
+    fitted_message,
 )
 
 # ADR-0206 §3's placement is **named rather than copied**, exactly as ADR-0087 §7
@@ -590,16 +590,17 @@ class FakeAssistantEngine:
         #: written message recorded and waiting, so no assistant message lands in a
         #: transcript or the change stream behind the case's back.
         self.chat_reader = chat_reader
-        #: ADR-0293 §6's reader and its writer. **The engine's own reader and
-        #: writer** over this fake's chat space, so the reading — every message starts
-        #: its own activation after the start wait, whatever runs, so several may run
-        #: from one conversation at once (ADR-0349 §8:1) — and the bookkeeping are the
-        #: engine's by construction rather than a copy kept in step by hand; what this
-        #: fake supplies is the activation (:meth:`_read_in`), which writes a canned
-        #: reply naming its input. Its reads are tasks held here, so none is collected
-        #: mid-run.
+        #: ADR-0293 §6's reader. **The engine's own reader** over this fake's chat
+        #: space, so the reading — every message starts its own activation after the
+        #: start wait, whatever runs, so several may run from one conversation at once
+        #: (ADR-0349 §8:1) — and the bookkeeping are the engine's by construction rather
+        #: than a copy kept in step by hand; what this fake supplies is the activation
+        #: (:meth:`_read_in`), which writes a canned reply naming its input, cut to fit
+        #: as the engine's writer cuts it (``fitted_message``). The engine's writer
+        #: writes only for a running work (ADR-0387 §3), which this fake's activation
+        #: is not, so the fake writes its reply into the conversation the input came
+        #: from itself. Its reads are tasks held here, so none is collected mid-run.
         self._chat_reads: set[asyncio.Task[None]] = set()
-        self._chat_writer = ChatWriter(conversations=self.chat, max_payload_bytes=max_payload_bytes)
         self._reader = ChatReader(
             conversations=self.chat,
             activate=self._read_in,
@@ -2159,12 +2160,12 @@ class FakeAssistantEngine:
         """
         conversation_id = activation.conversation_id
         assert conversation_id is not None  # noqa: S101 — a reader's input names its conversation
-        fitted = self._chat_writer.fitted(conversation_id, message)
+        fitted = fitted_message(conversation_id, message, max_bytes=self._max_payload_bytes)
         try:
-            receipt = await self._chat_writer.send(conversation_id, fitted)
-        except ConversationStoreError:
+            receipt = await self.chat.append_message(conversation_id, fitted)
+        except ConversationStoreError:  # gone, its unknown-conversation refusal among them
             return
-        if receipt is not None and receipt.outcome is SendOutcome.RECORDED:
+        if receipt.outcome is SendOutcome.RECORDED:
             activation.said(fitted.text)
 
     async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
