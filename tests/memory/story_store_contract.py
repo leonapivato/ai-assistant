@@ -55,6 +55,13 @@ note, a summary, a version and a log line carrying none of their own; and a home
 ``home_may_be_written`` does not allow refused with ``ValueError`` before any check or
 write (ADR-0386 §6:2), an empty create's included.
 
+And ADR-0383 §4:7: a write stays in its home. A create, a link or a split naming a story
+member of another home than the story it mints or writes, and a merge or a move between
+two stories of two homes, are each refused ``another_home``, naming the story of the
+other home, and write nothing, with the same write within one home beside each
+succeeding; the refusal takes its place after the stories are found standing and before
+the operation's own rule and the flag.
+
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
 """
@@ -121,6 +128,23 @@ async def made(store: StoryStore, *members: StoryMember) -> str:
     assert outcome.refusal is None, outcome
     assert outcome.story_id is not None
     return outcome.story_id
+
+
+async def homed(store: StoryStore, home: RecordHome, *members: StoryMember) -> str:
+    """Create a story in ``home`` holding ``members`` and return its id."""
+    outcome = await store.create(members, home=home, actor=_OWNER)
+    assert outcome.refusal is None, outcome
+    assert outcome.story_id is not None
+    return outcome.story_id
+
+
+#: The two homes a write may carry (ADR-0383 §2:3), each against the other: a story's
+#: own and another one, for the cases where a write would join the two (§4:7).
+_TWO_HOMES = [
+    (RecordHome.owners(), RecordHome.shared()),
+    (RecordHome.shared(), RecordHome.owners()),
+]
+_TWO_HOMES_IDS = ["owners-and-shared", "shared-and-owners"]
 
 
 async def held(store: StoryStore, story_id: str) -> list[StoryMember]:
@@ -336,8 +360,8 @@ class StoryStoreContract:
     async def test_no_write_changes_a_storys_home_a_merge_included(self, store: StoryStore) -> None:
         """ADR-0383 §4:6: every write that changes a story leaves its home as it was.
 
-        Each write here joins records of one home: whether a write joining two homes is
-        refused is ADR-0383 §4:7's, which this suite does not yet hold.
+        Each write here joins records of one home: a write joining two homes is refused
+        (§4:7), as the cases under "a write stays in its home" hold.
         """
         shared = [
             await store.create([act(one)], home=RecordHome.shared(), actor=_OWNER)
@@ -377,6 +401,156 @@ class StoryStoreContract:
             await store.create(members, home=home, actor=_OWNER)
 
         assert await everything(store) == before
+
+    # --- a write stays in its home (ADR-0383 §4:7) -----------------------------
+
+    @pytest.mark.parametrize(("home", "other"), _TWO_HOMES, ids=_TWO_HOMES_IDS)
+    async def test_a_create_naming_a_story_member_of_another_home_is_refused(
+        self, store: StoryStore, home: RecordHome, other: RecordHome
+    ) -> None:
+        """§4:7, "as a member": refused ``another_home``, naming the member, writing nothing.
+
+        A create naming a story member of its own home beside it succeeds.
+        """
+        elsewhere = await homed(store, other, act("a1"))
+        alike = await homed(store, home, act("a2"))
+        before = await everything(store)
+
+        outcome = await store.create([act("a3"), sub(elsewhere)], home=home, actor=_OWNER)
+
+        refused(outcome, StoryRefusalReason.ANOTHER_HOME)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == elsewhere
+        assert await everything(store) == before
+        same = await store.create([act("a3"), sub(alike)], home=home, actor=_OWNER)
+        assert same.refusal is None, same
+
+    @pytest.mark.parametrize(("home", "other"), _TWO_HOMES, ids=_TWO_HOMES_IDS)
+    async def test_a_link_naming_a_story_member_of_another_home_is_refused(
+        self, store: StoryStore, home: RecordHome, other: RecordHome
+    ) -> None:
+        """§4:7: a link adds no story of another home as a member; one of its own, it does."""
+        story_id = await homed(store, home, act("a1"))
+        elsewhere = await homed(store, other, act("a2"))
+        alike = await homed(store, home, act("a3"))
+        before = await everything(store)
+
+        outcome = await store.link(story_id, [sub(alike), sub(elsewhere)], actor=_OWNER)
+
+        refused(outcome, StoryRefusalReason.ANOTHER_HOME)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == elsewhere
+        assert await everything(store) == before
+        same = await store.link(story_id, [sub(alike)], actor=_OWNER)
+        assert same.refusal is None, same
+        assert await held(store, story_id) == [act("a1"), sub(alike)]
+
+    @pytest.mark.parametrize(("home", "other"), _TWO_HOMES, ids=_TWO_HOMES_IDS)
+    async def test_a_split_naming_a_story_member_of_another_home_is_refused(
+        self, store: StoryStore, home: RecordHome, other: RecordHome
+    ) -> None:
+        """§4:7: the story a split mints takes its source's home (ADR-0386 §2:3).
+
+        So a split naming a story member of another home is refused as a create naming
+        one is, before ``not_a_member``: the story split need not hold it. A split of a
+        story member of its own home succeeds.
+        """
+        alike = await homed(store, home, act("a1"))
+        story_id = await homed(store, home, act("a2"), sub(alike))
+        elsewhere = await homed(store, other, act("a3"))
+        before = await everything(store)
+
+        outcome = await store.split(story_id, [sub(alike), sub(elsewhere)], actor=_OWNER)
+
+        refused(outcome, StoryRefusalReason.ANOTHER_HOME)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == elsewhere
+        assert await everything(store) == before
+        same = await store.split(story_id, [sub(alike)], actor=_OWNER)
+        assert same.story_id is not None, same
+        made_off = await store.header(same.story_id)
+        assert made_off is not None
+        assert made_off.home == home
+
+    @pytest.mark.parametrize(("home", "other"), _TWO_HOMES, ids=_TWO_HOMES_IDS)
+    async def test_a_merge_of_two_stories_of_two_homes_is_refused(
+        self, store: StoryStore, home: RecordHome, other: RecordHome
+    ) -> None:
+        """§4:7, §3:2: a merge would carry every member and note of one into the other.
+
+        Refused ``another_home``, naming the story it would merge into, and writing
+        nothing: the absorbed story keeps its members, its notes and no merge target.
+        A merge into a story of its own home succeeds.
+        """
+        absorbed = await homed(store, home, act("a1"))
+        await noted(store, absorbed, "A note.", on="a1")
+        elsewhere = await homed(store, other, act("a2"))
+        alike = await homed(store, home, act("a3"))
+        before = await everything(store)
+
+        outcome = await store.merge(absorbed, elsewhere, actor=_OWNER)
+
+        refused(outcome, StoryRefusalReason.ANOTHER_HOME)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == elsewhere
+        assert await everything(store) == before
+        same = await store.merge(absorbed, alike, actor=_OWNER)
+        assert same.story_id == alike, same
+
+    @pytest.mark.parametrize(("home", "other"), _TWO_HOMES, ids=_TWO_HOMES_IDS)
+    @pytest.mark.parametrize("what", ["members", "notes", "both"])
+    async def test_a_move_between_two_stories_of_two_homes_is_refused(
+        self, store: StoryStore, home: RecordHome, other: RecordHome, what: str
+    ) -> None:
+        """§4:7, §3:2: a move puts members and notes of one story into another.
+
+        Between two stories of two homes it is refused ``another_home``, naming the
+        story moved to, members or notes alike, and writes nothing; between two of one
+        home it moves them.
+        """
+        source = await homed(store, home, act("a1"), act("a2"))
+        note = await noted(store, source, "A note.", on="a1")
+        elsewhere = await homed(store, other, act("a3"))
+        alike = await homed(store, home, act("a4"))
+        members = [] if what == "notes" else [act("a1")]
+        notes = [] if what == "members" else [note.note_id]
+        before = await everything(store)
+
+        outcome = await store.move(source, elsewhere, members, actor=_OWNER, notes=notes)
+
+        refused(outcome, StoryRefusalReason.ANOTHER_HOME)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == elsewhere
+        assert await everything(store) == before
+        same = await store.move(source, alike, members, actor=_OWNER, notes=notes)
+        assert same.story_id == alike, same
+
+    async def test_another_home_is_checked_after_the_stories_are_found_and_before_the_rest(
+        self, store: StoryStore
+    ) -> None:
+        """Its place in the fixed order: after ``unknown_story`` and ``merged_story``.
+
+        And before the operation's own rule and the flag (ADR-0302 §4:5): a note move
+        naming a note the story moved from does not hold is ``another_home``, not
+        ``no_notes`` (ADR-0304 §9:4, read as a refusal for its stories as any move
+        is); a link answering a flag no record holds, ``another_home``, not
+        ``unknown_flag``; a merge into a merged story still ``merged_story``.
+        """
+        owners = await homed(store, RecordHome.owners(), act("a1"))
+        shared = await homed(store, RecordHome.shared(), act("a2"))
+        gone = await homed(store, RecordHome.shared(), act("a3"))
+        await store.merge(gone, shared, actor=_OWNER)
+        unknown = StoryFlagName(
+            story=owners, version=1, flag=StoryFlag(kind=StoryFlagKind.TWO_MATTERS)
+        )
+
+        merged = await store.merge(owners, gone, actor=_OWNER)
+        note_move = await store.move(owners, shared, actor=_OWNER, notes=[999])
+        answering = await store.link(owners, [sub(shared)], actor=_PASS, answers=unknown)
+
+        refused(merged, StoryRefusalReason.MERGED_STORY)
+        refused(note_move, StoryRefusalReason.ANOTHER_HOME)
+        refused(answering, StoryRefusalReason.ANOTHER_HOME)
 
     # --- create (§3) ---------------------------------------------------------
 

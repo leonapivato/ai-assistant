@@ -18,7 +18,10 @@ one it is handed and ``append_message`` the one its message carries, no write ch
 either, and a home no write may carry is a ``ValueError`` before anything is read, as the
 durable store refuses it (§6:2). A deleted message's marker carries none (ADR-0293
 §5:12); the durable store keeps the home on the marker's row, which no read gives back,
-so this double, which holds the marker as the model a read returns, has nothing to keep.
+and this double keeps it beside the marker, in a map no read gives back either. A
+message replying to a message of another home, standing or deleted, is answered
+``another_home`` and writes nothing (ADR-0383 §4:7); one of another home than its
+conversation is recorded, as the durable store records it.
 
 It holds ADR-0293's chat space as the store does: each conversation's transcript,
 "my devices" and each conversation's devices, the change stream as one list of
@@ -443,6 +446,11 @@ class FakeConversationStore:
         #: ADR-0293 §5's transcripts: per conversation, position to the message or
         #: the marker it left (§5:12). A position stays until the conversation goes.
         self._messages: dict[str, dict[int, TranscriptMessage | DeletedMessage]] = {}
+        #: Per conversation, the home each deleted message's marker keeps, by position:
+        #: what the durable store keeps on the marker's row and the marker a read returns
+        #: carries none of (ADR-0293 §5:12), read only to refuse a reply naming it
+        #: across homes (ADR-0383 §4:7).
+        self._marker_homes: dict[str, dict[int, RecordHome]] = {}
         #: Per conversation, (device, message id) to position: what recognises a
         #: repeated send, deleted message or not (§4:2, §4:3).
         self._sent: dict[str, dict[tuple[str, str], int]] = {}
@@ -635,10 +643,34 @@ class FakeConversationStore:
     def _clear_chat_of(self, conversation_id: str) -> None:
         """Remove the transcript, devices and bookkeeping kept under a conversation."""
         self._messages.pop(conversation_id, None)
+        self._marker_homes.pop(conversation_id, None)
         self._sent.pop(conversation_id, None)
         self._claimed.pop(conversation_id, None)
         self._devices.pop(conversation_id, None)
         self._taken.pop(conversation_id, None)
+
+    def _names_refusal(
+        self, conversation_id: str, message: NewMessage, position: int
+    ) -> SendOutcome | None:
+        """Refuse a message naming what it may not, or ``None`` (§4:5, ADR-0383 §4:7).
+
+        ``NO_SUCH_REPLY`` where it replies to a position the conversation never held,
+        ``position`` being the one it would take; then ``ANOTHER_HOME`` where the
+        message it replies to, standing or deleted, whose marker's home is kept beside
+        it, is of another home.
+        """
+        if message.replies_to is not None:
+            if message.replies_to >= position:
+                return SendOutcome.NO_SUCH_REPLY
+            target = self._messages[conversation_id].get(message.replies_to)
+            replied: RecordHome | None = (
+                target.home
+                if isinstance(target, TranscriptMessage)
+                else self._marker_homes[conversation_id].get(message.replies_to)
+            )
+            if replied is not None and replied != message.home:
+                return SendOutcome.ANOTHER_HOME
+        return None
 
     def _standing(self, conversation_id: str) -> list[TranscriptMessage]:
         """The conversation's standing messages, ascending by position."""
@@ -710,6 +742,7 @@ class FakeConversationStore:
                 # ADR-0293 §2:1, §3:1: empty, on "my devices" as they stand.
                 devices = self._my_devices
                 self._messages[conversation.id] = {}
+                self._marker_homes[conversation.id] = {}
                 self._sent[conversation.id] = {}
                 self._claimed[conversation.id] = {}
                 self._devices[conversation.id] = devices
@@ -940,10 +973,8 @@ class FakeConversationStore:
                         position=claimed,
                     )
             position = max(held, default=0) + 1
-            if message.replies_to is not None and message.replies_to >= position:
-                return MessageReceipt(
-                    conversation_id=conversation_id, outcome=SendOutcome.NO_SUCH_REPLY
-                )
+            if refused := self._names_refusal(conversation_id, message, position):
+                return MessageReceipt(conversation_id=conversation_id, outcome=refused)
             recorded = TranscriptMessage(
                 conversation_id=conversation_id,
                 position=position,
@@ -972,10 +1003,12 @@ class FakeConversationStore:
         async with self._exclusive(conversation_id):
             self._live(conversation_id)
             held = self._messages[conversation_id]
-            if not isinstance(held.get(position), TranscriptMessage):
+            standing = held.get(position)
+            if not isinstance(standing, TranscriptMessage):
                 return False
             marker = DeletedMessage(conversation_id=conversation_id, position=position)
             held[position] = marker
+            self._marker_homes[conversation_id][position] = standing.home
             self._changes = [
                 one
                 for one in self._changes

@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     MessageReceipt,
     NewMessage,
     RecordHome,
+    SendOutcome,
     UserMessage,
 )
 from ai_assistant.interfaces import cli
@@ -532,6 +533,26 @@ async def test_a_device_that_is_no_longer_an_end_is_told_so(output: StringIO) ->
     assert "Not sent: this device is not one of this conversation's devices" in _flat(
         output.getvalue()
     )
+
+
+class _RefusesAcrossHomes(FakeAssistantEngine):
+    """A hub that answers a send as a reply across homes (ADR-0383 §4:7), recording nothing."""
+
+    async def write_message(
+        self, conversation_id: Identifier, *, message: UserMessage
+    ) -> MessageReceipt:
+        del message
+        return MessageReceipt(conversation_id=conversation_id, outcome=SendOutcome.ANOTHER_HOME)
+
+
+async def test_a_message_refused_across_homes_is_told_so(output: StringIO) -> None:
+    """ADR-0383 §4:7: the refusal is said plainly, as the store's other refusals are."""
+    engine = _RefusesAcrossHomes()
+    conversation = await _started(engine, HUB)
+
+    await _chat(engine, conversation, _lines("/reply 1 about that"))
+
+    assert "Not sent: the message it replies to is of another home." in _flat(output.getvalue())
 
 
 class _LosesTheFirstSend(FakeAssistantEngine):

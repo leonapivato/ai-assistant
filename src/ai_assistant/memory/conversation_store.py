@@ -77,6 +77,13 @@ label 14, is upgraded in place when the store opens (ADR-0326 §4:1): the column
 added, the owner's domain is written into every conversation and every message it holds
 (ADR-0383 §5:1), and the label advances to 15, which an older build refuses (§5:3).
 
+**A reply stays in its home** (ADR-0383 §4:7, "a reply"). Inside ``append_message``'s
+transaction, after every other answer, a message replying to a message of another home,
+standing or deleted (its marker's row keeps its home), is answered ``another_home`` and
+writes nothing. The homes are compared as their stored columns, so a row whose home is
+missing or unreadable is another home than any a write carries, never read as the
+message's (§5:3). A message's home is not compared with its conversation's.
+
 **There is no observation watermark** (ADR-0285 §4). The schema creates no
 ``observed_through`` column and nothing adds one to an existing file. Nothing drops
 it either: a file written by an earlier build that still carries the column is
@@ -1976,9 +1983,11 @@ class SqliteConversationStore:
     async def append_message(self, conversation_id: str, message: NewMessage) -> MessageReceipt:
         """Write one message into the transcript, in one ``IMMEDIATE`` transaction.
 
-        The repeat check, the device check, the reply check, the insert and the
-        change are one step, so two sends of one message cannot both record it and
-        a device removed concurrently either wrote before the removal or not at all.
+        The repeat check, the device check, the reply check, the home check, the
+        insert and the change are one step, so two sends of one message cannot both
+        record it, a device removed concurrently either wrote before the removal or
+        not at all, and a reply is compared with the home the store holds for what
+        it replies to as it writes (ADR-0383 §4:7).
         The message's home is checked first, before the lock and any I/O (ADR-0386
         §6:2), and written with it.
 
@@ -2038,10 +2047,8 @@ class SqliteConversationStore:
                 msg = f"a stored transcript position is corrupt: {describe_untrusted(last)}"
                 raise ConversationStoreError(msg)
             position = last + 1
-            if message.replies_to is not None and message.replies_to >= position:
-                return MessageReceipt(
-                    conversation_id=conversation_id, outcome=SendOutcome.NO_SUCH_REPLY
-                )
+            if refused := self._names_refusal(conn, conversation_id, message, position):
+                return MessageReceipt(conversation_id=conversation_id, outcome=refused)
             try:
                 recorded = TranscriptMessage(
                     conversation_id=conversation_id,
@@ -2078,6 +2085,39 @@ class SqliteConversationStore:
             return MessageReceipt(
                 conversation_id=conversation_id, outcome=SendOutcome.RECORDED, position=position
             )
+
+    @classmethod
+    def _names_refusal(
+        cls,
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        message: NewMessage,
+        position: int,
+    ) -> SendOutcome | None:
+        """Refuse a message naming what it may not, or ``None`` (§4:5, ADR-0383 §4:7).
+
+        ``NO_SUCH_REPLY`` where it replies to a position the conversation never held,
+        ``position`` being the one it would take; then ``ANOTHER_HOME`` where the
+        message it replies to, standing or deleted, whose marker's row keeps its home,
+        is of another home, compared as its two stored columns.
+
+        Raises:
+            ConversationStoreError: If the store cannot be read.
+        """
+        if message.replies_to is not None:
+            if message.replies_to >= position:
+                return SendOutcome.NO_SUCH_REPLY
+            home = (message.home.kind.value, message.home.id)
+            target = cls._fetch(
+                conn,
+                "read the home of the message replied to",
+                "SELECT home_kind, home_id FROM messages WHERE conversation_id = ? "
+                "AND position = ?",
+                (conversation_id, message.replies_to),
+            )
+            if target and tuple(target[0]) != home:
+                return SendOutcome.ANOTHER_HOME
+        return None
 
     async def delete_message(self, conversation_id: str, position: int) -> bool:
         """Delete one message, leaving its marker, in one ``IMMEDIATE`` transaction.

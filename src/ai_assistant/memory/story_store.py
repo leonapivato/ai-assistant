@@ -61,6 +61,12 @@ hold none of their own (ADR-0383 §3:2). A home
 ``ValueError`` before any check or write (ADR-0386 §6:2). The upgrade to the layout that
 added it writes the owner's domain into every story the file holds (ADR-0383 §5:1).
 
+**A write stays in its home** (ADR-0383 §4:7). Inside the write's transaction, once every
+story it names is found standing, a create, a link or a split naming a story member of
+another home than the story it mints or writes, and a merge or a move between stories
+of two homes, are refused ``another_home``, writing nothing. Since a note takes its
+story's home and no write changes a story's, no write changes a note's either (§4:6).
+
 The file is created owner-only (ADR-0004 §4). The membership records hold
 identities and instants only (ADR-0289 §2:7); the notes and the summary hold
 the text ADR-0300 §3 gives them, which is a fact about the owner's life as well.
@@ -587,6 +593,11 @@ def _unique[T](items: Sequence[T]) -> list[T]:
     return list(dict.fromkeys(items))
 
 
+def _story_members(members: Sequence[StoryMember]) -> list[str]:
+    """The stories ``members`` names as members, each once, in the order given."""
+    return _unique([one.id for one in members if one.kind is StoryMemberKind.STORY])
+
+
 # The notes' and the summary's argument checks and the cap rule. Held by each implementation rather
 # than in ``core/types.py``: they are this contract's admission rules, not semantics
 # intrinsic to the types they read (ADR-0016 §2), and the canonical fake holds its
@@ -942,6 +953,33 @@ class SqliteStoryStore:
                 return refused
         return None
 
+    def _home_of(self, conn: sqlite3.Connection, story_id: str) -> RecordHome:
+        """The home of a story a story refusal above has found standing."""
+        header = self._header(conn, story_id)
+        if header is None:  # pragma: no cover — the story refusal above found it
+            msg = f"the story store no longer holds {story_id!r} inside one transaction"
+            raise StoryStoreError(msg)
+        return header.home
+
+    def _home_refusal(
+        self, conn: sqlite3.Connection, home: RecordHome, named: Sequence[str]
+    ) -> StoryRefusal | None:
+        """Refuse a write naming a story of another home than ``home`` (ADR-0383 §4:7).
+
+        ``named`` are the stories the write names beside the one it writes to, each
+        already found standing; the first of another home is the one reported.
+        """
+        for story_id in named:
+            if self._home_of(conn, story_id) != home:
+                return StoryRefusal(reason=StoryRefusalReason.ANOTHER_HOME, story_id=story_id)
+        return None
+
+    def _beside_refusal(
+        self, conn: sqlite3.Connection, story_id: str, named: Sequence[str]
+    ) -> StoryRefusal | None:
+        """:meth:`_home_refusal` against the home of ``story_id``, the story written to."""
+        return self._home_refusal(conn, self._home_of(conn, story_id), named)
+
     @staticmethod
     def _tick(conn: sqlite3.Connection) -> int:
         """Advance the store's one counter and return its new value (see the module docstring)."""
@@ -1189,7 +1227,9 @@ class SqliteStoryStore:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         stamp = self._stamp(actor, trigger)
         with self._transaction("create a story") as conn:
-            if refused := self._members_refusal(conn, members):
+            if refused := self._members_refusal(conn, members) or self._home_refusal(
+                conn, home, _story_members(members)
+            ):
                 return StoryOutcome(refusal=refused)
             if flag is not None and (refused := self._flag_refusal(conn, flag)):
                 return StoryOutcome(refusal=refused)
@@ -1231,8 +1271,10 @@ class SqliteStoryStore:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         stamp = self._stamp(actor, trigger)
         with self._transaction("link to a story") as conn:
-            if refused := self._story_refusal(conn, story_id) or self._members_refusal(
-                conn, members
+            if refused := (
+                self._story_refusal(conn, story_id)
+                or self._members_refusal(conn, members)
+                or self._beside_refusal(conn, story_id, _story_members(members))
             ):
                 return StoryOutcome(refusal=refused)
             fresh = [m for m in _unique(members) if not self._holds(conn, story_id, m)]
@@ -1321,8 +1363,12 @@ class SqliteStoryStore:
         stamp = self._stamp(actor, trigger)
         try:
             with self._transaction("merge stories") as conn:
-                if refused := self._story_refusal(conn, absorbed) or self._story_refusal(
-                    conn, target
+                # A merge moves every member and note of the absorbed story into the
+                # target, so the two are of one home (ADR-0383 §3:2, §4:7).
+                if refused := (
+                    self._story_refusal(conn, absorbed)
+                    or self._story_refusal(conn, target)
+                    or self._beside_refusal(conn, absorbed, [target])
                 ):
                     return StoryOutcome(refusal=refused)
                 if absorbed == target:
@@ -1428,8 +1474,12 @@ class SqliteStoryStore:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         stamp = self._stamp(actor, trigger)
         with self._transaction("split a story") as conn:
-            if refused := self._story_refusal(conn, story_id) or self._members_refusal(
-                conn, members
+            # The story a split mints takes the home of the story split (ADR-0386 §2:3),
+            # so a story member of another home is refused as a create's is.
+            if refused := (
+                self._story_refusal(conn, story_id)
+                or self._members_refusal(conn, members)
+                or self._beside_refusal(conn, story_id, _story_members(members))
             ):
                 return StoryOutcome(refusal=refused)
             for member in members:
@@ -1506,7 +1556,12 @@ class SqliteStoryStore:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         stamp = self._stamp(actor, trigger)
         with self._transaction("move story members") as conn:
-            if refused := self._story_refusal(conn, source) or self._story_refusal(conn, target):
+            # A move puts members and notes of one story into the other (ADR-0383 §4:7).
+            if refused := (
+                self._story_refusal(conn, source)
+                or self._story_refusal(conn, target)
+                or self._beside_refusal(conn, source, [target])
+            ):
                 return StoryOutcome(refusal=refused)
             for member in members:
                 if not self._holds(conn, source, member):

@@ -2460,6 +2460,8 @@ async def _send(engine: AssistantEngine, view: _ChatView, message: UserMessage) 
                 f"[yellow]Not sent:[/] this conversation never held a message "
                 f"#{message.replies_to} to reply to."
             )
+        case SendOutcome.ANOTHER_HOME:
+            _print("[yellow]Not sent:[/] the message it replies to is of another home.")
         case _:  # pragma: no cover — exhaustive over the enum
             assert_never(receipt.outcome)
 
