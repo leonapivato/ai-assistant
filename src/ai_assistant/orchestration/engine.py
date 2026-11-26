@@ -4676,12 +4676,15 @@ class Engine:
         :data:`~ai_assistant.orchestration.upkeep.RECONSIDERED`). A held notification
         of another domain is left as it is: not re-ruled, not dropped, and not handed
         off, for the decision that rules whom it goes to. It stays due, so the drain
-        reads past it: each page starts after the records of another domain this run
-        has passed, which stay at the front of the due order, and a page counts as
-        progress where it passed a record of another domain not passed before, so a
-        page of them alone does not end the drain before the owner's records behind
-        them. Tending the domain makes the run no work (§3:3): it records no fact,
-        starts no activation and makes no call the check runs.
+        reads past it: every read starts at the front of the due order, as before, and
+        takes ``page`` records more than the records of another domain this run has
+        passed, which may still stand at the front. A read never starts past a record,
+        so one of them leaving the due set mid-drain, or a record falling due ahead of
+        them, skips nothing. A page counts as progress where it passed a record of
+        another domain not passed before, so a page of them alone does not end the
+        drain before the owner's records behind them. Tending the domain makes the run
+        no work (§3:3): it records no fact, starts no activation and makes no call the
+        check runs.
 
         Args:
             page: How many due records one store read takes.
@@ -4695,7 +4698,7 @@ class Engine:
         seen: set[str] = set()
         passed = 0
         ruled = 0
-        while due := await store.due(limit=page, offset=passed):
+        while due := await store.due(limit=page + passed):
             fresh = [record for record in due if record.id not in seen]
             if not fresh:
                 break

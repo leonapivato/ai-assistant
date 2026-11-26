@@ -30,6 +30,7 @@ from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
     ClassReach,
     DataTier,
+    HeldNotification,
     NotificationCandidate,
     NotificationCondition,
     NotificationDisposition,
@@ -402,6 +403,49 @@ async def test_the_drain_reads_past_a_page_of_another_domain_s_records() -> None
 
     assert ruled == 2
     assert [record.home for record in await store.due()] == [RecordHome.shared()] * 3
+
+
+class _DismissingStore(FakeNotificationStore):
+    """Dismisses ``gone`` once the first page of the due set has been read."""
+
+    def __init__(self, *, now: Callable[[], datetime]) -> None:
+        super().__init__(now=now)
+        self.gone: str | None = None
+        self.reads = 0
+
+    async def due(self, *, limit: int = 50, offset: int = 0) -> list[HeldNotification]:
+        page = await super().due(limit=limit, offset=offset)
+        self.reads += 1
+        if self.reads == 1 and self.gone is not None:
+            assert await self.dismiss(self.gone)
+        return page
+
+
+async def test_a_passed_record_leaving_the_due_set_mid_drain_skips_no_owners_record() -> None:
+    """A read never starts past a record, so one leaving the front shifts nothing away."""
+    store = _DismissingStore(now=lambda: AT)
+    policy = FakeNotificationPolicy()
+    engine = _wired(Harness(), store, policy)
+    ours = await store.admit(
+        _candidate("k1", expires=AT + timedelta(days=1)), home=RecordHome.shared(), policy=policy
+    )
+    mine = await store.admit(
+        _candidate("k2", expires=AT + timedelta(days=1)), home=RecordHome.owners(), policy=policy
+    )
+    assert ours.notification_id is not None
+    assert mine.notification_id is not None
+    await engine.set_notification_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class=_CLASS, reach=NotificationReach.INTERRUPT),)
+        )
+    )
+    store.gone = ours.notification_id
+
+    assert await engine.reconsider_notifications(page=1) == 1
+
+    reached = await store.get(mine.notification_id)
+    assert reached is not None
+    assert reached.kind is NotificationDispositionKind.INTERRUPT
 
 
 # --- the sweep runs inside an operation, so its ruling is correlated ---------

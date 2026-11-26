@@ -9,7 +9,7 @@ and in what order. What a tidy-up reads, renders, checks and writes is
 
 from __future__ import annotations
 
-import asyncio
+import functools
 import json
 from datetime import datetime, timedelta
 from itertools import count
@@ -22,6 +22,7 @@ from structured_support import structured
 
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import Message, RecordHome, StoryActor, StoryNoteAuthor
+from ai_assistant.orchestration import story_tidy_up
 from ai_assistant.orchestration.story_tidy_up import (
     STORY_TIDY_UP_PROMPT,
     ScheduledTidyUp,
@@ -29,6 +30,7 @@ from ai_assistant.orchestration.story_tidy_up import (
     StoryTidyUp,
     TidyUpResult,
 )
+from ai_assistant.orchestration.upkeep import FiringBudget
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt
 
 if TYPE_CHECKING:
@@ -424,11 +426,14 @@ async def test_each_run_keeps_its_own_bound_and_starts_its_first_whatever_the_bu
     assert spent == ScheduledTidyUpReport(due=2, tidied=2, written=2)
 
 
-async def test_a_domain_with_nothing_due_makes_no_completion_and_spends_no_budget() -> None:
+async def test_a_domain_with_nothing_due_makes_no_completion_and_spends_no_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An empty run of the owner's domain leaves the whole budget to the shared things'.
 
-    Each run's finding of what is due outlasts the budget. Had the owner's empty run
-    started it, the shared things' run would find it spent and start only its first.
+    Each run's finding of what is due moves the firing's clock past the budget. Had the
+    owner's empty run started it, the shared things' run would find it spent and start
+    only its first.
     """
     clock = _Clock()
     stories = _stories(clock)
@@ -440,16 +445,22 @@ async def test_a_domain_with_nothing_due_makes_no_completion_and_spends_no_budge
         clock.at = AT + timedelta(minutes=n)
         await _shared(stories, f"ours-{n}", f"s-{n}")
     tidy_up = _tidy_up(model, stories, memory)
+    monotonic = [0.0]
+    monkeypatch.setattr(
+        story_tidy_up,
+        "FiringBudget",
+        functools.partial(FiringBudget, clock=lambda: monotonic[0]),
+    )
     read = stories.stories
 
     async def slow(**kwargs: Any) -> Any:
-        await asyncio.sleep(0.2)
+        monotonic[0] += 10.0
         return await read(**kwargs)
 
-    stories.stories = slow  # type: ignore[method-assign]  # the store's reading, slowed
+    stories.stories = slow  # type: ignore[method-assign]  # each read of the store, slow
 
     report = await _scheduled(
-        tidy_up, stories, clock, threshold=1, budget=timedelta(milliseconds=150)
+        tidy_up, stories, clock, threshold=1, budget=timedelta(seconds=5)
     ).run()
 
     assert model.seen == ["ours-1", "ours-2"]
