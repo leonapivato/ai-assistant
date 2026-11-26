@@ -4872,6 +4872,45 @@ class PlanStoreContract:
             ) == expected[name], name
             assert await store.bound(sight).stopped_activations(["act-stopped", "act-b"]) == ()
 
+    async def test_a_work_with_no_facts_holds_its_own_records_and_nothing_else(
+        self,
+        sight_store_factory: Callable[[SightMode], PlanStore],
+        remove_records: Callable[[PlanStore, PlanRemoval], None],
+    ) -> None:
+        """ADR-0388 §5:1, §5:3: a work's sight of an anyone bound alone and its activation.
+
+        Withholding, it holds its own activation's effect records and the approval
+        requests it asked, whatever their homes, and nothing else: no observation, no
+        task and no stop record, as an unidentified sender's work holds (ADR-0383 §7:4);
+        and it answers every call in the battery as the same store holding only those
+        (§9:3).
+        """
+        sight = Sight.of_work(None, (), activation=OWN_ACTIVATION)
+        bound_store = sight_store_factory(SightMode.WITHHOLD)
+        holding_only = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(bound_store)
+        await _sight_history(holding_only)
+        whole = await bound_store.export()
+        effects = _by_home(
+            whole.activation_effects, lambda one: one.home, lambda one: one.activation_id
+        )
+        requests = _by_home(
+            whole.approval_requests,
+            lambda one: RecordHome.person(one.person),
+            lambda one: one.activation_id,
+        )
+        assert effects.own
+        assert requests.own
+        held = await bound_store.bound(sight).export()
+        assert held.stopped_activations == ()
+        assert {one.id for one in held.activation_effects} == effects.own
+        assert {one.id for one in held.approval_requests} == requests.own
+        assert held.observations == ()
+        assert held.scheduled_tasks == ()
+        assert held == await bound_store.bound(SIGHTS["unidentified-senders-work"]).export()
+        remove_records(holding_only, _not_seen(await holding_only.export(), sight))
+        await assert_answers_alike(bound_store.bound(sight), holding_only, _sight_battery())
+
     async def test_a_write_naming_a_record_a_bound_store_does_not_hold_is_as_for_one_never_written(
         self, sight_store_factory: Callable[[SightMode], PlanStore]
     ) -> None:

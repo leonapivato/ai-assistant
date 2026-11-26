@@ -3691,7 +3691,7 @@ class SightBound(BaseModel):
 
     @classmethod
     def anyone(cls) -> SightBound:
-        """The bound of an unidentified sender, or of an episode with no facts."""
+        """The bound of an unidentified sender, or of a work or an episode with no facts."""
         return cls(kind=SightBoundKind.ANYONE)
 
     @classmethod
@@ -3838,11 +3838,14 @@ class Sight(BaseModel):
     no value of it sees every record.
 
     Made by the constructors below, from recorded facts alone (§6:10): :meth:`of_work`,
-    :meth:`of_producer`, :meth:`of_run` and :meth:`of_tidy_up`; and, for an owner's own
-    act, by :meth:`of_owners_act` from the domain the act names or from none (ADR-0385
-    §3:3, §10:2). ``reader`` records which of them made it, for §11:1's event, and
-    decides nothing a sight sees; it decides one thing of a store bound to it, the mode
-    the store answers in (:meth:`answered_in`, ADR-0385 §3:5).
+    :meth:`of_producer`, :meth:`of_run` and :meth:`of_tidy_up`. A work whose facts were
+    not recorded still has a work's sight, by :meth:`of_work` from none: an anyone bound
+    alone and its activation, so its own records and nothing else (ADR-0388 §5:1,
+    §5:3). And, for an owner's own act, by :meth:`of_owners_act` from the domain the act
+    names or from none (ADR-0385 §3:3, §10:2). ``reader`` records which of them made
+    it, for §11:1's event, and decides nothing a sight sees; it decides one thing of a
+    store bound to it, the mode the store answers in (:meth:`answered_in`, ADR-0385
+    §3:5).
 
     Attributes:
         reader: Who reads by it.
@@ -4018,7 +4021,7 @@ class Sight(BaseModel):
     @classmethod
     def of_work(
         cls,
-        facts: WorkFacts,
+        facts: WorkFacts | None,
         senders: Iterable[InputSender],
         *,
         activation: str,
@@ -4033,11 +4036,19 @@ class Sight(BaseModel):
         are recorded again, as the meet of the sight it ``had`` and the one these give,
         so it never widens within a work (§6:6).
 
+        **A work whose facts were not recorded** (ADR-0368 §2:4) is given ``None``: its
+        sight is an anyone bound alone and ``activation``, so it sees its own records
+        and nothing else, and ``senders`` is not read (ADR-0388 §5:1, §5:3). Remade
+        once its facts are recorded, the meet keeps the anyone bound, so it never
+        widens (ADR-0388 §5:2).
+
         Args:
-            facts: The work's three facts as they now stand (ADR-0368 §2:4).
+            facts: The work's three facts as they now stand (ADR-0368 §2:4), or ``None``
+                where they were not recorded.
             senders: Every sender of every input it holds, as its inputs record them
                 (:attr:`RecordedChannelTrigger.senders`, :attr:`JoinedInput.senders`), and
-                never only those whose authority it carries.
+                never only those whose authority it carries. Not read where ``facts`` is
+                ``None``.
             activation: The work's activation.
             had: The sight it had, where its facts were recorded before.
 
@@ -4047,9 +4058,8 @@ class Sight(BaseModel):
         Raises:
             ValueError: If ``had`` is not this work's: another reader or activation.
         """
-        made = cls(
-            reader=SightReader.WORK, bounds=cls._of_facts(facts, senders), activation=activation
-        )
+        bounds = (SightBound.anyone(),) if facts is None else cls._of_facts(facts, senders)
+        made = cls(reader=SightReader.WORK, bounds=bounds, activation=activation)
         return made if had is None else had.meet(made)
 
     @classmethod
@@ -24829,13 +24839,60 @@ class StoryNote(BaseModel):
 
     @model_validator(mode="after")
     def _records_an_activation_as_its_author_does(self) -> Self:
-        owner = self.author is StoryNoteAuthor.OWNER
-        if owner == (self.written_during is not None):
-            msg = "a note records an activation exactly when the user did not write it directly"
-            raise ValueError(msg)
-        if owner and self.outside:
-            msg = "a note the user wrote directly is never marked as outside content"
-            raise ValueError(msg)
+        _note_fits_its_author(self.author, self.written_during, outside=self.outside)
+        return self
+
+
+def _note_fits_its_author(
+    author: StoryNoteAuthor, written_during: str | None, *, outside: bool
+) -> None:
+    """Refuse a note's activation or mark its author does not admit (ADR-0303 §2:5, §3:1).
+
+    Raises:
+        ValueError: If it names an activation exactly when the user wrote it directly, or
+            the user's own note is marked as outside content.
+    """
+    owner = author is StoryNoteAuthor.OWNER
+    if owner == (written_during is not None):
+        msg = "a note records an activation exactly when the user did not write it directly"
+        raise ValueError(msg)
+    if owner and outside:
+        msg = "a note the user wrote directly is never marked as outside content"
+        raise ValueError(msg)
+
+
+class StoryFirstNote(BaseModel):
+    """One of a story's first notes, written by the create that mints it (ADR-0388 §3:3).
+
+    It carries exactly what :meth:`~ai_assistant.core.protocols.StoryStore.append_note`
+    takes beside the story: the note's text, its author, the activation it was written
+    during and its outside mark, each as :class:`StoryNote` holds it, with
+    ``append_note``'s defaults. The store gives the note its identity and its instant,
+    as ``append_note`` does. That nothing writes a note as ``tidy_up`` is the store's
+    admission rule, as it is for ``append_note`` (ADR-0303 §2:1), and not this model's.
+
+    Attributes:
+        text: The note's text, non-blank, within :data:`STORY_NOTE_MAX_CHARS`.
+        author: Who writes it: ``planning`` or ``owner``.
+        written_during: The activation it was written during; ``None`` exactly for
+            ``owner``.
+        outside: Its mark, as the hub's record of what that activation read gives it
+            (ADR-0303 §3:1); never for ``owner``.
+
+    Raises:
+        ValueError: If a field is malformed, or the activation or the mark is one the
+            author does not admit.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    text: _StoryText
+    author: StoryNoteAuthor
+    written_during: Identifier | None = None
+    outside: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def _records_an_activation_as_its_author_does(self) -> Self:
+        _note_fits_its_author(self.author, self.written_during, outside=self.outside)
         return self
 
 

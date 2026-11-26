@@ -1360,6 +1360,33 @@ class MemoryStoreContract:
         assert held["unidentified-senders-work"] == {_OWN_EPISODE}
         assert held["producer-with-no-facts"] == set()
 
+    async def test_a_work_with_no_facts_holds_its_own_episode_and_nothing_else(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """ADR-0388 §5:1, §5:3: a work's sight of an anyone bound alone and its activation.
+
+        Withholding, it holds its own activation's episode and no other record, as an
+        unidentified sender's work does, and answers every call in the battery as the
+        same store holding only that episode (ADR-0383 §9:3); the producer's sight of the
+        same episode holds nothing (§6:7).
+        """
+        sight = Sight.of_work(None, (), activation=OWN_ACTIVATION)
+        bound_store = sight_store_factory(SightMode.WITHHOLD)
+        holding_only = sight_store_factory(SightMode.WITHHOLD)
+        history = _sight_history()
+        for store in (bound_store, holding_only):
+            for record in history:
+                await store.add(record)
+        held = {r.id for r in await bound_store.bound(sight).export()}
+        assert held == {_OWN_EPISODE}
+        unidentified = SIGHTS["unidentified-senders-work"]
+        assert held == {r.id for r in await bound_store.bound(unidentified).export()}
+        assert await bound_store.bound(SIGHTS["producer-with-no-facts"]).export() == []
+        for record in history:
+            if not sight.sees(record.home, made_by=_made_by(record)):
+                assert await holding_only.delete(record.id) is True
+        await assert_answers_alike(bound_store.bound(sight), holding_only, _sight_battery())
+
     async def test_a_bound_store_refuses_a_write_to_a_record_it_does_not_hold(
         self, sight_store_factory: Callable[[SightMode], MemoryStore]
     ) -> None:

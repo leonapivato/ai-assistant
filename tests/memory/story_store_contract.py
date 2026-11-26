@@ -102,6 +102,7 @@ from ai_assistant.core.types import (
     StoryChange,
     StoryDecision,
     StoryExport,
+    StoryFirstNote,
     StoryFlag,
     StoryFlagKind,
     StoryFlagName,
@@ -134,6 +135,8 @@ if TYPE_CHECKING:
 STORY_AT = datetime(2026, 10, 4, 12, tzinfo=UTC)
 
 _OWNER = StoryActor.OWNER
+_PLANNING = StoryNoteAuthor.PLANNING
+_TIDY_UP = StoryNoteAuthor.TIDY_UP
 
 #: The owner's sights, one for each domain an owner's act may name and one for none
 #: (ADR-0385 §3:3), by name.
@@ -3754,6 +3757,240 @@ class StoryStoreContract:
         assert StoryExport.model_validate(exported.model_dump()) == exported
         with pytest.raises(ValidationError):
             exported.stories = ()
+
+    # --- a story's first notes (ADR-0388 §3:3) -----------------------------------
+
+    @pytest.mark.parametrize(
+        "home", [RecordHome.owners(), RecordHome.shared()], ids=["owners", "shared"]
+    )
+    async def test_a_create_with_notes_reads_as_a_create_then_the_same_appends(
+        self, sight_store_factory: Callable[[SightMode], StoryStore], home: RecordHome
+    ) -> None:
+        """§3:3: the notes after the members, each as ``append_note`` writes one.
+
+        Two stores take one history; in one a create carries the first notes, in the
+        other the same create is followed by the same appends. The two outcomes are
+        alike, ``logged`` counting no note, and so is every read: each story's header,
+        view, log, pending, notes and summaries, the position, every reverse look-up
+        and the export.
+        """
+        with_notes = sight_store_factory(SightMode.WITHHOLD)
+        appended = sight_store_factory(SightMode.WITHHOLD)
+        firsts = (
+            StoryFirstNote(text="Asked about the trip.", author=_PLANNING, written_during="a1"),
+            StoryFirstNote(
+                text="Read a page about it.",
+                author=_PLANNING,
+                written_during="a2",
+                outside=True,
+            ),
+            StoryFirstNote(text="Keep this one.", author=StoryNoteAuthor.OWNER),
+        )
+        outcomes: list[StoryOutcome] = []
+        for store in (with_notes, appended):
+            earlier = await homed(store, home, act("a0"))
+            await noted(store, earlier, "An earlier note.", on="a0")
+            members = [act("a1"), sub(earlier), act("a2"), act("a1")]
+            if store is with_notes:
+                outcome = await store.create(
+                    members, home=home, actor=StoryActor.PLANNING, trigger="a1", notes=firsts
+                )
+            else:
+                outcome = await store.create(
+                    members, home=home, actor=StoryActor.PLANNING, trigger="a1"
+                )
+                assert outcome.story_id is not None
+                for first in firsts:
+                    appended_note = await store.append_note(
+                        outcome.story_id,
+                        first.text,
+                        author=first.author,
+                        written_during=first.written_during,
+                        outside=first.outside,
+                    )
+                    assert appended_note.refusal is None, appended_note
+            outcomes.append(outcome)
+        assert outcomes[0] == outcomes[1]
+        assert outcomes[0].refusal is None
+        assert outcomes[0].logged == 4
+        story_id = outcomes[0].story_id
+        assert story_id is not None
+        assert await everything(with_notes) == await everything(appended)
+        assert await with_notes.export() == await appended.export()
+        for member in (act("a0"), act("a1"), act("a2"), sub(story_id)):
+            assert await with_notes.stories_of(member) == await appended.stories_of(member)
+        notes = await notes_of(with_notes, story_id)
+        assert [(n.text, n.author, n.written_during, n.outside) for n in notes] == [
+            (first.text, first.author, first.written_during, first.outside) for first in firsts
+        ]
+        assert all(note.written_at == STORY_AT for note in notes)
+        pending = await state_of(with_notes, story_id)
+        assert {note.note_id for note in notes} <= {note.note_id for note in pending.pending_notes}
+
+    async def test_a_create_writes_no_note_by_default(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§3:3: the first notes are empty by default, and an empty list is the default."""
+        default = sight_store_factory(SightMode.WITHHOLD)
+        empty = sight_store_factory(SightMode.WITHHOLD)
+        first = await default.create([act("a1")], home=RecordHome.owners(), actor=_OWNER)
+        second = await empty.create([act("a1")], home=RecordHome.owners(), actor=_OWNER, notes=[])
+        assert first == second
+        assert first.story_id is not None
+        assert await notes_of(default, first.story_id) == []
+        assert await everything(default) == await everything(empty)
+
+    @pytest.mark.parametrize(
+        "notes",
+        [
+            (StoryFirstNote(text="By the tidy-up.", author=_TIDY_UP, written_during="a1"),),
+            (
+                StoryFirstNote(text="Fine.", author=_PLANNING, written_during="a1"),
+                StoryFirstNote(text="By the tidy-up.", author=_TIDY_UP, written_during="a1"),
+            ),
+            (StoryFirstNote.model_construct(text="  ", author=_PLANNING, written_during="a1"),),
+            (
+                StoryFirstNote.model_construct(
+                    text="x" * (STORY_NOTE_MAX_CHARS + 1), author=_PLANNING, written_during="a1"
+                ),
+            ),
+            (StoryFirstNote.model_construct(text="Mine.", author=_PLANNING, written_during=None),),
+            (
+                StoryFirstNote.model_construct(
+                    text="Mine.", author=StoryNoteAuthor.OWNER, written_during="a1", outside=False
+                ),
+            ),
+            (
+                StoryFirstNote.model_construct(
+                    text="Mine.", author=StoryNoteAuthor.OWNER, written_during=None, outside=True
+                ),
+            ),
+            ("A bare string.",),
+            "Notes as one string.",
+        ],
+        ids=[
+            "by-the-tidy-up",
+            "a-good-note-then-a-refused-one",
+            "blank",
+            "over-the-cap",
+            "planning-with-no-activation",
+            "owner-with-an-activation",
+            "owner-marked-outside",
+            "not-a-first-note",
+            "not-a-sequence",
+        ],
+    )
+    async def test_a_refused_note_refuses_the_whole_create_writing_nothing(
+        self, store: StoryStore, notes: Any
+    ) -> None:
+        """§3:3: refused as ``append_note`` refuses it, before any check or write.
+
+        No story is minted, no member added, no line logged and no note written: the
+        store reads as it did, its position included.
+        """
+        earlier = await made(store, act("a0"))
+        await noted(store, earlier, "An earlier note.", on="a0")
+        before = await everything(store)
+        with pytest.raises(ValueError):  # noqa: PT011 — each note's own message
+            await store.create(
+                [act("a1"), sub(earlier)], home=RecordHome.owners(), actor=_OWNER, notes=notes
+            )
+        assert await everything(store) == before
+        assert await store.stories_of(act("a1")) == ()
+
+    async def test_a_create_refused_for_its_members_writes_no_note(self, store: StoryStore) -> None:
+        """§3:3: a create with notes is refused for what one without them is, whole."""
+        first = (StoryFirstNote(text="Note.", author=_PLANNING, written_during="a1"),)
+        before = await everything(store)
+        refused(
+            await store.create([], home=RecordHome.owners(), actor=_OWNER, notes=first),
+            StoryRefusalReason.NO_MEMBERS,
+        )
+        refused(
+            await store.create(
+                [act("a1"), sub("story:never")], home=RecordHome.owners(), actor=_OWNER, notes=first
+            ),
+            StoryRefusalReason.UNKNOWN_STORY,
+        )
+        shared = await homed(store, RecordHome.shared(), act("s1"))
+        before = await everything(store)
+        refused(
+            await store.create(
+                [act("a1"), sub(shared)], home=RecordHome.owners(), actor=_OWNER, notes=first
+            ),
+            StoryRefusalReason.ANOTHER_HOME,
+        )
+        assert await everything(store) == before
+
+    @pytest.mark.parametrize(
+        "sight_name",
+        [
+            "unidentified-senders-work",
+            "producer-with-no-facts",
+            "work-for-no-one",
+            "run-over-the-shared-things",
+        ],
+    )
+    async def test_a_create_with_notes_by_a_sight_not_seeing_its_home_lands_whole_unseen(
+        self, sight_store_factory: Callable[[SightMode], StoryStore], sight_name: str
+    ) -> None:
+        """ADR-0388 §3:2, ADR-0383 §7:5, §8:2: written whole, then as one never written.
+
+        Withholding, a sight that does not see the owner's domain creates a story there
+        with its first notes: the create succeeds, the unbound store holds the story
+        with every member and note, pending, as a store the same create was made on
+        unbound does; and to the sight the story and its notes answer as never written.
+        """
+        sight = SIGHTS[sight_name]
+        assert not sight.sees(RecordHome.owners())
+        store = sight_store_factory(SightMode.WITHHOLD)
+        unbound = sight_store_factory(SightMode.WITHHOLD)
+        firsts = (
+            StoryFirstNote(text="A stranger asked.", author=_PLANNING, written_during="own"),
+            StoryFirstNote(text="And again.", author=_PLANNING, written_during="own"),
+        )
+        bound = store.bound(sight)
+        outcome = await bound.create(
+            [act("own")], home=RecordHome.owners(), actor=StoryActor.PLANNING, notes=firsts
+        )
+        alike = await unbound.create(
+            [act("own")], home=RecordHome.owners(), actor=StoryActor.PLANNING, notes=firsts
+        )
+        assert outcome == alike
+        assert outcome.refusal is None, outcome
+        assert outcome.story_id is not None
+        assert await everything(store) == await everything(unbound)
+        assert [note.text for note in await notes_of(store, outcome.story_id)] == [
+            "A stranger asked.",
+            "And again.",
+        ]
+        assert await bound.header(outcome.story_id) is None
+        assert await bound.notes(outcome.story_id, limit=MAX_STORY_PAGE) is None
+        assert await bound.current_summary(outcome.story_id) is None
+        summary_refused(
+            await bound.append_note(
+                outcome.story_id, "A later note.", author=_PLANNING, written_during="own"
+            ),
+            StorySummaryRefusalReason.UNKNOWN_STORY,
+        )
+        assert (await bound.export()).stories == ()
+
+    async def test_a_create_with_notes_through_a_counting_binding_is_read_as_unbound(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """ADR-0383 §7:10: counting, the story and its notes are read back as unbound."""
+        store = sight_store_factory(SightMode.COUNT)
+        bound = store.bound(SIGHTS["unidentified-senders-work"])
+        firsts = (StoryFirstNote(text="A stranger asked.", author=_PLANNING, written_during="own"),)
+        outcome = await bound.create(
+            [act("own")], home=RecordHome.owners(), actor=StoryActor.PLANNING, notes=firsts
+        )
+        assert outcome.story_id is not None, outcome
+        assert await notes_of(bound, outcome.story_id) == await notes_of(store, outcome.story_id)
+        assert [note.text for note in await notes_of(bound, outcome.story_id)] == [
+            "A stranger asked."
+        ]
+        assert await bound.header(outcome.story_id) == await store.header(outcome.story_id)
 
 
 #: The stories :func:`_sight_history` writes, by name, in each home.

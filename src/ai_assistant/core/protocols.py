@@ -254,6 +254,7 @@ if TYPE_CHECKING:
         SpokenReply,
         StoryActor,
         StoryExport,
+        StoryFirstNote,
         StoryFlagName,
         StoryHeader,
         StoryLogPage,
@@ -4583,6 +4584,14 @@ class PlanStore(Protocol):
         - A write mints its record in the home it carries, whether or not the sight sees
           it (§4, §7:5): a record the sight does not see is then one it does not hold.
 
+        **A limit a write checks is a figure of the records it holds** (ADR-0388 §6:1).
+        A check a write makes over records other than the one written, a cap, a count, a
+        chain or pending limit, or whether an equal record is already waiting or already
+        done, is made over the records the bound store holds (§7:2, §8:1), and is none of
+        the write's own checks below: :meth:`write_scheduled_task`'s chain and pending
+        limits, its replace and its wait, and :meth:`write_approval_request`'s request
+        already waiting, each as the list above has it.
+
         **A write's own checks are decided over every record the store holds** (§7:11),
         as the unbound store decides them: whether a stop record stands for the claiming
         activation, and for the activation :meth:`settle_occurrence` would push again;
@@ -8154,7 +8163,7 @@ class StoryStore(Protocol):
     as they are.
     """
 
-    async def create(
+    async def create(  # noqa: PLR0913 — ADR-0388 §3:3 adds the first notes as a keyword
         self,
         members: Sequence[StoryMember],
         *,
@@ -8162,8 +8171,9 @@ class StoryStore(Protocol):
         actor: StoryActor,
         trigger: Identifier | None = None,
         answers: StoryFlagName | None = None,
+        notes: Sequence[StoryFirstNote] = (),
     ) -> StoryOutcome:
-        """Mint a story holding ``members`` (ADR-0289 §3).
+        """Mint a story holding ``members``, and its first ``notes`` (ADR-0289 §3).
 
         Logs ``created``, then each member as ``added``, in the order given; a member
         named twice is added once. The store does not require two members: whether
@@ -8176,12 +8186,30 @@ class StoryStore(Protocol):
         records the decision ``grouped`` on the stories the flag concerns (ADR-0302
         §4:2), in its own transaction.
 
+        **The story's first notes** (ADR-0388 §3:3) are written after the members, in
+        the same transaction, in the order given, each as :meth:`append_note` would
+        write it to the story just minted: stamped with the store's clock and an
+        identity the store assigns, pending there, and logged as ``append_note`` logs
+        a note, which writes no change-log line, so ``logged`` counts none of them.
+        A create with notes leaves every read as a create followed by the same
+        ``append_note`` calls would. **Any note refused refuses the whole create**,
+        writing nothing: each is checked as ``append_note`` checks its arguments, a
+        malformed one, one written as ``tidy_up`` included, raising ``ValueError``
+        before any check or write. Neither of ``append_note``'s refusals can be
+        drawn, since the story a first note is written to is the one the same write
+        mints, so a create with notes is refused for what a create without them is
+        and for nothing else. Bound to a sight, the store writes them whatever that
+        sight sees, as it mints the story (ADR-0388 §3:2): the minted story is the
+        write's own, and is no story the write names.
+
         Args:
             members: The story's first members, at least one.
             home: The domain the story it mints lands in. Required, with no default.
             actor: Who is creating it.
             trigger: The activation that triggered it, where there was one.
             answers: The flag this create decides, where it decides one.
+            notes: The story's first notes, in the order they are written; none by
+                default.
 
         Returns:
             The minted story's id, or a refusal: ``no_members`` for an empty list,
@@ -8189,13 +8217,14 @@ class StoryStore(Protocol):
             the store can hold, ``another_home`` for a story member of another home
             than ``home`` (ADR-0383 §4:7), then ``unknown_flag``,
             ``already_decided``, or ``another_home`` for a story the flag concerns
-            of another home than ``home``.
+            of another home than ``home``. A refused create writes no note either.
 
         Raises:
             ValueError: If an argument is malformed, including an activation member
-                named by a create answering a flag (ADR-0302 §4:3), and a ``home``
+                named by a create answering a flag (ADR-0302 §4:3), a note
+                ``append_note`` would refuse with ``ValueError``, and a ``home``
                 :func:`~ai_assistant.core.types.home_may_be_written` does not allow,
-                which is refused before any check or write (ADR-0386 §6:2).
+                each refused before any check or write (ADR-0386 §6:2).
             StoryStoreError: If the store cannot be read or written.
         """
         ...
@@ -9744,6 +9773,11 @@ class NotificationStore(Protocol):
           slot, and no admission drops, displaces or changes a record it does not hold,
           as the cap never evicts and a ``DROP`` writes nothing. The record it writes
           carries the ``home`` it is handed, whether or not the sight sees it (§4).
+          The cap and the duplicate lookup are limits of ADR-0388 §6:1: a check a write
+          makes over records other than the one written, a cap, a count, a chain or
+          pending limit, or whether an equal record is already waiting or already done,
+          is a figure of the records the bound store holds (§7:2, §8:1), and is none of
+          the write's own checks below (§7:11).
         - :meth:`set_preferences` writes the setting and re-arms only the records it
           holds, and answers how many of those it made due: a write through it changes no
           record it does not hold (§7:5).

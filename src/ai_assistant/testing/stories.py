@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import copy
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, final
@@ -62,6 +63,7 @@ from ai_assistant.core.types import (
     StoryDecision,
     StoryEntry,
     StoryExport,
+    StoryFirstNote,
     StoryFlagName,
     StoryHeader,
     StoryLogLine,
@@ -96,7 +98,7 @@ from ai_assistant.core.types import (
 from ai_assistant.testing._home_count import count_homes
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import Sight
@@ -190,6 +192,35 @@ def _note_args(
         written_at=datetime(1970, 1, 1, tzinfo=UTC),
     )
     return checked.text, checked.author, checked.written_during, checked.outside
+
+
+type _NoteArgs = tuple[str, StoryNoteAuthor, str | None, bool]
+
+
+def _first_notes(notes: object) -> tuple[_NoteArgs, ...]:
+    """Check a create's first notes, each as :func:`_note_args` checks an append's.
+
+    Raises:
+        ValueError: If ``notes`` is a string or not a sequence, holds anything that is
+            not a :class:`StoryFirstNote`, or holds a note an append would refuse.
+    """
+    if isinstance(notes, str | bytes) or not isinstance(notes, Sequence):
+        msg = "a story's first notes must be a sequence of StoryFirstNote"
+        raise ValueError(msg)
+    checked: list[_NoteArgs] = []
+    for note in notes:
+        if not isinstance(note, StoryFirstNote):
+            msg = f"a story's first note must be a StoryFirstNote, got {type(note).__name__}"
+            raise ValueError(msg)
+        checked.append(
+            _note_args(
+                note.text,
+                author=note.author,
+                written_during=note.written_during,
+                outside=note.outside,
+            )
+        )
+    return tuple(checked)
 
 
 def _summary_draft(story_id: str, draft: object) -> StorySummaryDraft:
@@ -755,7 +786,7 @@ class FakeStoryStore:
 
     # --- writes --------------------------------------------------------------
 
-    async def create(
+    async def create(  # noqa: PLR0913 — ADR-0388 §3:3 adds the first notes as a keyword
         self,
         members: Sequence[StoryMember],
         *,
@@ -763,13 +794,18 @@ class FakeStoryStore:
         actor: StoryActor,
         trigger: Identifier | None = None,
         answers: StoryFlagName | None = None,
+        notes: Sequence[StoryFirstNote] = (),
     ) -> StoryOutcome:
-        """Mint a story holding ``members``, in ``home`` (ADR-0289 §3, ADR-0386 §2:2)."""
+        """Mint a story holding ``members``, in ``home``, with its first ``notes``.
+
+        ADR-0289 §3, ADR-0386 §2:2, ADR-0388 §3:3; the Protocol states the rest.
+        """
         checked_home = _checked_home(home)
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         flag = _answers(answers)
         _grouping(named, flag)
+        first_notes = _first_notes(notes)
         if not named:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
@@ -785,6 +821,10 @@ class FakeStoryStore:
         for member in unique:
             self._add(state, story_id, member, stamp)
         decided = [] if flag is None else self._decide(state, flag, StoryDecision.GROUPED, stamp)
+        # The first notes, after the members, each as an append writes one to the story
+        # just minted (ADR-0388 §3:3), whatever the sight sees (§3:2), and no log line.
+        for text, author, written_during, outside in first_notes:
+            self._write_note(state, story_id, text, author, written_during, outside, stamp.at)
         return StoryOutcome(story_id=story_id, logged=1 + len(unique) + len(decided))
 
     async def link(
@@ -1120,17 +1160,32 @@ class FakeStoryStore:
         if refused := self._summary_refusal(target):
             return StoryNoteOutcome(refusal=refused)
         at = self._now()
-        state = self._state
+        note = self._write_note(
+            self._state, target, checked_text, checked_author, checked_during, checked_outside, at
+        )
+        return StoryNoteOutcome(note=note)
+
+    @staticmethod
+    def _write_note(  # noqa: PLR0913 — the state, the story, the note's four fields, its instant
+        state: _State,
+        story_id: str,
+        text: str,
+        author: StoryNoteAuthor,
+        written_during: str | None,
+        outside: bool,
+        at: datetime,
+    ) -> StoryNote:
+        """Write one note to a story found standing, pending there, and return it."""
         note = StoryNote(
             note_id=_tick(state),
-            text=checked_text,
-            author=checked_author,
-            written_during=checked_during,
-            outside=checked_outside,
+            text=text,
+            author=author,
+            written_during=written_during,
+            outside=outside,
             written_at=at,
         )
-        state.notes[note.note_id] = _Held(note=note, story_id=target, pending_since=note.note_id)
-        return StoryNoteOutcome(note=note)
+        state.notes[note.note_id] = _Held(note=note, story_id=story_id, pending_since=note.note_id)
+        return note
 
     async def write_summary(
         self,
