@@ -165,6 +165,7 @@ from __future__ import annotations
 
 import asyncio
 import zlib
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -172,6 +173,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
+    AssistantError,
     CrossHomeWriteError,
     MemoryStoreConflictError,
     MemoryStoreError,
@@ -208,6 +210,8 @@ from ai_assistant.core.types import (
     Provenance,
     QuestionPart,
     RecordHome,
+    Sight,
+    SightMode,
     SupportDirection,
     SupportPart,
     TrackRecordEntry,
@@ -230,9 +234,10 @@ from ai_assistant.testing.memories import (
     said_support,
     sourced_support,
 )
+from sight_equivalence import OWN_ACTIVATION, SIGHTS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
 
@@ -1203,6 +1208,30 @@ def _bypassed_secret(record: Memory) -> MemoryUpdateProposal:
         conflicts=(),
         confirmation=None,
     )
+
+
+#: The calls a bound writer is held to ADR-0383 §9:3's obligation by, one per member
+#: and per path a read for a write takes (:func:`_bound_call`): an install, a fold and a
+#: supersession found by the conflict search, a retirement, an operation adding a
+#: support or citing one carried, and a track-record entry, each on a memory of the
+#: owner's domain and on one of the shared things.
+_BOUND_CALL_NAMES = (
+    "install-ours",
+    "install-theirs",
+    "install-on-its-own-episode",
+    "reinforce-ours",
+    "reinforce-theirs",
+    "supersede-ours",
+    "supersede-theirs",
+    "retire-ours",
+    "retire-theirs",
+    "add-support-ours",
+    "add-support-theirs",
+    "end-ours",
+    "end-theirs",
+    "use-ours",
+    "use-theirs",
+)
 
 
 class MemoryWriterContract:
@@ -4719,6 +4748,174 @@ class MemoryWriterContract:
         assert isinstance(written, Memory)
         assert [one.episode for one in written.track_record] == [_OTHER_CITED]
 
+    # · a writer bound to a sight (ADR-0383 §7:1, §7:6, §9:3)
+    # A bound writer makes every read it makes for a write through its store bound to the
+    # same sight, and every write through it. ``MemoryWriter`` has no read member, so
+    # §9:3's obligation is stated on what its members do: bound, each gives the same
+    # result or raises the same error class, asks the policy the same rulings on the same
+    # conflicts, and leaves the same records, as the same writer over the same store
+    # holding only the records the sight sees. A record the sight does not see is one
+    # never written (§4:8, §7:5, §8:2), save a write's own checks (§7:11).
+
+    @pytest.mark.parametrize("call_name", _BOUND_CALL_NAMES)
+    @pytest.mark.parametrize("sight_name", list(SIGHTS))
+    async def test_a_bound_writer_writes_as_over_the_store_holding_only_what_its_sight_sees(
+        self, make_writer: WriterFactory, sight_name: str, call_name: str
+    ) -> None:
+        """§9:3, §7:6: bound, each member writes as over a store holding only what it sees.
+
+        Two stores take one history; from the second every record the sight does not see
+        is deleted, which leaves every revision the rest carry as it is (§8:5). The same
+        call, handed the same memories as a caller read them, is made through the writer
+        bound to the sight over the first and through the same writer over the second:
+        the outcome, what the policy was asked, and what each store was left with are
+        the same, so no record the sight does not see is read, folded onto, retired or
+        changed, and none is told apart from a record never written.
+        """
+        sight = SIGHTS[sight_name]
+        world, holding_only = await _sight_world(), await _sight_world()
+        await _keep_only_what_it_sees(holding_only, sight)
+        call = _bound_call(call_name, await _as_read(world))
+
+        bound = await _written_through(make_writer, world, call, sight=sight)
+        reference = await _written_through(make_writer, holding_only, call, sight=None)
+
+        assert bound == reference
+
+    @pytest.mark.parametrize("call_name", _BOUND_CALL_NAMES)
+    async def test_a_writer_bound_over_a_counting_store_writes_as_the_unbound_writer(
+        self, make_writer: WriterFactory, call_name: str
+    ) -> None:
+        """§7:10, §11:1, §11:4: a bound writer has no mode of its own.
+
+        Over a store built to count, the writer bound to a sight that sees nothing
+        writes, refuses and asks exactly as the unbound writer over a twin store does:
+        whether reads withhold is the store's, and the refusals of §4 take effect
+        whatever it is.
+        """
+        world = await _sight_world(SightMode.COUNT)
+        twin = await _sight_world(SightMode.COUNT)
+        call = _bound_call(call_name, await _as_read(world))
+
+        bound = await _written_through(
+            make_writer, world, call, sight=SIGHTS["producer-with-no-facts"]
+        )
+        unbound = await _written_through(make_writer, twin, call, sight=None)
+
+        assert bound == unbound
+
+    async def test_a_bound_writer_bound_again_reads_by_the_meet_of_the_two_sights(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§6:6, §7:1: binding a bound writer never widens what it reads.
+
+        Bound to the owner's work, a memory resting on an episode of the owner's lands;
+        bound again to an unidentified sender's work, the same episode is one its store
+        does not hold, and only the work's own episode is read. Two sights that do not
+        meet are refused where the writer is bound, and binding leaves the writer it was
+        bound from as it was.
+        """
+        store = await _sight_world()
+        writer = make_writer(store, FakeMemoryPolicy())
+        owners = writer.bound(SIGHTS["owners-work"])
+        twice = owners.bound(SIGHTS["unidentified-senders-work"])
+
+        landed = await owners.ingest(_proposal(_preference("seen", evidence=(_CITED,))))
+        with pytest.raises(UnresolvedEvidenceError):
+            await twice.ingest(_proposal(_preference("unseen", evidence=(_CITED,))))
+        own = await twice.ingest(_proposal(_preference("own", evidence=(_OWN_EPISODE,))))
+        with pytest.raises(ValueError, match="meet"):
+            owners.bound(SIGHTS["run-over-the-shared-things"])
+        shared = _preference("unbound", evidence=(_SHARED_CITED,)).model_copy(update=_SHARED_HOME)
+        unbound = await writer.ingest(_proposal(shared))
+
+        assert (landed.record_id, own.record_id, unbound.record_id) == ("seen", "own", "unbound")
+
+    async def test_a_name_the_sight_does_not_see_is_answered_as_one_never_written(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§4:8: a refusal naming a record the sight does not see is one never written's.
+
+        Through a writer bound to the owner's domain alone, a support pointing at an
+        episode of the shared things is refused as one the store does not hold, by the
+        same error and the same message as where that episode was never written, and
+        never as a write across homes. A proposal retiring a memory of the shared things
+        is not refused as one: the policy is asked, as for a memory never written, and
+        its write is refused as one to a memory the store does not hold. Bound to the
+        owner's work, which sees both homes, the same retirement is refused across
+        homes before any ruling (§4:7).
+        """
+        sight = SIGHTS["run-over-the-owners-domain"]
+        world, holding_only = await _sight_world(), await _sight_world()
+        await _keep_only_what_it_sees(holding_only, sight)
+        theirs = (await _as_read(world))["m-theirs"]
+        resting = _proposal(_preference("new", evidence=(_SHARED_CITED,)))
+        retiring = _retiring(
+            _preference("new", _DISAGREEING, evidence=(_OWN_EPISODE,)),
+            theirs,
+            MemoryOperationKind.END,
+        )
+
+        refusals: list[tuple[type[BaseException], str]] = []
+        for store, bound in ((world, True), (holding_only, False)):
+            writer = make_writer(store, FakeMemoryPolicy())
+            with pytest.raises(UnresolvedEvidenceError) as refused:
+                await (writer.bound(sight) if bound else writer).ingest(resting)
+            refusals.append((type(refused.value), str(refused.value)))
+        unseen_policy = FakeMemoryPolicy()
+        with pytest.raises(MemoryStoreStaleError):
+            await make_writer(world, unseen_policy).bound(sight).ingest(retiring)
+        seen_policy = FakeMemoryPolicy()
+        with pytest.raises(CrossHomeWriteError):
+            await make_writer(world, seen_policy).bound(SIGHTS["owners-work"]).ingest(retiring)
+
+        assert refusals[0] == refusals[1]
+        assert len(unseen_policy.calls) > 0
+        assert seen_policy.calls == []
+
+    @pytest.mark.parametrize("sight_name", ["work-for-no-one", "run-over-the-shared-things"])
+    async def test_a_conflict_the_sight_does_not_see_is_not_found(
+        self, make_writer: WriterFactory, sight_name: str
+    ) -> None:
+        """§7:6: the conflict search is a read through the bound store.
+
+        A proposal of the shared things restating what a memory of the owner's says:
+        through a writer whose sight sees the shared things alone the owner's memory is
+        no conflict, so the policy rules on none and the proposal is installed beside it,
+        nothing folded onto, superseded or retired, the owner's memory as it was. The
+        unbound writer finds it, and the fold the ruling names onto it is refused across
+        homes (§4:7).
+        """
+        store = FakeMemoryStore(now=_after_close, sight_mode=SightMode.WITHHOLD)
+        await _cite(store)
+        await store.add(
+            _episodic(_SHARED_CITED, "an exchange of the shared things").model_copy(
+                update=_SHARED_HOME
+            )
+        )
+        ours = await self._stored(store, _preference("m-ours"))
+        restating = _proposal(
+            _preference("new", evidence=(_SHARED_CITED,)).model_copy(update=_SHARED_HOME)
+        )
+
+        unbound_policy = FakeMemoryPolicy(MemoryDecisionKind.REINFORCE)
+        with pytest.raises(CrossHomeWriteError):
+            await make_writer(store, unbound_policy).ingest(restating)
+        bound_policy = FakeMemoryPolicy(MemoryDecisionKind.REINFORCE)
+        result = await make_writer(store, bound_policy).bound(SIGHTS[sight_name]).ingest(restating)
+
+        assert [[one.id for one in call.conflicts] for call in unbound_policy.calls] == [["m-ours"]]
+        assert [list(call.conflicts) for call in bound_policy.calls] == [[]]
+        assert (result.decision.kind, result.record_id, result.conflicts) == (
+            MemoryDecisionKind.ACCEPT,
+            "new",
+            (),
+        )
+        assert await store.get("m-ours") == ours
+        written = await store.get("new")
+        assert written is not None
+        assert written.home == RecordHome.shared()
+
     # · the track record (§14:4, ADR-0328 §8)
 
     async def test_record_use_adds_one_entry_and_nothing_else(
@@ -5514,3 +5711,196 @@ def _inadmissible_inference(shape: str) -> Memory:
         ),
     }
     return memory("new", _DISAGREEING, *shapes[shape])
+
+
+# · a writer bound to a sight (ADR-0383 §7:1, §7:6, §9:3)
+
+#: The episode of the activation whose work's sights are proved (ADR-0383 §7:4): a work's
+#: sight holds it, whatever its home.
+_OWN_EPISODE = f"activation:{OWN_ACTIVATION}"
+
+#: Wording no memory of :func:`_sight_world` states, for an install the policy rules on.
+_UNRELATED = "keeps a sourdough starter in the fridge"
+
+
+def _made_by(record: MemoryRecord) -> str | None:
+    """The activation a store records as having made ``record``: an activation's episode's."""
+    if isinstance(record, EpisodicMemory) and record.id.startswith("activation:"):
+        return record.id.removeprefix("activation:")
+    return None
+
+
+async def _sight_world(mode: SightMode = SightMode.WITHHOLD) -> FakeMemoryStore:
+    """One history of two homes: an episode and a memory of each, and the work's episode.
+
+    :data:`_CITED` and ``m-ours`` are the owner's, :data:`_SHARED_CITED` and ``m-theirs``
+    the shared things', both memories stating :data:`_CONTENT`; :data:`_OWN_EPISODE` is
+    the owner's, made by the activation whose work's sights :data:`SIGHTS` holds.
+    """
+    store = FakeMemoryStore(now=_after_close, sight_mode=mode)
+    await _cite(store)
+    await store.add(
+        _episodic(_SHARED_CITED, "an exchange of the shared things").model_copy(update=_SHARED_HOME)
+    )
+    await store.add(_episodic(_OWN_EPISODE, "the work's own exchange"))
+    await store.add(_preference("m-ours", evidence=(_CITED,)))
+    await store.add(
+        _preference("m-theirs", evidence=(_SHARED_CITED,)).model_copy(update=_SHARED_HOME)
+    )
+    return store
+
+
+async def _keep_only_what_it_sees(store: MemoryStore, sight: Sight) -> None:
+    """Delete from ``store`` every record ``sight`` does not see, by the one predicate."""
+    for record in await store.export():
+        if not sight.sees(record.home, made_by=_made_by(record)):
+            assert await store.delete(record.id) is True
+
+
+async def _as_read(store: MemoryStore) -> dict[str, Memory]:
+    """The two memories of :func:`_sight_world` as a caller read them, unbound."""
+    read: dict[str, Memory] = {}
+    for key in ("m-ours", "m-theirs"):
+        found = await store.get(key)
+        assert isinstance(found, Memory)
+        read[key] = found
+    return read
+
+
+@dataclass(frozen=True)
+class _BoundCall:
+    """One call of a writer member, made alike on a bound writer and on its reference.
+
+    Attributes:
+        ruling: What the policy rules, subject to the fake policy's overrides.
+        run: Makes the call on the writer it is given.
+    """
+
+    ruling: MemoryDecisionKind
+    run: Callable[[MemoryWriter], Awaitable[object]]
+
+
+def _minting() -> Callable[[], str]:
+    """An id factory minting ``minted-1``, ``minted-2``, … afresh for each writer."""
+    count = 0
+
+    def mint() -> str:
+        nonlocal count
+        count += 1
+        return f"minted-{count}"
+
+    return mint
+
+
+def _bound_call(name: str, read: Mapping[str, Memory]) -> _BoundCall:
+    """The call ``name`` of :data:`_BOUND_CALL_NAMES`, over the memories as ``read``."""
+    accept, reinforce = MemoryDecisionKind.ACCEPT, MemoryDecisionKind.REINFORCE
+    supersede = MemoryDecisionKind.SUPERSEDE
+    ours, theirs = read["m-ours"], read["m-theirs"]
+    shared = _SHARED_HOME
+
+    def ingest(proposal: MemoryUpdateProposal) -> Callable[[MemoryWriter], Awaitable[object]]:
+        return lambda writer: writer.ingest(proposal)
+
+    def apply(change: MemoryChange) -> Callable[[MemoryWriter], Awaitable[object]]:
+        return lambda writer: writer.apply(change)
+
+    def adding(held: Memory, episode: str) -> MemoryChange:
+        support = said_support(episode, when=_WHEN, added_at=_WHEN)
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.ADD_SUPPORT,
+            cites=support.points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+        )
+        return MemoryChange(memory=held, operation=operation, support=support)
+
+    def ending(held: Memory) -> MemoryChange:
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.END,
+            cites=held.supports[0].points_at,
+            at=_WHEN + timedelta(days=1),
+            by=MemoryWriterName.REMEMBER,
+        )
+        return MemoryChange(memory=held, operation=operation)
+
+    def use(held: Memory, episode: str) -> Callable[[MemoryWriter], Awaitable[object]]:
+        return lambda writer: writer.record_use(held, _entry(episode))
+
+    new = _preference("new", _DISAGREEING, evidence=(_OWN_EPISODE,))
+    calls = {
+        "install-ours": _BoundCall(accept, ingest(_proposal(_preference("new", _UNRELATED)))),
+        "install-theirs": _BoundCall(
+            accept,
+            ingest(
+                _proposal(
+                    _preference("new", _UNRELATED, evidence=(_SHARED_CITED,)).model_copy(
+                        update=shared
+                    )
+                )
+            ),
+        ),
+        "install-on-its-own-episode": _BoundCall(
+            accept, ingest(_proposal(_preference("new", _UNRELATED, evidence=(_OWN_EPISODE,))))
+        ),
+        "reinforce-ours": _BoundCall(
+            reinforce, ingest(_proposal(_preference("new", evidence=(_OWN_EPISODE,))))
+        ),
+        "reinforce-theirs": _BoundCall(
+            reinforce,
+            ingest(
+                _proposal(_preference("new", evidence=(_SHARED_CITED,)).model_copy(update=shared))
+            ),
+        ),
+        "supersede-ours": _BoundCall(supersede, ingest(_proposal(new))),
+        "supersede-theirs": _BoundCall(
+            supersede,
+            ingest(
+                _proposal(
+                    _preference("new", _DISAGREEING, evidence=(_SHARED_CITED,)).model_copy(
+                        update=shared
+                    )
+                )
+            ),
+        ),
+        "retire-ours": _BoundCall(accept, ingest(_retiring(new, ours, MemoryOperationKind.END))),
+        "retire-theirs": _BoundCall(
+            accept, ingest(_retiring(new, theirs, MemoryOperationKind.END))
+        ),
+        "add-support-ours": _BoundCall(accept, apply(adding(ours, _OWN_EPISODE))),
+        "add-support-theirs": _BoundCall(accept, apply(adding(theirs, _SHARED_CITED))),
+        "end-ours": _BoundCall(accept, apply(ending(ours))),
+        "end-theirs": _BoundCall(accept, apply(ending(theirs))),
+        "use-ours": _BoundCall(accept, use(ours, _OWN_EPISODE)),
+        "use-theirs": _BoundCall(accept, use(theirs, _SHARED_CITED)),
+    }
+    return calls[name]
+
+
+type _Written = tuple[tuple[str, object], list[object], dict[str, MemoryRecord], list[str]]
+
+
+async def _written_through(
+    make_writer: WriterFactory, store: MemoryStore, call: _BoundCall, *, sight: Sight | None
+) -> _Written:
+    """What ``call`` gives and leaves, through a writer over ``store``, bound where given.
+
+    The outcome, a raised error by its class (ADR-0383 §8:2's "same outcome"); each
+    ruling the policy was asked, with the conflicts and relations it was handed; and the
+    records the call wrote or removed, read from the store unbound, so a change to a
+    record the sight does not see is seen too.
+    """
+    policy = FakeMemoryPolicy(call.ruling)
+    writer = make_writer(store, policy, id_factory=_minting())
+    if sight is not None:
+        writer = writer.bound(sight)
+    before = {one.id: one for one in await store.export()}
+    outcome: tuple[str, object]
+    try:
+        outcome = ("returned", await call.run(writer))
+    except (AssistantError, ValueError) as exc:
+        outcome = ("raised", type(exc))
+    after = {one.id: one for one in await store.export()}
+    changed = {key: one for key, one in after.items() if before.get(key) != one}
+    asked: list[object] = [(one.proposal, one.conflicts, one.relations) for one in policy.calls]
+    return outcome, asked, changed, sorted(before.keys() - after.keys())

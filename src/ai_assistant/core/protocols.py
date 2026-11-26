@@ -2538,6 +2538,54 @@ class MemoryWriter(Protocol):
         """
         ...
 
+    def bound(self, sight: Sight) -> MemoryWriter:
+        """This writer, bound to ``sight`` (ADR-0383 §7:1).
+
+        **The one binding member.** It returns the same Protocol over this writer's own
+        policy and its own store bound to ``sight`` (:meth:`MemoryStore.bound`), reads
+        and writes nothing, and adds no argument to any member. It has no mode of its
+        own: whether a bound writer's reads withhold or only count is its store's,
+        fixed when the store is built (§7:10). Binding a bound writer binds it to the
+        meet of the two sights (§6:6), so binding never widens what it reads.
+
+        **Every read a bound writer makes for a write is of the store bound to the same
+        sight** (§7:6), and every write it makes goes through that store (§7:5). Save a
+        write's own checks, decided over every record the store holds (§7:11), each
+        member answers as this writer would over the same store holding only the
+        records ``sight`` sees:
+
+        - :meth:`ingest` reads through it the episodes the proposal's supports point
+          at, every other record its memory names, its conflicts, a placed proposal's
+          memories and the numbers of the episodes it orders, and the memory a
+          retiring operation retires. A support pointing at an episode the sight does
+          not see is refused as one the store does not hold
+          (``UnresolvedEvidenceError``); a conflict the sight does not see is not
+          found, so nothing folds onto, supersedes or retires it; a placed proposal
+          naming a memory the sight does not see is stale, as one naming a memory
+          never written is; and a retiring operation on one is refused at its write as
+          a write to a memory the store does not hold.
+        - :meth:`apply` reads through it the episodes the support it adds and the
+          successor's supports point at, and writes the operation's memory through it.
+        - :meth:`record_use` and :meth:`write_labels` write the memory they are handed
+          through it.
+
+        A write changing a memory the sight does not see, the memory an operation,
+        an entry or a label write is handed included, is refused as a write to one
+        the store does not hold, as for a memory never written:
+        ``MemoryStoreStaleError``, nothing written (§7:5, §8:2).
+
+        Args:
+            sight: The sight to bind this writer to.
+
+        Returns:
+            This writer, bound to ``sight``.
+
+        Raises:
+            ValueError: If this writer is already bound to a sight of another reader or
+                activation, which do not meet.
+        """
+        ...
+
 
 @runtime_checkable
 class Reader(Protocol):

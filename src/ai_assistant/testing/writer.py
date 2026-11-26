@@ -27,6 +27,7 @@ can assert what its subject actually delegated.
 from __future__ import annotations
 
 import asyncio
+import copy
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -108,6 +109,7 @@ if TYPE_CHECKING:
         MemoryLabelChange,
         MemoryRecord,
         MemoryUpdateProposal,
+        Sight,
         TrackRecordEntry,
     )
 
@@ -720,6 +722,24 @@ class FakeMemoryWriter:
         self._lock = asyncio.Lock()
         self.calls: list[MemoryUpdateProposal] = []
 
+    def bound(self, sight: Sight) -> FakeMemoryWriter:
+        """This fake, bound to ``sight`` (ADR-0383 §7:1, §7:6), as ``MemoryIngestor`` binds.
+
+        A shallow copy holding its store bound to ``sight`` (the meet, where the store
+        was bound already, §6:6) and sharing everything else by reference, the lock and
+        :attr:`calls` included: a proposal handed to the bound fake is recorded where
+        the fake it was bound from records its own. Every read the fake makes for a
+        write is of its store, so binding the store binds them all; it holds no record
+        of its own to bind.
+
+        Raises:
+            ValueError: If the store is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._store = self._store.bound(sight)
+        return view
+
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
         """Record the proposal, then resolve, rule and apply (ADR-0328 §11:4).
 
@@ -942,8 +962,25 @@ class FakeMemoryWriter:
         labels = tuple(label for label in memory.labels if label.text in accepted)
         return memory.model_copy(update={"labels": labels}), tuple(refused)
 
+    async def _held_across_homes(self, proposal: MemoryUpdateProposal) -> tuple[Memory, ...]:
+        """The retired memory as the store holds it, where its copy is of another home.
+
+        As ``MemoryIngestor`` reads it (ADR-0383 §4:7, §4:8, §7:6): only where the
+        caller's copy is of another home than the proposal's memory, through the store,
+        so a memory the store does not hold, or a bound store's sight does not see, is
+        not judged and its write is refused as one to a memory it does not hold.
+        """
+        retirement = proposal.retiring
+        if retirement is None or retirement.memory.home == proposal.proposed.home:
+            return ()
+        found = await self._store.get_history([retirement.memory.id])
+        return tuple(found.values())
+
     def _retiring(
-        self, proposal: MemoryUpdateProposal, held: Mapping[str, MemoryRecord]
+        self,
+        proposal: MemoryUpdateProposal,
+        held: Mapping[str, MemoryRecord],
+        across_homes: Sequence[Memory],
     ) -> _Retiring | None:
         """The admission refusals and the checked retirement, as ``MemoryIngestor``'s.
 
@@ -963,7 +1000,7 @@ class FakeMemoryWriter:
         retirement = proposal.retiring
         if retirement is None:
             return None
-        refuse_other_home_targets(proposed, [retirement.memory], what="retire")
+        refuse_other_home_targets(proposed, across_homes, what="retire")
         cited = proposed.support_at(retirement.cites)
         if cited is None:  # pragma: no cover - retirement_fault found it among the backing
             msg = f"refusing to ingest {proposed.id!r}: its retirement cites no support of it"
@@ -985,7 +1022,7 @@ class FakeMemoryWriter:
         observed = observed.model_copy(update={"proposed": proposed})
         if observed.placement is not None:
             return await self._ingest_placed(observed, refused_labels, held)
-        retiring = self._retiring(observed, held)
+        retiring = self._retiring(observed, held, await self._held_across_homes(observed))
         conflicts = await self._conflicts_for(
             observed.proposed,
             withheld=None if retiring is None else retiring.retirement.memory.id,
