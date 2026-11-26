@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     RecallProvenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     StageEntry,
     StageOutcome,
     UnderstandingOmission,
@@ -93,6 +94,7 @@ def _episode(
         rounds=rounds,
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:a1",
         content="when?",
         occurred_at=_AT,

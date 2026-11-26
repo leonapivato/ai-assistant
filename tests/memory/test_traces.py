@@ -43,6 +43,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
+    RecordHome,
     TraceKind,
     TraceLabel,
     TraceOutcome,
@@ -183,6 +184,7 @@ def _semantic(
 def _episode(record_id: str, content: str) -> EpisodicMemory:
     """An episode: since ADR-0328 the one other kind the store holds (§2:1)."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=content,
         occurred_at=_WHEN,

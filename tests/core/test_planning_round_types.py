@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     Reversibility,
     RiskLevel,
     RoundContinuation,
@@ -125,6 +126,7 @@ def _frozen(record: EpisodeProcessingRecord) -> EpisodeProcessingRecord:
 
 def _episode(record: EpisodeProcessingRecord, *, outcome: str | None = None) -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:activation",
         content="",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_NOW),

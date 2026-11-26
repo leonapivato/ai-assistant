@@ -67,6 +67,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     RecordChunk,
     WalkPosition,
+    home_may_be_written,
     names_person,
     record_band,
     record_transaction_time,
@@ -88,6 +89,18 @@ if TYPE_CHECKING:
 #: (ADR-0073 §2). The fake enforces the real stores' range: a fake looser than the
 #: contract would certify consumers a real store rejects (ADR-0026 §7).
 _PAGE_BOUND = 2**63
+
+
+def _refuse_home(record: MemoryRecord) -> None:
+    """Refuse a write of ``record`` whose home no write may carry (ADR-0383 §2:3, §4:7).
+
+    Raises:
+        MemoryStoreError: If :func:`~ai_assistant.core.types.home_may_be_written` does
+            not allow the record's home.
+    """
+    if not home_may_be_written(record.home):
+        msg = f"a {record.home.kind} home is one no write may carry (ADR-0383 §2:3)"
+        raise MemoryStoreError(msg)
 
 
 def _utcnow() -> datetime:
@@ -468,11 +481,17 @@ class FakeMemoryStore:
         its connection lock, so a fake judging it outside would certify a consumer
         against a check the production store cannot make there.
 
+        **A home no write may carry is refused** (ADR-0383 §2:3, §4:7), from the
+        snapshot and before anything is written, as the persistent store refuses it.
+
         Raises:
             MemoryStoreError: ``record.id`` names a stored record of a different
-                ``kind`` (ADR-0108 §4). Nothing is written.
+                ``kind`` (ADR-0108 §4), or the record carries a home
+                :func:`~ai_assistant.core.types.home_may_be_written` does not allow.
+                Nothing is written.
         """
         snapshot = record.model_copy(deep=True)
+        _refuse_home(snapshot)
         async with self._resource.held():
             self._refuse_cross_kind(snapshot)
             self._records[snapshot.id] = self._stamped(snapshot)
@@ -574,8 +593,10 @@ class FakeMemoryStore:
                 row at a different ``revision``, or names no stored row at all
                 (ADR-0219 §3). Nothing is written.
             MemoryStoreError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
-                stored record of a different ``kind`` (ADR-0108 §4, ADR-0219 §4), or
-                the batch names the same id twice (ADR-0046 §3). Nothing is written.
+                stored record of a different ``kind`` (ADR-0108 §4, ADR-0219 §4), the
+                batch names the same id twice (ADR-0046 §3), or an element's record
+                carries a home no write may carry (ADR-0383 §2:3, §4:7). Nothing is
+                written.
         """
         staged = [
             (write.record.model_copy(deep=True), write.mode, write.expected_revision)
@@ -585,6 +606,8 @@ class FakeMemoryStore:
         if len(set(ids)) != len(ids):
             msg = "an atomic batch may not write the same id twice"
             raise MemoryStoreError(msg)
+        for record, _, _ in staged:
+            _refuse_home(record)
         async with self._resource.held():
             for record, mode, expected in staged:
                 if mode is MemoryWriteMode.INSERT_IF_ABSENT and record.id in self._records:

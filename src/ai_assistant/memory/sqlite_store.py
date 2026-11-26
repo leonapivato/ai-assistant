@@ -71,8 +71,10 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     ProcessingStatus,
     RecordChunk,
+    RecordHome,
     TraceKind,
     TraceRecordSet,
+    home_may_be_written,
     record_band,
     record_transaction_time,
 )
@@ -86,6 +88,7 @@ from ai_assistant.memory._channel_reads import (
 from ai_assistant.memory._continuing_upgrade import continuing_episode
 from ai_assistant.memory._episode_format import (
     CALLED_RECORD_FORMAT,
+    CAME_THROUGH_RECORD_FORMAT,
     CHECKED_RECORD_FORMAT,
     CONTINUING_RECORD_FORMAT,
     EPISODE_RECORD_FORMAT,
@@ -167,6 +170,11 @@ _VEC_KNN_MAX_K = 4096
 #: Large enough that a migration is a handful of statements per thousand records,
 #: small enough that a store of any size is never materialised at once.
 _BACKFILL_CHUNK = 500
+
+#: The owner's domain as a stored record carries it, which ADR-0383 §5:1's upgrade writes
+#: into every record from before it.
+_OWNERS_HOME: Final = RecordHome.owners().model_dump_json()
+
 _OWNER_ONLY = 0o600
 #: The sidecars SQLite may keep beside a database file. Each holds the same pages
 #: the database does, so ADR-0004 §4 reaches them too. SQLite copies the database
@@ -258,6 +266,20 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     if failure:
         raise failure[0]
     return outcome[0]
+
+
+def _refuse_home(record: MemoryRecord) -> None:
+    """Refuse a write of ``record`` whose home no write may carry (ADR-0383 §2:3, §4:7).
+
+    Raised before anything is embedded or written, so a refused write leaves nothing.
+
+    Raises:
+        MemoryStoreError: If :func:`~ai_assistant.core.types.home_may_be_written` does
+            not allow the record's home.
+    """
+    if not home_may_be_written(record.home):
+        msg = f"a {record.home.kind} home is one no write may carry (ADR-0383 §2:3)"
+        raise MemoryStoreError(msg)
 
 
 def _utcnow() -> datetime:
@@ -594,21 +616,7 @@ class SqliteMemoryStore:
             )
             self._migrate_records(conn)
             self._migrate_walk_key(conn)
-            self._upgrade_to_memories(conn, existing_format)
-            self._upgrade_to_joined(conn, existing_format)
-            self._upgrade_to_pinned(conn, existing_format)
-            self._upgrade_to_placed(conn, existing_format)
-            self._upgrade_to_scheduled(conn, existing_format)
-            self._upgrade_to_continuing(conn, existing_format)
-            self._upgrade_to_taken_over(conn, existing_format)
-            self._upgrade_to_parties(conn, existing_format)
-            self._upgrade_to_understood(conn, existing_format)
-            self._upgrade_to_called(conn, existing_format)
-            self._upgrade_to_showed(conn, existing_format)
-            self._upgrade_to_facts(conn, existing_format)
-            self._upgrade_to_unread(conn, existing_format)
-            self._upgrade_to_checked(conn, existing_format)
-            self._upgrade_to_came_through(conn, existing_format)
+            self._upgrade(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -631,6 +639,36 @@ class SqliteMemoryStore:
             msg = f"failed to open memory store at {self._path!r}: {exc}"
             raise MemoryStoreError(msg) from exc
         return conn
+
+    def _upgrade(self, conn: sqlite3.Connection, found: int | None) -> None:
+        """Apply, in order, each upgrade from the file's label (ADR-0326 §4:5).
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``. :meth:`_write_homes` comes
+        first, so every upgrade that decodes a stored record reads it with the home this
+        build requires; each step after it carries a file one label on.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        self._write_homes(conn, found)
+        self._upgrade_to_memories(conn, found)
+        self._upgrade_to_joined(conn, found)
+        self._upgrade_to_pinned(conn, found)
+        self._upgrade_to_placed(conn, found)
+        self._upgrade_to_scheduled(conn, found)
+        self._upgrade_to_continuing(conn, found)
+        self._upgrade_to_taken_over(conn, found)
+        self._upgrade_to_parties(conn, found)
+        self._upgrade_to_understood(conn, found)
+        self._upgrade_to_called(conn, found)
+        self._upgrade_to_showed(conn, found)
+        self._upgrade_to_facts(conn, found)
+        self._upgrade_to_unread(conn, found)
+        self._upgrade_to_checked(conn, found)
+        self._upgrade_to_came_through(conn, found)
+        self._upgrade_to_home(conn, found)
 
     def _create_label_tables(self, conn: sqlite3.Connection) -> None:
         """Create the tables a memory's labels are embedded into (ADR-0345 §7:4).
@@ -1683,6 +1721,60 @@ class SqliteMemoryStore:
             found: The label the file held when it was opened; ``None`` for a fresh
                 store, which is already written at the new label.
         """
+        if found is None or found >= CAME_THROUGH_RECORD_FORMAT:
+            return
+        conn.execute("UPDATE episode_record_format SET version = ?", (CAME_THROUGH_RECORD_FORMAT,))
+
+    @staticmethod
+    def _write_homes(conn: sqlite3.Connection, found: int | None) -> None:
+        """Write the owner's domain into every stored record: ADR-0383 §5:1's upgrade.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE`` for a file at a label before
+        :data:`MEMORY_RECORD_FORMAT`, and completes or rolls back with the transaction
+        (ADR-0326 §4:3). **Every stored record takes the owner's domain**, an episode and
+        a memory alike, open or frozen, whatever an episode's facts say of whom its work
+        was for (ADR-0383 §5:1): nothing asks the owner anything. The home is set inside
+        the record's stored JSON, as ``home.kind`` and ``home.id`` (§2:2), and nothing
+        else in the row moves: not a byte of the rest of the record, its ``revision``,
+        its columns or its vector, since the upgrade is no caller's write and a vector
+        embeds ``content``, which does not move. Nothing is dropped (§4:4). A record of
+        a kind ADR-0328 §16 upgrades is left as it is here: that upgrade makes it a memory
+        in the owner's domain (:func:`~ai_assistant.memory._legacy.memory_from_legacy`),
+        and its legacy support carries the record exactly as it was stored.
+
+        **It runs first, ahead of every earlier upgrade in the chain**, and
+        :meth:`_upgrade_to_home` moves the label last (ADR-0326 §4:5). This build's
+        episode and memory each require a home (ADR-0383 §5:4), so an earlier upgrade
+        that decodes a stored record, or rewrites one whole, reads it with the home it
+        will hold once the chain has run, and carries it.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        if found is None or found >= MEMORY_RECORD_FORMAT:
+            return
+        conn.execute(
+            "UPDATE records SET data = json_set(data, '$.home', json(?)) WHERE kind IN (?, ?)",
+            (_OWNERS_HOME, MemoryKind.EPISODIC.value, MemoryKind.MEMORY.value),
+        )
+
+    @staticmethod
+    def _upgrade_to_home(conn: sqlite3.Connection, found: int | None) -> None:
+        """Move a file's label to ADR-0383 §5:1's record, once the chain has run.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_came_through` has carried a file to 27, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+        :meth:`_write_homes` wrote every record's home at the head of the chain, so
+        **the label alone moves** here.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
         if found is None or found >= MEMORY_RECORD_FORMAT:
             return
         conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
@@ -1957,11 +2049,13 @@ class SqliteMemoryStore:
                 stopped (§7).
             MemoryStoreError: If the embedder fails or returns a wrong-sized
                 vector, if ``record.id`` names a stored record of a different
-                ``kind`` (ADR-0108 §4, refused in :meth:`_persist_record`), or the
-                write fails (the write is transactional — a failure leaves the
-                store unchanged).
+                ``kind`` (ADR-0108 §4, refused in :meth:`_persist_record`), if the
+                record carries a home no write may carry (ADR-0383 §2:3, §4:7; refused
+                before anything is embedded or written), or the write fails (the
+                write is transactional — a failure leaves the store unchanged).
         """
         snapshot = record.model_copy(deep=True)
+        _refuse_home(snapshot)
         # The store embeds no open episode (ADR-0286 §12:5); the write that freezes it
         # embeds its content.
         vector = None if is_open(snapshot) else await self._embed_one(snapshot.content)
@@ -2216,8 +2310,9 @@ class SqliteMemoryStore:
             MemoryStoreError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
                 stored record of a different ``kind`` (ADR-0108 §4 and ADR-0219 §4,
                 refused in :meth:`_persist_record`), the batch names the same id
-                twice (ADR-0046 §3), or any backend failure (with the ``sqlite3``
-                cause retained). Nothing is written.
+                twice (ADR-0046 §3), an element's record carries a home no write may
+                carry (ADR-0383 §2:3, §4:7), or any backend failure (with the
+                ``sqlite3`` cause retained). Nothing is written.
         """
         # Snapshot every record *before the first await*, so a caller aliasing a
         # submitted record and mutating it across the embedding awaits cannot
@@ -2236,6 +2331,8 @@ class SqliteMemoryStore:
             raise MemoryStoreError(msg)
         if not snapshot:
             return []
+        for record, _, _ in snapshot:
+            _refuse_home(record)
         prepared: list[_PreparedWrite] = []
         for record, mode, expected in snapshot:
             # No embedding for an open episode (ADR-0286 §12:5).

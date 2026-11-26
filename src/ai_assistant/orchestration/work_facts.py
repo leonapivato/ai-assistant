@@ -129,6 +129,7 @@ from ai_assistant.core.types import (
     HolderKind,
     InputSender,
     LineConnection,
+    RecordHome,
     Sureness,
     WorkAuthority,
     WorkFacts,
@@ -613,6 +614,27 @@ def persons_work(facts: WorkFacts | None, senders: Iterable[InputSender]) -> str
     if authority.unidentified or len(authority.persons) > 1:
         return None
     return whom.id
+
+
+def work_home(facts: WorkFacts | None) -> RecordHome:
+    """The home a work's write takes, from whom it is for (ADR-0383 §4:1).
+
+    :meth:`~ai_assistant.core.types.RecordHome.of_work` of whom its facts say it is for:
+    a person's domain, or the shared things for a work for no one. An unidentified
+    sender's work is for whoever its connection belongs to (ADR-0368 §3:3), which its
+    facts already record, so it writes there (ADR-0383 §4:4). A work with no facts, one
+    whose facts could not be decided (:func:`record_started`), is read as a work for no
+    one, as :func:`record_started` and :func:`persons_work` already read it, so it
+    writes into the shared things. Whom a work is for never changes once recorded, so
+    every write it makes carries the same home.
+
+    Args:
+        facts: The work's facts as they stand, or ``None`` where none were recorded.
+
+    Returns:
+        The home.
+    """
+    return RecordHome.of_work(WorkFor.no_one() if facts is None else facts.for_whom)
 
 
 def authority_persons(facts: WorkFacts | None) -> tuple[str, ...]:

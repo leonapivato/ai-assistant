@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
+    RecordHome,
     TraceKind,
     TraceOutcome,
 )
@@ -103,6 +104,7 @@ async def _plant_episode(store: MemoryStore) -> None:
     """
     await store.add(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id=_EPISODE,
             content="the exchange the proposals cite",
             occurred_at=_WHEN,

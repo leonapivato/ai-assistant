@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from memory_home_carry import homed_row
 from memory_parties_carry import holds, origin_recorded, parties_carried
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
@@ -231,7 +232,7 @@ async def test_no_support_is_rewritten(legacy: Path) -> None:
 
     after = _raw_rows(legacy)
     for record_id in ("mem-said", "mem-forwarded", "mem-noted"):
-        assert after[record_id] == before[record_id]
+        assert after[record_id] == homed_row(before[record_id])
     held = {
         record_id: [(one.origin, one.holder) for one in record.supports]
         for record_id, record in exported.items()
@@ -264,7 +265,7 @@ async def test_only_the_episodes_with_a_processing_record_are_rewritten(legacy: 
             assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
             assert "origin" not in json.loads(after[record_id][1])["processing_record"]["trigger"]
         else:
-            assert after[record_id] == row
+            assert after[record_id] == homed_row(row)
 
 
 async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:

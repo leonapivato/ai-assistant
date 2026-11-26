@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     StatementPart,
     SupportDirection,
     SupportHolder,
@@ -125,6 +126,7 @@ def _episode(
     )
     versions = tuple(_understood(n, relayed=one) for n, one in enumerate(relayed, start=1))
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=_ID,
         content="",
         occurred_at=_AT,

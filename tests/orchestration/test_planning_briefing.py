@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     RecordedDelivery,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     RequestedCall,
     RoundResponse,
     StageEntry,
@@ -220,6 +221,7 @@ def _episode(  # noqa: PLR0913 — one knob per part a short view shows
         joined=joined,
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=f"activation:{activation}",
         content="",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=at),

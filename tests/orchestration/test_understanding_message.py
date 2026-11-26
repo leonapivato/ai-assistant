@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     StatementPart,
     SupportHolder,
     TranscriptMessage,
@@ -201,6 +202,7 @@ def _episode(  # noqa: PLR0913 — one knob per field a case varies
         )
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content=text,
         occurred_at=at,

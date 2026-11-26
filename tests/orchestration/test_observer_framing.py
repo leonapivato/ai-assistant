@@ -10,6 +10,7 @@ root's bounds (ADR-0345 §7:3).
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import timedelta
 
 from observer_support import AT, LABELS, Minter, address, episode, framed, framing, read_as
@@ -24,6 +25,7 @@ from ai_assistant.core.types import (
     ObservationFinding,
     QuestionPart,
     ReadingCertainty,
+    RecordHome,
     RoundMessagePart,
     SupportOrigin,
 )
@@ -170,6 +172,21 @@ def test_an_approved_wording_framing_left_out_is_framed_by_code() -> None:
 
     contents = [one.memory.content for one in result.memories]
     assert contents == ["The user swims on Fridays.", _YES.text]
+
+
+def test_every_framed_memory_takes_the_leaving_episodes_home() -> None:
+    """ADR-0383 §4:2, §4:6: a memory the observer writes from an ended work's episode
+    takes that episode's home, never one made again from its facts and never one a model
+    gives: the leaving episode is in the shared things here, and both the memory framed
+    from the reply and the one code frames from an approved wording land there."""
+    view = _view(_P1, _YES)
+    shared = dataclasses.replace(
+        view, leaving=view.leaving.model_copy(update={"home": RecordHome.shared()})
+    )
+
+    result = _framed(shared, framing(framed("The user swims on Fridays.", "P1")))
+
+    assert [one.memory.home for one in result.memories] == [RecordHome.shared()] * 2
 
 
 def test_a_name_is_carried_only_as_a_part_gives_it() -> None:

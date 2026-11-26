@@ -52,6 +52,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     Attestation,
     BeliefBand,
     EpisodicMemory,
@@ -67,6 +68,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     Provenance,
+    RecordHome,
     SituationLabel,
     Validity,
     band_of,
@@ -176,6 +178,7 @@ def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need 
 def _episode(record_id: str, content: str, *, about_person: str | None = None) -> MemoryRecord:
     """An episode, the store's other kind (ADR-0328 §2:1), stating a subject or none."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=content,
         provenance=_provenance(),
@@ -264,6 +267,36 @@ async def test_add_and_get_round_trips_typed_record(
     assert isinstance(got, Memory)
     assert got.id == "p1"
     assert got.model_copy(update={"revision": 0}) == stored
+
+
+async def test_the_home_is_selectable_in_the_stores_own_query(
+    make_store: Callable[..., SqliteMemoryStore], tmp_path: Path
+) -> None:
+    """ADR-0383 §2:2, §7:3: the home is kept in the stored record as its kind and its
+    identifier, where a query over ``records`` selects on it with no further column, so
+    the bound store can apply a sight before it ranks, limits, pages or counts with no
+    second advance of the store's label."""
+    store = make_store()
+    await store.add(_semantic("owners", "prefers concise replies"))
+    await store.add(
+        _semantic("shared", "the house wifi").model_copy(update={"home": RecordHome.shared()})
+    )
+    store.close()
+
+    with sqlite3.connect(tmp_path / "memory.db") as conn:
+        selected = {
+            (kind, home_id): sorted(
+                str(one)
+                for (one,) in conn.execute(
+                    "SELECT id FROM records WHERE json_extract(data, '$.home.kind') = ? "
+                    "AND json_extract(data, '$.home.id') IS ?",
+                    (kind, home_id),
+                )
+            )
+            for kind, home_id in (("person", OWNER_PERSON_ID), ("shared", None))
+        }
+
+    assert selected == {("person", OWNER_PERSON_ID): ["owners"], ("shared", None): ["shared"]}
 
 
 async def test_get_missing_returns_none(make_store: Callable[..., SqliteMemoryStore]) -> None:
@@ -1545,6 +1578,7 @@ async def test_purge_expired_removes_only_expired_and_returns_count(
 def _captured_episode(record_id: str, content: str = "coffee") -> MemoryRecord:
     """An episode at :data:`_MARCH`, carrying the labels the retired index once held."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=content,
         provenance=_provenance(),
@@ -2819,6 +2853,7 @@ async def test_a_confirming_instant_survives_the_stores_round_trip(
     confirmed_at = datetime(2025, 7, 4, 8, 30, tzinfo=UTC)
     store = make_store()
     record = EpisodicMemory(
+        home=RecordHome.owners(),
         id="s1",
         content="the office moved to Lisbon",
         occurred_at=_WHEN,
@@ -3161,7 +3196,7 @@ async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, s
     assert db.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 28, 0])
+@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 29, 0])
 def test_current_shape_with_missing_or_unsupported_marker_is_refused(
     tmp_path: Path, marker: int | None
 ) -> None:

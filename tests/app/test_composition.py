@@ -67,6 +67,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     Provenance,
+    RecordHome,
     Reversibility,
     RiskLevel,
     StoryMember,
@@ -2465,6 +2466,7 @@ async def test_the_conflict_probe_asks_the_store_for_the_reported_figure() -> No
     # (ADR-0328 §4:7).
     await store.add(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id=HELD_EPISODE,
             content="the user said they drink oat milk",
             provenance=Provenance(

@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     ToolOutcome,
     UnderstandingOmission,
     WholeTextReply,
@@ -150,6 +151,7 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
         messages=line_input(messages)[1],
     )
     record = EpisodicMemory(
+        home=RecordHome.owners(),
         id=address(activation_id),
         content="",
         placement=Placement() if frozen else owner,

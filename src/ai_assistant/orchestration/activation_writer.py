@@ -653,6 +653,7 @@ class ActivationWriter:
         now = progress.captured_at
         episode = EpisodicMemory(
             id=progress.address,
+            home=state.home,
             content="",
             occurred_at=now,
             outcome=None,
@@ -684,6 +685,7 @@ class ActivationWriter:
         now = progress.captured_at
         episode = EpisodicMemory(
             id=progress.address,
+            home=state.home,
             content="",
             occurred_at=now,
             outcome=state.response,

@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     Sureness,
     WorkAuthority,
     WorkFacts,
@@ -74,6 +75,7 @@ def _record(
         }
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:activation",
         content="",
         occurred_at=_AT,

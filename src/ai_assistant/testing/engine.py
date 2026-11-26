@@ -98,6 +98,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     Provenance,
     RecordedInvocation,
+    RecordHome,
     RememberCallPart,
     SendOutcome,
     SourceGrant,
@@ -2654,6 +2655,7 @@ class FakeAssistantEngine:
             record_id=record_id,
         )
         memory = Memory(
+            home=RecordHome.owners(),
             id=record_id,
             content=content,
             supports=(support,),
@@ -2699,6 +2701,7 @@ class FakeAssistantEngine:
         """
         held = episode_view(
             EpisodicMemory(
+                home=RecordHome.owners(),
                 id=record_id,
                 content=content,
                 occurred_at=occurred_at,

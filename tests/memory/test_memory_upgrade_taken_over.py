@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from memory_home_carry import homed_row
 from memory_parties_carry import origin_recorded, parties_carried
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
@@ -178,7 +179,7 @@ async def test_the_file_is_upgraded_in_place_by_its_label_alone(legacy: Path) ->
             assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
             _holds(json.loads(after[record_id][1]), parties_carried(json.loads(row[1])))
         else:
-            assert after[record_id] == row
+            assert after[record_id] == homed_row(row)
 
 
 async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:

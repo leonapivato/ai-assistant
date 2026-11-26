@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     ProcessingStatus,
     RecordChunk,
+    home_may_be_written,
     names_person,
     record_band,
     record_transaction_time,
@@ -143,6 +144,18 @@ def _relevance(query_terms: set[str], content: str) -> float:
     return hits / len(query_terms)
 
 
+def _refuse_home(record: MemoryRecord) -> None:
+    """Refuse a write of ``record`` whose home no write may carry (ADR-0383 §2:3, §4:7).
+
+    Raises:
+        MemoryStoreError: If :func:`~ai_assistant.core.types.home_may_be_written` does
+            not allow the record's home.
+    """
+    if not home_may_be_written(record.home):
+        msg = f"a {record.home.kind} home is one no write may carry (ADR-0383 §2:3)"
+        raise MemoryStoreError(msg)
+
+
 class InMemoryMemoryStore:
     """A non-persistent ``MemoryStore`` backed by a dict, for dev and tests.
 
@@ -226,8 +239,10 @@ class InMemoryMemoryStore:
 
         Raises:
             MemoryStoreError: ``record.id`` names a stored record of a different
-                ``kind`` (ADR-0108 §4). Nothing is written.
+                ``kind`` (ADR-0108 §4), or the record carries a home no write may
+                carry (ADR-0383 §2:3, §4:7). Nothing is written.
         """
+        _refuse_home(record)
         self._refuse_cross_kind(record)
         # Deep copy so a caller mutating the record (including nested fields like
         # validity, which drives read filtering) after add cannot reach stored
@@ -318,10 +333,14 @@ class InMemoryMemoryStore:
                 row at a different ``revision``, or names no stored row at all
                 (ADR-0219 §3). Nothing is written.
             MemoryStoreError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
-                stored record of a different ``kind`` (ADR-0108 §4, ADR-0219 §4), or
-                the batch names the same id twice (ADR-0046 §3). Nothing is written.
+                stored record of a different ``kind`` (ADR-0108 §4, ADR-0219 §4), the
+                batch names the same id twice (ADR-0046 §3), or an element's record
+                carries a home no write may carry (ADR-0383 §2:3, §4:7). Nothing is
+                written.
         """
         self._reject_repeated_ids(writes)
+        for write in writes:
+            _refuse_home(write.record)
         # Stage first: validate every element against the *pre-batch* state, then
         # apply. No element's check may observe an earlier element's staged write
         # (the repeated-id rejection above makes that case unreachable anyway).

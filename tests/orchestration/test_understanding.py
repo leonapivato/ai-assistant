@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     SupportHolder,
     TranscriptMessage,
     UnclearPoint,
@@ -109,6 +110,7 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
     """
     event = channel.channel_type == "informational_event"
     record = EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content="",
         occurred_at=at,

@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     RecordedCall,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     ShownRecord,
     ShownRecordKind,
     ShownText,
@@ -62,6 +63,7 @@ class EpisodeInspectionSubject:
 
 def _episode(record_id: str, *, activation: bool = False) -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content='exact café 🍵\\"' * 100,
         occurred_at=INSPECTION_AT,

@@ -517,6 +517,11 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     a flag. The reference names a connection and is not its credential, which stays in
     the keyring, read by ``tools/`` alone.
 
+    **A record's home** (ADR-0383 §2:2). ``RecordHome``, on every ``EpisodicMemory`` and
+    ``Memory`` judged above, is a closed kind and a person's or a group's identity id,
+    set by code. It is not a credential, and no briefing renders it: it joins the
+    graph as a field of a record, never as text a model is shown.
+
     **The person block** (ADR-0338 §7). ``PersonBlock``, on understanding's ``person``
     and planning's, is a person's id, their ``Profile`` — five fields they typed, the
     person's own words, Tier 1 — the slot as ``KeptInMind``, each a ``Memory`` judged
@@ -628,6 +633,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "RecordedMessageDevices",
         "RecordedSpeechInput",
         "RecordedTextInput",
+        "RecordHome",
         "RefusedCall",
         "RememberCallPart",
         "ReportedExtent",

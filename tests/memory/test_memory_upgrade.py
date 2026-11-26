@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from memory_home_carry import without_home
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
@@ -205,9 +206,10 @@ async def test_no_episode_is_rewritten(legacy: Path) -> None:
         # A field a later decision adds at its default is the one difference: ADR-0332
         # §7:2's ``joined`` and ADR-0347 §4:1's ``stories_position`` on the processing
         # record.
-        assert episode.model_dump(mode="json", exclude={"revision"}) == _with_later_defaults(
-            before[record_id][1]
-        )
+        # ADR-0383 §5:1's home, set by the chain's end, is held by its own test.
+        assert without_home(
+            episode.model_dump(mode="json", exclude={"revision"})
+        ) == _with_later_defaults(before[record_id][1])
 
 
 async def test_each_legacy_record_becomes_a_memory_at_its_id(legacy: Path) -> None:

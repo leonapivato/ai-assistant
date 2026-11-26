@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     UnderstandingProducer,
     WholeTextReply,
 )
@@ -117,6 +118,7 @@ def _episode() -> EpisodicMemory:
         joined=(JoinedInput(joined_at=_AT, channel=_LINE, messages=messages[:1], relayed=True),),
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:act-line",
         content="Is this right?",
         occurred_at=_AT,

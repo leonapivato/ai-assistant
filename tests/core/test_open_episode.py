@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
+    RecordHome,
     SpokenAudioFormat,
     SpokenReply,
     StageEntry,
@@ -137,6 +138,7 @@ def _episode(
     placement: Placement = _OWNER_ONLY,
 ) -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:activation",
         content=content,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_NOW),
@@ -379,6 +381,7 @@ def test_another_activations_record_does_not_extend() -> None:
 
 def test_an_episode_without_a_processing_record_neither_extends_nor_is_extended() -> None:
     bare = EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:activation",
         content="",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_NOW),

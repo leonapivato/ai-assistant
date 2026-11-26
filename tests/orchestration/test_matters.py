@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     PlanningRound,
     Provenance,
     RecordedInputMessage,
+    RecordHome,
     SupportHolder,
     TextChannelPayload,
     ToolDefinition,
@@ -128,6 +129,7 @@ def _said(text: str, *, position: int | None = 1) -> RecordedInputMessage:
 
 def _episode(state: ActivationState, activation_id: str) -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=f"activation:{activation_id}",
         content="",
         occurred_at=_AT,

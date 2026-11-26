@@ -332,6 +332,7 @@ def _stored_episode(*, withheld: bool) -> dict[str, object]:
     return {
         "id": "e1",
         "kind": "episodic",
+        "home": {"kind": "person", "id": "person:owner"},
         "content": "the user asked about a guarded belief",
         "occurred_at": _EARLIER,
         "provenance": {

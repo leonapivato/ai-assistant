@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     StoryActor,
     StoryChange,
     StoryMember,
@@ -89,6 +90,7 @@ def episode(activation_id: str, *, running: bool = False) -> EpisodicMemory:
     """The episode at ``activation:<activation_id>``, frozen or still open."""
     at = STORY_SURFACE_AT
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=f"activation:{activation_id}",
         content="",
         occurred_at=at,

@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     SemanticMemory,
     SituationLabel,
     StatementPart,
@@ -81,6 +82,7 @@ def _episode(
     if parties is None:
         parties, messages = line_input(messages) if messages else (OWNERS_WORDS, ())
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:held",
         content="",
         occurred_at=AT,
@@ -313,6 +315,7 @@ def test_a_memory_carries_one_label_per_wording_and_no_retired_field() -> None:
 def test_a_name_must_be_given_by_a_part_the_owner_aside() -> None:
     """§9:3, §9:4: each name occurs in a part's text; the owner's identifier needs none."""
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:held",
         content="My sister Ana moved to Lisbon.",
         occurred_at=AT,
@@ -334,6 +337,7 @@ def test_the_person_filter_reads_subjects_and_involved_exactly() -> None:
     assert not names_person(held, "ana")
     assert names_person(held, None)
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="e",
         content="Ana",
         occurred_at=AT,
@@ -423,6 +427,7 @@ def test_label_bounds_are_positive_and_the_distance_a_cosine_one() -> None:
 def test_a_remember_call_gives_no_name() -> None:
     """§9:3: which call a remember call is lives on its effect record, so none is read."""
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:held",
         content="",
         occurred_at=AT,

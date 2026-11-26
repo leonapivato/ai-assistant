@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Provenance,
+    RecordHome,
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
@@ -143,6 +144,7 @@ async def _write(store: SqliteMemoryStore, records: Sequence[MemoryRecord]) -> N
 def _episode(record_id: str, content: str, *, validity: Validity | None = None) -> MemoryRecord:
     """One episode, so a case can decompose a store by more than one kind (ADR-0328 §2:1)."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=content,
         occurred_at=_NOW,

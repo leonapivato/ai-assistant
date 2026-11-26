@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
-from ai_assistant.core.types import EpisodicMemory, MemoryKind, MemorySource, Provenance
+from ai_assistant.core.types import EpisodicMemory, MemoryKind, MemorySource, Provenance, RecordHome
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models.embeddings import HashingEmbedder
 from ai_assistant.models.fastembed_embedder import FastEmbedEmbedder
@@ -181,7 +181,9 @@ def _records() -> list[MemoryRecord]:
     observed = Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_AT)
     facts: list[MemoryRecord] = [memory(key, text) for key, text in FACTS.items()]
     episodes: list[MemoryRecord] = [
-        EpisodicMemory(id=key, content=text, occurred_at=_AT, provenance=observed)
+        EpisodicMemory(
+            home=RecordHome.owners(), id=key, content=text, occurred_at=_AT, provenance=observed
+        )
         for key, text in EPISODES.items()
     ]
     return facts + episodes

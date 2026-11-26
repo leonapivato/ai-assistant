@@ -56,6 +56,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     SendOutcome,
     TranscriptMessage,
     UnderstandingOmission,
@@ -136,6 +137,7 @@ def conversation_episode(
     running = status is None
     reason, rule = (None, None) if status is None else _STATUS_REASON[status]
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=f"activation:{activation_id}",
         content="",
         occurred_at=at,

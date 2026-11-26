@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     JoinedInput,
     NewConversation,
     RecordedInputMessage,
+    RecordHome,
     ScheduledOccurrence,
     ScheduledTask,
     ScheduledTaskAuthor,
@@ -67,6 +68,7 @@ from ai_assistant.orchestration.work_facts import (
     sender_of,
     senders_of,
     started,
+    work_home,
 )
 from ai_assistant.testing import FakeIdentityStore
 
@@ -631,6 +633,40 @@ def test_the_readers_read_a_persons_work_and_authority_from_the_facts(
     senders = (_OWNER,)
     assert persons_work(facts, senders) == work
     assert persons_authority(facts, senders) == authority
+
+
+@pytest.mark.parametrize(
+    ("facts", "home"),
+    [
+        pytest.param(_work(_OWNERS_WORK, _OWNERS_AUTHORITY), RecordHome.owners(), id="owner"),
+        pytest.param(
+            _work(WorkFor.no_one(), WorkAuthority.none(), Sureness.NONE),
+            RecordHome.shared(),
+            id="no-one",
+        ),
+        pytest.param(
+            _work(WorkFor(kind=WorkForKind.GROUP, id="group:home"), WorkAuthority.none()),
+            RecordHome.group("group:home"),
+            id="a-group",
+        ),
+        pytest.param(None, RecordHome.shared(), id="no-facts"),
+    ],
+)
+def test_a_works_home_is_whom_it_is_for(facts: WorkFacts | None, home: RecordHome) -> None:
+    """ADR-0383 §4:1: a person's domain, the shared things for a work for no one, and a
+    group's domain, which no write may carry (§2:3). A work whose facts could not be
+    decided is read as a work for no one, as ``record_started`` and ``persons_work`` read
+    it, so it writes into the shared things."""
+    assert work_home(facts) == home
+
+
+async def test_an_unidentified_senders_work_writes_into_the_owners_domain() -> None:
+    """ADR-0383 §4:4: whom it is for is whoever its connection belongs to (ADR-0368
+    §3:3), the owner, whatever its senders and its level."""
+    state = await _line(identities=FakeIdentityStore(configured=[], now=lambda: _AT))
+
+    assert _facts(state).authority.unidentified
+    assert state.home == RecordHome.owners()
 
 
 @pytest.mark.parametrize(

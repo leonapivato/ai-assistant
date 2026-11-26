@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     ProcessingReason,
     RecordedChannelTrigger,
+    RecordHome,
     StageEntry,
     StageOutcome,
     StoryActor,
@@ -534,6 +535,30 @@ async def test_admission_writes_an_open_episode_each_append_extends_and_the_end_
     assert frozen.processing_record == state.processing(_AT, None)
     assert frozen.content == episode_content(frozen)
     assert wiring.writer._in_flight == {}
+
+
+@pytest.mark.parametrize("recorded", [True, False], ids=["owners-work", "no-facts"])
+async def test_every_write_of_a_works_episode_carries_its_home(*, recorded: bool) -> None:
+    """ADR-0383 §4:1, §4:6: the open episode takes the home whom its work is for gives,
+    and the writes that extend and freeze it leave that home as it was. A work whose
+    facts could not be recorded is read as a work for no one, so its episode lands in
+    the shared things."""
+    wiring = Wiring()
+    state = await wiring.state()
+    if not recorded:
+        state.started_facts = None
+    home = RecordHome.owners() if recorded else RecordHome.shared()
+
+    await wiring.admit(state)
+    opened = await wiring.memory.get(_ADDRESS)
+    state.stages.append(_entry(ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE))
+    await wiring.append(state)
+    extended = await wiring.memory.get(_ADDRESS)
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+    await _freeze(wiring, state)
+    frozen = await wiring.memory.get(_ADDRESS)
+
+    assert [one.home if one else None for one in (opened, extended, frozen)] == [home] * 3
 
 
 async def test_a_stored_record_other_than_the_one_written_is_a_mismatch_and_leaves_none() -> None:

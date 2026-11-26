@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
     RecordedDelivery,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     StageEntry,
     StageOutcome,
     SupportHolder,
@@ -137,6 +138,7 @@ def _record(*, frozen: bool = False, **fields: Any) -> EpisodeProcessingRecord:
 def _episode(record: EpisodeProcessingRecord, *, external: bool = False) -> EpisodicMemory:
     is_open = record.is_open
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=f"activation:{record.activation_id}",
         content="" if is_open else "find flights to Lisbon",
         provenance=Provenance(
@@ -692,6 +694,7 @@ def test_another_activations_effect_is_refused() -> None:
 
 def test_an_episode_with_no_processing_record_has_no_peer_view() -> None:
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="harness-row",
         content="The user asked: what is on today?",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_NOW),

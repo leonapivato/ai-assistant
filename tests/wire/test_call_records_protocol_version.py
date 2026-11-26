@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedDelivery,
     RecordedTextInput,
+    RecordHome,
     UnderstandingOmission,
     WholeTextReply,
 )
@@ -106,6 +107,7 @@ def _episode() -> EpisodicMemory:
         ),
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:act-1",
         content="book Riverside for Friday",
         occurred_at=_AT,

@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     MemoryStanding,
     MemoryUpdateProposal,
     Provenance,
+    RecordHome,
     Validity,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
@@ -53,6 +54,7 @@ async def _store(now: Callable[[], datetime] = _fixed_now) -> FakeMemoryStore:
     store = FakeMemoryStore(now=now)
     await store.add(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id=_EPISODE,
             content="the exchange the memories rest on",
             occurred_at=_fixed_now(),

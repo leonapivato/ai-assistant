@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     RecallProvenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     UnclearPoint,
     UnderstandingProducer,
     UnderstandingReferent,
@@ -140,6 +141,7 @@ def _episode() -> EpisodicMemory:
         ),
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:act-u1",
         content="make it Saturday",
         occurred_at=_AT,

@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     RecallCue,
     RecalledItem,
     RecallProvenance,
+    RecordHome,
     RememberCallPart,
     SupportDirection,
     SupportOrigin,
@@ -621,6 +622,7 @@ def test_the_track_summary_counts_its_entries() -> None:
 
 def _episode() -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="e",
         content="it happened",
         occurred_at=AT,
@@ -751,6 +753,7 @@ def test_an_attested_episodes_projection_carries_its_attestation() -> None:
     the listing and on the single view; a memory's projection carries none.
     """
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="e",
         content="a source's report",
         occurred_at=AT,

@@ -25,6 +25,7 @@ from typing import Final
 
 import pytest
 from memory_facts_carry import without_facts
+from memory_home_carry import homed_row
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 from ai_assistant.core.types import (
@@ -175,7 +176,7 @@ async def test_every_other_row_is_kept_and_the_rest_byte_for_byte(legacy: Path) 
         if record_id in _REWRITTEN:
             assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
         else:
-            assert after[record_id] == row, record_id
+            assert after[record_id] == homed_row(row), record_id
 
 
 def test_a_record_the_upgrade_cannot_read_leaves_the_file_as_it_was_found(legacy: Path) -> None:

@@ -93,6 +93,7 @@ from ai_assistant.core.types import (
     ProfileField,
     ProposedCall,
     Provenance,
+    RecordHome,
     Reversibility,
     RiskLevel,
     StoryActor,
@@ -261,6 +262,7 @@ async def _held_episode(store: InMemoryMemoryStore | FakeMemoryStore) -> None:
     """The episode a proposal's support points into (ADR-0328 §4:7)."""
     await store.add(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id=HELD_EPISODE,
             content="the user said they drink coffee",
             provenance=Provenance(

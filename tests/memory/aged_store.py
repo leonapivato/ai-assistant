@@ -68,6 +68,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Provenance,
+    RecordHome,
     Validity,
 )
 from ai_assistant.memory.sqlite_store import _VEC_KNN_MAX_K
@@ -680,6 +681,7 @@ def _materialise(draft: Draft) -> MemoryRecord:
     provenance = draft.provenance
     if draft.kind is MemoryKind.EPISODIC:
         return EpisodicMemory(
+            home=RecordHome.owners(),
             id=draft.record_id,
             content=content,
             provenance=provenance,

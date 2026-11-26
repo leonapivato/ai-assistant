@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
+    RecordHome,
     SpokenAudioFormat,
     SpokenReply,
     UnderstandingOmission,
@@ -63,6 +64,7 @@ def test_recorded_response_requires_nonblank_sole_outcome(outcome: str) -> None:
     """ADR-0284 §4:1: the response is nonblank text, or there is none."""
     with pytest.raises(ValidationError, match="nonblank outcome"):
         EpisodicMemory(
+            home=RecordHome.owners(),
             id="episode",
             content="input",
             provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_NOW),
@@ -76,6 +78,7 @@ def test_recorded_response_requires_nonblank_sole_outcome(outcome: str) -> None:
 def test_a_processing_record_episode_has_a_response_or_none(outcome: str | None) -> None:
     """ADR-0284 §4:1: ``outcome`` is the response, or ``None`` where none was sent."""
     record = EpisodicMemory(
+        home=RecordHome.owners(),
         id="episode",
         content="input",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_NOW),
@@ -105,6 +108,7 @@ def test_the_removed_record_fields_are_refused(removed: dict[str, object]) -> No
 def test_the_episode_carries_no_disposition() -> None:
     """ADR-0284 §5:3: the verdict is on the stage entry, never on the episode."""
     record = EpisodicMemory(
+        home=RecordHome.owners(),
         id="episode",
         content="input",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_NOW),
@@ -132,6 +136,7 @@ def test_the_record_is_schema_version_twelve() -> None:
 
 def test_absent_processing_retains_other_producer_outcomes() -> None:
     record = EpisodicMemory(
+        home=RecordHome.owners(),
         id="episode",
         content="input",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_NOW),

@@ -22,7 +22,7 @@ import hashlib
 import json
 import re
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import pytest
 from pydantic import ValidationError
@@ -103,6 +103,7 @@ from ai_assistant.core.types import (
     RecordedDelivery,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     ShownRecord,
     ShownRecordKind,
     ShownText,
@@ -143,6 +144,10 @@ _REVISED = datetime(2026, 1, 1, tzinfo=UTC)
 #: The word every episode fixture's ``content`` carries, so ``search`` reaches all
 #: of them.
 _ANY = "coffee"
+
+#: A record's home as the shared things, as a model update (ADR-0383 §2:1).
+_SHARED: Final = {"home": RecordHome.shared()}
+
 #: When an episode fixture occurred unless a case varies it — comfortably before
 #: ``_STORE_NOW``, so nothing is accidentally unreadable.
 _OCCURRED = datetime(2026, 3, 15, tzinfo=UTC)
@@ -311,6 +316,7 @@ def _episode(
 ) -> MemoryRecord:
     """An episode at ``occurred_at``, carrying no participant, topic or subject."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=content,
         provenance=_provenance(source=source, last_updated=last_updated),
@@ -385,6 +391,7 @@ def _episodic(record_id: str, content: str) -> EpisodicMemory:
     ``MemoryBase`` (ADR-0221 §5).
     """
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=content,
         provenance=_provenance(),
@@ -975,6 +982,7 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
 def _activation_episode(record_id: str, *, completed: bool = True) -> EpisodicMemory:
     channel = ChannelIdentity(channel_type="informational_event", instance_id="source")
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=_ANY,
         provenance=_provenance(),
@@ -1067,6 +1075,7 @@ def _open_episode(
     so its channel may be absent until a later write carries it (§2).
     """
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content="",
         provenance=_provenance(last_updated=last_updated),
@@ -4238,6 +4247,115 @@ class MemoryStoreContract:
         after = await store.get("t")
         assert after is not None
         assert after.content == "revised against what that read returned"
+
+    @pytest.mark.parametrize(
+        "read",
+        ["get", "get_many", "get_history", "search", "list_beliefs", "export", "walk_records"],
+    )
+    async def test_every_record_returning_read_gives_back_the_stored_home(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0383 §2:2: the store keeps a record's home, kind and identifier both, and
+        gives it back on every read that gives back the record, over the same reads as
+        the revision's clause. The shared things are used, so a store that dropped the
+        home and read back the owner's would fail."""
+        await store.add(_semantic("t", "distinctive coffee content").model_copy(update=_SHARED))
+
+        found = await _read_one(store, read, "t")
+
+        assert found is not None, f"{read} did not return the record"
+        assert found.home == RecordHome.shared(), read
+
+    async def test_an_episode_keeps_its_home_across_its_writes(self, store: MemoryStore) -> None:
+        """ADR-0383 §2:2, §4:6: an episode's home is kept as written, through a rewrite
+        that leaves it as it was, and given back by the episode reads."""
+        episode = _episode("e", "distinctive episode").model_copy(update=_SHARED)
+        await store.add(episode)
+        held = await store.get("e")
+        assert held is not None
+        await store.write_atomic(
+            [
+                MemoryWrite(
+                    record=held.model_copy(update={"content": "distinctive, rewritten"}),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=held.revision,
+                )
+            ]
+        )
+
+        after = await store.get("e")
+        assert after is not None
+        assert after.home == RecordHome.shared()
+        (exported,) = await store.export()
+        assert exported.home == RecordHome.shared()
+
+    @pytest.mark.parametrize(
+        "home",
+        [RecordHome.group("group:household"), RecordHome.person("person:sam")],
+        ids=["group", "another-person"],
+    )
+    async def test_a_home_no_write_may_carry_is_refused_by_add(
+        self, store: MemoryStore, home: RecordHome
+    ) -> None:
+        """ADR-0383 §2:3, §4:7: a group's domain or another person's is refused, with
+        nothing written."""
+        with pytest.raises(MemoryStoreError):
+            await store.add(_semantic("t", "distinctive").model_copy(update={"home": home}))
+
+        assert await store.export() == []
+
+    @pytest.mark.parametrize("mode", list(MemoryWriteMode))
+    @pytest.mark.parametrize(
+        "home",
+        [RecordHome.group("group:household"), RecordHome.person("person:sam")],
+        ids=["group", "another-person"],
+    )
+    async def test_a_home_no_write_may_carry_is_refused_by_a_batch(
+        self, store: MemoryStore, home: RecordHome, mode: MemoryWriteMode
+    ) -> None:
+        """ADR-0383 §2:3, §4:7: one element carrying a home no write may carry fails the
+        whole batch, whatever its mode, and nothing of it is written."""
+        await store.add(_semantic("held", "distinctive, held"))
+        held = await store.get("held")
+        assert held is not None
+        before = await store.export()
+        refused = (
+            held.model_copy(update={"home": home, "content": "distinctive, rewritten"})
+            if mode is MemoryWriteMode.IF_UNCHANGED
+            else _semantic("new", "distinctive, new").model_copy(update={"home": home})
+        )
+
+        with pytest.raises(MemoryStoreError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(record=_semantic("other", "distinctive, other")),
+                    MemoryWrite(
+                        record=refused,
+                        mode=mode,
+                        expected_revision=(
+                            held.revision if mode is MemoryWriteMode.IF_UNCHANGED else None
+                        ),
+                    ),
+                ]
+            )
+
+        assert await store.export() == before
+
+    async def test_the_shared_things_and_the_owners_domain_are_written(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0383 §2:3: the two homes a write may carry in this milestone."""
+        await store.write_atomic(
+            [
+                MemoryWrite(record=_semantic("a", "distinctive, the owner's")),
+                MemoryWrite(
+                    record=_semantic("b", "distinctive, shared").model_copy(update=_SHARED)
+                ),
+            ]
+        )
+
+        held = {record.id: record.home for record in await store.export()}
+        assert held == {"a": RecordHome.owners(), "b": RecordHome.shared()}
 
     async def test_the_two_refusals_stay_distinguishable(self, store: MemoryStore) -> None:
         # ADR-0219 §3 and §7: an INSERT_IF_ABSENT collision and a stale IF_UNCHANGED

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from memory_home_carry import homed_row
 from memory_parties_carry import origin_recorded, parties_carried
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
@@ -184,7 +185,7 @@ async def test_only_the_episodes_that_record_continues_are_rewritten(legacy: Pat
             assert (after[record_id][0], *after[record_id][2:]) == (kind, revision, band, is_open)
             assert after[record_id][1] != row[1]
         else:
-            assert after[record_id] == row
+            assert after[record_id] == homed_row(row)
 
 
 async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:

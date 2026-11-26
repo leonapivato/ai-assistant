@@ -66,6 +66,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     Provenance,
     QuestionPart,
+    RecordHome,
     SupportOrigin,
     UserConfirmation,
     origin_is_outside,
@@ -131,6 +132,7 @@ def _conflict(record_id: str, origin: SupportOrigin | None) -> MemoryRecord:
     """
     if origin is None:
         return EpisodicMemory(
+            home=RecordHome.owners(),
             id=record_id,
             content=record_id,
             provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_WHEN),

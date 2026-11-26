@@ -32,6 +32,7 @@ from typing import Any, Final
 
 import pytest
 from memory_facts_carry import episode_without_facts
+from memory_home_carry import homed_row
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 from ai_assistant.core.types import (
@@ -280,7 +281,7 @@ async def test_every_other_row_is_kept_and_the_rest_byte_for_byte(legacy: Path) 
             *before[record_id][2:],
         )
     for record_id in _UNTOUCHED:
-        assert after[record_id] == before[record_id], record_id
+        assert after[record_id] == homed_row(before[record_id]), record_id
 
 
 async def test_a_second_open_changes_nothing(legacy: Path) -> None:

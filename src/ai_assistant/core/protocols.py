@@ -1128,8 +1128,9 @@ class MemoryStore(Protocol):
             MemoryStoreError: ``record.id`` names a stored record of a different
                 ``kind``, or the write would change a stored episode's processing
                 record or response other than by extending an open one, or change or
-                drop its channel (ADR-0286 §12) — nothing is written — or the write
-                fails.
+                drop its channel (ADR-0286 §12), or the record carries a home
+                :func:`~ai_assistant.core.types.home_may_be_written` does not allow
+                (ADR-0383 §2:3, §4:7) — nothing is written — or the write fails.
         """
         ...
 
@@ -1195,9 +1196,11 @@ class MemoryStore(Protocol):
                 stored record of a different ``kind`` (ADR-0108 §4, ADR-0219 §4), an
                 element would change a stored episode's processing record or
                 response other than by extending an open one, or change or drop its
-                channel (ADR-0286 §12; this Protocol's docstring), any other backend
-                failure, or a malformed batch (two writes to the same id, ADR-0046
-                §3). Nothing is written.
+                channel (ADR-0286 §12; this Protocol's docstring), an element's record
+                carries a home :func:`~ai_assistant.core.types.home_may_be_written`
+                does not allow (ADR-0383 §2:3, §4:7), any other backend failure, or a
+                malformed batch (two writes to the same id, ADR-0046 §3). Nothing is
+                written.
         """
         ...
 

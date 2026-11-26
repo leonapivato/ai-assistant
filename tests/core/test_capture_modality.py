@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     MemorySource,
     Modality,
     Provenance,
+    RecordHome,
 )
 
 _WHEN = datetime(2026, 6, 1, tzinfo=UTC)
@@ -57,6 +58,7 @@ def _provenance() -> Provenance:
 def _episode(**overrides: Any) -> EpisodicMemory:
     """An episode with no capture stated unless a case states one."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="e1",
         content="The user asked: where did we land on the flights?",
         provenance=_provenance(),

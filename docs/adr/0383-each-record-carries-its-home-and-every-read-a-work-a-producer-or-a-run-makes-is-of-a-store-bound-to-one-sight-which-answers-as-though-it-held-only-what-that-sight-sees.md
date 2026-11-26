@@ -28,6 +28,15 @@
   adversarial and the architecture review. Building it is a breaking change under golden rule 5.
   It supersedes nothing (§12).
 - Partially superseded: 2026-11-26 by [ADR-0385](0385-the-owners-acts-read-through-a-sight-of-their-own-seeing-and-deleting-keep-their-members-and-one-new-member-exports-one-named-domain-whole.md) — §6:10, in the addition alone: a sight is also made by the `core` constructor for an owner's own act, from the domain the act names or none rather than from recorded facts (ADR-0385 §3:3); §9:2, in the addition alone: the engine's members make that sight through that constructor, and the named test admits them; §7:10, in its reach: its "the build that first binds the stores counts" does not reach a store bound to an owner's act's sight, which withholds from the build that first binds it (ADR-0385 §3:5), and its first half binds such a store as written. Every other clause stands. These replacements take effect on ratification of ADR-0385. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Amended: 2026-11-26 (§3's first row, §5:4 and §13 — the place named for the memory store's
+  home). In §3's first row, §5:4 and §13, the required home is a field of `EpisodicMemory` and
+  `Memory`, the two kinds the memory store holds, and not of `RecordEnvelope`: `SemanticMemory`
+  sits on the same envelope, and no store holds one (ADR-0328 §2:4). A minted record carries no
+  home. Naming the envelope rested on its holding only stored records, which the tree at the
+  decision's date did not bear out: a stale phrase of its own text, corrected as an appended note
+  with no `Status` edit (ADR-0070 §1; ADR-0082 §1 and its 2026-07-31 note). It changes nothing
+  decided: every record the memory store holds carries a required home (§3:1, §5:4). Applied by
+  the lane that builds the memory store's home.
 
 ## Context
 

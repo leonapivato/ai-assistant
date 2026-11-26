@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
+    RecordHome,
     SpokenAudioFormat,
     SpokenReply,
     StageEntry,
@@ -147,6 +148,7 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a test var
         stages=stages,
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="episode",
         content="the search text, never shown as the episode",
         provenance=provenance
@@ -159,6 +161,7 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a test var
 
 def _recordless(content: str = "The user asked: what is on today?") -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="harness-row",
         content=content,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_NOW),

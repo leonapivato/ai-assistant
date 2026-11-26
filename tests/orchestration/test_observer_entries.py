@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     ObservationState,
     ObserverStep,
     Provenance,
+    RecordHome,
     ReplyFailure,
     ReplyUsage,
     Role,
@@ -452,6 +453,7 @@ async def test_an_episode_with_no_processing_record_writes_nothing() -> None:
     harness = Harness()
     await harness.hold(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id="harness:bare",
             content="the user said they like tea",
             occurred_at=AT - timedelta(minutes=9),
