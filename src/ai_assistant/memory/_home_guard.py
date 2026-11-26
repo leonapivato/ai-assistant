@@ -143,25 +143,27 @@ def refuse_crossing_names(
                 raise CrossHomeWriteError(msg)
 
 
-def refuse_other_home_evidence(memory: Memory, held: Mapping[str, MemoryRecord]) -> None:
-    """Refuse a memory whose supports point at an episode of another home (ADR-0383 §4:7).
+def refuse_other_home_evidence(memory: Memory, named: Mapping[str, MemoryRecord]) -> None:
+    """Refuse a memory naming a record of another home it would write (ADR-0383 §4:7).
 
-    The writer's check, on the episodes it read for the supports, before it seeks any
-    ruling: a fold writes the supports onto a stored memory and never the proposal's own
-    record, so the store would not see the proposal's own pointers.
+    The writer's check, before it seeks any ruling, on the records it read for what the
+    memory names (:func:`named_records`): the episodes its supports point at, a
+    confirmation's asking activation's, and every other name it carries. A fold writes
+    the supports onto a stored memory and never the proposal's own record, so the store
+    would not see the proposal's own names.
 
     Args:
-        memory: The memory the supports are written with.
-        held: The episodes its supports point at, as the store holds them.
+        memory: The proposal's memory.
+        named: The records it names that the store holds, by id.
 
     Raises:
-        CrossHomeWriteError: A support points at an episode of another home.
+        CrossHomeWriteError: One of them is of another home.
     """
-    for episode, found in held.items():
+    for name, found in named.items():
         if found.home != memory.home:
             msg = (
-                f"refusing to write {memory.id!r}: a support points at {episode!r}, an "
-                f"episode of another home (ADR-0383 §4:7)"
+                f"refusing to write {memory.id!r}: it names {name!r}, a record of another "
+                f"home (ADR-0383 §4:7)"
             )
             raise CrossHomeWriteError(msg)
 

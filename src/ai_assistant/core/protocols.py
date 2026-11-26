@@ -2295,9 +2295,11 @@ class MemoryWriter(Protocol):
 
         **The refusals before a ruling.** A proposal whose memory carries a support
         pointing at an episode the store does not hold is refused with
-        ``UnresolvedEvidenceError`` and nothing written (§4:7), and one pointing at an
-        episode of another home than the memory's own, or retiring a memory of another
-        home, with ``CrossHomeWriteError`` (ADR-0383 §4:7). Conflict detection
+        ``UnresolvedEvidenceError`` and nothing written (§4:7), and one whose memory
+        names a held record of another home than its own (a support's episode, a
+        confirmation's asking activation's, and every name this module's ``MemoryStore``
+        docstring lists), or retiring a memory of another home, with
+        ``CrossHomeWriteError`` (ADR-0383 §4:7). Conflict detection
         surfacing more conflicts than the writer resolves in one ingest is refused
         (ADR-0079 §1). **After the ruling and before any write**, a write-producing
         ruling on a ``DataTier.SECRET`` proposal is refused (ADR-0078 §5b check 0), and
@@ -2371,8 +2373,8 @@ class MemoryWriter(Protocol):
             FoldOntoCitedRecordError: If a ``REINFORCE`` would fold onto a record the
                 proposal's supports point at — the only arm a caller may continue past
                 (ADR-0116 §2, §4).
-            CrossHomeWriteError: If a support points at an episode of another home than
-                the proposal's memory, the proposal retires a memory of another home, or
+            CrossHomeWriteError: If the proposal's memory names a held record of another
+                home than its own, the proposal retires a memory of another home, or
                 a placed proposal names one (before any ruling, the policy not asked); or
                 if a ``REINFORCE`` or ``SUPERSEDE`` would fold onto or retire a memory of
                 another home (ADR-0383 §4:7; ADR-0369 §2:6, §2:7). Nothing is written.

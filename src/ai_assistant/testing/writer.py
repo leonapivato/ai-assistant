@@ -72,7 +72,11 @@ from ai_assistant.core.types import (
     record_band,
     stamped_support,
 )
-from ai_assistant.testing._home_guard import refuse_other_home_evidence, refuse_other_home_targets
+from ai_assistant.testing._home_guard import (
+    named_records,
+    refuse_other_home_evidence,
+    refuse_other_home_targets,
+)
 from ai_assistant.testing._observer_writes import (
     added_inference_fault,
     inference_fault,
@@ -973,8 +977,8 @@ class FakeMemoryWriter:
     async def _ingest(self, observed: MemoryUpdateProposal) -> MemoryIngestResult:
         held = await self._require_held_episodes(observed.proposed.id, observed.proposed.supports)
         # ADR-0383 §4:7: a fold writes the supports onto a stored memory and never this
-        # record, so the store would not see its own pointers; refused before any ruling.
-        refuse_other_home_evidence(observed.proposed, held)
+        # record, so the store would not see its own names; refused before any ruling.
+        refuse_other_home_evidence(observed.proposed, await self._named(observed.proposed, held))
         proposed = _stamped(observed.proposed, held)
         _refuse_ungiven_names(proposed, held)
         proposed, refused_labels = await self._labelled(proposed)
@@ -1115,6 +1119,19 @@ class FakeMemoryWriter:
         except Exception:
             return own
         return labelled | own
+
+    async def _named(
+        self, memory: Memory, held: Mapping[str, MemoryRecord]
+    ) -> Mapping[str, MemoryRecord]:
+        """The records ``memory`` names that the store holds: ``held``, and the rest read.
+
+        Every name :func:`named_records` gives beyond the support episodes already read,
+        a confirmation's asking activation's episode among them, in one ``get_many``. A
+        name of a record the store does not hold is not judged (ADR-0383 §4:7).
+        """
+        others = sorted(named_records(memory) - held.keys())
+        found = await self._store.get_many(others) if others else {}
+        return {**held, **found}
 
     async def _require_held_episodes(
         self, memory_id: str, supports: Sequence[MemorySupport]
