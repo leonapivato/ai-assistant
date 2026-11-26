@@ -1284,6 +1284,39 @@ def test_neither_audit_read_is_a_connection_method() -> None:
     assert not (reads & CONNECTION_METHODS)
 
 
+# --- ADR-0385 §7:5: the export of one domain is carried here as the trail's is ---
+
+
+async def test_the_export_of_one_domain_is_served_on_the_remote_listener(
+    tmp_path: Path,
+) -> None:
+    """ADR-0385 §7:5: served on the remote listener as ``export_decisions`` is.
+
+    A device the owner gave the command role exports the shared things over the
+    remote listener; nothing withholds the method there.
+    """
+    engine = FakeAssistantEngine()
+    async with _remote(tmp_path, engine=engine) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
+        async with _dialling(hub) as peer:
+            assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+            await peer.send(
+                env.Envelope(
+                    kind=env.FrameKind.REQUEST,
+                    id="r-0",
+                    payload={"domain": {"kind": "shared"}},
+                    method="export_domain",
+                )
+            )
+            answer = await peer.receive()
+
+    assert answer.kind is env.FrameKind.RESULT, f"export_domain was not served: {answer.payload}"
+    assert [name for name, _arguments in engine.calls] == ["export_domain"]
+    assert "export_domain" in METHODS
+    assert "export_domain" not in CONNECTION_METHODS
+
+
 # --- ADR-0186 §10: the read-trail reads are carried on this listener too ------
 
 

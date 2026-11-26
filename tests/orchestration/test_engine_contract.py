@@ -67,6 +67,12 @@ from chat_surface_contract import (
     ChatReaderSubject,
     ChatSurfaceSubject,
 )
+from domain_export_contract import (
+    EXPORT_AT,
+    EXPORT_LIMIT,
+    SMALL_EXPORT_LIMIT,
+    DomainExportSubject,
+)
 from episode_inspection_contract import (
     INSPECTION_AT,
     INSPECTION_LIMIT,
@@ -144,7 +150,10 @@ from ai_assistant.testing import (
     FakeIdentityStore,
     FakeMemoryStore,
     FakeNotificationOutbox,
+    FakeNotificationPolicy,
+    FakeNotificationStore,
     FakePermissionLineStore,
+    FakePersonModelStore,
     FakePlanStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
@@ -352,6 +361,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     identities: FakeIdentityStore | None = None,
     lines: FakePermissionLineStore | None = None,
     held_things: tuple[ThingKey, ...] = (),
+    notifications: FakeNotificationStore | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -406,6 +416,9 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
 
     ``now`` is the engine's clock, a knob so the approvals panel's suite reads its requests
     and stamps its taps at the instant its stores are clocked at; ``None`` is the system's.
+
+    ``notifications`` is the notification store, a knob so the export's suite can seed
+    held notifications; ``None`` wires none, as before.
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -507,7 +520,11 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
             stories=FakeStoryStore() if stories is None else stories,
             conversations=conversation_store,
             plans=store,
+            people=None if person_blocks is None else person_blocks.store,
+            notifications=notifications,
         ),
+        notifications=notifications,
+        notification_policy=None if notifications is None else FakeNotificationPolicy(),
         person_blocks=person_blocks,
         now=(lambda: datetime.now(UTC)) if now is None else now,
         identities=identities,
@@ -590,6 +607,39 @@ async def _person_model(*, wired: bool) -> AsyncIterator[PersonModelSubject]:
     await built.start()
     try:
         yield PersonModelSubject(engine=built, people=people, memory=memory)
+    finally:
+        await built.aclose()
+
+
+async def _domain_export(limit: int) -> AsyncIterator[DomainExportSubject]:
+    """An engine over the six stores the export reads, each injected, at ``limit``."""
+    memory = FakeMemoryStore(now=lambda: EXPORT_AT)
+    stories = FakeStoryStore(now=lambda: EXPORT_AT)
+    chat = FakeConversationStore(now=lambda: EXPORT_AT)
+    plans = FakePlanStore(now=lambda: EXPORT_AT)
+    people = FakePersonModelStore(now=lambda: EXPORT_AT)
+    notifications = FakeNotificationStore()
+    built = _wire(
+        memory=memory,
+        max_payload_bytes=limit,
+        stories=stories,
+        conversation_store=chat,
+        plans=plans,
+        person_blocks=PersonBlocks(store=people, memory=memory, budget_chars=PERSON_BUDGET),
+        notifications=notifications,
+        now=lambda: EXPORT_AT,
+    )
+    await built.start()
+    try:
+        yield DomainExportSubject(
+            engine=built,
+            memory=memory,
+            stories=stories,
+            chat=chat,
+            plans=plans,
+            people=people,
+            notifications=notifications,
+        )
     finally:
         await built.aclose()
 
@@ -696,6 +746,18 @@ class TestEngineContract(AssistantEngineContract):
         """The production engine handed no line store."""
         async for subject in _lines(store=False):
             yield subject.engine
+
+    @pytest.fixture
+    async def domain_export_subject(self) -> AsyncIterator[DomainExportSubject]:
+        """The production engine over the six stores, injected, as the root wires them."""
+        async for subject in _domain_export(EXPORT_LIMIT):
+            yield subject
+
+    @pytest.fixture
+    async def domain_export_small(self) -> AsyncIterator[DomainExportSubject]:
+        """The same, at the small limit."""
+        async for subject in _domain_export(SMALL_EXPORT_LIMIT):
+            yield subject
 
     @pytest.fixture
     async def engine(self) -> AsyncIterator[AssistantEngine]:

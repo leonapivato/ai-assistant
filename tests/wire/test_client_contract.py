@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, ClassVar
@@ -84,6 +85,12 @@ from chat_surface_contract import (
     CHAT_SURFACE_AT,
     ChatReaderSubject,
     ChatSurfaceSubject,
+)
+from domain_export_contract import (
+    EXPORT_LIMIT,
+    SMALL_EXPORT_LIMIT,
+    DomainExportSubject,
+    fake_domain_export,
 )
 from episode_inspection_contract import (
     INSPECTION_AT,
@@ -284,6 +291,18 @@ async def _lines(tmp_path: Path, *, store: bool = True) -> AsyncIterator[Permiss
 
 
 @contextlib.asynccontextmanager
+async def _domain_export(tmp_path: Path, limit: int) -> AsyncIterator[DomainExportSubject]:
+    """A client of a hub whose fake engine exports from its own six stores."""
+    backing = fake_domain_export(limit)
+    async with serving(
+        backing.engine,
+        tmp_path / f"export-{limit}.sock",
+        max_frame_bytes=limit + ENVELOPE_RESERVE_BYTES,
+    ) as client:
+        yield replace(backing, engine=client)
+
+
+@contextlib.asynccontextmanager
 async def _person_model(tmp_path: Path, *, wired: bool) -> AsyncIterator[PersonModelSubject]:
     """A client of a hub whose fake engine holds the injected stores; wired or not."""
     people, memory = person_model_stores()
@@ -418,6 +437,18 @@ class TestHubEngineClientContract(AssistantEngineContract):
         """The same, the hub holding no line store."""
         async with _lines(tmp_path, store=False) as subject:
             yield subject.engine
+
+    @pytest.fixture
+    async def domain_export_subject(self, tmp_path: Path) -> AsyncIterator[DomainExportSubject]:
+        """The export over an authenticated local socket, as the hub's machine."""
+        async with _domain_export(tmp_path, EXPORT_LIMIT) as subject:
+            yield subject
+
+    @pytest.fixture
+    async def domain_export_small(self, tmp_path: Path) -> AsyncIterator[DomainExportSubject]:
+        """The same, the hub publishing the small limit."""
+        async with _domain_export(tmp_path, SMALL_EXPORT_LIMIT) as subject:
+            yield subject
 
     @pytest.fixture
     async def engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:

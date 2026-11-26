@@ -472,6 +472,22 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "MakeLineRefusal",
         "RemoveLineResult",
         "RemoveLineOutcome",
+        # ADR-0385 §6's ``export_domain`` and the types it carries (§6:8, §11): the
+        # result with its closed outcome and reason, the export, and each store's own
+        # export as its part. The story store's export reaches its stories' members,
+        # summary versions and kept summaries; ``ConversationExport`` and ``PlanExport``
+        # predate the promoted block, so the walk ends at them as leaves.
+        "DomainExport",
+        "DomainExportOutcome",
+        "DomainExportRefusal",
+        "DomainExportResult",
+        "StoryExport",
+        "ExportedStory",
+        "StoryEntry",
+        "StorySummary",
+        "StorySummaryVersion",
+        "StorySummaryVersionName",
+        "PersonModelExport",
     }
 )
 
@@ -945,8 +961,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     **ADR-0376 §4:1 adds four**, the owner's permission lines: ``permission_lines``,
     ``make_grant``, ``make_limit`` and ``remove_line`` — so the count rises to
     seventy-eight. ADR-0177 §1:1's enumeration gains none of them (ADR-0376 §6:6).
+
+    **ADR-0385 §6:1 adds one**, the owner's export of one domain, ``export_domain``, so
+    the count rises to seventy-nine. ADR-0177 §1:1's enumeration does not gain it
+    (ADR-0385 §7:4).
     """
-    assert len(_method_names()) == 78
+    assert len(_method_names()) == 79
     assert "converse_spoken" not in _method_names()
     for retired in (
         "converse",
@@ -2053,6 +2073,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     (ADR-0124 §9:2). No model gains a field. **The method set does not move and stays
     at 78.**
 
+    **143 is ADR-0385 §8:1, on the method set.** ``AssistantEngine`` gains
+    ``export_domain`` (§6:1), so **the method set moves to 79**; it carries
+    ``DomainExportResult`` and the domain's export, whose parts are the stores' own
+    exports, and no type a frame already carried changes. A hub at 142 answers the method
+    as unknown (ADR-0124 §9:2).
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -2061,7 +2087,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 142), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (79, 143), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

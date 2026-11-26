@@ -50,6 +50,7 @@ from ai_assistant.core.types import (
     DeviceRole,
     GrantHow,
     MakeLineOutcome,
+    RecordHome,
     RemoveLineOutcome,
     RequestingDevice,
     Sureness,
@@ -644,3 +645,23 @@ class _Admitting:
 
     def record_refusal(self, code: str) -> None:
         """Nothing is refused here."""
+
+
+async def test_the_export_of_one_domain_is_refused_to_a_device_without_the_command_role(
+    tmp_path: Path,
+) -> None:
+    """ADR-0385 §7:2, through a served connection: refused before dispatch, nothing read.
+
+    A device the owner gave the command role exports a domain; one without it is refused
+    before the engine is reached.
+    """
+    engine = FakeAssistantEngine()
+    roster = _Roster(devices={"bare": _BARE, "phone": _PHONE})
+    async with _client(engine, roster, tmp_path) as client:
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as refused:
+            await client.export_domain(RecordHome.owners())
+        with acting_for("phone"):
+            exported = await client.export_domain(RecordHome.owners())
+    assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
+    assert exported.export is not None
+    assert [name for name, _ in engine.calls] == ["export_domain"]

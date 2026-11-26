@@ -70,6 +70,8 @@ from ai_assistant.core.types import (
     ChannelResult,
     ConversationDigest,
     ConversationSummary,
+    DomainExport,
+    DomainExportResult,
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
@@ -92,6 +94,7 @@ from ai_assistant.core.types import (
     NotificationDelivery,
     PendingCandidate,
     PermissionDecision,
+    PersonModelExport,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -101,6 +104,7 @@ from ai_assistant.core.types import (
     RecordHome,
     RememberCallPart,
     SendOutcome,
+    Sight,
     SourceGrant,
     SpendTotal,
     SpokenAudio,
@@ -128,6 +132,8 @@ from ai_assistant.core.types import (
     describe_untrusted,
     encodable_text,
     episode_view,
+    named_domain,
+    owners_act_may_name,
     person_model_lists,
     profile_field,
     profile_value,
@@ -2600,6 +2606,43 @@ class FakeAssistantEngine:
         return self._checked(
             _ordered_invocations(await self.trail.export_invocations()), "export_invocations"
         )
+
+    async def export_domain(self, domain: RecordHome, /) -> DomainExportResult:
+        """Export one domain, each part its store's own export bound to the owner's sight.
+
+        ADR-0385 §6, over the stores this fake holds: :attr:`episode_memory`,
+        :attr:`story_store`, :attr:`chat`, :attr:`plan_store`, the person-model store of
+        :attr:`person_blocks` where one is wired (the part is empty where it is not), and
+        :attr:`notification_store`. A domain no owner's act may name is refused from the
+        value alone, reading nothing (§2:2), and the call is recorded only once the value
+        is known well-formed (§6:9).
+        """
+        named = named_domain(domain)
+        self.calls.append(("export_domain", {"domain": named}))
+        if not owners_act_may_name(named):
+            return self._checked(DomainExportResult.not_offered(), "export_domain")
+        sight = Sight.of_owners_act(named)
+        memory = await self.episode_memory.bound(sight).export()
+        stories = await self.story_store.bound(sight).export()
+        conversations = await self.chat.bound(sight).export()
+        plans = await self.plan_store.bound(sight).export()
+        people = (
+            PersonModelExport()
+            if self.person_blocks is None
+            else await self.person_blocks.store.bound(sight).export()
+        )
+        notifications = await self.notification_store.bound(sight).export()
+        export = DomainExport(
+            domain=named,
+            exported_at=_AT,
+            memory=tuple(memory),
+            stories=stories,
+            conversations=conversations,
+            plans=plans,
+            person_model=people,
+            notifications=tuple(notifications),
+        )
+        return self._checked(DomainExportResult.exported(export), "export_domain")
 
     async def spend_totals(self) -> tuple[SpendTotal, ...]:
         """Relay the ledger's two period totals, unchanged (ADR-0194 §6).
