@@ -626,8 +626,10 @@ class ActivationState:
         :meth:`~ai_assistant.core.types.Sight.of_producer`'s sight of what it records:
         with no facts an anyone bound alone, which sees nothing (§6:7, §6:3); with facts
         and no activation, the bounds its facts and senders give, with nothing its own,
-        as it has no activation to name. ``work_sight_degraded`` says which. Its
-        count events carry the reader code ``producer``.
+        as it has no activation to name. ``work_sight_degraded`` says which. These two
+        paths read by the producer's constructor because ``Sight.of_work`` takes recorded
+        facts and an activation, so their count events (§11:1) carry the reader code
+        ``producer``, not ``work``.
         """
         facts = self.work_facts
         had = self._sight

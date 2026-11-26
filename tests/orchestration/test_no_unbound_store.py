@@ -135,6 +135,8 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     # The person block (B8c) and the person panel (B10).
     "person_block.py:PersonBlocks": "B10",
     "person_block.py:still_held": "B8c",
+    # Its four `fetch_held` calls (`_found`, `_searched`, `_digest_recall`, `_digested`)
+    # still pass its unbound memory store to a parameter marked `Bound`: B8d binds them.
     "phase_path.py:PhasePath": "B8d",
     "phase_path.py:StoryReads": "B8c",
     # Planning's story calls (B8c) and the engine's story methods (B10).
