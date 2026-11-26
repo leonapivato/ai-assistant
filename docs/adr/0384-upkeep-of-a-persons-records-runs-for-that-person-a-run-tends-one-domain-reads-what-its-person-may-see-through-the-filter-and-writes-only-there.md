@@ -1,6 +1,6 @@
 # 384. Upkeep of a person's records runs for that person: a run tends one domain, reads what its person may see through the filter, and writes only there
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0388 (§2:1 and its table, in the addition alone: the observer's pin pass is a fourth job, run in the observer's run)
 - Date: 2026-11-26
 - Scope: decision D2 of milestone 22, "Every record has a home" (acceptance
   [#3709](https://github.com/leonapivato/ai-assistant/issues/3709)), its row "Upkeep still works".
@@ -24,6 +24,7 @@
   (§4:4, in its first sentence alone) and
   [ADR-0358](0358-planning-keeps-memory-only-on-purpose-a-matter-that-has-changed-is-tidied-in-the-background-and-planning-can-search-past-episodes-read-one-whole-and-read-its-origins-older-history.md)
   (§4:5, in the addition alone), as §9 records.
+- Partially superseded: 2026-11-26 by [ADR-0388](0388-before-the-stores-withhold-a-name-a-write-adds-must-resolve-a-story-starts-in-one-write-the-pin-pass-is-a-run-and-a-work-with-no-facts-keeps-its-activation.md) — §2:1 and its table, in the addition alone: the observer's pin pass (ADR-0338 §9:6) is a fourth job this decision covers, run once for each person domain in the observer's run before its episodes, by the sight of a run tending that domain (ADR-0388 §4). Every other clause stands. These replacements take effect on ratification of ADR-0388. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
