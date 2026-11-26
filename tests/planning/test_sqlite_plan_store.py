@@ -2227,6 +2227,7 @@ async def test_a_stored_request_that_no_longer_validates_names_none_of_its_argum
 # --- a store bound to a sight, over rows altered outside it (ADR-0383 §5:3, #3742) -----
 
 
+@pytest.mark.integration
 async def test_an_effect_row_whose_home_columns_name_no_home_is_held_by_no_sight(
     tmp_path: Path,
 ) -> None:
@@ -2264,6 +2265,7 @@ async def test_an_effect_row_whose_home_columns_name_no_home_is_held_by_no_sight
         store.close()
 
 
+@pytest.mark.integration
 async def test_a_request_whose_record_is_not_json_is_held_only_by_its_persons_domain(
     tmp_path: Path,
 ) -> None:
@@ -2292,6 +2294,7 @@ async def test_a_request_whose_record_is_not_json_is_held_only_by_its_persons_do
         store.close()
 
 
+@pytest.mark.integration
 async def test_a_bound_writes_own_checks_read_no_record_it_does_not_hold(
     tmp_path: Path,
 ) -> None:
@@ -2367,6 +2370,7 @@ async def test_a_bound_writes_own_checks_read_no_record_it_does_not_hold(
         store.close()
 
 
+@pytest.mark.integration
 async def test_a_row_of_the_own_activation_whose_home_is_unreadable_is_neither_read_nor_cleared(
     tmp_path: Path,
 ) -> None:
@@ -2400,6 +2404,7 @@ async def test_a_row_of_the_own_activation_whose_home_is_unreadable_is_neither_r
         store.close()
 
 
+@pytest.mark.integration
 async def test_no_record_a_binding_does_not_hold_reaches_a_json_function_that_can_fail(
     tmp_path: Path,
 ) -> None:
@@ -2456,6 +2461,7 @@ async def test_no_record_a_binding_does_not_hold_reaches_a_json_function_that_ca
         store.close()
 
 
+@pytest.mark.integration
 async def test_a_home_held_as_text_that_is_not_utf8_is_no_home_to_its_own_activation(
     tmp_path: Path,
 ) -> None:
@@ -2490,6 +2496,7 @@ async def test_a_home_held_as_text_that_is_not_utf8_is_no_home_to_its_own_activa
         store.close()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     ("first", "last", "held"),
     [(OWN_ACTIVATION, "other", False), ("other", OWN_ACTIVATION, True)],
@@ -2530,6 +2537,7 @@ async def test_a_request_naming_its_asker_twice_is_held_as_its_decoder_reads_it(
         store.close()
 
 
+@pytest.mark.integration
 async def test_a_key_check_fetches_nothing_of_a_row_the_binding_does_not_hold(
     tmp_path: Path,
 ) -> None:
@@ -2578,6 +2586,7 @@ async def test_a_key_check_fetches_nothing_of_a_row_the_binding_does_not_hold(
         store.close()
 
 
+@pytest.mark.integration
 async def test_every_key_a_statement_reads_from_a_record_is_the_decoders(
     tmp_path: Path,
 ) -> None:
@@ -2651,6 +2660,7 @@ async def test_every_key_a_statement_reads_from_a_record_is_the_decoders(
         store.close()
 
 
+@pytest.mark.integration
 async def test_a_bound_observation_write_fetches_no_column_of_a_record_it_does_not_hold(
     tmp_path: Path,
 ) -> None:
