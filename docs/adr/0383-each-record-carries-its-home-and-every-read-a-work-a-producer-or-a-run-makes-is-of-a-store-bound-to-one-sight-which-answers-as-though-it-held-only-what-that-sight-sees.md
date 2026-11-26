@@ -231,9 +231,7 @@ than the owner's own domain. What the owner's own acts show of such a record is 
 
 > **Normative.** A producer reads for an ended work by the sight §6:4 makes from the facts and
 > senders its episode records, with no activation, so nothing is its own. Where the episode records
-> no facts, or its home is not the one §4:1 gives from whom its facts say it was for, as §5:1 makes
-> it for an earlier episode recorded for no one, the producer reads by the sight of its home: a
-> one-domain bound and that home's person, or no one for the shared things.
+> no facts, its sight is an anyone bound alone, which sees nothing.
 
 > **Normative.** An ADR-0384 run reads by a one-domain bound for the domain it tends and a person
 > bound for that domain's person, the owner for the shared things (ADR-0384 §3:1, §3:2); a tidy-up a
@@ -266,10 +264,10 @@ whole domain.
 > of any of them gains an argument.
 
 > **Normative.** Save a write's own checks (§7:11), a bound store answers every member as the same
-> store would answer it if it held only the records its sight sees: the same records in the same order, the same totals and counts,
-> the same pages and whether more follow, and, for a named record it does not hold, the same
-> outcome, returned or raised, as for a record never written. It applies the sight before it
-> ranks, orders, limits, pages or counts.
+> store would answer it if it held only the records its sight sees: the same records in the same
+> order, the same totals and counts, the same pages and whether more follow, and, for a named
+> record it does not hold, the same outcome, returned or raised, as for a record never written. It
+> applies the sight before it ranks, orders, limits, pages or counts.
 
 > **Normative.** Each store decides what its sight sees by the one `core` predicate the sight
 > type carries, and by nothing else; a store may express it in its own query only where its
@@ -312,9 +310,13 @@ whole domain.
 > record's identifier is one code minted for it, never one taken from a model's output or an
 > input's text, so no reader can steer a check onto a record it does not see.
 
-> **Normative.** A producer keeps its own record of its work on an episode, the observation record
-> ADR-0329 §16:1 keys by that episode, through the plan store unbound, and through it reads and
-> writes that record alone, whatever its sight sees of the episode.
+> **Normative.** The observer's finding of what is due reads episodes and observation records
+> unbound, by occurrence and state alone (ADR-0329 §16:2), and hands a run nothing of them but which
+> episode is due and its observation record's state and revision.
+
+> **Normative.** A producer whose sight does not see the home of the episode it is due to process
+> reads nothing of that episode or of its observation record's findings, writes no record from it,
+> and records the episode skipped, with nothing else, through the plan store unbound.
 
 The choice ADR-0369 §16 left is taken this way for three reasons. **Absence holds by
 construction.** A store applies the sight before it limits or counts, so a page of ten is the ten
@@ -358,9 +360,9 @@ out of view stays the next prompt review's (ADR-0369 §10).
 ### 9. Catching a read that goes round the filter
 
 > **Normative.** No class or function under `orchestration/`, save the holder that binds stores
-> for a pass and the holders §7:8 and §7:12 name, takes or holds one of the six store Protocols of §7:1 or
-> `MemoryWriter` unbound; a stage holds a holder that gives a store only for a sight. The build
-> ships a named test that fails where any other does.
+> for a pass and the holders §7:8, §7:12 and §7:13 name, takes or holds one of the six store
+> Protocols of §7:1 or `MemoryWriter` unbound; a stage holds a holder that gives a store only for a
+> sight. The build ships a named test that fails where any other does.
 
 > **Normative.** No code makes a sight save through §6's `core` constructors, and no stage makes
 > one at all: a stage reads the sight its pass, its producer's run or its upkeep run carries. The
@@ -504,8 +506,8 @@ name across homes, and of a refusal that tells (§4:7, §4:8); the upgrade writi
 over facts for no one, and a record with no home as no one's (§5); the sight's bounds, their meet,
 senders from inputs, no level in a sight, and a producer's and a run's sights (§6); the filter in
 each store behind one binding member, the equivalence rule, a work's own records, count or
-withhold fixed at construction, a write's checks over every record and the producer's observation
-record (§7); §8's places; §9's tests; §10's reading of `owner_records`;
+withhold fixed at construction, a write's checks over every record, and the observer's finding of what is
+due and its skip (§7); §8's places; §9's tests; §10's reading of `owner_records`;
 §11's event; and §12:2's reading of earlier clauses over a bound store.
 
 Of the coordinator's readings: the filter goes by person, not level (§6:9, from ADR-0369 §6:1 and
@@ -522,10 +524,10 @@ itself rather than wrapped over it (§7); and `DeviceChecks` stays (§10:5).
 - Every work for the owner reads what it reads today. An unidentified sender's work reads its own
   records alone: its chat's history, its line's earlier episodes and the conversations its
   Connections section would list are withheld.
-- The observer reads nothing of an unidentified sender's work, its episode included, so it writes
-  nothing from it; it still keeps its observation record (§7:12).
-- A pre-upgrade episode whose facts say it was for no one is the owner's, and a producer reads for
-  it by the owner's sight (§6:7), as its work read.
+- The observer reads nothing of an unidentified sender's work, its episode included, and records
+  it skipped (§7:13). So it does for an episode from before the upgrade whose facts say it was for
+  no one, which §5:1 makes the owner's while §6:7 keeps its producer to the shared things, and for
+  an episode that records no facts; the first deploy's count shows whether any is still due.
 - Stages are handed stores per read, which moves where each holds them; no read site's call changes.
 - **Revisit** when a second person, a group or a sharing rule is built, or if a store cannot answer
   a bound read at the cost the unbound one has.
