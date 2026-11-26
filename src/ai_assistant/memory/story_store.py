@@ -1193,10 +1193,15 @@ class SqliteStoryStore:
         write's own check that one flag is answered once (§7:11); a line answering a
         held flag lies on the stories it concerns, which are held.
 
-        Whether the stories are held is decided first, before any version is read, so a
-        record of a story this store does not hold is never decoded for it (§7:2, §8:2).
+        Whether the story that raised it is held is decided first, by its home columns
+        alone, so a record of a story this store does not hold is never decoded for it;
+        then the version is read, as the same store holding only what it holds would read
+        it; then the stories the flag names and their merges, again by the columns alone
+        (§7:2, §8:2).
         """
-        if flag.activation is not None or not self._flag_seen(conn, flag):
+        if flag.activation is not None or (
+            flag.story is not None and not self._holds_story(conn, flag.story)
+        ):
             held = False
         else:
             row = conn.execute(
@@ -1204,7 +1209,11 @@ class SqliteStoryStore:
                 "AND story_id = ?",
                 (flag.version, flag.story),
             ).fetchone()
-            held = row is not None and flag.flag in _decoded(_version_from, row).flags
+            held = (
+                row is not None
+                and flag.flag in _decoded(_version_from, row).flags
+                and self._flag_seen(conn, flag)
+            )
         if not held:
             return StoryRefusal(reason=StoryRefusalReason.UNKNOWN_FLAG, flag=flag)
         answered = conn.execute(
@@ -1218,8 +1227,10 @@ class SqliteStoryStore:
     def _flag_seen(self, conn: sqlite3.Connection, flag: StoryFlagName) -> bool:
         """Whether every story a flag names, and each as followed through its merges, is held.
 
-        Each story is found held before its row is decoded to follow it, so nothing of a
-        story this store does not hold is read. Unbound, and counting, every flag is.
+        Read off each story's home columns and merge target alone, decoding no row, so
+        nothing of a story this store does not hold is read, and a held story is read no
+        more than the same store holding only what it holds reads it. Unbound, and
+        counting, every flag is.
         """
         if self._seen() is None:
             return True
@@ -1228,15 +1239,21 @@ class SqliteStoryStore:
             seen = {story_id}
             current: str | None = story_id
             while current is not None:
-                header = self._header(conn, current)
-                if header is None:
+                if not self._holds_story(conn, current):
                     return False
-                current = header.merged_into
-                if current in seen:
+                row = conn.execute(
+                    "SELECT merged_into FROM stories WHERE id = ?", (current,)
+                ).fetchone()
+                onward = None if row is None else row[0]
+                if onward is not None and type(onward) is not str:
+                    msg = f"a stored merge target is not an id: {describe_untrusted(onward)}"
+                    raise StoryStoreError(msg)
+                if onward in seen:
                     msg = f"story {story_id!r} is merged into a chain that loops"
                     raise StoryStoreError(msg)
-                if current is not None:
-                    seen.add(current)
+                if onward is not None:
+                    seen.add(onward)
+                current = onward
         return True
 
     def _concerned(self, conn: sqlite3.Connection, flag: StoryFlagName) -> list[str]:

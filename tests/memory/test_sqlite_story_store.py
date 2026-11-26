@@ -1260,3 +1260,26 @@ async def test_a_flag_on_a_story_the_binding_does_not_hold_is_never_read_for_it(
             await store.leave_flag(flag, actor=StoryActor.MATTERS_PASS)
     finally:
         store.close()
+
+
+async def test_a_flag_never_raised_on_a_held_story_is_unknown_whatever_its_header_holds() -> None:
+    """§7:2: answered as the same store holding only what the binding holds answers it.
+
+    A flag naming a version a held story never wrote is ``unknown_flag`` unbound,
+    without its header being read; a binding answers the same, its own check that the
+    story is held reading the home columns alone.
+    """
+    store = _bound_store(SightMode.WITHHOLD)
+    try:
+        shared = await homed(store, RecordHome.shared(), act("s1"))
+        store._conn.execute("UPDATE stories SET created_at = 'corrupt' WHERE id = ?", (shared,))
+        flag = StoryFlagName(
+            story=shared, version=999, flag=StoryFlag(kind=StoryFlagKind.TWO_MATTERS)
+        )
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        for one in (store, bound):
+            outcome = await one.leave_flag(flag, actor=StoryActor.MATTERS_PASS)
+            assert outcome.refusal is not None
+            assert outcome.refusal.reason is StoryRefusalReason.UNKNOWN_FLAG
+    finally:
+        store.close()
