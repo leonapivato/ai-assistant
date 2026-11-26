@@ -1,6 +1,6 @@
 # 384. Upkeep of a person's records runs for that person: a run tends one domain, reads what its person may see through the filter, and writes only there
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-26
 - Scope: decision D2 of milestone 22, "Every record has a home" (acceptance
   [#3709](https://github.com/leonapivato/ai-assistant/issues/3709)), its row "Upkeep still works".
