@@ -84,6 +84,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryStore, PlanStore, StoryStore
     from ai_assistant.core.types import ActivationEffect, MemoryRecord, StoryHeader
+    from ai_assistant.orchestration.bound_stores import Bound
 
 
 @final
@@ -121,12 +122,12 @@ _EFFECT_RANK: Final = {
 
 
 async def story_standing(
-    stories: StoryStore,
-    memory: MemoryStore,
+    stories: Bound[StoryStore],
+    memory: Bound[MemoryStore],
     story_id: str,
     *,
     reader: StandingReader,
-    plans: PlanStore | None = None,
+    plans: Bound[PlanStore] | None = None,
 ) -> StoryStanding | None:
     """Assemble where a story's matter stands, for one reader (ADR-0300 §8:1).
 
@@ -138,6 +139,10 @@ async def story_standing(
     read saw it: a member unlinked and linked again between two pages is kept at its
     later entry, and a story the reverse lookup names as one the story is part of is
     not also listed as one it contains.
+
+    Every store is bound to the reader's sight: a work's (ADR-0383 §7:7), or the
+    owner's for the owner's own act (ADR-0385 §3:1), so a record that sight does not see
+    is not there to show.
 
     Args:
         stories: The story store.
@@ -192,7 +197,7 @@ def _keep_latest(entries: dict[StoryMember, StoryEntry], page: Sequence[StoryEnt
 
 
 async def _shown(
-    memory: MemoryStore, entries: Sequence[StoryEntry], reader: StandingReader
+    memory: Bound[MemoryStore], entries: Sequence[StoryEntry], reader: StandingReader
 ) -> list[tuple[EpisodicMemory, StoryEntry]]:
     """The episodes of ``entries``' activation members this reader may be shown.
 
@@ -219,7 +224,7 @@ async def _shown(
 
 
 async def _done(
-    plans: PlanStore | None, shown: Sequence[tuple[EpisodicMemory, StoryEntry]]
+    plans: Bound[PlanStore] | None, shown: Sequence[tuple[EpisodicMemory, StoryEntry]]
 ) -> tuple[StoryStandingEffect, ...]:
     """What was done, from the effect records of the episodes shown (ADR-0300 §8:1).
 
@@ -296,7 +301,7 @@ def _moment(record: EpisodicMemory, activation_id: str) -> StoryStandingEpisode:
 
 
 async def _related(
-    stories: StoryStore, story: StoryHeader, entries: Sequence[StoryEntry]
+    stories: Bound[StoryStore], story: StoryHeader, entries: Sequence[StoryEntry]
 ) -> tuple[StoryRelated, ...]:
     """The stories ``story`` is part of, newest first, then those it contains, in link order.
 
@@ -325,7 +330,7 @@ async def _related(
     return tuple(related)
 
 
-async def _member_count(stories: StoryStore, related_id: str, story_id: str) -> int:
+async def _member_count(stories: Bound[StoryStore], related_id: str, story_id: str) -> int:
     """A related story's current member count, read as ADR-0289 §4:5 reads a story member's.
 
     Raises:

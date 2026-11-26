@@ -140,6 +140,7 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     RecordHome,
     ReplyCapability,
+    Sight,
     SpokenAudioFormat,
     SpokenRendering,
     SpokenReply,
@@ -427,7 +428,6 @@ if TYPE_CHECKING:
         RulePush,
         ScheduledTask,
         SecretValue,
-        Sight,
         SourceGrant,
         SourceReadRecord,
         SpendTotal,
@@ -3326,12 +3326,17 @@ class Engine:
         self._reject_if_closing()
         named = identifier(activation_id, name="activation_id")
         check_arguments("stop_activation", max_bytes=self._max_payload_bytes, activation_id=named)
-        # The owner's own act, not a work's (ADR-0369 §12:1), so not one of ADR-0383 §7:7's
-        # readers: it reads and writes unbound until the owner's sight is built (ADR-0385
-        # §3, lane B10).
-        return await self._tracked(self._stop(named), "stop_activation", checked=True)
+        # The owner's own act, not a work's (ADR-0369 §12:1, ADR-0385 §3:6): it reads the
+        # episode and writes the stop record through the stores bound to the owner's sight
+        # from none (§3:1), so an episode that sight does not see answers as one never
+        # written (§4:2), and it stops a pushed one as the reader's ``/stop`` does.
+        return await self._tracked(
+            self._stop(named, sight=self._owners_sight(None)), "stop_activation", checked=True
+        )
 
-    async def _stop(self, activation_id: str, *, sight: Sight | None = None) -> ActivationStop:
+    async def _stop(
+        self, activation_id: str, *, sight: Sight | None = None, pushed: bool = True
+    ) -> ActivationStop:
         """The two writes of :meth:`stop_activation`, in their order (ADR-0297 §3).
 
         Everything up to the mark runs before the first ``await``: the running
@@ -3344,17 +3349,19 @@ class Engine:
         it, and the store refuses a spawn of the stopped activation's on its stop record
         (ADR-0350 §3:3).
 
-        ``sight`` is the sight of the work whose stop call this is (:meth:`_work_stop`),
-        and every store it reads or writes is bound to it (ADR-0383 §7:7): an episode
-        that sight does not see answers as one never written (§8:2), and a stop record,
-        which carries no home, is written whatever it sees (§3:3, §7:11). **A work's stop
-        reaches only a running activation**: a work names only what it was shown as
+        ``sight`` is the sight the stores it reads and writes are bound to: a work's, for
+        the stop call of that work (:meth:`_work_stop`, ADR-0383 §7:7), or the owner's,
+        for the owner's :meth:`stop_activation` (ADR-0385 §3:1). An episode that sight does
+        not see answers as one never written (ADR-0383 §8:2), and a stop record, which
+        carries no home, is written whatever it sees (§3:3, §7:11). ``None`` is the chat
+        reader's ``/stop`` (:meth:`_stop_line`), which reads and writes unbound (§7:8).
+
+        ``pushed`` is whether an activation the Task Scheduler pushed and has not admitted
+        may be stopped (:meth:`_stop_pushed`): the owner's and the reader's may. **A work's
+        stop reaches only a running activation**: a work names only what it was shown as
         running (ADR-0349 §4:8), which a pushed, not admitted activation never is, so for
         one not running it answers from the bound episode read alone, sets no mark and
-        writes nothing, and never reaches :meth:`_stop_pushed`. ``None`` is a caller that
-        is not a work, which reads and writes unbound and stops a pushed one as today: the
-        owner's :meth:`stop_activation` and the chat reader's ``/stop``
-        (:meth:`_stop_line`).
+        writes nothing.
         """
         running = self._running_state(activation_id)
         if running is not None:
@@ -3364,9 +3371,9 @@ class Engine:
             await self._stop_plans(sight).record_stop(activation_id)
             return ActivationStop.STOPPED
         if (
-            sight is None
+            pushed
             and self._task_manager is not None
-            and await self._stop_pushed(activation_id)
+            and await self._stop_pushed(activation_id, sight)
         ):
             return ActivationStop.STOPPED
         episode = await self._stop_memory(sight).get(f"activation:{activation_id}")
@@ -3383,14 +3390,14 @@ class Engine:
         Raises:
             RuntimeError: Where no admitted work is running here, which has no sight.
         """
-        return await self._stop(activation_id, sight=work_sight())
+        return await self._stop(activation_id, sight=work_sight(), pushed=False)
 
     def _stop_memory(self, sight: Sight | None) -> MemoryStore:
-        """The memory store a stop reads an episode from: bound to a work's ``sight``."""
+        """The memory store a stop reads an episode from: bound to ``sight``, where given."""
         return self._memory if sight is None else self._stores.memory(sight)
 
     def _stop_plans(self, sight: Sight | None) -> PlanStore:
-        """The plan store a stop writes its record through: bound to a work's ``sight``."""
+        """The plan store a stop writes its record through: bound to ``sight``, where given."""
         return self._plans if sight is None else self._stores.plans(sight)
 
     def _running_state(self, activation_id: str) -> ActivationState | None:
@@ -3404,7 +3411,7 @@ class Engine:
             None,
         )
 
-    async def _stop_pushed(self, activation_id: str) -> bool:
+    async def _stop_pushed(self, activation_id: str, sight: Sight | None) -> bool:
         """Stop an activation the Task Scheduler pushed and has not admitted (ADR-0350 §9:10).
 
         Its stop record is written, so admission refuses it, and the sensor's admission
@@ -3415,8 +3422,9 @@ class Engine:
         still read pushed while its outcome is written: it ran, so a stop naming it once
         it has ended changes nothing (ADR-0295 §1:6), and this writes nothing for it.
 
-        No work's stop reaches it (:meth:`_stop`): it is the owner's and the reader's
-        alone, which read and write unbound.
+        No work's stop reaches it (:meth:`_stop`): it is the owner's, which reads and
+        writes through the stores bound to the owner's ``sight`` (ADR-0385 §3:1), and the
+        reader's, which passes ``None`` and reads and writes unbound.
 
         Returns:
             Whether an occurrence was pushed to it, not yet admitted.
@@ -3425,12 +3433,12 @@ class Engine:
         if not pending and (
             activation_id in self._admitted
             or activation_id in self._unwritten
-            or await self._memory.get(f"activation:{activation_id}") is not None
+            or await self._stop_memory(sight).get(f"activation:{activation_id}") is not None
         ):
             return False
         if pending:
             self._pushed[activation_id] = True
-        pushed = await self._plans.stop_pushed_activation(activation_id)
+        pushed = await self._stop_plans(sight).stop_pushed_activation(activation_id)
         return pending or pushed
 
     async def _still_live(
@@ -3459,6 +3467,34 @@ class Engine:
         its admission (ADR-0350 §9:10).
         """
         return self._pushed.get(activation_id) is False
+
+    # --- the owner's own acts (ADR-0385 §3) --------------------------------
+    #
+    # An owner's act is a call to a member of `AssistantEngine` other than `receive`
+    # (§3:6). Each reads and writes every store whose records carry a home through the
+    # holder (`self._stores`), bound to the owner's sight this one method makes, anew for
+    # each call: never once for the engine, and by no other means (§3:3, §10:3).
+
+    @staticmethod
+    def _owners_sight(domain: RecordHome | None, /) -> Sight:
+        """The owner's sight for one owner's own act (ADR-0385 §3:3, §10:3).
+
+        **The one place the engine makes it**, through the one ``core`` constructor, and
+        the one each owner's act takes its bound stores from the holder by. Made for each
+        call, so no sight outlives the act it was made for. A store bound to it withholds
+        whatever mode it was built in and writes no count event (§3:5).
+
+        Args:
+            domain: The domain the act names, or ``None`` where it names none, as every
+                seeing member and the item deletes (§4:1, §5:2).
+
+        Returns:
+            The owner's sight: from none, the owner's domain and the hub's shared things.
+
+        Raises:
+            ValueError: If ``domain`` is not one an owner's act may name (§2:2).
+        """
+        return Sight.of_owners_act(domain)
 
     async def episodes(
         self,
@@ -3520,9 +3556,8 @@ class Engine:
         cursor: str | None,
         limit: int,
     ) -> EpisodePage:
-        page = await self._memory.episodes(
-            channel=channel, status=status, cursor=cursor, limit=limit
-        )
+        memory = self._stores.memory(self._owners_sight(None))
+        page = await memory.episodes(channel=channel, status=status, cursor=cursor, limit=limit)
         return fit_page(page, channel=channel, status=status, max_bytes=self._max_payload_bytes)
 
     async def _episode_detail(
@@ -3533,7 +3568,8 @@ class Engine:
         offset: int,
         max_bytes: int,
     ) -> EpisodeChunk | None:
-        chunk = await self._memory.episode_chunk(
+        memory = self._stores.memory(self._owners_sight(None))
+        chunk = await memory.episode_chunk(
             episode_id, version=version, offset=offset, max_bytes=max_bytes
         )
         return fit_chunk(chunk, max_bytes=self._max_payload_bytes)
@@ -3546,9 +3582,14 @@ class Engine:
     # ``MemoryStore.get_many`` and is refused ``unknown_activation`` where none is
     # there; a merge or a split checks no activation. The shared logic is
     # `orchestration/stories.py`, which the canonical fake engine calls too.
+    #
+    # Each is an owner's own act: it reads and writes the story store, and the memory and
+    # plan stores where it reads them, bound to the owner's sight from none (ADR-0385
+    # §3:1, §4:1), so a story or an episode that sight does not see is answered as one
+    # never written (ADR-0383 §8:2).
 
-    def _story_store(self) -> StoryStore:
-        """The wired story store, or the refusal a deployment with none earns.
+    def _story_store(self, sight: Sight) -> Bound[StoryStore]:
+        """The wired story store bound to ``sight``, or the refusal an engine with none earns.
 
         Raises:
             ConfigurationError: If this engine was built with no story store.
@@ -3556,16 +3597,19 @@ class Engine:
         if self._stories is None:
             msg = "no story store is wired into this engine (ADR-0289 §1)"
             raise ConfigurationError(msg)
-        return self._stories
+        return self._stores.stories(sight)
 
     async def create_story(self, members: Sequence[StoryMember]) -> StoryOutcome:
         """Create a story holding ``members``, as the owner (ADR-0289 §§3-4)."""
         self._reject_if_closing()
         named = story_members(members)
         check_arguments("create_story", max_bytes=self._max_payload_bytes, members=named)
-        stories = self._story_store()
+        sight = self._owners_sight(None)
+        stories = self._story_store(sight)
         return await self._tracked(
-            self._linked_story(stories, None, named), "create_story", checked=True
+            self._linked_story(stories, self._stores.memory(sight), None, named),
+            "create_story",
+            checked=True,
         )
 
     async def link_story(
@@ -3578,13 +3622,20 @@ class Engine:
         check_arguments(
             "link_story", max_bytes=self._max_payload_bytes, story_id=target, members=named
         )
-        stories = self._story_store()
+        sight = self._owners_sight(None)
+        stories = self._story_store(sight)
         return await self._tracked(
-            self._linked_story(stories, target, named), "link_story", checked=True
+            self._linked_story(stories, self._stores.memory(sight), target, named),
+            "link_story",
+            checked=True,
         )
 
     async def _linked_story(
-        self, stories: StoryStore, story_id: str | None, members: tuple[StoryMember, ...]
+        self,
+        stories: Bound[StoryStore],
+        memory: Bound[MemoryStore],
+        story_id: str | None,
+        members: tuple[StoryMember, ...],
     ) -> StoryOutcome:
         """Check each activation member's record, then create or link (ADR-0289 §4).
 
@@ -3595,19 +3646,19 @@ class Engine:
         one for a story linked to; a story not there, or merged, is left to the store's
         own refusal, which comes before a home is judged.
         """
-        if members and (refusal := await unknown_activation(self._memory, members)):
+        if members and (refusal := await unknown_activation(memory, members)):
             return StoryOutcome(refusal=refusal)
         if story_id is None:
             # The owner's own act outside a work: the owner's domain (ADR-0383 §4:5).
             home = RecordHome.owners()
-            if members and await of_another_home(self._memory, members, home) is not None:
+            if members and await of_another_home(memory, members, home) is not None:
                 return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.ANOTHER_HOME))
             return await stories.create(members, home=home, actor=StoryActor.OWNER)
         header = await stories.header(story_id) if members else None
         if (
             header is not None
             and header.merged_into is None
-            and await of_another_home(self._memory, members, header.home) is not None
+            and await of_another_home(memory, members, header.home) is not None
         ):
             return StoryOutcome(
                 refusal=StoryRefusal(reason=StoryRefusalReason.ANOTHER_HOME, story_id=story_id)
@@ -3624,7 +3675,7 @@ class Engine:
         check_arguments(
             "unlink_story", max_bytes=self._max_payload_bytes, story_id=target, members=named
         )
-        stories = self._story_store()
+        stories = self._story_store(self._owners_sight(None))
         return await self._tracked(
             stories.unlink(target, named, actor=StoryActor.OWNER), "unlink_story", checked=True
         )
@@ -3637,7 +3688,7 @@ class Engine:
         check_arguments(
             "merge_stories", max_bytes=self._max_payload_bytes, story_id=absorbed, into=target
         )
-        stories = self._story_store()
+        stories = self._story_store(self._owners_sight(None))
         return await self._tracked(
             stories.merge(absorbed, target, actor=StoryActor.OWNER), "merge_stories", checked=True
         )
@@ -3664,7 +3715,7 @@ class Engine:
             members=named,
             notes=going,
         )
-        stories = self._story_store()
+        stories = self._story_store(self._owners_sight(None))
         return await self._tracked(
             stories.split(source, named, actor=StoryActor.OWNER, notes=going),
             "split_story",
@@ -3685,10 +3736,12 @@ class Engine:
         check_arguments(
             "story", max_bytes=self._max_payload_bytes, story_id=target, cursor=cursor, limit=limit
         )
-        stories = self._story_store()
+        sight = self._owners_sight(None)
+        stories = self._story_store(sight)
+        memory = self._stores.memory(sight)
 
         async def read(size: int) -> StoryView | None:
-            return await resolved_view(stories, self._memory, target, cursor=cursor, limit=size)
+            return await resolved_view(stories, memory, target, cursor=cursor, limit=size)
 
         return await self._tracked(
             fitted(read, limit, max_bytes=self._max_payload_bytes, subject="the result of story()"),
@@ -3713,7 +3766,7 @@ class Engine:
             cursor=cursor,
             limit=limit,
         )
-        stories = self._story_store()
+        stories = self._story_store(self._owners_sight(None))
 
         async def read(size: int) -> StoryLogPage | None:
             return await stories.log(target, cursor=cursor, limit=size)
@@ -3732,7 +3785,7 @@ class Engine:
         self._reject_if_closing()
         check_story_page(cursor, limit)
         check_arguments("stories", max_bytes=self._max_payload_bytes, cursor=cursor, limit=limit)
-        stories = self._story_store()
+        stories = self._story_store(self._owners_sight(None))
 
         async def read(size: int) -> StoryPage:
             return await stories.stories(cursor=cursor, limit=size)
@@ -3755,7 +3808,7 @@ class Engine:
         check_arguments(
             "activation_stories", max_bytes=self._max_payload_bytes, activation_id=named
         )
-        stories = self._story_store()
+        stories = self._story_store(self._owners_sight(None))
         member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=named)
         return await self._tracked(stories.stories_of(member), "activation_stories", checked=True)
 
@@ -3771,7 +3824,7 @@ class Engine:
         self._reject_if_closing()
         target = identifier(story_id, name="story_id")
         check_arguments("story_summary", max_bytes=self._max_payload_bytes, story_id=target)
-        stories = self._story_store()
+        stories = self._story_store(self._owners_sight(None))
         return await self._tracked(
             owner_summary(stories, target, notes=self._story_summary_notes),
             "story_summary",
@@ -3786,9 +3839,16 @@ class Engine:
         self._reject_if_closing()
         target = identifier(story_id, name="story_id")
         check_arguments("story_standing", max_bytes=self._max_payload_bytes, story_id=target)
-        stories = self._story_store()
+        sight = self._owners_sight(None)
+        stories = self._story_store(sight)
         return await self._tracked(
-            standing_of(stories, self._memory, target, reader=OWNER_READER, plans=self._plans),
+            standing_of(
+                stories,
+                self._stores.memory(sight),
+                target,
+                reader=OWNER_READER,
+                plans=self._stores.plans(sight),
+            ),
             "story_standing",
             checked=True,
         )
@@ -3801,7 +3861,7 @@ class Engine:
         check_arguments(
             "add_story_note", max_bytes=self._max_payload_bytes, story_id=target, text=written
         )
-        stories = self._story_store()
+        stories = self._story_store(self._owners_sight(None))
         return await self._tracked(
             stories.append_note(target, written, author=StoryNoteAuthor.OWNER),
             "add_story_note",
@@ -3834,7 +3894,7 @@ class Engine:
             members=named,
             notes=going,
         )
-        stories = self._story_store()
+        stories = self._story_store(self._owners_sight(None))
         return await self._tracked(
             stories.move(source, target, named, actor=StoryActor.OWNER, notes=going),
             "move_story_members",
@@ -4021,6 +4081,10 @@ class Engine:
         (§8:2), and it reads no store.
         """
         self._conversations.activation_writer.forgetting(record_id)
+        # ADR-0385 §5:2, §5:3: read and destroyed through the memory store bound to the
+        # owner's sight from none, so a record that sight does not see is answered as one
+        # never written: nothing is destroyed or counted, and ``False`` comes back.
+        memory = self._stores.memory(self._owners_sight(None))
         # ADR-0296 §4:9: an episode is read into its conversation's current state, so
         # the conversation it names is counted once it is destroyed, and an open change
         # stream sends that state again. Only a live episode is read into the state, and
@@ -4029,11 +4093,11 @@ class Engine:
         # cannot be read is still destroyed, and the stream's sweep sends its
         # conversation's state instead.
         try:
-            conversation = episode_conversation(await self._memory.get(record_id))
+            conversation = episode_conversation(await memory.get(record_id))
         except MemoryStoreError:
             conversation = None
         try:
-            return await self._memory.delete(record_id)
+            return await memory.delete(record_id)
         finally:
             if conversation is not None:
                 self._count_change(conversation)
@@ -4060,7 +4124,9 @@ class Engine:
         return await self._tracked(self._pending_candidates(), "pending_candidates", checked=True)
 
     async def _pending_candidates(self) -> tuple[PendingCandidate, ...]:
-        return await held_candidates(self._memory, self._plans)
+        """Every pending candidate the owner's sight from none sees (ADR-0385 §4:1)."""
+        sight = self._owners_sight(None)
+        return await held_candidates(self._stores.memory(sight), self._stores.plans(sight))
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------
     #
@@ -4371,14 +4437,20 @@ class Engine:
         failure the caller can see, and the bound is safe because both acts are
         idempotent: a caller that meant it repeats it.
         """
+        # ADR-0385 §3:1: both attempts read and write through the memory store bound to
+        # the owner's sight from none, so a record that sight does not see names nothing
+        # live, as one never written.
+        memory = self._stores.memory(self._owners_sight(None))
         try:
-            return await self._place_once(record_id, reach)
+            return await self._place_once(memory, record_id, reach)
         except MemoryStoreStaleError:
             # Nothing was written — ADR-0219 §3's all-or-nothing — so there is no
             # partial state to unwind before the decision runs again.
-            return await self._place_once(record_id, reach)
+            return await self._place_once(memory, record_id, reach)
 
-    async def _place_once(self, record_id: str, reach: PlacementReach) -> Placement | None:
+    async def _place_once(
+        self, memory: Bound[MemoryStore], record_id: str, reach: PlacementReach
+    ) -> Placement | None:
         """Decide ADR-0217 §3's precedence over the record as read, and write once.
 
         **The read is in the call that writes**, never one read earlier (§7): the act
@@ -4409,7 +4481,7 @@ class Engine:
         ineligible side against a later proposal in §3's fold, rather than a
         placement a model may narrow by duplication.
         """
-        record = await self._memory.get(record_id)
+        record = await memory.get(record_id)
         if record is None:
             return None
         standing = record.placement
@@ -4418,7 +4490,7 @@ class Engine:
         if standing.reach is reach and standing.set_by is PlacementSetter.OWNER_ACT:
             return standing
         acted = Placement(reach=reach, set_by=PlacementSetter.OWNER_ACT, set_at=self._placed_at())
-        await self._memory.write_atomic(
+        await memory.write_atomic(
             [
                 MemoryWrite(
                     record=record.model_copy(update={"placement": acted}),
@@ -9439,11 +9511,12 @@ class Engine:
         and no count of its own. Its supports' episodes are resolved in one read for
         the page, so each summary can say whether none of them resolves (§15:7).
         """
-        records = await self._memory.list_beliefs(
+        sight = self._owners_sight(None)
+        records = await self._stores.memory(sight).list_beliefs(
             bands=bands, kinds=kinds, limit=limit, offset=offset
         )
         reading = await self._support_contents(
-            [record for record in records if isinstance(record, Memory)]
+            sight, [record for record in records if isinstance(record, Memory)]
         )
         now = self._clock()
         return tuple(
@@ -9454,13 +9527,17 @@ class Engine:
         )
 
     async def _belief(self, record_id: str) -> Belief | None:
-        """Read one live record and project it, or report that there is none."""
-        record = await self._memory.get(record_id)
+        """Read one live record and project it, or report that there is none.
+
+        By the owner's sight from none (ADR-0385 §4:1): a record it does not see is none.
+        """
+        sight = self._owners_sight(None)
+        record = await self._stores.memory(sight).get(record_id)
         if record is None:
             return None
         if not isinstance(record, Memory):
             return episode_view(record)
-        reading = await self._support_contents((record,))
+        reading = await self._support_contents(sight, (record,))
         return belief_view(
             record,
             now=self._clock(),
@@ -9468,7 +9545,7 @@ class Engine:
             supports_gone=reading.all_gone(record),
         )
 
-    async def _support_contents(self, memories: Sequence[Memory]) -> _SupportReading:
+    async def _support_contents(self, sight: Sight, memories: Sequence[Memory]) -> _SupportReading:
         """Resolve each support's part to readable content at presentation (ADR-0328 §15:2).
 
         **Lazily, here, and without rewriting anything** (ADR-0077 §6, kept by §15:7).
@@ -9487,9 +9564,15 @@ class Engine:
 
         Resolution happens at this façade rather than in `interfaces/`, which golden
         rule 3 keeps thin.
+
+        Both stores are read bound to ``sight``, the owner's sight of the act that shows
+        the memories (ADR-0385 §3:1): a support pointing into an episode, an effect record
+        or a request that sight does not see reads as gone.
         """
+        store = self._stores.memory(sight)
+        plans = self._stores.plans(sight)
         wanted = episodes_to_read(memories)
-        found = await self._memory.get_many(wanted) if wanted else {}
+        found = await store.get_many(wanted) if wanted else {}
         episodes = {
             record_id: record
             for record_id, record in found.items()
@@ -9497,13 +9580,13 @@ class Engine:
         }
         activations = remember_activations(memories, episodes)
         effects = (
-            {effect.id: effect for effect in await self._plans.activation_effects(activations)}
+            {effect.id: effect for effect in await plans.activation_effects(activations)}
             if activations
             else {}
         )
         asked = requests_to_read(memories)
         requests = (
-            {str(one.id): one for one in await self._plans.approval_requests(list(asked))}
+            {str(one.id): one for one in await plans.approval_requests(list(asked))}
             if asked
             else {}
         )

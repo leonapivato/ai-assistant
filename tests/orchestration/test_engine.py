@@ -1189,11 +1189,12 @@ async def test_beliefs_snapshots_its_filters_so_a_caller_cannot_change_the_page(
     entered = asyncio.Event()
     release = asyncio.Event()
 
+    #: ``bands`` as the store read it after resuming, or ``None`` if it was given none;
+    #: kept outside the store, so the bound copy the owner's act reads through writes here.
+    observed: list[tuple[BeliefBand, ...] | None] = []
+
     class GatedBeliefStore(RecordingBeliefStore):
         """Holds ``list_beliefs`` open, then reads ``bands`` only once released."""
-
-        #: ``bands`` as it read after resuming, or ``None`` if it was given none.
-        observed_on_resume: tuple[BeliefBand, ...] | None = None
 
         async def list_beliefs(
             self,
@@ -1205,7 +1206,7 @@ async def test_beliefs_snapshots_its_filters_so_a_caller_cannot_change_the_page(
         ) -> list[MemoryRecord]:
             entered.set()
             await release.wait()
-            self.observed_on_resume = None if bands is None else tuple(bands)
+            observed.append(None if bands is None else tuple(bands))
             return await super().list_beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
 
     store = GatedBeliefStore(now=lambda: AT)
@@ -1223,7 +1224,7 @@ async def test_beliefs_snapshots_its_filters_so_a_caller_cannot_change_the_page(
     # are both the filter as it stood when the call was made, not as the caller left
     # it. The second assertion is the original after-the-fact property, kept — it is
     # implied here but costs nothing and names the weaker half explicitly.
-    assert store.observed_on_resume == (BeliefBand.ASSERTED,)
+    assert observed == [(BeliefBand.ASSERTED,)]
     assert store.calls[-1][0] == (BeliefBand.ASSERTED,)
 
 
@@ -1759,17 +1760,24 @@ class RefusingCitationStore(FakeMemoryStore):
 
     def __init__(self, *, now: Callable[[], datetime]) -> None:
         super().__init__(now=now)
-        self._armed = False
-        self.batches = 0
+        # Held in one list each, so a bound copy (the owner's act reads through one,
+        # ADR-0385 §3:1) shares them with the store the case holds.
+        self._armed: list[bool] = [False]
+        self._batches: list[int] = [0]
+
+    @property
+    def batches(self) -> int:
+        """How many support batches were refused."""
+        return self._batches[0]
 
     def arm(self) -> None:
         """Start refusing every batch from here on."""
-        self._armed = True
+        self._armed[0] = True
 
     async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
-        if not self._armed:
+        if not self._armed[0]:
             return await super().get_many(record_ids)
-        self.batches += 1
+        self._batches[0] += 1
         msg = "the support batch cannot be read"
         raise MemoryStoreError(msg)
 

@@ -84,6 +84,7 @@ if TYPE_CHECKING:
         PlanningRound,
         ProposedCall,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
 
 __all__ = ["DoneCandidate", "done_candidates", "held_candidates", "pending_candidates"]
 
@@ -95,12 +96,13 @@ type _Done = frozenset[tuple[str, str, str]]
 
 
 async def pending_candidates(
-    plans: PlanStore, episodes: Sequence[EpisodicMemory], /
+    plans: Bound[PlanStore], episodes: Sequence[EpisodicMemory], /
 ) -> dict[str, tuple[str, ...]]:
     """Each unprocessed episode's pending candidates, by its id (ADR-0329 §6:9).
 
     Args:
-        plans: The plan store the observation records and effect records are read from.
+        plans: The plan store the observation records and effect records are read from,
+            bound to the sight of the work whose window this is (ADR-0383 §7:7).
         episodes: The episodes the window shows. An open one, or one with no processing
             record, records no round and has none.
 
@@ -208,8 +210,13 @@ def done_candidates(
     return tuple(joined)
 
 
-async def held_candidates(memory: MemoryStore, plans: PlanStore, /) -> tuple[PendingCandidate, ...]:
+async def held_candidates(
+    memory: Bound[MemoryStore], plans: Bound[PlanStore], /
+) -> tuple[PendingCandidate, ...]:
     """Every pending candidate, as the panel shows them (ADR-0329 §18:1).
+
+    Both stores are bound to the owner's sight (ADR-0385 §3:1, §4:1), so an episode, an
+    observation record or an effect record that sight does not see is not walked.
 
     Args:
         memory: The store the episodes are read from.
@@ -237,7 +244,7 @@ async def held_candidates(memory: MemoryStore, plans: PlanStore, /) -> tuple[Pen
 
 
 async def _page_candidates(
-    memory: MemoryStore, plans: PlanStore, rows: Sequence[EpisodeSummary]
+    memory: Bound[MemoryStore], plans: Bound[PlanStore], rows: Sequence[EpisodeSummary]
 ) -> list[PendingCandidate]:
     """The pending candidates of one page of the episode listing, in its order."""
     named = {
@@ -286,7 +293,7 @@ def _done_remember(effect: ActivationEffect) -> bool:
 
 
 async def _approved_candidates(
-    memory: MemoryStore,
+    memory: Bound[MemoryStore],
     episodes: Sequence[EpisodicMemory],
     done: Mapping[str, Sequence[ActivationEffect]],
 ) -> dict[str, tuple[str, ...]]:
