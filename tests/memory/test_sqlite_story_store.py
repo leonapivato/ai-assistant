@@ -1019,17 +1019,18 @@ async def test_a_corrupt_carried_note_is_a_story_store_error(tmp_path: Path) -> 
         reopened.close()
 
 
-@pytest.mark.parametrize("held_as", ["member", "holder"])
+@pytest.mark.parametrize("held_as", ["member", "holder", "holder-of-both"])
 async def test_a_merge_copies_no_membership_across_homes_a_file_holds(
     tmp_path: Path, held_as: str
 ) -> None:
     """ADR-0383 §4:7: a merge writes no membership naming a story of another home.
 
     Before these refusals, a link could join two homes, so a file may hold a story of
-    one home as a member, or a holder, of another's. The story is given the shared
-    things' home on its row, as such a file holds it. Merging the owner's story into
-    another of the owner's would then copy that membership onto the story merged into:
-    refused ``another_home``, naming the story of the other home, and nothing written.
+    one home as a member, or a holder, of another's, a holder of both stories included.
+    The story is given the shared things' home on its row, as such a file holds it.
+    Merging the owner's story into another of the owner's would then copy that
+    membership onto the story merged into, or change the holder: refused
+    ``another_home``, naming the story of the other home, and nothing written.
     """
     path = tmp_path / "stories.db"
     store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
@@ -1039,8 +1040,12 @@ async def test_a_merge_copies_no_membership_across_homes_a_file_holds(
         other = await made(store, act("a3"))
         if held_as == "member":
             linked = await store.link(absorbed, [sub(other)], actor=StoryActor.OWNER)
-        else:
+        elif held_as == "holder":
             linked = await store.link(other, [sub(absorbed)], actor=StoryActor.OWNER)
+        else:
+            # A holder already holding the story merged into gains nothing, but the
+            # merge still removes the absorbed story from it, which changes it.
+            linked = await store.link(other, [sub(absorbed), sub(target)], actor=StoryActor.OWNER)
         assert linked.refusal is None, linked
         conn = sqlite3.connect(path)
         conn.execute(

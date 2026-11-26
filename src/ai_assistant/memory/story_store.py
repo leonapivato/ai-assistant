@@ -985,11 +985,12 @@ class SqliteStoryStore:
     ) -> StoryRefusal | None:
         """Refuse a merge whose writes would name a story of another home (ADR-0383 §4:7).
 
-        The two stories are of one home already; this reads the memberships the merge
+        The two stories are of one home already; this reads the other stories the merge
         would write. Each story member of the absorbed story the target would gain, and
-        each story holding the absorbed one that would gain the target, is to be of the
-        target's home, so a membership across homes a store holds from before these
-        refusals is never copied. The first that is not is the one reported.
+        every story holding the absorbed one, which the merge changes whether or not it
+        then gains the target, is to be of the target's home, so a membership across
+        homes a store holds from before these refusals is never copied and no story of
+        another home is changed. The first that is not is the one reported.
         """
         home = self._home_of(conn, target)
         target_member = StoryMember(kind=StoryMemberKind.STORY, id=target)
@@ -1000,12 +1001,8 @@ class SqliteStoryStore:
             and member != target_member
             and not self._holds(conn, target, member)
         ]
-        gaining = [
-            holder
-            for holder in self._holders(conn, absorbed)
-            if holder != target and not self._holds(conn, holder, target_member)
-        ]
-        return self._home_refusal(conn, home, [*gained, *gaining])
+        changed = [holder for holder in self._holders(conn, absorbed) if holder != target]
+        return self._home_refusal(conn, home, [*gained, *changed])
 
     @staticmethod
     def _tick(conn: sqlite3.Connection) -> int:
