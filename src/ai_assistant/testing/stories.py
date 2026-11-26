@@ -662,13 +662,15 @@ class FakeStoryStore:
 
         ``home`` is the write's own; ``None``, for a decision changing no story, the
         home of the first story the flag concerns (ADR-0383 §3:2, §4:7), as the durable
-        store judges it.
+        store judges it; then the stories the flag names as recorded, which each
+        ``decided`` line carries.
         """
         if refused := self._flag_refusal(state, flag):
             return refused
         concerned = self._concerned(state, flag)
         own = state.stories[concerned[0]].home if home is None else home
-        return self._home_refusal(state, own, concerned)
+        named = [one for one in (flag.story, flag.flag.story if flag.flag else None) if one]
+        return self._home_refusal(state, own, _unique([*concerned, *named]))
 
     def _decide(
         self, state: _State, flag: StoryFlagName, outcome: StoryDecision, stamp: _Stamp

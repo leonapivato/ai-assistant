@@ -1279,15 +1279,20 @@ class SqliteStoryStore:
         ``decided`` line would be written into a story of another home (ADR-0383 §3:2,
         §4:7). ``home`` is the write's own; ``None``, for a decision that changes no
         story, takes the home of the first story the flag concerns, so a flag whose
-        stories span two homes is refused. Withholding, a flag concerning a story this
-        store does not hold is ``unknown_flag`` first (§4:8), so ``another_home`` is
-        answered between stories it holds alone.
+        stories span two homes is refused. Then the stories the flag names as recorded,
+        the one that raised it and the one it names, since each ``decided`` line carries
+        the flag and so names them too: only a file written before these refusals holds
+        a merge across homes that would part a story from the one it was merged into.
+        Withholding, a flag concerning a story this store does not hold is
+        ``unknown_flag`` first (§4:8), so ``another_home`` is answered between stories it
+        holds alone.
         """
         if refused := self._flag_refusal(conn, flag):
             return refused
         concerned = self._concerned(conn, flag)
         own = self._home_of(conn, concerned[0]) if home is None else home
-        return self._home_refusal(conn, own, concerned)
+        named = [one for one in (flag.story, flag.flag.story if flag.flag else None) if one]
+        return self._home_refusal(conn, own, _unique([*concerned, *named]))
 
     def _decide(
         self,
