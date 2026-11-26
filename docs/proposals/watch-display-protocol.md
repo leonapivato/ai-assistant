@@ -107,7 +107,7 @@ The watch sends `hello` first:
 {"type": "hello", "version": 1, "device": "watch-7f3a",
  "screen": {"w": 410, "h": 502, "depth": 16, "byte_order": "big"},
  "images": ["wi1", "jpeg"], "max_image_bytes": 262144,
- "max_layers": 4, "cache_bytes": 4194304,
+ "max_layers": 4, "cache_bytes": 2097152, "max_screen_pixels": 960000,
  "max_staged": 4, "max_flipbook_bytes": 2097152,
  "effects": ["fade", "slide-left", "slide-right", "slide-up", "slide-down"],
  "buttons": ["side"], "audio": ["pcm16-16k-mono"],
@@ -172,6 +172,16 @@ do with them.
 - `stage` with `"wake": true` marks the screen to show when the wrist rises.
   The newest one marked wins.
 - `clear` turns the screen off.
+- A screen whose layers hold more pixels between them than the watch's
+  `max_screen_pixels` is refused with the error `too-large`. Decoded pixels
+  are what fill the watch's memory, so the limit is on them and not on bytes
+  sent.
+- The watch may drop a staged screen that is not on show when it needs the
+  room. `show` for a screen it no longer holds answers the error `not-staged`,
+  and the gateway sends it again.
+- `screen` for the id that is already on show replaces it in place. Each layer
+  that keeps its name stays scrolled where the person left it. This is how a
+  layer grows, since a layer's size is fixed.
 
 Everyday screens use a black background. On this kind of display black pixels
 are switched off, black costs almost nothing to send, and it wears the screen
@@ -391,6 +401,30 @@ push rate and Wi-Fi throughput are still unmeasured (item 9). The watch's own
 board file compiles and has never run; its power chip, touch and buzzer are
 not written.
 
+The memory was cut eighth. The engine now holds one whole frame and the
+firmware one: a transition draws the new screen in place and uses the engine's
+frame for the old screen. Decoded pixels are counted and capped, which is
+where `max_screen_pixels` and the dropping of staged screens in section 3 come
+from, and `cache_bytes` is 2 MB. At their limits the frames, decoded pixels,
+stored images and sound take about 5.2 MB of the 8, leaving about 3 MB for the
+network. The same demo now peaks at 1.6 MB in the emulator.
+
+Answers that arrive in pieces were built ninth. The test gateway asks a model
+(Claude, through a command on the PC; not the hub, and it knows nothing about
+the owner), cuts the answer into sentences as it is written, and shows and
+speaks each one. One audio stream carries the whole answer, with silence where
+the next sentence is still being made. With a question spoken in 1.5 s, the
+first sound of the answer came 3.5 s after the question ended, all of it spent
+on the PC. Three things came out of it. A layer's size is fixed, so a growing
+answer means sending the screen again, which is the in-place `screen` of
+section 3. Nothing lets the watch keep the newest text in view. And the text
+reaches the screen a sentence before the voice says it (item 12).
+
+A watch face and a message screen were built tenth, as a first design of the
+everyday screens (item 7): the time drawn by the watch, the date, what is next
+and what is waiting drawn by the hub side, and "Ask", which opens the
+microphone with no wait.
+
 One thing the engine does is not protocol but shapes it: the watch frees a
 screen's decoded pixels when it leaves the screen, unless an update or a
 flipbook changed them, because those cannot be rebuilt from the stored image.
@@ -458,6 +492,10 @@ at 320 x 192 (Espressif); about 32 frames a second pushed to a similar
     word belongs on the watch, is the owner's to rule.
 11. **Later parts:** the `act` family, the JPEG stream, vector animation,
     compressed audio, a LoRa text path.
+12. **A spoken answer on the screen.** Whether the words should keep time with
+    the voice, and whether a layer can be told to follow its end as text is
+    added. The prototype shows each sentence whole, ahead of the voice, and
+    leaves the scrolling to the person.
 
 ## Sources
 
