@@ -362,6 +362,14 @@ things this showed: a denial needs the PIN as an approval does (ADR-0377 §3),
 and the digits are visible to whatever logs presses, so a gateway must keep
 presses on a PIN screen out of its logs.
 
+TLS was built sixth, on the test gateway. The gateway makes and signs its own
+certificate, and a watch is given it at enrolment and trusts no other, which
+is ADR-0124 §4's enrolled hub identity in another form. The first build
+admitted on the secret alone, which is the design ADR-0124 refuses; the second
+signs a certificate for each watch and admits only on both. The C engine ran
+against the gateway over a real TLS socket. The chip's own TLS client is not
+written.
+
 One thing the engine does is not protocol but shapes it: the watch frees a
 screen's decoded pixels when it leaves the screen, unless an update or a
 flipbook changed them, because those cannot be rebuilt from the stored image.
@@ -399,9 +407,14 @@ at 320 x 192 (Espressif); about 32 frames a second pushed to a similar
    decision of its own before the hub builds it.
 2. **Admission.** Ruled. Left to its decision: where the secret sits in the
    watch's flash, and what a lost watch costs (ADR-0124's expelling a device).
-3. **The public door.** Ruled. It is a new edge: ADR-0124 keeps the remote
-   listener on the overlay, so this needs its own decision, as the web door
-   did (ADR-0327). The first connection is tried at home on the LAN.
+3. **The public door.** Ruled, and it does not fit beside ruling 2 as put.
+   ADR-0124 §7 admits a device on two facts, its overlay identity and its
+   secret, and a public door has no overlay identity; ADR-0124's alternatives
+   refuse "a public TLS listener with a bearer token" by name. So admission
+   cannot stay unchanged. The prototype now gives each watch a certificate at
+   enrolment, checked in the TLS handshake, as the fact that takes the overlay
+   identity's place; whether that is acceptable is the owner's to rule, in the
+   door's own proposal. The first connection is tried at home on the LAN.
 4. **Channels.** Ruled. Not yet checked clause by clause against ADR-0292 §2
    and §9; that is owed when this becomes a decision.
 5. **`core` surface.** Whether the watch is the second spoke that fires
