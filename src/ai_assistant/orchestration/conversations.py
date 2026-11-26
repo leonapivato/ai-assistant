@@ -737,7 +737,11 @@ class ConversationLifecycle:
     (ADR-0385 §3:1), are made through the stores the engine hands each call, bound to the
     owner's sight it made for that call: :meth:`recent`, :meth:`digest`, :meth:`state`,
     :meth:`start`, :meth:`set_conversation_devices`, :meth:`write`,
-    :meth:`delete_message`, :meth:`transcript`, :meth:`forget` and :meth:`delete`.
+    :meth:`delete_message`, :meth:`transcript`, :meth:`forget` and :meth:`delete`; and the
+    reads that join device rows to records of a home, which a store bound to the owner's
+    sight gives back as the unbound store does for everything of the owner's and the
+    shared things' (ADR-0389 §2, §5): :meth:`device_conversations`,
+    :meth:`device_changes` and :meth:`changes`.
     The stores this stage holds unbound are read only where a clause keeps a read so:
 
     * the engine's start and its sweeps, :meth:`sweep_deletions` and :meth:`reclaim`,
@@ -748,14 +752,10 @@ class ConversationLifecycle:
       the owner's acts and by ADR-0298 §5's device checks (ADR-0385 §3:2, ADR-0383
       §10:5): :meth:`my_devices`, :meth:`set_my_devices` and
       :meth:`conversation_devices`;
-    * the chat space handed to the readers and writers that hold it under their own
-      clauses (:attr:`chat_space`);
-    * and, **not yet converted**, the reads that mix device rows with records of a home,
-      which no bound store gives back as the owner reads them today:
-      :meth:`device_conversations`, :meth:`device_changes` and :meth:`changes`. A store
-      bound to any sight gives back no device row (ADR-0383 §3:3), so bound, a device's
-      listing is empty and the change stream loses every change of a set of devices.
-      The device checks read them too, as today (ADR-0385 §3:2).
+    * and the chat space handed to the readers and writers that hold it under their own
+      clauses (:attr:`chat_space`), ADR-0298 §5's device checks among them, which read a
+      device's listing, its changes and the chat space's head through it, as today
+      (ADR-0389 §4:4).
     """
 
     def __init__(  # noqa: PLR0913 — the two stores, the horizon, the clock, the story store and the holder over them
@@ -841,8 +841,10 @@ class ConversationLifecycle:
         devices read. Handed unbound to those that hold it under their own clauses: the
         holder that binds it (ADR-0383 §9:1); the chat's reader's intake and the task
         sensor (§7:8); a work's own turn and the place lists (ADR-0387 §7:4); the engine's
-        revoking of a device, which writes device rows alone (ADR-0385 §3:2); and the
-        change stream's reads not yet converted (:class:`ConversationLifecycle`).
+        revoking of a device, which writes device rows alone (ADR-0385 §3:2); ADR-0298
+        §5's device checks, which read device rows as today (ADR-0389 §4:4); and the
+        change stream's check that a device reads a conversation as a change is sent
+        (ADR-0298 §7:5, ADR-0389 §4:4).
         """
         return self._conversations
 
@@ -1006,24 +1008,44 @@ class ConversationLifecycle:
 
     # --- one device's view (ADR-0296 §4, ADR-0298 §5) ------------------------
     #
-    # Not yet converted (B10g, ADR-0389). Each mixes device rows, which a bound store
-    # gives back none of (ADR-0383 §3:3), with records of a home, so a device's listing
-    # and its changes, and the hub's changes, cannot be read through a bound store as the
-    # owner reads them today; the device checks read them as today (ADR-0385 §3:2).
+    # Each joins device rows to records of a home. A store bound to the owner's sight
+    # holds "my devices" and the device rows of each conversation it holds (ADR-0389
+    # §2), so each reads through the store the engine bound to the owner's sight from
+    # none for the call (§5:1). The device checks read these through the chat space,
+    # unbound, as today (§4:4).
 
     async def device_conversations(
-        self, device_id: str, *, limit: int, offset: int = 0
+        self,
+        device_id: str,
+        *,
+        limit: int,
+        offset: int = 0,
+        conversations: Bound[ConversationStore],
     ) -> list[DeviceConversation]:
-        """List the conversations ``device_id`` reads, as ``recent`` orders them."""
-        return await self._conversations.device_conversations(device_id, limit=limit, offset=offset)
+        """List the conversations ``device_id`` reads, as ``recent`` orders them.
 
-    async def device_changes(self, device_id: str, *, after: int, limit: int) -> DeviceChanges:
+        Through ``conversations``, bound to the owner's sight for the call (ADR-0389
+        §5:1): the conversations it holds that the device reads, each with its access,
+        the sight applied before the page is cut (§2:3).
+        """
+        return await conversations.device_conversations(device_id, limit=limit, offset=offset)
+
+    async def device_changes(
+        self,
+        device_id: str,
+        *,
+        after: int,
+        limit: int,
+        conversations: Bound[ConversationStore],
+    ) -> DeviceChanges:
         """Read the changes after a cursor that ``device_id`` may see (ADR-0296 §4:5).
 
         Each change that adds the device as a reader carries the conversation's
-        snapshot as of that change (ADR-0298 §7:6).
+        snapshot as of that change (ADR-0298 §7:6). Through ``conversations``, bound to
+        the owner's sight for the call (ADR-0389 §5:1): the changes it holds that reach
+        the device, each snapshot of the messages it holds (§2:3).
         """
-        return await self._conversations.device_changes(device_id, after=after, limit=limit)
+        return await conversations.device_changes(device_id, after=after, limit=limit)
 
     async def write(
         self,
@@ -1080,13 +1102,19 @@ class ConversationLifecycle:
         return await conversations.transcript(conversation_id, before=before, limit=limit)
 
     async def changes(
-        self, *, after: int, conversation_ids: Sequence[str] | None, limit: int
+        self,
+        *,
+        after: int,
+        conversation_ids: Sequence[str] | None,
+        limit: int,
+        conversations: Bound[ConversationStore],
     ) -> ChatChanges:
         """Read the chat space's changes after a cursor (ADR-0293 §5:10, §5:11).
 
-        Unbound: not yet converted, as the section above says.
+        Through ``conversations``, bound to the owner's sight for the call (ADR-0389
+        §5:1): every change it holds (§2:2), restricted to ``conversation_ids`` as today.
         """
-        return await self._conversations.changes(
+        return await conversations.changes(
             after=after, conversation_ids=conversation_ids, limit=limit
         )
 

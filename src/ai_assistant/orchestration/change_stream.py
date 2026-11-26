@@ -55,15 +55,15 @@ read; the next sweep reads it again, so the sweep converges rather than claiming
 completeness.
 
 **Following the stream is the owner's act** (ADR-0385 §4:1). The engine's stream reads
-each conversation's state, the hub's own machine's listing of the conversations it reads
-them of, and whether each conversation a state is sent of is one the sight sees, through
-stores bound to the owner's sight, made anew for each read, so no sight outlives the read
-it was made for. Whether a device reads a conversation is read
-from the conversation's devices as today: device rows are no domain's records (§3:2).
-**The pages of changes and a device's listing are not yet read through a bound store**
-(B10g, ADR-0389): each mixes device rows, which a store bound to any sight gives
-back none of (ADR-0383 §3:3), with records of a home, so bound, the stream would lose
-every change of a set of devices, and a device every change, that the owner is sent today.
+each conversation's state, its pages of changes, the listing of the conversations it
+reads states of, the hub's own machine's and a device's, and whether each conversation a
+state is sent of is one the sight sees, through stores bound to the owner's sight from
+none, made anew for each read, so no sight outlives the read it was made for (ADR-0389
+§5:1). A store bound to that sight holds "my devices" and the device rows of each
+conversation it holds (ADR-0389 §2), so its pages and listings are what the owner is sent
+today wherever every record is the owner's or the shared things'. Whether a device reads
+a conversation as a change is sent is read from the conversation's devices as today,
+unbound (ADR-0298 §7:5, ADR-0389 §4:4).
 """
 
 from __future__ import annotations
@@ -159,16 +159,15 @@ class ChangeStream:
 
         Args:
             chat: The engine's chat space, held unbound. Read through it as today: each
-                conversation's devices, which are no domain's records (ADR-0385 §3:2);
-                and, not yet through a bound store (B10g, ADR-0389), the pages of
-                changes and a device's listing, which mix device rows with records of a
-                home where a store bound to any sight gives back no device row (ADR-0383
-                §3:3).
-            seen_chat: The chat space bound to the owner's sight, made anew for each
-                read: the hub's own machine's listing of the conversations whose state
-                the stream sends is read through it, and whether the owner's sight sees
-                each conversation a state is sent of (ADR-0385 §4:1). ``None`` reads
-                ``chat`` and sends every state, as the canonical fake engine does.
+                conversation's devices, for whether a device reads it as a change or a
+                state is sent (ADR-0298 §7:5, ADR-0389 §4:4).
+            seen_chat: The chat space bound to the owner's sight from none, made anew for
+                each read (ADR-0389 §5:1): the pages of changes, the hub's own
+                machine's and a device's listing of the conversations whose state the
+                stream sends, and whether the owner's sight sees each conversation a
+                state is sent of (ADR-0385 §4:1) are read through it. ``None`` reads
+                ``chat`` for each and sends every state, as the canonical fake engine
+                does.
             running: What the engine runs now, per conversation.
             state_of: A conversation's current state, given what runs from it; the
                 engine's reads it through the memory store bound to the owner's sight,
@@ -301,6 +300,8 @@ class ChangeStream:
     async def _read_conversations(self, device: RequestingDevice) -> set[str]:
         """Every conversation the device reads now: every one held, for the hub's.
 
+        Each page is read through the chat space bound to the owner's sight for that
+        read (:meth:`_bound`), so it lists only the conversations the sight sees.
         Paged by offset over an order activity and deletion change, so a conversation
         that moves across a page boundary while it is read can be passed over; the
         sweep reads it again at its next interval, and nothing is consumed by a
@@ -309,13 +310,13 @@ class ChangeStream:
         found: set[str] = set()
         offset = 0
         while True:
+            seen = self._bound()
             if device.is_hub:
-                seen = self._chat if self._seen_chat is None else self._seen_chat()
                 listed = await self._read(seen.recent(limit=CHANGE_STREAM_PAGE, offset=offset))
                 page = [one.id for one in listed]
             else:
                 held = await self._read(
-                    self._chat.device_conversations(
+                    seen.device_conversations(
                         device.device_id, limit=CHANGE_STREAM_PAGE, offset=offset
                     )
                 )
@@ -342,16 +343,31 @@ class ChangeStream:
                     await self._all_closed.wait()
 
     async def _page(self, device: RequestingDevice, cursor: int) -> DeviceChanges:
-        """The next page of the device's changes: every change, for the hub's machine."""
+        """The next page of the device's changes: every change, for the hub's machine.
+
+        Read through the chat space bound to the owner's sight for this read
+        (:meth:`_bound`, ADR-0389 §5:1): the changes it holds (§2:2), and for a device
+        those of them that reach it, each adding it with a snapshot of the messages it
+        holds (§2:3).
+        """
+        seen = self._bound()
         if device.is_hub:
-            whole = await self._read(self._chat.changes(after=cursor, limit=CHANGE_STREAM_PAGE))
+            whole = await self._read(seen.changes(after=cursor, limit=CHANGE_STREAM_PAGE))
             return DeviceChanges(
                 changes=tuple(DeviceChange(change=one) for one in whole.changes),
                 next_after=whole.next_after,
             )
         return await self._read(
-            self._chat.device_changes(device.device_id, after=cursor, limit=CHANGE_STREAM_PAGE)
+            seen.device_changes(device.device_id, after=cursor, limit=CHANGE_STREAM_PAGE)
         )
+
+    def _bound(self) -> Bound[ConversationStore]:
+        """The chat space bound to the owner's sight, made for one read.
+
+        ``chat`` itself where no bound store is handed: the canonical fake engine's,
+        which holds one store and reads it whole.
+        """
+        return self._chat if self._seen_chat is None else self._seen_chat()
 
     async def _read[T](self, work: Awaitable[T]) -> T:
         """Run one read so shutdown drains it.

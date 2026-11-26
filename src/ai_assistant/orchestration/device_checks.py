@@ -55,6 +55,7 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from ai_assistant.core.protocols import ConversationStore
     from ai_assistant.core.types import (
         ChatChange,
         ChatDevice,
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
         RequestingDevice,
         UserMessage,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
     from ai_assistant.orchestration.conversations import ConversationLifecycle
 
 #: How many changes one page of the replay in :meth:`DeviceChecks._an_end` reads.
@@ -93,6 +95,11 @@ class DeviceChecks:
 
     def __init__(self, conversations: ConversationLifecycle) -> None:
         """Read membership from the chat space the engine acts on.
+
+        Every read is of device rows as today, unbound (ADR-0389 §4:4): "my devices"
+        and a conversation's devices through the stage, and a device's listing, the
+        changes that reach it and the chat space's head through its chat space, so a
+        role is judged over every conversation the store holds.
 
         Args:
             conversations: The engine's conversation stage, whose devices and "my
@@ -229,7 +236,9 @@ class DeviceChecks:
 
     async def _latest(self) -> int:
         """The chat space's latest sequence number, as one read answers it."""
-        page = await self._conversations.changes(after=_LAST, conversation_ids=None, limit=1)
+        page = await self._conversations.chat_space.changes(
+            after=_LAST, conversation_ids=None, limit=1
+        )
         return page.next_after
 
     async def _an_end(self, device_id: str) -> bool:
@@ -244,14 +253,13 @@ class DeviceChecks:
         """
         if _access(await self._conversations.my_devices(), device_id) is not None:
             return True
-        if await self._conversations.device_conversations(device_id, limit=1):
+        chat = self._conversations.chat_space
+        if await chat.device_conversations(device_id, limit=1):
             return True
         member: dict[str, bool] = {}
         after = 0
         while True:
-            page = await self._conversations.device_changes(
-                device_id, after=after, limit=_REPLAY_PAGE
-            )
+            page = await chat.device_changes(device_id, after=after, limit=_REPLAY_PAGE)
             for entry in page.changes:
                 one = entry.change
                 if (
@@ -284,10 +292,11 @@ def _reason(held: bool | None) -> DeviceRefusal:
     return DeviceRefusal.NO_ROLE if held is False else DeviceRefusal.NOT_ALLOWED
 
 
-async def device_changes(
-    conversations: ConversationLifecycle,
+async def device_changes(  # noqa: PLR0913 — the stage, the device, the store and the page
+    stage: ConversationLifecycle,
     device_id: str,
     *,
+    conversations: Bound[ConversationStore],
     after: int,
     conversation_ids: Sequence[str] | None,
     limit: int,
@@ -304,9 +313,14 @@ async def device_changes(
     shorter than ``limit`` still means the reader has caught up (``ChatChanges``),
     however many changes in other conversations stood in between.
 
+    Every page is read through ``conversations``, the store the engine bound to the
+    owner's sight for the call (ADR-0389 §5:1), so the restriction is applied over the
+    changes it holds, before the page is cut.
+
     Args:
-        conversations: The chat space.
+        stage: The engine's conversation stage.
         device_id: The device.
+        conversations: The chat space, bound to the owner's sight from none.
         after: The cursor.
         conversation_ids: The conversations the caller asked about, or ``None`` for
             every one the device may see.
@@ -316,14 +330,18 @@ async def device_changes(
         The page, and the cursor to ask from next.
     """
     if conversation_ids is None:
-        whole = await conversations.device_changes(device_id, after=after, limit=limit)
+        whole = await stage.device_changes(
+            device_id, after=after, limit=limit, conversations=conversations
+        )
         return whole.without_snapshots()
     named = frozenset(conversation_ids)
     kept: list[ChatChange] = []
     cursor = after
     while True:
         page = (
-            await conversations.device_changes(device_id, after=cursor, limit=limit)
+            await stage.device_changes(
+                device_id, after=cursor, limit=limit, conversations=conversations
+            )
         ).without_snapshots()
         for one in page.changes:
             if one.conversation_id is None or one.conversation_id in named:
