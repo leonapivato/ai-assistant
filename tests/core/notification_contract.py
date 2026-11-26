@@ -51,7 +51,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import pytest
 import structlog
@@ -68,6 +68,7 @@ from ai_assistant.core.types import (
     NotificationReach,
     QuietWindow,
     RecordHome,
+    Sight,
     SightMode,
 )
 from sight_equivalence import SIGHTS, ReadCall, assert_answers_alike
@@ -140,6 +141,15 @@ def reaching(notification_class: str, reach: NotificationReach) -> NotificationP
     return NotificationPreferences(
         reaches=(ClassReach(notification_class=notification_class, reach=reach),)
     )
+
+
+#: The owner's sights, one for each domain an owner's act may name and one for none
+#: (ADR-0385 §3:3), by name.
+_OWNERS_ACTS: Final[dict[str, Sight]] = {
+    "from-none": Sight.of_owners_act(None),
+    "from-the-owners-domain": Sight.of_owners_act(RecordHome.owners()),
+    "from-the-shared-things": Sight.of_owners_act(RecordHome.shared()),
+}
 
 
 class MutableClock:
@@ -2394,6 +2404,108 @@ class NotificationStoreContract(ABC):
         assert await bound.preferences() == settings
         assert await bound.delete(later.notification_id) is True
         assert await store.get(later.notification_id) is None
+
+    # --- a store bound to the owner's sight (ADR-0385 §3:3 to §3:5) ----------------
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    @pytest.mark.parametrize("act", list(_OWNERS_ACTS))
+    async def test_the_owners_sight_is_withheld_for_in_either_mode_and_counts_nothing(
+        self,
+        sight_factory: SightStoreFactory,
+        policy: NotificationPolicy,
+        act: str,
+        mode: SightMode,
+    ) -> None:
+        """ADR-0385 §3:5: bound to the owner's sight, a store withholds in either mode.
+
+        §9:3's obligation, with the bound store built in ``mode``: it answers every call
+        in the battery as the same store holding only what the owner's sight sees, in
+        the counting build too, and writes no ``sight_counted`` event (ADR-0383 §11:1).
+        """
+        sight = _OWNERS_ACTS[act]
+        bound_clock, only_clock = MutableClock(), MutableClock()
+        bound_store = sight_factory(mode=mode, now=bound_clock)
+        holding_only = sight_factory(mode=SightMode.WITHHOLD, now=only_clock)
+        ids = await _sight_history(bound_store, bound_clock, policy)
+        assert await _sight_history(holding_only, only_clock, policy) == ids
+        for record in await holding_only.export():
+            if not sight.sees(record.home):
+                assert await holding_only.delete(record.id) is True
+        with structlog.testing.capture_logs() as events:
+            await assert_answers_alike(bound_store.bound(sight), holding_only, _sight_battery(ids))
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_the_owners_sight_holds_the_domain_it_names_and_from_none_both(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy, mode: SightMode
+    ) -> None:
+        """ADR-0385 §3:3, §3:4: from none both homes; from a domain that domain alone."""
+        clock = MutableClock()
+        store = sight_factory(mode=mode, now=clock)
+        await _sight_history(store, clock, policy)
+        records = await store.export()
+        owners = {one.id for one in records if one.home == RecordHome.owners()}
+        shared = {one.id for one in records if one.home == RecordHome.shared()}
+        assert owners
+        assert shared
+        held = {
+            name: {one.id for one in await store.bound(sight).export()}
+            for name, sight in _OWNERS_ACTS.items()
+        }
+        assert held == {
+            "from-none": owners | shared,
+            "from-the-owners-domain": owners,
+            "from-the-shared-things": shared,
+        }
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_the_owners_sight_refuses_a_write_naming_a_record_it_does_not_see(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy, mode: SightMode
+    ) -> None:
+        """ADR-0383 §7:5, §8:2 for the owner's sight, in either mode.
+
+        A dismissal, a deletion and a reconsideration naming a record of the domain the
+        act did not name answer as for one never written and change nothing.
+        """
+        clock = MutableClock()
+        store = sight_factory(mode=mode, now=clock)
+        ids = await _sight_history(store, clock, policy)
+        before = await store.export()
+        for act, unseen in (
+            ("from-the-owners-domain", ids["shared-held"]),
+            ("from-the-shared-things", ids["owners-held"]),
+        ):
+            bound = store.bound(_OWNERS_ACTS[act])
+            assert await bound.get(unseen) is None
+            assert await bound.dismiss(unseen) is False
+            assert await bound.delete(unseen) is False
+            assert await bound.reconsider(unseen, policy=policy) is None
+        assert await store.export() == before
+
+    async def test_a_counting_store_bound_to_a_runs_sight_still_counts(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0383 §7:10, §11:1 stand for every other reader of a store built to count.
+
+        Bound to the owner's sight, the store withholds and counts nothing; the same
+        store bound to a run's sight answers as unbound and counts, as before.
+        """
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.COUNT, now=clock)
+        ids = await _sight_history(store, clock, policy)
+        with structlog.testing.capture_logs() as events:
+            withheld = await store.bound(_OWNERS_ACTS["from-the-shared-things"]).get(
+                ids["owners-held"]
+            )
+            counted_read = await store.bound(SIGHTS["run-over-the-shared-things"]).get(
+                ids["owners-held"]
+            )
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert withheld is None
+        assert counted_read is not None
+        assert [(event["member"], event["reader"], event["other_home"]) for event in counted] == [
+            ("get", "run", 1)
+        ]
 
 
 async def _sight_history(

@@ -2117,6 +2117,10 @@ class MemoryStore(Protocol):
         **Whether a bound store withholds or only counts is fixed at construction**
         (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
         the store when it builds it, read from no ``Settings`` field and no running act.
+        **Save for the owner's sight** (ADR-0385 §3:5): bound to a sight
+        :meth:`~ai_assistant.core.types.Sight.of_owners_act` made, the store withholds
+        whatever mode it was built in, from the build that first binds it, and writes no
+        count event; :meth:`~ai_assistant.core.types.Sight.answered_in` decides it.
 
         **Withholding** (§7:2 to §7:5, §8). Save a write's own checks, a bound store
         answers every member as this store would answer it if it held only the records
@@ -2545,8 +2549,11 @@ class MemoryWriter(Protocol):
         policy and its own store bound to ``sight`` (:meth:`MemoryStore.bound`), reads
         and writes nothing, and adds no argument to any member. It has no mode of its
         own: whether a bound writer's reads withhold or only count is its store's,
-        fixed when the store is built (§7:10). Binding a bound writer binds it to the
-        meet of the two sights (§6:6), so binding never widens what it reads.
+        fixed when the store is built (§7:10), save that bound to the owner's sight
+        (:meth:`~ai_assistant.core.types.Sight.of_owners_act`) its store withholds
+        whatever mode it was built in and writes no count event (ADR-0385 §3:5).
+        Binding a bound writer binds it to the meet of the two sights (§6:6), so
+        binding never widens what it reads.
 
         **Every read a bound writer makes for a write is of the store bound to the same
         sight** (§7:6), and every write it makes goes through that store (§7:5). Save a
@@ -4514,6 +4521,10 @@ class PlanStore(Protocol):
         **Whether a bound store withholds or only counts is fixed at construction**
         (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
         the store when it builds it, read from no ``Settings`` field and no running act.
+        **Save for the owner's sight** (ADR-0385 §3:5): bound to a sight
+        :meth:`~ai_assistant.core.types.Sight.of_owners_act` made, the store withholds
+        whatever mode it was built in, from the build that first binds it, and writes no
+        count event; :meth:`~ai_assistant.core.types.Sight.answered_in` decides it.
 
         **What it holds** (§3, §7:3, §7:4), decided by
         :meth:`~ai_assistant.core.types.Sight.withheld` and by nothing else. An effect
@@ -7920,6 +7931,10 @@ class ConversationStore(Protocol):
         **Whether a bound store withholds or only counts is fixed at construction**
         (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
         the store when it builds it, read from no ``Settings`` field and no running act.
+        **Save for the owner's sight** (ADR-0385 §3:5): bound to a sight
+        :meth:`~ai_assistant.core.types.Sight.of_owners_act` made, the store withholds
+        whatever mode it was built in, from the build that first binds it, and writes no
+        count event; :meth:`~ai_assistant.core.types.Sight.answered_in` decides it.
 
         **Withholding** (§3:3, §7:2, §7:5, §8). Save a write's own checks, a bound store
         answers every member as this store would answer it if it held only the records
@@ -8744,6 +8759,10 @@ class StoryStore(Protocol):
         **Whether a bound store withholds or only counts is fixed at construction**
         (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
         the store when it builds it, read from no ``Settings`` field and no running act.
+        **Save for the owner's sight** (ADR-0385 §3:5): bound to a sight
+        :meth:`~ai_assistant.core.types.Sight.of_owners_act` made, the store withholds
+        whatever mode it was built in, from the build that first binds it, and writes no
+        count event; :meth:`~ai_assistant.core.types.Sight.answered_in` decides it.
 
         **What it holds.** A story is held where ``sight`` sees its home, decided by
         :meth:`~ai_assistant.core.types.Sight.withheld` and by nothing else (§7:3), and
@@ -9653,6 +9672,10 @@ class NotificationStore(Protocol):
         **Whether a bound store withholds or only counts is fixed at construction**
         (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
         the store when it builds it, read from no ``Settings`` field and no running act.
+        **Save for the owner's sight** (ADR-0385 §3:5): bound to a sight
+        :meth:`~ai_assistant.core.types.Sight.of_owners_act` made, the store withholds
+        whatever mode it was built in, from the build that first binds it, and writes no
+        count event; :meth:`~ai_assistant.core.types.Sight.answered_in` decides it.
 
         **What it holds.** A held notification is held where ``sight`` sees its home,
         decided by :meth:`~ai_assistant.core.types.Sight.withheld` and by nothing else
@@ -15317,6 +15340,10 @@ class PersonModelStore(Protocol):
         **Whether a bound store withholds or only counts is fixed at construction**
         (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
         the store when it builds it, read from no ``Settings`` field and no running act.
+        **Save for the owner's sight** (ADR-0385 §3:5): bound to a sight
+        :meth:`~ai_assistant.core.types.Sight.of_owners_act` made, the store withholds
+        whatever mode it was built in, from the build that first binds it, and writes no
+        count event; :meth:`~ai_assistant.core.types.Sight.answered_in` decides it.
 
         **Withholding** (§7:2, §7:5, §8). Save a write's own checks, a bound store
         answers every member as this store would answer it if it held only the people

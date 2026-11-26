@@ -167,9 +167,10 @@ import asyncio
 import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pytest
+import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
@@ -1232,6 +1233,14 @@ _BOUND_CALL_NAMES = (
     "use-ours",
     "use-theirs",
 )
+
+#: The owner's sights, one for each domain an owner's act may name and one for none
+#: (ADR-0385 §3:3), by name.
+_OWNERS_ACTS: Final[dict[str, Sight]] = {
+    "from-none": Sight.of_owners_act(None),
+    "from-the-owners-domain": Sight.of_owners_act(RecordHome.owners()),
+    "from-the-shared-things": Sight.of_owners_act(RecordHome.shared()),
+}
 
 
 class MemoryWriterContract:
@@ -4804,6 +4813,63 @@ class MemoryWriterContract:
         unbound = await _written_through(make_writer, twin, call, sight=None)
 
         assert bound == unbound
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    @pytest.mark.parametrize("act", list(_OWNERS_ACTS))
+    @pytest.mark.parametrize("call_name", _BOUND_CALL_NAMES)
+    async def test_a_writer_bound_to_the_owners_sight_withholds_over_a_store_in_either_mode(
+        self, make_writer: WriterFactory, call_name: str, act: str, mode: SightMode
+    ) -> None:
+        """ADR-0385 §3:5: bound to the owner's sight, a writer's store withholds in either mode.
+
+        Over a store built in ``mode``, the writer bound to the owner's sight writes as
+        the same writer over a store holding only what that sight sees, the counting
+        build included: a record of the domain the act did not name is one never
+        written. Its store writes no ``sight_counted`` event (ADR-0383 §11:1).
+        """
+        sight = _OWNERS_ACTS[act]
+        world, holding_only = await _sight_world(mode), await _sight_world()
+        await _keep_only_what_it_sees(holding_only, sight)
+        call = _bound_call(call_name, await _as_read(world))
+
+        with structlog.testing.capture_logs() as events:
+            bound = await _written_through(make_writer, world, call, sight=sight)
+        reference = await _written_through(make_writer, holding_only, call, sight=None)
+
+        assert bound == reference
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    async def test_a_writer_bound_to_a_runs_sight_over_a_counting_store_still_counts(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0383 §7:10, §11:1 stand for every other reader of a store built to count.
+
+        Over one counting store, the writer bound to the owner's sight from the shared
+        things finds no episode of the owner's domain, as one never written, and counts
+        nothing; bound to a run's sight over the shared things, it reads as unbound, and
+        its store counts the read.
+        """
+        store = await _sight_world(SightMode.COUNT)
+        writer = make_writer(store, FakeMemoryPolicy())
+        withheld = _proposal(_preference("withheld", evidence=(_CITED,)))
+        with (
+            structlog.testing.capture_logs() as events,
+            pytest.raises(UnresolvedEvidenceError),
+        ):
+            await writer.bound(_OWNERS_ACTS["from-the-shared-things"]).ingest(withheld)
+        assert not [event for event in events if event["event"] == "sight_counted"]
+        with structlog.testing.capture_logs() as events:
+            landed = await writer.bound(SIGHTS["run-over-the-shared-things"]).ingest(
+                _proposal(
+                    _preference("counted", evidence=(_SHARED_CITED,)).model_copy(
+                        update=_SHARED_HOME
+                    )
+                )
+            )
+        assert landed.record_id == "counted"
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert counted
+        assert {event["reader"] for event in counted} == {"run"}
 
     async def test_a_bound_writer_bound_again_reads_by_the_meet_of_the_two_sights(
         self, make_writer: WriterFactory

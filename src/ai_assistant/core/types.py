@@ -3471,6 +3471,25 @@ def home_may_be_written(home: RecordHome) -> bool:
     return home.kind is RecordHomeKind.PERSON and home.id == OWNER_PERSON_ID
 
 
+def owners_act_may_name(domain: RecordHome) -> bool:
+    """Whether an owner's act may name ``domain`` (ADR-0385 §2:1): the one place that decides it.
+
+    The owner's domain, the person home of :data:`OWNER_PERSON_ID`, and the hub's shared
+    things (ADR-0369 §12:1, §12:2, §2:8), and no other. Any other value, a group's domain
+    or another person's included, is refused from the value alone, before any store is
+    read, and alike whatever any store holds (ADR-0385 §2:2). It is decided by equality
+    with those two values alone, so a value built round its validation that is neither
+    is refused too.
+
+    Args:
+        domain: The domain an owner's act names.
+
+    Returns:
+        Whether the act may name it.
+    """
+    return domain == RecordHome.owners() or domain == RecordHome.shared()
+
+
 class AuthorityKind(StrEnum):
     """Whose authority a work carries (ADR-0368 §2:2). Closed, **added to, never renamed**."""
 
@@ -3717,6 +3736,11 @@ class SightReader(StrEnum):
     """A producer reading for a work that has ended (§6:7)."""
     RUN = "run"
     """An ADR-0384 run tending one domain (§6:8)."""
+    OWNERS_ACT = "owners_act"
+    """An owner's own act, a call to a member of ``AssistantEngine`` other than
+    ``receive`` (ADR-0385 §3:3). A store bound to its sight withholds whatever mode it
+    was built in and writes no event of §11:1 (ADR-0385 §3:5), so no event carries this
+    code."""
 
 
 class WithheldReason(StrEnum):
@@ -3785,8 +3809,11 @@ class Sight(BaseModel):
     no value of it sees every record.
 
     Made by the constructors below, from recorded facts alone (§6:10): :meth:`of_work`,
-    :meth:`of_producer`, :meth:`of_run` and :meth:`of_tidy_up`. ``reader`` records which
-    of them made it, for §11:1's event, and decides nothing a sight sees.
+    :meth:`of_producer`, :meth:`of_run` and :meth:`of_tidy_up`; and, for an owner's own
+    act, by :meth:`of_owners_act` from the domain the act names or from none (ADR-0385
+    §3:3, §10:2). ``reader`` records which of them made it, for §11:1's event, and
+    decides nothing a sight sees; it decides one thing of a store bound to it, the mode
+    the store answers in (:meth:`answered_in`, ADR-0385 §3:5).
 
     Attributes:
         reader: Who reads by it.
@@ -3882,6 +3909,24 @@ class Sight(BaseModel):
             bounds=(*self.bounds, *other.bounds),
             activation=self.activation,
         )
+
+    def answered_in(self, built: SightMode) -> SightMode:
+        """The mode a store built in ``built`` answers this sight in (ADR-0385 §3:5).
+
+        **The one place that decides it.** The owner's sight (:meth:`of_owners_act`) is
+        answered withholding whatever mode the store was built in, from the build that
+        first binds it, and so writes no event of ADR-0383 §11:1: a counting store
+        answers as the unbound one does, which for an owner's act would show every
+        domain (ADR-0385 §3:5, §10:4). Every other sight is answered in the mode the
+        store was built in, as ADR-0383 §7:10 has it.
+
+        Args:
+            built: The mode the store was built in.
+
+        Returns:
+            The mode a store bound to this sight answers in.
+        """
+        return SightMode.WITHHOLD if self.reader is SightReader.OWNERS_ACT else built
 
     @property
     def codes(self) -> tuple[str, ...]:
@@ -4048,6 +4093,43 @@ class Sight(BaseModel):
             reader=SightReader.WORK,
             bounds=(*work.bounds, SightBound.one_domain(story)),
             activation=work.activation,
+        )
+
+    @classmethod
+    def of_owners_act(cls, domain: RecordHome | None) -> Sight:
+        """The owner's sight, for an owner's own act (ADR-0385 §3:3, §3:4).
+
+        **The one constructor for it**, from the domain the act names or from none. From
+        none, a person bound for the owner alone, which sees the owner's domain and the
+        hub's shared things (ADR-0383 §6:1, ADR-0369 §6:1). From a domain
+        :func:`owners_act_may_name` allows, a person bound for the owner and a one-domain
+        bound for that domain, which sees that domain alone. Neither sees a record with
+        no home (ADR-0383 §5:3). Any other domain is refused from the value alone
+        (ADR-0385 §2:2).
+
+        It carries no activation, so nothing is an act's own (ADR-0383 §7:4), and no
+        level, link, lowering or line enters it (ADR-0383 §6:9). A store bound to it
+        withholds whatever mode it was built in and writes no count event
+        (:meth:`answered_in`, ADR-0385 §3:5).
+
+        Args:
+            domain: The domain the act names, or ``None`` where it names none.
+
+        Returns:
+            The owner's sight.
+
+        Raises:
+            ValueError: If ``domain`` is one :func:`owners_act_may_name` does not allow.
+        """
+        owner = SightBound.person(OWNER_PERSON_ID)
+        if domain is None:
+            return cls(reader=SightReader.OWNERS_ACT, bounds=(owner,))
+        if not owners_act_may_name(domain):
+            msg = "an owner's act names the owner's domain or the hub's shared things"
+            raise ValueError(msg)
+        return cls(
+            reader=SightReader.OWNERS_ACT,
+            bounds=(owner, SightBound.one_domain(domain)),
         )
 
 

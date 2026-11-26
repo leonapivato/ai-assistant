@@ -75,7 +75,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 import structlog
@@ -86,6 +86,7 @@ from ai_assistant.core.types import (
     STORY_NOTE_MAX_CHARS,
     STORY_SUMMARY_CAP_CHARS,
     RecordHome,
+    Sight,
     SightMode,
     StoryActor,
     StoryChange,
@@ -122,6 +123,14 @@ if TYPE_CHECKING:
 STORY_AT = datetime(2026, 10, 4, 12, tzinfo=UTC)
 
 _OWNER = StoryActor.OWNER
+
+#: The owner's sights, one for each domain an owner's act may name and one for none
+#: (ADR-0385 §3:3), by name.
+_OWNERS_ACTS: Final[dict[str, Sight]] = {
+    "from-none": Sight.of_owners_act(None),
+    "from-the-owners-domain": Sight.of_owners_act(RecordHome.owners()),
+    "from-the-shared-things": Sight.of_owners_act(RecordHome.shared()),
+}
 
 
 def act(activation_id: str) -> StoryMember:
@@ -3493,6 +3502,110 @@ class StoryStoreContract:
         assert header is not None
         assert header.merged_into == later
         assert await store.position() == await bound.position()
+
+    # --- a store bound to the owner's sight (ADR-0385 §3:3 to §3:5) ----------------
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    @pytest.mark.parametrize("act_name", list(_OWNERS_ACTS))
+    async def test_the_owners_sight_is_withheld_for_in_either_mode_and_counts_nothing(
+        self,
+        sight_store_factory: Callable[[SightMode], StoryStore],
+        remove_stories: Callable[[StoryStore, Collection[str]], None],
+        act_name: str,
+        mode: SightMode,
+    ) -> None:
+        """ADR-0385 §3:5: bound to the owner's sight, a store withholds in either mode.
+
+        §9:3's obligation, with the bound store built in ``mode``: it answers every call
+        in the battery as the same store holding only what the owner's sight sees, in
+        the counting build too, and writes no ``sight_counted`` event (ADR-0383 §11:1).
+        """
+        sight = _OWNERS_ACTS[act_name]
+        bound_store = sight_store_factory(mode)
+        holding_only = sight_store_factory(SightMode.WITHHOLD)
+        names = await _sight_history(bound_store)
+        assert await _sight_history(holding_only) == names
+        battery = await _sight_battery(bound_store, names)
+        unheld = [
+            header.story_id
+            for header in await _all_headers(holding_only)
+            if not sight.sees(header.home)
+        ]
+        remove_stories(holding_only, unheld)
+        with structlog.testing.capture_logs() as events:
+            await assert_answers_alike(bound_store.bound(sight), holding_only, battery)
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_the_owners_sight_holds_the_domain_it_names_and_from_none_both(
+        self, sight_store_factory: Callable[[SightMode], StoryStore], mode: SightMode
+    ) -> None:
+        """ADR-0385 §3:3, §3:4: from none both homes; from a domain that domain alone."""
+        store = sight_store_factory(mode)
+        names = await _sight_history(store)
+        owners = {names[name] for name in _OWNERS_STORIES}
+        shared = {names[name] for name in _SHARED_STORIES}
+        held = {
+            name: {header.story_id for header in await _all_headers(store.bound(sight))}
+            for name, sight in _OWNERS_ACTS.items()
+        }
+        assert held == {
+            "from-none": owners | shared,
+            "from-the-owners-domain": owners,
+            "from-the-shared-things": shared,
+        }
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_the_owners_sight_refuses_a_write_naming_a_story_it_does_not_see(
+        self, sight_store_factory: Callable[[SightMode], StoryStore], mode: SightMode
+    ) -> None:
+        """ADR-0383 §4:8, §7:5, §8:2 for the owner's sight, in either mode.
+
+        A write to a story of the domain the act did not name, or naming one as a
+        member, is refused ``unknown_story`` as for one never written, and nothing is
+        written.
+        """
+        store = sight_store_factory(mode)
+        names = await _sight_history(store)
+        owners, shared = names["owners-one"], names["shared-one"]
+        before = await everything(store)
+        for act_name, unseen, seen in (
+            ("from-the-shared-things", owners, shared),
+            ("from-the-owners-domain", shared, owners),
+        ):
+            bound = store.bound(_OWNERS_ACTS[act_name])
+            for outcome in (
+                await bound.link(unseen, [act("x")], actor=_OWNER),
+                await bound.link(seen, [sub(unseen)], actor=_OWNER),
+            ):
+                refused(outcome, StoryRefusalReason.UNKNOWN_STORY)
+                assert outcome.refusal is not None
+                assert outcome.refusal.story_id == unseen
+            note = await bound.append_note(unseen, "Note.", author=StoryNoteAuthor.OWNER)
+            summary_refused(note, StorySummaryRefusalReason.UNKNOWN_STORY)
+            assert await bound.header(unseen) is None
+        assert await everything(store) == before
+
+    async def test_a_counting_store_bound_to_a_runs_sight_still_counts(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """ADR-0383 §7:10, §11:1 stand for every other reader of a store built to count.
+
+        Bound to the owner's sight, the store withholds and counts nothing; the same
+        store bound to a run's sight answers as unbound and counts, as before.
+        """
+        store = sight_store_factory(SightMode.COUNT)
+        names = await _sight_history(store)
+        owners = names["owners-one"]
+        with structlog.testing.capture_logs() as events:
+            withheld = await store.bound(_OWNERS_ACTS["from-the-shared-things"]).header(owners)
+            counted_read = await store.bound(SIGHTS["run-over-the-shared-things"]).header(owners)
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert withheld is None
+        assert counted_read is not None
+        assert [(event["member"], event["reader"], event["other_home"]) for event in counted] == [
+            ("header", "run", 1)
+        ]
 
 
 #: The stories :func:`_sight_history` writes, by name, in each home.

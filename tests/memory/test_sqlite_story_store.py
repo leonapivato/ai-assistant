@@ -49,6 +49,7 @@ from story_store_contract import (
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
     RecordHome,
+    Sight,
     SightMode,
     StoryActor,
     StoryChange,
@@ -1185,6 +1186,35 @@ async def test_a_story_whose_home_the_store_cannot_read_is_held_by_no_sight(
         assert await store.bound(SIGHTS["owners-work"]).header(kept) is not None
         with pytest.raises(StoryStoreError):
             await store.header(odd)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("mode", list(SightMode))
+async def test_the_owners_sight_holds_no_story_with_no_home_in_either_mode(
+    mode: SightMode,
+) -> None:
+    """ADR-0385 §3:3, §3:5 with ADR-0383 §5:3: the owner's sight from none sees no such story.
+
+    Bound to the owner's sight, in either mode, a story whose home columns were cleared
+    outside the store is given back by no read and named by no list, a write naming it
+    is refused as one to a story never written, and no count event is written; the
+    shared story beside it is held.
+    """
+    store = _bound_store(mode)
+    try:
+        odd = await homed(store, RecordHome.owners(), act("a1"))
+        kept = await homed(store, RecordHome.shared(), act("a1"))
+        _set_home(store, odd, None, None)
+        bound = store.bound(Sight.of_owners_act(None))
+        with structlog.testing.capture_logs() as events:
+            assert await bound.header(odd) is None
+            assert {one.story_id for one in (await bound.stories()).stories} == {kept}
+            assert {one.story_id for one in await bound.stories_of(act("a1"))} == {kept}
+            refusal = await bound.link(odd, [act("a2")], actor=StoryActor.OWNER)
+        assert refusal.refusal is not None
+        assert refusal.refusal.reason is StoryRefusalReason.UNKNOWN_STORY
+        assert not [event for event in events if event["event"] == "sight_counted"]
     finally:
         store.close()
 

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+import structlog
 from plan_store_contract import (
     PlanRemoval,
     PlanStoreContract,
@@ -54,6 +55,7 @@ from ai_assistant.core.types import (
     QuestionPart,
     RecordHome,
     ScheduledTaskAuthor,
+    Sight,
     SightMode,
     Sureness,
     TaskSpawn,
@@ -2261,6 +2263,41 @@ async def test_an_effect_row_whose_home_columns_name_no_home_is_held_by_no_sight
                 await bound.finish_activation_effect("e-cleared", ToolOutcome.SUCCEEDED)
         own = store.bound(SIGHTS["unidentified-senders-work"])
         assert [one.id for one in await own.activation_effects([OWN_ACTIVATION])] == ["e-kept"]
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode", list(SightMode))
+async def test_the_owners_sight_holds_no_effect_with_no_home_in_either_mode(
+    tmp_path: Path, mode: SightMode
+) -> None:
+    """ADR-0385 §3:3, §3:5 with ADR-0383 §5:3: the owner's sight from none sees no such row.
+
+    Bound to the owner's sight, in either mode, an effect whose home columns an outside
+    writer cleared is given back by no read, a finish naming it is refused as for a
+    record never written, and no count event is written; the effect beside it is held.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=mode)
+    try:
+        for effect_id, values in (("e-cleared", "a" * 64), ("e-kept", "b" * 64)):
+            claimed = await store.claim_activation_effect(
+                _effect(effect_id, activation="act-1", values=values), match=None
+            )
+            assert claimed is ActivationEffectClaim.CLAIMED
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE activation_effects SET home_kind = NULL, home_id = NULL "
+                "WHERE id = 'e-cleared'"
+            )
+        bound = store.bound(Sight.of_owners_act(None))
+        with structlog.testing.capture_logs() as events:
+            held = [one.id for one in await bound.activation_effects(["act-1"])]
+            with pytest.raises(PlanningError):
+                await bound.finish_activation_effect("e-cleared", ToolOutcome.SUCCEEDED)
+        assert held == ["e-kept"]
+        assert not [event for event in events if event["event"] == "sight_counted"]
     finally:
         store.close()
 

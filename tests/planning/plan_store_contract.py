@@ -24,7 +24,7 @@ import asyncio
 import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import pytest
 import structlog
@@ -233,6 +233,15 @@ def _observation(
             ),
         ),
     )
+
+
+#: The owner's sights, one for each domain an owner's act may name and one for none
+#: (ADR-0385 §3:3), by name.
+_OWNERS_ACTS: Final[dict[str, Sight]] = {
+    "from-none": Sight.of_owners_act(None),
+    "from-the-owners-domain": Sight.of_owners_act(RecordHome.owners()),
+    "from-the-shared-things": Sight.of_owners_act(RecordHome.shared()),
+}
 
 
 class _CancellationOp(Protocol):
@@ -5159,6 +5168,135 @@ class PlanStoreContract:
         assert await narrowed.export() == await alone.export()
         with pytest.raises(ValueError, match="meet"):
             store.bound(owners).bound(SIGHTS["run-over-the-shared-things"])
+
+    # --- a store bound to the owner's sight (ADR-0385 §3:3 to §3:5) ----------------
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    @pytest.mark.parametrize("act", list(_OWNERS_ACTS))
+    async def test_the_owners_sight_is_withheld_for_in_either_mode_and_counts_nothing(
+        self,
+        sight_store_factory: Callable[[SightMode], PlanStore],
+        remove_records: Callable[[PlanStore, PlanRemoval], None],
+        act: str,
+        mode: SightMode,
+    ) -> None:
+        """ADR-0385 §3:5: bound to the owner's sight, a store withholds in either mode.
+
+        §9:3's obligation, with the bound store built in ``mode``: it answers every call
+        in the battery as the same store holding only what the owner's sight sees, in
+        the counting build too, and writes no ``sight_counted`` event (ADR-0383 §11:1).
+        """
+        sight = _OWNERS_ACTS[act]
+        bound_store = sight_store_factory(mode)
+        holding_only = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(bound_store)
+        await _sight_history(holding_only)
+        remove_records(holding_only, _not_seen(await holding_only.export(), sight))
+        with structlog.testing.capture_logs() as events:
+            await assert_answers_alike(bound_store.bound(sight), holding_only, _sight_battery())
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_the_owners_sight_holds_the_domain_it_names_and_from_none_both(
+        self, sight_store_factory: Callable[[SightMode], PlanStore], mode: SightMode
+    ) -> None:
+        """ADR-0385 §3:3, §3:4: from none both homes; from a domain that domain alone.
+
+        The owner's act carries no activation, so nothing is its own (ADR-0383 §7:4):
+        the effect and the request of the activation the work sights call their own are
+        held by their homes alone, and another person's task and request by none. No
+        stop record is held (ADR-0383 §3:3).
+        """
+        store = sight_store_factory(mode)
+        await _sight_history(store)
+        whole = await store.export()
+        effects = _by_home(
+            whole.activation_effects, lambda one: one.home, lambda one: one.activation_id
+        )
+        observed = _by_home(whole.observations, lambda one: one.home, lambda _one: None)
+        tasks = _by_home(
+            whole.scheduled_tasks, lambda one: RecordHome.person(one.person), lambda _one: None
+        )
+        requests = _by_home(
+            whole.approval_requests,
+            lambda one: RecordHome.person(one.person),
+            lambda one: one.activation_id,
+        )
+        assert "r-bob-own" in requests.own
+        assert tasks.other
+        expected = {
+            "from-none": (
+                effects.owners | effects.shared,
+                observed.owners | observed.shared,
+                tasks.owners,
+                requests.owners,
+            ),
+            "from-the-owners-domain": (
+                effects.owners,
+                observed.owners,
+                tasks.owners,
+                requests.owners,
+            ),
+            "from-the-shared-things": (effects.shared, observed.shared, set(), set()),
+        }
+        for name, sight in _OWNERS_ACTS.items():
+            held = await store.bound(sight).export()
+            assert held.stopped_activations == (), name
+            assert (
+                {one.id for one in held.activation_effects},
+                {one.episode for one in held.observations},
+                {one.id for one in held.scheduled_tasks},
+                {one.id for one in held.approval_requests},
+            ) == expected[name], name
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_the_owners_sight_refuses_a_write_naming_a_record_it_does_not_see(
+        self, sight_store_factory: Callable[[SightMode], PlanStore], mode: SightMode
+    ) -> None:
+        """ADR-0383 §7:5, §8:2 for the owner's sight, in either mode.
+
+        From the shared things, a write naming the owner's effect, task or request is
+        refused as one naming a record never written; from none, so is one naming
+        another person's task. Nothing is written.
+        """
+        store = sight_store_factory(mode)
+        await _sight_history(store)
+        before = await store.export()
+        shared = store.bound(_OWNERS_ACTS["from-the-shared-things"])
+        with pytest.raises(PlanningError):
+            await shared.finish_activation_effect("e-part-owner", ToolOutcome.SUCCEEDED)
+        cancelled = await shared.cancel_scheduled_task("t-owner-2")
+        assert cancelled.reason is TaskRefusal.UNKNOWN_TASK
+        assert await shared.remove_scheduled_task("t-owner-1") is False
+        with pytest.raises(PlanningError):
+            await shared.void_approval_ticket("r-owner")
+        others = await store.bound(_OWNERS_ACTS["from-none"]).cancel_scheduled_task("t-bob-1")
+        assert others.reason is TaskRefusal.UNKNOWN_TASK
+        assert await store.export() == before
+
+    async def test_a_counting_store_bound_to_a_runs_sight_still_counts(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """ADR-0383 §7:10, §11:1 stand for every other reader of a store built to count.
+
+        Bound to the owner's sight, the store withholds and counts nothing; the same
+        store bound to a run's sight answers as unbound and counts, as before.
+        """
+        store = sight_store_factory(SightMode.COUNT)
+        await _sight_history(store)
+        with structlog.testing.capture_logs() as events:
+            withheld = await store.bound(_OWNERS_ACTS["from-the-shared-things"]).scheduled_tasks(
+                ["t-owner-1"]
+            )
+            counted_read = await store.bound(SIGHTS["run-over-the-shared-things"]).scheduled_tasks(
+                ["t-owner-1"]
+            )
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert withheld == ()
+        assert counted_read
+        assert [(event["member"], event["reader"]) for event in counted] == [
+            ("scheduled_tasks", "run")
+        ]
 
 
 #: A person whose domain no sight :data:`SIGHTS` holds sees: whom a task or a request
