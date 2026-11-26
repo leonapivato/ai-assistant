@@ -668,13 +668,13 @@ async def _scheduled_tidy_up(now: Clock) -> None:
     def conforming() -> datetime:
         return _AWARE
 
-    stories = FakeStoryStore(now=conforming)
-    memory = FakeMemoryStore(now=conforming)
+    stores = BoundStores(
+        memory=FakeMemoryStore(now=conforming), stories=FakeStoryStore(now=conforming)
+    )
     await ScheduledTidyUp(
         tidy_up=StoryTidyUp(
             model=structured(FakeModelProvider()),
-            stories=stories,
-            memory=memory,
+            stores=stores,
             excerpt_chars=10,
             other_stories=0,
             decisions=0,
@@ -682,7 +682,7 @@ async def _scheduled_tidy_up(now: Clock) -> None:
             threshold=0.0,
             prompt=default_prompt(STORY_TIDY_UP_PROMPT),
         ),
-        stories=stories,
+        stores=stores,
         threshold=1,
         quiet=timedelta(hours=1),
         per_run=1,

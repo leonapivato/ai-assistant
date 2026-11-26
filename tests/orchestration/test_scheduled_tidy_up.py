@@ -23,6 +23,7 @@ from structured_support import structured
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import Message, RecordHome, StoryActor, StoryNoteAuthor
 from ai_assistant.orchestration import story_tidy_up
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.story_tidy_up import (
     STORY_TIDY_UP_PROMPT,
     ScheduledTidyUp,
@@ -30,19 +31,21 @@ from ai_assistant.orchestration.story_tidy_up import (
     StoryTidyUp,
     TidyUpResult,
 )
-from ai_assistant.orchestration.upkeep import FiringBudget
-from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt
+from ai_assistant.orchestration.upkeep import FiringBudget, upkeep_run
+from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStoryStore, default_prompt
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.types import MemoryRecord
-    from ai_assistant.testing import FakeMemoryStore
 
 _QUIET: Final = timedelta(hours=24)
 _BUDGET: Final = timedelta(seconds=30)
 _GOOD: Final = json.dumps({"lines": ["A matter, tidied."], "flags": []})
 _BROKEN: Final = "not a reply"
+_OWNERS: Final = RecordHome.owners()
+#: A run tending the owner's domain, by the sight one is made with (ADR-0383 §6:8).
+_OWNERS_SIGHT: Final = upkeep_run(_OWNERS).sight
 
 
 class _Clock:
@@ -82,8 +85,7 @@ def _stories(clock: _Clock) -> FakeStoryStore:
 def _tidy_up(model: _Model, stories: FakeStoryStore, memory: FakeMemoryStore) -> StoryTidyUp:
     return StoryTidyUp(
         model=structured(model.provider),
-        stories=stories,
-        memory=memory,
+        stores=BoundStores(memory=memory, stories=stories),
         excerpt_chars=2000,
         other_stories=0,
         decisions=0,
@@ -104,7 +106,7 @@ def _scheduled(  # noqa: PLR0913 — one knob per bound a case varies
 ) -> ScheduledTidyUp:
     return ScheduledTidyUp(
         tidy_up=tidy_up,
-        stories=stories,
+        stores=BoundStores(memory=FakeMemoryStore(), stories=stories),
         threshold=threshold,
         quiet=_QUIET,
         per_run=per_run,
@@ -329,17 +331,25 @@ async def test_a_failure_is_held_until_a_run_on_the_story_writes() -> None:
     model.broken.add("other")
     tidy_up = _tidy_up(model, stories, await _memory())
 
-    assert (await tidy_up.run(trip)).result is TidyUpResult.REFUSED
-    assert (await tidy_up.run(other)).result is TidyUpResult.REFUSED
+    assert (
+        await tidy_up.run(trip, sight=_OWNERS_SIGHT, tends=_OWNERS)
+    ).result is TidyUpResult.REFUSED
+    assert (
+        await tidy_up.run(other, sight=_OWNERS_SIGHT, tends=_OWNERS)
+    ).result is TidyUpResult.REFUSED
     first, second = tidy_up.last_failure(trip), tidy_up.last_failure(other)
     assert first is not None
     assert second is not None
     assert first < second
 
     model.broken.clear()
-    assert (await tidy_up.run(trip)).result is TidyUpResult.WRITTEN
+    assert (
+        await tidy_up.run(trip, sight=_OWNERS_SIGHT, tends=_OWNERS)
+    ).result is TidyUpResult.WRITTEN
     assert tidy_up.last_failure(trip) is None
-    assert (await tidy_up.run(trip)).result is TidyUpResult.NOTHING_TO_READ
+    assert (
+        await tidy_up.run(trip, sight=_OWNERS_SIGHT, tends=_OWNERS)
+    ).result is TidyUpResult.NOTHING_TO_READ
     assert tidy_up.last_failure(trip) is None
     assert tidy_up.last_failure(other) == second
 
@@ -526,7 +536,7 @@ async def test_its_bounds_are_positive(
     with pytest.raises(ValueError, match="positive"):
         ScheduledTidyUp(
             tidy_up=tidy_up,
-            stories=stories,
+            stores=BoundStores(memory=FakeMemoryStore(), stories=stories),
             threshold=threshold,
             quiet=quiet,
             per_run=per_run,

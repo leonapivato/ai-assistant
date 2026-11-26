@@ -19,7 +19,16 @@ from test_matters_pass import _pass, _raise
 from test_matters_pass import _shown as _shown_to_the_pass
 from test_matters_pass import _stories as _pass_stories
 from test_matters_pass import _story as _pass_story
-from test_story_tidy_up import _note, _reply, _shown, _stories, _story, _tidy_up
+from test_story_tidy_up import (
+    _OWNERS,
+    _OWNERS_SIGHT,
+    _note,
+    _reply,
+    _shown,
+    _stories,
+    _story,
+    _tidy_up,
+)
 
 from ai_assistant.core.types import (
     CallOutcomeKind,
@@ -89,7 +98,7 @@ async def test_the_tidy_up_shows_the_message_and_never_the_notes(recorded: Any, 
     await _note(stories, trip, "Camping at Riverside in mid-October.")
     model = FakeModelProvider(_reply(["A camping trip."]))
 
-    await _tidy_up(model, stories, memory).run(trip)
+    await _tidy_up(model, stories, memory).run(trip, sight=_OWNERS_SIGHT, tends=_OWNERS)
 
     shown = _shown(model)
     (rendered,) = shown["episodes"]

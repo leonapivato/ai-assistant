@@ -108,6 +108,7 @@ from ai_assistant.orchestration.story_calls import (
     StoryCalls,
 )
 from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp
+from ai_assistant.orchestration.upkeep import upkeep_run
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeMemoryStore,
@@ -138,9 +139,7 @@ def _calls(
     *, stories: StoryStore, memory: MemoryStore, tidy_up: StoryTidyUp | None = None
 ) -> StoryCalls:
     """The runner over ``stories`` and ``memory``, through the one holder as the root wires it."""
-    return StoryCalls(
-        stores=bound_stores(memory, stories), stories=stories, memory=memory, tidy_up=tidy_up
-    )
+    return StoryCalls(stores=bound_stores(memory, stories), tidy_up=tidy_up)
 
 
 @pytest.fixture(autouse=True)
@@ -831,8 +830,7 @@ async def test_a_tidy_up_writes_the_story_s_version_log() -> None:
     await stories.append_note(trip, "A camping trip.", author=StoryNoteAuthor.OWNER)
     tidy_up = StoryTidyUp(
         model=structured(FakeModelProvider(reply=json.dumps({"lines": ["A camping trip."]}))),
-        stories=stories,
-        memory=memory,
+        stores=bound_stores(memory, stories),
         excerpt_chars=200,
         other_stories=0,
         decisions=0,
@@ -865,8 +863,7 @@ async def test_a_tidy_up_with_none_wired_or_a_refused_reply_is_not_done() -> Non
         memory=memory,
         tidy_up=StoryTidyUp(
             model=structured(FakeModelProvider(reply="not json")),
-            stories=stories,
-            memory=memory,
+            stores=bound_stores(memory, stories),
             excerpt_chars=200,
             other_stories=0,
             decisions=0,
@@ -1748,8 +1745,7 @@ def _tidying(model: FakeModelProvider, stories: FakeStoryStore, memory: Any) -> 
 def _tidy_up_of(model: FakeModelProvider, stories: FakeStoryStore, memory: Any) -> StoryTidyUp:
     return StoryTidyUp(
         model=structured(model),
-        stories=stories,
-        memory=memory,
+        stores=bound_stores(memory, stories),
         excerpt_chars=2000,
         other_stories=5,
         decisions=0,
@@ -1909,7 +1905,10 @@ async def test_a_tidy_up_of_another_domain_is_not_done_while_a_run_is_on_that_st
     model = _HeldModel(_tidy_reply(["The boiler."]))
     tidy_up = _tidy_up_of(model, stories, memory)
     calls = _calls(stories=stories, memory=memory, tidy_up=tidy_up)
-    running = asyncio.create_task(tidy_up.run(story_id, tends=RecordHome.shared()))
+    shared_run = upkeep_run(RecordHome.shared())
+    running = asyncio.create_task(
+        tidy_up.run(story_id, sight=shared_run.sight, tends=shared_run.tends)
+    )
     await model.entered.wait()
 
     result = await calls.run(_call(TIDY_STORY, {STORY_ARGUMENT: story_id}))

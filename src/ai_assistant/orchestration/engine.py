@@ -351,7 +351,7 @@ from ai_assistant.orchestration.understanding import (
     TranscriptWindow,
     place_window_links,
 )
-from ai_assistant.orchestration.upkeep import RECONSIDERED
+from ai_assistant.orchestration.upkeep import RECONSIDERED, upkeep_run
 from ai_assistant.orchestration.work_facts import (
     chat_sender_of,
     chat_senders_of,
@@ -1630,19 +1630,19 @@ def _check_chat_waits(start_wait: timedelta, lapse: timedelta, cap: timedelta) -
 
 
 def _ruling_policy(
-    policy: NotificationPolicy | None,
-    policy_for: PolicyForZone | None,
-    person_blocks: PersonBlocks | None,
+    policy: NotificationPolicy | None, policy_for: PolicyForZone | None
 ) -> RulingPolicy | None:
     """The pick each reconsideration's policy comes from (ADR-0338 §3:6).
 
-    The owner's zone where their profile sets one, read from the store the person block
-    reads, and the hub's policy otherwise; ``None`` where no policy is wired.
+    The owner's zone where their profile sets one, and the hub's policy otherwise;
+    ``None`` where no policy is wired. It holds no person-model store: each
+    reconsideration reads the zone through the one bound to its run's sight
+    (:meth:`~ai_assistant.orchestration.notifications.RulingPolicy.pick_through`,
+    ADR-0384 §7:1), where the person model is on.
 
     Args:
         policy: The policy over ``Settings.timezone``, or ``None``.
         policy_for: Builds the policy for a person's zone, or ``None``.
-        person_blocks: The person block's assembly, whose store the zone is read from.
 
     Returns:
         The pick, or ``None`` where there is no policy to hand over.
@@ -1659,11 +1659,7 @@ def _ruling_policy(
             )
             raise ConfigurationError(msg)
         return None
-    return RulingPolicy(
-        default=policy,
-        policy_for=policy_for,
-        people=None if person_blocks is None else person_blocks.store,
-    )
+    return RulingPolicy(default=policy, policy_for=policy_for)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2181,8 +2177,10 @@ class Engine:
                 running-work coordinator reads the peer view and writes a merge's stop
                 record through, and the channels' readers read a work's window through
                 once its sight is made (§7:7, §7:9), bound to the sight of the work that
-                makes each. ``None`` builds one over ``memory``, ``stories``, ``plans``,
-                the person block's store and the chat space, which binds them alike.
+                makes each, and the notification reconsideration reads and re-rules
+                through, bound to its run's sight (ADR-0384 §7:1). ``None`` builds one
+                over ``memory``, ``stories``, ``plans``, the person block's store, the
+                chat space and ``notifications``, which binds them alike.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2273,9 +2271,10 @@ class Engine:
             raise ConfigurationError(msg)
         self._notifications = notifications
         self._notification_policy = notification_policy
-        self._notification_policies = _ruling_policy(
-            notification_policy, notification_policy_for, person_blocks
-        )
+        self._notification_policies = _ruling_policy(notification_policy, notification_policy_for)
+        # ADR-0338 §3:6: the owner's zone is read from the person-model store the person
+        # block reads, where it is on, through the holder bound to the run's sight.
+        self._zone_read = person_blocks is not None
         self._notification_outbox = notification_outbox
         #: Whether this engine has already closed the open episodes a dead process
         #: left (ADR-0286 §7). Guarded because ``start`` is also the scheduler's
@@ -2367,12 +2366,15 @@ class Engine:
                 plans=plans,
                 people=None if person_blocks is None else person_blocks.store,
                 conversations=conversations.chat_space,
+                notifications=notifications,
             )
         )
         #: The one holder, which the place lists and the Connections section read a place
         #: that is not one of the work's own through, bound to its sight (ADR-0387 §4:3),
         #: and the stages wired below read through: the Task Manager, the person's zone,
-        #: ``request_approval``'s runner and a task's lineage (ADR-0383 §9:1).
+        #: ``request_approval``'s runner and a task's lineage (ADR-0383 §9:1); and the
+        #: notification reconsideration reads and re-rules through, bound to its run's
+        #: sight (ADR-0383 §7:7, ADR-0384 §7:1).
         self._stores = held
         self._matters = Matters(
             running=lambda: (one.state for one in self._running if one.state is not None),
@@ -4790,18 +4792,24 @@ class Engine:
         so a zone changed mid-drain governs the records ruled after it.
 
         **The run tends the owner's domain alone** (ADR-0384 §3:4,
-        :data:`~ai_assistant.orchestration.upkeep.RECONSIDERED`). A held notification
-        of another domain is left as it is: not re-ruled, not dropped, and not handed
-        off, for the decision that rules whom it goes to. It stays due, so the drain
-        reads past it: every read starts at the front of the due order, as before, and
-        takes ``page`` records more than the records of another domain this run has
-        passed, which may still stand at the front. A read never starts past a record,
-        so one of them leaving the due set mid-drain, or a record falling due ahead of
-        them, skips nothing. A page counts as progress where it passed a record of
-        another domain not passed before, so a page of them alone does not end the
-        drain before the owner's records behind them. Tending the domain makes the run
-        no work (§3:3): it records no fact, starts no activation and makes no call the
-        check runs.
+        :data:`~ai_assistant.orchestration.upkeep.RECONSIDERED`), and reads by its sight
+        (ADR-0383 §6:8, §7:7, ADR-0384 §7:1): made once for the run by
+        :func:`~ai_assistant.orchestration.upkeep.upkeep_run`, its finding of what is due,
+        each re-ruling and the zone each ruling reads all go through the stores the
+        holder binds to it. Where the stores withhold, a held notification of another
+        domain is one the bound store does not hold: it is never read, paged past or
+        counted. In the counting build, whose reads answer as the unbound store does, one
+        is left as it is, a write's check (ADR-0384 §4:2, ADR-0383 §11:4): not re-ruled,
+        not dropped, and not handed off, for the decision that rules whom it goes to. It
+        stays due, so the drain reads past it: every read starts at the front of the due
+        order, as before, and takes ``page`` records more than the records of another
+        domain this run has passed, which may still stand at the front. A read never
+        starts past a record, so one of them leaving the due set mid-drain, or a record
+        falling due ahead of them, skips nothing. A page counts as progress where it
+        passed a record of another domain not passed before, so a page of them alone
+        does not end the drain before the owner's records behind them. Tending the
+        domain makes the run no work (§3:3): it records no fact, starts no activation
+        and makes no call the check runs.
 
         Args:
             page: How many due records one store read takes.
@@ -4809,9 +4817,12 @@ class Engine:
         Returns:
             How many were re-ruled.
         """
-        store = self._notification_surface()
+        self._notification_surface()
         assert self._notification_policies is not None  # noqa: S101 — wired together (see __init__)
         policies = self._notification_policies
+        run = upkeep_run(RECONSIDERED)
+        store = self._stores.notifications(run.sight)
+        people = self._stores.people(run.sight) if self._zone_read else None
         seen: set[str] = set()
         passed = 0
         ruled = 0
@@ -4822,10 +4833,12 @@ class Engine:
             before = (ruled, passed)
             for record in fresh:
                 seen.add(record.id)
-                if record.home != RECONSIDERED:
+                if record.home != run.tends:
                     passed += 1
                     continue
-                ruling = await store.reconsider(record.id, policy=await policies.pick())
+                ruling = await store.reconsider(
+                    record.id, policy=await policies.pick_through(people)
+                )
                 if ruling is not None:
                     ruled += 1
                     await self._hand_off(ruling, record.candidate)

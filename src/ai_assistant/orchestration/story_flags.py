@@ -29,6 +29,13 @@ logs. So :func:`read_records` reads every story's header and change log, and, fo
 pass, its version log, page by page. What that costs grows with the store, which the
 test hub is where to measure.
 
+**Through a run's sight** (ADR-0383 §7:7, ADR-0384 §7:1). Every read here is of the story
+store bound to the sight of the run or the work that asks (``Bound[StoryStore]``), handed
+in per call, so the records it holds are those that sight sees: in a build whose stores
+withhold, no story of another domain than the one a run tends, nor its log, nor its
+versions. What a run is shown of the stories a decision concerns is counted from those
+records alone (:meth:`StoryRecords.held`, ADR-0383 §8:4, ADR-0384 §5:2).
+
 **It holds identities and instants only**: no story's summary text and no note is read
 here, so nothing of it can reach a log line (ADR-0275 §8).
 """
@@ -58,6 +65,7 @@ if TYPE_CHECKING:
         StoryLogLine,
         StorySummaryVersion,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
 
 __all__ = [
     "RaisedFlag",
@@ -211,6 +219,17 @@ class StoryRecords:
         """The stories ``flag`` concerns, followed through merges, each once (§2:3)."""
         return _unique(self.followed(story_id) for story_id in self.raised(flag))
 
+    def held(self, story_ids: Iterable[str]) -> tuple[str, ...]:
+        """Those of ``story_ids`` whose header these records hold, in their order.
+
+        What a reader may be shown or counted of the stories a flag concerns: these
+        records are what the reader's bound store gave back, and a story they hold no
+        header of is one its sight does not see, absent to it (ADR-0383 §8:2, §8:4,
+        ADR-0384 §5:2). The store deletes no story, so a record of the reader's own
+        domain is always held.
+        """
+        return tuple(story_id for story_id in story_ids if story_id in self.headers)
+
     def flags(self) -> list[RaisedFlag]:
         """Every flag these records hold, in the order they were raised (§2).
 
@@ -284,7 +303,7 @@ def _absorbed(lines: Iterable[StoryLogLine]) -> list[str]:
 # --- reading the store ---------------------------------------------------------------
 
 
-async def read_log(stories: StoryStore, story_id: str) -> tuple[StoryLogLine, ...]:
+async def read_log(stories: Bound[StoryStore], story_id: str) -> tuple[StoryLogLine, ...]:
     """Every line of ``story_id``'s change log, page by page; empty for no such story."""
     lines: list[StoryLogLine] = []
     cursor: int | None = None
@@ -298,7 +317,9 @@ async def read_log(stories: StoryStore, story_id: str) -> tuple[StoryLogLine, ..
         cursor = page.next_cursor
 
 
-async def read_versions(stories: StoryStore, story_id: str) -> tuple[StorySummaryVersion, ...]:
+async def read_versions(
+    stories: Bound[StoryStore], story_id: str
+) -> tuple[StorySummaryVersion, ...]:
     """Every version of ``story_id``'s summary, oldest first; empty for no such story."""
     versions: list[StorySummaryVersion] = []
     cursor: int | None = None
@@ -312,7 +333,7 @@ async def read_versions(stories: StoryStore, story_id: str) -> tuple[StorySummar
         cursor = page.next_cursor
 
 
-async def read_headers(stories: StoryStore) -> dict[str, StoryHeader]:
+async def read_headers(stories: Bound[StoryStore]) -> dict[str, StoryHeader]:
     """Every story's header, merged stories included, by id."""
     headers: dict[str, StoryHeader] = {}
     cursor: int | None = None
@@ -324,11 +345,11 @@ async def read_headers(stories: StoryStore) -> dict[str, StoryHeader]:
         cursor = page.next_cursor
 
 
-async def read_records(stories: StoryStore, *, versions: bool) -> StoryRecords:
+async def read_records(stories: Bound[StoryStore], *, versions: bool) -> StoryRecords:
     """Read every story's header and change log, and its version log where asked.
 
     Args:
-        stories: The story store.
+        stories: The story store, bound to the reader's sight.
         versions: Whether to read every version log too, where a tidy-up's flags
             are recorded.
 
@@ -349,7 +370,7 @@ async def read_records(stories: StoryStore, *, versions: bool) -> StoryRecords:
 
 
 async def reread(
-    records: StoryRecords, stories: StoryStore, story_ids: Iterable[str]
+    records: StoryRecords, stories: Bound[StoryStore], story_ids: Iterable[str]
 ) -> StoryRecords:
     """``records`` with ``story_ids`` read again, and every story merged into them.
 
@@ -382,7 +403,7 @@ async def reread(
     return StoryRecords(headers=headers, logs=logs, versions=versions)
 
 
-async def recorded_decisions(stories: StoryStore, story_id: str) -> list[RecordedDecision]:
+async def recorded_decisions(stories: Bound[StoryStore], story_id: str) -> list[RecordedDecision]:
     """The decisions recorded for ``story_id`` (§3:6), read from its lineage alone.
 
     Its own change log, then the change log of every story its ``absorbed`` lines name,

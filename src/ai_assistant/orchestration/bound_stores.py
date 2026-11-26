@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         ConversationStore,
         MemoryStore,
         MemoryWriter,
+        NotificationStore,
         PersonModelStore,
         PlanStore,
         StoryStore,
@@ -55,6 +56,7 @@ class BoundStores:
         conversations: ConversationStore | None = None,
         plans: PlanStore | None = None,
         writer: MemoryWriter | None = None,
+        notifications: NotificationStore | None = None,
     ) -> None:
         """Hold the stores a converted stage reads, and the writer a producer writes by.
 
@@ -68,6 +70,8 @@ class BoundStores:
             conversations: The conversation store.
             plans: The plan store.
             writer: The memory write path, persisting to ``memory`` (ADR-0028 §4).
+            notifications: The notification store, which the reconsideration reads and
+                re-rules through (ADR-0384 §3:4, §7:1).
         """
         self._memory = memory
         self._stories = stories
@@ -75,6 +79,7 @@ class BoundStores:
         self._conversations = conversations
         self._plans = plans
         self._writer = writer
+        self._notifications = notifications
 
     def memory(self, sight: Sight) -> Bound[MemoryStore]:
         """The memory store, bound to ``sight``."""
@@ -122,6 +127,14 @@ class BoundStores:
             RuntimeError: If no writer is wired to this holder.
         """
         return _wired(self._writer, "memory writer").bound(sight)
+
+    def notifications(self, sight: Sight) -> Bound[NotificationStore]:
+        """The notification store, bound to ``sight`` (ADR-0383 §7:1).
+
+        Raises:
+            RuntimeError: If no notification store is wired to this holder.
+        """
+        return _wired(self._notifications, "notification").bound(sight)
 
 
 def _wired[S](store: S | None, name: str) -> S:

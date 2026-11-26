@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     UnderstandingProducer,
 )
 from ai_assistant.orchestration import matters_pass
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.matters_pass import (
     MATTERS_PASS_PROMPT,
     MattersPass,
@@ -49,7 +50,13 @@ from ai_assistant.orchestration.matters_pass import (
     MattersPassReport,
 )
 from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT
-from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt, prompt_from
+from ai_assistant.testing import (
+    FakeMemoryStore,
+    FakeModelProvider,
+    FakeStoryStore,
+    default_prompt,
+    prompt_from,
+)
 from ai_assistant.testing.structured import FakeStructuredCompleter, ScriptedReply
 
 if TYPE_CHECKING:
@@ -93,8 +100,7 @@ def _pass(  # noqa: PLR0913 — one knob per bound a case varies
 ) -> MattersPass:
     return MattersPass(
         model=structured(model),
-        stories=stories,
-        memory=memory,
+        stores=BoundStores(memory=memory, stories=stories),
         excerpt_chars=1000,
         flags_per_run=flags_per_run,
         decisions=decisions,
@@ -264,8 +270,7 @@ async def test_the_system_message_is_what_the_template_renders() -> None:
     model = FakeModelProvider(_LEAVE)
     matters = MattersPass(
         model=structured(model),
-        stories=stories,
-        memory=memory,
+        stores=BoundStores(memory=memory, stories=stories),
         excerpt_chars=1000,
         flags_per_run=10,
         decisions=5,
@@ -288,8 +293,7 @@ async def test_the_pass_refuses_another_prompts_template() -> None:
     with pytest.raises(ValueError, match="matters_pass prompt"):
         MattersPass(
             model=structured(FakeModelProvider(_LEAVE)),
-            stories=stories,
-            memory=await memory_of(),
+            stores=BoundStores(memory=await memory_of(), stories=stories),
             excerpt_chars=1000,
             flags_per_run=10,
             decisions=5,
@@ -1263,8 +1267,7 @@ def test_its_bounds_are_positive(bounds: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match="positive"):
         MattersPass(
             model=structured(FakeModelProvider()),
-            stories=_stories(),
-            memory=None,  # type: ignore[arg-type]  # never reached: the bound refuses first
+            stores=BoundStores(memory=FakeMemoryStore(), stories=_stories()),
             prompt=default_prompt(MATTERS_PASS_PROMPT),
             **arguments,
         )

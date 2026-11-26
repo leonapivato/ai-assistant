@@ -2048,6 +2048,24 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             label_bounds=LABEL_BOUNDS,
             label_embedder=embedder,
         )
+        # ADR-0383 §9:1: the one holder that binds stores for a pass, over the very stores
+        # every other reader holds. A converted stage holds it and never a store, and asks
+        # it for a store only for the sight its pass carries; whether a bound store
+        # withholds or counts is each store's construction (§7:10), not the holder's. The
+        # person-model store is in it where the switch is on, and the writer persisting to
+        # that memory store, which a producer writes by bound to its sight (§7:6). The
+        # channels' readers read a work's window through it (§7:9), and the upkeep runs
+        # read and write through it by each run's sight (ADR-0384 §7:1), the notification
+        # store the reconsideration's.
+        pass_stores = BoundStores(
+            memory=memory,
+            stories=stories,
+            people=person_model,
+            conversations=conversations,
+            plans=plans,
+            writer=writer,
+            notifications=notifications,
+        )
         # ADR-0300 §5's tidy-up, **one operation** for planning's tidy-up call (ADR-0300 §10:4), so
         # at most one run is on a story at a time (§5:10). Its lookalike search keeps what recall
         # would, at recall's threshold for the embedder wired (ADR-0303 §5:7). It runs on
@@ -2058,8 +2076,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         tidy_up = StoryTidyUp(
             # ADR-0354 §6:2: consolidation's route, handed as its `StructuredCompleter`.
             model=consolidation_model,
-            stories=stories,
-            memory=memory,
+            # ADR-0383 §7:7: the story and memory stores, bound to each run's sight.
+            stores=pass_stores,
             excerpt_chars=STORY_TIDY_UP_EXCERPT_CHARS,
             other_stories=STORY_TIDY_UP_OTHER_STORIES,
             decisions=STORY_TIDY_UP_DECISIONS,
@@ -2076,21 +2094,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # (ADR-0383 §7:7); the observer's finding of what is due walks it over the store it
         # holds, unbound (§7:12).
         episode_selector = RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT)
-        # ADR-0383 §9:1: the one holder that binds stores for a pass, over the very stores
-        # every other reader holds. A converted stage holds it and never a store, and asks
-        # it for a store only for the sight its pass carries; whether a bound store
-        # withholds or counts is each store's construction (§7:10), not the holder's. The
-        # person-model store is in it where the switch is on, and the writer persisting to
-        # that memory store, which a producer writes by bound to its sight (§7:6). The
-        # channels' readers read a work's window through it (§7:9).
-        pass_stores = BoundStores(
-            memory=memory,
-            stories=stories,
-            people=person_model,
-            conversations=conversations,
-            plans=plans,
-            writer=writer,
-        )
         # ADR-0329's observer, memory's one writer (§2:1): a background stage over its two
         # routes, the commit step's carrying framing and placement (ADR-0346 §10:2), the
         # one memory store, the write stage over the writer persisting to that store
@@ -2328,8 +2331,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             matters_pass=MattersPass(
                 # ADR-0354 §6:2: consolidation's route, as its `StructuredCompleter`.
                 model=consolidation_model,
-                stories=stories,
-                memory=memory,
+                # ADR-0384 §7:1: through the one holder, by each run's sight.
+                stores=pass_stores,
                 excerpt_chars=MATTERS_PASS_EXCERPT_CHARS,
                 flags_per_run=MATTERS_PASS_FLAGS_PER_RUN,
                 decisions=MATTERS_PASS_DECISIONS,
@@ -2345,7 +2348,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # time whoever started it (ADR-0300 §5:10), and the same story store.
             scheduled_tidy_up=ScheduledTidyUp(
                 tidy_up=tidy_up,
-                stories=stories,
+                stores=pass_stores,
                 threshold=SCHEDULED_TIDY_UP_THRESHOLD,
                 quiet=SCHEDULED_TIDY_UP_QUIET,
                 per_run=SCHEDULED_TIDY_UP_PER_RUN,
@@ -3051,15 +3054,10 @@ def _build_phase_path(
             settings.forecast_connection, _forecast_destinations(settings.forecast_origin)
         ),
     )
-    # Every story call but the tidy-up through the one holder, by the sight of the work it
-    # runs in (ADR-0383 §7:7); the tidy-up reads the stores themselves, as no work's sight
-    # reaches the task it runs in (ADR-0307 §7:2), until its own sight is built (§6:8).
-    story_calls = StoryCalls(
-        stores=seams.pass_stores,
-        stories=seams.stories,
-        memory=seams.memory,
-        tidy_up=seams.tidy_up,
-    )
+    # Every story call through the one holder, by the sight of the work it runs in
+    # (ADR-0383 §7:7); a tidy-up by the sight of the work that asked for it, carried into
+    # the task it runs in (ADR-0307 §7:2), with the story's domain's bound (§6:8).
+    story_calls = StoryCalls(stores=seams.pass_stores, tidy_up=seams.tidy_up)
     # ADR-0307 §6:1: the story views, over the one story store, memory store and plan
     # store, each bound to the pass's sight through the one holder (ADR-0383 §7:7); a
     # short view is read as understanding's are, at its bounds. The same reads give a

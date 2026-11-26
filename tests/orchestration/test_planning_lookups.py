@@ -16,8 +16,8 @@ import pytest
 from exchange_support import Tag, reported, section, tag, tags
 from test_planning import _inputs, _remembered, _sent, _stage
 from test_planning_stories import _note, _story
+from test_story_tidy_up import _OWNERS, _OWNERS_SIGHT, _reply, _summary, _tidy_up, _trip
 from test_story_tidy_up import _note as _tidy_note
-from test_story_tidy_up import _reply, _summary, _tidy_up, _trip
 from test_story_tidy_up import _story as _tidy_story
 
 from ai_assistant.core.types import (
@@ -350,12 +350,14 @@ async def test_a_note_moved_away_leaves_the_story_it_left_nothing_to_tidy_until_
     car = await _tidy_story(stories, "a-2")
     inspection = await _tidy_note(stories, trip, "The car's inspection is due before Porto.")
     first = FakeModelProvider(_reply(["Porto trip.", "Car inspection before departure."]))
-    assert (await _tidy_up(first, stories, memory).run(trip)).result is TidyUpResult.WRITTEN
+    assert (
+        await _tidy_up(first, stories, memory).run(trip, sight=_OWNERS_SIGHT, tends=_OWNERS)
+    ).result is TidyUpResult.WRITTEN
 
     moved = await stories.move(trip, car, actor=StoryActor.PLANNING, notes=(inspection,))
     assert moved.refusal is None
     idle = FakeModelProvider(_reply(["unused"]))
-    left = await _tidy_up(idle, stories, memory).run(trip)
+    left = await _tidy_up(idle, stories, memory).run(trip, sight=_OWNERS_SIGHT, tends=_OWNERS)
 
     assert left.result is TidyUpResult.NOTHING_TO_READ
     assert idle.calls == []
@@ -363,7 +365,7 @@ async def test_a_note_moved_away_leaves_the_story_it_left_nothing_to_tidy_until_
 
     await _tidy_note(stories, trip, "The car's inspection now lives with the car story.")
     second = FakeModelProvider(_reply(["Porto trip."]))
-    noted = await _tidy_up(second, stories, memory).run(trip)
+    noted = await _tidy_up(second, stories, memory).run(trip, sight=_OWNERS_SIGHT, tends=_OWNERS)
 
     assert noted.result is TidyUpResult.WRITTEN
     assert await _summary(stories, trip) == ["Porto trip."]

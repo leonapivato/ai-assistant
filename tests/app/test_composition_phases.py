@@ -197,11 +197,9 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(  # noq
         (story_calls,) = distinct.values()
         assert isinstance(story_calls, StoryCalls)
         assert all(runners[name] is look_ups for name in LOOK_UP_CAPABILITIES)
-        # Every call but the tidy-up through the one holder (ADR-0383 §9:1); the tidy-up
-        # reads the same stores unbound.
+        # Every call through the one holder (ADR-0383 §9:1), the tidy-up included, by the
+        # sight of the work that asked for it (§6:8).
         assert story_calls._stores is engine._windows._stores  # type: ignore[union-attr]
-        assert story_calls._tidy_reads.stories is engine._stories
-        assert story_calls._tidy_reads.memory is engine._memory
         assert story_calls._tidy_up is not None
         story_reads = phases._story_reads
         assert story_reads is not None

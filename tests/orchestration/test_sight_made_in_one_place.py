@@ -4,10 +4,12 @@
 a sight outside the places that hold one by §6:4 to §6:8: the work's sight, made when its
 facts are first recorded and made again each time they are recorded again (§6:4 to §6:6),
 in :meth:`ActivationState._see
-<ai_assistant.orchestration.activation_state.ActivationState>`; and the producer's sight,
+<ai_assistant.orchestration.activation_state.ActivationState>`; the producer's sight,
 made by the observer's run once for each episode it reads, from the facts and senders that
-episode records (§6:7), in ``observer/stage.py``'s ``_sight_of``. A run's and a tidy-up's
-(§6:8) are made where milestone 22's B9b and B8c put them, each adding its place here.
+episode records (§6:7), in ``observer/stage.py``'s ``_sight_of``; an upkeep run's, made
+once for the run from the domain it tends (§6:8), in ``upkeep.py``'s ``upkeep_run``; and
+the sight of a tidy-up a work asks for, made where the call starts it from the asking
+work's sight and the story's home (§6:8), in ``story_calls.py``'s ``StoryCalls._tidy``.
 
 **How it reads "constructs".** Any reference to ``Sight`` or ``SightBound`` outside an
 annotation, by its own name or as an attribute (``Sight(...)``, ``Sight.of_work``,
@@ -42,6 +44,10 @@ PLACES: Final = frozenset(
         "activation_state.py:ActivationState._see",
         # §6:7: a producer's, the observer's for an ended work.
         "observer/stage.py:_sight_of",
+        # §6:8: an ADR-0384 run's, from the domain it tends, once for the run.
+        "upkeep.py:upkeep_run",
+        # §6:8: a tidy-up a work asks for, its work's with the story's domain's bound.
+        "story_calls.py:StoryCalls._tidy",
     }
 )
 
