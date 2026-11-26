@@ -1,6 +1,6 @@
 # 384. Upkeep of a person's records runs for that person: a run tends one domain, reads what its person may see through the filter, and writes only there
 
-- Status: Partially superseded by ADR-0388 (§2:1 and its table, in the addition alone: the observer's pin pass is a fourth job, run in the observer's run)
+- Status: Partially superseded by ADR-0388 (§2:1 and its table, in the addition alone: the observer's pin pass is a fourth job, run in the observer's run; the table's upcoming-event producer row, in the addition alone: its reads and writes are a run's, by the sight of its source's home's domain)
 - Date: 2026-11-26
 - Scope: decision D2 of milestone 22, "Every record has a home" (acceptance
   [#3709](https://github.com/leonapivato/ai-assistant/issues/3709)), its row "Upkeep still works".
@@ -24,7 +24,7 @@
   (§4:4, in its first sentence alone) and
   [ADR-0358](0358-planning-keeps-memory-only-on-purpose-a-matter-that-has-changed-is-tidied-in-the-background-and-planning-can-search-past-episodes-read-one-whole-and-read-its-origins-older-history.md)
   (§4:5, in the addition alone), as §9 records.
-- Partially superseded: 2026-11-26 by [ADR-0388](0388-before-the-stores-withhold-a-name-a-write-adds-must-resolve-a-story-starts-in-one-write-the-pin-pass-is-a-run-and-a-work-with-no-facts-keeps-its-activation.md) — §2:1 and its table, in the addition alone: the observer's pin pass (ADR-0338 §9:6) is a fourth job this decision covers, run once for each person domain in the observer's run before its episodes, by the sight of a run tending that domain (ADR-0388 §4). Every other clause stands. These replacements take effect on ratification of ADR-0388. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-11-26 by [ADR-0388](0388-before-the-stores-withhold-a-name-a-write-adds-must-resolve-a-limit-counts-what-the-store-holds-and-a-story-start-the-pin-pass-the-upcoming-event-producer-and-a-work-with-no-facts-each-read-by-a-sight.md) — §2:1 and its table, in the addition alone: the observer's pin pass (ADR-0338 §9:6) is a fourth job this decision covers, run once for each person domain in the observer's run before its episodes, by the sight of a run tending that domain (ADR-0388 §4). The table's upcoming-event producer row, in the addition alone: its reads of the person-model store and its writes through the notification store are a run's, by `Sight.of_run` for the domain its source's home is in, made once for each pass, under §3:3, §4, §5 and §7; it stays no upkeep job (ADR-0388 §7). Every other clause stands. These replacements take effect on ratification of ADR-0388. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
