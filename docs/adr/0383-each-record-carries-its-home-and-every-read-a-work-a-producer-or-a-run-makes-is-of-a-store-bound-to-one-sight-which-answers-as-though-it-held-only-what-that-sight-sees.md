@@ -311,12 +311,16 @@ whole domain.
 > input's text, so no reader can steer a check onto a record it does not see.
 
 > **Normative.** The observer's finding of what is due reads episodes and observation records
-> unbound, by occurrence and state alone (ADR-0329 §16:2), and hands a run nothing of them but which
-> episode is due and its observation record's state and revision.
+> unbound, by occurrence, state, home and recorded facts and senders alone (ADR-0329 §16:2), and
+> hands a run nothing of them but which episode is due and its observation record's state and
+> revision.
 
-> **Normative.** A producer whose sight does not see the home of the episode it is due to process
-> reads nothing of that episode or of its observation record's findings, writes no record from it,
-> and records the episode skipped, with nothing else, through the plan store unbound.
+> **Normative.** In a build whose bound stores withhold, the finding of what is due hands no run an
+> episode whose home the sight §6:7 makes for it does not see. It sets the episode aside as stuck
+> under a code-owned reason of its own (ADR-0329 §16:5), keeping every attempt, model call, finding
+> and outcome its observation record holds, and nothing reads them for a run. In a build whose bound
+> stores count, such an episode is processed as today, and §11's event counts what its run's reads
+> would have withheld.
 
 The choice ADR-0369 §16 left is taken this way for three reasons. **Absence holds by
 construction.** A store applies the sight before it limits or counts, so a page of ten is the ten
@@ -336,9 +340,9 @@ predicate in `core` and §9:3 proves each store applies it alike.
 > `total` among them.
 
 > **Normative.** Save §7:11's checks, a look-up, fetch or write that names a record its reader
-> does not see gives the reader exactly what naming a record never written gives: a `get` its `None`, a `get_many` the id
-> left out, a store error the same error, a tool result the same result. ADR-0282 §2:8's "an id with
-> no record" is that outcome.
+> does not see gives the reader exactly what naming a record never written gives: a `get` its
+> `None`, a `get_many` the id left out, a store error the same error, a tool result the same
+> result. ADR-0282 §2:8's "an id with no record" is that outcome.
 
 > **Normative.** No record a reader sees names a record of another home, by §4:7, and a sight
 > sees every record of a home or none of them, so no member, link, pin, mark, lineage, reply or
@@ -506,8 +510,8 @@ name across homes, and of a refusal that tells (§4:7, §4:8); the upgrade writi
 over facts for no one, and a record with no home as no one's (§5); the sight's bounds, their meet,
 senders from inputs, no level in a sight, and a producer's and a run's sights (§6); the filter in
 each store behind one binding member, the equivalence rule, a work's own records, count or
-withhold fixed at construction, a write's checks over every record, and the observer's finding of what is
-due and its skip (§7); §8's places; §9's tests; §10's reading of `owner_records`;
+withhold fixed at construction, a write's checks over every record, and the observer's finding of
+what is due and its setting aside (§7); §8's places; §9's tests; §10's reading of `owner_records`;
 §11's event; and §12:2's reading of earlier clauses over a bound store.
 
 Of the coordinator's readings: the filter goes by person, not level (§6:9, from ADR-0369 §6:1 and
@@ -524,10 +528,11 @@ itself rather than wrapped over it (§7); and `DeviceChecks` stays (§10:5).
 - Every work for the owner reads what it reads today. An unidentified sender's work reads its own
   records alone: its chat's history, its line's earlier episodes and the conversations its
   Connections section would list are withheld.
-- The observer reads nothing of an unidentified sender's work, its episode included, and records
-  it skipped (§7:13). So it does for an episode from before the upgrade whose facts say it was for
-  no one, which §5:1 makes the owner's while §6:7 keeps its producer to the shared things, and for
-  an episode that records no facts; the first deploy's count shows whether any is still due.
+- Once the filter withholds, the observer reads nothing of an unidentified sender's work, its
+  episode included, and sets it aside (§7:13). So it does for an episode from before the upgrade
+  whose facts say it was for no one, which §5:1 makes the owner's while §6:7 keeps its producer to
+  the shared things, and for an episode that records no facts; the first deploy's count shows
+  whether any is still due.
 - Stages are handed stores per read, which moves where each holds them; no read site's call changes.
 - **Revisit** when a second person, a group or a sharing rule is built, or if a store cannot answer
   a bound read at the cost the unbound one has.
