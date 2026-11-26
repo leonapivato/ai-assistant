@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import structlog
 from conversation_store_contract import (
     ConversationStoreContract,
     ConversationStoreFactory,
@@ -2109,4 +2110,56 @@ async def test_a_bound_stores_change_read_decodes_no_device_set_it_does_not_hold
         with pytest.raises(ConversationStoreError):
             await store.changes(after=0)
     finally:
+        store.close()
+
+
+async def test_a_counted_awaiting_list_is_counted_from_its_own_reading(tmp_path: Path) -> None:
+    """ADR-0383 §11:1: the listing and the homes it is counted by are one reading.
+
+    A shared conversation is listed only for an owner's message not taken in. Straight
+    after the listing, another connection on the same file takes that message in; the
+    count still says the listed conversation is withheld for that message's home,
+    because the evidence is read in the listing's own transaction.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(
+        path=path, now=_fixed_now, new_id=lambda: "only", sight_mode=SightMode.COUNT
+    )
+    other = sqlite3.connect(path, timeout=0, isolation_level=None, check_same_thread=False)
+    try:
+        await store.set_my_devices([ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)])
+        await store.start(home=RecordHome.shared())
+        await store.append_message(
+            "only",
+            NewMessage(
+                author=MessageAuthor.USER,
+                text="mine",
+                device_id="phone",
+                message_id="m-1",
+                home=RecordHome.owners(),
+            ),
+        )
+        listing = store._fetch
+
+        def taken_meanwhile(conn: sqlite3.Connection, what: str, *args: Any) -> list[Any]:
+            found = listing(conn, what, *args)
+            if what == "list conversations awaiting the reader":
+                # A write from another connection, as soon as the page is read: refused
+                # while the reading stands (`timeout=0`), and if a journal mode let it
+                # commit, the reading would still not see it.
+                with contextlib.suppress(sqlite3.OperationalError):
+                    other.execute(
+                        "INSERT INTO taken_in(conversation_id, position, activation_id) "
+                        "VALUES ('only', 1, 'elsewhere')"
+                    )
+            return found
+
+        store._fetch = taken_meanwhile  # type: ignore[method-assign,assignment]
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        with structlog.testing.capture_logs() as events:
+            assert await bound.conversations_awaiting() == ["only"]
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert [(one["given"], one["other_home"]) for one in counted] == [(1, 1)]
+    finally:
+        other.close()
         store.close()
