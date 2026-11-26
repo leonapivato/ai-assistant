@@ -222,8 +222,13 @@ measuring it on the chip.
 - **Panning.** When a layer's image is larger than the display, the watch
   scrolls it locally. `pan` is `none`, `vertical` or `both`.
 - **Overlays.** Things the watch draws on top and keeps current alone: a
-  `clock`, a `timer` that counts down to an instant the gateway gives, and a
-  `presence` mark.
+  `clock`, a `timer` that counts down to an instant the gateway gives, a
+  `presence` mark, and the assistant's `mark`.
+- **The mark.** `{"kind": "mark", "x": 35, "y": 6, "size": 340, "colour": ...,
+  "listen": ..., "signal": ...}` is the assistant's own sign, which the watch
+  draws and moves itself because pictures of it could not be sent fast enough.
+  It needs no message: the watch shows the link cut, the microphone open, or
+  the assistant working (`presence: thinking`) from what it already knows.
 - **Digits.** The watch holds no font. A clock or timer names a `glyphs` image
   the hub drew: eleven equal cells, the digits 0 to 9 and then a colon. The
   watch builds the time from those cells, so the digits match the screen's own
@@ -424,6 +429,20 @@ A watch face and a message screen were built tenth, as a first design of the
 everyday screens (item 7): the time drawn by the watch, the date, what is next
 and what is waiting drawn by the hub side, and "Ask", which opens the
 microphone with no wait.
+
+The mark was built eleventh, with a new face and a "one thing" screen around
+it. The face is the mark over the time; when one thing matters now (a message,
+where to be next, a card to approve) the face gives way to a screen with that
+one thing in large type and the mark small in a corner. The mark shows three
+things only, by the owner's word: that the assistant is there or cut off, that
+the microphone is open, and that it is working. What is waiting belongs to the
+"one thing" screen. With the microphone open the watch also lights the edge of
+the display, so that people nearby can tell. The type and the colours are a
+first choice and not ruled. The mark brings the engine to 35 KB of code and 34 KB
+of fixed memory. A moving mark changes most of its square on every frame, twenty
+to thirty times a second; whether the real chip and display keep up is not
+known without a watch. Which things earn the "one thing" screen, and who
+decides, is the hub's to say and is open.
 
 One thing the engine does is not protocol but shapes it: the watch frees a
 screen's decoded pixels when it leaves the screen, unless an update or a
