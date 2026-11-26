@@ -188,11 +188,16 @@ def test_a_record_with_no_home_is_seen_by_no_sight() -> None:
     assert owners.withheld(None) is WithheldReason.NO_HOME
 
 
-def test_a_works_own_records_are_seen_whatever_their_home() -> None:
-    """§7:4: a work's sight holds what its activation made, and no other sight does."""
+def test_a_works_own_records_are_seen_whatever_home_they_carry() -> None:
+    """§7:4: a work's sight holds what its activation made, and no other sight does.
+
+    Only where it carries a home: a record with none, its own included, is withheld
+    from every sight (§5:3).
+    """
     sight = Sight.of_work(_unidentifieds_message(), (_NO_ONE_SENDS,), activation="a")
     assert sight.sees(_OWNERS, made_by="a")
-    assert sight.sees(None, made_by="a")
+    assert sight.sees(_THEIRS, made_by="a")
+    assert sight.withheld(None, made_by="a") is WithheldReason.NO_HOME
     assert not sight.sees(_OWNERS, made_by="b")
     assert not sight.sees(_OWNERS)
     producer = Sight.of_producer(_unidentifieds_message(), (_NO_ONE_SENDS,))

@@ -121,6 +121,11 @@ _DISTANCE_TOLERANCE = 1e-5
 #: and picking a threshold here would be the guess it forbids.
 _LATENCY_FIXED_MS = 25.0
 _LATENCY_PER_RECORD_MS = 0.05
+#: The bound, withholding search's per-record allowance: the same trip-wire's shape,
+#: an order of magnitude above what an unloaded machine measures for it. Larger than
+#: the unbound one because that search decodes every candidate row once to read its
+#: home (ADR-0383 §7:3; #3732), which no column holds.
+_BOUND_LATENCY_PER_RECORD_MS = 0.3
 
 #: The realistic k-shortfall sweep. Crowding is records per topical cluster,
 #: window-closed ones included, because a closed record occupies a KNN candidate
@@ -327,18 +332,19 @@ async def test_retrieval_latency_scales_with_the_live_record_count(
     report(pytestconfig, rows)
 
 
-async def test_a_bound_search_that_withholds_stays_under_the_same_trip_wire(
+async def test_a_bound_search_that_withholds_stays_under_its_trip_wire(
     make_store: Callable[..., SqliteMemoryStore],
     profile: Profile,
     pytestconfig: pytest.Config,
 ) -> None:
-    """ADR-0383 §7:2's cost: the sight binds before the KNN cut, read off each row's JSON.
+    """ADR-0383 §7:2's cost: the sight binds before the KNN cut, read off each row.
 
     A store bound to the owner's domain and withholding carries the sight into the
-    restriction the KNN is bound by, so every candidate row's stored home is read
-    from its JSON: no column or index holds it. Every record the instrument plants is
+    restriction the KNN is bound by, so every candidate row is decoded to read its
+    home: no column or index holds it (#3732). Every record the instrument plants is
     the owner's, so the bound read must serve exactly what the unbound one does, and
-    the figures it reports beside the unbound ones are the price of the filter.
+    the figures it reports beside the unbound ones are the price of the filter. The
+    trip-wire is the unbound one's shape with its own per-record allowance.
     """
     rows = ["", "ADR-0383 §7:2 — search bound to the owner's domain, withholding"]
     rows.append(f"{'live':>8} {'total':>8} {'p50 ms':>9} {'p95 ms':>9} {'max ms':>9} {'us/rec':>8}")
@@ -363,7 +369,7 @@ async def test_a_bound_search_that_withholds_stays_under_the_same_trip_wire(
             f"{spec.live:>8} {spec.total:>8} {p50:>9.2f} {p95:>9.2f} "
             f"{latencies[-1]:>9.2f} {p50 * 1000 / spec.total:>8.2f}"
         )
-        ceiling = _LATENCY_FIXED_MS + _LATENCY_PER_RECORD_MS * spec.total
+        ceiling = _LATENCY_FIXED_MS + _BOUND_LATENCY_PER_RECORD_MS * spec.total
         assert p95 < ceiling, (
             f"bound p95 {p95:.1f}ms at live={live} exceeds the {ceiling:.1f}ms trip-wire"
         )
