@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ConversationStore,
         MemoryStore,
+        MemoryWriter,
         PersonModelStore,
         PlanStore,
         StoryStore,
@@ -45,7 +46,7 @@ class BoundStores:
     sight and no mode: each call binds anew, so one holder serves every pass at once.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per store §7:1 binds, and the writer
         self,
         *,
         memory: MemoryStore,
@@ -53,8 +54,9 @@ class BoundStores:
         people: PersonModelStore | None = None,
         conversations: ConversationStore | None = None,
         plans: PlanStore | None = None,
+        writer: MemoryWriter | None = None,
     ) -> None:
-        """Hold the stores a converted stage reads.
+        """Hold the stores a converted stage reads, and the writer a producer writes by.
 
         Each but the memory store is optional, for a holder built where that store is
         not wired; asking such a holder for it is a wiring defect, and raises.
@@ -65,12 +67,14 @@ class BoundStores:
             people: The person-model store, where the person model is wired.
             conversations: The conversation store.
             plans: The plan store.
+            writer: The memory write path, persisting to ``memory`` (ADR-0028 §4).
         """
         self._memory = memory
         self._stories = stories
         self._people = people
         self._conversations = conversations
         self._plans = plans
+        self._writer = writer
 
     def memory(self, sight: Sight) -> Bound[MemoryStore]:
         """The memory store, bound to ``sight``."""
@@ -107,6 +111,17 @@ class BoundStores:
             RuntimeError: If no plan store is wired to this holder.
         """
         return _wired(self._plans, "plan").bound(sight)
+
+    def writer(self, sight: Sight) -> Bound[MemoryWriter]:
+        """The memory write path, bound to ``sight`` (ADR-0383 §7:1, §7:6).
+
+        Every read it makes for a write, its conflict search and its fetch of a placed
+        proposal's memories included, is of the memory store bound to the same sight.
+
+        Raises:
+            RuntimeError: If no writer is wired to this holder.
+        """
+        return _wired(self._writer, "memory writer").bound(sight)
 
 
 def _wired[S](store: S | None, name: str) -> S:
