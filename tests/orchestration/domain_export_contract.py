@@ -22,7 +22,16 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from story_surface_contract import act, episode
 
-from ai_assistant.core.errors import OversizedValueError
+from ai_assistant.core.errors import (
+    AssistantError,
+    ConversationStoreError,
+    MemoryStoreError,
+    NotificationStoreError,
+    OversizedValueError,
+    PersonModelStoreError,
+    PlanningError,
+    StoryStoreError,
+)
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     DataTier,
@@ -219,6 +228,18 @@ NOT_OFFERED: Final = (
 )
 
 
+#: Each store the export reads, by the subject's attribute, and the error its contract
+#: declares for a read that fails (§6:9).
+FAILING: Final = (
+    ("memory", MemoryStoreError),
+    ("stories", StoryStoreError),
+    ("chat", ConversationStoreError),
+    ("plans", PlanningError),
+    ("people", PersonModelStoreError),
+    ("notifications", NotificationStoreError),
+)
+
+
 class DomainExportContract:
     """``export_domain`` through the engine, the fake and the wire client alike."""
 
@@ -351,3 +372,34 @@ class DomainExportContract:
         result = await subject.engine.export_domain(_OWNERS)
 
         assert DomainExportResult.model_validate_json(result.model_dump_json()) == result
+
+    async def test_an_oversized_domain_is_refused_before_anything_is_read(
+        self, domain_export_small: DomainExportSubject
+    ) -> None:
+        """ADR-0085 §8c: the argument is measured before dispatch, by every implementation,
+        so a domain too large to send is ``OversizedValueError`` and never ``not_offered``."""
+        subject = domain_export_small
+
+        with pytest.raises(OversizedValueError):
+            await subject.engine.export_domain(RecordHome.person("x" * SMALL_EXPORT_LIMIT))
+
+    @pytest.mark.parametrize(("store", "error"), FAILING, ids=[one for one, _ in FAILING])
+    async def test_a_store_that_cannot_be_read_raises_its_error_and_nothing_is_returned(
+        self,
+        domain_export_subject: DomainExportSubject,
+        store: str,
+        error: type[AssistantError],
+    ) -> None:
+        """§6:9: the error the store's contract declares, whichever part fails, the last
+        included; no export is returned in part."""
+        subject = domain_export_subject
+        await seed(subject)
+
+        async def _failing() -> object:
+            raise error("the store cannot be read")
+
+        # Set on the instance, so the copy ``bound`` makes carries it.
+        getattr(subject, store).export = _failing
+
+        with pytest.raises(error, match="the store cannot be read"):
+            await subject.engine.export_domain(_OWNERS)
