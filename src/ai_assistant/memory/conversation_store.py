@@ -77,6 +77,18 @@ label 14, is upgraded in place when the store opens (ADR-0326 §4:1): the column
 added, the owner's domain is written into every conversation and every message it holds
 (ADR-0383 §5:1), and the label advances to 15, which an older build refuses (§5:3).
 
+**A conversation's deletion keeps its home** (ADR-0389 §3:1). A ``conversation_deleted``
+row of the change stream carries its conversation's home in two columns of its own
+(``home_kind``, ``home_id``), written in the step that records the deletion, by a stamp
+and by a reclaim alike, from the conversation's row as it then stands, and never
+changed; no other change row carries one. So the home outlives the conversation's row,
+which ``drop_if_eligible`` removes, and a bound store reads a deletion's home from the
+deletion alone (§3:2). Nothing on the wire moves: ``ConversationDeletedChange`` carries
+no home. A file written before the columns, at the label 15, is upgraded in place when
+the store opens (ADR-0326 §4:1): the columns are added, every deletion it holds is given
+its conversation row's home where that row stands and the owner's domain where it does
+not (ADR-0389 §3:3), and the label advances to 16, which an older build refuses (§5:3).
+
 **A reply stays in its home** (ADR-0383 §4:7, "a reply"). Inside ``append_message``'s
 transaction, after every other answer, a message replying to a message of another home,
 standing or deleted (its marker's row keeps its home), is answered ``another_home`` and
@@ -90,10 +102,14 @@ only counts is fixed when the store is built (§7:10). Withholding, it holds a
 conversation whose home columns name a home the sight sees, and within it each message,
 or marker, whose own columns do (:func:`~ai_assistant.memory._home_columns.seen_sql`);
 every statement applies that before it orders, limits, pages or counts, so it answers
-as this store would holding only those records (§7:2, §8). Device rows carry no home and
-are given back by no member of it (§3:3); a write's own checks still read them, and
-every other record, over the whole file (§7:11). A conversation it does not hold is, for
-every member naming it, one never started. Counting, it answers as unbound and logs
+as this store would holding only those records (§7:2, §8). Device rows carry no home:
+bound to the owner's sight it holds "my devices" and the device rows of each
+conversation it holds, as the unbound store holds them (ADR-0389 §2), and bound to any
+other sight it gives back none (ADR-0383 §3:3, ADR-0389 §4:1),
+:meth:`SqliteConversationStore._holds_device_rows` deciding which. A conversation's
+deletion is held by the home it carries (ADR-0389 §3:2). A write's own checks still read
+every record over the whole file (§7:11). A conversation it does not hold is, for every
+member naming it, one never started. Counting, it answers as unbound and logs
 ``sight_counted`` for each read (§11:1).
 
 **There is no observation watermark** (ADR-0285 §4). The schema creates no
@@ -150,6 +166,7 @@ from ai_assistant.core.types import (
     RecordHome,
     SendOutcome,
     SightMode,
+    SightReader,
     TranscriptMessage,
     TranscriptPage,
     UtcInstant,
@@ -162,6 +179,7 @@ from ai_assistant.memory._episode_format import (
     CLAIMED_CONVERSATION_RECORD_FORMAT,
     CONVERSATION_RECORD_FORMAT,
     CONVERSATION_RECORD_FORMATS,
+    HOMED_CONVERSATION_RECORD_FORMAT,
     inspect_existing,
     stored_format,
 )
@@ -321,9 +339,17 @@ _CAME_THROUGH_COLUMN: Final = "came_through TEXT"
 #: row, never anyone's (§5:3).
 _HOME_COLUMNS: Final = ("home_kind TEXT", "home_id TEXT")
 
-#: The tables that carry a home: a conversation and each message, and nothing else this
-#: store keeps (ADR-0383 §3: device rows carry none).
+#: The tables that carry a home: a conversation and each message (ADR-0383 §3: device
+#: rows carry none), and a conversation's deletion in ``chat_changes``, below.
 _HOMED_TABLES: Final = ("conversations", "messages")
+
+#: The table whose ``conversation_deleted`` rows carry ADR-0389 §3:1's home, as
+#: :data:`_HOME_COLUMNS`: the home of the conversation the deletion is of, which outlives
+#: the conversation's row. Held apart from :data:`_CHAT_SCHEMA` as :data:`_HOME_COLUMNS`
+#: is: :meth:`SqliteConversationStore._upgrade_to_deletion_homes` adds them to a file that
+#: lacks them, a fresh one included. ``NULL`` on every other change row, whose home is
+#: read as ADR-0389 §2:2 and ADR-0383 §3:3 have it.
+_CHANGES_TABLE: Final = "chat_changes"
 
 #: What makes an effect record name one message per conversation (ADR-0350 §12:9), and
 #: what :meth:`SqliteConversationStore.effect_position` reads through. Created after
@@ -370,9 +396,13 @@ _WRITING_ONLY: Final = json.dumps(sorted(one.value for one in DeviceAccess if no
 #: decodes from, so it is a store fault rather than an empty set. The filter itself is
 #: :func:`_reaches`, in Python, so every set it consults is decoded and checked as
 #: :meth:`SqliteConversationStore.changes` checks the sets it returns: a corrupt set is
-#: a store fault, never a reason to withhold a change in silence. Written out as one
-#: literal, for the reason the module gives for its column lists (ruff ``S608``). Its
-#: parameters are the cursor and the batch bound.
+#: a store fault, never a reason to withhold a change in silence. The message a
+#: message's addition or deletion names is joined as ``m`` and the conversation a change
+#: names as ``v``, so ``{held}``, :meth:`SqliteConversationStore._changes_held`'s
+#: condition, is on the batch's own rows and applied before it is limited (ADR-0389
+#: §2:3); the sets a change is judged against are read whole, since every set of a
+#: conversation a bound store holds, and of "my devices", is one it holds. Its
+#: parameters are the cursor, the condition's and the batch bound.
 _DEVICE_CHANGES_SQL: Final = (
     "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "
     "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
@@ -382,9 +412,11 @@ _DEVICE_CHANGES_SQL: Final = (
     "WHERE p.conversation_id IS c.conversation_id "
     "AND p.kind IN ('conversation_started', 'devices_changed') AND p.seq < c.seq "
     "ORDER BY p.seq DESC LIMIT 1) "
-    "FROM chat_changes c LEFT JOIN messages m ON c.kind = 'message_added' "
+    "FROM chat_changes c LEFT JOIN messages m "
+    "ON c.kind IN ('message_added', 'message_deleted') "
     "AND m.conversation_id = c.conversation_id AND m.position = c.position "
-    "WHERE c.seq > ? ORDER BY c.seq ASC LIMIT ?"
+    "LEFT JOIN conversations v ON v.id = c.conversation_id "
+    "WHERE c.seq > ? AND {held} ORDER BY c.seq ASC LIMIT ?"
 )
 
 #: How many changes :meth:`SqliteConversationStore.device_changes` reads at a time
@@ -1142,6 +1174,7 @@ class SqliteConversationStore:
             self._upgrade_to_claimed(conn, existing_format)
             self._upgrade_to_came_through(conn, existing_format)
             self._upgrade_to_homes(conn, existing_format)
+            self._upgrade_to_deletion_homes(conn, existing_format)
             conn.execute(_EFFECT_INDEX)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS conversations_activity "
@@ -1317,13 +1350,61 @@ class SqliteConversationStore:
             for column in _HOME_COLUMNS:
                 if column.split(" ")[0] not in present:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
-        if found is not None and found < CONVERSATION_RECORD_FORMAT:
+        if found is not None and found < HOMED_CONVERSATION_RECORD_FORMAT:
             owners = RecordHome.owners()
             for table in _HOMED_TABLES:
                 conn.execute(
                     f"UPDATE {table} SET home_kind = ?, home_id = ?",  # noqa: S608 — a module constant, no input
                     (owners.kind.value, owners.id),
                 )
+            conn.execute(
+                "UPDATE episode_record_format SET version = ?",
+                (HOMED_CONVERSATION_RECORD_FORMAT,),
+            )
+
+    @staticmethod
+    def _upgrade_to_deletion_homes(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0389 §3:1's, in place (ADR-0326 §4:1).
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after :meth:`_upgrade_to_homes`
+        has carried a file to 15 and every conversation row holds a home, so the upgrades
+        chain (§4:5), and it completes or rolls back with the transaction (§4:3). The
+        ``chat_changes`` table gains :data:`_HOME_COLUMNS` where it lacks them, read from
+        ``PRAGMA table_info`` as the earlier upgrades read their columns, so a fresh file
+        gains them here too and there is one shape. Every ``conversation_deleted`` row a
+        file held before them is written its conversation row's two home columns, as they
+        stand, where that row stands, and the owner's domain where it does not, a dropped
+        conversation's home being one nothing in the file recalls (ADR-0389 §3:3, as
+        ADR-0383 §5:1 writes the owner's domain whatever a record's facts say). No other
+        change row gains a home, and no other byte moves (§4:4). The label then advances,
+        so an older build, which reads 12 to 15, refuses the file (§5:3).
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        present = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({_CHANGES_TABLE})")}
+        for column in _HOME_COLUMNS:
+            if column.split(" ")[0] not in present:
+                conn.execute(f"ALTER TABLE {_CHANGES_TABLE} ADD COLUMN {column}")
+        if found is not None and found < CONVERSATION_RECORD_FORMAT:
+            owners = RecordHome.owners()
+            conn.execute(
+                "UPDATE chat_changes SET "
+                "home_kind = (SELECT v.home_kind FROM conversations v "
+                "WHERE v.id = chat_changes.conversation_id), "
+                "home_id = (SELECT v.home_id FROM conversations v "
+                "WHERE v.id = chat_changes.conversation_id) "
+                "WHERE kind = 'conversation_deleted' AND EXISTS "
+                "(SELECT 1 FROM conversations v WHERE v.id = chat_changes.conversation_id)"
+            )
+            conn.execute(
+                "UPDATE chat_changes SET home_kind = ?, home_id = ? "
+                "WHERE kind = 'conversation_deleted' AND NOT EXISTS "
+                "(SELECT 1 FROM conversations v WHERE v.id = chat_changes.conversation_id)",
+                (owners.kind.value, owners.id),
+            )
             conn.execute(
                 "UPDATE episode_record_format SET version = ?", (CONVERSATION_RECORD_FORMAT,)
             )
@@ -1411,6 +1492,19 @@ class SqliteConversationStore:
         """Whether this store, as bound, holds a record whose home columns are these."""
         sight = self._withholding()
         return sight is None or sight.sees(stored_home(kind, ident))
+
+    def _holds_device_rows(self) -> bool:
+        """Whether this store, as bound, holds device rows: **the one place that decides it**.
+
+        Unbound, or bound and only counting, it holds every one. Bound to a sight
+        :meth:`~ai_assistant.core.types.Sight.of_owners_act` made, it holds "my devices"
+        and the device rows of each conversation it holds, as the unbound store holds them
+        (ADR-0389 §2:1); each member then narrows them to the conversations it holds.
+        Bound to a work's, a producer's or a run's sight and withholding, it holds none
+        (ADR-0383 §3:3, ADR-0389 §4:1).
+        """
+        sight = self._withholding()
+        return sight is None or sight.reader is SightReader.OWNERS_ACT
 
     def _standing(self, conn: sqlite3.Connection, conversation_id: str) -> Sequence[Any] | None:
         """The conversation's row where it stands and this store, as bound, holds it.
@@ -1557,11 +1651,33 @@ class SqliteConversationStore:
         position: int | None = None,
         devices: tuple[ChatDevice, ...] | None = None,
     ) -> None:
-        """Record one change in the stream, inside the transaction making it (§5:10)."""
+        """Record one change in the stream, inside the transaction making it (§5:10).
+
+        Not a conversation's deletion, which :meth:`_record_deletion` records with its home.
+        """
         conn.execute(
             "INSERT INTO chat_changes(kind, conversation_id, position, devices) "
             "VALUES (?, ?, ?, ?)",
             (kind, conversation_id, position, None if devices is None else _devices_json(devices)),
+        )
+
+    @classmethod
+    def _record_deletion(cls, conn: sqlite3.Connection, conversation: Sequence[Any]) -> None:
+        """Clear a conversation's chat and record its deletion, with its home (ADR-0389 §3:1).
+
+        ``conversation`` is its row as :meth:`_row_of` read it, inside the transaction that
+        stamps or reclaims it. The deletion keeps every device that read the conversation
+        (ADR-0296 §4:5, §4:8) and the row's two home columns, as they stand: a home the
+        store cannot read is kept as it is, and withholds the deletion from every bound
+        store as it withholds the conversation (ADR-0389 §3:4). Nothing changes it after.
+        """
+        conversation_id = conversation[0]
+        ends = cls._readers_of(conn, conversation_id)
+        cls._clear_chat_of(conn, conversation_id)
+        conn.execute(
+            "INSERT INTO chat_changes(kind, conversation_id, position, devices, home_kind, "
+            "home_id) VALUES ('conversation_deleted', ?, NULL, ?, ?, ?)",
+            (conversation_id, _devices_json(ends), conversation[5], conversation[6]),
         )
 
     @classmethod
@@ -1959,9 +2075,8 @@ class SqliteConversationStore:
     def _stamp_deleted_sync(self, conversation_id: str) -> bool:
         with self._transaction("stamp a conversation deleted") as conn:
             now = self._now()
-            if self._standing(conn, conversation_id) is None or self._keeps_unheld(
-                conn, conversation_id
-            ):
+            row = self._standing(conn, conversation_id)
+            if row is None or self._keeps_unheld(conn, conversation_id):
                 # Bound and withholding, a conversation it does not hold is one never
                 # started, and one keeping a message it does not hold is not deleted,
                 # since that would delete a record it does not give back (ADR-0383 §7:5).
@@ -1972,10 +2087,9 @@ class SqliteConversationStore:
             )
             # ADR-0293 §2:3: the transcript goes with the conversation, and its
             # devices learn of it from the one change left in the stream, which
-            # keeps every device that read it (ADR-0296 §4:5, §4:8).
-            ends = self._readers_of(conn, conversation_id)
-            self._clear_chat_of(conn, conversation_id)
-            self._record_change(conn, "conversation_deleted", conversation_id, devices=ends)
+            # keeps every device that read it and the conversation's home (ADR-0296
+            # §4:5, §4:8; ADR-0389 §3:1).
+            self._record_deletion(conn, row)
             return True
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
@@ -2048,10 +2162,10 @@ class SqliteConversationStore:
                 )
                 conn.execute("DELETE FROM taken_in WHERE conversation_id = ?", (conversation_id,))
             else:
-                # A reclaim is a deletion as far as the conversation's devices go.
-                ends = self._readers_of(conn, conversation_id)
-                self._clear_chat_of(conn, conversation_id)
-                self._record_change(conn, "conversation_deleted", conversation_id, devices=ends)
+                # A reclaim is a deletion as far as the conversation's devices go, and
+                # its deletion keeps the home the row is about to take with it (ADR-0389
+                # §3:1), recorded in this same step.
+                self._record_deletion(conn, row)
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             return True
 
@@ -2507,7 +2621,7 @@ class SqliteConversationStore:
                 "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "  # noqa: S608 — module text; values bound
                 "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
                 "m.options, m.cut_off, m.device_id, m.message_id, m.deleted, m.came_through, "
-                "m.home_kind, m.home_id, v.home_kind, v.home_id "
+                "m.home_kind, m.home_id, v.home_kind, v.home_id, c.home_kind, c.home_id "
                 "FROM chat_changes c LEFT JOIN messages m "
                 "ON c.kind IN ('message_added', 'message_deleted') "
                 "AND m.conversation_id = c.conversation_id AND m.position = c.position "
@@ -2524,31 +2638,50 @@ class SqliteConversationStore:
     def _changes_held(self) -> tuple[str, list[object]]:
         """The sight's condition over a change, ``1`` where nothing is held back.
 
-        Bound and withholding, a change is held where it names a conversation the store
-        holds and, for a message's addition or deletion, a message or marker it holds;
-        a change of a set of devices never is, nor one naming a conversation since
-        dropped, whose home no row holds any more (ADR-0383 §3:3, §5:3).
+        Over a statement whose change is ``c``, the conversation it names ``v`` and, for
+        a message's addition or deletion, the message or marker it names ``m``. Bound and
+        withholding, a conversation's deletion is held where the sight sees the home the
+        deletion carries, whether or not the conversation's row stands, and never by the
+        row's (ADR-0389 §3:2, §3:4); a conversation's start where the store holds the
+        conversation; a message's addition or deletion where it holds the conversation
+        and the message or marker. A change of a set of devices is held only where the
+        store holds device rows (:meth:`_holds_device_rows`): a change to "my devices",
+        and one to a conversation's devices where it holds the conversation (ADR-0389
+        §2:2); bound to any other sight, none is (ADR-0383 §3:3).
         """
         if self._withholding() is None:
             return "1", []
+        deletion, deletion_params = self._seen("c.")
         conversation, conversation_params = self._seen("v.")
         message, message_params = self._seen("m.")
+        if self._holds_device_rows():
+            devices = f"(c.conversation_id IS NULL OR {conversation})"
+            devices_params = conversation_params
+        else:
+            devices, devices_params = "0", []
         return (
-            f"c.kind != 'devices_changed' AND {conversation} AND "
-            f"(c.kind NOT IN ('message_added', 'message_deleted') OR {message})",
-            [*conversation_params, *message_params],
+            f"((c.kind = 'conversation_deleted' AND {deletion}) "
+            f"OR (c.kind = 'devices_changed' AND {devices}) "
+            "OR (c.kind NOT IN ('conversation_deleted', 'devices_changed') "
+            f"AND {conversation} "
+            f"AND (c.kind NOT IN ('message_added', 'message_deleted') OR {message})))",
+            [*deletion_params, *devices_params, *conversation_params, *message_params],
         )
 
     def _change_home(self, row: Sequence[Any]) -> RecordHome | None:
         """The home a change of the stream is withheld by, for §11:1's count.
 
-        A change of a set of devices has none (§3:3); a conversation's start or deletion
-        has its conversation's, none once it is dropped; a message's addition or
-        deletion has what :meth:`_deciding` gives the message it names.
+        A change of a set of devices has none (§3:3); a conversation's start has its
+        conversation's; a conversation's deletion the one it carries, read from the
+        deletion's own row and never from the conversation's (ADR-0389 §3:2); a
+        message's addition or deletion has what :meth:`_deciding` gives the message it
+        names.
         """
         kind = row[1]
         if kind == "devices_changed":
             return None
+        if kind == "conversation_deleted":
+            return stored_home(row[21], row[22])
         conversation = stored_home(row[19], row[20])
         if kind in {"message_added", "message_deleted"}:
             return self._deciding(conversation, row[17:19])
@@ -2557,12 +2690,13 @@ class SqliteConversationStore:
     def _without_devices(self, row: Sequence[Any]) -> Sequence[Any]:
         """A change's row as a bound store holding no device row reads it (ADR-0383 §3:3).
 
-        Bound and withholding, a conversation's start is read with no devices, put in
-        place of its stored set **before** anything is decoded, so a set the store does
-        not give back can neither be shown nor fail the read; unbound, or counting, the
-        row is as stored.
+        Bound to a sight whose store holds no device row (:meth:`_holds_device_rows`), a
+        conversation's start is read with no devices, put in place of its stored set
+        **before** anything is decoded, so a set the store does not give back can neither
+        be shown nor fail the read; unbound, counting, or bound to the owner's sight, the
+        row is as stored (ADR-0389 §2:2).
         """
-        if self._withholding() is None or row[1] != "conversation_started":
+        if self._holds_device_rows() or row[1] != "conversation_started":
             return row
         return (*row[:4], "[]", *row[5:])
 
@@ -2572,8 +2706,8 @@ class SqliteConversationStore:
         Raises:
             ConversationStoreError: If the store cannot be read, or a row is corrupt.
         """
-        if self._withholding() is not None:
-            return ()  # a device row is given back by no bound store (ADR-0383 §3:3)
+        if not self._holds_device_rows():
+            return ()  # given back by no store bound to such a sight (ADR-0383 §3:3)
         async with self._lock:
             devices = await _run_to_completion(self._my_devices_sync)
         self._counted("my_devices", (None for _ in devices))
@@ -2629,8 +2763,8 @@ class SqliteConversationStore:
             if row is None:
                 return None
             home = stored_home(row[5], row[6])
-            if self._withholding() is not None:
-                return home, ()  # a device row is given back by no bound store (§3:3)
+            if not self._holds_device_rows():
+                return home, ()  # given back by no store bound to such a sight (§3:3)
             return home, self._devices_of(conn, conversation_id)
 
     async def set_conversation_devices(
@@ -2957,18 +3091,20 @@ class SqliteConversationStore:
     ) -> tuple[list[tuple[Any, list[Any] | None]], int]:
         seen: list[tuple[Any, list[Any] | None]] = []
         with self._transaction("read a device's changes", immediate=False) as conn:
-            if self._withholding() is not None:
+            if not self._holds_device_rows():
                 # Holding no device row, a bound store reaches no device with any
                 # change, and its cursor moves to the head, as a store's does across
                 # changes it passes over (ADR-0383 §3:3, §8:5).
                 return seen, self._head(conn)
+            held, params = self._changes_held()
+            statement = _DEVICE_CHANGES_SQL.format(held=held)  # module text; values bound
             cursor = after
             while len(seen) < limit:
                 batch = self._fetch(
                     conn,
                     "read a device's changes",
-                    _DEVICE_CHANGES_SQL,
-                    (cursor, _DEVICE_CHANGES_BATCH),
+                    statement,
+                    (cursor, *params, _DEVICE_CHANGES_BATCH),
                 )
                 for row in batch:
                     if _reaches(device, row):
@@ -2983,13 +3119,13 @@ class SqliteConversationStore:
                 cursor = batch[-1][0]
             return seen, self._head(conn)
 
-    @classmethod
-    def _snapshot_at(cls, conn: sqlite3.Connection, row: Sequence[Any]) -> list[Any]:
+    def _snapshot_at(self, conn: sqlite3.Connection, row: Sequence[Any]) -> list[Any]:
         """The message rows of a conversation as it stood at the change in ``row``.
 
-        The newest :data:`~ai_assistant.core.types.CHAT_SNAPSHOT_ENTRIES` at or below
-        the highest position the change recorded beside its set
-        (:meth:`_highest_position`), newest first.
+        The newest :data:`~ai_assistant.core.types.CHAT_SNAPSHOT_ENTRIES` it holds at or
+        below the highest position the change recorded beside its set
+        (:meth:`_highest_position`), newest first: bound and withholding, of the messages
+        and markers it holds, the sight applied before the limit (ADR-0389 §2:3).
 
         **A change recorded before that position was kept carries none**, and a
         message deleted since has lost the addition that dated it, so its position
@@ -3002,8 +3138,9 @@ class SqliteConversationStore:
         ever shown.
         """
         seq, conversation_id, recorded = row[0], row[2], row[3]
-        if recorded is None:
-            held = cls._fetch(
+        held, params = self._seen()
+        if recorded is None and self._withholding() is None:
+            placed = self._fetch(
                 conn,
                 "read a conversation's position at a change",
                 "SELECT COALESCE(MAX(position), 0) FROM chat_changes "
@@ -3011,15 +3148,30 @@ class SqliteConversationStore:
                 "AND seq <= ?",
                 (conversation_id, seq),
             )
-            recorded = held[0][0]
-        return cls._fetch(
+            recorded = placed[0][0]
+        elif recorded is None:
+            # Bound and withholding, from the records of the messages and markers it
+            # holds alone, as the same store holding only those would place it.
+            message, message_params = self._seen("m.")
+            placed = self._fetch(
+                conn,
+                "read a conversation's position at a change",
+                "SELECT COALESCE(MAX(c.position), 0) FROM chat_changes c JOIN messages m "  # noqa: S608 — module text; values bound
+                "ON m.conversation_id = c.conversation_id AND m.position = c.position "
+                "WHERE c.conversation_id = ? "
+                "AND c.kind IN ('message_added', 'message_deleted') "
+                f"AND c.seq <= ? AND {message}",
+                (conversation_id, seq, *message_params),
+            )
+            recorded = placed[0][0]
+        return self._fetch(
             conn,
             "read a conversation's snapshot at a change",
-            "SELECT conversation_id, position, author, written_at, text, replies_to, "
+            "SELECT conversation_id, position, author, written_at, text, replies_to, "  # noqa: S608 — module text; values bound
             "options, cut_off, device_id, message_id, deleted, came_through, home_kind, home_id "
-            "FROM messages "
-            "WHERE conversation_id = ? AND position <= ? ORDER BY position DESC LIMIT ?",
-            (conversation_id, recorded, CHAT_SNAPSHOT_ENTRIES),
+            f"FROM messages WHERE conversation_id = ? AND position <= ? AND {held} "
+            "ORDER BY position DESC LIMIT ?",
+            (conversation_id, recorded, *params, CHAT_SNAPSHOT_ENTRIES),
         )
 
     async def device_conversations(
@@ -3042,7 +3194,7 @@ class SqliteConversationStore:
         if limit == 0:
             self._counted("device_conversations", ())
             return []
-        if self._withholding() is not None:
+        if not self._holds_device_rows():
             return []  # each entry is a device row's access, which §3:3 gives back none of
         async with self._lock:
             rows = await _run_to_completion(self._device_conversations_sync, device, limit, offset)
@@ -3058,15 +3210,18 @@ class SqliteConversationStore:
         return listed
 
     def _device_conversations_sync(self, device: str, limit: int, offset: int) -> list[Any]:
+        # Bound to the owner's sight, the conversations it holds alone, the sight applied
+        # before the page is ordered and cut (ADR-0389 §2:3); ``1`` unbound or counting.
+        held, params = self._seen("c.")
         return self._fetch(
             self._conn,
             "list a device's conversations",
-            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "  # noqa: S608 — module text; values bound
             "c.home_kind, c.home_id, d.access FROM conversations c JOIN conversation_devices d "
             "ON d.conversation_id = c.id WHERE c.deleted_at IS NULL AND d.device_id = ? "
-            "AND d.access NOT IN (SELECT value FROM json_each(?)) "
+            f"AND d.access NOT IN (SELECT value FROM json_each(?)) AND {held} "
             "ORDER BY c.last_active_at DESC, c.id ASC LIMIT ? OFFSET ?",
-            (device, _WRITING_ONLY, limit, offset),
+            (device, _WRITING_ONLY, *params, limit, offset),
         )
 
     async def remove_device(self, device_id: str) -> bool:

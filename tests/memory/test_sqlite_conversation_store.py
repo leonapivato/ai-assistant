@@ -44,9 +44,11 @@ from ai_assistant.core.types import (
     SendOutcome,
     Sight,
     SightMode,
+    SightReader,
 )
 from ai_assistant.memory import conversation_store
 from ai_assistant.memory._episode_format import CONVERSATION_RECORD_FORMAT
+from ai_assistant.memory._home_columns import stored_home
 from ai_assistant.memory.conversation_store import SqliteConversationStore, _run_to_completion
 from ai_assistant.testing.cancellation import (
     ResourceLog,
@@ -1414,7 +1416,7 @@ _INCOMPATIBLE_SHAPES: dict[str, str] = {
     "format9": "UPDATE episode_record_format SET version = 9",
     "format10": "UPDATE episode_record_format SET version = 10",
     "format11": "UPDATE episode_record_format SET version = 11",
-    "newer": "UPDATE episode_record_format SET version = 16",
+    "newer": "UPDATE episode_record_format SET version = 17",
     "malformed": "ALTER TABLE episode_record_format RENAME COLUMN version TO invalid",
 }
 
@@ -1897,7 +1899,8 @@ def test_the_set_a_change_was_recorded_under_is_found_without_walking_messages(
     raw = sqlite3.connect(path)
     try:
         plan = raw.execute(
-            "EXPLAIN QUERY PLAN " + conversation_store._DEVICE_CHANGES_SQL, (0, 10)
+            "EXPLAIN QUERY PLAN " + conversation_store._DEVICE_CHANGES_SQL.format(held="1"),
+            (0, 10),
         ).fetchall()
     finally:
         raw.close()
@@ -2071,8 +2074,11 @@ def _keep_only(store: ConversationStore, sight: Sight) -> None:
     The ``KeepOnly`` the shared suite asks of each implementation, in SQL on the store's
     own connection, each row judged in Python by :meth:`~ai_assistant.core.types.Sight.sees`
     over the home its columns hold, so the store's own condition is what the obligation
-    tests. ``sqlite_sequence`` is left as it is, so the stream's head and every issued
-    number stand (ADR-0383 §8:5).
+    tests. A conversation's deletion is judged by the home its own row carries, whether
+    or not its conversation stands (ADR-0389 §3:2). Every device row goes (ADR-0383
+    §3:3), save for the owner's sight, which keeps "my devices" and the device rows of
+    each conversation kept (ADR-0389 §2:1). ``sqlite_sequence`` is left as it is, so the
+    stream's head and every issued number stand (ADR-0383 §8:5).
     """
     assert isinstance(store, SqliteConversationStore)
     conn = store._conn
@@ -2082,9 +2088,18 @@ def _keep_only(store: ConversationStore, sight: Sight) -> None:
     ).fetchall():
         if sight.sees(RecordHome(kind=kind, id=ident)):
             continue
-        for table in ("messages", "taken_in", "conversation_devices", "chat_changes"):
+        for table in ("messages", "taken_in", "conversation_devices"):
             conn.execute(f"DELETE FROM {table} WHERE conversation_id = ?", (conversation_id,))  # noqa: S608 — a constant
+        conn.execute(
+            "DELETE FROM chat_changes WHERE conversation_id = ? AND kind != 'conversation_deleted'",
+            (conversation_id,),
+        )
         conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+    for seq, kind, ident in conn.execute(
+        "SELECT seq, home_kind, home_id FROM chat_changes WHERE kind = 'conversation_deleted'"
+    ).fetchall():
+        if not sight.sees(stored_home(kind, ident)):
+            conn.execute("DELETE FROM chat_changes WHERE seq = ?", (seq,))
     for conversation_id, position, kind, ident in conn.execute(
         "SELECT conversation_id, position, home_kind, home_id FROM messages"
     ).fetchall():
@@ -2099,15 +2114,18 @@ def _keep_only(store: ConversationStore, sight: Sight) -> None:
             key,
         )
     conn.execute(
-        "DELETE FROM chat_changes WHERE kind = 'devices_changed' OR conversation_id IS NULL "
-        "OR conversation_id NOT IN (SELECT id FROM conversations)"
+        "DELETE FROM chat_changes WHERE kind != 'conversation_deleted' "
+        "AND conversation_id IS NOT NULL "
+        "AND conversation_id NOT IN (SELECT id FROM conversations)"
     )
-    conn.execute(
-        "UPDATE chat_changes SET devices = '[]' "
-        "WHERE kind IN ('conversation_started', 'conversation_deleted')"
-    )
-    conn.execute("DELETE FROM conversation_devices")
-    conn.execute("DELETE FROM chat_devices")
+    if sight.reader is not SightReader.OWNERS_ACT:
+        conn.execute("DELETE FROM chat_changes WHERE kind = 'devices_changed'")
+        conn.execute(
+            "UPDATE chat_changes SET devices = '[]' "
+            "WHERE kind IN ('conversation_started', 'conversation_deleted')"
+        )
+        conn.execute("DELETE FROM conversation_devices")
+        conn.execute("DELETE FROM chat_devices")
     conn.execute("COMMIT")
 
 

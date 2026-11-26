@@ -19,7 +19,9 @@ upgrades it in place: never refuse it (ADR-0326 §5:1), drop nothing (§4:4), re
 every record as that release did, and write the owner's domain into every conversation
 and every message the file holds, the deleted message's marker and the deleted
 conversation's tombstone included, whoever the works that wrote them were for (ADR-0383
-§5:1), moving no other byte. No device row, change or bookkeeping row gains a home (§3).
+§5:1), moving no other byte. No device row or bookkeeping row gains a home (§3), and of
+the change stream a conversation's deletion alone, by the next label's upgrade, chained
+after this one (ADR-0389 §3:3, ADR-0326 §4:5).
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from ai_assistant.memory._episode_format import (
     CAME_THROUGH_CONVERSATION_RECORD_FORMAT,
     CONVERSATION_RECORD_FORMAT,
     CONVERSATION_RECORD_FORMATS,
+    HOMED_CONVERSATION_RECORD_FORMAT,
     inspect_existing,
 )
 from ai_assistant.memory.conversation_store import SqliteConversationStore
@@ -190,7 +193,10 @@ async def test_the_upgrade_writes_the_home_and_moves_nothing_else(legacy: Path) 
     """ADR-0326 §4:4, ADR-0383 §5:1: only the conversations' and the messages' rows change.
 
     Each gains the owner's domain, the deleted conversation's tombstone and the deleted
-    message's marker included; the label row moves; nothing else does.
+    message's marker included; the label row moves. The next label's upgrade, chained
+    after this one, gives the change stream the two columns and the deletion of
+    ``conv-gone``, whose row stands, that row's home, the owner's (ADR-0389 §3:3);
+    nothing else moves.
     """
     before = _tables(legacy)
     _open(legacy).close()
@@ -198,12 +204,22 @@ async def test_the_upgrade_writes_the_home_and_moves_nothing_else(legacy: Path) 
 
     assert set(after) == set(before)
     for name, (columns, rows) in before.items():
-        if name in {*_HOMED, "episode_record_format"}:
+        if name in {*_HOMED, "chat_changes", "episode_record_format"}:
             continue
         assert after[name] == (columns, rows), name
     for name in _HOMED:
         columns, rows = before[name]
         assert after[name] == ((*columns, *_HOME_COLUMNS), [(*row, *_OWNERS) for row in rows])
+    columns, rows = before["chat_changes"]
+    kind = columns.index("kind")
+    assert any(row[kind] == "conversation_deleted" for row in rows)
+    assert after["chat_changes"] == (
+        (*columns, *_HOME_COLUMNS),
+        [
+            (*row, *(_OWNERS if row[kind] == "conversation_deleted" else (None, None)))
+            for row in rows
+        ],
+    )
     assert after["episode_record_format"] == (("version",), [(CONVERSATION_RECORD_FORMAT,)])
 
 
@@ -272,12 +288,14 @@ async def test_deleting_a_message_keeps_its_home_with_the_marker(legacy: Path) -
 
 
 async def test_an_older_build_refuses_the_upgraded_file(legacy: Path) -> None:
-    """ADR-0326 §5:3: the previous release opens 12 to 14, so it refuses the file at 15."""
+    """ADR-0326 §5:3: the previous release opens 12 to 14, so it refuses the upgraded file."""
     _open(legacy).close()
 
     with pytest.raises(IncompatibleStateError):
         inspect_existing(
-            str(legacy), accepted=CONVERSATION_RECORD_FORMATS - {CONVERSATION_RECORD_FORMAT}
+            str(legacy),
+            accepted=CONVERSATION_RECORD_FORMATS
+            - {HOMED_CONVERSATION_RECORD_FORMAT, CONVERSATION_RECORD_FORMAT},
         )
 
 

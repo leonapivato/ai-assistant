@@ -268,7 +268,7 @@ CLAIMED_CONVERSATION_RECORD_FORMAT: Final[int] = 13
 #: (ADR-0326 §5:3).
 CAME_THROUGH_CONVERSATION_RECORD_FORMAT: Final[int] = 14
 
-#: The conversation store's own label, the one this build writes. It advances to 15 for
+#: The conversation store's label for ADR-0383 §5:1's record. It advances to 15 for
 #: ADR-0383 §5:1's record: each conversation and each message gains its home
 #: (ADR-0386 §4:1, §4:2), as the ``home_kind`` and ``home_id`` columns of its
 #: ``conversations`` and ``messages`` tables, holding a ``RecordHome`` and the closed
@@ -277,7 +277,17 @@ CAME_THROUGH_CONVERSATION_RECORD_FORMAT: Final[int] = 14
 #: holds, a deleted message's marker included, whatever the works that wrote them were
 #: for (ADR-0383 §5:1); an older build, which serves 12 to 14, refuses a file at 15
 #: (ADR-0326 §5:3).
-CONVERSATION_RECORD_FORMAT: Final[int] = 15
+HOMED_CONVERSATION_RECORD_FORMAT: Final[int] = 15
+
+#: The conversation store's own label, the one this build writes. It advances to 16 for
+#: ADR-0389 §3:1's record: a conversation's deletion in the change stream carries its
+#: conversation's home, as the ``home_kind`` and ``home_id`` columns of its
+#: ``chat_changes`` table, set on a ``conversation_deleted`` row alone (ADR-0326 §2:3).
+#: A file at 15 is upgraded in place by adding the columns and writing into every
+#: deletion it holds its conversation row's home where that row stands, and the owner's
+#: domain where it does not (ADR-0389 §3:3); an older build, which serves 12 to 15,
+#: refuses a file at 16 (ADR-0326 §5:3).
+CONVERSATION_RECORD_FORMAT: Final[int] = 16
 
 #: The conversation store's labels a build opens: its own, and each it upgrades from,
 #: in order (ADR-0326 §4:5, §5:1).
@@ -286,6 +296,7 @@ CONVERSATION_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
         EPISODE_RECORD_FORMAT,
         CLAIMED_CONVERSATION_RECORD_FORMAT,
         CAME_THROUGH_CONVERSATION_RECORD_FORMAT,
+        HOMED_CONVERSATION_RECORD_FORMAT,
         CONVERSATION_RECORD_FORMAT,
     }
 )

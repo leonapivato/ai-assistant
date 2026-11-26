@@ -59,6 +59,7 @@ from ai_assistant.core.types import (
     SendOutcome,
     Sight,
     SightMode,
+    SightReader,
     TranscriptMessage,
 )
 from ai_assistant.testing.cancellation import held_at_its_first_await, settle
@@ -286,9 +287,13 @@ class KeepOnly(Protocol):
 
     Each implementation's own: every conversation, and every message or marker, whose
     home ``sight`` does not see is removed as though never written, with what is kept
-    under it, the bookkeeping about it and the changes naming it; every device row goes
+    under it, the bookkeeping about it and the changes naming it; a conversation's
+    deletion is removed where ``sight`` does not see the home the deletion carries,
+    whether or not its conversation stands (ADR-0389 §3:2). Every device row goes
     (§3:3), so a conversation's start is recorded with no devices, a deletion keeps no
-    reader and no change sets devices; a deletion whose conversation is gone goes (§5:3).
+    reader and no change sets devices, **save for a sight**
+    :meth:`~ai_assistant.core.types.Sight.of_owners_act` **made**, for which "my devices"
+    and the device rows of each conversation kept stay as they were (ADR-0389 §2:1).
     Every number the store issued stays as it was (§8:5): the positions, the sequence
     numbers and the change stream's head. Decided record by record by
     :meth:`~ai_assistant.core.types.Sight.sees`, the one predicate, and never by the
@@ -3967,8 +3972,11 @@ class ConversationStoreContract:
         """ADR-0385 §3:5: bound to the owner's sight, a store withholds in either mode.
 
         §9:3's obligation, with the bound store built in ``mode``: it answers every call
-        in the battery as the same store holding only what the owner's sight sees, in
-        the counting build too, and writes no ``sight_counted`` event (ADR-0383 §11:1).
+        in the battery as the same store holding only what the owner's sight sees, with
+        "my devices" and the device rows of each conversation it holds (ADR-0389 §2,
+        §7), its devices listings, changes and device changes, pages and snapshots
+        included, in the counting build too, and writes no ``sight_counted`` event
+        (ADR-0383 §11:1).
         """
         sight = _OWNERS_ACTS[act]
         bound_store, _ = await self._sight_pair(sight_store_factory, mode)
@@ -4060,6 +4068,220 @@ class ConversationStoreContract:
             ("get", "run", 1)
         ]
 
+    # --- the device rows the owner's sight holds (ADR-0389 §2) ----------------------
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    @pytest.mark.parametrize("act", list(_OWNERS_ACTS))
+    async def test_the_owners_sight_holds_the_device_rows_of_what_it_holds(
+        self, sight_store_factory: SightStoreFactory, act: str, mode: SightMode
+    ) -> None:
+        """ADR-0389 §2:1, §2:3: "my devices" as unbound, and the devices of each it holds.
+
+        ``my_devices`` is the unbound set; ``conversation_devices`` the unbound set of a
+        conversation it holds and ``None`` for one it does not; ``device_conversations``
+        the unbound listing narrowed to the conversations it holds; and ``changes``
+        carries the change to "my devices" and the devices a start recorded.
+        """
+        sight = _OWNERS_ACTS[act]
+        store, _ = await self._sight_pair(sight_store_factory, mode)
+        bound = store.bound(sight)
+        assert await bound.my_devices() == await store.my_devices() == (_PHONE, _WATCH)
+        held = set()
+        for one in [*_SIGHT_CONVERSATIONS, _NEVER]:
+            if await bound.get(one) is None:
+                assert await bound.conversation_devices(one) is None, one
+            else:
+                held.add(one)
+                devices = await store.conversation_devices(one)
+                assert devices
+                assert await bound.conversation_devices(one) == devices, one
+        assert held, "the sight holds a conversation"
+        for device in ("phone", "watch", "laptop", "never"):
+            listed = await store.device_conversations(device)
+            assert await bound.device_conversations(device) == [
+                one for one in listed if one.conversation.id in held
+            ], device
+        changes = (await bound.changes(after=0, limit=1000)).changes
+        mine = [
+            one.devices
+            for one in changes
+            if isinstance(one, DevicesChangedChange) and one.conversation_id is None
+        ]
+        assert mine == [(_PHONE, _WATCH)]
+        started = [one for one in changes if isinstance(one, ConversationStartedChange)]
+        assert {one.conversation_id for one in started} == held
+        assert all(one.devices for one in started)
+        if act == "from-none":
+            assert held == {_A, _B}
+            assert await bound.device_conversations("laptop") != []
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_the_owners_sight_snapshots_the_newest_messages_it_holds(
+        self, sight_store_factory: SightStoreFactory, keep_only: KeepOnly, mode: SightMode
+    ) -> None:
+        """ADR-0389 §2:3: a change adding a reader carries the newest messages it holds.
+
+        A conversation of the owner's holds the owner's messages and the shared things'
+        in turn, more than a snapshot's worth of each, one of the owner's deleted; a
+        device added to it is given, bound to the owner's sight from the owner's domain,
+        the newest ``CHAT_SNAPSHOT_ENTRIES`` of the owner's, the marker among them, the
+        sight applied before the limit, as the same store holding only those gives it.
+        """
+        sight = _OWNERS_ACTS["from-the-owners-domain"]
+        total = 2 * CHAT_SNAPSHOT_ENTRIES + 6
+        made = []
+        for store_mode in (mode, SightMode.WITHHOLD):
+            store = sight_store_factory(store_mode, now=MovableClock(), new_id=ScriptedIds(["s"]))
+            await store.set_my_devices([_PHONE])
+            await store.start(home=RecordHome.owners())
+            for index in range(total):
+                home = RecordHome.owners() if index % 2 == 0 else RecordHome.shared()
+                await store.append_message(
+                    "s", _homed(MessageAuthor.USER, home, f"m-{index}", device="phone")
+                )
+            assert await store.delete_message("s", total - 1) is True
+            await store.set_conversation_devices("s", [_PHONE, _LAPTOP])
+            await store.append_message("s", _said("after", message_id="m-after"))
+            made.append(store)
+        bound_store, holding_only = made
+        keep_only(holding_only, sight)
+        calls = [
+            _named("device_changes", "laptop", after=0),
+            _named("device_changes", "laptop", after=0, limit=1),
+            _named("device_changes", "phone", after=0),
+        ]
+        await assert_answers_alike(bound_store.bound(sight), holding_only, calls)
+        added = [
+            one
+            for one in (await bound_store.bound(sight).device_changes("laptop", after=0)).changes
+            if one.snapshot
+        ]
+        assert len(added) == 1
+        snapshot = added[0].snapshot
+        assert snapshot is not None
+        positions = [one.position for one in snapshot]
+        owners = list(range(1, total + 1, 2))
+        assert positions == owners[-CHAT_SNAPSHOT_ENTRIES:]
+        assert isinstance(snapshot[-1], DeletedMessage)
+
+    # --- a conversation's deletion keeps its home (ADR-0389 §3) ---------------------
+
+    async def _deletions(
+        self, factory: SightStoreFactory, mode: SightMode
+    ) -> tuple[ConversationStore, MovableClock]:
+        """Two conversations of each home, one of each stamped and one of each reclaimable.
+
+        ``del-owners`` starts on "my devices", the phone and the watch, and is then set to
+        the phone and the laptop, so the watch read it once; ``del-owners`` and
+        ``del-shared`` are stamped, and ``rec-owners`` and ``rec-shared`` hold no message,
+        so a reclaim, the implementation's own retention past, drops them.
+        """
+        clock = MovableClock()
+        store = factory(mode, now=clock, new_id=ScriptedIds(list(_DELETIONS)))
+        await store.set_my_devices([_PHONE, _WATCH])
+        for one in _DELETIONS.values():
+            await store.start(home=one)
+        await store.set_conversation_devices("del-owners", [_PHONE, _LAPTOP])
+        clock.advance(_MINUTE)
+        assert await store.stamp_deleted("del-owners") is True
+        assert await store.stamp_deleted("del-shared") is True
+        return store, clock
+
+    @staticmethod
+    async def _deleted(store: ConversationStore) -> set[str]:
+        """The conversations whose deletion ``store`` gives back."""
+        return {
+            one.conversation_id
+            for one in await _all_changes(store)
+            if isinstance(one, ConversationDeletedChange)
+        }
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    @pytest.mark.parametrize("sight_name", [*SIGHTS, *_OWNERS_ACTS])
+    async def test_a_deletion_is_held_by_its_home_before_and_after_its_row_is_dropped(
+        self, sight_store_factory: SightStoreFactory, sight_name: str, mode: SightMode
+    ) -> None:
+        """ADR-0389 §3:1, §3:2: a deletion is given back where the sight sees its home.
+
+        For every sight, before and after ``drop_if_eligible`` removes a stamped
+        conversation's row, and for a reclaim, which records the deletion and drops the
+        row in one step: given back where the sight sees the conversation's home and
+        withheld where it does not, by the one predicate; in the counting build, a
+        sight other than the owner's answers as unbound.
+        """
+        sight = _SIGHTS_AND_OWNERS_ACTS[sight_name]
+        withholds = mode is SightMode.WITHHOLD or sight.reader is SightReader.OWNERS_ACT
+        store, clock = await self._deletions(sight_store_factory, mode)
+        bound = store.bound(sight)
+
+        def seen(names: set[str]) -> set[str]:
+            return {one for one in names if not withholds or sight.sees(_DELETIONS[one])}
+
+        stamped = {"del-owners", "del-shared"}
+        assert await self._deleted(store) == stamped
+        assert await self._deleted(bound) == seen(stamped)
+        clock.advance(31 * _DAY)
+        for one in _DELETIONS:
+            assert await store.drop_if_eligible(one) is True, one
+        assert await store.get("rec-owners") is None
+        assert await self._deleted(store) == set(_DELETIONS)
+        assert await self._deleted(bound) == seen(set(_DELETIONS))
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_a_dropped_deletion_reaches_every_device_that_read_it_for_the_owner(
+        self, sight_store_factory: SightStoreFactory, mode: SightMode
+    ) -> None:
+        """ADR-0389 §7: bound to the owner's sight, after the drop, every reader is told.
+
+        The watch read ``del-owners`` before it was set to the phone and the laptop, and
+        is still reached by its deletion after the row is gone, as are the phone and the
+        laptop; a reclaimed conversation's deletion reaches the devices it started on.
+        From the shared things the owner's deletions reach no device, and a store bound
+        to a work's, a producer's or a run's sight reaches none at all (§4:1).
+        """
+        store, clock = await self._deletions(sight_store_factory, mode)
+        clock.advance(31 * _DAY)
+        for one in _DELETIONS:
+            assert await store.drop_if_eligible(one) is True, one
+        owners = store.bound(_OWNERS_ACTS["from-none"])
+        shared = store.bound(_OWNERS_ACTS["from-the-shared-things"])
+
+        async def told(bound: ConversationStore, device: str) -> set[str]:
+            return {
+                one.conversation_id
+                for one in await _seen_by(bound, device)
+                if isinstance(one, ConversationDeletedChange)
+            }
+
+        assert await told(owners, "watch") == set(_DELETIONS)
+        assert await told(owners, "phone") == set(_DELETIONS)
+        assert await told(owners, "laptop") == {"del-owners"}
+        assert await told(store, "watch") == set(_DELETIONS)
+        assert await told(shared, "watch") == {"del-shared", "rec-shared"}
+        assert await told(shared, "laptop") == set()
+        if mode is SightMode.WITHHOLD:
+            for sight in SIGHTS.values():
+                assert await _seen_by(store.bound(sight), "watch") == []
+
+    async def test_a_dropped_deletion_is_counted_by_the_home_it_carries(
+        self, sight_store_factory: SightStoreFactory
+    ) -> None:
+        """ADR-0389 §7, ADR-0383 §11:1: a deletion is counted by its own home, never none.
+
+        Counting, a store bound to a run over the shared things gives back every change,
+        and counts each of the owner's deletions as of another home, after the rows are
+        gone; only the change to "my devices" counts as having none.
+        """
+        store, clock = await self._deletions(sight_store_factory, SightMode.COUNT)
+        clock.advance(31 * _DAY)
+        for one in _DELETIONS:
+            assert await store.drop_if_eligible(one) is True, one
+        with structlog.testing.capture_logs() as events:
+            page = await store.bound(SIGHTS["run-over-the-shared-things"]).changes(after=0)
+        assert len(page.changes) == 5
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert [(one["given"], one["other_home"], one["no_home"]) for one in counted] == [(5, 2, 1)]
+
 
 # --- the history and the battery of ADR-0383 §9:3's obligation ---------------------
 
@@ -4069,6 +4291,17 @@ _SIGHT_CONVERSATIONS: tuple[str, ...] = (_A, _B, _C, _D, _E)
 
 #: An id no conversation carries.
 _NEVER = "conv-never"
+
+#: The conversations of the deletion cases, each with the home it is started in.
+_DELETIONS: Final[dict[str, RecordHome]] = {
+    "del-owners": RecordHome.owners(),
+    "del-shared": RecordHome.shared(),
+    "rec-owners": RecordHome.owners(),
+    "rec-shared": RecordHome.shared(),
+}
+
+#: Every sight the suite binds by name: ADR-0383 §9:3's and the owner's.
+_SIGHTS_AND_OWNERS_ACTS: Final[dict[str, Sight]] = {**SIGHTS, **_OWNERS_ACTS}
 
 #: The effect records the history's assistant messages are claimed under, and one never.
 _SIGHT_EFFECTS: tuple[str, ...] = ("effect-a2", "effect-a3", "effect-b4", "effect-never")

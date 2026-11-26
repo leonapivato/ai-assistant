@@ -23,12 +23,14 @@ from conversation_store_contract import (
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
+    ConversationDeletedChange,
     ConversationStartedChange,
     DevicesChangedChange,
     MessageAddedChange,
     MessageDeletedChange,
     RecordHome,
     SightMode,
+    SightReader,
 )
 from ai_assistant.testing import FakeConversationStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite, settle
@@ -242,11 +244,15 @@ def _keep_only(store: ConversationStore, sight: Sight) -> None:
 
     The ``KeepOnly`` the shared suite asks of each implementation, written against the
     fake's own state: every conversation and every message or marker ``sight`` does not
-    see goes, with its bookkeeping, claims and changes; every device row goes, a start
-    is recorded with no devices and a deletion with no readers; a deletion of a
-    conversation no longer held goes. The counter is left as it is (ADR-0383 §8:5).
+    see goes, with its bookkeeping, claims and changes; a deletion goes where ``sight``
+    does not see the home kept beside it, whether or not its conversation stands
+    (ADR-0389 §3:2). Every device row goes, a start is recorded with no devices and a
+    deletion with no readers (ADR-0383 §3:3), save for the owner's sight, which keeps "my
+    devices" and the device rows of each conversation kept (ADR-0389 §2:1). The counter
+    is left as it is (ADR-0383 §8:5).
     """
     assert isinstance(store, FakeConversationStore)
+    owners = sight.reader is SightReader.OWNERS_ACT
     for conversation_id, conversation in list(store._conversations.items()):
         if not sight.sees(conversation.home):
             del store._conversations[conversation_id]
@@ -257,11 +263,13 @@ def _keep_only(store: ConversationStore, sight: Sight) -> None:
                 _forget_message(store, conversation_id, position)
     store._changes[:] = [
         one.model_copy(update={"devices": ()})
-        if isinstance(one, ConversationStartedChange)
+        if isinstance(one, ConversationStartedChange) and not owners
         else one
         for one in store._changes
-        if _kept(store, one)
+        if _kept(store, one, sight)
     ]
+    if owners:
+        return
     store._shared.my_devices = ()
     for conversation_id in store._devices:
         store._devices[conversation_id] = ()
@@ -281,10 +289,13 @@ def _forget_message(store: FakeConversationStore, conversation_id: str, position
         del claimed[claim]
 
 
-def _kept(store: FakeConversationStore, change: ChatChange) -> bool:
+def _kept(store: FakeConversationStore, change: ChatChange, sight: Sight) -> bool:
     """Whether a store holding only what is left would have recorded ``change``."""
-    if isinstance(change, DevicesChangedChange):
-        return False
+    if isinstance(change, ConversationDeletedChange):
+        return sight.sees(store._deleted_homes.get(change.seq))
+    owners = sight.reader is SightReader.OWNERS_ACT
+    if isinstance(change, DevicesChangedChange) and (not owners or change.conversation_id is None):
+        return owners
     conversation_id = change.conversation_id
     if conversation_id not in store._conversations:
         return False

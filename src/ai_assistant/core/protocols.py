@@ -8000,7 +8000,25 @@ class ConversationStore(Protocol):
         by nothing else (§7:3), applied before it orders, limits, pages or counts. It
         holds a conversation whose home ``sight`` sees and, within it, each message
         whose own home ``sight`` sees, a deleted message's marker by the home it keeps;
-        it holds no device row (§3:3), and no record with no home (§5:3).
+        and no record with no home (§5:3), nor the device rows of a conversation with
+        none (ADR-0389 §4:3).
+
+        **Device rows** carry no home ("my devices", a conversation's devices, and each
+        set the change stream records with them). Bound to a sight
+        :meth:`~ai_assistant.core.types.Sight.of_owners_act` made, the store holds, beside
+        the records that sight sees, "my devices" and, for each conversation it holds,
+        that conversation's devices and each set the change stream recorded for it, as
+        the unbound store holds them, and no device row of a conversation it does not
+        hold (ADR-0389 §2:1). Bound to a work's, a producer's or a run's sight, it holds
+        no device row (§3:3, ADR-0389 §4:1).
+
+        **A conversation's deletion carries its conversation's home**, written in the
+        step that records it, by :meth:`stamp_deleted` and by :meth:`drop_if_eligible`'s
+        reclaim alike, kept in the store alone and never changed (ADR-0389 §3:1): a bound
+        store holds the deletion where ``sight`` sees that home, whether or not the
+        conversation's row still stands, and never reads it from the conversation's
+        row; a stored deletion with no home, or one it cannot read, it does not hold
+        (§3:2, §3:4).
 
         * A conversation it does not hold is, for every member naming it, one never
           started: :meth:`get`'s and :meth:`transcript`'s ``None``,
@@ -8022,13 +8040,25 @@ class ConversationStore(Protocol):
           ``NO_SUCH_REPLY``, the refusal a reply to a position never held gets
           (§4:8). :meth:`conversations_awaiting` lists a conversation only for a
           message it holds.
-        * :meth:`changes` gives back a change only where it names a conversation the
-          store holds and, for a message's addition or deletion, a message it holds; a
-          change to a set of devices never, a conversation's start with no devices, and
-          the deletion of a conversation since dropped never, its home being held by no
-          row any more. :meth:`my_devices` gives ``()``, :meth:`conversation_devices`
-          ``()`` for a conversation it holds, :meth:`device_conversations` an empty
-          page, and :meth:`device_changes` no change, each device reached by none.
+        * :meth:`changes` gives back a conversation's start where it holds the
+          conversation, a message's addition or deletion where it holds the conversation
+          and the message, and a conversation's deletion where it holds the deletion, as
+          above, restricted to ``conversation_ids`` as unbound. Bound to the owner's
+          sight it also gives back every change to "my devices" and each change setting
+          the devices of a conversation it holds, and a start with its devices
+          (ADR-0389 §2:2); bound to any other sight, a change to a set of devices never,
+          and a start with no devices.
+        * **Bound to the owner's sight** (ADR-0389 §2:3), :meth:`my_devices` gives the
+          set; :meth:`conversation_devices` the set of a conversation it holds and
+          ``None`` for one it does not; :meth:`device_conversations` the conversations
+          it holds that the device reads, each with its access, ordered and paged as
+          :meth:`recent`; and :meth:`device_changes` the changes it holds that reach the
+          device, judged against the sets as recorded, a change adding the device as a
+          reader carrying the newest messages it holds at or below that change, a
+          deleted one as its marker. **Bound to any other sight**, :meth:`my_devices`
+          gives ``()``, :meth:`conversation_devices` ``()`` for a conversation it holds,
+          :meth:`device_conversations` an empty page, and :meth:`device_changes` no
+          change, each device reached by none (§3:3, ADR-0389 §4:1).
         * **What counts writes answers alike bound or not** (§8:5): a message's
           position and a change's sequence number are issued by the one store-wide
           counter each, gaps where records it does not hold sit included, and a page's
@@ -8048,8 +8078,9 @@ class ConversationStore(Protocol):
         event to the hub's log alone, carrying
         :class:`~ai_assistant.core.types.SightCount`'s numbers and codes: how many
         records the read gave back (the conversations it presents, each message or
-        marker by the home it would be withheld by, and each device row or change
-        reaching a device by one, as having no home), how many ``sight`` would have
+        marker by the home it would be withheld by, a conversation's deletion by the
+        home it carries, and each device row or change reaching a device by one, as
+        having no home), how many ``sight`` would have
         withheld by reason, and the reader's kind and bounds. It carries no record's
         text and no identifier.
 
