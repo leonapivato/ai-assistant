@@ -7,11 +7,20 @@ in ``test_scheduled_tidy_up.py`` and ``test_story_tidy_up.py``, the matters pass
 
 from __future__ import annotations
 
-import asyncio
 from datetime import timedelta
 
 from ai_assistant.core.types import RecordHome
 from ai_assistant.orchestration.upkeep import RECONSIDERED, UPKEEP_DOMAINS, FiringBudget
+
+
+class _Clock:
+    """A monotonic clock the case moves by hand."""
+
+    def __init__(self) -> None:
+        self.at = 100.0
+
+    def __call__(self) -> float:
+        return self.at
 
 
 def test_a_hub_with_one_person_has_two_domains_the_owners_first() -> None:
@@ -24,31 +33,42 @@ def test_the_reconsideration_tends_the_owners_domain_alone() -> None:
     assert RecordHome.owners() == RECONSIDERED
 
 
-async def test_a_budget_no_run_started_is_never_spent() -> None:
+def test_a_budget_no_run_started_is_never_spent() -> None:
     """A firing whose runs find nothing to do spends none of its budget."""
-    budget = FiringBudget(timedelta(microseconds=1))
+    clock = _Clock()
+    budget = FiringBudget(timedelta(seconds=1), clock=clock)
 
-    await asyncio.sleep(0.01)
+    clock.at += 10
 
     assert budget.spent() is False
 
 
-async def test_a_started_budget_is_spent_once_its_time_has_passed() -> None:
-    budget = FiringBudget(timedelta(milliseconds=5))
+def test_a_started_budget_is_spent_once_its_time_has_passed() -> None:
+    clock = _Clock()
+    budget = FiringBudget(timedelta(seconds=1), clock=clock)
     budget.start()
-    assert budget.spent() is False
 
-    await asyncio.sleep(0.02)
+    clock.at += 0.5
+    assert budget.spent() is False
+    clock.at += 0.5
+    assert budget.spent() is True
+
+
+def test_a_later_run_starting_the_budget_does_not_move_it() -> None:
+    """The firing's runs share one budget: the second run's start leaves the first's."""
+    clock = _Clock()
+    budget = FiringBudget(timedelta(seconds=1), clock=clock)
+    budget.start()
+    clock.at += 2
+
+    budget.start()
 
     assert budget.spent() is True
 
 
-async def test_a_later_run_starting_the_budget_does_not_move_it() -> None:
-    """The firing's runs share one budget: the second run's start leaves the first's."""
-    budget = FiringBudget(timedelta(milliseconds=5))
-    budget.start()
-    await asyncio.sleep(0.02)
+async def test_with_no_clock_it_measures_on_the_running_loop() -> None:
+    budget = FiringBudget(timedelta(0))
 
+    assert budget.spent() is False
     budget.start()
-
     assert budget.spent() is True

@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Final
 from ai_assistant.core.types import RecordHome
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import timedelta
 
 __all__ = ["RECONSIDERED", "UPKEEP_DOMAINS", "FiringBudget"]
@@ -60,23 +61,29 @@ class FiringBudget:
     nothing never starts it.
     """
 
-    __slots__ = ("_budget", "_deadline")
+    __slots__ = ("_budget", "_clock", "_deadline")
 
-    def __init__(self, budget: timedelta) -> None:
+    def __init__(self, budget: timedelta, *, clock: Callable[[], float] | None = None) -> None:
         """Hold the firing's budget, not yet started.
 
         Args:
             budget: How long the firing's runs may spend, together, once one of them
                 has found something to do.
+            clock: A monotonic clock in seconds; the running event loop's when
+                ``None``, as each job's run measured its budget before.
         """
         self._budget = budget
+        self._clock = clock
         self._deadline: float | None = None
+
+    def _time(self) -> float:
+        return asyncio.get_running_loop().time() if self._clock is None else self._clock()
 
     def start(self) -> None:
         """Start the budget, unless a run of this firing already started it."""
         if self._deadline is None:
-            self._deadline = asyncio.get_running_loop().time() + self._budget.total_seconds()
+            self._deadline = self._time() + self._budget.total_seconds()
 
     def spent(self) -> bool:
         """Whether the budget has started and its time has passed."""
-        return self._deadline is not None and asyncio.get_running_loop().time() >= self._deadline
+        return self._deadline is not None and self._time() >= self._deadline
