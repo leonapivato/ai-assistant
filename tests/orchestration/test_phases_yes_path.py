@@ -360,11 +360,15 @@ class _Hub:
             phases=self.phases,
             # Understanding is shown the candidate stories' short views (ADR-0300 §6).
             story_candidates=StoryCandidates(
-                stories=self.stories, memory=self.memory, limit=5, lines=3, notes=2, episodes=2
+                stores=bound_stores(self.memory, self.stories),
+                limit=5,
+                lines=3,
+                notes=2,
+                episodes=2,
             )
             if stories_shown
             else None,
-            story_links=StoryLinksStage(stories=self.stories, memory=self.memory)
+            story_links=StoryLinksStage(stores=bound_stores(self.memory, self.stories))
             if stories_shown
             else None,
             telegram=telegram,

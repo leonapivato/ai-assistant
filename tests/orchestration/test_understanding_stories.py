@@ -31,7 +31,7 @@ from story_support import (
     memory_of,
     story,
 )
-from understanding_support import Container, Rendered, TextAsStructured
+from understanding_support import OWNERS_SIGHT, Container, Rendered, TextAsStructured, bound_stores
 
 from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.types import (
@@ -341,18 +341,24 @@ async def test_a_spoken_pass_with_a_pending_owner_note_is_told_nothing_of_notes(
     )
     window = (episode("a-1"),)
     assembler = StoryCandidates(
-        stories=stories, memory=await memory_of(*window), limit=5, lines=3, notes=2, episodes=2
+        stores=bound_stores(await memory_of(*window), stories),
+        limit=5,
+        lines=3,
+        notes=2,
+        episodes=2,
     )
     spoken = FakeModelProvider(_proposal())
     bounded = FakeModelProvider(_proposal())
 
     await _understand(
         spoken,
-        stories=await assembler.assemble(window, audience=UNBOUNDED),
+        stories=await assembler.assemble(window, sight=OWNERS_SIGHT, audience=UNBOUNDED),
         episodes=None,
         audience=UNBOUNDED,
     )
-    await _understand(bounded, stories=await assembler.assemble(window, audience=BOUNDED))
+    await _understand(
+        bounded, stories=await assembler.assemble(window, sight=OWNERS_SIGHT, audience=BOUNDED)
+    )
 
     (view,) = _matters(spoken)
     assert [one.name for one in view.tags if one.name == "note"] == []

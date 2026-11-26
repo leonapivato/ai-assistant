@@ -110,11 +110,24 @@ another home is the story store's to refuse, in its own file.
 placed for the owner alone, planning can still write notes and change stories (ADR-0307
 §6:5); only a move or a split is held to members alone there, as above.
 
+**Through the work's sight** (ADR-0383 §7:5, §7:7, §9:1). Every call but the tidy-up, and
+the hub's check before authorizing, reads and writes through the stores
+:class:`~ai_assistant.orchestration.bound_stores.BoundStores` binds to the sight of the
+work it runs in, read off that work and never made (§9:2). A story or an episode that
+sight does not see is one the stores do not hold: a call naming it is told what a call
+naming one never written is told (§8:2), and a write changing a story the bound store
+does not give back is refused as one to a story it does not hold (§7:5). A call run
+outside any work has no sight, reads nothing and is not done. **The tidy-up apart**: it
+runs in a task of its own that inherits no work's state, so no work's sight reaches it,
+and it reads the story it is handed and this activation's episode unbound, as it always
+has, until the lane that gives a work's tidy-up its own sight (ADR-0383 §6:8).
+
 **It logs stage and code-owned reason only**, never a note or a story (ADR-0275 §8).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -147,7 +160,7 @@ from ai_assistant.core.types import (
     ToolResult,
     home_may_be_written,
 )
-from ai_assistant.orchestration.activation_state import active_state
+from ai_assistant.orchestration.activation_state import active_state, work_sight
 from ai_assistant.orchestration.remembering import EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT
 from ai_assistant.orchestration.stories import (
     episode_address,
@@ -164,10 +177,12 @@ if TYPE_CHECKING:
         FrozenJson,
         ProposedCall,
         RecordHome,
+        Sight,
         StoryHeader,
         StoryOutcome,
         ToolCall,
     )
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
 
 __all__ = [
@@ -778,6 +793,19 @@ def _activation_of_episode(episode_id: str) -> str | None:
     return activation or None
 
 
+@dataclass(frozen=True, slots=True)
+class _Held:
+    """The stores one story call reads and writes, bound to its work's sight (§7:7).
+
+    Attributes:
+        stories: The story store every call writes.
+        memory: The memory store an activation member's episode is read in.
+    """
+
+    stories: Bound[StoryStore]
+    memory: Bound[MemoryStore]
+
+
 class StoryCalls:
     """Run planning's story calls against the story store (ADR-0306 §3:3).
 
@@ -789,20 +817,33 @@ class StoryCalls:
     """
 
     def __init__(
-        self, *, stories: StoryStore, memory: MemoryStore, tidy_up: StoryTidyUp | None = None
+        self,
+        *,
+        stores: BoundStores,
+        stories: StoryStore,
+        memory: MemoryStore,
+        tidy_up: StoryTidyUp | None = None,
     ) -> None:
         """Wire the runner to the stores it writes and reads, and to the tidy-up.
 
         Args:
-            stories: The story store every call writes.
-            memory: The memory store an activation member's episode is checked in
-                before a create or a link (ADR-0289 §4).
+            stores: The holder giving the story store every call but the tidy-up writes,
+                and the memory store an activation member's episode is checked in before
+                a create or a link (ADR-0289 §4), each bound to the sight of the work
+                the call runs in (ADR-0383 §7:7).
+            stories: The story store a tidy-up call reads the story it names in,
+                **unbound**: the tidy-up runs in a task that inherits no work's state,
+                so no work's sight reaches it (ADR-0307 §7:2), and the sight
+                ADR-0383 §6:8 gives it is a later lane's.
+            memory: The memory store a tidy-up call reads this activation's episode in,
+                unbound, for the same reason.
             tidy_up: The tidy-up operation, the one the deployment holds, so at most
                 one run is on a story at a time (ADR-0300 §5:10); ``None`` where none
                 is wired, and a tidy-up call is then not done.
         """
-        self._stories = stories
-        self._memory = memory
+        self._stores = stores
+        # Unbound, handed to the parameters marked `Bound` by the tidy-up call alone.
+        self._tidy_reads = _Held(stories=stories, memory=memory)
         self._tidy_up = tidy_up
 
     async def run(self, call: ToolCall) -> ToolResult:
@@ -843,29 +884,55 @@ class StoryCalls:
         return ToolResult(outcome=ToolOutcome.SUCCEEDED)
 
     async def _dispatch(self, call: ToolCall) -> None:
-        """Run the call its capability names; a capability no story call has is not done."""
+        """Run the call its capability names; a capability no story call has is not done.
+
+        Every call but the tidy-up reads and writes through the stores bound to the
+        sight of the work it runs in (ADR-0383 §7:7); the tidy-up reads as it always has.
+        """
         capability = str(call.request.tool.capability)
         parameters = call.request.parameters
-        if capability == START_STORY_CAPABILITY:
-            await self._start(call)
-        elif capability == NOTE_STORY_CAPABILITY:
-            await self._note(parameters)
-        elif capability in {LINK_STORY_CAPABILITY, UNLINK_STORY_CAPABILITY}:
-            await self._membership(parameters, link=capability == LINK_STORY_CAPABILITY)
-        elif capability == TIDY_STORY_CAPABILITY:
+        if capability == TIDY_STORY_CAPABILITY:
             await self._tidy(parameters)
-        elif capability in _REORGANISING:
-            await self._reorganise(capability, parameters)
-        elif capability == GROUP_STORY_CAPABILITY:
-            await self._group(parameters)
-        else:
+            return
+        if capability not in _BOUND_CALLS:
             raise _NotDone(
                 ToolFailureKind.INVALID_REQUEST, "not a story call", reason="not_a_story_call"
             )
+        held = self._held(self._sight())
+        if capability == START_STORY_CAPABILITY:
+            await self._start(held, call)
+        elif capability == NOTE_STORY_CAPABILITY:
+            await self._note(held, parameters)
+        elif capability in {LINK_STORY_CAPABILITY, UNLINK_STORY_CAPABILITY}:
+            await self._membership(held, parameters, link=capability == LINK_STORY_CAPABILITY)
+        elif capability in _REORGANISING:
+            await self._reorganise(held, capability, parameters)
+        else:
+            await self._group(held, parameters)
+
+    def _held(self, sight: Sight) -> _Held:
+        """The stores a call reads and writes, bound to ``sight`` (ADR-0383 §7:7)."""
+        return _Held(stories=self._stores.stories(sight), memory=self._stores.memory(sight))
+
+    @staticmethod
+    def _sight() -> Sight:
+        """The sight of the work this call runs in, read and never made (ADR-0383 §9:2).
+
+        A call run outside any work has none: no store is read for it (§6:3), and it is
+        not done, writing nothing.
+        """
+        try:
+            return work_sight()
+        except RuntimeError:
+            raise _NotDone(
+                ToolFailureKind.INTERNAL,
+                "no work is running, so no story is read or written for it",
+                reason="no_work",
+            ) from None
 
     # --- the calls ---
 
-    async def _start(self, call: ToolCall) -> None:
+    async def _start(self, held: _Held, call: ToolCall) -> None:
         """Start a story with this activation and its first notes (ADR-0300 §10:3)."""
         parameters = call.request.parameters
         notes = _first_notes(parameters.get(NOTES_ARGUMENT))
@@ -874,21 +941,21 @@ class StoryCalls:
         activation = self._activation(parameters)
         outside = self._mark(parameters)
         inside = _optional_text(parameters, INSIDE_ARGUMENT)
-        larger = None if inside is None else await self._current(inside)
+        larger = None if inside is None else await self._current(held, inside)
         own = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
         home = self._home()
-        await self._episode_held(own)
+        await self._episode_held(held, own)
         if home_may_be_written(home):
             # A home no write may carry is the store's to refuse first (ADR-0383 §2:3).
-            await self._same_home([own], home)
-        created = await self._stories.create(
+            await self._same_home(held, [own], home)
+        created = await held.stories.create(
             [own], home=home, actor=StoryActor.PLANNING, trigger=activation
         )
         if created.story_id is None:
             raise _refused("the story store refused the start")
         started = str(created.story_id)
         try:
-            await self._started(started, notes, activation, outside=outside, larger=larger)
+            await self._started(held, started, notes, activation, outside=outside, larger=larger)
         except (_NotDone, StoryStoreError, MemoryStoreError, ValueError) as exc:
             # The story exists, so the start happened, though not whole: never reported
             # as not done, which the duplicate backstop would let an identical start
@@ -896,8 +963,9 @@ class StoryCalls:
             msg = "a story was started, but its first notes or its place were not all written"
             raise StartUnfinishedError(msg) from exc
 
-    async def _started(
+    async def _started(  # noqa: PLR0913 — the stores, the story, its notes, the activation, the mark and its place
         self,
+        held: _Held,
         started: str,
         notes: Sequence[FrozenJson],
         activation: str,
@@ -907,7 +975,7 @@ class StoryCalls:
     ) -> None:
         """Write a started story's first notes, then place it inside the larger one."""
         for note in notes:
-            written = await self._stories.append_note(
+            written = await held.stories.append_note(
                 started,
                 str(note),
                 author=StoryNoteAuthor.PLANNING,
@@ -917,7 +985,7 @@ class StoryCalls:
             if written.note is None:
                 raise _refused("a first note was refused")
         if larger is not None:
-            linked = await self._stories.link(
+            linked = await held.stories.link(
                 larger,
                 [StoryMember(kind=StoryMemberKind.STORY, id=started)],
                 actor=StoryActor.PLANNING,
@@ -926,12 +994,12 @@ class StoryCalls:
             if linked.story_id is None:
                 raise _refused("the story was not placed inside the larger one")
 
-    async def _note(self, parameters: Mapping[str, FrozenJson]) -> None:
+    async def _note(self, held: _Held, parameters: Mapping[str, FrozenJson]) -> None:
         """Write a note by ``planning`` on a story, with its mark (ADR-0303 §9:3)."""
-        story = await self._current(_text(parameters, STORY_ARGUMENT))
+        story = await self._current(held, _text(parameters, STORY_ARGUMENT))
         note = _text(parameters, NOTE_ARGUMENT)
         activation = self._activation(parameters)
-        written = await self._stories.append_note(
+        written = await held.stories.append_note(
             story,
             note,
             author=StoryNoteAuthor.PLANNING,
@@ -941,7 +1009,9 @@ class StoryCalls:
         if written.note is None:
             raise _refused("the story store refused the note")
 
-    async def _membership(self, parameters: Mapping[str, FrozenJson], *, link: bool) -> None:
+    async def _membership(
+        self, held: _Held, parameters: Mapping[str, FrozenJson], *, link: bool
+    ) -> None:
         """Link a member into a story, or unlink one from it (ADR-0300 §10:3, ADR-0303 §9:1).
 
         The member is the story or the activation the call names, or this activation
@@ -949,18 +1019,18 @@ class StoryCalls:
         (ADR-0289 §4); an unlinked one's is not, since a member whose episode is
         forgotten may still be removed.
         """
-        header = await self._current_header(_text(parameters, STORY_ARGUMENT))
+        header = await self._current_header(held, _text(parameters, STORY_ARGUMENT))
         story = str(header.story_id)
         activation = self._activation(parameters)
-        member = await self._member(parameters, activation)
+        member = await self._member(held, parameters, activation)
         if link:
-            await self._episode_held(member)
-            await self._same_home([member], header.home)
-            outcome = await self._stories.link(
+            await self._episode_held(held, member)
+            await self._same_home(held, [member], header.home)
+            outcome = await held.stories.link(
                 story, [member], actor=StoryActor.PLANNING, trigger=activation
             )
         else:
-            outcome = await self._stories.unlink(
+            outcome = await held.stories.unlink(
                 story, [member], actor=StoryActor.PLANNING, trigger=activation
             )
         if outcome.story_id is None:
@@ -979,11 +1049,16 @@ class StoryCalls:
         so the domain is read off this activation's episode, which the hub fills and
         which carries the home its work gives (ADR-0383 §4:1, §4:6). An episode not held,
         or of a home no write may carry, leaves the tidy-up not done, writing nothing.
+
+        **Read unbound** (ADR-0383 §6:8): no work's sight reaches the task it runs in, so
+        the story and the episode are read as they always were, and what it is handed is
+        the story's id as it stands through its merges and the home its episode carries.
         """
         if self._tidy_up is None:
             raise _NotDone(ToolFailureKind.UNAVAILABLE, "no tidy-up is wired", reason="no_tidy_up")
-        header = await self._current_header(_text(parameters, STORY_ARGUMENT))
-        tends = await self._work_home(self._activation(parameters))
+        reads = self._tidy_reads
+        header = await self._current_header(reads, _text(parameters, STORY_ARGUMENT))
+        tends = await self._work_home(reads, self._activation(parameters))
         if header.home != tends:
             # Judged here first: a run already on the story answers busy before it reads
             # the domain it is handed, which would report a story of another domain done.
@@ -1000,34 +1075,40 @@ class StoryCalls:
                 reason=f"tidy_up_{outcome.result.value}",
             )
 
-    async def _reorganise(self, capability: str, parameters: Mapping[str, FrozenJson]) -> None:
+    async def _reorganise(
+        self, held: _Held, capability: str, parameters: Mapping[str, FrozenJson]
+    ) -> None:
         """Move, merge or split, as the store does each in one transaction (ADR-0303 §9:1)."""
         activation = self._activation(parameters)
         if capability == MERGE_STORY_CAPABILITY:
-            outcome = await self._merge(parameters, activation)
+            outcome = await self._merge(held, parameters, activation)
         elif capability == MOVE_STORY_CAPABILITY:
-            outcome = await self._move(parameters, activation)
+            outcome = await self._move(held, parameters, activation)
         else:
-            outcome = await self._split(parameters, activation)
+            outcome = await self._split(held, parameters, activation)
         if outcome.story_id is None:
             raise _store_refused(outcome)
 
-    async def _merge(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryOutcome:
+    async def _merge(
+        self, held: _Held, parameters: Mapping[str, FrozenJson], activation: str
+    ) -> StoryOutcome:
         """Merge one story into another; every note goes with it (ADR-0303 §6:3).
 
         The story absorbed is named as it is, never followed: one merged since is refused
         as merged, so a repeat changes nothing (ADR-0303 §9's table).
         """
         absorbed = _text(parameters, STORY_ARGUMENT)
-        into = await self._current(_text(parameters, INTO_ARGUMENT))
-        return await self._stories.merge(
+        into = await self._current(held, _text(parameters, INTO_ARGUMENT))
+        return await held.stories.merge(
             absorbed, into, actor=StoryActor.PLANNING, trigger=activation
         )
 
-    async def _move(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryOutcome:
+    async def _move(
+        self, held: _Held, parameters: Mapping[str, FrozenJson], activation: str
+    ) -> StoryOutcome:
         """Move activation members, notes, or both, to another story (ADR-0303 §6)."""
-        source = await self._current(_text(parameters, STORY_ARGUMENT))
-        going_to = await self._current_header(_text(parameters, TO_ARGUMENT))
+        source = await self._current(held, _text(parameters, STORY_ARGUMENT))
+        going_to = await self._current_header(held, _text(parameters, TO_ARGUMENT))
         target = str(going_to.story_id)
         episodes = _episode_members(parameters)
         notes = _note_ids(parameters)
@@ -1039,51 +1120,53 @@ class StoryCalls:
                 "a move goes from one story to another; these are one story now",
                 reason="same_story",
             )
-        await self._same_home(episodes, going_to.home)
-        return await self._stories.move(
+        await self._same_home(held, episodes, going_to.home)
+        return await held.stories.move(
             source, target, episodes, actor=StoryActor.PLANNING, trigger=activation, notes=notes
         )
 
-    async def _split(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryOutcome:
+    async def _split(
+        self, held: _Held, parameters: Mapping[str, FrozenJson], activation: str
+    ) -> StoryOutcome:
         """Split members off a story into a new one, with the notes named (ADR-0303 §6)."""
-        split_from = await self._current_header(_text(parameters, STORY_ARGUMENT))
+        split_from = await self._current_header(held, _text(parameters, STORY_ARGUMENT))
         source = str(split_from.story_id)
-        members = [*_episode_members(parameters), *await self._story_members(parameters)]
+        members = [*_episode_members(parameters), *await self._story_members(held, parameters)]
         notes = _note_ids(parameters)
         if not members:
             raise _malformed("a split names the episodes or the stories that leave")
         # The new story takes the home of the story it is split from, in the store.
-        await self._same_home(members, split_from.home)
-        return await self._stories.split(
+        await self._same_home(held, members, split_from.home)
+        return await held.stories.split(
             source, members, actor=StoryActor.PLANNING, trigger=activation, notes=notes
         )
 
-    async def _group(self, parameters: Mapping[str, FrozenJson]) -> None:
+    async def _group(self, held: _Held, parameters: Mapping[str, FrozenJson]) -> None:
         """Group stories under a new larger one, then write its first notes (ADR-0303 §9:1).
 
         Everything is checked first, so a group naming a story not there makes nothing;
         once the larger story exists, a first note not written leaves the call
         unfinished, never not done, as a start does (ADR-0306 §5:6, §5:11).
         """
-        held = parameters.get(NOTES_ARGUMENT)
+        given = parameters.get(NOTES_ARGUMENT)
         # An empty list is no first notes, as main read it; anything else must read.
-        empty = held is None or (isinstance(held, list | tuple) and not held)
-        notes = () if empty else _first_notes(held)
+        empty = given is None or (isinstance(given, list | tuple) and not given)
+        notes = () if empty else _first_notes(given)
         if not empty and not notes:
             raise _malformed("a group's first notes are each non-blank text")
         activation = self._activation(parameters)
         outside = self._mark(parameters)
-        grouped = await self._story_members(parameters)
+        grouped = await self._story_members(held, parameters)
         if not grouped:
             raise _malformed("a group names the stories it groups")
-        created = await self._stories.create(
+        created = await held.stories.create(
             grouped, home=self._home(), actor=StoryActor.PLANNING, trigger=activation
         )
         if created.story_id is None:
             raise _store_refused(created)
         try:
             for note in notes:
-                written = await self._stories.append_note(
+                written = await held.stories.append_note(
                     str(created.story_id),
                     str(note),
                     author=StoryNoteAuthor.PLANNING,
@@ -1096,10 +1179,12 @@ class StoryCalls:
             msg = "stories were grouped, but the larger story's first notes were not all written"
             raise StartUnfinishedError(msg) from exc
 
-    async def _story_members(self, parameters: Mapping[str, FrozenJson]) -> list[StoryMember]:
+    async def _story_members(
+        self, held: _Held, parameters: Mapping[str, FrozenJson]
+    ) -> list[StoryMember]:
         """The stories a split or a group names, each followed through its merges, once."""
         named = _ids(parameters, STORIES_ARGUMENT)
-        current = [await self._current(one) for one in named]
+        current = [await self._current(held, one) for one in named]
         return [StoryMember(kind=StoryMemberKind.STORY, id=one) for one in dict.fromkeys(current)]
 
     # --- the hub's check before authorizing ---
@@ -1108,6 +1193,7 @@ class StoryCalls:
         self,
         call: ProposedCall,
         *,
+        sight: Sight,
         owner_records: bool,
         labels: Mapping[str, str] | None = None,
     ) -> str | None:
@@ -1123,6 +1209,8 @@ class StoryCalls:
 
         Args:
             call: The call, its labels already ids.
+            sight: The sight the pass carries, which binds every read the check makes
+                (ADR-0383 §7:7): a story it does not see is one never written.
             owner_records: Whether this pass may show a record placed for the owner
                 alone.
             labels: Each note's label, by its id as text, so the reason names the note
@@ -1134,7 +1222,9 @@ class StoryCalls:
         if call.name not in _CARRYING:
             return None
         try:
-            return await self._checked(call, owner_records=owner_records, labels=labels or {})
+            return await self._checked(
+                self._held(sight), call, owner_records=owner_records, labels=labels or {}
+            )
         except _NotDone as refused:
             return str(refused)
         except StoryStoreError:
@@ -1142,7 +1232,7 @@ class StoryCalls:
             return "the stories could not be read, so the notes named could not be checked"
 
     async def _checked(
-        self, call: ProposedCall, *, owner_records: bool, labels: Mapping[str, str]
+        self, held: _Held, call: ProposedCall, *, owner_records: bool, labels: Mapping[str, str]
     ) -> str | None:
         """:meth:`refusal`'s reason, raising what it could not decide."""
         named = _note_ids(call.arguments)
@@ -1153,19 +1243,20 @@ class StoryCalls:
                 "on this pass a move or a split carries members only: name no notes, "
                 "and every note stays where it is"
             )
-        source = await self._current(_text(call.arguments, STORY_ARGUMENT))
-        missing = await self._not_held(source, named)
+        source = await self._current(held, _text(call.arguments, STORY_ARGUMENT))
+        missing = await self._not_held(held, source, named)
         if not missing:
             return None
         shown = labels.get(str(missing[0]), "a note named")
         return f"{shown} is not on the story it would leave, so nothing was moved"
 
-    async def _not_held(self, story_id: str, named: Sequence[int]) -> list[int]:
+    @staticmethod
+    async def _not_held(held: _Held, story_id: str, named: Sequence[int]) -> list[int]:
         """The notes of ``named`` that ``story_id`` does not hold now, in the order named."""
         wanted = set(named)
         cursor: int | None = None
         while wanted:
-            page = await self._stories.notes(story_id, cursor=cursor, limit=_NOTES_PAGE)
+            page = await held.stories.notes(story_id, cursor=cursor, limit=_NOTES_PAGE)
             if page is None:
                 break
             wanted -= {one.note_id for one in page.notes}
@@ -1208,7 +1299,9 @@ class StoryCalls:
             raise _malformed("a story call writing a note carries the hub's mark")
         return outside
 
-    async def _member(self, parameters: Mapping[str, FrozenJson], activation: str) -> StoryMember:
+    async def _member(
+        self, held: _Held, parameters: Mapping[str, FrozenJson], activation: str
+    ) -> StoryMember:
         """The member an add or a remove names, or this activation where it names none.
 
         ``member`` names a matter or an episode by label, and planning's check puts the id
@@ -1219,7 +1312,7 @@ class StoryCalls:
         if story is not None and episode is not None:
             raise _malformed("an add or a remove names one member: a matter or an episode")
         if story is not None:
-            return StoryMember(kind=StoryMemberKind.STORY, id=await self._current(story))
+            return StoryMember(kind=StoryMemberKind.STORY, id=await self._current(held, story))
         if episode is None:
             return StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
         named = _activation_of_episode(episode)
@@ -1231,23 +1324,28 @@ class StoryCalls:
             )
         return StoryMember(kind=StoryMemberKind.ACTIVATION, id=named)
 
-    async def _episode_held(self, member: StoryMember) -> None:
-        """Refuse an activation member with no episode, before it is linked (ADR-0289 §4)."""
-        if await unknown_activation(self._memory, [member]) is not None:
+    @staticmethod
+    async def _episode_held(held: _Held, member: StoryMember) -> None:
+        """Refuse an activation member with no episode, before it is linked (ADR-0289 §4).
+
+        One the sight does not see is one with no episode (ADR-0383 §8:2).
+        """
+        if await unknown_activation(held.memory, [member]) is not None:
             raise _NotDone(
                 ToolFailureKind.INVALID_REQUEST,
                 "the activation named has no episode",
                 reason="unknown_activation",
             )
 
-    async def _work_home(self, activation: str) -> RecordHome:
+    @staticmethod
+    async def _work_home(held: _Held, activation: str) -> RecordHome:
         """The home this activation's records land in, read off its episode (§4:1, §4:6).
 
         Raises:
             _NotDone: Where the episode is not held, or carries a home no write may
                 carry (ADR-0383 §2:3): nothing is written.
         """
-        record = await self._memory.get(episode_address(activation))
+        record = await held.memory.get(episode_address(activation))
         if not isinstance(record, EpisodicMemory):
             raise _NotDone(
                 ToolFailureKind.INVALID_REQUEST,
@@ -1262,7 +1360,8 @@ class StoryCalls:
             )
         return record.home
 
-    async def _same_home(self, members: Sequence[StoryMember], home: RecordHome) -> None:
+    @staticmethod
+    async def _same_home(held: _Held, members: Sequence[StoryMember], home: RecordHome) -> None:
         """Refuse an activation member whose episode is of another home (ADR-0383 §4:7).
 
         A story names an episode in another store file, so this runner, the code that
@@ -1271,26 +1370,30 @@ class StoryCalls:
         with no record is passed over (:func:`~ai_assistant.orchestration.stories.
         of_another_home`), so a move or a split still carries one forgotten since.
         """
-        if await of_another_home(self._memory, members, home) is not None:
+        if await of_another_home(held.memory, members, home) is not None:
             raise _NotDone(ToolFailureKind.REFUSED, _ANOTHER_HOME, reason="another_home")
 
-    async def _current(self, story_id: str) -> str:
+    @classmethod
+    async def _current(cls, held: _Held, story_id: str) -> str:
         """The story ``story_id`` names as it stands now, followed through its merges."""
-        return str((await self._current_header(story_id)).story_id)
+        return str((await cls._current_header(held, story_id)).story_id)
 
-    async def _current_header(self, story_id: str) -> StoryHeader:
+    @staticmethod
+    async def _current_header(held: _Held, story_id: str) -> StoryHeader:
         """The header of the story ``story_id`` names as it stands now, through its merges.
 
         Followed to the story that is not merged, however many merges that takes: the
         store bounds no chain. A merged story is never a merge target (ADR-0289 §3), so
         a story met twice is the store contradicting itself, raised as its failure
         rather than followed for ever, as ``story_links`` stops on a target named twice.
+        A story the store does not hold, one its sight does not see included, is not
+        there (ADR-0383 §8:2).
         """
         current = story_id
         followed: set[str] = set()
         while current not in followed:
             followed.add(current)
-            header = await self._stories.header(current)
+            header = await held.stories.header(current)
             if header is None:
                 raise _NotDone(
                     ToolFailureKind.INVALID_REQUEST,
@@ -1317,6 +1420,19 @@ def _refused(message: str) -> _NotDone:
 #: The calls :meth:`StoryCalls._reorganise` runs.
 _REORGANISING: Final = frozenset(
     {MOVE_STORY_CAPABILITY, MERGE_STORY_CAPABILITY, SPLIT_STORY_CAPABILITY}
+)
+
+#: Every call that reads and writes through the stores bound to its work's sight: all but
+#: the tidy-up (ADR-0383 §7:7).
+_BOUND_CALLS: Final = frozenset(
+    {
+        START_STORY_CAPABILITY,
+        NOTE_STORY_CAPABILITY,
+        LINK_STORY_CAPABILITY,
+        UNLINK_STORY_CAPABILITY,
+        GROUP_STORY_CAPABILITY,
+        *_REORGANISING,
+    }
 )
 
 

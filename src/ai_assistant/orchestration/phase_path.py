@@ -549,7 +549,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.acting import OwnRecordsAnswer, OwnRecordsCalls
     from ai_assistant.orchestration.activation_state import ActivationState
-    from ai_assistant.orchestration.bound_stores import Bound
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.lookups import EpisodeLookedUp, LookUps
@@ -1404,26 +1404,28 @@ class _Reread:
 class StoryReads:
     """What planning is shown of stories, read under the pass's audience (ADR-0307 §6:1).
 
-    It holds the story store, the memory store the episodes are read from, the plan
-    store the effect records are read from, the short views' reader, and how many of a
-    story's episodes are shown. It reads; it writes nothing and calls no model.
+    It holds the holder that binds the story store, the memory store the episodes are
+    read from and the plan store the effect records are read from to a pass's sight
+    (ADR-0383 §9:1), the short views' reader, and how many of a story's episodes are
+    shown. Every read is of those stores bound to the sight it is handed (§7:7), so a
+    story the sight does not see is one the store does not hold: no view shows it, and a
+    story read naming it is told what one naming a story never written is (§8:2). It
+    reads; it writes nothing and calls no model.
     """
 
     def __init__(
         self,
         *,
-        stories: StoryStore,
-        memory: MemoryStore,
-        plans: PlanStore,
+        stores: BoundStores,
         short_views: StoryCandidates,
         episodes: int,
     ) -> None:
         """Wire the reads to their stores.
 
         Args:
-            stories: The story store.
-            memory: The memory store the stories' episodes are fetched from.
-            plans: The plan store holding the effect records (ADR-0306 §6).
+            stores: The holder giving the story store, the memory store the stories'
+                episodes are fetched from and the plan store holding the effect records
+                (ADR-0306 §6), each bound to a pass's sight; built with a plan store.
             short_views: The short views' reader, understanding's (ADR-0300 §6:2).
             episodes: How many of a story's latest episodes are shown, and of the
                 episodes newer than its summary (#2589's numbers).
@@ -1434,9 +1436,7 @@ class StoryReads:
         if episodes < 1:
             msg = "a story view shows at least one episode"
             raise ValueError(msg)
-        self._stories = stories
-        self._memory = memory
-        self._plans = plans
+        self._stores = stores
         self._short = short_views
         self._episodes = episodes
 
@@ -1444,6 +1444,7 @@ class StoryReads:
         self,
         activation_id: str,
         *,
+        sight: Sight,
         understanding: ActivationUnderstanding | None,
         audience: TurnSupply,
         owner_records: bool,
@@ -1452,6 +1453,7 @@ class StoryReads:
 
         Args:
             activation_id: The activation.
+            sight: The sight the pass carries, which binds every read (ADR-0383 §7:7).
             understanding: Its latest recorded understanding, whose ``story``
                 referents name the stories cited (ADR-0304 §8).
             audience: The pass's audience posture, which admits the episodes.
@@ -1470,17 +1472,18 @@ class StoryReads:
         try:
             belongs = [
                 header.story_id
-                for header in await self._stories.stories_of(member)
+                for header in await self._stores.stories(sight).stories_of(member)
                 if header.merged_into is None
             ]
             views = [
                 view
                 for story_id in belongs
-                if (view := await self._story(story_id, audience, visibility)) is not None
+                if (view := await self._story(story_id, sight, audience, visibility)) is not None
             ]
             shown = {*belongs, *(one.story_id for view in views for one in view.inherited)}
             cited = await self._short.short_views(
                 [story_id for story_id in _cited(understanding) if story_id not in shown],
+                sight=sight,
                 audience=audience,
                 visibility=visibility,
             )
@@ -1490,32 +1493,47 @@ class StoryReads:
         _log.info("planning_stories", stage="planning", stories=len(views), cited=len(cited))
         return PlanningStories(stories=tuple(views), cited=cited)
 
-    async def members(self, story_ids: Sequence[str]) -> dict[str, int]:
+    async def members(self, story_ids: Sequence[str], *, sight: Sight) -> dict[str, int]:
         """How many members each story holds now, by its view's count; one gone is left out.
+
+        One the pass's ``sight`` does not see is one the store does not hold (ADR-0383
+        §8:2), and is left out as one gone is.
 
         Raises:
             StoryStoreError: If the story store cannot be read.
         """
+        stories = self._stores.stories(sight)
         counts: dict[str, int] = {}
         for story_id in story_ids:
-            page = await self._stories.view(story_id, limit=1)
+            page = await stories.view(story_id, limit=1)
             if page is not None:
                 counts[story_id] = page.member_count
         return counts
 
-    async def states(self, story_ids: Sequence[str]) -> dict[str, StorySummaryState | None]:
+    async def states(
+        self, story_ids: Sequence[str], *, sight: Sight
+    ) -> dict[str, StorySummaryState | None]:
         """Each story's summary state as the store holds it now, or ``None`` where it is gone.
 
         What the news compares a matter planning was shown against (ADR-0356 §5:5, as the
-        owner's ruling widens it). It reads the store and nothing else.
+        owner's ruling widens it). It reads the store, bound to the pass's ``sight``, and
+        nothing else: a story the sight does not see is ``None``, as one gone is (ADR-0383
+        §8:2).
 
         Raises:
             StoryStoreError: If the story store cannot be read.
         """
-        return {story_id: await self._stories.current_summary(story_id) for story_id in story_ids}
+        stories = self._stores.stories(sight)
+        return {story_id: await stories.current_summary(story_id) for story_id in story_ids}
 
     async def view(
-        self, story_id: str, *, audience: TurnSupply, owner_records: bool, older_page: int = 1
+        self,
+        story_id: str,
+        *,
+        sight: Sight,
+        audience: TurnSupply,
+        owner_records: bool,
+        older_page: int = 1,
     ) -> PlanningStory | None:
         """One story's full view, read as the views of the activation's stories are.
 
@@ -1528,6 +1546,7 @@ class StoryReads:
 
         Args:
             story_id: The story.
+            sight: The sight the pass carries, which binds every read (ADR-0383 §7:7).
             audience: The pass's audience posture, which admits the episodes.
             owner_records: Whether a record placed for the owner alone may be shown.
             older_page: Which page of the older notes to show, the newest page 1.
@@ -1543,6 +1562,7 @@ class StoryReads:
         """
         return await self._story(
             story_id,
+            sight,
             audience,
             SummaryVisibility(owner_records=owner_records),
             older_page=older_page,
@@ -1551,6 +1571,7 @@ class StoryReads:
     async def _story(
         self,
         story_id: str,
+        sight: Sight,
         audience: TurnSupply,
         visibility: SummaryVisibility,
         *,
@@ -1564,16 +1585,18 @@ class StoryReads:
             StoryStoreError: If the story store cannot be read, or, for a full view, the
                 story was written while its notes were read, every time they were read.
         """
-        state = await self._stories.current_summary(story_id)
+        stories = self._stores.stories(sight)
+        memory = self._stores.memory(sight)
+        state = await stories.current_summary(story_id)
         if state is None:
             return None
         taken_in: tuple[StoryNote, ...] | None = None
         if older_page is not None and visibility.owner_records:
-            state, taken_in = await self._older(story_id, state, visibility)
+            state, taken_in = await self._older(stories, story_id, state, visibility)
             if state is None:
                 return None
         standing = await story_standing(
-            self._stories, self._memory, story_id, reader=audience, plans=self._plans
+            stories, memory, story_id, reader=audience, plans=self._stores.plans(sight)
         )
         parents: list[str] = (
             []
@@ -1584,10 +1607,12 @@ class StoryReads:
                 if related.relation is StoryRelation.PART_OF
             ]
         )
-        inherited = await self._short.short_views(parents, audience=audience, visibility=visibility)
+        inherited = await self._short.short_views(
+            parents, sight=sight, audience=audience, visibility=visibility
+        )
         latest = [] if standing is None else _latest(standing, self._episodes)
         newer = [episode_address(activation) for activation in state.pending_episodes]
-        fetched = await admitted_episodes(self._memory, dict.fromkeys([*newer, *latest]), audience)
+        fetched = await admitted_episodes(memory, dict.fromkeys([*newer, *latest]), audience)
         pending = sorted(
             (record for address in newer if (record := fetched.get(address)) is not None),
             key=lambda record: (record.occurred_at, record.id),
@@ -1622,8 +1647,12 @@ class StoryReads:
             summary_version=None if summary is None else summary.version,
         )
 
+    @staticmethod
     async def _older(
-        self, story_id: str, state: StorySummaryState, visibility: SummaryVisibility
+        stories: Bound[StoryStore],
+        story_id: str,
+        state: StorySummaryState,
+        visibility: SummaryVisibility,
     ) -> tuple[StorySummaryState | None, tuple[StoryNote, ...]]:
         """The notes ``story_id`` holds that are not pending on it, newest first.
 
@@ -1648,14 +1677,14 @@ class StoryReads:
             held: list[StoryNote] = []
             cursor: int | None = None
             while True:
-                page = await self._stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+                page = await stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
                 if page is None:
                     break
                 held.extend(page.notes)
                 if page.next_cursor is None:
                     break
                 cursor = page.next_cursor
-            again = await self._stories.current_summary(story_id)
+            again = await stories.current_summary(story_id)
             if again is None:
                 return None, ()
             if again == state:
@@ -5080,7 +5109,8 @@ class PhasePath:
         if self._story_reads is None or not story_ids:
             return {}
         try:
-            return await self._story_reads.states(story_ids)
+            # ADR-0383 §7:7: read by the sight the work carries.
+            return await self._story_reads.states(story_ids, sight=work_sight())
         except StoryStoreError:
             _log.warning("planning_stories_unreadable", stage="planning")
             return {}
@@ -5090,7 +5120,7 @@ class PhasePath:
         if self._story_reads is None or not story_ids:
             return {}
         try:
-            return await self._story_reads.members(story_ids)
+            return await self._story_reads.members(story_ids, sight=work_sight())
         except StoryStoreError:
             _log.warning("planning_stories_unreadable", stage="planning")
             return {}
@@ -5604,7 +5634,7 @@ class PhasePath:
         refused = []
         for one in planned.calls:
             reason = await self._story_calls.refusal(
-                one.call, owner_records=working.owner_records, labels=notes
+                one.call, sight=work_sight(), owner_records=working.owner_records, labels=notes
             )
             if reason is None:
                 kept.append(one)
@@ -5694,6 +5724,8 @@ class PhasePath:
             return None
         read = await self._story_reads.read(
             working.activation_id,
+            # ADR-0383 §7:7: the views are read by the sight the work carries.
+            sight=work_sight(),
             understanding=given.understanding,
             audience=given.supply,
             owner_records=working.owner_records,

@@ -2303,15 +2303,16 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # same story store and the one memory store, and the stage that records
             # its links there with the actor `understanding`. Wired together, as the
             # engine requires.
+            # Both read and write through the one holder, by the sight each pass carries
+            # (ADR-0383 §7:7, §9:1).
             story_candidates=StoryCandidates(
-                stories=stories,
-                memory=memory,
+                stores=pass_stores,
                 limit=UNDERSTANDING_STORY_CANDIDATES,
                 lines=STORY_SHORT_VIEW_LINES,
                 notes=STORY_SHORT_VIEW_NOTES,
                 episodes=STORY_SHORT_VIEW_EPISODES,
             ),
-            story_links=StoryLinksStage(stories=stories, memory=memory),
+            story_links=StoryLinksStage(stores=pass_stores),
             # ADR-0300 §9:3's matters pass, as ADR-0302 §5 builds it, which the
             # scheduler's `matters_pass` row runs on consolidation's interval. On
             # **consolidation's route**, for the tidy-up's reason: background work over
@@ -3041,17 +3042,23 @@ def _build_phase_path(
             settings.forecast_connection, _forecast_destinations(settings.forecast_origin)
         ),
     )
-    story_calls = StoryCalls(stories=seams.stories, memory=seams.memory, tidy_up=seams.tidy_up)
-    # ADR-0307 §6:1: the story views, over the one story store, memory store and plan
-    # store; a short view is read as understanding's are, at its bounds. The same reads
-    # give a story read its full view (§6:6).
-    story_reads = StoryReads(
+    # Every story call but the tidy-up through the one holder, by the sight of the work it
+    # runs in (ADR-0383 §7:7); the tidy-up reads the stores themselves, as no work's sight
+    # reaches the task it runs in (ADR-0307 §7:2), until its own sight is built (§6:8).
+    story_calls = StoryCalls(
+        stores=seams.pass_stores,
         stories=seams.stories,
         memory=seams.memory,
-        plans=seams.plans,
+        tidy_up=seams.tidy_up,
+    )
+    # ADR-0307 §6:1: the story views, over the one story store, memory store and plan
+    # store, each bound to the pass's sight through the one holder (ADR-0383 §7:7); a
+    # short view is read as understanding's are, at its bounds. The same reads give a
+    # story read its full view (§6:6).
+    story_reads = StoryReads(
+        stores=seams.pass_stores,
         short_views=StoryCandidates(
-            stories=seams.stories,
-            memory=seams.memory,
+            stores=seams.pass_stores,
             limit=UNDERSTANDING_STORY_CANDIDATES,
             lines=STORY_SHORT_VIEW_LINES,
             notes=STORY_SHORT_VIEW_NOTES,

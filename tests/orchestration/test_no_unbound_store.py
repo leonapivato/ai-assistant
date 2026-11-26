@@ -89,14 +89,14 @@ NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
-#: B8c look-ups, stories, the person block and matters,
 #: B8d the plan store's users, authorizing, acting, tasks, approvals and the holders
 #: ADR-0387 names, B9 the observer and the upkeep runs, B10 the owner's own acts
-#: (ADR-0385). A holder more than one lane converts names the last of them. **Only
-#: shrinks.** A holder whose last unbound read is one §7:8, §7:12 or §7:13 names moves
-#: to :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest: the observer's
-#: finding of what is due (§7:12, §7:13), the engine's start and ADR-0384 §2's unchanged
-#: jobs (§7:8).
+#: (ADR-0385); B8b's windows, B8c's stories and B8e's look-ups, person block and matters
+#: are converted, save the parts named here for a later lane. A holder more than one lane
+#: converts names the last of them. **Only shrinks.** A holder whose last unbound read is
+#: one §7:8, §7:12 or §7:13 names moves to :data:`NAMED_BY_THE_DECISION` in the lane that
+#: converts the rest: the observer's finding of what is due (§7:12, §7:13), the engine's
+#: start and ADR-0384 §2's unchanged jobs (§7:8).
 NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "acting.py:ActingStage": "B8d",
     # The work's own episode (B8d, ADR-0387); closing open episodes is §7:8's.
@@ -150,26 +150,27 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     # Its four `fetch_held` calls (`_found`, `_searched`, `_digest_recall`, `_digested`)
     # still pass its unbound memory store to a parameter marked `Bound`: B8d binds them.
     "phase_path.py:PhasePath": "B8d",
-    "phase_path.py:StoryReads": "B8c",
-    # Planning's story calls (B8c) and the engine's story methods (B10).
+    # A work's story calls and story links hand these a store bound to the work's sight
+    # (B8c); the engine's story methods (B10) and the canonical fake engine an unbound one.
     "stories.py:unknown_activation": "B10",
     "stories.py:of_another_home": "B10",
     "stories.py:resolved_view": "B10",
     "stories.py:owner_summary": "B10",
     "stories.py:_all_notes": "B10",
-    "story_calls.py:StoryCalls": "B8c",
-    # The matters pass and the scheduled tidy-up (B9), and a work's tidy-up (B8c).
+    # Every story call reads and writes through the holder by its work's sight (B8c) but
+    # the tidy-up, which runs in a task no work's sight reaches and reads the story and
+    # its episode unbound, handing them to its parameters marked `Bound`: B9 gives a
+    # work's tidy-up its sight (ADR-0383 §6:8).
+    "story_calls.py:StoryCalls": "B9",
+    # The matters pass, the scheduled tidy-up and a work's tidy-up (B9).
     "story_flags.py:read_headers": "B9",
     "story_flags.py:read_log": "B9",
     "story_flags.py:read_records": "B9",
     "story_flags.py:read_versions": "B9",
     "story_flags.py:recorded_decisions": "B9",
     "story_flags.py:reread": "B9",
-    "story_links.py:StoryCandidates": "B8c",
-    "story_links.py:StoryLinksStage": "B8c",
-    "story_links.py:_Writes": "B8c",
-    "story_links.py:admitted_episodes": "B8c",
-    # The phases' story views (B8c) and the engine's story standing (B10).
+    # The phases' story views hand these stores bound to the work's sight (B8c); the
+    # engine's story standing (B10) unbound ones.
     "story_standing.py:story_standing": "B10",
     "story_standing.py:_shown": "B10",
     "story_standing.py:_done": "B10",
@@ -188,7 +189,7 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "writes.py:MemoryWriteStage": "B9",
 }
 
-_LANES: Final = frozenset({"B8c", "B8d", "B9", "B10"})
+_LANES: Final = frozenset({"B8d", "B9", "B10"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
@@ -423,6 +424,21 @@ def test_the_channel_readers_read_a_works_window_through_the_holder_alone() -> N
         for (module, holder), methods in _WINDOW_READS.items()
     }
     assert reaches == {key: {} for key in reaches}
+
+
+def test_the_story_stages_hold_no_store() -> None:
+    """A work's story reads and story calls (milestone 22's B8c) read through the holder."""
+    held = unbound_holders()
+    for converted in (
+        "story_links.py:StoryCandidates",
+        "story_links.py:StoryLinksStage",
+        "story_links.py:_Writes",
+        "story_links.py:admitted_episodes",
+        "phase_path.py:StoryReads",
+        "story_calls.py:_Held",
+    ):
+        assert converted not in held
+        assert converted not in NOT_YET_CONVERTED
 
 
 def test_the_reading_sees_every_shape_a_store_is_held_in(tmp_path: Path) -> None:

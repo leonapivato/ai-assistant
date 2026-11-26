@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, Self, cast
 
 import pytest
 from exchange_support import reported
@@ -24,6 +24,7 @@ from story_support import episode as story_episode
 from story_support import memory_of as story_memory_of
 from structured_support import structured
 from test_activation_state import _admitted
+from understanding_support import OWNERS_SIGHT, bound_stores
 
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
@@ -120,8 +121,8 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from ai_assistant.core.protocols import StoryStore
-    from ai_assistant.core.types import FrozenJson, ToolDefinition
+    from ai_assistant.core.protocols import MemoryStore, StoryStore
+    from ai_assistant.core.types import FrozenJson, Sight, ToolDefinition
 
 _AT: Final = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
 _ACTIVATION: Final = "act-1"
@@ -130,6 +131,15 @@ _EPISODE: Final = f"activation:{_ACTIVATION}"
 
 def _now() -> datetime:
     return _AT
+
+
+def _calls(
+    *, stories: StoryStore, memory: MemoryStore, tidy_up: StoryTidyUp | None = None
+) -> StoryCalls:
+    """The runner over ``stories`` and ``memory``, through the one holder as the root wires it."""
+    return StoryCalls(
+        stores=bound_stores(memory, stories), stories=stories, memory=memory, tidy_up=tidy_up
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -354,7 +364,7 @@ async def test_a_start_and_a_group_mint_their_story_in_the_home_whom_the_work_is
     """ADR-0383 §4:1, ADR-0386 §2:2: the running work's home, the owner's here."""
     stories, memory = await _stores()
     trip = await _story(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
     state = CURRENT_ACTIVATION.get()
     assert state is not None
     assert state.state is not None
@@ -374,7 +384,7 @@ async def test_a_start_in_a_work_whose_home_no_write_may_carry_starts_nothing(
 ) -> None:
     """ADR-0383 §2:3, §4:1, ADR-0386 §6:2: the store refuses it, and nothing is written."""
     stories, memory = await _stores()
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
     monkeypatch.setattr(
         ActivationState, "home", property(lambda _: RecordHome.person("person:sam"))
     )
@@ -388,9 +398,10 @@ async def test_a_start_in_a_work_whose_home_no_write_may_carry_starts_nothing(
 
 
 async def test_a_start_outside_any_work_has_no_home_to_carry_and_starts_nothing() -> None:
-    """ADR-0383 §4:1: a story a call starts takes its work's home, and there is none."""
+    """ADR-0383 §4:1, §6:3: a story a call starts takes its work's home and is read by its
+    work's sight, and there is neither: nothing is read or written."""
     stories, memory = await _stores()
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
     token = CURRENT_ACTIVATION.set(None)
     try:
         result = await calls.run(_call(START_STORY, {NOTES_ARGUMENT: ["A camping trip."]}))
@@ -407,7 +418,7 @@ async def test_a_start_holds_this_activation_its_first_notes_and_sits_inside_a_s
     """ADR-0300 §10:3: the activation's episode joins it; it sits inside the larger one."""
     stories, memory = await _stores()
     summer = await _story(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(
@@ -437,7 +448,7 @@ async def test_a_start_holds_this_activation_its_first_notes_and_sits_inside_a_s
 
 async def test_a_start_inside_a_story_not_there_starts_nothing() -> None:
     stories, memory = await _stores()
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(START_STORY, {NOTES_ARGUMENT: ["A trip."], INSIDE_ARGUMENT: "story:gone"})
@@ -452,7 +463,7 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
     """ADR-0306 §3:1, §5:9: not safe to repeat, so the backstop refuses the second."""
     stories, memory = await _stores()
     plans = FakePlanStore(now=_now)
-    acting = _acting(plans, StoryCalls(stories=stories, memory=memory))
+    acting = _acting(plans, _calls(stories=stories, memory=memory))
     notes: dict[str, FrozenJson] = {NOTES_ARGUMENT: ["A camping trip."]}
 
     first = await acting.act(
@@ -510,6 +521,11 @@ class _FailsAfterCreate:
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
 
+    def bound(self, sight: Sight) -> Self:
+        """This wrapper itself: its fake counts, so a bound read answers as unbound."""
+        del sight
+        return self
+
     async def append_note(self, story_id: str, text: str, **kwargs: Any) -> Any:
         self._notes += 1
         if self._notes == self._note_at:
@@ -545,7 +561,7 @@ async def test_a_start_that_made_its_story_is_never_reported_not_done(
     await memory.add(_episode("activation:act-0"))
     summer = await _story(stories.inner)
     plans = FakePlanStore(now=_now)
-    acting = _acting(plans, StoryCalls(stories=cast("StoryStore", stories), memory=memory))
+    acting = _acting(plans, _calls(stories=cast("StoryStore", stories), memory=memory))
     arguments: dict[str, FrozenJson] = {
         NOTES_ARGUMENT: ["A camping trip.", "Waiting on the reply."],
         INSIDE_ARGUMENT: summer,
@@ -589,7 +605,7 @@ async def test_a_note_is_planning_s_written_during_this_activation_and_marked_by
     stories, memory = await _stores()
     trip = await _story(stories)
     plans = FakePlanStore(now=_now)
-    acting = _acting(plans, StoryCalls(stories=stories, memory=memory))
+    acting = _acting(plans, _calls(stories=stories, memory=memory))
     call = _call(
         NOTE_STORY,
         {STORY_ARGUMENT: trip, NOTE_ARGUMENT: "Next: check the dog policy."}
@@ -618,7 +634,7 @@ async def test_a_note_on_a_merged_story_is_written_where_it_went() -> None:
     trip = await _story(stories)
     larger = await _story(stories, StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION))
     await stories.merge(trip, larger, actor=StoryActor.OWNER)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(_call(NOTE_STORY, {STORY_ARGUMENT: trip, NOTE_ARGUMENT: "noted"}))
 
@@ -628,7 +644,7 @@ async def test_a_note_on_a_merged_story_is_written_where_it_went() -> None:
 
 async def test_a_note_on_a_story_not_there_is_not_done() -> None:
     stories, memory = await _stores()
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(NOTE_STORY, {STORY_ARGUMENT: "story:gone", NOTE_ARGUMENT: "noted"})
@@ -649,7 +665,7 @@ async def test_a_note_follows_a_chain_of_merges_however_long_to_the_story_standi
     chain = [await _story(stories) for _ in range(_LONG_CHAIN + 1)]
     for absorbed, into in pairwise(chain):
         await stories.merge(absorbed, into, actor=StoryActor.OWNER)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(_call(NOTE_STORY, {STORY_ARGUMENT: chain[0], NOTE_ARGUMENT: "noted"}))
 
@@ -674,6 +690,11 @@ class _MergedInALoop:
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
 
+    def bound(self, sight: Sight) -> Self:
+        """This wrapper itself: its fake counts, so a bound read answers as unbound."""
+        del sight
+        return self
+
     async def header(self, story_id: str) -> StoryHeader | None:
         self.headers_read += 1
         assert self.headers_read <= _LONG_CHAIN, "a loop of merges was followed for ever"
@@ -689,10 +710,12 @@ async def test_a_loop_of_merges_is_the_store_s_failure_and_writes_nothing() -> N
     """#2880: a story met twice is not followed again; the call fails as the store failing."""
     stories = _MergedInALoop()
     memory = FakeMemoryStore(now=_now)
-    calls = StoryCalls(stories=cast("StoryStore", stories), memory=memory)
+    calls = _calls(stories=cast("StoryStore", stories), memory=memory)
 
     result = await calls.run(_call(NOTE_STORY, {STORY_ARGUMENT: "story:a", NOTE_ARGUMENT: "noted"}))
-    reason = await calls.refusal(_carrying("move_to_matter", "story:a", ["1"]), owner_records=True)
+    reason = await calls.refusal(
+        _carrying("move_to_matter", "story:a", ["1"]), sight=OWNERS_SIGHT, owner_records=True
+    )
 
     assert result.outcome is ToolOutcome.FAILED
     assert result.failure is not None
@@ -711,7 +734,7 @@ async def test_link_and_unlink_this_activation_another_and_a_story() -> None:
     stories, memory = await _stores()
     trip = await _story(stories)
     inner = await _story(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
     this = StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)
     story = StoryMember(kind=StoryMemberKind.STORY, id=inner)
 
@@ -767,7 +790,7 @@ async def test_a_link_naming_what_cannot_be_linked_links_nothing(
 ) -> None:
     stories, memory = await _stores()
     trip = await _story(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(_call(LINK_STORY, {STORY_ARGUMENT: trip, **arguments}))
 
@@ -782,7 +805,7 @@ async def test_a_link_naming_what_cannot_be_linked_links_nothing(
 async def test_a_link_that_would_make_a_loop_is_refused_by_the_store() -> None:
     stories, memory = await _stores()
     trip = await _story(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(_call(LINK_STORY, {STORY_ARGUMENT: trip, MEMBER_STORY_ARGUMENT: trip}))
 
@@ -810,7 +833,7 @@ async def test_a_tidy_up_writes_the_story_s_version_log() -> None:
         threshold=0.0,
         prompt=default_prompt(STORY_TIDY_UP_PROMPT),
     )
-    calls = StoryCalls(stories=stories, memory=memory, tidy_up=tidy_up)
+    calls = _calls(stories=stories, memory=memory, tidy_up=tidy_up)
 
     result = await calls.run(_call(TIDY_STORY, {STORY_ARGUMENT: trip}))
 
@@ -829,8 +852,8 @@ async def test_a_tidy_up_with_none_wired_or_a_refused_reply_is_not_done() -> Non
     stories, memory = await _stores()
     trip = await _story(stories)
     await stories.append_note(trip, "A camping trip.", author=StoryNoteAuthor.OWNER)
-    unwired = StoryCalls(stories=stories, memory=memory)
-    refusing = StoryCalls(
+    unwired = _calls(stories=stories, memory=memory)
+    refusing = _calls(
         stories=stories,
         memory=memory,
         tidy_up=StoryTidyUp(
@@ -856,7 +879,7 @@ async def test_a_tidy_up_with_none_wired_or_a_refused_reply_is_not_done() -> Non
 
 async def test_a_call_that_is_no_story_call_is_not_done() -> None:
     stories, memory = await _stores()
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
     other = TIDY_STORY.model_copy(update={"id": "other", "capability": "other"})
 
     result = await calls.run(_call(other, {STORY_ARGUMENT: "story:x"}))
@@ -1007,7 +1030,7 @@ async def test_each_reorganising_call_runs_through_the_own_records_seam(
     }
     arguments = by_call[str(tool.capability)]
     plans = FakePlanStore(now=_now)
-    acting = _acting(plans, StoryCalls(stories=stories, memory=memory))
+    acting = _acting(plans, _calls(stories=stories, memory=memory))
 
     acted = await acting.act(
         AuthorizedRound(_ACTIVATION, "round:1", (AuthorizedCall(_call(tool, arguments)),)),
@@ -1031,7 +1054,7 @@ async def test_a_move_carries_the_activations_and_the_notes_it_names() -> None:
     trip, other = await _two_stories(stories)
     goes = await _noted(stories, trip, "Goes.")
     await _noted(stories, trip, "Stays.")
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(
@@ -1059,7 +1082,7 @@ async def test_a_note_move_alone_carries_only_the_note() -> None:
     stories, memory = await _stores()
     trip, other = await _two_stories(stories)
     goes = await _noted(stories, trip, "Goes.")
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(MOVE_STORY, {STORY_ARGUMENT: trip, TO_ARGUMENT: other, NOTES_ARGUMENT: [str(goes)]})
@@ -1080,7 +1103,7 @@ async def test_a_move_naming_a_note_the_story_no_longer_holds_is_refused_whole_b
     goes = await _noted(stories, trip, "Goes.")
     gone = await _noted(stories, trip, "Moved away meanwhile.")
     await stories.move(trip, third, actor=StoryActor.MATTERS_PASS, notes=[gone])
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(
@@ -1115,7 +1138,7 @@ async def test_a_move_naming_nothing_that_can_go_is_not_done(
 ) -> None:
     stories, memory = await _stores()
     trip, other = await _two_stories(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(MOVE_STORY, {STORY_ARGUMENT: trip, TO_ARGUMENT: other, **arguments})
@@ -1133,7 +1156,7 @@ async def test_a_move_from_a_merged_story_is_made_from_where_it_went() -> None:
     trip, other = await _two_stories(stories)
     larger = await _story(stories, _activation_member("act-4"))
     await stories.merge(trip, larger, actor=StoryActor.OWNER)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     moved = await calls.run(
         _call(
@@ -1158,7 +1181,7 @@ async def test_a_merge_carries_everything_and_a_repeat_is_refused_changing_nothi
     stories, memory = await _stores()
     trip, other = await _two_stories(stories)
     await _noted(stories, trip, "Comes along.")
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
     merge = _call(MERGE_STORY, {STORY_ARGUMENT: trip, INTO_ARGUMENT: other})
 
     first = await calls.run(merge)
@@ -1178,7 +1201,7 @@ async def test_a_merge_into_a_merged_story_joins_where_it_went() -> None:
     trip, other = await _two_stories(stories)
     larger = await _story(stories, _activation_member("act-4"))
     await stories.merge(other, larger, actor=StoryActor.OWNER)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(_call(MERGE_STORY, {STORY_ARGUMENT: trip, INTO_ARGUMENT: other}))
 
@@ -1199,7 +1222,7 @@ async def test_a_split_carries_activations_stories_and_the_notes_it_names() -> N
         StoryMember(kind=StoryMemberKind.STORY, id=inner),
     )
     goes = await _noted(stories, trip, "Goes.")
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(
@@ -1231,7 +1254,7 @@ async def test_a_split_naming_no_member_or_a_non_member_is_not_done() -> None:
     """ADR-0303 §9's table: a repeat names members the story no longer holds."""
     stories, memory = await _stores()
     trip, _ = await _two_stories(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     nothing = await calls.run(_call(SPLIT_STORY, {STORY_ARGUMENT: trip, NOTES_ARGUMENT: ["1"]}))
     stranger = await calls.run(
@@ -1251,7 +1274,7 @@ async def test_a_group_puts_the_stories_under_a_new_larger_one_with_its_first_no
     trip, other = await _two_stories(stories)
     absorbed = await _story(stories, _activation_member("act-6"))
     await stories.merge(absorbed, other, actor=StoryActor.OWNER)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(
@@ -1284,7 +1307,7 @@ async def test_a_group_repeated_identically_is_refused_as_already_done() -> None
     stories, memory = await _stores()
     trip, other = await _two_stories(stories)
     plans = FakePlanStore(now=_now)
-    acting = _acting(plans, StoryCalls(stories=stories, memory=memory))
+    acting = _acting(plans, _calls(stories=stories, memory=memory))
     arguments: dict[str, FrozenJson] = {STORIES_ARGUMENT: [trip, other]}
 
     first = await acting.act(
@@ -1314,7 +1337,7 @@ async def test_a_group_that_made_its_story_is_never_reported_not_done() -> None:
     stories = _FailsAfterCreate(note_at=1)
     memory = FakeMemoryStore(now=_now)
     trip = await _story(stories.inner)
-    calls = StoryCalls(stories=cast("StoryStore", stories), memory=memory)
+    calls = _calls(stories=cast("StoryStore", stories), memory=memory)
 
     with pytest.raises(StartUnfinishedError):
         await calls.run(
@@ -1328,7 +1351,7 @@ async def test_a_group_that_made_its_story_is_never_reported_not_done() -> None:
 async def test_a_group_naming_a_story_not_there_makes_nothing() -> None:
     stories, memory = await _stores()
     trip, _ = await _two_stories(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(_call(GROUP_STORY, {STORIES_ARGUMENT: [trip, "story:gone"]}))
 
@@ -1352,14 +1375,17 @@ async def test_the_hub_refuses_a_move_or_a_split_naming_a_note_not_held(name: st
     trip, other = await _two_stories(stories)
     held = await _noted(stories, trip, "Held.")
     elsewhere = await _noted(stories, other, "Elsewhere.")
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
     labels = {str(held): "N1", str(elsewhere): "N2"}
 
     refused = await calls.refusal(
-        _carrying(name, trip, [str(held), str(elsewhere)]), owner_records=True, labels=labels
+        _carrying(name, trip, [str(held), str(elsewhere)]),
+        sight=OWNERS_SIGHT,
+        owner_records=True,
+        labels=labels,
     )
     passed = await calls.refusal(
-        _carrying(name, trip, [str(held)]), owner_records=True, labels=labels
+        _carrying(name, trip, [str(held)]), sight=OWNERS_SIGHT, owner_records=True, labels=labels
     )
 
     assert refused == "N2 is not on the story it would leave, so nothing was moved"
@@ -1376,6 +1402,11 @@ class _PagesCounted:
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
 
+    def bound(self, sight: Sight) -> Self:
+        """This wrapper itself: its fake counts, so a bound read answers as unbound."""
+        del sight
+        return self
+
     async def notes(self, story_id: str, **kwargs: Any) -> Any:
         self.pages_read += 1
         return await self.inner.notes(story_id, **kwargs)
@@ -1387,7 +1418,7 @@ async def _past_one_page() -> tuple[_PagesCounted, StoryCalls, str, list[int]]:
     memory = FakeMemoryStore(now=_now)
     trip = await _story(stories.inner)
     held = [await _noted(stories.inner, trip, f"Note {n}.") for n in range(MAX_STORY_PAGE + 1)]
-    return stories, StoryCalls(stories=cast("StoryStore", stories), memory=memory), trip, held
+    return stories, _calls(stories=cast("StoryStore", stories), memory=memory), trip, held
 
 
 @pytest.mark.parametrize("name", ["move_to_matter", "split_matter"])
@@ -1395,7 +1426,9 @@ async def test_the_hub_accepts_a_note_held_on_the_second_page(name: str) -> None
     """#2882: the check reads the story's notes page by page, past the first."""
     stories, calls, trip, held = await _past_one_page()
 
-    reason = await calls.refusal(_carrying(name, trip, [str(held[-1])]), owner_records=True)
+    reason = await calls.refusal(
+        _carrying(name, trip, [str(held[-1])]), sight=OWNERS_SIGHT, owner_records=True
+    )
 
     assert reason is None
     assert stories.pages_read == 2  # one page more than a page holds
@@ -1410,6 +1443,7 @@ async def test_the_hub_refuses_held_and_missing_notes_after_reading_every_page(n
 
     reason = await calls.refusal(
         _carrying(name, trip, [str(held[-1]), str(held[0]), str(missing)]),
+        sight=OWNERS_SIGHT,
         owner_records=True,
         labels=labels,
     )
@@ -1423,10 +1457,10 @@ async def test_the_hub_checks_the_story_a_merged_one_went_into() -> None:
     trip, other = await _two_stories(stories)
     note = await _noted(stories, trip, "Held.")
     await stories.merge(trip, other, actor=StoryActor.OWNER)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     assert await calls.refusal(
-        _carrying("move_to_matter", trip, [str(note)]), owner_records=True
+        _carrying("move_to_matter", trip, [str(note)]), sight=OWNERS_SIGHT, owner_records=True
     ) is (None)
 
 
@@ -1435,13 +1469,15 @@ async def test_on_an_owner_only_pass_a_move_or_a_split_carries_members_only() ->
     stories, memory = await _stores()
     trip, _ = await _two_stories(stories)
     note = await _noted(stories, trip, "Held.")
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     with_notes = await calls.refusal(
-        _carrying("split_matter", trip, [str(note)]), owner_records=False
+        _carrying("split_matter", trip, [str(note)]), sight=OWNERS_SIGHT, owner_records=False
     )
     members_only = await calls.refusal(
-        _carrying("split_matter", trip, [], episodes=["activation:act-0"]), owner_records=False
+        _carrying("split_matter", trip, [], episodes=["activation:act-0"]),
+        sight=OWNERS_SIGHT,
+        owner_records=False,
     )
 
     assert with_notes is not None
@@ -1458,6 +1494,11 @@ class _Unreadable:
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
 
+    def bound(self, sight: Sight) -> Self:
+        """This wrapper itself: its fake counts, so a bound read answers as unbound."""
+        del sight
+        return self
+
     async def notes(self, story_id: str, **kwargs: Any) -> Any:
         del story_id, kwargs
         msg = "the store could not be read"
@@ -1468,31 +1509,33 @@ async def test_the_hub_check_fails_closed_where_the_stories_cannot_be_read() -> 
     stories = _Unreadable()
     memory = FakeMemoryStore(now=_now)
     trip = await _story(stories.inner)
-    calls = StoryCalls(stories=cast("StoryStore", stories), memory=memory)
+    calls = _calls(stories=cast("StoryStore", stories), memory=memory)
 
-    reason = await calls.refusal(_carrying("move_to_matter", trip, ["1"]), owner_records=True)
+    reason = await calls.refusal(
+        _carrying("move_to_matter", trip, ["1"]), sight=OWNERS_SIGHT, owner_records=True
+    )
 
     assert reason == "the stories could not be read, so the notes named could not be checked"
 
 
 async def test_the_hub_check_passes_every_other_call() -> None:
     stories, memory = await _stores()
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     for call in (
         ProposedCall(call_id="c1", name="note_matter", arguments={STORY_ARGUMENT: "story:x"}),
         _carrying("merge_matters", "story:x", ["1"]),
         _carrying("move_to_matter", "story:x", []),
     ):
-        assert await calls.refusal(call, owner_records=False) is None
+        assert await calls.refusal(call, sight=OWNERS_SIGHT, owner_records=False) is None
 
 
 async def test_the_hub_check_refuses_a_story_not_there_with_the_reason() -> None:
     stories, memory = await _stores()
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     reason = await calls.refusal(
-        _carrying("move_to_matter", "story:gone", ["1"]), owner_records=True
+        _carrying("move_to_matter", "story:gone", ["1"]), sight=OWNERS_SIGHT, owner_records=True
     )
 
     assert reason == "the story named is not there"
@@ -1547,7 +1590,7 @@ async def test_a_group_with_an_empty_list_of_notes_groups_and_writes_none() -> N
     memory = FakeMemoryStore(now=_now)
     await memory.add(_episode(_EPISODE))
     trip = await _story(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(_call(GROUP_STORY, {STORIES_ARGUMENT: [trip], NOTES_ARGUMENT: []}))
 
@@ -1588,7 +1631,7 @@ def _refused_as_another_home(result: ToolResult) -> None:
 async def test_a_start_whose_episode_is_of_another_home_starts_nothing() -> None:
     """ADR-0383 §4:7: the story would be the work's home, its member's episode another."""
     stories, memory = await _stores_with_shared(_EPISODE)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(_call(START_STORY, {NOTES_ARGUMENT: ["A camping trip."]}))
 
@@ -1603,7 +1646,7 @@ async def test_a_link_into_a_story_of_another_home_links_nothing() -> None:
         [_activation_member("act-9")], home=RecordHome.shared(), actor=StoryActor.OWNER
     )
     assert shared.story_id is not None
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(_call(LINK_STORY, {STORY_ARGUMENT: str(shared.story_id)}))
 
@@ -1615,7 +1658,7 @@ async def test_a_link_of_an_episode_of_another_home_links_nothing() -> None:
     """ADR-0383 §4:7: an earlier episode of the shared things into an owner's story."""
     stories, memory = await _stores_with_shared("activation:act-7")
     trip = await _story(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(LINK_STORY, {STORY_ARGUMENT: trip, MEMBER_EPISODE_ARGUMENT: "activation:act-7"})
@@ -1629,7 +1672,7 @@ async def test_a_move_of_an_episode_of_another_home_moves_nothing() -> None:
     """ADR-0383 §4:7: the story moved to is the owner's, the episode the shared things'."""
     stories, memory = await _stores_with_shared("activation:act-0")
     trip, other = await _two_stories(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(
@@ -1650,7 +1693,7 @@ async def test_a_split_of_an_episode_of_another_home_splits_nothing() -> None:
     """ADR-0383 §4:7: the new story takes the owner's story's home; the episode is another."""
     stories, memory = await _stores_with_shared("activation:act-0")
     trip, _ = await _two_stories(stories)
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(SPLIT_STORY, {STORY_ARGUMENT: trip, EPISODES_ARGUMENT: ["activation:act-0"]})
@@ -1669,7 +1712,7 @@ async def test_a_move_still_carries_an_episode_forgotten_since() -> None:
     stories, memory = await _stores()
     trip = await _story(stories, _activation_member("act-0"), _activation_member("act-gone"))
     other = await _story(stories, _activation_member("act-2"))
-    calls = StoryCalls(stories=stories, memory=memory)
+    calls = _calls(stories=stories, memory=memory)
 
     result = await calls.run(
         _call(
@@ -1689,7 +1732,7 @@ async def test_a_move_still_carries_an_episode_forgotten_since() -> None:
 
 
 def _tidying(model: FakeModelProvider, stories: FakeStoryStore, memory: Any) -> StoryCalls:
-    return StoryCalls(stories=stories, memory=memory, tidy_up=_tidy_up_of(model, stories, memory))
+    return _calls(stories=stories, memory=memory, tidy_up=_tidy_up_of(model, stories, memory))
 
 
 def _tidy_up_of(model: FakeModelProvider, stories: FakeStoryStore, memory: Any) -> StoryTidyUp:
@@ -1855,7 +1898,7 @@ async def test_a_tidy_up_of_another_domain_is_not_done_while_a_run_is_on_that_st
     await stories.append_note(story_id, "The boiler.", author=StoryNoteAuthor.OWNER)
     model = _HeldModel(_tidy_reply(["The boiler."]))
     tidy_up = _tidy_up_of(model, stories, memory)
-    calls = StoryCalls(stories=stories, memory=memory, tidy_up=tidy_up)
+    calls = _calls(stories=stories, memory=memory, tidy_up=tidy_up)
     running = asyncio.create_task(tidy_up.run(story_id, tends=RecordHome.shared()))
     await model.entered.wait()
 

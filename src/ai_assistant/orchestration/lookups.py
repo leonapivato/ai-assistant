@@ -693,9 +693,17 @@ class StoryViews(Protocol):
     """
 
     async def view(
-        self, story_id: str, *, audience: TurnSupply, owner_records: bool, older_page: int = 1
+        self,
+        story_id: str,
+        *,
+        sight: Sight,
+        audience: TurnSupply,
+        owner_records: bool,
+        older_page: int = 1,
     ) -> PlanningStory | None:
         """One story's full view, under ``audience``, or ``None`` where it is not held.
+
+        Read through the stores bound to ``sight``, the work's (ADR-0383 §7:7).
 
         It shows the ``older_page``-th page of the story's older notes, newest first,
         where notes may be shown (#2893).
@@ -1043,6 +1051,7 @@ class LookUps:
         try:
             view = await self._views.view(
                 story_id,
+                sight=scope.sight(),
                 audience=scope.audience,
                 owner_records=scope.owner_records,
                 older_page=older_page,

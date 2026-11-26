@@ -13,7 +13,9 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Final
 
+import pytest
 from exchange_support import reported, shown_text, tag
+from story_support import owners_work
 from test_authorizer import _ACTIVATION
 from test_authorizer import _episode as _own_episode
 from test_engine import AT
@@ -44,6 +46,8 @@ from ai_assistant.orchestration.understanding import TranscriptWindow
 from ai_assistant.testing import FakeDiagnosticSink, FakeStoryStore, FakeToolCallingCompleter
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from ai_assistant.core.types import ProposedCall
     from ai_assistant.orchestration.phase_path import PhasePath, PhaseWorking
 
@@ -131,6 +135,15 @@ async def _run(
     return working, completer
 
 
+@pytest.fixture
+def _owners_work() -> Iterator[None]:
+    """A work of the owner's is running, as every pass the phases run is one's: its story
+    reads are read by that work's sight (ADR-0383 §7:7)."""
+    with owners_work():
+        yield
+
+
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_note_a_tidy_up_took_in_is_read_then_moved_by_its_label() -> None:
     """#2893's scenario: the Dana note, taken in by a tidy-up, moved back by its label.
 
@@ -159,6 +172,7 @@ async def test_a_note_a_tidy_up_took_in_is_read_then_moved_by_its_label() -> Non
     assert await _texts(stories, car) == ["Dana is driving us to Porto."]
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_note_on_a_later_page_is_read_then_split_off_by_its_label() -> None:
     """Paging past the first page: the read naming page 2 shows the oldest note.
 
@@ -201,6 +215,7 @@ async def test_a_note_on_a_later_page_is_read_then_split_off_by_its_label() -> N
     assert "The car inspection is due." not in await _texts(stories, trip)
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_on_a_pass_that_may_not_show_owner_records_a_read_shows_no_older_note() -> None:
     """ADR-0307 §6:4, ADR-0305 §4: absent with nothing said, as every story note is."""
     stories = FakeStoryStore(now=lambda: AT)
@@ -227,6 +242,7 @@ async def test_on_a_pass_that_may_not_show_owner_records_a_read_shows_no_older_n
     assert "Dana" not in shown_text(completer.last_call)
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_marked_older_note_a_read_shows_is_named_once_in_authorizings_grounds() -> None:
     """R2/F6: a marked older note read is outside content, counted as a newer one is.
 

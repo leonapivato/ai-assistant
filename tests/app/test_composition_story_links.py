@@ -36,10 +36,13 @@ async def test_the_engine_is_built_with_both_story_pieces_over_its_one_story_sto
         links = engine._story_links
         assert isinstance(candidates, StoryCandidates)
         assert isinstance(links, StoryLinksStage)
-        # One story store: the engine surface's, the candidates' and the stage's.
-        assert candidates._stories is engine._stories
-        assert links._stories is engine._stories
-        assert candidates._memory is engine._memory
+        # One story store: the engine surface's, the candidates' and the stage's, each
+        # read through the one holder every converted stage holds (ADR-0383 §9:1).
+        assert candidates._stores is links._stores
+        assert candidates._stores is engine._windows._stores  # type: ignore[union-attr]
+        assert candidates._stores._stories is engine._stories
+        assert candidates._stores._memory is engine._memory
+        assert candidates._stores._plans is engine._plans
         assert (candidates._limit, candidates._lines, candidates._notes, candidates._episodes) == (
             UNDERSTANDING_STORY_CANDIDATES,
             STORY_SHORT_VIEW_LINES,

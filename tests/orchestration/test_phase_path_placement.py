@@ -15,7 +15,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from story_support import activation, address, episode
+from story_support import activation, address, episode, owners_work
 from test_activation_state import _admitted
 from test_authorizer import _ACTIVATION
 from test_authorizer import _episode as _own_episode
@@ -73,6 +73,8 @@ from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore, FakeToolCallingCompleter
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from ai_assistant.core.types import EpisodicMemory, MemoryRecord
     from ai_assistant.orchestration.disclosure import TurnSupply
 
@@ -133,6 +135,14 @@ def _window_episode(*, stamped: bool) -> EpisodicMemory:
 
 
 # --- the windows, and the pass's audience ----------------------------------------------
+
+
+@pytest.fixture
+def _owners_work() -> Iterator[None]:
+    """A work of the owner's is running, as every pass the phases run is one's: its story
+    reads are read by that work's sight (ADR-0383 §7:7)."""
+    with owners_work():
+        yield
 
 
 async def test_a_stamped_window_record_places_the_episode_on_a_bounded_pass() -> None:
@@ -316,6 +326,7 @@ async def test_a_quick_question_over_nothing_leaves_the_episode_for_anyone() -> 
 # --- what a story view showed --------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_stamped_episode_a_story_view_shows_places_the_episode() -> None:
     """A story view's episodes are memory records the activation was given (§5:10).
 
@@ -350,6 +361,7 @@ async def test_a_stamped_episode_a_story_view_shows_places_the_episode() -> None
     assert state.facts.supplied_withheld
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_stamped_episode_a_storys_full_view_shows_is_held_for_the_freeze() -> None:
     """What a call returned (§5:10): a story read's full view, its episodes included.
 
@@ -389,6 +401,7 @@ async def test_a_stamped_episode_a_storys_full_view_shows_is_held_for_the_freeze
     assert working.supplied.withheld(_BOUNDED)
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_round() -> None:
     """What a call returned is obtained, whatever became of the round's other calls.
 

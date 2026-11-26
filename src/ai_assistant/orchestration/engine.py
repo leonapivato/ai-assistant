@@ -9115,6 +9115,8 @@ class Engine:
         windows = working.windows
         candidates = await self._story_candidates.assemble(
             fetched.episodes or (),
+            # ADR-0383 §7:7: the candidates are read by the sight the pass carries.
+            sight=working.sight,
             audience=working.supply,
             recalled=() if recalled is None else recalled.stories(admitted),
             place=()
@@ -9155,6 +9157,8 @@ class Engine:
                 async with asyncio.timeout_at(working.deadline):
                     decision = await self._story_links.record(
                         understanding.story_links,
+                        # ADR-0383 §7:5, §7:7: read and written by the pass's sight.
+                        sight=working.sight,
                         activation_id=state.activation_id,
                         home=state.home,
                     )

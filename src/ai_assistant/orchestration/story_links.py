@@ -44,6 +44,15 @@ the hub records understanding's own record, and not an action planning chooses (
 Neither is saved with the episode (§12:3): the candidates are the understanding phase's
 part of the working episode, the decision the stage's, and both live for the pass.
 
+**Through the work's sight** (ADR-0383 §7:7, §9:1). Each holds
+:class:`~ai_assistant.orchestration.bound_stores.BoundStores` and no store, and every read
+and write it makes for a pass is of the stores bound to the sight that pass carries, which
+it is handed and never makes (§9:2). So a story or an episode the sight does not see is
+one the stores do not hold: it is no candidate and no view, a link naming it is refused
+as naming a story never written is, and a start holding it judges it as one with no
+record (§7:2, §8:2). In the counting build each read answers as the unbound store does and
+writes its count (§11:1).
+
 **It logs stage and code-owned counts only** — no story id, no note, no line and no
 episode content (ADR-0275 §8).
 """
@@ -78,10 +87,12 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.core.types import (
         RecordHome,
+        Sight,
         StoryNote,
         StorySummaryLine,
         StorySummaryState,
     )
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = [
@@ -219,16 +230,16 @@ class _Read:
 class StoryCandidates:
     """Assemble understanding's candidate stories and their short views (ADR-0300 §6).
 
-    It holds the story store and the memory store, and the four composition-root
-    numbers. It reads the stories of what the windows and recall already chose, and the
-    records of those stories; it searches nothing and calls no model.
+    It holds the holder that binds the story store and the memory store for a pass
+    (ADR-0383 §9:1), and the four composition-root numbers. It reads the stories of what
+    the windows and recall already chose, and the records of those stories, through the
+    stores bound to the sight it is handed; it searches nothing and calls no model.
     """
 
-    def __init__(  # noqa: PLR0913 — the two stores and §6's four numbers
+    def __init__(
         self,
         *,
-        stories: StoryStore,
-        memory: MemoryStore,
+        stores: BoundStores,
         limit: int,
         lines: int,
         notes: int,
@@ -237,8 +248,9 @@ class StoryCandidates:
         """Wire the assembler to its stores and its bounds.
 
         Args:
-            stories: The story store the candidates are read from.
-            memory: The store a candidate's episodes are fetched from.
+            stores: The holder giving the story store the candidates are read from and
+                the memory store their episodes are fetched from, each bound to a
+                pass's sight (ADR-0383 §7:7).
             limit: ``UNDERSTANDING_STORY_CANDIDATES`` (§6:1).
             lines: How many of a summary's first lines a short view takes (§6:2).
             notes: How many of the newest pending notes it takes, at most two.
@@ -253,8 +265,7 @@ class StoryCandidates:
         if max(notes, episodes) > 2:  # noqa: PLR2004 — §6:2's "at most two"
             msg = "a short view takes at most two entries and two episodes (ADR-0300 §6:2)"
             raise ValueError(msg)
-        self._stories = stories
-        self._memory = memory
+        self._stores = stores
         self._limit = limit
         self._lines = lines
         self._notes = notes
@@ -264,6 +275,7 @@ class StoryCandidates:
         self,
         window: Sequence[EpisodicMemory],
         *,
+        sight: Sight,
         audience: TurnSupply,
         recalled: Sequence[str] = (),
         place: Sequence[str] = (),
@@ -273,6 +285,7 @@ class StoryCandidates:
         Args:
             window: The episode window's records as the understanding phase fetched
                 them, in the window's order: already admitted for the pass.
+            sight: The sight the pass carries, which binds every read (ADR-0383 §7:7).
             audience: The pass's audience posture, which decides what of each view
                 may be shown (§6:3, ADR-0303 §3:9, ADR-0304 §4).
             recalled: The stories recall's kept episodes belong to, already in §6:1's
@@ -292,15 +305,18 @@ class StoryCandidates:
             MemoryStoreError: If the episodes cannot be fetched, as the window's own
                 fetch would.
         """
+        stories = self._stores.stories(sight)
         try:
-            chosen = await self._chosen(place, window, recalled)
-            reads = [read for story_id in chosen if (read := await self._read(story_id))]
+            chosen = await self._chosen(stories, place, window, recalled)
+            reads = [read for story_id in chosen if (read := await self._read(stories, story_id))]
         except StoryStoreError:
             _log.warning("story_candidates_unreadable", stage="understanding")
             return Candidates(unreadable=True)
         # ADR-0304 §4: one question about the reader decides every note and the summary.
         visibility = SummaryVisibility(owner_records=admits_owner_placed(audience))
-        views, fetched, held = await self._viewed(reads, audience, visibility)
+        views, fetched, held = await self._viewed(
+            self._stores.memory(sight), reads, audience, visibility
+        )
         _log.info(
             "story_candidates",
             stage="understanding",
@@ -317,6 +333,7 @@ class StoryCandidates:
         self,
         story_ids: Sequence[str],
         *,
+        sight: Sight,
         audience: TurnSupply,
         visibility: SummaryVisibility,
     ) -> tuple[ShortView, ...]:
@@ -332,6 +349,8 @@ class StoryCandidates:
 
         Args:
             story_ids: The stories, in the order they are shown.
+            sight: The sight the reader's pass carries, which binds every read
+                (ADR-0383 §7:7): a story it does not see is one the store does not hold.
             audience: The pass's audience posture, which admits the episodes.
             visibility: Whether the reader may be shown the summary and the notes.
 
@@ -342,14 +361,21 @@ class StoryCandidates:
             StoryStoreError: If the story store cannot be read.
             MemoryStoreError: If the episodes cannot be fetched.
         """
+        stories = self._stores.stories(sight)
         reads = [
-            read for story_id in dict.fromkeys(story_ids) if (read := await self._read(story_id))
+            read
+            for story_id in dict.fromkeys(story_ids)
+            if (read := await self._read(stories, story_id))
         ]
-        views, _, _ = await self._viewed(reads, audience, visibility)
+        views, _, _ = await self._viewed(self._stores.memory(sight), reads, audience, visibility)
         return views
 
     async def _viewed(
-        self, reads: Sequence[_Read], audience: TurnSupply, visibility: SummaryVisibility
+        self,
+        memory: Bound[MemoryStore],
+        reads: Sequence[_Read],
+        audience: TurnSupply,
+        visibility: SummaryVisibility,
     ) -> tuple[tuple[ShortView, ...], tuple[str, ...], dict[str, EpisodicMemory]]:
         """The short views of ``reads``, with the ids fetched for them and what came back.
 
@@ -359,20 +385,24 @@ class StoryCandidates:
         then fetched for their current versions, the predicate applied again.
         """
         chosen_from = await admitted_episodes(
-            self._memory,
+            memory,
             dict.fromkeys(address for read in reads for address in read.addresses()),
             audience,
         )
         latest = [read.latest(chosen_from, episodes=self._episodes) for read in reads]
         fetched = tuple(dict.fromkeys(id_ for ids in latest for id_ in ids))
-        held = await admitted_episodes(self._memory, fetched, audience)
+        held = await admitted_episodes(memory, fetched, audience)
         views = tuple(
             read.view(visibility, ids, held) for read, ids in zip(reads, latest, strict=True)
         )
         return views, fetched, held
 
     async def _chosen(
-        self, place: Sequence[str], window: Sequence[EpisodicMemory], recalled: Sequence[str]
+        self,
+        stories: Bound[StoryStore],
+        place: Sequence[str],
+        window: Sequence[EpisodicMemory],
+        recalled: Sequence[str],
     ) -> list[str]:
         """ADR-0303 §7:9's order: the place window's, the episode window's, recall's, once.
 
@@ -386,15 +416,15 @@ class StoryCandidates:
             if len(chosen) >= self._limit:
                 break
             member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
-            for header in await self._stories.stories_of(member):
+            for header in await stories.stories_of(member):
                 chosen.setdefault(header.story_id)
         for story_id in recalled:
             chosen.setdefault(story_id)
         return list(chosen)[: self._limit]
 
-    async def _read(self, story_id: str) -> _Read | None:
+    async def _read(self, stories: Bound[StoryStore], story_id: str) -> _Read | None:
         """One candidate's summary's first lines and its mark, its notes and members."""
-        state = await self._stories.current_summary(story_id)
+        state = await stories.current_summary(story_id)
         if state is None:
             return None
         summary = state.summary
@@ -404,12 +434,14 @@ class StoryCandidates:
             lines=() if summary is None else summary.lines[: self._lines],
             outside=summary is not None and summary.outside,
             notes=newest,
-            members=await self._members(story_id, state),
+            members=await self._members(stories, story_id, state),
             written=summary is not None,
             summary_version=None if summary is None else summary.version,
         )
 
-    async def _members(self, story_id: str, state: StorySummaryState) -> tuple[str, ...]:
+    async def _members(
+        self, stories: Bound[StoryStore], story_id: str, state: StorySummaryState
+    ) -> tuple[str, ...]:
         """The story's activation members, every one: its latest are chosen by occurrence.
 
         Link order says nothing about when an episode occurred once a merge or a move
@@ -423,7 +455,7 @@ class StoryCandidates:
         members: dict[str, None] = {}
         cursor: int | None = None
         while True:
-            page = await self._stories.view(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+            page = await stories.view(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
             if page is None:
                 break
             members |= dict.fromkeys(
@@ -438,13 +470,14 @@ class StoryCandidates:
 
 
 async def admitted_episodes(
-    memory: MemoryStore, addresses: Iterable[str], audience: TurnSupply
+    memory: Bound[MemoryStore], addresses: Iterable[str], audience: TurnSupply
 ) -> dict[str, EpisodicMemory]:
     """The frozen episodes at ``addresses`` the audience admits, by address.
 
     One ``MemoryStore.get_many``, an open episode left out (ADR-0286 §6) and the
     audience predicate applied (ADR-0282 §2:8), so a reader is shown only what its pass
-    may be shown.
+    may be shown. ``memory`` is bound to the reader's sight (ADR-0383 §7:7), so an
+    episode the sight does not see is left out as one with no record is.
 
     Raises:
         MemoryStoreError: If the episodes cannot be read.
@@ -492,12 +525,16 @@ class StoryLinksDecision:
 class StoryLinksStage:
     """Record an understanding's story links in the story store (ADR-0300 §6:12).
 
-    It holds the story store, and the memory store it reads the homes of the earlier
-    episodes a start would hold from (ADR-0383 §4:7); what it writes, it writes with the
-    actor ``understanding`` and the activation as trigger (ADR-0289 §4:4 as ADR-0300
-    supersedes it). A later lane replaces the stores a stage holds with a holder that
-    gives them for a sight (ADR-0383 §9:1); a memory store held beside the story store is
-    the same kind of thing the stage already does.
+    It holds the holder that binds the story store, and the memory store it reads the
+    homes of the earlier episodes a start would hold from (ADR-0383 §4:7), to the sight
+    each run is handed (§7:7, §9:1); what it writes, it writes through the bound story
+    store with the actor ``understanding`` and the activation as trigger (ADR-0289 §4:4 as
+    ADR-0300 supersedes it).
+
+    **A story the sight does not see is one never written** (§7:5, §8:2). A link naming
+    one is refused by the bound store as a link into a story it does not hold, and an
+    earlier episode it does not see belongs to no story it holds and is judged as one
+    with no record.
 
     **A start holding an episode of another home starts nothing.** The earlier episodes a
     start would hold are named by understanding's output, its ``story_links``, not picked
@@ -514,24 +551,31 @@ class StoryLinksStage:
     whole of the serialization the rule needs.
     """
 
-    def __init__(self, *, stories: StoryStore, memory: MemoryStore) -> None:
-        """Wire the stage to the story store it writes and the memory store it reads.
+    def __init__(self, *, stores: BoundStores) -> None:
+        """Wire the stage to the holder of the stores it writes and reads.
 
         Args:
-            stories: The story store the engine surface writes too.
-            memory: The memory store the earlier episodes' homes are read from.
+            stores: The holder giving the story store the engine surface writes too, and
+                the memory store the earlier episodes' homes are read from, each bound
+                to a run's sight (ADR-0383 §7:7).
         """
-        self._stories = stories
-        self._memory = memory
+        self._stores = stores
         self._serial = asyncio.Lock()
 
     async def record(
-        self, links: Sequence[StoryMember], *, activation_id: str, home: RecordHome
+        self,
+        links: Sequence[StoryMember],
+        *,
+        sight: Sight,
+        activation_id: str,
+        home: RecordHome,
     ) -> StoryLinksDecision:
         """Write the links of one activation's latest recorded understanding.
 
         Args:
             links: The understanding's ``story_links``, in proposal order.
+            sight: The sight the activation's pass carries, which binds every read and
+                write the run makes (ADR-0383 §7:5, §7:7).
             activation_id: The activation the understanding is of.
             home: The home a story the run starts takes: whom the activation's work is
                 for gives it (ADR-0383 §4:1, ``ActivationState.home``).
@@ -541,7 +585,8 @@ class StoryLinksStage:
             ``failed`` carrying the ``StoryStoreError`` or ``MemoryStoreError`` a store
             raised. Writes made before a failure stand, each its own transaction.
         """
-        writes = _Writes(self._stories, self._memory, activation_id, home)
+        bound = self._stores.stories(sight)
+        writes = _Writes(bound, self._stores.memory(sight), activation_id, home)
         try:
             async with self._serial:
                 unstoried: list[StoryMember] = []
@@ -549,7 +594,7 @@ class StoryLinksStage:
                     if member.kind is StoryMemberKind.STORY:
                         await writes.link(member.id)
                         continue
-                    stories = await self._stories.stories_of(member)
+                    stories = await bound.stories_of(member)
                     if not stories:
                         unstoried.append(member)
                     for header in stories:
@@ -574,7 +619,11 @@ class _Writes:
     """One stage run's writes, and what they did."""
 
     def __init__(
-        self, stories: StoryStore, memory: MemoryStore, activation_id: str, home: RecordHome
+        self,
+        stories: Bound[StoryStore],
+        memory: Bound[MemoryStore],
+        activation_id: str,
+        home: RecordHome,
     ) -> None:
         self._stories = stories
         self._memory = memory

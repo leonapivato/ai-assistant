@@ -192,9 +192,16 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(  # noq
         (story_calls,) = held.values()
         assert isinstance(story_calls, StoryCalls)
         assert all(runners[name] is look_ups for name in LOOK_UP_CAPABILITIES)
-        assert story_calls._stories is engine._stories
-        assert story_calls._memory is engine._memory
+        # Every call but the tidy-up through the one holder (ADR-0383 §9:1); the tidy-up
+        # reads the same stores unbound.
+        assert story_calls._stores is engine._windows._stores  # type: ignore[union-attr]
+        assert story_calls._tidy_reads.stories is engine._stories
+        assert story_calls._tidy_reads.memory is engine._memory
         assert story_calls._tidy_up is not None
+        story_reads = phases._story_reads
+        assert story_reads is not None
+        assert story_reads._stores is story_calls._stores
+        assert story_reads._short._stores is story_calls._stores
         assert not hasattr(engine, "_interim_tidy_up"), "the interim run is gone (§5:8)"
         # The same runner makes the hub's check of a move or a split before authorizing
         # (ADR-0307 §5:3-§5:4).

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from identity_support import owners_trigger
-from understanding_support import Rendered, TextAsStructured
+from understanding_support import OWNERS_SIGHT, Rendered, TextAsStructured, bound_stores
 
 from ai_assistant.core.reply_shapes import read_reply
 from ai_assistant.core.types import (
@@ -377,8 +377,11 @@ async def test_the_story_links_stage_links_a_running_activation_member(where: st
         )
         held = made.story_id
 
-    decision = await StoryLinksStage(stories=stories, memory=FakeMemoryStore()).record(
-        understood.story_links, home=RecordHome.owners(), activation_id=_HOLDER
+    decision = await StoryLinksStage(stores=bound_stores(FakeMemoryStore(), stories)).record(
+        understood.story_links,
+        sight=OWNERS_SIGHT,
+        home=RecordHome.owners(),
+        activation_id=_HOLDER,
     )
 
     assert decision.refused == ()

@@ -317,11 +317,11 @@ def _linked(
         understanding=understanding_stage(model=model),
         stories=stories,
         story_candidates=StoryCandidates(
-            stories=stories, memory=memory, limit=5, lines=3, notes=2, episodes=2
+            stores=bound_stores(memory, stories), limit=5, lines=3, notes=2, episodes=2
         )
         if wired
         else None,
-        story_links=StoryLinksStage(stories=stories, memory=memory) if wired else None,
+        story_links=StoryLinksStage(stores=bound_stores(memory, stories)) if wired else None,
     )
 
 
@@ -494,9 +494,9 @@ def _recalling(
         recall=recall_stage(memory, stories=stories if recall_stories is None else recall_stories),
         stories=stories,
         story_candidates=StoryCandidates(
-            stories=stories, memory=memory, limit=5, lines=3, notes=2, episodes=2
+            stores=bound_stores(memory, stories), limit=5, lines=3, notes=2, episodes=2
         ),
-        story_links=StoryLinksStage(stories=stories, memory=memory),
+        story_links=StoryLinksStage(stores=bound_stores(memory, stories)),
     )
 
 
