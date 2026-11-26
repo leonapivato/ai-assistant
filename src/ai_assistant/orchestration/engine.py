@@ -5089,7 +5089,7 @@ class Engine:
 
         The hub's own machine's listing is read through the conversation store bound to
         the owner's sight from none (ADR-0385 §4:1). **A device's listing is not yet**
-        (milestone 22's B10e): each entry is a device row's access beside the
+        (B10g, ADR-0389): each entry is a device row's access beside the
         conversation, and a store bound to any sight gives back no device row (ADR-0383
         §3:3), so bound, every device's listing would be empty.
         """
@@ -5619,7 +5619,7 @@ class Engine:
         its membership as each change was recorded — restricted to the conversations
         it named as :meth:`ConversationStore.changes` restricts them.
 
-        **Not yet read through the owner's sight** (milestone 22's B10e). A store bound to
+        **Not yet read through the owner's sight** (B10g, ADR-0389). A store bound to
         any sight gives back no device row (ADR-0383 §3:3): bound, the hub's page would
         lose every change of a set of devices and each start's devices, and a device's
         page every change, where the owner reads them today (ADR-0385 §3:2).

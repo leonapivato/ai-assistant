@@ -61,7 +61,7 @@ stores bound to the owner's sight, made anew for each read, so no sight outlives
 it was made for. Whether a device reads a conversation is read
 from the conversation's devices as today: device rows are no domain's records (§3:2).
 **The pages of changes and a device's listing are not yet read through a bound store**
-(milestone 22's B10e): each mixes device rows, which a store bound to any sight gives
+(B10g, ADR-0389): each mixes device rows, which a store bound to any sight gives
 back none of (ADR-0383 §3:3), with records of a home, so bound, the stream would lose
 every change of a set of devices, and a device every change, that the owner is sent today.
 """
@@ -160,7 +160,7 @@ class ChangeStream:
         Args:
             chat: The engine's chat space, held unbound. Read through it as today: each
                 conversation's devices, which are no domain's records (ADR-0385 §3:2);
-                and, not yet through a bound store (milestone 22's B10e), the pages of
+                and, not yet through a bound store (B10g, ADR-0389), the pages of
                 changes and a device's listing, which mix device rows with records of a
                 home where a store bound to any sight gives back no device row (ADR-0383
                 §3:3).

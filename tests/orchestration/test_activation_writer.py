@@ -936,6 +936,82 @@ async def test_with_no_story_store_no_position_is_recorded() -> None:
     assert await _recorded_position(wiring) is None
 
 
+_DOMAINS = pytest.mark.parametrize(
+    "owners", [True, False], ids=["the owner's capture", "the shared things' capture"]
+)
+
+
+async def _of(wiring: Wiring, *, owners: bool) -> ActivationState:
+    """An admitted activation on a conversation, the owner's work or, with no facts
+    decided, one for no one, which writes into the shared things (ADR-0383 §4:1)."""
+    state = await wiring.state()
+    if not owners:
+        state.started_facts = None
+    assert state.home == (RecordHome.owners() if owners else RecordHome.shared())
+    return state
+
+
+@_DOMAINS
+async def test_forgetting_a_conversation_during_admission_marks_its_domains_captures_alone(
+    owners: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0385 §5:4: forgetting the owner's domain on a conversation's place marks the
+    captures in flight of that domain, by the home each recorded as it was tracked; a
+    capture of the shared things, its admission write still out, is not that domain's,
+    and its episode is written and frozen as usual."""
+    stories = FakeStoryStore(now=lambda: _AT)
+    reading = asyncio.Event()
+    release = asyncio.Event()
+    read = stories.position
+
+    async def suspended() -> int:
+        reading.set()
+        await release.wait()
+        return await read()
+
+    monkeypatch.setattr(stories, "position", suspended)
+    wiring = Wiring(stories=stories)
+    state = await _of(wiring, owners=owners)
+
+    admitting = asyncio.create_task(wiring.admit(state))
+    await reading.wait()
+    wiring.writer.forgetting_conversation(str(state.conversation_id), RecordHome.owners())
+    release.set()
+    await admitting
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+    report = await _freeze(wiring, state)
+
+    held = await wiring.memory.get(_ADDRESS)
+    if owners:
+        assert held is None
+        assert report.state == "degraded"
+    else:
+        assert held is not None
+        assert held.home == RecordHome.shared()
+        assert report.state == "recorded"
+    assert wiring.writer._in_flight == {}
+
+
+@_DOMAINS
+async def test_forgetting_a_conversation_before_the_freeze_marks_its_domains_captures_alone(
+    owners: bool,
+) -> None:
+    """ADR-0385 §5:4: a capture whose open episode stands is marked only where it is of
+    the domain forgotten; the shared things' freezes, and its episode stands."""
+    wiring = Wiring()
+    state = await _of(wiring, owners=owners)
+    await wiring.admit(state)
+    assert await wiring.memory.get(_ADDRESS) is not None
+
+    wiring.writer.forgetting_conversation(str(state.conversation_id), RecordHome.owners())
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+    await _freeze(wiring, state)
+
+    held = await wiring.memory.get(_ADDRESS)
+    assert (held is None) is owners
+    assert wiring.writer._in_flight == {}
+
+
 async def test_a_conversation_forgotten_while_the_position_is_read_leaves_no_episode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -961,7 +1037,7 @@ async def test_a_conversation_forgotten_while_the_position_is_read_leaves_no_epi
 
     admitting = asyncio.create_task(wiring.admit(state))
     await reading.wait()
-    wiring.writer.forgetting_conversation(str(state.conversation_id))
+    wiring.writer.forgetting_conversation(str(state.conversation_id), RecordHome.owners())
     release.set()
     await admitting
 

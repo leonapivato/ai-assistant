@@ -123,6 +123,10 @@ class EpisodeProgress:
     #: ``occurred_at``, ``expires_at``, the placement's ``set_at`` and the instant
     #: ``record_turn`` carries all reuse it.
     captured_at: datetime
+    #: The home of the work the capture is for, read as capture is tracked, before its
+    #: first await (ADR-0383 §4:1): what forgetting a conversation judges a capture in
+    #: flight by, so it marks those of the domain it forgets alone (ADR-0385 §5:4).
+    home: RecordHome
     #: The record the store is known to carry: the last write that returned.
     written: EpisodicMemory | None = None
     #: The record a write whose outcome is not known carried, until a read settles it.
