@@ -7715,10 +7715,10 @@ class StoryStore(Protocol):
     story, and writes nothing: a :meth:`create`, :meth:`link` or :meth:`split` naming a
     story member of another home, a :meth:`merge` or :meth:`move` between two stories of
     two homes, which would carry one story's members and notes into the other (§3:2).
-    So no write changes a story's home, nor a note's, which is its story's
-    (§4:6). A flag a summary raises, and a decision on one, are neither a member nor
-    any other name §4:7 lists, and are not refused for the homes of the stories they
-    name.
+    A merge also names no story of another home in a membership it writes: each story
+    member the story merged into gains, and each story that gains it in place of the
+    story absorbed, is of its home. So no write changes a story's home, nor a note's,
+    which is its story's (§4:6).
 
     **Members** are exactly one of two kinds, carried with the id and never inferred
     from it: an activation, named by its activation id, or another story (§2).

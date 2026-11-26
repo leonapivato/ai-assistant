@@ -1017,3 +1017,44 @@ async def test_a_corrupt_carried_note_is_a_story_store_error(tmp_path: Path) -> 
                 await reopened.log(story_id)
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize("held_as", ["member", "holder"])
+async def test_a_merge_copies_no_membership_across_homes_a_file_holds(
+    tmp_path: Path, held_as: str
+) -> None:
+    """ADR-0383 §4:7: a merge writes no membership naming a story of another home.
+
+    Before these refusals, a link could join two homes, so a file may hold a story of
+    one home as a member, or a holder, of another's. The story is given the shared
+    things' home on its row, as such a file holds it. Merging the owner's story into
+    another of the owner's would then copy that membership onto the story merged into:
+    refused ``another_home``, naming the story of the other home, and nothing written.
+    """
+    path = tmp_path / "stories.db"
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        absorbed = await made(store, act("a1"))
+        target = await made(store, act("a2"))
+        other = await made(store, act("a3"))
+        if held_as == "member":
+            linked = await store.link(absorbed, [sub(other)], actor=StoryActor.OWNER)
+        else:
+            linked = await store.link(other, [sub(absorbed)], actor=StoryActor.OWNER)
+        assert linked.refusal is None, linked
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "UPDATE stories SET home_kind = 'shared', home_id = NULL WHERE id = ?", (other,)
+        )
+        conn.commit()
+        conn.close()
+        before = await everything(store)
+
+        outcome = await store.merge(absorbed, target, actor=StoryActor.OWNER)
+
+        assert outcome.refusal is not None
+        assert outcome.refusal.reason is StoryRefusalReason.ANOTHER_HOME
+        assert outcome.refusal.story_id == other
+        assert await everything(store) == before
+    finally:
+        store.close()
