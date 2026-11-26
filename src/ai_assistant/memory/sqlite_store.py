@@ -54,6 +54,7 @@ from ai_assistant.core.errors import (
     MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
     MemoryStoreStaleError,
+    UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
     ChannelEpisode,
@@ -114,9 +115,11 @@ from ai_assistant.memory._episode_format import (
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
 from ai_assistant.memory._facts_upgrade import facts_episode
 from ai_assistant.memory._home_guard import (
+    episode_address,
     named_records,
     refuse_crossing_names,
     refuse_home_change,
+    refuse_unresolved_names,
 )
 from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._parties_upgrade import parties_episode
@@ -141,7 +144,8 @@ from ai_assistant.memory._walk import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
@@ -2271,6 +2275,8 @@ class SqliteMemoryStore:
                 transaction, so nothing is written.
             MemoryStoreConflictError: Bound and withholding, ``record.id`` names a
                 stored record this store does not hold (ADR-0383 §7:5).
+            UnresolvedEvidenceError: Bound and withholding, the record adds a name that
+                resolves to no record this store holds (ADR-0388 §2:1). Nothing is written.
         """
         snapshot = record.model_copy(deep=True)
         _refuse_home(snapshot)
@@ -2289,8 +2295,11 @@ class SqliteMemoryStore:
         # so a later commit cannot persist an inconsistent record/vector pair.
         with self._transaction(f"store memory {record.id!r}") as conn:
             self._refuse_unheld(conn, record.id, MemoryWriteMode.UPSERT)
+            unresolved = self._unresolved(conn, [record])
             self._persist_record(record, vector, labels)
             self._refuse_crossing_names(conn, [record])
+            if unresolved is not None:
+                raise unresolved
 
     def _persist_record(
         self, record: MemoryRecord, vector: Embedding | None, labels: Sequence[Embedding] = ()
@@ -2555,6 +2564,9 @@ class SqliteMemoryStore:
         Bound and withholding, an ``UPSERT`` or ``IF_UNCHANGED`` element naming a stored
         record this store does not hold is refused as a write to one it does not hold
         (ADR-0383 §7:5): ``MemoryStoreConflictError`` and ``MemoryStoreStaleError``.
+        A record the batch would leave adding a name that resolves neither to a record of
+        the batch nor to one this store holds is refused with ``UnresolvedEvidenceError``
+        (ADR-0388 §2:1).
         """
         # Snapshot every record *before the first await*, so a caller aliasing a
         # submitted record and mutating it across the embedding awaits cannot
@@ -2587,6 +2599,9 @@ class SqliteMemoryStore:
     def _write_atomic_sync(self, prepared: Sequence[_PreparedWrite]) -> None:
         try:
             with self._transaction("commit an atomic memory batch") as conn:
+                # ADR-0388 §2, judged over the rows as they stand before the batch writes,
+                # and raised after every other check, as the in-memory store raises it.
+                unresolved = self._unresolved(conn, [record for record, *_ in prepared])
                 for record, mode, expected, vector, labels in prepared:
                     if mode is MemoryWriteMode.INSERT_IF_ABSENT:
                         row = conn.execute(
@@ -2605,6 +2620,8 @@ class SqliteMemoryStore:
                 # ADR-0383 §4:7, judged once the whole batch is in place, so a name of a
                 # record the batch itself writes is judged by the home it writes there.
                 self._refuse_crossing_names(conn, [record for record, *_ in prepared])
+                if unresolved is not None:
+                    raise unresolved
         except MemoryStoreError:
             # `MemoryStoreStaleError` arrives through this arm too, as the
             # `MemoryStoreError` it is (ADR-0219 §3): the transaction has rolled
@@ -2641,14 +2658,17 @@ class SqliteMemoryStore:
             msg = f"failed to commit an atomic memory batch: {exc}"
             raise MemoryStoreError(msg) from exc
 
-    @staticmethod
-    def _refuse_crossing_names(conn: sqlite3.Connection, records: Sequence[MemoryRecord]) -> None:
+    def _refuse_crossing_names(
+        self, conn: sqlite3.Connection, records: Sequence[MemoryRecord]
+    ) -> None:
         """Refuse records that name a stored record of another home (ADR-0383 §4:7).
 
         Run inside the write's own transaction, after its records are written and before
         it commits, so the homes read are those the write would leave, the batch's own
         included, and a refusal rolls the whole write back. Each named record's home is
         read from its stored JSON, chunked to the connection's bound-parameter limit.
+        Bound and withholding, only rows this store holds are read, and a record the
+        write itself writes is judged by the home it writes (ADR-0388 §2:3).
 
         Raises:
             CrossHomeWriteError: A record names a record of another home.
@@ -2657,20 +2677,113 @@ class SqliteMemoryStore:
         """
         names = sorted(set().union(*(named_records(record) for record in records)))
         homes: dict[str, RecordHome] = {}
-        chunk = max(conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER), 1)
-        for start in range(0, len(names), chunk):
-            ids = names[start : start + chunk]
-            sql = (
-                "SELECT id, json_extract(data, '$.home') FROM records "  # noqa: S608 — placeholders only, bound below
-                f"WHERE id IN ({', '.join('?' * len(ids))})"
-            )
-            for record_id, home in conn.execute(sql, ids):
-                try:
-                    homes[str(record_id)] = RecordHome.model_validate_json(str(home))
-                except ValidationError as exc:
-                    msg = f"the home stored for {record_id!r} could not be read: {exc}"
-                    raise MemoryStoreError(msg) from exc
+        for record_id, home in self._named_rows(conn, names, "json_extract(data, '$.home')"):
+            try:
+                homes[record_id] = RecordHome.model_validate_json(str(home))
+            except ValidationError as exc:
+                msg = f"the home stored for {record_id!r} could not be read: {exc}"
+                raise MemoryStoreError(msg) from exc
+        homes.update({record.id: record.home for record in records})
         refuse_crossing_names(records, homes.get)
+
+    def _named_rows(
+        self, conn: sqlite3.Connection, ids: Sequence[str], column: str
+    ) -> Iterator[tuple[str, object]]:
+        """Each row at one of ``ids`` this store holds, as its id and ``column``.
+
+        Every row, unbound and bound in the counting mode; bound and withholding, the rows
+        its sight sees (ADR-0383 §7:3). Chunked to the connection's bound-parameter limit,
+        less the sight's own parameters. ``column`` is module text, never a value.
+        """
+        seen = self._seen()
+        where, params = ("1", []) if seen is None else seen
+        chunk = max(conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - len(params), 1)
+        for start in range(0, len(ids), chunk):
+            part = list(ids[start : start + chunk])
+            sql = (
+                f"SELECT id, {column} FROM records "  # noqa: S608 — module text; values bound
+                f"WHERE id IN ({', '.join('?' * len(part))}) AND {where}"
+            )
+            for record_id, value in conn.execute(sql, [*part, *params]):
+                yield str(record_id), value
+
+    def _unresolved(
+        self, conn: sqlite3.Connection, records: Sequence[MemoryRecord]
+    ) -> UnresolvedEvidenceError | None:
+        """ADR-0388 §2's refusal of a write, read before the write's rows are written.
+
+        Judged only where this store is bound and withholds; unbound, or bound in the
+        counting mode, ``None`` (§1:2). A name resolves to a record the write writes or a
+        row this store holds; one that does not is refused unless a row this store holds
+        already carries it, the row stored under a written id read first, and only then
+        any other (§2:2). Every name either resolves or not alike before and after the
+        write, since no write changes a record's home (ADR-0383 §4:6), so reading before
+        it is reading the state it would leave; the caller raises the refusal after the
+        write's other checks, in the order the in-memory store makes them.
+
+        Returns:
+            The refusal, or ``None`` where every added name resolves.
+
+        Raises:
+            MemoryStoreError: A row read for a name does not decode.
+        """
+        sight = self._sight
+        if sight is None or self._seen() is None:
+            return None
+        written = {record.id for record in records}
+        names = sorted(set().union(*(named_records(record) for record in records)) - written)
+        held = {record_id for record_id, _ in self._named_rows(conn, names, "1")}
+        try:
+            refuse_unresolved_names(
+                records,
+                resolves=lambda name: name in written or name in held,
+                carried=lambda unresolved: self._carried(conn, written, unresolved),
+                own_episode=None if sight.activation is None else episode_address(sight.activation),
+            )
+        except UnresolvedEvidenceError as exc:
+            return exc
+        return None
+
+    def _carried(
+        self, conn: sqlite3.Connection, written: AbstractSet[str], names: frozenset[str]
+    ) -> frozenset[str]:
+        """Of ``names``, those a row this store holds already carries (ADR-0388 §2:2).
+
+        Asked only of names that resolve to nothing (§9), so no index of names is kept.
+        First the rows stored under the ids the write writes, as they stand before it;
+        then, for each name still not found, any other row this store holds whose stored
+        text holds it, each decoded and judged by what it names. A name of an
+        activation's episode is looked for by the activation's id, which is what a
+        record naming it stores. Text of characters no JSON encoder escapes is found in
+        the row as written; any other is looked for among the JSON's decoded strings.
+
+        Raises:
+            MemoryStoreError: A row read does not decode.
+        """
+        found: set[str] = set()
+        for _, data in self._named_rows(conn, sorted(written), "data"):
+            found |= named_records(self._decode(str(data))) & names
+        seen = self._seen()
+        where, params = ("1", []) if seen is None else seen
+        for name in sorted(names - found):
+            # A name by an activation is stored as the activation's id alone, so the text
+            # looked for is what the record stores; the decoded record then decides.
+            stored = name.removeprefix(episode_address(""))
+            text = (
+                "instr(data, ?) > 0"
+                if all(" " <= char <= "~" and char not in '"\\/' for char in stored)
+                else (
+                    "EXISTS (SELECT 1 FROM json_tree(records.data) AS node "
+                    "WHERE node.type = 'text' AND instr(node.atom, ?) > 0)"
+                )
+            )
+            rows = conn.execute(
+                f"SELECT data FROM records WHERE {text} AND {where}",  # noqa: S608 — module text; values bound
+                [stored, *params],
+            )
+            if any(name in named_records(self._decode(str(data))) for (data,) in rows):
+                found.add(name)
+        return frozenset(found)
 
     @staticmethod
     def _refuse_stale(conn: sqlite3.Connection, record_id: str, expected: int | None) -> None:

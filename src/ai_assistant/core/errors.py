@@ -432,7 +432,7 @@ class MemoryStoreStaleError(MemoryStoreError):
 
 
 class UnresolvedEvidenceError(MemoryStoreError):
-    """A support pointed at an episode the store does not hold (ADR-0328 §4:7).
+    """A write named a record the store does not hold (ADR-0328 §4:7, ADR-0388 §2:1).
 
     ADR-0077 §5's refusal, which ADR-0328 §4:7 widens to every support but a legacy
     one, whatever the memory's band. Raised by ``MemoryWriter.ingest`` before any
@@ -441,6 +441,15 @@ class UnresolvedEvidenceError(MemoryStoreError):
     written, and no decision is fabricated — a ruling is the policy's to make
     (ADR-0005 §3), so a writer inventing a ``REJECT`` would put a decision nobody
     made into the ingest result.
+
+    **Any name a withholding store refuses** (ADR-0388 §2:1). A memory store bound to a
+    sight in the withholding mode raises it, from the write itself and with nothing
+    written, for a write adding to a record any name ``MemoryStore``'s docstring lists
+    that resolves to no record the bound store holds once the write is made: a support's,
+    an operation's or an open question's episode, a confirmation's asking activation and
+    ``ran_in``, a track-record entry's or a label's episode, a lineage, and an episode's
+    taker or the activation a joined input was taken from. A name withheld from the sight
+    and a name never written get the one refusal, and :attr:`unresolved_ids` names each.
 
     Narrowed out of :class:`MemoryStoreError` for one caller and one question:
     **the ingesting stage cannot otherwise tell a race from a bug.** An episode is

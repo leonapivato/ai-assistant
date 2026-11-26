@@ -4983,6 +4983,182 @@ class MemoryWriterContract:
         assert written is not None
         assert written.home == RecordHome.shared()
 
+    # · a name a bound writer's write adds (ADR-0388 §2)
+    # The writer's store, bound to the same sight, judges every name the write leaves:
+    # withholding, one resolving to no record it holds that no held record already
+    # carries is refused as one never written, with ``UnresolvedEvidenceError``. A name
+    # held of another home is refused across homes; in the counting mode nothing is
+    # judged for the sight (§1:2). No member of this Protocol writes an episode, so
+    # §2:5's takeover lineage is the store suite's case alone.
+
+    @pytest.mark.parametrize("name", ["entry", "asking"])
+    async def test_a_name_withheld_and_one_never_written_are_refused_alike_through_a_writer(
+        self, make_writer: WriterFactory, name: str
+    ) -> None:
+        """ADR-0388 §2:1: the refusal of a name the sight does not see is one never written's.
+
+        Through a writer bound to a run over the owner's domain, a track-record entry
+        naming an episode of the shared things, and a proposal whose confirmation was
+        asked in that episode, are refused with the same error, message and ids as where
+        that episode was never written, nothing written; never as a write across homes.
+        """
+        sight = SIGHTS["run-over-the-owners-domain"]
+        world, holding_only = await _sight_world(), await _sight_world()
+        for store in (world, holding_only):
+            await store.add(_episodic(_ASKED_SHARED, "a question").model_copy(update=_SHARED_HOME))
+        await _keep_only_what_it_sees(holding_only, sight)
+        befores = [await _snapshot(world), await _snapshot(holding_only)]
+
+        refusals: list[tuple[str, list[str]]] = []
+        for store in (world, holding_only):
+            writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)).bound(sight)
+            read = await store.get("m-ours")
+            assert isinstance(read, Memory)
+            support = confirmed_support(
+                _CITED, asking_activation=_ASKED_SHARED.removeprefix("activation:")
+            )
+            call = (
+                writer.record_use(read, _entry(_SHARED_CITED))
+                if name == "entry"
+                else writer.ingest(_proposal(memory("new", _UNRELATED, support)))
+            )
+            with pytest.raises(UnresolvedEvidenceError) as refused:
+                await call
+            refusals.append((str(refused.value), list(refused.value.unresolved_ids)))
+
+        assert refusals[0] == refusals[1]
+        assert refusals[0][1] == [_SHARED_CITED if name == "entry" else _ASKED_SHARED]
+        assert [await _snapshot(world), await _snapshot(holding_only)] == befores
+
+    async def test_a_bound_writer_does_not_judge_a_name_a_held_record_already_carries(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0388 §2:2: a memory whose support's episode is gone takes a later entry.
+
+        ``m-ours`` rests on an episode since deleted; through a writer bound to the
+        owner's work, an entry naming the work's own episode is recorded, the support's
+        episode not judged again.
+        """
+        store = await _sight_world()
+        read = await store.get("m-ours")
+        assert isinstance(read, Memory)
+        assert await store.delete(_CITED) is True
+
+        await (
+            make_writer(store, FakeMemoryPolicy())
+            .bound(SIGHTS["owners-work"])
+            .record_use(read, _entry(_OWN_EPISODE))
+        )
+
+        written = await store.get("m-ours")
+        assert isinstance(written, Memory)
+        assert [one.episode for one in written.track_record] == [_OWN_EPISODE]
+
+    async def test_a_dispute_copying_a_confirmation_whose_asking_episode_is_gone_is_written(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0388 §2:2 (ADR-0345 §3:5, §3:8): a support copied from a held memory lands.
+
+        A held memory rests on a confirmation asked in an episode since deleted; an
+        operation adding that same support to another memory, through a writer bound to
+        the owner's work, is applied: a record the store holds already carries the name.
+        Once no held record carries it, the same operation is refused.
+        """
+        store = await _sight_world()
+        await store.add(_episodic(_ASKED_GONE, "the question"))
+        asked = confirmed_support(
+            _CITED, asking_activation=_ASKED_GONE.removeprefix("activation:"), when=_WHEN
+        )
+        await store.add(memory("m-held", "states the confirmed wording", asked))
+        assert await store.delete(_ASKED_GONE) is True
+        writer = make_writer(store, FakeMemoryPolicy()).bound(SIGHTS["owners-work"])
+
+        def adding(read: Memory) -> MemoryChange:
+            operation = MemoryOperation(
+                kind=MemoryOperationKind.ADD_SUPPORT,
+                cites=asked.points_at,
+                at=_WHEN,
+                by=MemoryWriterName.OBSERVER,
+            )
+            return MemoryChange(memory=read, operation=operation, support=asked)
+
+        read = await store.get("m-ours")
+        assert isinstance(read, Memory)
+        await writer.apply(adding(read))
+        written = await store.get("m-ours")
+        assert isinstance(written, Memory)
+        assert asked.points_at in {one.points_at for one in written.supports}
+
+        other = await self._stored(store, _preference("m-other", _UNRELATED))
+        for gone in ("m-held", "m-ours"):
+            assert await store.delete(gone) is True
+        before = await _snapshot(store)
+        with pytest.raises(UnresolvedEvidenceError) as refused:
+            await writer.apply(adding(other))
+        assert list(refused.value.unresolved_ids) == [_ASKED_GONE]
+        assert await _snapshot(store) == before
+
+    async def test_a_bound_writer_refuses_a_name_held_of_another_home_as_today(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0388 §2:3: through the owner's work, which sees both homes, an entry naming
+        an episode of the shared things is refused across homes, nothing written."""
+        store = await _sight_world()
+        read = await store.get("m-ours")
+        assert isinstance(read, Memory)
+        before = await _snapshot(store)
+
+        with pytest.raises(CrossHomeWriteError):
+            await (
+                make_writer(store, FakeMemoryPolicy())
+                .bound(SIGHTS["owners-work"])
+                .record_use(read, _entry(_SHARED_CITED))
+            )
+        assert await _snapshot(store) == before
+
+    async def test_a_bound_writer_over_a_counting_store_judges_no_name_it_adds(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0388 §1:2: over a store built to count, the writes above answer as unbound.
+
+        Entries naming, and proposals confirmed in, an episode of the shared things the
+        sight does not see and one never written answer through the bound writer exactly
+        as through the unbound writer over a twin store: the shared episode's names are
+        refused across homes, as unbound, and the never-written one's are written.
+        """
+        sight = SIGHTS["run-over-the-owners-domain"]
+        world, twin = await _sight_world(SightMode.COUNT), await _sight_world(SightMode.COUNT)
+        for store in (world, twin):
+            await store.add(_episodic(_ASKED_SHARED, "a question").model_copy(update=_SHARED_HOME))
+
+        async def writes(store: FakeMemoryStore, writer: MemoryWriter) -> list[str]:
+            done: list[str] = []
+            for episode in (_SHARED_CITED, "activation:never-written", _ASKED_SHARED):
+                read = await store.get("m-ours")
+                assert isinstance(read, Memory)
+                support = confirmed_support(
+                    _CITED, asking_activation=episode.removeprefix("activation:")
+                )
+                for call in (
+                    writer.record_use(read, _entry(episode)),
+                    writer.ingest(_proposal(memory(f"new-{episode}", _UNRELATED, support))),
+                ):
+                    try:
+                        await call
+                    except MemoryStoreError as exc:
+                        done.append(f"{type(exc).__name__}: {exc}")
+                    else:
+                        done.append("written")
+            return done
+
+        bound = await writes(world, make_writer(world, FakeMemoryPolicy()).bound(sight))
+        unbound = await writes(twin, make_writer(twin, FakeMemoryPolicy()))
+
+        assert bound == unbound
+        assert bound[2:4] == ["written", "written"]
+        assert [one.split(":")[0] for one in (bound[0], bound[5])] == ["CrossHomeWriteError"] * 2
+        assert await _snapshot(world) == await _snapshot(twin)
+
     # · the track record (§14:4, ADR-0328 §8)
 
     async def test_record_use_adds_one_entry_and_nothing_else(
@@ -5785,6 +5961,12 @@ def _inadmissible_inference(shape: str) -> Memory:
 #: The episode of the activation whose work's sights are proved (ADR-0383 §7:4): a work's
 #: sight holds it, whatever its home.
 _OWN_EPISODE = f"activation:{OWN_ACTIVATION}"
+
+#: An episode of the shared things a confirmation was asked in (ADR-0388 §2's cases).
+_ASKED_SHARED = "activation:act-asked-shared"
+
+#: An episode a confirmation was asked in, deleted once a memory carries it.
+_ASKED_GONE = "activation:act-asked-gone"
 
 #: Wording no memory of :func:`_sight_world` states, for an install the policy rules on.
 _UNRELATED = "keeps a sourdough starter in the fridge"

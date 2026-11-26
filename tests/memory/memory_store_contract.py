@@ -34,11 +34,13 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
     MemoryStoreStaleError,
     StaleEpisodeReadError,
+    UnresolvedEvidenceError,
 )
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.cancellation import held_at_its_first_await, settle
 from ai_assistant.testing.memories import (
+    HELD_EPISODE,
     confirmed_support,
     memory,
     remembered_support,
@@ -66,6 +68,7 @@ from ai_assistant.core.types import (
     Capture,
     ChannelContext,
     ChannelIdentity,
+    ConfirmationPart,
     ControllerRule,
     ControllerStage,
     DeliveryStatus,
@@ -1264,6 +1267,102 @@ def _naming_memory(lineage: str, named: str) -> Memory:
     base = memory("m", "distinctive, replacing", said_support(_OURS))
     create = base.operations[0].model_copy(update={"replaces": (named,)})
     return base.model_copy(update={"operations": (create,)})
+
+
+# --- ADR-0388 §2's cases: a name a write adds --------------------------------------
+
+#: A run over the owner's domain: it holds :data:`_OURS` and not :data:`_THEIRS`, and
+#: carries no activation, so no episode it writes is a work's own (ADR-0388 §2:5).
+_OWNERS_RUN: Final = Sight.of_run(RecordHome.owners())
+#: An episode written and then deleted, or never written: a name nothing resolves.
+_GONE: Final = "activation:act-gone"
+_ALSO_GONE: Final = "activation:act-also-gone"
+
+
+async def _named_homes(store: MemoryStore) -> None:
+    """:func:`_two_homes`, and the owner's episode the fixture memories' supports name."""
+    await _two_homes(store)
+    await store.add(_episode(HELD_EPISODE, "distinctive, held"))
+
+
+def _ran_in(episode: str) -> Memory:
+    """An owner's memory on a request's confirmation whose ticket ran in ``episode``."""
+    support = confirmed_support(_OURS, asking_activation=_OURS.removeprefix("activation:"))
+    part = ConfirmationPart(
+        episode=_OURS,
+        asking_activation=_OURS.removeprefix("activation:"),
+        request="request-1",
+        ran_in=episode.removeprefix("activation:"),
+    )
+    return memory("m", "distinctive, naming", support.model_copy(update={"points_at": part}))
+
+
+def _joined_from(episode: str) -> EpisodicMemory:
+    """An episode, not a work's own, holding an input taken over from ``episode``'s work."""
+    merged = _activation_episode("activation:merged")
+    assert merged.processing_record is not None
+    joined = JoinedInput(
+        joined_at=_OCCURRED,
+        channel=ChannelIdentity(channel_type="conversation", instance_id="c-1"),
+        messages=(RecordedInputMessage(text="and for four", sent_at=_OCCURRED),),
+        taken_over_from=episode.removeprefix("activation:"),
+    )
+    record = merged.processing_record.model_copy(update={"joined": (joined,)})
+    return merged.model_copy(update={"processing_record": record})
+
+
+#: Each name ADR-0388 §2 lists, as a new record adding it: the name kind, and the record
+#: naming a given id as that name, every other name it carries resolving.
+_ADDED_NAMES: Final[dict[str, Callable[[str], MemoryRecord]]] = {
+    "support": lambda name: _naming_episode("support", name),
+    "confirmation": lambda name: _naming_episode("confirmation", name),
+    "ran_in": _ran_in,
+    "track_record": lambda name: _naming_episode("track_record", name),
+    "label": lambda name: _naming_episode("label", name),
+    "successor": lambda name: _naming_memory("successor", name),
+    "replaces": lambda name: _naming_memory("replaces", name),
+    "joined": _joined_from,
+}
+
+
+def _taken_over(opened: EpisodicMemory, lineage: str, episode: str) -> EpisodicMemory:
+    """``opened`` revised to name ``episode``'s work as its takeover lineage (ADR-0388 §2:5).
+
+    ``taker``: the revision freezing it as stopped, taken over by that work (ADR-0352
+    §5:2); ``joined``: extended by an input taken over from it (ADR-0349 §7:7).
+    """
+    activation = episode.removeprefix("activation:")
+    if lineage == "taker":
+        return _revised(
+            opened,
+            processing={
+                "status": ProcessingStatus.INTERRUPTED,
+                "reason": ProcessingReason.STOPPED,
+                "ended_at": _OCCURRED,
+                "understanding_omitted": UnderstandingOmission.NOT_REACHED,
+                "stages": ended_pass(_OCCURRED, ControllerRule.STOPPED),
+                "taken_over_by": activation,
+            },
+            content=_ANY,
+            placement=Placement(),
+        )
+    joined = JoinedInput(
+        joined_at=_OCCURRED,
+        channel=_CONVERSATION_A,
+        messages=(RecordedInputMessage(text="and for four", sent_at=_OCCURRED),),
+        taken_over_from=activation,
+    )
+    return _revised(opened, processing={"joined": (joined,)})
+
+
+async def _outcome(store: MemoryStore, record: MemoryRecord) -> str:
+    """What ``store.add(record)`` answers, as text; a record written is deleted again."""
+    try:
+        await store.add(record)
+    except MemoryStoreError as exc:
+        return f"{type(exc).__name__}: {exc} {getattr(exc, 'unresolved_ids', ())}"
+    assert await store.delete(record.id) is True
+    return "written"
 
 
 class MemoryStoreContract:
@@ -5014,6 +5113,227 @@ class MemoryStoreContract:
         )
 
         assert await store.get("m") is not None
+
+    # --- ADR-0388 §2: a withholding store judges a name a write adds ----------------
+
+    @pytest.mark.parametrize("door", ["add", "insert_if_absent"])
+    @pytest.mark.parametrize("pointer", list(_ADDED_NAMES))
+    async def test_a_withheld_name_and_one_never_written_are_refused_alike(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore], pointer: str, door: str
+    ) -> None:
+        """ADR-0388 §2:1, §2:3: one refusal for a name the sight does not see and one never written.
+
+        Through a run over the owner's domain, which does not see the shared things, a
+        write adding a name of an episode of the shared things is refused with
+        ``UnresolvedEvidenceError`` naming it, by the same message as the same write to a
+        store from which that episode was deleted, and never as a write across homes.
+        Nothing is written in either. Unbound, the same write lands (ADR-0383 §4:8 stands
+        for an unbound store's writes, #3727).
+        """
+        world, holding_only = (
+            sight_store_factory(SightMode.WITHHOLD),
+            sight_store_factory(SightMode.WITHHOLD),
+        )
+        for store in (world, holding_only):
+            await _named_homes(store)
+        assert await holding_only.delete(_THEIRS) is True
+        befores = [await world.export(), await holding_only.export()]
+
+        refusals: list[UnresolvedEvidenceError] = []
+        for store in (world, holding_only):
+            with pytest.raises(UnresolvedEvidenceError) as refused:
+                await _written(store.bound(_OWNERS_RUN), _ADDED_NAMES[pointer](_THEIRS), door)
+            refusals.append(refused.value)
+
+        assert [await world.export(), await holding_only.export()] == befores
+        assert type(refusals[0]) is type(refusals[1]) is UnresolvedEvidenceError
+        assert str(refusals[0]) == str(refusals[1])
+        assert list(refusals[0].unresolved_ids) == list(refusals[1].unresolved_ids) == [_THEIRS]
+        await _written(holding_only, _ADDED_NAMES[pointer](_THEIRS), door)
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_a_name_the_record_already_carries_is_not_judged_again(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore], door: str
+    ) -> None:
+        """ADR-0388 §2:2: a later write to a memory whose support's episode is gone lands.
+
+        The memory rests on an episode since deleted; rewritten through a withholding
+        bound store with a track-record entry added, the support's episode is a name the
+        record stored under its id already carries, so it is not judged again. The
+        entry's episode, which the store holds, resolves.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _named_homes(store)
+        await store.add(_episode(_GONE, "distinctive, gone"))
+        await store.add(memory("m", "distinctive, resting", said_support(_GONE)))
+        assert await store.delete(_GONE) is True
+        stored = await store.get("m")
+        assert isinstance(stored, Memory)
+        entry = TrackRecordEntry(
+            episode=_OURS,
+            relied_at=_REVISED,
+            held_up=True,
+            recorded_at=_REVISED,
+            recorded_by=MemoryWriterName.OBSERVER,
+        )
+        later = stored.model_copy(update={"track_record": (entry,)})
+
+        await _replace(store.bound(_OWNERS_RUN), later, door)
+
+        written = await store.get("m")
+        assert isinstance(written, Memory)
+        assert [one.episode for one in written.track_record] == [_OURS]
+        assert written.supports == stored.supports
+
+    @pytest.mark.parametrize("asking", ["act-gone", 'act-"gonè"/'], ids=["plain", "escaped"])
+    @pytest.mark.parametrize("door", ["add", "insert_if_absent"])
+    async def test_a_dispute_copying_a_held_memorys_confirmation_whose_asking_episode_is_gone(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore], door: str, asking: str
+    ) -> None:
+        """ADR-0388 §2:2 (ADR-0345 §3:5, §3:8): a support copied from a held memory lands.
+
+        A held memory rests on a confirmation whose asking activation's episode has since
+        been deleted. A new memory carrying the same confirmation, as a dispute copies
+        one, adds no name: a record the store holds already carries it. The same
+        confirmation on a new memory where no held record carries it is refused. An
+        asking activation whose id a JSON encoder escapes is found alike.
+        """
+        gone = f"activation:{asking}"
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _named_homes(store)
+        await store.add(_episode(gone, "distinctive, the question"))
+        asked = confirmed_support(_OURS, asking_activation=asking)
+        await store.add(memory("held", "distinctive, confirmed", asked))
+        assert await store.delete(gone) is True
+        bound = store.bound(_OWNERS_RUN)
+
+        await _written(bound, memory("dispute", "distinctive, disputed", asked), door)
+
+        assert await store.get("dispute") is not None
+        assert await store.delete("held") is True
+        assert await store.delete("dispute") is True
+        with pytest.raises(UnresolvedEvidenceError) as refused:
+            await _written(bound, memory("again", "distinctive, again", asked), door)
+        assert list(refused.value.unresolved_ids) == [gone]
+        assert await store.get("again") is None
+
+    @pytest.mark.parametrize("door", ["add", "insert_if_absent"])
+    @pytest.mark.parametrize("pointer", list(_ADDED_NAMES))
+    async def test_a_name_held_of_another_home_is_refused_as_today(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore], pointer: str, door: str
+    ) -> None:
+        """ADR-0388 §2:3: a name resolving to a held record of another home crosses homes.
+
+        Through the owner's work, which sees both homes, the name of an episode of the
+        shared things is refused with ``CrossHomeWriteError``, nothing written, as the
+        unbound store refuses it.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _named_homes(store)
+        before = await store.export()
+
+        for one in (store.bound(SIGHTS["owners-work"]), store):
+            with pytest.raises(CrossHomeWriteError):
+                await _written(one, _ADDED_NAMES[pointer](_THEIRS), door)
+        assert await store.export() == before
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    @pytest.mark.parametrize("lineage", ["taker", "joined"])
+    async def test_a_takeover_lineage_naming_a_deleted_episode_is_written_the_capture_kept(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore], lineage: str, door: str
+    ) -> None:
+        """ADR-0388 §2:5: a work's capture writes its own episode's takeover lineage.
+
+        Through the owner's work, the freezing write of its own episode naming, as the
+        activation that took it over or one a joined input was taken from, an activation
+        whose episode was deleted lands, the capture kept. The same lineage on an episode
+        that is not the work's own is refused, and on its own episode a name resolving
+        to a held episode of another home is still refused across homes.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _named_homes(store)
+        await store.add(_episode(_GONE, "distinctive, the taker"))
+        assert await store.delete(_GONE) is True
+        bound = store.bound(SIGHTS["owners-work"])
+        own = _open_episode(_OWN_EPISODE, channel=_CONVERSATION_A)
+        other = _open_episode("activation:another-work", channel=_CONVERSATION_A)
+        for opened in (own, other):
+            await store.add(opened)
+
+        await _replace(bound, _taken_over(own, lineage, _GONE), door)
+
+        assert _unstamped_or_none(await store.get(_OWN_EPISODE)) == _taken_over(own, lineage, _GONE)
+        # Another name, since the own episode now carries the first (§2:2).
+        with pytest.raises(UnresolvedEvidenceError) as refused:
+            await _replace(bound, _taken_over(other, lineage, _ALSO_GONE), door)
+        assert list(refused.value.unresolved_ids) == [_ALSO_GONE]
+        assert _unstamped_or_none(await store.get(other.id)) == other
+        crossed = sight_store_factory(SightMode.WITHHOLD)
+        await _named_homes(crossed)
+        await crossed.add(own)
+        with pytest.raises(CrossHomeWriteError):
+            await _replace(
+                crossed.bound(SIGHTS["owners-work"]), _taken_over(own, lineage, _THEIRS), door
+            )
+        assert _unstamped_or_none(await crossed.get(_OWN_EPISODE)) == own
+
+    async def test_the_owners_sight_judges_a_name_a_write_adds_in_either_build(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """ADR-0385 §3:5 with ADR-0388 §2:1: bound to the owner's sight, a store built to
+        count withholds, so a name of a record that sight does not see is refused as one
+        never written; a name it sees lands, and the same store bound to a run counts, so
+        there a name never written is not judged."""
+        store = sight_store_factory(SightMode.COUNT)
+        await _named_homes(store)
+        owners = store.bound(_OWNERS_ACTS["from-the-owners-domain"])
+
+        with pytest.raises(UnresolvedEvidenceError) as refused:
+            await owners.add(_naming_episode("support", _THEIRS))
+        assert list(refused.value.unresolved_ids) == [_THEIRS]
+        assert await store.get("m") is None
+        await owners.add(_naming_episode("support", _OURS))
+        assert await store.get("m") is not None
+        await store.bound(_OWNERS_RUN).add(
+            memory("counted", "distinctive, counted", said_support(_GONE))
+        )
+        assert await store.get("counted") is not None
+
+    async def test_a_counting_store_judges_no_name_a_write_adds(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """ADR-0388 §1:2: bound in the counting mode, each write answers as unbound.
+
+        Every write the cases above make, through a store built to count and bound to the
+        same sight, gives the same outcome, the same error and message where refused, and
+        leaves the same records as the same write to an unbound twin; and no write writes
+        a ``sight_counted`` event.
+        """
+        bound_store = sight_store_factory(SightMode.COUNT)
+        twin = sight_store_factory(SightMode.COUNT)
+        for one in (bound_store, twin):
+            await _named_homes(one)
+            await one.add(_open_episode(_OWN_EPISODE, channel=_CONVERSATION_A))
+            await one.add(_open_episode("activation:another-work", channel=_CONVERSATION_A))
+        own = _open_episode(_OWN_EPISODE, channel=_CONVERSATION_A)
+        other = _open_episode("activation:another-work", channel=_CONVERSATION_A)
+        writes: list[tuple[Sight, MemoryRecord]] = [
+            *((_OWNERS_RUN, make(_THEIRS)) for make in _ADDED_NAMES.values()),
+            *((_OWNERS_RUN, make(_GONE)) for make in _ADDED_NAMES.values()),
+            *((SIGHTS["owners-work"], make(_THEIRS)) for make in _ADDED_NAMES.values()),
+            (SIGHTS["owners-work"], _taken_over(own, "taker", _GONE)),
+            (SIGHTS["owners-work"], _taken_over(other, "joined", _GONE)),
+        ]
+
+        with structlog.testing.capture_logs() as events:
+            bound = [await _outcome(bound_store.bound(sight), record) for sight, record in writes]
+        unbound = [await _outcome(twin, record) for _, record in writes]
+
+        assert bound == unbound
+        assert "written" in bound
+        assert any(outcome.startswith("CrossHomeWriteError") for outcome in bound)
+        assert not [event for event in events if event["event"] == "sight_counted"]
+        assert await bound_store.export() == await twin.export()
 
     async def test_the_two_refusals_stay_distinguishable(self, store: MemoryStore) -> None:
         # ADR-0219 §3 and §7: an INSERT_IF_ABSENT collision and a stale IF_UNCHANGED

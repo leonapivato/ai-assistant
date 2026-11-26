@@ -56,7 +56,13 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory._channel_reads import channel_of, check_channel_page
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
-from ai_assistant.memory._home_guard import refuse_crossing_names, refuse_home_change
+from ai_assistant.memory._home_guard import (
+    episode_address,
+    named_records,
+    refuse_crossing_names,
+    refuse_home_change,
+    refuse_unresolved_names,
+)
 from ai_assistant.memory._sight import count_records, made_by
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -302,6 +308,44 @@ class InMemoryMemoryStore:
         if self._sight is not None and self._sight_mode is SightMode.COUNT:
             count_records(self._sight, member, records)
 
+    def _refuse_unresolved(self, records: Sequence[MemoryRecord]) -> None:
+        """Refuse a write adding a name that resolves to no record this store holds.
+
+        ADR-0388 §2:1 to §2:3 and §2:5, judged only where this store is bound and
+        withholds, over the state before the write: a name resolves to a record the write
+        itself writes or to one this store holds, and a name a held record already
+        carries is not judged again. Unbound, or bound in the counting mode, nothing is
+        judged here (§1:2).
+
+        Raises:
+            UnresolvedEvidenceError: A record adds a name that does not resolve.
+        """
+        sight = self._sight
+        if sight is None or self._sight_mode is SightMode.COUNT:
+            return
+        written = {record.id for record in records}
+
+        def resolves(name: str) -> bool:
+            stored = self._records.get(name)
+            return name in written or (stored is not None and self._holds(stored))
+
+        refuse_unresolved_names(
+            records,
+            resolves=resolves,
+            carried=self._carried,
+            own_episode=None if sight.activation is None else episode_address(sight.activation),
+        )
+
+    def _carried(self, names: frozenset[str]) -> frozenset[str]:
+        """Of ``names``, those a record this store holds already carries (ADR-0388 §2:2)."""
+        found: set[str] = set()
+        for stored in self._records.values():
+            if self._holds(stored):
+                found |= named_records(stored) & names
+                if len(found) == len(names):
+                    break
+        return frozenset(found)
+
     def _refuse_unheld(
         self, record_id: str, mode: MemoryWriteMode, expected: int | None = None
     ) -> None:
@@ -343,11 +387,14 @@ class InMemoryMemoryStore:
                 carry (ADR-0383 §2:3, §4:7). Nothing is written.
             MemoryStoreConflictError: Bound and withholding, ``record.id`` names a
                 stored record this store does not hold (ADR-0383 §7:5).
+            UnresolvedEvidenceError: Bound and withholding, the record adds a name that
+                resolves to no record this store holds (ADR-0388 §2:1). Nothing is written.
         """
         _refuse_home(record)
         self._refuse_unheld(record.id, MemoryWriteMode.UPSERT)
         self._refuse_cross_kind(record)
         refuse_crossing_names([record], self._home_after({record.id: record}))
+        self._refuse_unresolved([record])
         # Deep copy so a caller mutating the record (including nested fields like
         # validity, which drives read filtering) after add cannot reach stored
         # state — matching FakeMemoryStore and the serialised persistent store.
@@ -424,13 +471,16 @@ class InMemoryMemoryStore:
 
         From ``written`` where it writes the id, and otherwise from the records stored,
         whatever their expiry or window: a retained record is held, and a name of it is
-        judged like any other.
+        judged like any other. Bound and withholding, only from the records this store
+        holds (ADR-0388 §2:3): a name of a record it does not hold resolves to none.
         """
 
         def home_of(name: str) -> RecordHome | None:
             found = written.get(name)
             if found is None:
                 found = self._records.get(name)
+                if found is not None and not self._holds(found):
+                    found = None
             return None if found is None else found.home
 
         return home_of
@@ -471,6 +521,9 @@ class InMemoryMemoryStore:
         Bound and withholding, an ``UPSERT`` or ``IF_UNCHANGED`` element naming a stored
         record this store does not hold is refused as a write to one it does not hold
         (ADR-0383 §7:5): ``MemoryStoreConflictError`` and ``MemoryStoreStaleError``.
+        A record the batch would leave adding a name that resolves neither to a record of
+        the batch nor to one this store holds is refused with ``UnresolvedEvidenceError``
+        (ADR-0388 §2:1).
         """
         self._reject_repeated_ids(writes)
         for write in writes:
@@ -495,6 +548,7 @@ class InMemoryMemoryStore:
             # stores a row takes a fresh revision (ADR-0219 §1).
             staged.append(self._stamped(write.record))
         refuse_crossing_names(staged, self._home_after({record.id: record for record in staged}))
+        self._refuse_unresolved(staged)
         for record in staged:
             self._records[record.id] = record
             self._issue_key(record.id)
