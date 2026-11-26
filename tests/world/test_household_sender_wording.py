@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     PersonActHow,
     PersonModelAct,
     ProfileField,
+    RecordHome,
     Sureness,
 )
 from ai_assistant.testing import FakePersonModelStore
@@ -194,12 +195,18 @@ async def test_the_owners_telegram_account_names_its_kind() -> None:
 
 
 async def test_a_person_the_system_knows_but_does_not_serve_is_never_named() -> None:
-    """§5's row for another person's device: an unknown sender's, the person unnamed."""
+    """§5's row for another person's device: an unknown sender's, the person unnamed.
+
+    ADR-0383 §2:3, §4:1: the work is for Sam, whose domain no write may carry while the
+    hub admits the owner alone, so its episode is refused with nothing written; what both
+    models were shown is read as before."""
     async with Household(people=await _people()) as home:
         sam = home.person("sam")
         phone = await home.device(sam, "sams-phone")
-        work = await home.say(phone, "Can I borrow the canoe?")
+        work = await home.say_unstored(phone, "Can I borrow the canoe?")
 
+    assert not work.stored
+    assert work.episode.home == RecordHome.person(sam.id)
     assert work.reads == (None, None)
     heard = _heard(work)
     (words,) = heard.tags("The stimulus")
