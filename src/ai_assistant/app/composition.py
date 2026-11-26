@@ -1420,6 +1420,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 field_chars=PROFILE_FIELD_CHARS,
                 seed_time_zone=seeded_time_zone(settings),
                 now=_utcnow,
+                sight_mode=SightMode.COUNT,
             )
             if settings.person_model
             else None
@@ -1514,6 +1515,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             path=directory / "conversations.db",
             retention=settings.episode_retention,
             tombstone_grace=settings.conversation_tombstone_grace,
+            sight_mode=SightMode.COUNT,
         )
         opened.append(conversations.close)
         # The **sixth** connection-owning Tier 1 store (ADR-0102 §7), under the same

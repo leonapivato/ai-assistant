@@ -24,7 +24,9 @@ import pytest
 from conversation_store_contract import (
     ConversationStoreContract,
     ConversationStoreFactory,
+    KeepOnly,
     MovableClock,
+    SightStoreFactory,
 )
 
 from ai_assistant.core.errors import (
@@ -39,6 +41,7 @@ from ai_assistant.core.types import (
     NewMessage,
     RecordHome,
     SendOutcome,
+    SightMode,
 )
 from ai_assistant.memory import conversation_store
 from ai_assistant.memory._episode_format import CONVERSATION_RECORD_FORMAT
@@ -54,6 +57,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from ai_assistant.core.protocols import ConversationStore
+    from ai_assistant.core.types import Sight
     from ai_assistant.testing.cancellation import SuspendedCall
 
 #: The store's own defaults, restated here rather than imported (see the fake's
@@ -184,6 +188,27 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
         yield
         first.close()
         second.close()
+
+    @pytest.fixture
+    def sight_store_factory(self) -> Iterator[SightStoreFactory]:
+        opened: list[SqliteConversationStore] = []
+
+        def build(
+            mode: SightMode, *, now: Callable[[], datetime], new_id: Callable[[], str]
+        ) -> ConversationStore:
+            store = SqliteConversationStore(
+                path=":memory:", now=now, new_id=new_id, sight_mode=mode
+            )
+            opened.append(store)
+            return store
+
+        yield build
+        for store in opened:
+            store.close()
+
+    @pytest.fixture
+    def keep_only(self) -> KeepOnly:
+        return _keep_only
 
     @pytest.fixture
     def factory(self) -> Iterator[ConversationStoreFactory]:
@@ -1985,3 +2010,49 @@ async def test_a_reply_is_compared_with_the_home_its_targets_row_keeps(
         assert (alone.outcome, alone.position) == (SendOutcome.RECORDED, 2)
     finally:
         store.close()
+
+
+def _keep_only(store: ConversationStore, sight: Sight) -> None:
+    """Make the file hold only what ``sight`` sees, as though nothing else was written.
+
+    The ``KeepOnly`` the shared suite asks of each implementation, in SQL on the store's
+    own connection, each row judged in Python by :meth:`~ai_assistant.core.types.Sight.sees`
+    over the home its columns hold, so the store's own condition is what the obligation
+    tests. ``sqlite_sequence`` is left as it is, so the stream's head and every issued
+    number stand (ADR-0383 §8:5).
+    """
+    assert isinstance(store, SqliteConversationStore)
+    conn = store._conn
+    conn.execute("BEGIN IMMEDIATE")
+    for conversation_id, kind, ident in conn.execute(
+        "SELECT id, home_kind, home_id FROM conversations"
+    ).fetchall():
+        if sight.sees(RecordHome(kind=kind, id=ident)):
+            continue
+        for table in ("messages", "taken_in", "conversation_devices", "chat_changes"):
+            conn.execute(f"DELETE FROM {table} WHERE conversation_id = ?", (conversation_id,))  # noqa: S608 — a constant
+        conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+    for conversation_id, position, kind, ident in conn.execute(
+        "SELECT conversation_id, position, home_kind, home_id FROM messages"
+    ).fetchall():
+        if sight.sees(RecordHome(kind=kind, id=ident)):
+            continue
+        key = (conversation_id, position)
+        conn.execute("DELETE FROM messages WHERE conversation_id = ? AND position = ?", key)
+        conn.execute("DELETE FROM taken_in WHERE conversation_id = ? AND position = ?", key)
+        conn.execute(
+            "DELETE FROM chat_changes WHERE conversation_id = ? AND position = ? "
+            "AND kind IN ('message_added', 'message_deleted')",
+            key,
+        )
+    conn.execute(
+        "DELETE FROM chat_changes WHERE kind = 'devices_changed' OR conversation_id IS NULL "
+        "OR conversation_id NOT IN (SELECT id FROM conversations)"
+    )
+    conn.execute(
+        "UPDATE chat_changes SET devices = '[]' "
+        "WHERE kind IN ('conversation_started', 'conversation_deleted')"
+    )
+    conn.execute("DELETE FROM conversation_devices")
+    conn.execute("DELETE FROM chat_devices")
+    conn.execute("COMMIT")

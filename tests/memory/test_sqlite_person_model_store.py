@@ -24,11 +24,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 from person_model_store_contract import (
+    FIELD_CHARS,
     MEMORY,
     OTHER_MEMORY,
     PANEL,
     PersonModelStoreContract,
     PersonModelStoreFactory,
+    SightStoreFactory,
     field_suggestion,
     pin_suggestion,
     ticking,
@@ -43,6 +45,7 @@ from ai_assistant.core.types import (
     PersonModelWriteKind,
     PersonRole,
     ProfileField,
+    SightMode,
 )
 from ai_assistant.memory.person_model_store import (
     PERSON_MODEL_SCHEMA_VERSION,
@@ -81,6 +84,27 @@ class TestSqlitePersonModelStoreContract(PersonModelStoreContract):
                 store = SqlitePersonModelStore(path=path, field_chars=field_chars)
             else:
                 store = SqlitePersonModelStore(path=path, field_chars=field_chars, now=now)
+            opened.append(store)
+            return store
+
+        yield build
+        for store in opened:
+            store.close()
+
+    @pytest.fixture
+    def sight_store_factory(self, tmp_path: Path) -> Iterator[SightStoreFactory]:
+        opened: list[SqlitePersonModelStore] = []
+
+        def build(
+            mode: SightMode, *, now: Callable[[], datetime], new_id: Callable[[str], str]
+        ) -> PersonModelStore:
+            store = SqlitePersonModelStore(
+                path=tmp_path / f"person_model-sight-{len(opened)}.db",
+                field_chars=FIELD_CHARS,
+                now=now,
+                new_id=new_id,
+                sight_mode=mode,
+            )
             opened.append(store)
             return store
 

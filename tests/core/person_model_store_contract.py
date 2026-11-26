@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 from zoneinfo import ZoneInfo
 
 import pytest
+import structlog
 
 from ai_assistant.core.errors import PersonModelStoreError
 from ai_assistant.core.protocols import PersonModelStore
@@ -39,10 +40,13 @@ from ai_assistant.core.types import (
     ProfileField,
     ProposedSuggestion,
     QuestionPart,
+    RecordHome,
+    SightMode,
     SuggestionKind,
     SuggestionState,
     SupportOrigin,
 )
+from sight_equivalence import SIGHTS, ReadCall, assert_answers_alike
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -161,6 +165,24 @@ async def owner(store: PersonModelStore) -> PersonModel:
     model = await store.read(OWNER_PERSON_ID)
     assert model is not None
     return model
+
+
+class SightStoreFactory(Protocol):
+    """Builds a subject as first created, whose bindings withhold or count as ``mode`` says.
+
+    On the clock and the id source given, so two subjects built alike and handed one
+    history hold the same records under the same ids (ADR-0383 §7:10, §9:3).
+    """
+
+    def __call__(
+        self,
+        mode: SightMode,
+        *,
+        now: Callable[[], datetime],
+        new_id: Callable[[str], str],
+    ) -> PersonModelStore:
+        """Build a subject in ``mode``, with the suite's bound on a field's length."""
+        ...
 
 
 class PersonModelStoreContract:
@@ -812,6 +834,211 @@ class PersonModelStoreContract:
         exported = await store.export()
         assert exported.model_dump() == type(exported)().model_dump()
         assert await store.read(OWNER_PERSON_ID) is None
+
+    # --- a store bound to a sight (ADR-0383 §7, §8, §9:3, §11) ---------------------
+
+    @pytest.fixture
+    def sight_store_factory(self) -> SightStoreFactory:
+        """Override with a builder of subjects in a mode, on a given clock and id source."""
+        raise NotImplementedError
+
+    async def _sight_pair(
+        self, factory: SightStoreFactory, mode: SightMode
+    ) -> tuple[PersonModelStore, PersonModelStore]:
+        """Two subjects in ``mode`` that took one history, act by act."""
+        made = []
+        for _ in range(2):
+            store = factory(mode, now=ticking(), new_id=_numbered())
+            await _sight_history(store)
+            made.append(store)
+        return made[0], made[1]
+
+    @pytest.mark.parametrize("sight_name", list(SIGHTS))
+    async def test_a_bound_store_answers_as_the_same_store_holding_only_what_its_sight_sees(
+        self, sight_store_factory: SightStoreFactory, sight_name: str
+    ) -> None:
+        """§9:3's shared obligation, for every read member (§7:2, §8:1, §8:2).
+
+        The store holds the owner alone, so the same store holding only what a sight
+        sees is the store as it is, where the sight sees the owner's domain, and the
+        store cleared, where it does not. The first, bound and withholding, answers
+        every call in the battery as the second does, "no such person" included.
+        """
+        sight = SIGHTS[sight_name]
+        bound_store, holding_only = await self._sight_pair(sight_store_factory, SightMode.WITHHOLD)
+        if not sight.sees(RecordHome.owners()):
+            await holding_only.clear()
+        await assert_answers_alike(bound_store.bound(sight), holding_only, _sight_battery())
+
+    async def test_the_sights_withhold_what_they_do_not_see(
+        self, sight_store_factory: SightStoreFactory
+    ) -> None:
+        """Each sight's held set: the owner's model where it sees the owner's domain."""
+        store, _ = await self._sight_pair(sight_store_factory, SightMode.WITHHOLD)
+        everything = await store.export()
+        assert everything.persons
+        assert everything.changes
+        assert everything.pins
+        assert everything.style_marks
+        assert everything.suggestions
+        for name, sight in SIGHTS.items():
+            exported = await store.bound(sight).export()
+            if name in {"owners-work", "run-over-the-owners-domain"}:
+                assert exported == everything, name
+                assert await store.bound(sight).read(OWNER_PERSON_ID) is not None, name
+            else:
+                assert exported == type(exported)(), name
+                assert await store.bound(sight).read(OWNER_PERSON_ID) is None, name
+
+    async def test_a_bound_store_refuses_a_write_for_a_person_it_does_not_hold(
+        self, sight_store_factory: SightStoreFactory
+    ) -> None:
+        """§7:5, §8:2: every write naming a person not held is ``unknown_person``.
+
+        As for a person the store never held: nothing is written, and no second model
+        is created beside the one withheld (§7:11). ``clear`` erases and counts only
+        what it holds. The unbound store answers as before.
+        """
+        store, _ = await self._sight_pair(sight_store_factory, SightMode.WITHHOLD)
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        before = await store.export()
+        held = await store.read(OWNER_PERSON_ID)
+        assert held is not None
+        pin, mark = held.pins[-1].id, held.style_marks[-1].id
+        pending = held.suggestions[0].id
+        refused = [
+            await bound.set_field(OWNER_PERSON_ID, ProfileField.NAME, "Elsewhere", act=PANEL),
+            await bound.add_pin(OWNER_PERSON_ID, "memory:later", act=PANEL),
+            await bound.remove_pin(OWNER_PERSON_ID, pin),
+            await bound.add_style_mark(OWNER_PERSON_ID, "memory:later"),
+            await bound.remove_style_mark(OWNER_PERSON_ID, mark),
+            await bound.record_suggestion(OWNER_PERSON_ID, pin_suggestion("memory:later")),
+            await bound.accept_suggestion(OWNER_PERSON_ID, pending, by=OWNER_PERSON_ID),
+            await bound.dismiss_suggestion(OWNER_PERSON_ID, pending),
+        ]
+        assert [(one.kind, one.refusal) for one in refused] == [
+            (REFUSED, PersonModelRefusal.UNKNOWN_PERSON)
+        ] * len(refused)
+        assert await bound.clear() == 0
+        assert await store.export() == before
+        owners = store.bound(SIGHTS["owners-work"])
+        written = await owners.set_field(OWNER_PERSON_ID, ProfileField.NAME, "Later", act=PANEL)
+        assert written.kind is WRITTEN
+
+    async def test_a_bound_stores_clear_reaches_only_what_it_holds(
+        self, sight_store_factory: SightStoreFactory
+    ) -> None:
+        """§7:2: a binding that sees the owner's domain clears and counts it as unbound."""
+        store, twin = await self._sight_pair(sight_store_factory, SightMode.WITHHOLD)
+        assert await store.bound(SIGHTS["run-over-the-owners-domain"]).clear() == (
+            await twin.clear()
+        )
+        assert await store.read(OWNER_PERSON_ID) is None
+
+    async def test_a_store_bound_in_the_counting_mode_answers_as_unbound_and_counts(
+        self, sight_store_factory: SightStoreFactory
+    ) -> None:
+        """§7:10, §11:1 to §11:3: counting changes no answer and writes one event a read.
+
+        The answers are the unbound store's, no write is refused for the sight, and each
+        read writes one ``sight_counted`` event of numbers and codes alone: the person
+        and each change, pin, mark and suggestion it gave back.
+        """
+        store, twin = await self._sight_pair(sight_store_factory, SightMode.COUNT)
+        sight = SIGHTS["run-over-the-shared-things"]
+        await assert_answers_alike(store.bound(sight), twin, _sight_battery())
+        with structlog.testing.capture_logs() as events:
+            model = await store.bound(sight).read(OWNER_PERSON_ID)
+            exported = await store.bound(sight).export()
+            await store.bound(sight).read(STRANGER)
+        assert model is not None
+        records = 1 + len(model.changes) + len(model.pins) + len(model.style_marks)
+        records += len(model.suggestions)
+        everything = len(exported.persons) + len(exported.changes) + len(exported.pins)
+        everything += len(exported.style_marks) + len(exported.suggestions)
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert counted == [
+            {
+                "event": "sight_counted",
+                "log_level": "info",
+                "store": "person_model",
+                "member": member,
+                "given": given,
+                "other_home": given,
+                "no_home": 0,
+                "sees_nothing": 0,
+                "reader": "run",
+                "bounds": ["domain", "person_owner"],
+            }
+            for member, given in (("read", records), ("export", everything), ("read", 0))
+        ]
+        bound = store.bound(sight)
+        with structlog.testing.capture_logs() as events:
+            written = await bound.set_field(
+                OWNER_PERSON_ID, ProfileField.NAME, "Counted", act=PANEL
+            )
+        assert written.kind is WRITTEN
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    async def test_a_store_bound_twice_is_bound_to_the_meet_of_the_two_sights(
+        self, sight_store_factory: SightStoreFactory
+    ) -> None:
+        """§6:6, §7:1: binding again never widens; two sights that do not meet are refused."""
+        store, _ = await self._sight_pair(sight_store_factory, SightMode.WITHHOLD)
+        owners = SIGHTS["owners-work"]
+        twice = store.bound(owners).bound(SIGHTS["unidentified-senders-work"])
+        assert await twice.read(OWNER_PERSON_ID) is None
+        with pytest.raises(ValueError, match="meet"):
+            store.bound(owners).bound(SIGHTS["run-over-the-shared-things"])
+
+    async def test_a_bound_store_reads_what_the_unbound_store_writes_after_binding(
+        self, sight_store_factory: SightStoreFactory
+    ) -> None:
+        """§7:1: a binding is over the store's own records, not a copy of them."""
+        store = sight_store_factory(SightMode.WITHHOLD, now=ticking(), new_id=_numbered())
+        bound = store.bound(SIGHTS["owners-work"])
+        await store.add_pin(OWNER_PERSON_ID, MEMORY, act=PANEL)
+        model = await bound.read(OWNER_PERSON_ID)
+        assert model is not None
+        assert [one.memory_id for one in model.pins] == [MEMORY]
+
+
+def _numbered() -> Callable[[str], str]:
+    """An id source minting ``<kind>-1``, ``<kind>-2`` and on, one count for every kind."""
+    numbers = count(1)
+    return lambda kind: f"{kind}-{next(numbers)}"
+
+
+async def _sight_history(store: PersonModelStore) -> None:
+    """One history touching every kind of record the store holds, in one order."""
+    for field, value in (
+        (ProfileField.NAME, "Sam"),
+        (ProfileField.TIME_ZONE, "Europe/Rome"),
+    ):
+        assert (await store.set_field(OWNER_PERSON_ID, field, value, act=PANEL)).kind is WRITTEN
+    for memory in (MEMORY, OTHER_MEMORY):
+        assert (await store.add_pin(OWNER_PERSON_ID, memory, act=PANEL)).kind is WRITTEN
+        assert (await store.add_style_mark(OWNER_PERSON_ID, memory)).kind is WRITTEN
+    first = await store.read(OWNER_PERSON_ID)
+    assert first is not None
+    await store.remove_pin(OWNER_PERSON_ID, first.pins[0].id)
+    await store.remove_style_mark(OWNER_PERSON_ID, first.style_marks[0].id)
+    pending = await store.record_suggestion(OWNER_PERSON_ID, pin_suggestion("memory:third"))
+    dismissed = await store.record_suggestion(
+        OWNER_PERSON_ID, field_suggestion(ProfileField.NAME, "Samuel")
+    )
+    assert pending.kind is dismissed.kind is WRITTEN
+    assert dismissed.record_id is not None
+    await store.dismiss_suggestion(OWNER_PERSON_ID, dismissed.record_id)
+
+
+def _sight_battery() -> list[ReadCall[PersonModelStore]]:
+    """Every read member, a person held and one never held among them."""
+    return [
+        ReadCall("read(owner)", lambda store: store.read(OWNER_PERSON_ID)),
+        ReadCall("read(stranger)", lambda store: store.read(STRANGER)),
+        ReadCall("export()", lambda store: store.export()),
+    ]
 
 
 def _strings(value: object) -> list[str]:

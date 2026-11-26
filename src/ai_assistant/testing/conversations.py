@@ -23,6 +23,14 @@ message replying to a message of another home, standing or deleted, is answered
 ``another_home`` and writes nothing (ADR-0383 §4:7); one of another home than its
 conversation is recorded, as the durable store records it.
 
+**It can be bound to a sight** (ADR-0383 §7:1), as the store is:
+:meth:`FakeConversationStore.bound` returns a copy sharing every piece of this fake's
+state, with the sight set. Built to withhold, the copy holds a conversation whose home
+the sight sees and, within it, each message or marker whose own home it sees, applied
+before anything is ordered, sliced or counted; it gives back no device row (§3:3), and a
+conversation it does not hold is, for every member naming it, one never started. Built
+to count, the default, it answers as unbound and logs ``sight_counted`` for each read.
+
 It holds ADR-0293's chat space as the store does: each conversation's transcript,
 "my devices" and each conversation's devices, the change stream as one list of
 changes under one counter, and the reader's bookkeeping. A change is held as the
@@ -54,12 +62,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
+import structlog
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -85,6 +95,7 @@ from ai_assistant.core.types import (
     MessageReceipt,
     RecordHome,
     SendOutcome,
+    SightMode,
     TranscriptMessage,
     TranscriptPage,
     UtcInstant,
@@ -95,11 +106,16 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import ChatChange, NewMessage
+    from ai_assistant.core.types import ChatChange, NewMessage, Sight
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
+
+_log = structlog.get_logger(__name__)
+
+#: The store's code in ADR-0383 §11:1's event, as the conversation store writes it.
+_STORE_CODE: Final = "conversations"
 
 #: One past the largest value a paging argument accepts — the signed 64-bit
 #: ceiling a SQLite bind parameter tops out at (ADR-0073 §2). Duplicated from the
@@ -367,6 +383,20 @@ class _Exclusion:
     holders: int = 0
 
 
+@dataclass(slots=True)
+class _Shared:
+    """The fake's two values a write replaces, held apart so a bound copy shares them.
+
+    A fake bound to a sight is a copy sharing every piece of its state by reference
+    (:meth:`FakeConversationStore.bound`); a counter or a set held as a plain attribute
+    would be copied by value, and a write through the copy would leave the store's own
+    behind.
+    """
+
+    seq: int = 0
+    my_devices: tuple[ChatDevice, ...] = ()
+
+
 def _by_last_activity(conversations: list[Conversation]) -> list[Conversation]:
     """ADR-0074 §2's total order: ``last_active_at`` descending, ``id`` ascending.
 
@@ -384,7 +414,7 @@ class FakeConversationStore:
     :class:`~ai_assistant.core.protocols.ConversationStore`.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per injected seam the contract names
         self,
         *,
         now: Clock = _utcnow,
@@ -392,6 +422,7 @@ class FakeConversationStore:
         retention: timedelta | None = _DEFAULT_EPISODE_RETENTION,
         tombstone_grace: timedelta = _DEFAULT_TOMBSTONE_GRACE,
         purge_batch: int = _DEFAULT_PURGE_BATCH,
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> None:
         """Create an empty store.
 
@@ -411,6 +442,8 @@ class FakeConversationStore:
                 stamp (ADR-0074 §8).
             purge_batch: The batch size :meth:`stamped_conversation_ids` uses by
                 default.
+            sight_mode: Whether a copy bound to a sight withholds or only counts
+                (ADR-0383 §7:10).
 
         Raises:
             ValueError: If ``tombstone_grace`` is not strictly positive, if
@@ -459,11 +492,12 @@ class FakeConversationStore:
         #: from the message, which a device reads and which never carries it.
         self._claimed: dict[str, dict[str, int]] = {}
         #: "My devices" (§3:1), and each conversation's devices (§3:3).
-        self._my_devices: tuple[ChatDevice, ...] = ()
+        #: "My devices" (§3:1) and the change stream's counter (§5:10), held apart so a
+        #: copy bound to a sight shares them (:meth:`bound`).
+        self._shared = _Shared()
         self._devices: dict[str, tuple[ChatDevice, ...]] = {}
-        #: The change stream (§5:10), in sequence order, and its counter.
+        #: The change stream (§5:10), in sequence order; its counter is in `_shared`.
         self._changes: list[ChatChange] = []
-        self._seq = 0
         #: Per deletion's sequence number, every device that read its conversation at
         #: any point of its recorded history: what the store keeps beside the deletion,
         #: read by :meth:`device_changes` alone (ADR-0296 §4:5, §4:8).
@@ -477,6 +511,8 @@ class FakeConversationStore:
         self._taken: dict[str, dict[int, str]] = {}
         self._start_lock = asyncio.Lock()
         self._resource = SuspendableResource()
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
 
     def suspend_next_operation(self) -> LoopSuspension:
         """Hold the next call open *inside* the resource it acquired (ADR-0060 §3).
@@ -502,6 +538,109 @@ class FakeConversationStore:
     def resource_log(self) -> ResourceLog:
         """When each call was inside the modelled resource (ADR-0060's case reads it)."""
         return self._resource.log
+
+    # --- a copy bound to a sight (ADR-0383 §7, §11) ----------------------------
+
+    def bound(self, sight: Sight) -> FakeConversationStore:
+        """This fake, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing every piece of this fake's state, its locks and its
+        modelled resource, with the sight set: the meet of the one it was already bound
+        to, where it was (§6:6).
+
+        Raises:
+            ValueError: If this fake is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _withholding(self) -> Sight | None:
+        """The sight this fake withholds by, where it is bound and withholds."""
+        return None if self._sight_mode is SightMode.COUNT else self._sight
+
+    def _holds(self, home: RecordHome | None) -> bool:
+        """Whether this fake, as bound, holds a record of ``home``."""
+        sight = self._withholding()
+        return sight is None or sight.sees(home)
+
+    def _standing_held(self, conversation_id: str) -> Conversation | None:
+        """The conversation where it stands and this fake, as bound, holds it."""
+        conversation = self._conversations.get(conversation_id)
+        if conversation is None or conversation.deleted_at is not None:
+            return None
+        return conversation if self._holds(conversation.home) else None
+
+    def _message_home(self, conversation_id: str, position: int) -> RecordHome | None:
+        """The home of the message, or the marker, at ``position``; ``None`` where none is."""
+        held = self._messages.get(conversation_id, {}).get(position)
+        if isinstance(held, TranscriptMessage):
+            return held.home
+        return self._marker_homes.get(conversation_id, {}).get(position)
+
+    def _holds_message(self, conversation_id: str, position: int) -> bool:
+        """Whether this fake, as bound, holds the message or marker at ``position``."""
+        return self._holds(self._message_home(conversation_id, position))
+
+    def _keeps_unheld(self, conversation_id: str) -> bool:
+        """Whether the conversation keeps a message or marker this fake, as bound, does not hold."""
+        return any(
+            not self._holds_message(conversation_id, position)
+            for position in self._messages.get(conversation_id, {})
+        )
+
+    def _counted(self, member: str, given: Iterable[RecordHome | None]) -> None:
+        """Write §11:1's count of one read, where this fake is bound and only counts."""
+        if self._sight is None or self._sight_mode is not SightMode.COUNT:
+            return
+        count = self._sight.count(
+            store=_STORE_CODE, member=member, given=((home, None) for home in given)
+        )
+        _log.info("sight_counted", **count.model_dump(mode="json"))
+
+    def _deciding(
+        self, conversation: RecordHome | None, message: RecordHome | None
+    ) -> RecordHome | None:
+        """The home a message in ``conversation`` is withheld by, as the store counts it."""
+        if self._sight is None or self._sight.sees(conversation):
+            return message
+        return conversation
+
+    def _change_home(self, change: ChatChange) -> RecordHome | None:
+        """The home a change is withheld by: none for a set of devices (§3:3)."""
+        if isinstance(change, DevicesChangedChange):
+            return None
+        held = self._conversations.get(change.conversation_id or "")
+        conversation = None if held is None else held.home
+        if isinstance(change, MessageAddedChange):
+            return self._deciding(conversation, change.message.home)
+        if isinstance(change, MessageDeletedChange):
+            return self._deciding(
+                conversation, self._message_home(change.conversation_id, change.marker.position)
+            )
+        return conversation
+
+    def _holds_change(self, change: ChatChange) -> bool:
+        """Whether this fake, as bound, gives back ``change`` (ADR-0383 §3:3, §5:3)."""
+        if self._withholding() is None:
+            return True
+        if isinstance(change, DevicesChangedChange):
+            return False
+        held = self._conversations.get(change.conversation_id or "")
+        if held is None or not self._holds(held.home):
+            return False
+        if isinstance(change, MessageAddedChange):
+            return self._holds(change.message.home)
+        if isinstance(change, MessageDeletedChange):
+            return self._holds_message(change.conversation_id, change.marker.position)
+        return True
+
+    def _given(self, change: ChatChange) -> ChatChange:
+        """``change`` as given back: a start carries no devices through a withholding copy."""
+        if self._withholding() is None or not isinstance(change, ConversationStartedChange):
+            return change
+        return change.model_copy(update={"devices": ()})
 
     # --- internals -----------------------------------------------------------
 
@@ -568,11 +707,12 @@ class FakeConversationStore:
         Raises:
             UnknownConversationError: If the id names nothing, or names a
                 conversation stamped deleted — refused, never created (ADR-0074
-                §1, §8). The narrow subclass, so a sweep can tell "someone else
-                already finished this" from "the store is broken" (ADR-0076 §2).
+                §1, §8) — or, bound and withholding, one this fake does not hold.
+                The narrow subclass, so a sweep can tell "someone else already
+                finished this" from "the store is broken" (ADR-0076 §2).
         """
-        conversation = self._conversations.get(conversation_id)
-        if conversation is None or conversation.deleted_at is not None:
+        conversation = self._standing_held(conversation_id)
+        if conversation is None:
             described = describe_untrusted(conversation_id)
             msg = f"no such conversation: {described}"
             raise UnknownConversationError(msg)
@@ -584,12 +724,12 @@ class FakeConversationStore:
         Drawn inside the step that makes the change and appended in the same
         expression, with no ``await`` between, so the list stays in sequence order.
         """
-        self._seq += 1
-        return self._seq
+        self._shared.seq += 1
+        return self._shared.seq
 
     def _drop_changes_of(self, conversation_id: str) -> None:
         """Remove every change of one conversation from the stream."""
-        self._changes = [one for one in self._changes if one.conversation_id != conversation_id]
+        self._changes[:] = [one for one in self._changes if one.conversation_id != conversation_id]
 
     def _readers_of(self, conversation_id: str) -> tuple[ChatDevice, ...]:
         """Every device that read the conversation at any point of its recorded history.
@@ -661,6 +801,12 @@ class FakeConversationStore:
         """
         if message.replies_to is not None:
             if message.replies_to >= position:
+                return SendOutcome.NO_SUCH_REPLY
+            if message.replies_to in self._messages[conversation_id] and not (
+                self._holds_message(conversation_id, message.replies_to)
+            ):
+                # ADR-0383 §4:8: a reply to a message this copy does not hold is
+                # refused as one to a position never held.
                 return SendOutcome.NO_SUCH_REPLY
             target = self._messages[conversation_id].get(message.replies_to)
             replied: RecordHome | None = (
@@ -740,7 +886,7 @@ class FakeConversationStore:
                     continue
                 self._conversations[conversation.id] = conversation
                 # ADR-0293 §2:1, §3:1: empty, on "my devices" as they stand.
-                devices = self._my_devices
+                devices = self._shared.my_devices
                 self._messages[conversation.id] = {}
                 self._marker_homes[conversation.id] = {}
                 self._sent[conversation.id] = {}
@@ -767,9 +913,8 @@ class FakeConversationStore:
         sites ADR-0060's clause binds (#492).
         """
         async with self._resource.held():
-            conversation = self._conversations.get(conversation_id)
-            if conversation is None or conversation.deleted_at is not None:
-                return None
+            conversation = self._standing_held(conversation_id)
+            self._counted("get", () if conversation is None else [conversation.home])
             return conversation
 
     async def mark_active(self, conversation_id: str) -> Conversation:
@@ -807,8 +952,8 @@ class FakeConversationStore:
         """
         _, checked_at = _checked_turn(episode_id, occurred_at)
         async with self._exclusive(conversation_id):
-            conversation = self._conversations.get(conversation_id)
-            if conversation is None or conversation.deleted_at is not None:
+            conversation = self._standing_held(conversation_id)
+            if conversation is None:
                 return None
             recorded = conversation.model_copy(update={"last_turn_at": checked_at})
             self._conversations[conversation_id] = recorded
@@ -833,14 +978,21 @@ class FakeConversationStore:
         batch = self._purge_batch if limit is None else limit
         _check_page_bound("limit", batch)
         if batch == 0:
+            self._counted("stamped_conversation_ids", ())
             return []
         async with self._resource.held():  # a locked read on the durable store (#492)
             stamped = sorted(
-                one.id for one in self._conversations.values() if one.deleted_at is not None
+                (
+                    one
+                    for one in self._conversations.values()
+                    if one.deleted_at is not None and self._holds(one.home)
+                ),
+                key=lambda one: one.id,
             )
         if after_id is not None:
-            stamped = [one for one in stamped if one > after_id]
-        return stamped[:batch]
+            stamped = [one for one in stamped if one.id > after_id]
+        self._counted("stamped_conversation_ids", (one.home for one in stamped[:batch]))
+        return [one.id for one in stamped[:batch]]
 
     async def recent(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]:
         """List unstamped conversations, last activity first, ``id`` breaking ties.
@@ -851,16 +1003,25 @@ class FakeConversationStore:
         _check_page_bound("limit", limit)
         _check_page_bound("offset", offset)
         if limit == 0:
+            self._counted("recent", ())
             return []
         async with self._resource.held():  # a locked read on the durable store (#492)
-            live = [one for one in self._conversations.values() if one.deleted_at is None]
-        return _by_last_activity(live)[offset : offset + limit]
+            live = [
+                one
+                for one in self._conversations.values()
+                if one.deleted_at is None and self._holds(one.home)
+            ]
+        page = _by_last_activity(live)[offset : offset + limit]
+        self._counted("recent", (one.home for one in page))
+        return page
 
     async def stamp_deleted(self, conversation_id: str) -> bool:
         """Stamp the conversation deleted, returning whether this call did it."""
         async with self._exclusive(conversation_id):
-            conversation = self._conversations.get(conversation_id)
-            if conversation is None or conversation.deleted_at is not None:
+            conversation = self._standing_held(conversation_id)
+            if conversation is None or self._keeps_unheld(conversation_id):
+                # Bound and withholding: one it does not hold, or one keeping what it
+                # does not hold, is not deleted (ADR-0383 §7:5).
                 return False
             self._conversations[conversation_id] = conversation.model_copy(
                 update={"deleted_at": self._now()}
@@ -885,6 +1046,8 @@ class FakeConversationStore:
             conversation = self._conversations.get(conversation_id)
             if conversation is None:
                 return False
+            if not self._holds(conversation.home) or self._keeps_unheld(conversation_id):
+                return False  # bound and withholding, not held, or keeping what is not
             now = self._now()
             # `now - stamp >= duration` rather than `stamp + duration <= now`:
             # equivalent, and only the first cannot overflow at a clock reading
@@ -920,12 +1083,32 @@ class FakeConversationStore:
         """
         async with self._resource.held():  # a locked read on the durable store (#492)
             live = _by_last_activity(
-                [one for one in self._conversations.values() if one.deleted_at is None]
+                [
+                    one
+                    for one in self._conversations.values()
+                    if one.deleted_at is None and self._holds(one.home)
+                ]
+            )
+            messages = [
+                message
+                for one in live
+                for message in self._exported(one.id)
+                if self._holds(message.home)
+            ]
+            self._counted(
+                "export",
+                [
+                    *(one.home for one in live),
+                    *(
+                        self._deciding(self._conversations[one.conversation_id].home, one.home)
+                        for one in messages
+                    ),
+                ],
             )
             return ConversationExport(
                 exported_at=self._now(),
                 conversations=tuple(live),
-                messages=tuple(message for one in live for message in self._exported(one.id)),
+                messages=tuple(messages),
             )
 
     # --- the chat space (ADR-0293) --------------------------------------------
@@ -1004,12 +1187,12 @@ class FakeConversationStore:
             self._live(conversation_id)
             held = self._messages[conversation_id]
             standing = held.get(position)
-            if not isinstance(standing, TranscriptMessage):
+            if not isinstance(standing, TranscriptMessage) or not self._holds(standing.home):
                 return False
             marker = DeletedMessage(conversation_id=conversation_id, position=position)
             held[position] = marker
             self._marker_homes[conversation_id][position] = standing.home
-            self._changes = [
+            self._changes[:] = [
                 one
                 for one in self._changes
                 if not (
@@ -1031,8 +1214,26 @@ class FakeConversationStore:
         """
         effect = _checked_effect_id(effect_id)
         async with self._resource.held():  # a locked read on the durable store (#492)
-            self._live(conversation_id)
-            return self._claimed[conversation_id].get(effect)
+            conversation = self._live(conversation_id)
+            position = self._claimed[conversation_id].get(effect)
+            if position is not None and not self._holds_message(conversation_id, position):
+                position = None  # bound and withholding, a message never written
+            self._counted(
+                "effect_position",
+                [
+                    conversation.home,
+                    *(
+                        ()
+                        if position is None
+                        else [
+                            self._deciding(
+                                conversation.home, self._message_home(conversation_id, position)
+                            )
+                        ]
+                    ),
+                ],
+            )
+            return position
 
     async def transcript(
         self,
@@ -1050,16 +1251,31 @@ class FakeConversationStore:
             _check_position("before", before)
         _check_page_bound("limit", limit)
         async with self._resource.held():  # a locked read on the durable store (#492)
-            conversation = self._conversations.get(conversation_id)
-            if conversation is None or conversation.deleted_at is not None:
+            conversation = self._standing_held(conversation_id)
+            if conversation is None:
+                self._counted("transcript", ())
                 return None
             held = self._messages[conversation_id]
-            positions = [one for one in sorted(held) if before is None or one < before]
+            positions = [
+                one
+                for one in sorted(held)
+                if (before is None or one < before) and self._holds_message(conversation_id, one)
+            ]
             chosen = positions[-limit:] if limit else []
+            self._counted(
+                "transcript",
+                [
+                    conversation.home,
+                    *(
+                        self._deciding(conversation.home, self._message_home(conversation_id, one))
+                        for one in chosen
+                    ),
+                ],
+            )
             return TranscriptPage(
                 conversation_id=conversation_id,
                 entries=tuple(held[one] for one in chosen),
-                as_of=self._seq,
+                as_of=self._shared.seq,
             )
 
     async def changes(
@@ -1080,23 +1296,33 @@ class FakeConversationStore:
         named = _checked_conversation_ids(conversation_ids)
         async with self._resource.held():  # a locked read on the durable store (#492)
             if limit == 0:
+                self._counted("changes", ())
                 return ChatChanges(next_after=after)
             wanted = None if named is None else set(named)
             page: list[ChatChange] = []
             for one in self._changes:
-                if one.seq <= after:
+                if one.seq <= after or not self._holds_change(one):
                     continue
                 if wanted is not None and one.conversation_id not in wanted | {None}:
                     continue
                 page.append(one)
                 if len(page) == limit:
-                    return ChatChanges(changes=tuple(page), next_after=page[-1].seq)
-            return ChatChanges(changes=tuple(page), next_after=self._seq)
+                    break
+            self._counted("changes", (self._change_home(one) for one in page))
+            # Where the page is not full, the cursor is the stream's head: a store-wide
+            # figure that counts writes, alike bound or not (ADR-0383 §8:5).
+            next_after = page[-1].seq if len(page) == limit else self._shared.seq
+            return ChatChanges(
+                changes=tuple(self._given(one) for one in page), next_after=next_after
+            )
 
     async def my_devices(self) -> tuple[ChatDevice, ...]:
         """Return "my devices", ``device_id`` ascending (ADR-0293 §3:1)."""
         async with self._resource.held():  # a locked read on the durable store (#492)
-            return self._my_devices
+            if self._withholding() is not None:
+                return ()  # a device row is given back by no bound store (ADR-0383 §3:3)
+            self._counted("my_devices", (None for _ in self._shared.my_devices))
+            return self._shared.my_devices
 
     async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
         """Replace "my devices", recording the change where it is one (ADR-0293 §3:1).
@@ -1110,19 +1336,24 @@ class FakeConversationStore:
         wanted = checked_chat_devices(devices)
         async with self._start_lock, self._resource.held():
             await asyncio.sleep(0)
-            if wanted == self._my_devices:
+            if wanted == self._shared.my_devices:
                 return False
-            self._my_devices = wanted
+            self._shared.my_devices = wanted
             self._changes.append(DevicesChangedChange(seq=self._next_seq(), devices=wanted))
             return True
 
     async def conversation_devices(self, conversation_id: str) -> tuple[ChatDevice, ...] | None:
         """Return a conversation's devices, or ``None`` if absent or stamped (§3:3)."""
         async with self._resource.held():  # a locked read on the durable store (#492)
-            conversation = self._conversations.get(conversation_id)
-            if conversation is None or conversation.deleted_at is not None:
+            conversation = self._standing_held(conversation_id)
+            if conversation is None:
+                self._counted("conversation_devices", ())
                 return None
-            return self._devices[conversation_id]
+            if self._withholding() is not None:
+                return ()  # a device row is given back by no bound store (§3:3)
+            devices = self._devices[conversation_id]
+            self._counted("conversation_devices", [conversation.home, *(None for _ in devices)])
+            return devices
 
     async def set_conversation_devices(
         self, conversation_id: str, devices: Sequence[ChatDevice]
@@ -1166,7 +1397,7 @@ class FakeConversationStore:
             marked: list[int] = []
             for position in sorted(set(named)):
                 message = held.get(position)
-                if not isinstance(message, TranscriptMessage):
+                if not isinstance(message, TranscriptMessage) or not self._holds(message.home):
                     continue
                 if message.author is not MessageAuthor.USER or position in taken:
                     continue
@@ -1184,10 +1415,22 @@ class FakeConversationStore:
         """
         _check_page_bound("limit", limit)
         async with self._resource.held():  # a locked read on the durable store (#492)
-            conversation = self._conversations.get(conversation_id)
-            if conversation is None or conversation.deleted_at is not None:
+            if limit == 0:
+                self._counted("untaken_messages", ())
                 return ()
-            return tuple(self._untaken(conversation_id)[:limit])
+            conversation = self._standing_held(conversation_id)
+            if conversation is None:
+                self._counted("untaken_messages", ())
+                return ()
+            found = [one for one in self._untaken(conversation_id) if self._holds(one.home)]
+            self._counted(
+                "untaken_messages",
+                [
+                    conversation.home,
+                    *(self._deciding(conversation.home, one.home) for one in found[:limit]),
+                ],
+            )
+            return tuple(found[:limit])
 
     async def conversations_awaiting(
         self, *, limit: int = _DEFAULT_AWAITING_PAGE, after_id: str | None = None
@@ -1199,16 +1442,23 @@ class FakeConversationStore:
         """
         _check_page_bound("limit", limit)
         if limit == 0:
+            self._counted("conversations_awaiting", ())
             return []
         async with self._resource.held():  # a locked read on the durable store (#492)
             awaiting = sorted(
-                one.id
-                for one in self._conversations.values()
-                if one.deleted_at is None and self._untaken(one.id)
+                (
+                    one
+                    for one in self._conversations.values()
+                    if one.deleted_at is None
+                    and self._holds(one.home)
+                    and any(self._holds(message.home) for message in self._untaken(one.id))
+                ),
+                key=lambda one: one.id,
             )
         if after_id is not None:
-            awaiting = [one for one in awaiting if one > after_id]
-        return awaiting[:limit]
+            awaiting = [one for one in awaiting if one.id > after_id]
+        self._counted("conversations_awaiting", (one.home for one in awaiting[:limit]))
+        return [one.id for one in awaiting[:limit]]
 
     async def taken_in(
         self, conversation_id: str, *, positions: Sequence[int]
@@ -1220,13 +1470,30 @@ class FakeConversationStore:
         """
         named = _checked_positions(positions)
         if not named:
+            self._counted("taken_in", ())
             return {}
         async with self._resource.held():  # a locked read on the durable store (#492)
-            conversation = self._conversations.get(conversation_id)
-            if conversation is None or conversation.deleted_at is not None:
+            conversation = self._standing_held(conversation_id)
+            if conversation is None:
+                self._counted("taken_in", ())
                 return {}
             taken = self._taken[conversation_id]
-            return {one: taken[one] for one in named if one in taken}
+            found = {
+                one: taken[one]
+                for one in named
+                if one in taken and self._holds_message(conversation_id, one)
+            }
+            self._counted(
+                "taken_in",
+                [
+                    conversation.home,
+                    *(
+                        self._deciding(conversation.home, self._message_home(conversation_id, one))
+                        for one in found
+                    ),
+                ],
+            )
+            return found
 
     # --- the chat space: one device's view (ADR-0296 §3, §4) ------------------
 
@@ -1250,17 +1517,24 @@ class FakeConversationStore:
         _check_page_bound("limit", limit)
         async with self._resource.held():  # a locked read on the durable store (#492)
             if limit == 0:
+                self._counted("device_changes", ())
                 return DeviceChanges(next_after=after)
+            if self._withholding() is not None:
+                # Holding no device row, a withholding copy reaches no device with any
+                # change, and its cursor moves to the head (ADR-0383 §3:3, §8:5).
+                return DeviceChanges(next_after=self._shared.seq)
             devices: dict[str | None, tuple[ChatDevice, ...]] = {}
             page: list[DeviceChange] = []
             for one in self._changes:
                 if one.seq > after and self._reaches(device, one, devices):
                     page.append(self._with_snapshot(device, one, devices))
                     if len(page) == limit:
+                        self._counted("device_changes", (None for _ in page))
                         return DeviceChanges(changes=tuple(page), next_after=page[-1].seq)
                 if isinstance(one, (ConversationStartedChange, DevicesChangedChange)):
                     devices[one.conversation_id] = one.devices
-            return DeviceChanges(changes=tuple(page), next_after=self._seq)
+            self._counted("device_changes", (None for _ in page))
+            return DeviceChanges(changes=tuple(page), next_after=self._shared.seq)
 
     def _with_snapshot(
         self, device: str, change: ChatChange, devices: dict[str | None, tuple[ChatDevice, ...]]
@@ -1297,7 +1571,10 @@ class FakeConversationStore:
         _check_page_bound("limit", limit)
         _check_page_bound("offset", offset)
         if limit == 0:
+            self._counted("device_conversations", ())
             return []
+        if self._withholding() is not None:
+            return []  # each entry is a device row's access, which §3:3 gives back none of
         async with self._resource.held():  # a locked read on the durable store (#492)
             access = {
                 conversation_id: held
@@ -1309,10 +1586,9 @@ class FakeConversationStore:
                 for one in self._conversations.values()
                 if one.deleted_at is None and one.id in access
             ]
-        return [
-            DeviceConversation(conversation=one, access=access[one.id].access)
-            for one in _by_last_activity(live)[offset : offset + limit]
-        ]
+        page = _by_last_activity(live)[offset : offset + limit]
+        self._counted("device_conversations", (None for _ in page))
+        return [DeviceConversation(conversation=one, access=access[one.id].access) for one in page]
 
     async def remove_device(self, device_id: str) -> bool:
         """Remove a device from every set of devices, as one step (ADR-0296 §3:6).
@@ -1328,10 +1604,12 @@ class FakeConversationStore:
         async with self._start_lock, self._resource.held():
             await asyncio.sleep(0)
             removed = False
-            if _access_of(device, self._my_devices) is not None:
-                self._my_devices = tuple(one for one in self._my_devices if one.device_id != device)
+            if _access_of(device, self._shared.my_devices) is not None:
+                self._shared.my_devices = tuple(
+                    one for one in self._shared.my_devices if one.device_id != device
+                )
                 self._changes.append(
-                    DevicesChangedChange(seq=self._next_seq(), devices=self._my_devices)
+                    DevicesChangedChange(seq=self._next_seq(), devices=self._shared.my_devices)
                 )
                 removed = True
             for conversation_id in sorted(self._devices):

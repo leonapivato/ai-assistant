@@ -44,6 +44,18 @@ database file, restricted before the first write (ADR-0004 §4).
   code does not understand (ADR-0326 §5:3), and no release wrote an earlier one. Every
   later schema change ships its upgrade from the version it replaces (§4:1).
 
+**A store bound to a sight** (ADR-0383 §7:1). Every record here is keyed by
+``person_id``, and that person's domain is its home (§3, §5:2): no column is added for
+it. :meth:`SqlitePersonModelStore.bound` returns this store over the same connection,
+bound to a sight; whether it withholds or only counts is fixed when the store is built
+(§7:10). Withholding, every statement keeps a row only where its person's domain is one
+the sight sees, before anything is ordered or counted, so the bound store answers as
+this store would holding only those people's records, and a write naming a person it
+does not hold is refused ``unknown_person``, as for a person never held (§7:5, §8:2).
+A write's own checks, a minted id's uniqueness above all, are decided over every row
+(§7:11). Counting, it answers as unbound and logs ``sight_counted`` for each read
+(§11:1).
+
 Where the file goes, and the bound on a field's length, are the composition root's.
 """
 
@@ -51,6 +63,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -81,21 +94,28 @@ from ai_assistant.core.types import (
     ProfileChange,
     ProfileField,
     ProposedSuggestion,
+    SightMode,
     StyleMark,
     SuggestionKind,
     SuggestionState,
     describe_untrusted,
     encodable_text,
 )
+from ai_assistant.memory._bound_columns import count_given, home_of_person, persons_seen_sql
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from contextlib import AbstractContextManager
+
+    from ai_assistant.core.types import RecordHome, Sight
 
 __all__ = ["PERSON_MODEL_SCHEMA_VERSION", "SqlitePersonModelStore"]
 
 _log = structlog.get_logger(__name__)
+
+#: The store's code in ADR-0383 §11:1's event.
+_STORE_CODE: Final = "person_model"
 
 _OWNER_ONLY: Final = 0o600
 
@@ -384,6 +404,27 @@ def _profile_from(rows: Sequence[Sequence[Any]]) -> Profile:
 type _Proposal = tuple[str, str | None, str | None, str | None]
 
 
+def _homes_of_model(model: PersonModel) -> list[RecordHome | None]:
+    """The home of each record a person's model carries, for §11:1's count.
+
+    The person, and each change, pin, mark and suggestion: all of the one person's
+    domain (ADR-0383 §3).
+    """
+    records = 1 + len(model.changes) + len(model.pins) + len(model.style_marks)
+    return [home_of_person(model.person.id)] * (records + len(model.suggestions))
+
+
+def _homes_of_export(exported: PersonModelExport) -> list[RecordHome | None]:
+    """The home of each record an export carries, for §11:1's count."""
+    return [
+        *(home_of_person(one.id) for one in exported.persons),
+        *(home_of_person(one.person_id) for one in exported.changes),
+        *(home_of_person(one.person_id) for one in exported.pins),
+        *(home_of_person(one.person_id) for one in exported.style_marks),
+        *(home_of_person(one.person_id) for one in exported.suggestions),
+    ]
+
+
 def _proposal(proposed: ProposedSuggestion) -> _Proposal:
     field = None if proposed.field is None else proposed.field.value
     return (proposed.kind.value, field, proposed.value, proposed.memory_id)
@@ -400,7 +441,7 @@ def _pin_proposal(memory_id: str) -> _Proposal:
 class SqlitePersonModelStore:
     """The person model, on SQLite (ADR-0338 §10), holding the owner from the start."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per injected seam, the mode with them
         self,
         *,
         path: Path | str,
@@ -408,6 +449,7 @@ class SqlitePersonModelStore:
         seed_time_zone: str | None = None,
         now: Callable[[], datetime] = _utcnow,
         new_id: Callable[[str], str] = _random_id,
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> None:
         """Open the store at ``path``, creating it, the owner and the seed if it is new.
 
@@ -421,6 +463,8 @@ class SqlitePersonModelStore:
             now: The clock every instant the store records is read from.
             new_id: Mints a record's id from its kind (``pin``, ``mark`` or
                 ``suggestion``). An id a held record already carries is minted again.
+            sight_mode: Whether a store bound to a sight withholds or only counts
+                (ADR-0383 §7:10), fixed here and read from no setting.
 
         Raises:
             ValueError: If ``field_chars`` is not an ``int`` of at least 1, or
@@ -442,6 +486,8 @@ class SqlitePersonModelStore:
         # ADR-0026 §2: every reading aware and converted to UTC, checked where it is read.
         self._clock = checked_clock(now, owner="SqlitePersonModelStore")
         self._new_id = new_id
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
         self._path = path if path == ":memory:" else str(Path(path))
         self._lock = asyncio.Lock()
         self._conn = self._setup()
@@ -550,6 +596,37 @@ class SqlitePersonModelStore:
         """Close the underlying database connection."""
         self._conn.close()
 
+    # --- a store bound to a sight (ADR-0383 §7, §11) --------------------------------
+
+    def bound(self, sight: Sight) -> SqlitePersonModelStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing this store's connection and lock by reference, with the
+        sight set: the meet of the one it was already bound to, where it was (§6:6). It
+        opens nothing, and closing either closes both.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _withholding(self) -> Sight | None:
+        """The sight this store withholds by, where it is bound and withholds."""
+        return None if self._sight_mode is SightMode.COUNT else self._sight
+
+    def _seen(self, column: str) -> tuple[str, list[object]]:
+        """The sight's condition over ``column``'s person, or ``1`` where nothing is held back."""
+        sight = self._withholding()
+        return ("1", []) if sight is None else persons_seen_sql(sight, column=column)
+
+    def _counted(self, member: str, given: Iterable[RecordHome | None]) -> None:
+        """Write §11:1's count of one read, where this store is bound and only counts."""
+        if self._sight is not None and self._sight_mode is SightMode.COUNT:
+            count_given(self._sight, store=_STORE_CODE, member=member, given=given)
+
     # --- internals -----------------------------------------------------------------
 
     def _transaction(
@@ -608,8 +685,15 @@ class SqlitePersonModelStore:
         msg = f"the person-model store minted a held {kind} id {_MINT_BUDGET} times running"
         raise PersonModelStoreError(msg)
 
-    @staticmethod
-    def _holds(conn: sqlite3.Connection, person_id: str) -> bool:
+    def _holds(self, conn: sqlite3.Connection, person_id: str) -> bool:
+        """Whether this store holds ``person_id``: a bound one withholding, only where seen.
+
+        A write naming a person it does not hold is refused as for one never held
+        (ADR-0383 §7:5, §8:2).
+        """
+        sight = self._withholding()
+        if sight is not None and not sight.sees(home_of_person(person_id)):
+            return False
         return (
             conn.execute("SELECT 1 FROM persons WHERE id = ?", (person_id,)).fetchone() is not None
         )
@@ -663,14 +747,18 @@ class SqlitePersonModelStore:
             PersonModelStoreError: If the store cannot be read, or a row is corrupt.
         """
         person = _checked(person_id, name="person_id")
-        return await self._run(self._read_sync, person)
+        model = await self._run(self._read_sync, person)
+        self._counted("read", () if model is None else _homes_of_model(model))
+        return model
 
     def _read_sync(self, person_id: str) -> PersonModel | None:
         with self._transaction("read a person's model", immediate=False) as conn:
+            if not self._holds(conn, person_id):
+                return None
             row = conn.execute(
                 "SELECT id, role, created_at FROM persons WHERE id = ?", (person_id,)
             ).fetchone()
-            if row is None:
+            if row is None:  # pragma: no cover — held a statement ago, in this transaction
                 return None
             where = (person_id,)
             fields = conn.execute(
@@ -708,21 +796,37 @@ class SqlitePersonModelStore:
         Raises:
             PersonModelStoreError: If the store cannot be read, or a row is corrupt.
         """
-        return await self._run(self._export_sync)
+        exported = await self._run(self._export_sync)
+        self._counted("export", _homes_of_export(exported))
+        return exported
 
     def _export_sync(self) -> PersonModelExport:
+        own, own_params = self._seen("person_id")
+        person, person_params = self._seen("id")
         with self._transaction("export the person model", immediate=False) as conn:
             persons = conn.execute(
-                "SELECT id, role, created_at FROM persons ORDER BY seq"
+                f"SELECT id, role, created_at FROM persons WHERE {person} ORDER BY seq",  # noqa: S608 — module text; values bound
+                person_params,
             ).fetchall()
-            fields = conn.execute("SELECT person_id, field, value FROM fields").fetchall()
+            fields = conn.execute(
+                f"SELECT person_id, field, value FROM fields WHERE {own}",  # noqa: S608 — module text; values bound
+                own_params,
+            ).fetchall()
             changes = conn.execute(
-                f"SELECT {_CHANGE_COLUMNS} FROM changes ORDER BY seq"  # noqa: S608 — only constants are interpolated
+                f"SELECT {_CHANGE_COLUMNS} FROM changes WHERE {own} ORDER BY seq",  # noqa: S608 — module text; values bound
+                own_params,
             ).fetchall()
-            pins = conn.execute(f"SELECT {_PIN_COLUMNS} FROM pins ORDER BY seq").fetchall()  # noqa: S608 — only constants are interpolated
-            marks = conn.execute(f"SELECT {_MARK_COLUMNS} FROM marks ORDER BY seq").fetchall()  # noqa: S608 — only constants are interpolated
+            pins = conn.execute(
+                f"SELECT {_PIN_COLUMNS} FROM pins WHERE {own} ORDER BY seq",  # noqa: S608 — module text; values bound
+                own_params,
+            ).fetchall()
+            marks = conn.execute(
+                f"SELECT {_MARK_COLUMNS} FROM marks WHERE {own} ORDER BY seq",  # noqa: S608 — module text; values bound
+                own_params,
+            ).fetchall()
             suggestions = conn.execute(
-                f"SELECT {_SUGGESTION_COLUMNS} FROM suggestions ORDER BY seq"  # noqa: S608 — only constants are interpolated
+                f"SELECT {_SUGGESTION_COLUMNS} FROM suggestions WHERE {own} ORDER BY seq",  # noqa: S608 — module text; values bound
+                own_params,
             ).fetchall()
         people = [_person_from(row) for row in persons]
         return PersonModelExport(
@@ -750,14 +854,23 @@ class SqlitePersonModelStore:
         return await self._run(self._clear_sync)
 
     def _clear_sync(self) -> int:
+        own, own_params = self._seen("person_id")
+        person, person_params = self._seen("id")
         with self._transaction("clear the person model") as conn:
             # The persons first: the change log's trigger lets a person's entries go
-            # only once the person has.
-            persons = conn.execute("DELETE FROM persons").rowcount
-            conn.execute("DELETE FROM fields")
+            # only once the person has. Bound and withholding, only the people it holds
+            # and their records go, and only they are counted (ADR-0383 §7:2).
+            persons = conn.execute(
+                f"DELETE FROM persons WHERE {person}",  # noqa: S608 — module text; values bound
+                person_params,
+            ).rowcount
+            conn.execute(f"DELETE FROM fields WHERE {own}", own_params)  # noqa: S608 — module text; values bound
             erased = 2 * persons
             for table in ("changes", "pins", "marks", "suggestions"):
-                erased += conn.execute(f"DELETE FROM {table}").rowcount  # noqa: S608 — only constants are interpolated
+                erased += conn.execute(
+                    f"DELETE FROM {table} WHERE {own}",  # noqa: S608 — module text; values bound
+                    own_params,
+                ).rowcount
             return erased
 
     # --- the profile (§3) ----------------------------------------------------------
