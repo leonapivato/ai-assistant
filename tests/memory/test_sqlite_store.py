@@ -19,7 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import pytest
 import sqlite_vec
@@ -96,6 +96,7 @@ from ai_assistant.testing.memories import (
     said_support,
     sourced_support,
 )
+from sight_equivalence import SIGHTS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
@@ -3520,3 +3521,65 @@ async def test_each_label_vector_is_its_own_texts_embedding(
         "at the dentist": sqlite_vec.serialize_float32(list(expected[0])),
         "on a train": sqlite_vec.serialize_float32(list(expected[1])),
     }
+
+
+# --- a home the persistent store cannot read (ADR-0383 §5:3, §7:3, §7:5) -----------
+
+#: Stored homes no write leaves, each planted into an episode's JSON: no home at all,
+#: a key the model forbids, a key given twice (whose last value a decoder would keep),
+#: a string, and the right keys in another order.
+_UNREADABLE_HOMES: Final = {
+    "none": "json_remove(data, '$.home')",
+    "extra-key": """json_set(data, '$.home', json('{"kind":"shared","id":null,"x":1}'))""",
+    "duplicate-key": (
+        'replace(data, \'"home":{"kind":"person","id":"person:owner"}\', '
+        '\'"home":{"kind":"shared","id":null,'
+        '"kind":"person","id":"person:owner"}\')'
+    ),
+    "string": """json_set(data, '$.home', '{"kind":"shared","id":null}')""",
+    "reordered": """json_set(data, '$.home', json('{"id":null,"kind":"shared"}'))""",
+}
+
+
+@pytest.mark.parametrize("planted", list(_UNREADABLE_HOMES))
+@pytest.mark.parametrize("sight_name", ["owners-work", "run-over-the-shared-things"])
+async def test_a_row_whose_home_the_store_cannot_read_is_held_by_no_bound_store(
+    make_store: Callable[..., SqliteMemoryStore], planted: str, sight_name: str
+) -> None:
+    """§5:3: no bound store gives it back, names it, counts it, deletes it or writes it.
+
+    The sight's expression reads a home only in the compact form every write stores,
+    so it agrees with the predicate's "no home" on every row, a corrupt one included,
+    and its negation is never ``NULL``: a write naming the row is refused as one to a
+    record the store does not hold (§7:5).
+    """
+    store = make_store(name=f"unreadable-{planted}-{sight_name}.db", sight_mode=SightMode.WITHHOLD)
+    record = _on_channel("activation:planted")
+    await store.add(record)
+    stored = await store.get("activation:planted")
+    assert stored is not None
+    store._conn.execute(
+        f"UPDATE records SET data = {_UNREADABLE_HOMES[planted]} WHERE id = ?",  # noqa: S608 — module literals
+        ("activation:planted",),
+    )
+    bound = store.bound(SIGHTS[sight_name])
+    assert await bound.get("activation:planted") is None
+    assert await bound.get_many(["activation:planted"]) == {}
+    assert await bound.channel_episode_ids(_CHANNEL_A, limit=10) == ()
+    assert (await bound.channel_episodes(_CHANNEL_A, limit=10)).total == 0
+    assert await bound.export() == []
+    with pytest.raises(MemoryStoreStaleError):
+        await bound.write_atomic(
+            [
+                MemoryWrite(
+                    record=record,
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=stored.revision,
+                )
+            ]
+        )
+    with pytest.raises(MemoryStoreConflictError):
+        await bound.add(record)
+    assert await bound.delete("activation:planted") is False
+    assert await bound.clear() == 0
+    assert len(await store.channel_episode_ids(_CHANNEL_A, limit=10)) == 1

@@ -82,27 +82,35 @@ def count_records(sight: Sight, member: str, records: Iterable[MemoryRecord]) ->
 def seen_sql(sight: Sight) -> tuple[str, list[object]]:
     """The persistent store's expression of ``sight`` over a ``records`` row (§7:3).
 
-    A row is seen where its stored home's kind and identifier are those of a home every
-    bound sees (:attr:`~ai_assistant.core.types.Sight.homes_seen`), or where it is the
-    episode of the sight's activation (§7:4). A row whose JSON is not valid, or carries
-    no home, matches no home and is seen only as an activation's own episode, which is
-    :meth:`~ai_assistant.core.types.Sight.withheld`'s answer for a home the store cannot
-    read (§5:3). Only placeholders are written into the text; every value is bound.
+    **The store reads a home in the one form it writes it.** Every write stores a record
+    as its model's compact JSON, and the upgrade that wrote the owner's home into older
+    rows stores the same text, so a home is the object
+    ``RecordHome.model_dump_json()`` renders, key for key. A row is seen where its
+    stored home, rendered by SQLite's ``->`` as compact JSON, is exactly that text for
+    a home every bound sees (:attr:`~ai_assistant.core.types.Sight.homes_seen`), or
+    where it is the episode of the sight's activation (§7:4). Any other stored home is
+    one the store cannot read, and no sight sees it (§5:3): none, a string, invalid
+    JSON, a key the model forbids, a key given twice, an identifier of another type.
+
+    The condition is ``0`` or ``1`` on every row and never ``NULL``, so its negation
+    selects exactly the rows it does not, which the write refusals read (§7:5). Only
+    placeholders are written into the text; every value is bound.
 
     Returns:
         The SQL condition and its parameters, in order.
     """
     terms: list[str] = []
     params: list[object] = []
-    for home in sorted(sight.homes_seen, key=lambda one: (one.kind.value, one.id or "")):
+    homes = sorted(home.model_dump_json() for home in sight.homes_seen)
+    if homes:
         terms.append(
-            "(json_extract(CASE WHEN json_valid(data) THEN data END, '$.home.kind') = ? "
-            "AND json_extract(CASE WHEN json_valid(data) THEN data END, '$.home.id') IS ?)"
+            "(CASE WHEN json_valid(data) THEN data -> '$.home' END) "
+            f"IN ({', '.join('?' * len(homes))})"
         )
-        params.extend([home.kind.value, home.id])
+        params.extend(homes)
     if sight.activation is not None:
         terms.append("(kind = ? AND id = ?)")
         params.extend([MemoryKind.EPISODIC.value, episode_of(sight.activation)])
     if not terms:
         return "0", []
-    return f"({' OR '.join(terms)})", params
+    return f"coalesce(({' OR '.join(terms)}), 0)", params

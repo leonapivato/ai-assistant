@@ -468,13 +468,18 @@ def _retrieval_reading(retrieved: _Retrieved) -> traces.Reading:
 
 
 def _home_or_none(stored: object) -> RecordHome | None:
-    """A stored home read back, or ``None`` where there is none or it cannot be read."""
+    """A stored home read back, or ``None`` where there is none or it cannot be read.
+
+    Read as :func:`seen_sql` reads it: only in the compact form every write stores, so
+    a home given in any other form is one the store cannot read (ADR-0383 §5:3).
+    """
     if stored is None:
         return None
     try:
-        return RecordHome.model_validate_json(str(stored))
+        home = RecordHome.model_validate_json(str(stored))
     except ValidationError:
         return None
+    return home if home.model_dump_json() == str(stored) else None
 
 
 class SqliteMemoryStore:
@@ -489,6 +494,13 @@ class SqliteMemoryStore:
     logs what the sight would have withheld of the rows it gave back. The sight's
     expression reads the home from the row's JSON: no column, index or format label
     is added for it.
+
+    Withholding reads a home only in the compact form every write stores
+    (:func:`seen_sql`). Counting classifies each record a read gave back by the home
+    its decoded record carries, the one exception being :meth:`channel_episode_ids`,
+    which decodes nothing and reads the stored form. The two differ only on a row
+    whose home is stored in a form no write leaves, which a count reads as its
+    decoded home and withholding holds back.
     """
 
     def __init__(  # noqa: PLR0913 — each is a construction-fixed seam
@@ -2727,6 +2739,7 @@ class SqliteMemoryStore:
         """
         wanted = tuple(dict.fromkeys(record_ids))
         if not wanted:
+            self._counted("get_many", ())  # a read that answered, counted (§11:1)
             return {}
         async with self._lock:
             now = self._now()
@@ -2823,6 +2836,7 @@ class SqliteMemoryStore:
         """
         wanted = tuple(dict.fromkeys(record_ids))
         if not wanted:
+            self._counted("get_history", ())  # a read that answered, counted (§11:1)
             return {}
         async with self._lock:
             now = self._now_micros()
@@ -3462,7 +3476,7 @@ class SqliteMemoryStore:
         an unbound enumeration still reads the channel index alone.
         """
         home = (
-            "CASE WHEN json_valid(data) THEN json_extract(data, '$.home') END"
+            "CASE WHEN json_valid(data) THEN data -> '$.home' END"
             if self._counting() is not None
             else "NULL"
         )
@@ -3609,6 +3623,7 @@ class SqliteMemoryStore:
         _check_page_bounds(limit, offset)
         selects_nothing = (wanted_bands is not None and not wanted_bands) or not wanted_kinds
         if limit == 0 or selects_nothing:
+            self._counted("list_beliefs", ())  # a read that answered, counted (§11:1)
             return []
 
         async with self._lock:

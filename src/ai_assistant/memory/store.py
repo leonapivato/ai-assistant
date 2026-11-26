@@ -570,6 +570,7 @@ class InMemoryMemoryStore:
             # Answered without reading the clock at all, matching the persistent
             # store's "no round trip": an empty argument must not be the one call
             # that surfaces a bad clock as ``MemoryStoreError``.
+            self._counted("get_many", ())  # a read that answered, counted (§11:1)
             return {}
         now = self._now_utc()  # one reading for the whole batch, never one per id
         found = {
@@ -594,6 +595,7 @@ class InMemoryMemoryStore:
         """
         wanted = dict.fromkeys(record_ids)
         if not wanted:
+            self._counted("get_history", ())  # a read that answered, counted (§11:1)
             return {}
         now = self._now_utc()  # one reading for the whole batch, never one per id
         found = {
@@ -671,6 +673,7 @@ class InMemoryMemoryStore:
         # a read that matches nothing *by construction* and so is never a capped one
         # (ADR-0128 §2).
         if limit <= 0 or not query_terms or _selects_nothing(wanted, wanted_bands):
+            self._counted("search", ())  # a read that answered, counted (§11:1)
             return MemorySearchResult(records=())
 
         now = self._now_utc()  # one reading for the whole search, not one per record
@@ -910,6 +913,7 @@ class InMemoryMemoryStore:
         _check_page_bounds(limit, offset)
         selects_nothing = (wanted_bands is not None and not wanted_bands) or not wanted_kinds
         if limit == 0 or selects_nothing:
+            self._counted("list_beliefs", ())  # a read that answered, counted (§11:1)
             return []
 
         now = self._now_utc()  # one reading for the whole page, as ``search`` takes

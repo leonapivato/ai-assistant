@@ -847,6 +847,7 @@ class FakeMemoryStore:
             # resource exactly where the persistent store reaches its lock — a fake
             # that queued behind a held resource where the real store would not
             # would certify a consumer the real store never blocks (ADR-0026 §7).
+            self._counted("get_many", ())  # a read that answered, counted (§11:1)
             return {}
         async with self._resource.held():
             self._refuse_read()
@@ -883,6 +884,7 @@ class FakeMemoryStore:
         if not wanted:
             # No round trip for an empty argument, matching the persistent store
             # and `get_many` (ADR-0026 §7).
+            self._counted("get_history", ())  # a read that answered, counted (§11:1)
             return {}
         async with self._resource.held():
             self._refuse_read()
@@ -947,6 +949,7 @@ class FakeMemoryStore:
         wanted_bands = None if bands is None else frozenset(bands)
         query_terms = {term for term in query.lower().split() if term}
         if limit <= 0 or not query_terms or _selects_nothing(wanted, wanted_bands):
+            self._counted("search", ())  # a read that answered, counted (§11:1)
             return MemorySearchResult(records=())
         async with self._resource.held():
             self._refuse_read()
@@ -1219,6 +1222,7 @@ class FakeMemoryStore:
         _check_page_bounds(limit, offset)
         selects_nothing = (wanted_bands is not None and not wanted_bands) or not wanted_kinds
         if limit == 0 or selects_nothing:
+            self._counted("list_beliefs", ())  # a read that answered, counted (§11:1)
             return []
 
         async with self._resource.held():
