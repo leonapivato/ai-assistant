@@ -1283,3 +1283,28 @@ async def test_a_flag_never_raised_on_a_held_story_is_unknown_whatever_its_heade
             assert outcome.refusal.reason is StoryRefusalReason.UNKNOWN_FLAG
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("merged_into", ["itself", 7])
+async def test_a_held_flags_answer_is_the_unbound_ones_whatever_its_merge_target_holds(
+    merged_into: object,
+) -> None:
+    """§7:2: whether a flag's stories are held validates nothing of them.
+
+    A decided flag whose story's merge target was altered to name itself, or to hold
+    no id, is ``already_decided`` unbound, and so through a binding that holds it.
+    """
+    store = _bound_store(SightMode.WITHHOLD)
+    try:
+        shared = await homed(store, RecordHome.shared(), act("s1"))
+        flag = await raised(store, shared, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        assert (await store.leave_flag(flag, actor=StoryActor.MATTERS_PASS)).refusal is None
+        target = shared if merged_into == "itself" else merged_into
+        store._conn.execute("UPDATE stories SET merged_into = ? WHERE id = ?", (target, shared))
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        for one in (store, bound):
+            outcome = await one.leave_flag(flag, actor=StoryActor.MATTERS_PASS)
+            assert outcome.refusal is not None
+            assert outcome.refusal.reason is StoryRefusalReason.ALREADY_DECIDED
+    finally:
+        store.close()
