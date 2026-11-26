@@ -89,6 +89,7 @@ if TYPE_CHECKING:
         RecordHome,
         UserMessage,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
 
 _log = structlog.get_logger(__name__)
 
@@ -184,7 +185,7 @@ def episode_conversation(record: MemoryRecord | None) -> str | None:
     return None
 
 
-async def _open_on(memory: MemoryStore, channel: ChannelIdentity) -> list[EpisodicMemory]:
+async def _open_on(memory: Bound[MemoryStore], channel: ChannelIdentity) -> list[EpisodicMemory]:
     """Every open episode of an activation started from ``channel``, oldest first.
 
     The open episodes are walked whole (ADR-0286 §12:1's enumeration): they are this
@@ -201,7 +202,7 @@ async def _open_on(memory: MemoryStore, channel: ChannelIdentity) -> list[Episod
         after = page[-1].number
 
 
-async def episodes_on_place(memory: MemoryStore, conversation_id: str) -> list[str]:
+async def episodes_on_place(memory: Bound[MemoryStore], conversation_id: str) -> list[str]:
     """The id of every episode on a conversation's place, open ones first (ADR-0293 §2:4).
 
     What forgetting the conversation destroys, shared by the engine and the canonical
@@ -210,6 +211,10 @@ async def episodes_on_place(memory: MemoryStore, conversation_id: str) -> list[s
     episode ``channel_episode_ids`` holds on the channel — the enumeration of what the
     store physically holds, expired and not-yet-valid ones included (ADR-0275 §6:6) —
     whether or not the conversation still stands (§2:5). Each id once.
+
+    Walked through ``memory`` as its caller bound it: the engine's ``forget_conversation``
+    hands the store bound to the owner's sight from the owner's domain, so the walk finds
+    that domain's episodes and none of another home (ADR-0385 §5:4).
 
     Raises:
         MemoryStoreError: If the store cannot be read.
@@ -224,7 +229,7 @@ async def episodes_on_place(memory: MemoryStore, conversation_id: str) -> list[s
 
 
 async def conversation_state(
-    memory: MemoryStore, conversation_id: str, *, running: Sequence[str | None] = ()
+    memory: Bound[MemoryStore], conversation_id: str, *, running: Sequence[str | None] = ()
 ) -> ConversationState:
     """What a conversation's devices are shown about the assistant (ADR-0293 §8).
 
@@ -259,6 +264,10 @@ async def conversation_state(
     seen, and a conversation whose episodes were forgotten reads as idle: what the
     assistant forgot it no longer knows ran.
 
+    Read through ``memory`` as its caller bound it: the engine's acts and its change
+    stream hand the store bound to the owner's sight from none, made for each read, so
+    an episode that sight does not see ends nothing shown (ADR-0385 §4:1, §4:2).
+
     Raises:
         MemoryStoreError: If the episodes cannot be read.
     """
@@ -281,7 +290,9 @@ _ENDING_WIDER: Final = 4
 _ENDING_BOUND: Final = 1000
 
 
-async def _shown_ending(memory: MemoryStore, channel: ChannelIdentity) -> ActivationEnding | None:
+async def _shown_ending(
+    memory: Bound[MemoryStore], channel: ChannelIdentity
+) -> ActivationEnding | None:
     """How the activation a conversation shows the ending of ended (ADR-0352 §5:1-§5:3).
 
     Its newest ended episode, read newest first, passing over each whose activation's
@@ -312,7 +323,7 @@ async def _shown_ending(memory: MemoryStore, channel: ChannelIdentity) -> Activa
 
 
 async def _older_ending(
-    memory: MemoryStore, channel: ChannelIdentity, *, below: int
+    memory: Bound[MemoryStore], channel: ChannelIdentity, *, below: int
 ) -> ActivationEnding | None:
     """:func:`_shown_ending` over the episodes numbered below ``below``, newest first.
 
@@ -349,7 +360,7 @@ async def _older_ending(
 
 
 async def _judged(
-    memory: MemoryStore, record: EpisodicMemory, channel: ChannelIdentity
+    memory: Bound[MemoryStore], record: EpisodicMemory, channel: ChannelIdentity
 ) -> tuple[bool, ActivationEnding | None]:
     """Whether the state shows an ending for ``record``, an ended episode, and which.
 
@@ -369,7 +380,7 @@ async def _judged(
     return False, None
 
 
-async def _last_taker(memory: MemoryStore, taker: str) -> EpisodicMemory | None:
+async def _last_taker(memory: Bound[MemoryStore], taker: str) -> EpisodicMemory | None:
     """The frozen episode of the activation that took a matter last (ADR-0352 §5:3).
 
     Followed forward from ``taker`` through each episode that records an activation that
@@ -719,7 +730,33 @@ def fit_stream_chunk(chunk: ChatStreamChunk, *, max_bytes: int) -> ChatStreamChu
 
 
 class ConversationLifecycle:
-    """Owns every ``ConversationStore``/``MemoryStore`` sequence (ADR-0074 §9)."""
+    """Owns every ``ConversationStore``/``MemoryStore`` sequence (ADR-0074 §9).
+
+    **Which store each sequence reads by** (ADR-0383 §9:1). The owner's acts on
+    conversations, every member of ``AssistantEngine`` that reads or writes one
+    (ADR-0385 §3:1), are made through the stores the engine hands each call, bound to the
+    owner's sight it made for that call: :meth:`recent`, :meth:`digest`, :meth:`state`,
+    :meth:`start`, :meth:`set_conversation_devices`, :meth:`write`,
+    :meth:`delete_message`, :meth:`transcript`, :meth:`forget` and :meth:`delete`.
+    The stores this stage holds unbound are read only where a clause keeps a read so:
+
+    * the engine's start and its sweeps, :meth:`sweep_deletions` and :meth:`reclaim`,
+      and the restart's close (:attr:`open_episodes`) (ADR-0383 §7:8);
+    * :meth:`begin`, which marks a work's trigger's conversation active as its turn
+      begins, a write of the work's own turn (ADR-0387 §3:1, §7:4);
+    * "my devices" and a conversation's devices, no domain's records, read as today by
+      the owner's acts and by ADR-0298 §5's device checks (ADR-0385 §3:2, ADR-0383
+      §10:5): :meth:`my_devices`, :meth:`set_my_devices` and
+      :meth:`conversation_devices`;
+    * the chat space handed to the readers and writers that hold it under their own
+      clauses (:attr:`chat_space`);
+    * and, **not yet converted**, the reads that mix device rows with records of a home,
+      which no bound store gives back as the owner reads them today:
+      :meth:`device_conversations`, :meth:`device_changes` and :meth:`changes`. A store
+      bound to any sight gives back no device row (ADR-0383 §3:3), so bound, a device's
+      listing is empty and the change stream loses every change of a set of devices.
+      The device checks read them too, as today (ADR-0385 §3:2).
+    """
 
     def __init__(  # noqa: PLR0913 — the two stores, the horizon, the clock, the story store and the holder over them
         self,
@@ -801,7 +838,11 @@ class ConversationLifecycle:
 
         The same store every act in the medium relays to, so the reader's bookkeeping,
         the transcript it brings in and the messages the writer adds are the ones the
-        devices read.
+        devices read. Handed unbound to those that hold it under their own clauses: the
+        holder that binds it (ADR-0383 §9:1); the chat's reader's intake and the task
+        sensor (§7:8); a work's own turn and the place lists (ADR-0387 §7:4); the engine's
+        revoking of a device, which writes device rows alone (ADR-0385 §3:2); and the
+        change stream's reads not yet converted (:class:`ConversationLifecycle`).
         """
         return self._conversations
 
@@ -849,7 +890,12 @@ class ConversationLifecycle:
     # --- deletion (§8) -------------------------------------------------------
 
     async def digest(
-        self, conversation_id: str, *, running: Sequence[str | None] = ()
+        self,
+        conversation_id: str,
+        *,
+        conversations: Bound[ConversationStore],
+        memory: Bound[MemoryStore],
+        running: Sequence[str | None] = (),
     ) -> ConversationDigest | None:
         """One conversation as it is read, or ``None`` (ADR-0283 §4:2, ADR-0293 §8).
 
@@ -858,6 +904,13 @@ class ConversationLifecycle:
         is the count — every live episode on the channel, eligible or not, whatever
         the page held; then the conversation's devices and its current state
         (:meth:`state`).
+
+        The record and the episodes are read through ``conversations`` and ``memory``,
+        the stores the engine bound to the owner's sight for the call (ADR-0385 §4:1), so
+        a conversation the sight does not see is one never started, and the count and the
+        state are of the episodes it sees (ADR-0383 §8:1). The devices are read as today,
+        through the store held unbound, once the bound record is found: device rows are
+        no domain's records (ADR-0385 §3:2).
 
         Returns:
             The digest, or ``None`` when the id names nothing or names a
@@ -868,61 +921,95 @@ class ConversationLifecycle:
             ConversationStoreError: If the conversation store cannot be read.
             MemoryStoreError: If the memory store cannot be read.
         """
-        conversation = await self._conversations.get(conversation_id)
+        conversation = await conversations.get(conversation_id)
         if conversation is None:
             return None
-        page = await self._memory.channel_episodes(conversation_channel(conversation_id), limit=1)
-        devices = await self._conversations.conversation_devices(conversation_id)
+        page = await memory.channel_episodes(conversation_channel(conversation_id), limit=1)
+        devices = await self.conversation_devices(conversation_id)
         return ConversationDigest(
             id=conversation.id,
             started_at=conversation.started_at,
             last_turn_at=conversation.last_turn_at,
             recorded_turns=page.total,
-            state=await self.state(conversation_id, running=running),
+            state=await self.state(conversation_id, memory=memory, running=running),
             devices=devices or (),
         )
 
     async def state(
-        self, conversation_id: str, *, running: Sequence[str | None] = ()
+        self,
+        conversation_id: str,
+        *,
+        memory: Bound[MemoryStore],
+        running: Sequence[str | None] = (),
     ) -> ConversationState:
         """What the conversation's devices are shown about the assistant (ADR-0293 §8).
 
-        :func:`conversation_state` over this stage's memory store, with the caller's
-        running activations started from the conversation.
+        :func:`conversation_state` over ``memory``, the store the engine bound to the
+        owner's sight for the read (ADR-0385 §4:1), with the caller's running activations
+        started from the conversation.
 
         Raises:
             MemoryStoreError: If the episodes cannot be read.
         """
-        return await conversation_state(self._memory, conversation_id, running=running)
+        return await conversation_state(memory, conversation_id, running=running)
 
     # --- the chat space's acts and reads (ADR-0293 §2-§5) --------------------
 
-    async def start(self, *, home: RecordHome) -> Conversation:
+    async def start(
+        self, *, home: RecordHome, conversations: Bound[ConversationStore]
+    ) -> Conversation:
         """Start an empty conversation in ``home``, given "my devices" (ADR-0293 §2:1, §3:1).
 
-        ``home`` is the caller's, set by ADR-0383 §4 (ADR-0386 §4:1).
+        ``home`` is the caller's, set by ADR-0383 §4 (ADR-0386 §4:1). Written through
+        ``conversations``, the store the engine bound to the owner's sight for the call,
+        which starts one as the unbound store does (ADR-0385 §3:1).
         """
-        return await self._conversations.start(home=home)
+        return await conversations.start(home=home)
 
     async def my_devices(self) -> tuple[ChatDevice, ...]:
-        """Read "my devices" (ADR-0293 §3:1)."""
+        """Read "my devices" (ADR-0293 §3:1).
+
+        Unbound, as today: device rows are no domain's records, and the owner's acts and
+        the device checks read them so (ADR-0385 §3:2).
+        """
         return await self._conversations.my_devices()
 
     async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
-        """Replace "my devices" (ADR-0293 §3:1, §3:2)."""
+        """Replace "my devices" (ADR-0293 §3:1, §3:2), unbound as today (ADR-0385 §3:2)."""
         return await self._conversations.set_my_devices(devices)
 
     async def set_conversation_devices(
-        self, conversation_id: str, devices: Sequence[ChatDevice]
+        self,
+        conversation_id: str,
+        devices: Sequence[ChatDevice],
+        *,
+        conversations: Bound[ConversationStore],
     ) -> bool:
-        """Replace one conversation's devices (ADR-0293 §3:3)."""
-        return await self._conversations.set_conversation_devices(conversation_id, devices)
+        """Replace one conversation's devices (ADR-0293 §3:3).
+
+        Through ``conversations``, the store the engine bound to the owner's sight for
+        the call: the devices are no domain's records (ADR-0385 §3:2), but the
+        conversation the act names is, so one the sight does not see is refused as one
+        never started (ADR-0383 §8:2), and the set is written as the unbound store
+        writes it.
+        """
+        return await conversations.set_conversation_devices(conversation_id, devices)
 
     async def conversation_devices(self, conversation_id: str) -> tuple[ChatDevice, ...] | None:
-        """Read one conversation's devices, or ``None`` where it is not held (§3:3)."""
+        """Read one conversation's devices, or ``None`` where it is not held (§3:3).
+
+        Unbound, as today (ADR-0385 §3:2): read by the device checks (ADR-0383 §10:5),
+        by the change stream to judge whether a device reads a conversation, and by
+        :meth:`digest` once its bound record is found.
+        """
         return await self._conversations.conversation_devices(conversation_id)
 
     # --- one device's view (ADR-0296 §4, ADR-0298 §5) ------------------------
+    #
+    # Not yet converted (milestone 22's B10e). Each mixes device rows, which a bound store
+    # gives back none of (ADR-0383 §3:3), with records of a home, so a device's listing
+    # and its changes, and the hub's changes, cannot be read through a bound store as the
+    # owner reads them today; the device checks read them as today (ADR-0385 §3:2).
 
     async def device_conversations(
         self, device_id: str, *, limit: int, offset: int = 0
@@ -939,7 +1026,13 @@ class ConversationLifecycle:
         return await self._conversations.device_changes(device_id, after=after, limit=limit)
 
     async def write(
-        self, conversation_id: str, message: UserMessage, *, home: RecordHome, came_through: str
+        self,
+        conversation_id: str,
+        message: UserMessage,
+        *,
+        home: RecordHome,
+        came_through: str,
+        conversations: Bound[ConversationStore],
     ) -> MessageReceipt:
         """Record the user's message and answer for it (ADR-0293 §4).
 
@@ -948,32 +1041,58 @@ class ConversationLifecycle:
         reader's (§6). ``came_through`` is the device the message came through, the
         request's connecting device, which the engine alone supplies (ADR-0378 §4:2),
         and ``home`` the home it lands in, which the engine sets by ADR-0383 §4.
+
+        Written through ``conversations``, the store the engine bound to the owner's
+        sight for the call (ADR-0385 §3:1): a conversation the sight does not see is
+        one never started, and a reply to a message it does not see is a reply to
+        nothing (ADR-0383 §8:2). Whether the device is an end for writing is the
+        store's own check, over every record (§7:11).
         """
-        return await self._conversations.append_message(
+        return await conversations.append_message(
             conversation_id, message.as_new_message(home=home, came_through=came_through)
         )
 
-    async def delete_message(self, conversation_id: str, position: int) -> bool:
-        """Delete one message, leaving its marker (ADR-0293 §5:8, §5:12)."""
-        return await self._conversations.delete_message(conversation_id, position)
+    async def delete_message(
+        self, conversation_id: str, position: int, *, conversations: Bound[ConversationStore]
+    ) -> bool:
+        """Delete one message, leaving its marker (ADR-0293 §5:8, §5:12).
+
+        Through ``conversations``, bound to the owner's sight for the call (ADR-0385
+        §5:2, §5:3): ``UnknownConversationError`` where the sight does not see the
+        conversation, and ``False`` where it does not see the message.
+        """
+        return await conversations.delete_message(conversation_id, position)
 
     async def transcript(
-        self, conversation_id: str, *, before: int | None, limit: int
+        self,
+        conversation_id: str,
+        *,
+        before: int | None,
+        limit: int,
+        conversations: Bound[ConversationStore],
     ) -> TranscriptPage | None:
-        """Read part of a conversation's transcript (ADR-0293 §5:13)."""
-        return await self._conversations.transcript(conversation_id, before=before, limit=limit)
+        """Read part of a conversation's transcript (ADR-0293 §5:13).
+
+        Through ``conversations``, bound to the owner's sight for the call (ADR-0385
+        §4:1): ``None`` for a conversation it does not see, and the page the last
+        ``limit`` of the messages it sees.
+        """
+        return await conversations.transcript(conversation_id, before=before, limit=limit)
 
     async def changes(
         self, *, after: int, conversation_ids: Sequence[str] | None, limit: int
     ) -> ChatChanges:
-        """Read the chat space's changes after a cursor (ADR-0293 §5:10, §5:11)."""
+        """Read the chat space's changes after a cursor (ADR-0293 §5:10, §5:11).
+
+        Unbound: not yet converted, as the section above says.
+        """
         return await self._conversations.changes(
             after=after, conversation_ids=conversation_ids, limit=limit
         )
 
     # --- forgetting (ADR-0293 §2:4-§2:8) -------------------------------------
 
-    async def forget(self, conversation_id: str) -> bool:
+    async def forget(self, conversation_id: str, *, memory: Bound[MemoryStore]) -> bool:
         """Forget every episode on the conversation's place, and nothing else (§2:4).
 
         Memory's act alone: the conversation, its transcript and its devices are
@@ -981,6 +1100,12 @@ class ConversationLifecycle:
         still stands (§2:5), by :func:`episodes_on_place`. Each episode's capture in
         flight is told before its deletion, as ``forget`` tells one (ADR-0286 §8:1),
         so no later write re-creates it (§2:6). Idempotent by re-walking.
+
+        Walked and forgotten through ``memory``, the store the engine bound to the
+        owner's sight from the owner's domain for the call (ADR-0385 §5:4), so an
+        episode of another home on the place is neither found nor destroyed. The mark on
+        the captures in flight from the conversation is set by its id before any read,
+        and judges no home (ADR-0293 §2:6).
 
         Returns:
             Whether an episode was forgotten.
@@ -990,12 +1115,14 @@ class ConversationLifecycle:
         """
         self.activation_writer.forgetting_conversation(conversation_id)
         forgot = False
-        for episode_id in await episodes_on_place(self._memory, conversation_id):
+        for episode_id in await episodes_on_place(memory, conversation_id):
             self.activation_writer.forgetting(episode_id)
-            forgot = await self._memory.delete(episode_id) or forgot
+            forgot = await memory.delete(episode_id) or forgot
         return forgot
 
-    async def delete(self, conversation_id: str) -> bool:
+    async def delete(
+        self, conversation_id: str, *, conversations: Bound[ConversationStore]
+    ) -> bool:
         """Delete a conversation: stamp it, then drop the record (§8).
 
         ADR-0283 §8:1 as ADR-0293 §2:3 partially supersedes it: deleting removes the
@@ -1006,6 +1133,12 @@ class ConversationLifecycle:
         between the steps the stamped record is still there, so
         :meth:`sweep_deletions` finishes it (ADR-0076).
 
+        Both steps are made through ``conversations``, the store the engine bound to the
+        owner's sight for the call (ADR-0385 §5:2, §5:3): a conversation the sight does
+        not see is one never started, so it is neither stamped nor dropped, and the
+        call answers ``False``. :meth:`sweep_deletions`, the engine's start's, finishes
+        a deletion this call left unfinished unbound (ADR-0383 §7:8).
+
         Returns:
             ``True`` if this call stamped the conversation; ``False`` if it was
             already stamped or the id names nothing. Either way the sweep behind it
@@ -1014,9 +1147,9 @@ class ConversationLifecycle:
         Raises:
             ConversationStoreError: If the store cannot be read or written.
         """
-        stamped = await self._conversations.stamp_deleted(conversation_id)
+        stamped = await conversations.stamp_deleted(conversation_id)
         try:
-            await self._finish_deletion(conversation_id)
+            await conversations.drop_if_eligible(conversation_id)
         except UnknownConversationError:
             # Someone else — another engine, or a start-up sweep — finished this one
             # between the stamp and the purge. A conversation that is gone is a
@@ -1043,6 +1176,9 @@ class ConversationLifecycle:
         completed (ADR-0076 §2). Every other failure aborts and propagates, because
         a sweep that swallowed real store faults to stay running would report
         success over work it never did.
+
+        Unbound: the engine's start's, and its sweeps', which read as they do today
+        (ADR-0383 §7:8).
 
         Returns:
             How many tombstones this call carried through to a drop.
@@ -1111,6 +1247,9 @@ class ConversationLifecycle:
         not a setting under which conversations should quietly disappear, and
         deletion is then the only thing that removes one.
 
+        Unbound: the engine's start's, and its sweeps', which read as they do today
+        (ADR-0383 §7:8).
+
         Returns:
             How many conversation records were dropped.
         """
@@ -1163,16 +1302,25 @@ class ConversationLifecycle:
 
     # --- listing (§2) --------------------------------------------------------
 
-    async def recent(self, *, limit: int = _RECLAIM_PAGE, offset: int = 0) -> list[Conversation]:
+    async def recent(
+        self,
+        *,
+        conversations: Bound[ConversationStore],
+        limit: int = _RECLAIM_PAGE,
+        offset: int = 0,
+    ) -> list[Conversation]:
         """List conversations by last activity, most recent first (§2).
 
         The read that lets the hub answer "which conversation?", because a
         stateless client cannot: without it, "continue yesterday's conversation"
         would require the *client* to have kept the id. Relayed to the store
         unchanged — the order and the page are its contract, and a stamped
-        conversation is absent from it by construction.
+        conversation is absent from it by construction. Read through
+        ``conversations``, the store the engine bound to the owner's sight for the call,
+        which lists only what the sight sees, before it pages (ADR-0385 §4:1, ADR-0383
+        §7:2).
         """
-        return await self._conversations.recent(limit=limit, offset=offset)
+        return await conversations.recent(limit=limit, offset=offset)
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as this stage's own error.

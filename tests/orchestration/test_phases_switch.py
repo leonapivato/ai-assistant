@@ -101,7 +101,7 @@ async def test_a_spoken_input_to_a_conversation_is_refused_and_starts_nothing(
         else ChannelIdentity(channel_type="conversation", instance_id=conversation)
     )
 
-    before = await harness.conversations.recent(limit=50)
+    before = await harness.conversations.recent(conversations=harness.conversation_store, limit=50)
 
     with pytest.raises(ValueError, match="unsupported channel input and reply combination"):
         await harness.engine.receive(
@@ -112,7 +112,10 @@ async def test_a_spoken_input_to_a_conversation_is_refused_and_starts_nothing(
 
     assert await episodes(harness.memory) == []
     assert completer.calls == []
-    assert await harness.conversations.recent(limit=50) == before
+    assert (
+        await harness.conversations.recent(conversations=harness.conversation_store, limit=50)
+        == before
+    )
 
 
 async def test_an_engine_without_the_phases_refuses_an_event_and_runs_no_reader() -> None:

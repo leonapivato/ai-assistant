@@ -53,6 +53,16 @@ conversation its device reads and sends each that differs from the last it sent.
 listing it reads is paged and may pass over a conversation that moves while it is
 read; the next sweep reads it again, so the sweep converges rather than claiming
 completeness.
+
+**Following the stream is the owner's act** (ADR-0385 §4:1). The engine's stream reads
+each conversation's state, and the hub's own machine's listing of the conversations it
+reads them of, through stores bound to the owner's sight, made anew for each read, so no
+sight outlives the read it was made for. Whether a device reads a conversation is read
+from the conversation's devices as today: device rows are no domain's records (§3:2).
+**The pages of changes and a device's listing are not yet read through a bound store**
+(milestone 22's B10e): each mixes device rows, which a store bound to any sight gives
+back none of (ADR-0383 §3:3), with records of a home, so bound, the stream would lose
+every change of a set of devices, and a device every change, that the owner is sent today.
 """
 
 from __future__ import annotations
@@ -79,6 +89,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import ConversationStore
     from ai_assistant.core.types import ConversationState, RequestingDevice
+    from ai_assistant.orchestration.bound_stores import Bound
 
 #: How often an open change stream reads the chat space for what happened after its
 #: cursor, in seconds: the latency a change reaches a following device with.
@@ -134,6 +145,7 @@ class ChangeStream:
         self,
         *,
         chat: ConversationStore,
+        seen_chat: Callable[[], Bound[ConversationStore]] | None = None,
         running: Callable[[], Running],
         state_of: Callable[[str, Sequence[str | None]], Awaitable[ConversationState]],
         closing: Callable[[], bool],
@@ -145,9 +157,20 @@ class ChangeStream:
         """Read the chat space and the engine's account of what it runs.
 
         Args:
-            chat: The engine's chat space.
+            chat: The engine's chat space, held unbound. Read through it as today: each
+                conversation's devices, which are no domain's records (ADR-0385 §3:2);
+                and, not yet through a bound store (milestone 22's B10e), the pages of
+                changes and a device's listing, which mix device rows with records of a
+                home where a store bound to any sight gives back no device row (ADR-0383
+                §3:3).
+            seen_chat: The chat space bound to the owner's sight, made anew for each
+                read: the hub's own machine's listing of the conversations whose state
+                the stream sends is read through it (ADR-0385 §4:1). ``None`` reads
+                ``chat``, as the canonical fake engine does.
             running: What the engine runs now, per conversation.
-            state_of: A conversation's current state, given what runs from it.
+            state_of: A conversation's current state, given what runs from it; the
+                engine's reads it through the memory store bound to the owner's sight,
+                made for each read.
             closing: Whether the engine is shutting down, which ends every stream.
             tracked: How a read is run so that shutdown drains it: each read the
                 stream makes is handed through here, and one refused with a
@@ -160,6 +183,7 @@ class ChangeStream:
                 state read again; :data:`CHANGE_STREAM_SWEEP_SECONDS` but in a test.
         """
         self._chat = chat
+        self._seen_chat = seen_chat
         self._running = running
         self._state_of = state_of
         self._closing = closing
@@ -284,9 +308,8 @@ class ChangeStream:
         offset = 0
         while True:
             if device.is_hub:
-                listed = await self._read(
-                    self._chat.recent(limit=CHANGE_STREAM_PAGE, offset=offset)
-                )
+                seen = self._chat if self._seen_chat is None else self._seen_chat()
+                listed = await self._read(seen.recent(limit=CHANGE_STREAM_PAGE, offset=offset))
                 page = [one.id for one in listed]
             else:
                 held = await self._read(
