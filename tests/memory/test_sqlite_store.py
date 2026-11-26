@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 
 import pytest
 import sqlite_vec
+import structlog
 from aged_store import (
     AgedStoreSpec,
     ClusteredEmbedder,
@@ -3523,63 +3524,129 @@ async def test_each_label_vector_is_its_own_texts_embedding(
     }
 
 
-# --- a home the persistent store cannot read (ADR-0383 §5:3, §7:3, §7:5) -----------
+# --- a stored home read as the decoder reads it (ADR-0383 §5:3, §7:3, §7:5) ---------
 
-#: Stored homes no write leaves, each planted into an episode's JSON: no home at all,
-#: a key the model forbids, a key given twice (whose last value a decoder would keep),
-#: a string, and the right keys in another order.
-_UNREADABLE_HOMES: Final = {
-    "none": "json_remove(data, '$.home')",
-    "extra-key": """json_set(data, '$.home', json('{"kind":"shared","id":null,"x":1}'))""",
-    "duplicate-key": (
-        'replace(data, \'"home":{"kind":"person","id":"person:owner"}\', '
-        '\'"home":{"kind":"shared","id":null,'
-        '"kind":"person","id":"person:owner"}\')'
+_OWNERS_STORED = '"home":{"kind":"person","id":"person:owner"}'
+
+#: Stored homes no write leaves, each planted over an owner's episode's home, by the
+#: SQL that plants it, with the home the record decoder reads there (``None`` where
+#: the row has no home it can read, or cannot be decoded at all).
+_PLANTED_HOMES: Final[dict[str, tuple[str, RecordHome | None]]] = {
+    "none": ("json_remove(data, '$.home')", None),
+    "extra-key": (
+        """json_set(data, '$.home', json('{"kind":"shared","id":null,"x":1}'))""",
+        None,
     ),
-    "string": """json_set(data, '$.home', '{"kind":"shared","id":null}')""",
-    "reordered": """json_set(data, '$.home', json('{"id":null,"kind":"shared"}'))""",
+    "string": ("""json_set(data, '$.home', '{"kind":"shared","id":null}')""", None),
+    "number-id": ("""json_set(data, '$.home', json('{"kind":"person","id":7}'))""", None),
+    "reordered": (
+        """json_set(data, '$.home', json('{"id":null,"kind":"shared"}'))""",
+        RecordHome.shared(),
+    ),
+    "shared-without-id": (
+        """json_set(data, '$.home', json('{"kind":"shared"}'))""",
+        RecordHome.shared(),
+    ),
+    # A key given twice: the decoder keeps the last, inside a home and of the home.
+    "inner-duplicate": (
+        f"replace(data, '{_OWNERS_STORED}', "
+        """'"home":{"kind":"person","id":"person:owner","kind":"shared","id":null}')""",
+        RecordHome.shared(),
+    ),
+    "outer-duplicate": (
+        f"replace(data, '{_OWNERS_STORED}', "
+        """'"home":{"kind":"person","id":"person:owner"},"home":{"kind":"shared","id":null}')""",
+        RecordHome.shared(),
+    ),
+    "outer-duplicate-owner-last": (
+        f"replace(data, '{_OWNERS_STORED}', "
+        """'"home":{"kind":"shared","id":null},"home":{"kind":"person","id":"person:owner"}')""",
+        RecordHome.owners(),
+    ),
 }
 
 
-@pytest.mark.parametrize("planted", list(_UNREADABLE_HOMES))
-@pytest.mark.parametrize("sight_name", ["owners-work", "run-over-the-shared-things"])
-async def test_a_row_whose_home_the_store_cannot_read_is_held_by_no_bound_store(
-    make_store: Callable[..., SqliteMemoryStore], planted: str, sight_name: str
-) -> None:
-    """§5:3: no bound store gives it back, names it, counts it, deletes it or writes it.
-
-    The sight's expression reads a home only in the compact form every write stores,
-    so it agrees with the predicate's "no home" on every row, a corrupt one included,
-    and its negation is never ``NULL``: a write naming the row is refused as one to a
-    record the store does not hold (§7:5).
-    """
-    store = make_store(name=f"unreadable-{planted}-{sight_name}.db", sight_mode=SightMode.WITHHOLD)
-    record = _on_channel("activation:planted")
-    await store.add(record)
+async def _planted(
+    make_store: Callable[..., SqliteMemoryStore], planted: str, mode: SightMode
+) -> tuple[SqliteMemoryStore, MemoryRecord]:
+    """A store holding one owner's episode on ``_CHANNEL_A`` with its home replanted."""
+    store = make_store(name=f"planted-{planted}-{mode}.db", sight_mode=mode)
+    await store.add(_on_channel("activation:planted"))
     stored = await store.get("activation:planted")
     assert stored is not None
     store._conn.execute(
-        f"UPDATE records SET data = {_UNREADABLE_HOMES[planted]} WHERE id = ?",  # noqa: S608 — module literals
+        f"UPDATE records SET data = {_PLANTED_HOMES[planted][0]} WHERE id = ?",  # noqa: S608 — module literals
         ("activation:planted",),
     )
-    bound = store.bound(SIGHTS[sight_name])
-    assert await bound.get("activation:planted") is None
-    assert await bound.get_many(["activation:planted"]) == {}
-    assert await bound.channel_episode_ids(_CHANNEL_A, limit=10) == ()
-    assert (await bound.channel_episodes(_CHANNEL_A, limit=10)).total == 0
-    assert await bound.export() == []
-    with pytest.raises(MemoryStoreStaleError):
-        await bound.write_atomic(
-            [
-                MemoryWrite(
-                    record=record,
-                    mode=MemoryWriteMode.IF_UNCHANGED,
-                    expected_revision=stored.revision,
-                )
-            ]
-        )
-    with pytest.raises(MemoryStoreConflictError):
-        await bound.add(record)
-    assert await bound.delete("activation:planted") is False
-    assert await bound.clear() == 0
-    assert len(await store.channel_episode_ids(_CHANNEL_A, limit=10)) == 1
+    return store, stored
+
+
+@pytest.mark.parametrize("planted", list(_PLANTED_HOMES))
+async def test_the_decoder_reads_each_planted_home_as_the_table_says(
+    make_store: Callable[..., SqliteMemoryStore], planted: str
+) -> None:
+    """The table's second column is the decoder's own reading, not an assumption."""
+    store, _ = await _planted(make_store, planted, SightMode.COUNT)
+    expected = _PLANTED_HOMES[planted][1]
+    if expected is None:
+        with pytest.raises(MemoryStoreError):
+            await store.get("activation:planted")
+    else:
+        decoded = await store.get("activation:planted")
+        assert decoded is not None
+        assert decoded.home == expected
+
+
+@pytest.mark.parametrize("planted", list(_PLANTED_HOMES))
+@pytest.mark.parametrize("sight_name", list(SIGHTS))
+async def test_a_bound_store_reads_a_planted_home_as_the_decoder_and_the_predicate_do(
+    make_store: Callable[..., SqliteMemoryStore], planted: str, sight_name: str
+) -> None:
+    """§7:3: the statement's answer equals the predicate's over the decoded home, on
+    every row, a key given twice or in another order included; §5:3: a row with no
+    home the decoder could read is held by no bound store.
+
+    Withholding, the row is given back, named and counted exactly where the sight sees
+    the decoded home; a row it does not hold is refused to a conditional write and to
+    an upsert as one the store does not hold (§7:5), deleted by nothing and cleared by
+    nothing. Counting, ``channel_episode_ids`` classifies it by that same home.
+    """
+    sight = SIGHTS[sight_name]
+    home = _PLANTED_HOMES[planted][1]
+    sees = sight.sees(home)
+    store, stored = await _planted(make_store, planted, SightMode.WITHHOLD)
+    bound = store.bound(sight)
+    held = [one.episode_id for one in await bound.channel_episode_ids(_CHANNEL_A, limit=10)]
+    assert held == (["activation:planted"] if sees else [])
+    if sees:
+        found = await bound.get("activation:planted")
+        assert found is not None
+        assert found.home == home
+        assert (await bound.channel_episodes(_CHANNEL_A, limit=10)).total == 1
+    else:
+        assert await bound.get("activation:planted") is None
+        assert await bound.get_many(["activation:planted"]) == {}
+        assert (await bound.channel_episodes(_CHANNEL_A, limit=10)).total == 0
+        assert await bound.export() == []
+        with pytest.raises(MemoryStoreStaleError):
+            await bound.write_atomic(
+                [
+                    MemoryWrite(
+                        record=stored,
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=stored.revision,
+                    )
+                ]
+            )
+        with pytest.raises(MemoryStoreConflictError):
+            await bound.add(stored)
+        assert await bound.delete("activation:planted") is False
+        assert await bound.clear() == 0
+        assert len(await store.channel_episode_ids(_CHANNEL_A, limit=10)) == 1
+    counting, _ = await _planted(make_store, planted, SightMode.COUNT)
+    with structlog.testing.capture_logs() as events:
+        await counting.bound(sight).channel_episode_ids(_CHANNEL_A, limit=10)
+    (event,) = [one for one in events if one["event"] == "sight_counted"]
+    withheld = event["other_home"] + event["no_home"] + event["sees_nothing"]
+    assert (event["given"], withheld) == (1, 0 if sees else 1)
+    assert event["no_home"] == (1 if home is None else 0)
