@@ -813,7 +813,8 @@ class Matters:
                 to the sight of the work that reads or writes.
             stop: The Task Manager's stop, which planning's stop call runs (§4:7):
                 ``stop_activation``'s one implementation, which stops only the activation
-                it names (ADR-0352 §2:1).
+                it names (ADR-0352 §2:1), reading and writing by the sight of the work
+                running where it is called (ADR-0383 §7:7).
             held_input_limit: ``Settings.held_input_limit`` (§9:2).
             in_progress_limit: ``Settings.in_progress_limit`` (§9:3).
             set_up: What a stopped activation set up that is still live, which the stop
@@ -1361,7 +1362,11 @@ class Matters:
                 _log.warning("merge_stop_unrecorded", stage=stage, reason="store_failed")
 
     async def stop(self, activation_id: str) -> ActivationStop:
-        """The Task Manager's stop, for planning's stop call (§4:7, ADR-0352 §2:1)."""
+        """The Task Manager's stop, for planning's stop call (§4:7, ADR-0352 §2:1).
+
+        Called inside the calling work, whose sight the stop reads and writes by
+        (ADR-0383 §7:7): an episode that sight does not see answers as one never written.
+        """
         return await self._stop(activation_id)
 
     async def still_live(

@@ -2379,7 +2379,8 @@ class Engine:
             # ADR-0383 §9:1: the peer view's reads and a merge's stop record go through
             # the holder, bound to the sight of the work that makes them.
             stores=held,
-            stop=self._stop,
+            # §7:7: and a work's stop call reads and writes by its work's sight.
+            stop=self._work_stop,
             held_input_limit=held_input_limit,
             in_progress_limit=in_progress_limit,
             set_up=self._still_live,
@@ -3323,9 +3324,12 @@ class Engine:
         self._reject_if_closing()
         named = identifier(activation_id, name="activation_id")
         check_arguments("stop_activation", max_bytes=self._max_payload_bytes, activation_id=named)
+        # The owner's own act, not a work's (ADR-0369 §12:1), so not one of ADR-0383 §7:7's
+        # readers: it reads and writes unbound until the owner's sight is built (ADR-0385
+        # §3, lane B10).
         return await self._tracked(self._stop(named), "stop_activation", checked=True)
 
-    async def _stop(self, activation_id: str) -> ActivationStop:
+    async def _stop(self, activation_id: str, *, sight: Sight | None = None) -> ActivationStop:
         """The two writes of :meth:`stop_activation`, in their order (ADR-0297 §3).
 
         Everything up to the mark runs before the first ``await``: the running
@@ -3337,20 +3341,46 @@ class Engine:
         cascade record: what the activation set up stays until a cancel or a stop names
         it, and the store refuses a spawn of the stopped activation's on its stop record
         (ADR-0350 §3:3).
+
+        ``sight`` is the sight of the work whose stop call this is (:meth:`_work_stop`),
+        and every store it reads or writes is bound to it (ADR-0383 §7:7): an episode
+        that sight does not see answers as one never written (§8:2), and a stop record,
+        which carries no home, is written whatever it sees (§3:3, §7:11). ``None`` is a
+        caller that is not a work, which reads and writes unbound: the owner's
+        :meth:`stop_activation` and the chat reader's ``/stop`` (:meth:`_stop_line`).
         """
         running = self._running_state(activation_id)
         if running is not None:
             if not running.stop():
                 return ActivationStop.ALREADY_ENDED
             # §3:4: only once the mark is set is the record written.
-            await self._plans.record_stop(activation_id)
+            await self._stop_plans(sight).record_stop(activation_id)
             return ActivationStop.STOPPED
-        if self._task_manager is not None and await self._stop_pushed(activation_id):
+        if self._task_manager is not None and await self._stop_pushed(activation_id, sight=sight):
             return ActivationStop.STOPPED
-        episode = await self._memory.get(f"activation:{activation_id}")
+        episode = await self._stop_memory(sight).get(f"activation:{activation_id}")
         return (
             ActivationStop.NO_SUCH_ACTIVATION if episode is None else ActivationStop.ALREADY_ENDED
         )
+
+    async def _work_stop(self, activation_id: str) -> ActivationStop:
+        """A work's stop call, which :class:`Matters` runs for planning (ADR-0349 §4:7).
+
+        As :meth:`_stop`, by the sight of the work that makes the call, read from the work
+        running here and never made (ADR-0383 §7:7, §9:2).
+
+        Raises:
+            RuntimeError: Where no admitted work is running here, which has no sight.
+        """
+        return await self._stop(activation_id, sight=work_sight())
+
+    def _stop_memory(self, sight: Sight | None) -> MemoryStore:
+        """The memory store a stop reads an episode from: bound to a work's ``sight``."""
+        return self._memory if sight is None else self._stores.memory(sight)
+
+    def _stop_plans(self, sight: Sight | None) -> PlanStore:
+        """The plan store a stop writes its record through: bound to a work's ``sight``."""
+        return self._plans if sight is None else self._stores.plans(sight)
 
     def _running_state(self, activation_id: str) -> ActivationState | None:
         """The running activation by that id, where this engine holds one."""
@@ -3363,7 +3393,7 @@ class Engine:
             None,
         )
 
-    async def _stop_pushed(self, activation_id: str) -> bool:
+    async def _stop_pushed(self, activation_id: str, *, sight: Sight | None) -> bool:
         """Stop an activation the Task Scheduler pushed and has not admitted (ADR-0350 §9:10).
 
         Its stop record is written, so admission refuses it, and the sensor's admission
@@ -3374,6 +3404,9 @@ class Engine:
         still read pushed while its outcome is written: it ran, so a stop naming it once
         it has ended changes nothing (ADR-0295 §1:6), and this writes nothing for it.
 
+        The episode is read, and the record written, through the stores bound to a work's
+        ``sight``, as :meth:`_stop` reads (ADR-0383 §7:7); ``None`` reads unbound.
+
         Returns:
             Whether an occurrence was pushed to it, not yet admitted.
         """
@@ -3381,12 +3414,12 @@ class Engine:
         if not pending and (
             activation_id in self._admitted
             or activation_id in self._unwritten
-            or await self._memory.get(f"activation:{activation_id}") is not None
+            or await self._stop_memory(sight).get(f"activation:{activation_id}") is not None
         ):
             return False
         if pending:
             self._pushed[activation_id] = True
-        pushed = await self._plans.stop_pushed_activation(activation_id)
+        pushed = await self._stop_plans(sight).stop_pushed_activation(activation_id)
         return pending or pushed
 
     async def _still_live(
@@ -6793,6 +6826,8 @@ class Engine:
             Whether it stopped one: ``False`` where it had already ended.
         """
         try:
+            # The reader's, not a work's: not one of ADR-0383 §7:7's readers, it reads as
+            # today until a decision gives it a sight of its own (§7:8).
             return await self._stop(activation_id) is ActivationStop.STOPPED
         except PlanningError:
             _log.warning("telegram_stop_unrecorded", stage="telegram_reader", reason="store_failed")
@@ -7480,12 +7515,23 @@ class Engine:
 
         Only the request's person's: a ticket is for that person alone (§5:1). A store
         that cannot be read shows none, and runs none.
+
+        Read through the plan store bound to ``state``'s sight (ADR-0383 §7:7), so a
+        request that sight does not see is not shown, as one never written (§8:2).
+
+        Raises:
+            RuntimeError: Where ``state`` holds an approval's input and carries no sight,
+                which no admitted work lacks: no read is made for it (§6:3).
         """
         held = self._held_requests(state)
         if not held:
             return ()
+        sight = state.sight
+        if sight is None:
+            msg = "a work's tickets are read only by its work's sight (ADR-0383 §7:7)"
+            raise RuntimeError(msg)
         try:
-            found = await self._plans.approval_requests(list(held))
+            found = await self._stores.plans(sight).approval_requests(list(held))
         except PlanningError:
             _log.warning("approval_tickets_unread", stage="planning", reason="store_failed")
             return ()
