@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     PlanningLabel,
     PlanningRound,
     QuestionPart,
+    RecordHome,
     Reversibility,
     RiskLevel,
     RoundResponse,
@@ -425,6 +426,7 @@ def test_the_approval_does_not_change_what_a_decision_authorises() -> None:
 def test_a_call_effect_carries_the_part_it_spends_and_a_message_none() -> None:
     """§4:9: the part key rides on a call's record; a message spends no part."""
     call = ActivationEffect(
+        home=RecordHome.owners(),
         id="e1",
         activation_id="act-yes",
         round="r1",
@@ -437,7 +439,14 @@ def test_a_call_effect_carries_the_part_it_spends_and_a_message_none() -> None:
     assert call.part == _PART
     assert ActivationEffect.model_validate_json(call.model_dump_json()) == call
     with pytest.raises(ValidationError, match="spends no question part"):
-        ActivationEffect(id="m1", activation_id="a", place="conv-1", claimed_at=_AT, part=_PART)
+        ActivationEffect(
+            home=RecordHome.owners(),
+            id="m1",
+            activation_id="a",
+            place="conv-1",
+            claimed_at=_AT,
+            part=_PART,
+        )
 
 
 def test_the_claim_answers_already_used_as_its_own_member() -> None:

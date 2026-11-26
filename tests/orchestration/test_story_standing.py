@@ -475,6 +475,7 @@ async def _effect(  # noqa: PLR0913 — one keyword per part of the record a cas
     """Claim one effect record for ``activation_id`` and, where given, finish it."""
     if message:
         effect = ActivationEffect(
+            home=RecordHome.owners(),
             id=effect_id,
             activation_id=activation_id,
             round="round:1",
@@ -483,6 +484,7 @@ async def _effect(  # noqa: PLR0913 — one keyword per part of the record a cas
         )
     else:
         effect = ActivationEffect(
+            home=RecordHome.owners(),
             id=effect_id,
             activation_id=activation_id,
             round="round:1",

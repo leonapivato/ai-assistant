@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     PlanningRound,
     ProposedCall,
+    RecordHome,
     RequestedCall,
     TicketClaim,
     ToolOutcome,
@@ -65,6 +66,7 @@ async def _approved(harness: Harness) -> ApprovalRequest:
         expires_at=_WRITTEN + timedelta(hours=24),
     )
     asking = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect-ask",
         activation_id="ask",
         round="r-ask",
@@ -88,6 +90,7 @@ async def _approved(harness: Harness) -> ApprovalRequest:
 async def _ran(harness: Harness, request: ApprovalRequest, ran_in: str) -> None:
     """The ticket's remember, claimed under it in ``ran_in`` and done (§5:4-§5:5)."""
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect-run",
         activation_id=ran_in,
         round="r-run",

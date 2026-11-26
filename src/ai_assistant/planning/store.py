@@ -142,7 +142,10 @@ def _utcnow() -> datetime:
 class InMemoryPlanStore:
     """A non-persistent ``PlanStore`` backed by a set and a dict, for dev and tests.
 
-    Structurally implements :class:`~ai_assistant.core.protocols.PlanStore`.
+    Structurally implements :class:`~ai_assistant.core.protocols.PlanStore`. Each effect
+    and observation record it holds keeps its home, kind and identifier, as the record
+    carries it (ADR-0386 §5), and a home no write may carry is refused before any step by
+    the shared checks every writing member runs first (ADR-0386 §6).
     """
 
     def __init__(self, *, now: Clock = _utcnow) -> None:

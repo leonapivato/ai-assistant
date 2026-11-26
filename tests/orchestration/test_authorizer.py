@@ -1011,9 +1011,9 @@ async def test_a_candidate_is_recorded_once_through_actings_own_records_seam() -
     )
 
     first = await hub.authorize(_round(_call("c1", "remember_fact", **_fact("likes tea"))))
-    acted = await stage.act(_for_acting(first), held=HeldResults())
+    acted = await stage.act(_for_acting(first), home=RecordHome.owners(), held=HeldResults())
     again = await hub.authorize(_round(_call("c1", "remember_fact", **_fact("likes tea"))))
-    repeated = await stage.act(_for_acting(again), held=HeldResults())
+    repeated = await stage.act(_for_acting(again), home=RecordHome.owners(), held=HeldResults())
 
     assert acted.calls[0].outcome is ActedOutcome.DONE
     (effect,) = await plans.activation_effects([_ACTIVATION])

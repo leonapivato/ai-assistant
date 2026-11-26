@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     PersonActHow,
     PersonModelAct,
     ProfileField,
+    RecordHome,
     RuleDay,
     ScheduledTaskAuthor,
     Sureness,
@@ -36,6 +37,7 @@ from ai_assistant.core.types import (
     TaskSpawn,
     TaskWriteAnswer,
     ToolCall,
+    ToolOutcome,
     ToolResult,
 )
 from ai_assistant.orchestration.acting import Unwritten
@@ -462,6 +464,26 @@ async def test_the_task_managers_replace_computes_a_rules_first_occurrence() -> 
     assert written.answer is TaskWriteAnswer.WRITTEN
     assert written.task is not None
     assert written.task.occurrences[0].due_at == datetime(2026, 10, 26, 11, 0, tzinfo=UTC)
+
+
+async def test_the_task_managers_replace_is_claimed_in_the_owners_domain() -> None:
+    """ADR-0383 §4:5: the command is the owner's own act and no work's, so the effect
+    record it is claimed under takes the owner's domain, and its finish keeps it."""
+    world = await _world()
+    one_off = (await _spawn(world, at="2026-10-23T20:00"), await _only_task(world))[1]
+
+    written = await world.manager.replace(
+        one_off.id, instruction="the bins", when=DueAt(at=datetime(2026, 10, 30, tzinfo=UTC))
+    )
+
+    assert written.answer is TaskWriteAnswer.WRITTEN
+    (command,) = [
+        one
+        for one in (await world.plans.export()).activation_effects
+        if (one.round or "").startswith("command:")
+    ]
+    assert command.home == RecordHome.owners()
+    assert command.outcome is ToolOutcome.SUCCEEDED
 
 
 async def test_the_task_managers_replace_refuses_a_rule_with_no_occurrence_left() -> None:

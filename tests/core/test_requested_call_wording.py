@@ -164,7 +164,7 @@ def test_an_export_holding_a_worded_request_round_trips_at_the_current_label() -
     """
     export = PlanExport(exported_at=_AT, approval_requests=(_request(_call(wording=_WORDING)),))
 
-    assert export.schema_version == 31
+    assert export.schema_version == 32
     assert PlanExport.model_validate_json(export.model_dump_json()) == export
     with pytest.raises(ValidationError):
         PlanExport.model_validate({**export.model_dump(mode="json"), "schema_version": 27})

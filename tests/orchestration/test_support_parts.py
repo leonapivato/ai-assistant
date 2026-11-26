@@ -138,6 +138,7 @@ def _effect(
     effect_id: str, activation_id: str, round_id: str, digest: str = _DIGEST_SHA
 ) -> ActivationEffect:
     return ActivationEffect(
+        home=RecordHome.owners(),
         id=effect_id,
         activation_id=activation_id,
         round=round_id,

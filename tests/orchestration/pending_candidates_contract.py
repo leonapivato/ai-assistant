@@ -114,6 +114,7 @@ async def hold_episode(
     for index, fact in enumerate(facts, start=1):
         filled = {**_arguments(fact), "episode": episode, "rests_on_outside_content": False}
         effect = ActivationEffect(
+            home=RecordHome.owners(),
             id=f"effect:{activation}:{index}",
             activation_id=activation,
             round=round_id,
@@ -223,10 +224,13 @@ class PendingCandidatesContract:
         settled = await hold_episode(subject, "a1", "lives in Lisbon")
         waiting = await hold_episode(subject, "a2", "has a dog")
         await subject.plans.write_observation(
-            ObservationRecord(episode=settled, state=state), expected_revision=0
+            ObservationRecord(home=RecordHome.owners(), episode=settled, state=state),
+            expected_revision=0,
         )
         await subject.plans.write_observation(
-            ObservationRecord(episode=waiting, state=ObservationState.WAITING),
+            ObservationRecord(
+                home=RecordHome.owners(), episode=waiting, state=ObservationState.WAITING
+            ),
             expected_revision=0,
         )
 

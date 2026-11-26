@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     QuestionPart,
+    RecordHome,
     Reversibility,
     RiskLevel,
     ToolCall,
@@ -265,7 +266,9 @@ async def test_a_call_that_changes_nothing_runs_unclaimed_and_goes_to_a_digest()
     invoker = _Invoker(lambda _: ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"a": 1}))
     held = HeldResults()
 
-    acted = await _stage(plans, invoker).act(held=held, authorized=_round(_authorized("lookup")))
+    acted = await _stage(plans, invoker).act(
+        home=RecordHome.owners(), held=held, authorized=_round(_authorized("lookup"))
+    )
 
     (call,) = acted.calls
     assert (call.outcome, call.route, call.effect_id, call.result_id) == (
@@ -287,7 +290,9 @@ async def test_a_call_in_the_world_is_claimed_and_finished() -> None:
     plans = FakePlanStore(now=_now)
     booking = _authorized("book", effect="e1")
 
-    acted = await _stage(plans).act(held=HeldResults(), authorized=_round(booking))
+    acted = await _stage(plans).act(
+        home=RecordHome.owners(), held=HeldResults(), authorized=_round(booking)
+    )
 
     (call,) = acted.calls
     assert (call.outcome, call.route, call.effect_id, call.result_id) == (
@@ -301,6 +306,67 @@ async def test_a_call_in_the_world_is_claimed_and_finished() -> None:
     assert record.capability == "book"
     assert record.values_digest == values_digest(booking.call)
     assert record.outcome is ToolOutcome.SUCCEEDED
+    assert record.home == RecordHome.owners()
+
+
+async def test_the_record_takes_the_home_acting_is_handed() -> None:
+    """ADR-0383 §4:1, ADR-0386 §5:1: the round's work's home, set by its caller, not a model."""
+    plans = FakePlanStore(now=_now)
+
+    await _stage(plans).act(
+        home=RecordHome.shared(),
+        held=HeldResults(),
+        authorized=_round(_authorized("book", effect="e1")),
+    )
+
+    (record,) = await plans.activation_effects(["act-1"])
+    assert record.home == RecordHome.shared()
+
+
+@pytest.mark.parametrize(
+    "home",
+    [RecordHome.person("person:sam"), RecordHome.group("group:household")],
+    ids=["a-person-the-hub-does-not-admit", "a-group"],
+)
+async def test_a_call_whose_work_writes_in_a_home_no_write_may_carry_is_not_done(
+    home: RecordHome,
+) -> None:
+    """ADR-0383 §2:3, ADR-0386 §6: the claim would be refused before anything is written,
+    so nothing is claimed or run, and the call is not done, never unknown; a call that
+    gets no record runs as before."""
+    plans = FakePlanStore(now=_now)
+    invoker = _Invoker()
+
+    acted = await _stage(plans, invoker).act(
+        home=home,
+        held=HeldResults(),
+        authorized=_round(_authorized("book", effect="e1"), _authorized("lookup", decision="d2")),
+    )
+
+    booked, looked = acted.calls
+    assert booked.outcome is ActedOutcome.NOT_DONE
+    assert booked.reason == "refused before the call was made"
+    assert booked.effect_id is None
+    assert looked.outcome is ActedOutcome.DONE
+    assert [call.request.tool.capability for call in invoker.calls] == ["lookup"]
+    assert (await plans.export()).activation_effects == ()
+
+
+async def test_a_call_that_gets_a_record_needs_a_running_work() -> None:
+    """ADR-0383 §4:1: with no work running there is no home to claim a record in, so
+    acting raises rather than claim one; a call that gets no record needs none."""
+    plans = FakePlanStore(now=_now)
+
+    looked = await _stage(plans).act(
+        home=None, held=HeldResults(), authorized=_round(_authorized("lookup"))
+    )
+    with pytest.raises(RuntimeError, match="no home"):
+        await _stage(plans).act(
+            home=None, held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+        )
+
+    assert looked.calls[0].outcome is ActedOutcome.DONE
+    assert (await plans.export()).activation_effects == ()
 
 
 async def test_two_equal_calls_in_one_round_run_once() -> None:
@@ -309,6 +375,7 @@ async def test_two_equal_calls_in_one_round_run_once() -> None:
     invoker = _Invoker()
 
     acted = await _stage(plans, invoker).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=_round(
             _authorized("book", effect="e1"), _authorized("book", decision="d2", effect="e2")
@@ -330,13 +397,15 @@ async def test_an_effect_done_in_the_matter_refuses_a_repeat_unless_deliberate()
     earlier = AuthorizedRound(
         activation_id="act-0", round_id="r0", calls=(_authorized("book", effect="e0"),)
     )
-    await _stage(plans).act(held=HeldResults(), authorized=earlier)
+    await _stage(plans).act(home=RecordHome.owners(), held=HeldResults(), authorized=earlier)
 
     refused = await _stage(plans).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=_round(_authorized("book", decision="d1", effect="e1"), stories=("act-0",)),
     )
     repeated = await _stage(plans).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=_round(
             _authorized("book", decision="d2", effect="e2", deliberate_repeat=True),
@@ -352,6 +421,7 @@ async def test_an_activation_in_no_story_is_matched_against_its_own_effects() ->
     """§5:9: another activation's effect, outside every story, does not refuse it."""
     plans = FakePlanStore(now=_now)
     await _stage(plans).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=AuthorizedRound(
             activation_id="act-0", round_id="r0", calls=(_authorized("book", effect="e0"),)
@@ -359,7 +429,9 @@ async def test_an_activation_in_no_story_is_matched_against_its_own_effects() ->
     )
 
     acted = await _stage(plans).act(
-        held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("book", effect="e1")),
     )
 
     assert acted.calls[0].outcome is ActedOutcome.DONE
@@ -372,6 +444,7 @@ async def test_a_stopped_activation_starts_nothing_it_must_claim() -> None:
     invoker = _Invoker()
 
     acted = await _stage(plans, invoker).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=_round(_authorized("book", effect="e1"), _authorized("lookup", decision="d2")),
     )
@@ -392,7 +465,9 @@ async def test_a_failed_call_is_not_done_with_a_code_owned_reason() -> None:
     invoker = _Invoker(lambda _: ToolResult(outcome=ToolOutcome.FAILED, failure=failure))
 
     acted = await _stage(plans, invoker).act(
-        held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("book", effect="e1")),
     )
 
     (call,) = acted.calls
@@ -409,7 +484,9 @@ async def test_an_unknown_outcome_is_recorded_and_never_retried() -> None:
     invoker = _Invoker(lambda _: ToolResult(outcome=ToolOutcome.INDETERMINATE, failure=failure))
 
     acted = await _stage(plans, invoker).act(
-        held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("book", effect="e1")),
     )
 
     assert acted.calls[0].outcome is ActedOutcome.UNKNOWN
@@ -427,7 +504,9 @@ async def test_a_refusal_before_the_call_is_not_done() -> None:
         raise AuthorisationSpentError("spent")
 
     acted = await _stage(plans, _Invoker(spent)).act(
-        held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("book", effect="e1")),
     )
 
     assert acted.calls[0].outcome is ActedOutcome.NOT_DONE
@@ -452,7 +531,9 @@ async def test_a_call_the_invocation_seam_stopped_is_shown_refused(refusal: Exce
         raise refusal
 
     acted = await _stage(FakePlanStore(now=_now), _Invoker(refuse)).act(
-        held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("book", effect="e1")),
     )
 
     (call,) = acted.calls
@@ -471,7 +552,9 @@ async def test_a_call_its_tools_own_check_would_not_take_is_not_done() -> None:
         raise ToolBindingError("both coordinates or neither")
 
     acted = await _stage(plans, _Invoker(refuse)).act(
-        held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("book", effect="e1")),
     )
 
     (call,) = acted.calls
@@ -495,7 +578,9 @@ async def test_a_refusal_logs_no_class_name_it_did_not_author() -> None:
 
     with capture_logs() as logs:
         acted = await _stage(FakePlanStore(now=_now), _Invoker(refuse)).act(
-            held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+            home=RecordHome.owners(),
+            held=HeldResults(),
+            authorized=_round(_authorized("book", effect="e1")),
         )
 
     assert acted.calls[0].outcome is ActedOutcome.NOT_DONE
@@ -509,7 +594,9 @@ async def test_a_call_on_the_assistants_own_records_runs_directly() -> None:
     invoker, own = _Invoker(), _OwnRecords()
 
     acted = await _stage(plans, invoker, own).act(
-        held=HeldResults(), authorized=_round(_authorized("remember", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("remember", effect="e1")),
     )
 
     (call,) = acted.calls
@@ -527,7 +614,9 @@ async def test_a_call_on_the_assistants_own_records_is_awaited_to_its_end() -> N
     own.release = asyncio.Event()
     task = asyncio.ensure_future(
         _stage(plans, own=own).act(
-            held=HeldResults(), authorized=_round(_authorized("remember", effect="e1"))
+            home=RecordHome.owners(),
+            held=HeldResults(),
+            authorized=_round(_authorized("remember", effect="e1")),
         )
     )
     await own.entered.wait()
@@ -555,7 +644,9 @@ async def test_a_cancelled_invocation_leaves_its_record_unfinished() -> None:
     invoker.release = asyncio.Event()
     task = asyncio.ensure_future(
         _stage(plans, invoker).act(
-            held=HeldResults(), authorized=_round(_authorized("book", effect="e1"))
+            home=RecordHome.owners(),
+            held=HeldResults(),
+            authorized=_round(_authorized("book", effect="e1")),
         )
     )
     await invoker.entered.wait()
@@ -567,6 +658,7 @@ async def test_a_cancelled_invocation_leaves_its_record_unfinished() -> None:
     (record,) = await plans.activation_effects(["act-1"])
     assert record.outcome is None
     repeat = await _stage(plans).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=_round(_authorized("book", decision="d2", effect="e2", deliberate_repeat=True)),
     )
@@ -605,7 +697,9 @@ async def test_the_call_claimed_is_the_call_invoked_whatever_the_caller_rewrites
     invoker = _Invoker()
     expected = values_digest(original.call)
 
-    await _stage(plans, invoker).act(held=HeldResults(), authorized=_round(original))
+    await _stage(plans, invoker).act(
+        home=RecordHome.owners(), held=HeldResults(), authorized=_round(original)
+    )
 
     (invoked,) = invoker.calls
     assert invoked.request.parameters["date"] == "2026-11-01"
@@ -625,6 +719,7 @@ async def test_a_sibling_that_raises_does_not_abandon_a_claimed_call() -> None:
 
     with pytest.raises(RuntimeError, match="unexpected"):
         await _stage(plans, _Invoker(answer)).act(
+            home=RecordHome.owners(),
             held=HeldResults(),
             authorized=_round(
                 _authorized("book", effect="e1"), _authorized("lookup", decision="d2")
@@ -649,6 +744,7 @@ async def test_each_call_is_handed_back_as_it_finishes_where_a_sibling_raises() 
     handed: list[ActedCall] = []
     with pytest.raises(RuntimeError, match="unexpected"):
         await _stage(plans, _Invoker(answer)).act(
+            home=RecordHome.owners(),
             held=HeldResults(),
             authorized=_round(
                 _authorized("lookup"), _authorized("book", decision="d2", effect="e1")
@@ -672,6 +768,7 @@ async def test_a_call_finished_before_a_cancellation_is_handed_back_once() -> No
     handed: list[ActedCall] = []
     task = asyncio.ensure_future(
         _stage(plans, invoker, own).act(
+            home=RecordHome.owners(),
             held=HeldResults(),
             authorized=_round(
                 _authorized("lookup"), _authorized("remember", decision="d2", effect="e1")
@@ -704,6 +801,7 @@ async def test_each_call_is_handed_back_once_on_a_round_that_returns() -> None:
     handed: list[ActedCall] = []
 
     acted = await _stage(plans).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=_round(
             _authorized("lookup"), _authorized("remember", decision="d2", effect="e1")
@@ -736,6 +834,7 @@ async def test_a_result_is_held_as_soon_as_its_call_is_recorded() -> None:
 
     task = asyncio.create_task(
         stage.act(
+            home=RecordHome.owners(),
             held=held,
             authorized=_round(
                 _authorized("lookup"), _authorized("remember", decision="d2", effect="e1")
@@ -765,6 +864,7 @@ async def test_each_result_takes_its_own_id() -> None:
     held = HeldResults()
 
     acted = await _stage(plans, invoker).act(
+        home=RecordHome.owners(),
         held=held,
         authorized=_round(
             _authorized("lookup", parameters={"q": "first"}),
@@ -786,7 +886,9 @@ async def test_a_null_result_is_held_as_it_arrived() -> None:
     plans = FakePlanStore(now=_now)
     held = HeldResults()
 
-    acted = await _stage(plans).act(held=held, authorized=_round(_authorized("lookup")))
+    acted = await _stage(plans).act(
+        home=RecordHome.owners(), held=held, authorized=_round(_authorized("lookup"))
+    )
 
     assert acted.calls[0].route is ResultRoute.DIGEST
     assert held.get("result:1") == HeldResult(
@@ -804,7 +906,7 @@ async def test_a_call_not_done_brings_no_result_and_holds_nothing() -> None:
     held = HeldResults()
 
     acted = await _stage(plans, _Invoker(lambda _: failed)).act(
-        held=held, authorized=_round(_authorized("lookup"))
+        home=RecordHome.owners(), held=held, authorized=_round(_authorized("lookup"))
     )
 
     assert (acted.calls[0].outcome, acted.calls[0].result_id) == (ActedOutcome.NOT_DONE, None)
@@ -816,7 +918,9 @@ async def test_a_capability_with_no_result_mints_no_id() -> None:
     plans = FakePlanStore(now=_now)
 
     acted = await _stage(plans).act(
-        held=HeldResults(), authorized=_round(_authorized("remember", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("remember", effect="e1")),
     )
 
     assert acted.calls[0].result_id is None
@@ -828,6 +932,7 @@ async def test_an_own_records_result_that_may_carry_outside_text_is_held_whole()
     held = HeldResults()
 
     acted = await _stage(plans).act(
+        home=RecordHome.owners(),
         held=held,
         authorized=_round(
             _authorized(
@@ -890,7 +995,9 @@ async def test_a_read_of_own_records_holds_its_outside_records_by_id() -> None:
     held = HeldResults(on_hold=told.append)
     answer = HeldByIds(output={"records": ["said"]}, outside=("reported", "mailed"))
 
-    acted = await _acting(answer).act(held=held, authorized=_round(_read()))
+    acted = await _acting(answer).act(
+        home=RecordHome.owners(), held=held, authorized=_round(_read())
+    )
 
     (one,) = acted.calls
     assert (one.outcome, one.route, one.result_id) == (
@@ -915,7 +1022,7 @@ async def test_a_read_of_own_records_with_no_outside_record_goes_to_planning() -
     held = HeldResults()
 
     acted = await _acting(HeldByIds(output={"records": ["said"]})).act(
-        held=held, authorized=_round(_read())
+        home=RecordHome.owners(), held=held, authorized=_round(_read())
     )
 
     (one,) = acted.calls
@@ -933,7 +1040,9 @@ async def test_a_read_declared_to_carry_no_outside_text_holds_nothing() -> None:
     answer = HeldByIds(output={"story": "s1"}, outside=("reported",))
 
     acted = await _acting(answer).act(
-        held=held, authorized=_round(_read(result=CapabilityResult.NO_OUTSIDE_TEXT))
+        home=RecordHome.owners(),
+        held=held,
+        authorized=_round(_read(result=CapabilityResult.NO_OUTSIDE_TEXT)),
     )
 
     (one,) = acted.calls
@@ -954,7 +1063,7 @@ async def test_a_follow_up_offers_the_result_it_names_again_as_held() -> None:
     told.clear()
 
     acted = await _acting(NamedResult(result_id="result:9")).act(
-        held=held, authorized=_round(_read())
+        home=RecordHome.owners(), held=held, authorized=_round(_read())
     )
 
     (one,) = acted.calls
@@ -977,7 +1086,7 @@ async def test_a_follow_up_naming_a_result_with_nothing_held_is_not_done() -> No
     held = HeldResults(on_hold=told.append)
 
     acted = await _acting(NamedResult(result_id="result:9")).act(
-        held=held, authorized=_round(_read())
+        home=RecordHome.owners(), held=held, authorized=_round(_read())
     )
 
     (one,) = acted.calls
@@ -1002,7 +1111,9 @@ async def test_a_round_rewritten_to_share_a_decision_runs_nothing() -> None:
     object.__setattr__(authorized, "calls", (authorized.calls[0], authorized.calls[0]))
 
     with pytest.raises(ValueError, match="its own decision"):
-        await _stage(plans, invoker).act(held=HeldResults(), authorized=authorized)
+        await _stage(plans, invoker).act(
+            home=RecordHome.owners(), held=HeldResults(), authorized=authorized
+        )
 
     assert invoker.calls == []
 
@@ -1076,7 +1187,9 @@ async def test_a_call_under_an_approval_is_claimed_with_its_part_key() -> None:
     """§4:9: the record carries the asking round's id and the part number."""
     plans = FakePlanStore(now=_now)
 
-    acted = await _stage(plans).act(held=HeldResults(), authorized=_round(_approved("book")))
+    acted = await _stage(plans).act(
+        home=RecordHome.owners(), held=HeldResults(), authorized=_round(_approved("book"))
+    )
 
     assert acted.calls[0].outcome is ActedOutcome.DONE
     (record,) = await plans.part_effects([QuestionPart(round="q1", part=1)])
@@ -1090,7 +1203,9 @@ async def test_every_call_under_an_approval_gets_a_record_whatever_its_capabilit
     plans = FakePlanStore(now=_now)
     assert not gets_effect_record(_tool("lookup"))
 
-    acted = await _stage(plans).act(held=HeldResults(), authorized=_round(_approved("lookup")))
+    acted = await _stage(plans).act(
+        home=RecordHome.owners(), held=HeldResults(), authorized=_round(_approved("lookup"))
+    )
 
     assert acted.calls[0].effect_id == "e1"
     (record,) = await plans.activation_effects(["act-1"])
@@ -1109,6 +1224,7 @@ async def test_an_approval_given_to_another_activation_runs_nothing() -> None:
     invoker = _Invoker()
 
     acted = await _stage(plans, invoker).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=AuthorizedRound(
             activation_id="act-2", round_id="r2", calls=(_approved("book"),)
@@ -1127,9 +1243,12 @@ async def test_a_second_yes_to_one_part_does_not_run_it_again() -> None:
     """§4:9, §8:1: a part is spent once, and its second claim comes back not done."""
     plans = FakePlanStore(now=_now)
     invoker = _Invoker()
-    await _stage(plans, invoker).act(held=HeldResults(), authorized=_round(_approved("book")))
+    await _stage(plans, invoker).act(
+        home=RecordHome.owners(), held=HeldResults(), authorized=_round(_approved("book"))
+    )
 
     again = await _stage(plans, invoker).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=AuthorizedRound(
             activation_id="act-2",
@@ -1153,9 +1272,12 @@ async def test_a_deliberate_retry_under_an_approval_passes_an_unknown_outcome() 
     earlier = AuthorizedRound(
         activation_id="act-0", round_id="r0", calls=(_authorized("book", effect="e0"),)
     )
-    await _stage(plans, unknown).act(held=HeldResults(), authorized=earlier)
+    await _stage(plans, unknown).act(
+        home=RecordHome.owners(), held=HeldResults(), authorized=earlier
+    )
 
     unapproved = await _stage(plans).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=_round(
             _authorized("book", decision="d1", effect="e1", deliberate_repeat=True),
@@ -1163,6 +1285,7 @@ async def test_a_deliberate_retry_under_an_approval_passes_an_unknown_outcome() 
         ),
     )
     approved = await _stage(plans).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=_round(
             _approved("book", decision="d2", effect="e2", deliberate_repeat=True),
@@ -1211,7 +1334,9 @@ async def test_a_call_that_needs_you_is_reported_so_with_what_it_replaces() -> N
     seam = _Approving(NeedsYou(replaces=(_assertion(),)))
 
     acted = await _over(plans, seam).act(
-        held=HeldResults(), authorized=_round(_authorized("remember", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("remember", effect="e1")),
     )
 
     (one,) = acted.calls
@@ -1231,7 +1356,9 @@ async def test_a_call_that_needs_you_carries_detached_records() -> None:
     seam = _Approving(NeedsYou(replaces=(assertion,)))
 
     acted = await _over(FakePlanStore(now=_now), seam).act(
-        held=HeldResults(), authorized=_round(_authorized("remember", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("remember", effect="e1")),
     )
 
     (shown,) = acted.calls[0].replaces
@@ -1244,7 +1371,7 @@ async def test_an_approved_call_runs_through_the_seams_plain_run() -> None:
     seam = _Approving()
 
     await _over(FakePlanStore(now=_now), seam).act(
-        held=HeldResults(), authorized=_round(_approved("remember"))
+        home=RecordHome.owners(), held=HeldResults(), authorized=_round(_approved("remember"))
     )
 
     assert len(seam.run_calls) == 1

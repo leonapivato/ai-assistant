@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     ApprovalRequest,
     ApprovalRequestState,
     ApprovalWriteAnswer,
+    RecordHome,
     RequestedCall,
     TicketState,
 )
@@ -110,7 +111,7 @@ async def test_every_request_reads_back_as_the_previous_release_wrote_it(legacy:
         "effect-q-before-pin",
     ]
     assert [one.model_dump_json() for one in read] == _stored_requests(legacy)
-    assert _label(legacy) == "21"
+    assert _label(legacy) == "22"
 
 
 async def test_a_stored_call_differs_from_this_builds_declaration_by_its_grant_alone(
@@ -153,6 +154,7 @@ async def test_a_request_written_after_holds_its_default_grant_across_a_reopen(
         written = await store.write_approval_request(
             request,
             ActivationEffect(
+                home=RecordHome.owners(),
                 id="effect-q-after-pin",
                 activation_id="act-q-after-pin",
                 round="r1",
@@ -176,4 +178,4 @@ async def test_a_request_written_after_holds_its_default_grant_across_a_reopen(
 
     assert read.call.tool == PIN
     assert read.call.tool.default_grant == PIN.default_grant
-    assert _label(legacy) == "21"
+    assert _label(legacy) == "22"

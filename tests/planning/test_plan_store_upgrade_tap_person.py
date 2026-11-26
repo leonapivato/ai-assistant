@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from record_homes import decoded_tables, homeless_tables
 from request_tappers import decoded, untapped
 
 from ai_assistant.core.errors import PlanningError
@@ -144,8 +145,8 @@ async def test_every_answer_is_upgraded_to_the_requests_person_at_no_recorded_le
     finally:
         store.close()
 
-    assert _label(legacy) == "21"
-    assert export.schema_version == 31
+    assert _label(legacy) == "22"
+    assert export.schema_version == 32
     assert [one.id for one in export.approval_requests] == _REQUESTS
     assert read == export.approval_requests
     answers = {one.id: one.answer for one in read}
@@ -185,9 +186,10 @@ async def test_every_other_record_and_field_is_carried_as_it_stands(legacy: Path
     after = _dump(legacy)
     assert set(after) == _TABLES
     untouched = _TABLES - {"meta", "approval_requests"}
-    assert {table: after[table] for table in untouched} == {
-        table: before[table] for table in untouched
-    }
+    # The step past 21 writes each effect's and observation's home (ADR-0383 §5:1).
+    assert homeless_tables({table: after[table] for table in untouched}) == decoded_tables(
+        {table: before[table] for table in untouched}
+    )
     assert untapped(after["approval_requests"]) == decoded(before["approval_requests"])
     unanswered = [row for row in before["approval_requests"] if row[0] in _UNANSWERED]
     assert [row for row in after["approval_requests"] if row[0] in _UNANSWERED] == unanswered

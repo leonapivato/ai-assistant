@@ -11,6 +11,8 @@ round; and a ``remember`` call run under an approval, spending its question part
 The head opens a copy and must upgrade it in place (ADR-0326 §4:1, §5:1): carry every
 record whole (§4:4), move the label through 13 and 14 to the head's 15 (§4:5), add the empty
 observation table, and leave the file exactly as it found it where the open fails (§4:3).
+The step past 21 gives every effect record the owner's domain as its home (ADR-0383 §5:1),
+and nothing else: :mod:`record_homes` holds each row to that.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from record_homes import decoded, homeless, owners_effect
 
 from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
@@ -31,6 +34,7 @@ from ai_assistant.core.types import (
     ObservationRecord,
     ObservationState,
     QuestionPart,
+    RecordHome,
     ToolOutcome,
 )
 from ai_assistant.planning import SqlitePlanStore
@@ -91,10 +95,7 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
 ) -> None:
     """§4:1, §4:2, §4:4: opened, upgraded in place, and every record read back whole."""
     before = _dump(legacy)
-    held_effects = {
-        str(row[0]): ActivationEffect.model_validate_json(str(row[3]))
-        for row in before["activation_effects"]
-    }
+    held_effects = {str(row[0]): owners_effect(row[3]) for row in before["activation_effects"]}
 
     store = SqlitePlanStore(path=legacy, now=_now)
     try:
@@ -102,7 +103,7 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "21"
+    assert _label(legacy) == "22"
     assert export.stopped_activations == ("act-legacy-stopped", "act-legacy-stopped-2")
     assert {one.id: one for one in export.activation_effects} == held_effects
     # Claim order is the order the previous release claimed them in.
@@ -112,7 +113,9 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     assert export.observations == ()
     after = _dump(legacy)
     assert after["stopped_activations"] == before["stopped_activations"]
-    assert after["activation_effects"] == before["activation_effects"]
+    assert homeless("activation_effects", after["activation_effects"]) == decoded(
+        "activation_effects", before["activation_effects"]
+    )
     assert after["observations"] == []
 
 
@@ -125,6 +128,7 @@ async def test_the_upgraded_file_behaves_as_the_previous_release_left_it(legacy:
         with pytest.raises(ClaimStopped):
             await store.claim_activation_effect(
                 ActivationEffect(
+                    home=RecordHome.owners(),
                     id="effect-after",
                     activation_id="act-legacy-stopped-2",
                     round="r9",
@@ -134,6 +138,7 @@ async def test_the_upgraded_file_behaves_as_the_previous_release_left_it(legacy:
                 match=None,
             )
         repeat = ActivationEffect(
+            home=RecordHome.owners(),
             id="effect-again",
             activation_id="act-legacy-9",
             round="r9",
@@ -157,7 +162,11 @@ async def test_the_upgraded_file_takes_observation_records_and_keeps_them(
     store = SqlitePlanStore(path=legacy, now=_now)
     try:
         stored = await store.write_observation(
-            ObservationRecord(episode="activation:act-legacy-1", state=ObservationState.SKIPPED),
+            ObservationRecord(
+                home=RecordHome.owners(),
+                episode="activation:act-legacy-1",
+                state=ObservationState.SKIPPED,
+            ),
             expected_revision=0,
         )
         await store.finish_activation_effect("effect-open", ToolOutcome.FAILED, reason="late")
@@ -170,7 +179,7 @@ async def test_the_upgraded_file_takes_observation_records_and_keeps_them(
         assert len((await reopened.export()).activation_effects) == 8
     finally:
         reopened.close()
-    assert _label(legacy) == "21"
+    assert _label(legacy) == "22"
 
 
 @pytest.mark.parametrize(
@@ -204,14 +213,17 @@ async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path, spo
 
 
 def test_the_fixture_records_validate_as_this_build_reads_them() -> None:
-    """Each stored blob is a record this build's ``ActivationEffect`` reads unchanged.
+    """Each stored blob, given the home the step past 21 writes, is a record this build's
+    ``ActivationEffect`` reads unchanged.
 
-    The upgrade rewrites no effect record, so a blob this build could not read would be
-    a record the upgrade failed to carry; this pins that none is.
+    The upgrade rewrites no other part of an effect record, so a blob this build could not
+    read would be a record the upgrade failed to carry; this pins that none is.
     """
     with sqlite3.connect(_FIXTURE) as conn:
         blobs = [str(data) for (data,) in conn.execute("SELECT data FROM activation_effects")]
 
     for blob in blobs:
-        record = ActivationEffect.model_validate_json(blob)
-        assert json.loads(record.model_dump_json()) == json.loads(blob)
+        record = owners_effect(blob)
+        dumped = json.loads(record.model_dump_json())
+        assert dumped.pop("home") == record.home.model_dump(mode="json")
+        assert dumped == json.loads(blob)

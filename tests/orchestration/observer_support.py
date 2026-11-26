@@ -203,6 +203,7 @@ async def remembered(  # noqa: PLR0913 — the call, where it was recorded, and 
     """Claim and finish the effect record that shows a ``remember`` call done (§3:3)."""
     filled = {**values, "episode": address(activation_id), "rests_on_outside_content": False}
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id=effect_id,
         activation_id=activation_id,
         round=round_id,

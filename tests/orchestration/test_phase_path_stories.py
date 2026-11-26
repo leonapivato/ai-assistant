@@ -214,6 +214,7 @@ async def test_what_was_done_is_read_from_the_effect_records() -> None:
 
 def _call_effect(effect_id: str, activation_id: str) -> ActivationEffect:
     return ActivationEffect(
+        home=RecordHome.owners(),
         id=effect_id,
         activation_id=activation_id,
         round="round:1",

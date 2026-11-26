@@ -176,6 +176,7 @@ async def hold_request(  # noqa: PLR0913 — one knob per part of a request a ca
         expires_at=at + DAY,
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id=f"effect:{request_id}",
         activation_id=activation,
         round=f"round:{activation}",

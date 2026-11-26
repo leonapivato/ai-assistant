@@ -81,6 +81,13 @@ follow-up's *looking for*. It mints no result and holds nothing again, and the o
 carries the named result's id. A follow-up naming a result with nothing held is not
 done, with the reason.
 
+**Every record it claims carries its work's home** (ADR-0383 §4:1, ADR-0386 §5:1): the
+home whom the work is for gives, which the caller hands :meth:`ActingStage.act` and no
+model sets (§4:6). A home no write may carry, a work's for a person the hub knows but
+does not admit, is refused by every member that would claim it before anything is
+written (ADR-0386 §6), so acting claims nothing for it: the call is not done, with the
+reason a refusal before the call carries, and never run (ADR-0383 §2:3).
+
 **It logs stage and code-owned reason only**, never arguments or results (ADR-0275 §8).
 """
 
@@ -119,6 +126,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
     canonical_json_bytes,
+    home_may_be_written,
 )
 from ai_assistant.orchestration.activation_cleanup import drain_registered
 from ai_assistant.orchestration.held_results import HeldResult
@@ -132,6 +140,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         FrozenJson,
         FrozenJsonValue,
+        RecordHome,
         ToolDefinition,
     )
     from ai_assistant.orchestration.held_results import HeldResults
@@ -674,6 +683,7 @@ class ActingStage:
         authorized: AuthorizedRound,
         *,
         held: HeldResults,
+        home: RecordHome | None,
         on_acted: Callable[[ActedCall], None] | None = None,
     ) -> ActedRound:
         """Run every call of ``authorized`` in parallel and say what came of each.
@@ -701,6 +711,10 @@ class ActingStage:
             authorized: The round's allowed calls.
             held: The activation's held results, acting's part of its working
                 episode.
+            home: The home every effect record the round's calls are claimed under
+                takes: the one whom the round's work is for gives (ADR-0383 §4:1), set
+                by code and never by a model (§4:6). ``None`` where no work is running,
+                which only a round none of whose calls gets a record may be run with.
             on_acted: Handed each call's outcome as it is known, once per call. It is
                 called synchronously and must not raise. ``None`` hands back nothing
                 but the round.
@@ -734,7 +748,7 @@ class ActingStage:
             on_acted(acted)
 
         async def each(one: AuthorizedCall) -> ActedCall:
-            acted = await self._act(activation_id, round_id, match, one, held, hand_back)
+            acted = await self._act(activation_id, round_id, match, one, held, home, hand_back)
             hand_back(acted)
             return acted
 
@@ -762,6 +776,7 @@ class ActingStage:
         match: tuple[str, ...],
         one: AuthorizedCall,
         held: HeldResults,
+        home: RecordHome | None,
         hand_back: Callable[[ActedCall], None],
     ) -> ActedCall:
         """Claim one detached call where it gets a record, run it, and finish the record.
@@ -780,6 +795,9 @@ class ActingStage:
             _log.info("acting_call_not_done", stage="acting", reason="another_activations_yes")
             return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ANOTHER_ACTIVATIONS)
         if effect_id is not None:
+            if home is None:
+                msg = "no work is running, so an effect record has no home to be claimed in"
+                raise RuntimeError(msg)
             ticket = (
                 approval.how.request
                 if approval is not None and isinstance(approval.how, TapOnCard)
@@ -788,6 +806,7 @@ class ActingStage:
             record = ActivationEffect(
                 id=effect_id,
                 activation_id=activation_id,
+                home=home,
                 round=round_id,
                 capability=one.recorded if one.recorded is not None else tool.capability,
                 values_digest=values_digest(call),
@@ -796,6 +815,12 @@ class ActingStage:
                 part=call.decision.approved_part,
                 ticket=ticket,
             )
+            if not home_may_be_written(record.home):
+                # ADR-0383 §2:3, ADR-0386 §6: every member that would claim it refuses
+                # this home before anything is written, so it is known that nothing was
+                # claimed or run: not done, never unknown.
+                _log.info("acting_call_not_done", stage="acting", reason="home_refused")
+                return ActedCall(one, ActedOutcome.NOT_DONE, reason=_REFUSED)
             # A record the call gets only because it runs under an approval (ADR-0321
             # §4:10), as a cancel's or a list pull's under a ticket does, is no write's own:
             # acting claims it, as it claims any call's (ADR-0362 §3:4).

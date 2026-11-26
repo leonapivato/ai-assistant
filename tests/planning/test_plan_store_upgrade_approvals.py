@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from record_homes import decoded_tables, homeless_tables
 from task_setters import decoded, unset
 
 from ai_assistant.core.errors import ClaimStopped, PlanningError
@@ -43,6 +44,7 @@ from ai_assistant.core.types import (
     Idempotency,
     OccurrenceState,
     QuestionPart,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -149,6 +151,7 @@ def _request() -> ApprovalRequest:
 
 def _asking(request: ApprovalRequest) -> ActivationEffect:
     return ActivationEffect(
+        home=RecordHome.owners(),
         id="ask-after",
         activation_id=request.activation_id,
         round=request.round,
@@ -187,8 +190,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "21"
-    assert export.schema_version == 31
+    assert _label(legacy) == "22"
+    assert export.schema_version == 32
     assert export.stopped_activations == ("act-before-stopped",)
     effects = {one.id: one for one in export.activation_effects}
     assert list(effects) == _EFFECTS
@@ -208,7 +211,10 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     assert set(after) == {*_TABLES_BEFORE, "approval_requests"}
     assert after["approval_requests"] == []
     carried = {table for table in before if table not in {"meta", "scheduled_tasks"}}
-    assert {table: after[table] for table in carried} == {table: before[table] for table in carried}
+    # And the step past 21 writes each effect's and observation's home (ADR-0383 §5:1).
+    assert homeless_tables({table: after[table] for table in carried}) == decoded_tables(
+        {table: before[table] for table in carried}
+    )
     assert unset(after["scheduled_tasks"]) == decoded(before["scheduled_tasks"])
 
 
@@ -255,7 +261,7 @@ async def test_the_upgraded_file_holds_a_request_and_keeps_what_it_carried(
         assert [one.id for one in spent] == ["effect-before-part"]
     finally:
         reopened.close()
-    assert _label(legacy) == "21"
+    assert _label(legacy) == "22"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

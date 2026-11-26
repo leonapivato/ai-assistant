@@ -1,0 +1,662 @@
+{
+ "activation_effects": [
+  {
+   "activation_id": "act-before-1",
+   "capability": "send_email",
+   "claimed_at": "2026-11-26T09:01:00Z",
+   "decision_id": "d-effect-before-done",
+   "id": "effect-before-done",
+   "outcome": "succeeded",
+   "part": null,
+   "place": null,
+   "position": null,
+   "reason": null,
+   "round": "r-before-1",
+   "values_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+   "activation_id": "act-before-1",
+   "capability": "send_email",
+   "claimed_at": "2026-11-26T09:02:00Z",
+   "decision_id": "d-effect-before-failed",
+   "id": "effect-before-failed",
+   "outcome": "failed",
+   "part": null,
+   "place": null,
+   "position": null,
+   "reason": "The mail server refused it.",
+   "round": "r-before-1",
+   "values_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  {
+   "activation_id": "act-before-1",
+   "capability": "send_email",
+   "claimed_at": "2026-11-26T09:03:00Z",
+   "decision_id": "d-effect-before-unknown",
+   "id": "effect-before-unknown",
+   "outcome": "indeterminate",
+   "part": null,
+   "place": null,
+   "position": null,
+   "reason": null,
+   "round": "r-before-1",
+   "values_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  {
+   "activation_id": "act-before-2",
+   "capability": "send_email",
+   "claimed_at": "2026-11-26T09:04:00Z",
+   "decision_id": "d-effect-before-part",
+   "id": "effect-before-part",
+   "outcome": "succeeded",
+   "part": {
+    "part": 1,
+    "round": "r-before-asked"
+   },
+   "place": null,
+   "position": null,
+   "reason": null,
+   "round": "r-before-1",
+   "values_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  {
+   "activation_id": "act-before-1",
+   "capability": null,
+   "claimed_at": "2026-11-26T09:05:00Z",
+   "decision_id": null,
+   "id": "effect-before-sent",
+   "outcome": "succeeded",
+   "part": null,
+   "place": "conversation:chat-before",
+   "position": 3,
+   "reason": null,
+   "round": "r-before-1",
+   "values_digest": null
+  },
+  {
+   "activation_id": "act-before-3",
+   "capability": null,
+   "claimed_at": "2026-11-26T09:06:00Z",
+   "decision_id": null,
+   "id": "effect-before-open",
+   "outcome": null,
+   "part": null,
+   "place": "conversation:chat-before",
+   "position": null,
+   "reason": null,
+   "round": "r-before-3",
+   "values_digest": null
+  },
+  {
+   "activation_id": "act-before-3",
+   "capability": null,
+   "claimed_at": "2026-11-26T09:07:00Z",
+   "decision_id": null,
+   "id": "effect-before-couldnt",
+   "outcome": "failed",
+   "part": null,
+   "place": "conversation:chat-before",
+   "position": null,
+   "reason": "its place's medium has no record of it (ADR-0350 §8:11)",
+   "round": null,
+   "values_digest": null
+  },
+  {
+   "activation_id": "act-before-1",
+   "capability": "spawn",
+   "claimed_at": "2026-11-26T09:08:00Z",
+   "decision_id": "d-effect-before-spawn",
+   "id": "effect-before-spawn",
+   "outcome": "succeeded",
+   "part": null,
+   "place": null,
+   "position": null,
+   "reason": null,
+   "round": "r-before-1",
+   "values_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  {
+   "activation_id": "act-before-2",
+   "capability": "request_approval",
+   "claimed_at": "2026-11-26T09:09:00Z",
+   "decision_id": "d-effect-before-request",
+   "id": "effect-before-request",
+   "outcome": "succeeded",
+   "part": null,
+   "place": null,
+   "position": null,
+   "reason": null,
+   "request": "q-before",
+   "round": "r-before-2",
+   "values_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+ ],
+ "export": {
+  "activation_effects": [
+   {
+    "activation_id": "act-before-1",
+    "capability": "send_email",
+    "claimed_at": "2026-11-26T09:01:00Z",
+    "decision_id": "d-effect-before-done",
+    "id": "effect-before-done",
+    "outcome": "succeeded",
+    "part": null,
+    "place": null,
+    "position": null,
+    "reason": null,
+    "round": "r-before-1",
+    "values_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   {
+    "activation_id": "act-before-1",
+    "capability": "send_email",
+    "claimed_at": "2026-11-26T09:02:00Z",
+    "decision_id": "d-effect-before-failed",
+    "id": "effect-before-failed",
+    "outcome": "failed",
+    "part": null,
+    "place": null,
+    "position": null,
+    "reason": "The mail server refused it.",
+    "round": "r-before-1",
+    "values_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   {
+    "activation_id": "act-before-1",
+    "capability": "send_email",
+    "claimed_at": "2026-11-26T09:03:00Z",
+    "decision_id": "d-effect-before-unknown",
+    "id": "effect-before-unknown",
+    "outcome": "indeterminate",
+    "part": null,
+    "place": null,
+    "position": null,
+    "reason": null,
+    "round": "r-before-1",
+    "values_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+   },
+   {
+    "activation_id": "act-before-2",
+    "capability": "send_email",
+    "claimed_at": "2026-11-26T09:04:00Z",
+    "decision_id": "d-effect-before-part",
+    "id": "effect-before-part",
+    "outcome": "succeeded",
+    "part": {
+     "part": 1,
+     "round": "r-before-asked"
+    },
+    "place": null,
+    "position": null,
+    "reason": null,
+    "round": "r-before-1",
+    "values_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+   },
+   {
+    "activation_id": "act-before-1",
+    "capability": null,
+    "claimed_at": "2026-11-26T09:05:00Z",
+    "decision_id": null,
+    "id": "effect-before-sent",
+    "outcome": "succeeded",
+    "part": null,
+    "place": "conversation:chat-before",
+    "position": 3,
+    "reason": null,
+    "round": "r-before-1",
+    "values_digest": null
+   },
+   {
+    "activation_id": "act-before-3",
+    "capability": null,
+    "claimed_at": "2026-11-26T09:06:00Z",
+    "decision_id": null,
+    "id": "effect-before-open",
+    "outcome": null,
+    "part": null,
+    "place": "conversation:chat-before",
+    "position": null,
+    "reason": null,
+    "round": "r-before-3",
+    "values_digest": null
+   },
+   {
+    "activation_id": "act-before-3",
+    "capability": null,
+    "claimed_at": "2026-11-26T09:07:00Z",
+    "decision_id": null,
+    "id": "effect-before-couldnt",
+    "outcome": "failed",
+    "part": null,
+    "place": "conversation:chat-before",
+    "position": null,
+    "reason": "its place's medium has no record of it (ADR-0350 §8:11)",
+    "round": null,
+    "values_digest": null
+   },
+   {
+    "activation_id": "act-before-1",
+    "capability": "spawn",
+    "claimed_at": "2026-11-26T09:08:00Z",
+    "decision_id": "d-effect-before-spawn",
+    "id": "effect-before-spawn",
+    "outcome": "succeeded",
+    "part": null,
+    "place": null,
+    "position": null,
+    "reason": null,
+    "round": "r-before-1",
+    "values_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+   },
+   {
+    "activation_id": "act-before-2",
+    "capability": "request_approval",
+    "claimed_at": "2026-11-26T09:09:00Z",
+    "decision_id": "d-effect-before-request",
+    "id": "effect-before-request",
+    "outcome": "succeeded",
+    "part": null,
+    "place": null,
+    "position": null,
+    "reason": null,
+    "request": "q-before",
+    "round": "r-before-2",
+    "values_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+   }
+  ],
+  "approval_requests": [
+   {
+    "activation_id": "act-before-2",
+    "answer": null,
+    "call": {
+     "binding": null,
+     "deliberate_repeat": false,
+     "replaces": [],
+     "tool": {
+      "capability": "send_email",
+      "cost": {
+       "amount": null,
+       "basis": "free",
+       "currency": null
+      },
+      "default_grant": {
+       "bar": "normal",
+       "how": "allowed"
+      },
+      "description": "Send an email.",
+      "discloses": [],
+      "effect": "world",
+      "id": "send_email",
+      "idempotency": "none",
+      "idempotency_window": null,
+      "latency": null,
+      "leaves_hub": true,
+      "outcome_can_be_unknown": true,
+      "parameters_schema": {},
+      "reads": [],
+      "result": "no_outside_text",
+      "reversibility": "reversible",
+      "risk_level": "low",
+      "safe_to_repeat": false,
+      "side_effecting": true,
+      "system_supplied": [],
+      "writes": []
+     },
+     "values": {
+      "to": "ada@example.com"
+     }
+    },
+    "cards": [],
+    "expires_at": "2026-11-27T09:09:00Z",
+    "id": "q-before",
+    "person": "person:owner",
+    "pushed_to": null,
+    "round": "r-before-2",
+    "spent_by": null,
+    "state": "pending",
+    "ticket": null,
+    "why": "You asked me to write to Ada.",
+    "written_at": "2026-11-26T09:09:00Z"
+   }
+  ],
+  "exported_at": "2026-11-26T10:00:00Z",
+  "observations": [
+   {
+    "attempts": [
+     {
+      "calls": [
+       {
+        "at": "2026-11-26T09:20:00Z",
+        "step": "scout"
+       }
+      ],
+      "end": "finished",
+      "started_at": "2026-11-26T09:20:00Z"
+     }
+    ],
+    "declines": [],
+    "episode": "activation:act-before-1",
+    "findings": [
+     {
+      "annotations": null,
+      "candidate": null,
+      "claim": "The user writes to Ada on Sundays.",
+      "episode": "activation:act-before-1",
+      "framed": [],
+      "further_candidates": [],
+      "id": "finding-before-1",
+      "outcome": {
+       "asked": [],
+       "at": "2026-11-26T09:21:00Z",
+       "ruling": null,
+       "unclear": [],
+       "unwritten": null,
+       "writes": [
+        {
+         "memory": "memory-before-ada",
+         "operations": [
+          "create"
+         ],
+         "track_record": null
+        }
+       ]
+      },
+      "relied_on": null,
+      "rests_on": [
+       {
+        "episode": "activation:act-before-1",
+        "message": null,
+        "part": "input"
+       }
+      ],
+      "supply": null,
+      "written": []
+     },
+     {
+      "annotations": null,
+      "candidate": null,
+      "claim": "The user once sent a mail.",
+      "episode": "activation:act-before-1",
+      "framed": [],
+      "further_candidates": [],
+      "id": "finding-before-2",
+      "outcome": {
+       "asked": [],
+       "at": "2026-11-26T09:21:00Z",
+       "ruling": null,
+       "unclear": [],
+       "unwritten": "not_kept",
+       "writes": []
+      },
+      "relied_on": null,
+      "rests_on": [
+       {
+        "episode": "activation:act-before-1",
+        "message": 0,
+        "part": "input"
+       }
+      ],
+      "supply": null,
+      "written": []
+     }
+    ],
+    "next_attempt_at": null,
+    "revision": 1,
+    "state": "processed"
+   },
+   {
+    "attempts": [
+     {
+      "calls": [],
+      "end": "finished",
+      "started_at": "2026-11-26T09:22:00Z"
+     }
+    ],
+    "declines": [],
+    "episode": "activation:act-before-2",
+    "findings": [],
+    "next_attempt_at": null,
+    "revision": 2,
+    "state": "skipped"
+   },
+   {
+    "attempts": [
+     {
+      "calls": [
+       {
+        "at": "2026-11-26T09:23:00Z",
+        "step": "scout"
+       }
+      ],
+      "end": "failed",
+      "started_at": "2026-11-26T09:23:00Z"
+     }
+    ],
+    "declines": [],
+    "episode": "activation:act-before-3",
+    "findings": [],
+    "next_attempt_at": "2026-11-26T09:53:00Z",
+    "revision": 3,
+    "state": "waiting"
+   },
+   {
+    "attempts": [
+     {
+      "calls": [],
+      "end": "failed",
+      "started_at": "2026-11-26T09:24:00Z"
+     },
+     {
+      "calls": [],
+      "end": "failed",
+      "started_at": "2026-11-26T09:26:00Z"
+     }
+    ],
+    "declines": [],
+    "episode": "activation:act-before-stopped",
+    "findings": [],
+    "next_attempt_at": null,
+    "revision": 5,
+    "state": "stuck"
+   }
+  ],
+  "scheduled_tasks": [
+   {
+    "author": "assistant",
+    "author_person": null,
+    "chain_length": 1,
+    "id": "task-before",
+    "instruction": "Check the weather.",
+    "occurrences": [
+     {
+      "activations": [],
+      "due_at": "2026-11-26T09:08:00Z",
+      "ended_at": null,
+      "number": 1,
+      "second_try": false,
+      "state": "pending"
+     }
+    ],
+    "outside_content": false,
+    "parent": "act-before-1",
+    "person": "person:owner",
+    "places": [],
+    "set_at": "2026-11-26T09:08:00Z",
+    "set_in": {
+     "channel_type": "conversation",
+     "instance_id": "chat-before",
+     "kind": "channel"
+    },
+    "setting_connection": null,
+    "setting_level": "none",
+    "when": {
+     "kind": "now"
+    }
+   }
+  ],
+  "schema_version": 31,
+  "stopped_activations": [
+   "act-before-stopped"
+  ]
+ },
+ "observations": [
+  {
+   "attempts": [
+    {
+     "calls": [
+      {
+       "at": "2026-11-26T09:20:00Z",
+       "step": "scout"
+      }
+     ],
+     "end": "finished",
+     "started_at": "2026-11-26T09:20:00Z"
+    }
+   ],
+   "declines": [],
+   "episode": "activation:act-before-1",
+   "findings": [
+    {
+     "annotations": null,
+     "candidate": null,
+     "claim": "The user writes to Ada on Sundays.",
+     "episode": "activation:act-before-1",
+     "framed": [],
+     "further_candidates": [],
+     "id": "finding-before-1",
+     "outcome": {
+      "asked": [],
+      "at": "2026-11-26T09:21:00Z",
+      "ruling": null,
+      "unclear": [],
+      "unwritten": null,
+      "writes": [
+       {
+        "memory": "memory-before-ada",
+        "operations": [
+         "create"
+        ],
+        "track_record": null
+       }
+      ]
+     },
+     "relied_on": null,
+     "rests_on": [
+      {
+       "episode": "activation:act-before-1",
+       "message": null,
+       "part": "input"
+      }
+     ],
+     "supply": null,
+     "written": []
+    },
+    {
+     "annotations": null,
+     "candidate": null,
+     "claim": "The user once sent a mail.",
+     "episode": "activation:act-before-1",
+     "framed": [],
+     "further_candidates": [],
+     "id": "finding-before-2",
+     "outcome": {
+      "asked": [],
+      "at": "2026-11-26T09:21:00Z",
+      "ruling": null,
+      "unclear": [],
+      "unwritten": "not_kept",
+      "writes": []
+     },
+     "relied_on": null,
+     "rests_on": [
+      {
+       "episode": "activation:act-before-1",
+       "message": 0,
+       "part": "input"
+      }
+     ],
+     "supply": null,
+     "written": []
+    }
+   ],
+   "next_attempt_at": null,
+   "revision": 1,
+   "state": "processed"
+  },
+  {
+   "attempts": [
+    {
+     "calls": [],
+     "end": "finished",
+     "started_at": "2026-11-26T09:22:00Z"
+    }
+   ],
+   "declines": [],
+   "episode": "activation:act-before-2",
+   "findings": [],
+   "next_attempt_at": null,
+   "revision": 2,
+   "state": "skipped"
+  },
+  {
+   "attempts": [
+    {
+     "calls": [
+      {
+       "at": "2026-11-26T09:23:00Z",
+       "step": "scout"
+      }
+     ],
+     "end": "failed",
+     "started_at": "2026-11-26T09:23:00Z"
+    }
+   ],
+   "declines": [],
+   "episode": "activation:act-before-3",
+   "findings": [],
+   "next_attempt_at": "2026-11-26T09:53:00Z",
+   "revision": 3,
+   "state": "waiting"
+  },
+  {
+   "attempts": [
+    {
+     "calls": [],
+     "end": "failed",
+     "started_at": "2026-11-26T09:24:00Z"
+    },
+    {
+     "calls": [],
+     "end": "failed",
+     "started_at": "2026-11-26T09:26:00Z"
+    }
+   ],
+   "declines": [],
+   "episode": "activation:act-before-stopped",
+   "findings": [],
+   "next_attempt_at": null,
+   "revision": 5,
+   "state": "stuck"
+  }
+ ],
+ "observer_calls_since": 2,
+ "part_effects": [
+  {
+   "activation_id": "act-before-2",
+   "capability": "send_email",
+   "claimed_at": "2026-11-26T09:04:00Z",
+   "decision_id": "d-effect-before-part",
+   "id": "effect-before-part",
+   "outcome": "succeeded",
+   "part": {
+    "part": 1,
+    "round": "r-before-asked"
+   },
+   "place": null,
+   "position": null,
+   "reason": null,
+   "round": "r-before-1",
+   "values_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+ ]
+}

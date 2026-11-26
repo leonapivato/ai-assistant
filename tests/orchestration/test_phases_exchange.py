@@ -17,10 +17,12 @@ from channel_receiver_contract import event_input
 from exchange_support import reported
 from phases_support import chat_turn, event, phases_harness, processing, written
 from task_support import seams
+from test_activation_state import _admitted
 from test_engine_phases import _LOOKUP
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActionRequest,
     CallOutcomeKind,
     ChannelIdentity,
@@ -35,10 +37,15 @@ from ai_assistant.core.types import (
     PlanningLabel,
     ProposedCall,
     RecordedCall,
+    RecordHome,
     RoundResponse,
+    Sureness,
     ToolCall,
     ToolDefinition,
     ToolOutcome,
+    WorkAuthority,
+    WorkFacts,
+    WorkFor,
 )
 from ai_assistant.orchestration.acting import (
     ActedCall,
@@ -46,6 +53,7 @@ from ai_assistant.orchestration.acting import (
     AuthorizedCall,
     ResultRoute,
 )
+from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
 from ai_assistant.orchestration.matters import STOP_ACTIVATION_CAPABILITY
 from ai_assistant.orchestration.message_tools import TEXT_CALL, TEXT_CAPABILITY
 from ai_assistant.orchestration.phase_path import (
@@ -334,8 +342,14 @@ async def test_a_write_that_raises_after_sending_keeps_what_it_tried_and_where()
         target=PlaceTarget(channel=_LINE, writer=writer),
     )
 
-    with pytest.raises(_SendRaisedError) as raised:
-        await phases._sent(working, "Booked.", effect_id="e1", round_id="round-1", place=None)
+    # The message's effect record is the running work's, so it is claimed inside one
+    # (ADR-0383 §4:1, ADR-0386 §5:1).
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        with pytest.raises(_SendRaisedError) as raised:
+            await phases._sent(working, "Booked.", effect_id="e1", round_id="round-1", place=None)
+    finally:
+        CURRENT_ACTIVATION.reset(token)
 
     assert writer.taken == ["Booked."]
     assert isinstance(raised.value.__context__, OSError)
@@ -385,14 +399,88 @@ async def test_a_send_the_place_took_stays_sent_when_its_record_cannot_be_finish
 
     monkeypatch.setattr(harness.plans, "finish_activation_effect", unfinished)
 
-    with pytest.raises(_SendRaisedError) as raised:
-        await phases._sent(working, "Booked.", effect_id="e1", round_id="round-1", place=None)
+    # The message's effect record is the running work's, so it is claimed inside one
+    # (ADR-0383 §4:1, ADR-0386 §5:1).
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        with pytest.raises(_SendRaisedError) as raised:
+            await phases._sent(working, "Booked.", effect_id="e1", round_id="round-1", place=None)
+    finally:
+        CURRENT_ACTIVATION.reset(token)
 
     assert isinstance(raised.value.__context__, PlanningError)
     sent = raised.value.sent
     assert sent.kind is CallOutcomeKind.DONE
     assert sent.delivered is not None
     assert (sent.delivered.words, sent.delivered.status) == ("Booked.", DeliveryStatus.SENT)
+    await harness.engine.aclose()
+
+
+class _CountingWriter(_TakingWriter):
+    """A place's writer that takes the message, counting each time it is reached."""
+
+    def __init__(self) -> None:
+        self.reached = 0
+
+    async def deliver(self, fitted: Fitted, *, effect_id: str) -> Delivery:
+        self.reached += 1
+        return await super().deliver(fitted, effect_id=effect_id)
+
+
+@pytest.mark.parametrize(
+    ("for_whom", "written"),
+    [
+        (WorkFor.for_person(OWNER_PERSON_ID), True),
+        (WorkFor.no_one(), True),
+        (WorkFor.for_person("person:sam"), False),
+    ],
+    ids=["the-owners", "no-ones", "a-person-the-hub-does-not-admit"],
+)
+async def test_a_message_is_claimed_in_its_works_home_or_not_at_all(
+    for_whom: WorkFor, written: bool
+) -> None:
+    """ADR-0383 §2:3, §4:1; ADR-0386 §5:1, §6: the message's effect record takes the home
+    whom the work is for gives. One no write may carry is refused before anything is
+    written, so nothing is claimed, the place's writer is not reached, and the message is
+    not done, never unknown."""
+    harness = phases_harness(FakeToolCallingCompleter())
+    phases = harness.engine._phases
+    assert isinstance(phases, PhasePath)
+    writer = _CountingWriter()
+    working = PhaseWorking(
+        activation_id="activation",
+        place=PlaceWindow(takes_message=True),
+        conversation_id=None,
+        trigger=None,
+        owner_records=True,
+        round_limit=3,
+        target=PlaceTarget(channel=_LINE, writer=writer),
+    )
+    state = _admitted()
+    state.started_facts = WorkFacts(
+        for_whom=for_whom, authority=WorkAuthority.none(), level=Sureness.NONE
+    )
+
+    token = CURRENT_ACTIVATION.set(ActivationScope(state))
+    try:
+        sent = await phases._sent(
+            working, "Booked.", effect_id="e1", round_id="round-1", place=None
+        )
+    finally:
+        CURRENT_ACTIVATION.reset(token)
+
+    effects = await harness.plans.activation_effects(["activation"])
+    if written:
+        assert sent.kind is CallOutcomeKind.DONE
+        assert writer.reached == 1
+        (effect,) = effects
+        assert effect.home == RecordHome.of_work(for_whom)
+    else:
+        assert sent.kind is CallOutcomeKind.NOT_DONE
+        assert sent.delivered is not None
+        assert sent.delivered.status is DeliveryStatus.FAILED
+        assert writer.reached == 0
+        assert effects == ()
     await harness.engine.aclose()
 
 

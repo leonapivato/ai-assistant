@@ -22,6 +22,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import ObservationRecord, UtcInstant, encodable_text
+from ai_assistant.planning.activation_effects import refuse_unwritable_home
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -38,7 +39,8 @@ def checked_observation(record: object) -> ObservationRecord:
 
     Rebuilt from its dump, so a caller holding the record cannot change what is written
     while the write waits (ADR-0018 §3), and a record built with ``model_construct`` or
-    edited through ``__dict__`` is validated rather than trusted.
+    edited through ``__dict__`` is validated rather than trusted. Its home must be one a
+    write may carry, refused here before any I/O (ADR-0386 §6).
 
     Args:
         record: What the caller passed.
@@ -47,7 +49,8 @@ def checked_observation(record: object) -> ObservationRecord:
         The validated copy, its revision as submitted (the store discards it).
 
     Raises:
-        PlanningError: If the value is not a valid ``ObservationRecord``.
+        PlanningError: If the value is not a valid ``ObservationRecord``, or its home is
+            one no write may carry.
     """
     if not isinstance(record, ObservationRecord):
         msg = (
@@ -55,10 +58,12 @@ def checked_observation(record: object) -> ObservationRecord:
         )
         raise PlanningError(msg)
     try:
-        return ObservationRecord.model_validate(record.model_dump())
+        checked = ObservationRecord.model_validate(record.model_dump())
     except ValidationError as exc:
         msg = f"the observation record to write does not validate: {exc}"
         raise PlanningError(msg) from exc
+    refuse_unwritable_home(checked.home, record=f"the observation record of {checked.episode!r}")
+    return checked
 
 
 def checked_expected_revision(expected: object) -> int:

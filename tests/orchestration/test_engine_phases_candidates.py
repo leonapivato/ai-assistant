@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     Memory,
     ObservationRecord,
     ObservationState,
+    RecordHome,
     RoundResponse,
     ToolOutcome,
     UserMessage,
@@ -278,7 +279,10 @@ async def test_a_processed_episode_shows_no_candidate() -> None:
     conversation = await _conversation(harness)
     first = await _first(harness, conversation)
     await harness.plans.write_observation(
-        ObservationRecord(episode=first.id, state=ObservationState.PROCESSED), expected_revision=0
+        ObservationRecord(
+            home=RecordHome.owners(), episode=first.id, state=ObservationState.PROCESSED
+        ),
+        expected_revision=0,
     )
 
     await _say(harness, conversation, "thanks", "m-2")
@@ -298,7 +302,10 @@ async def test_a_waiting_episode_still_shows_its_candidates() -> None:
     conversation = await _conversation(harness)
     first = await _first(harness, conversation)
     await harness.plans.write_observation(
-        ObservationRecord(episode=first.id, state=ObservationState.WAITING), expected_revision=0
+        ObservationRecord(
+            home=RecordHome.owners(), episode=first.id, state=ObservationState.WAITING
+        ),
+        expected_revision=0,
     )
 
     await _say(harness, conversation, "thanks", "m-2")

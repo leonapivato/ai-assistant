@@ -44,12 +44,14 @@ from ai_assistant.core.types import (
     ObservationRecord,
     PlanExport,
     QuestionPart,
+    RecordHome,
     ScheduledTaskWrite,
     TaskWriteAnswer,
     TicketClaim,
     ToolOutcome,
     UtcInstant,
     encodable_text,
+    home_may_be_written,
 )
 from ai_assistant.testing._approvals import (
     Book,
@@ -156,15 +158,32 @@ def _revalidated_activation_id(activation_id: object) -> Identifier:
         raise PlanningError(msg) from exc
 
 
+def _refuse_unwritable_home(home: RecordHome, *, record: str) -> None:
+    """Refuse a record whose home no write may carry (ADR-0383 §4:7, ADR-0386 §6).
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives. Called before any other step, so nothing is
+    written.
+
+    Raises:
+        PlanningError: If ``home`` is one no write may carry.
+    """
+    if not home_may_be_written(home):
+        msg = f"{record} lands in a {home.kind} home no write may carry (ADR-0383 §2:3)"
+        raise PlanningError(msg)
+
+
 def _claimable_effect(effect: object) -> ActivationEffect:
     """Return the fake's own copy of a record about to be claimed, or refuse it.
 
     Re-implemented here rather than imported from ``ai_assistant.planning``, for the
-    reason this module's docstring gives (ADR-0306 §5:4, §6:2).
+    reason this module's docstring gives (ADR-0306 §5:4, §6:2). Every member that writes
+    an effect record takes it through here first, so a home no write may carry is
+    refused before any other step (ADR-0386 §6).
 
     Raises:
-        PlanningError: If the value is not a valid ``ActivationEffect``, or it carries
-            an outcome, a reason or a position.
+        PlanningError: If the value is not a valid ``ActivationEffect``, it carries an
+            outcome, a reason or a position, or its home is one no write may carry.
     """
     if not isinstance(effect, ActivationEffect):
         msg = f"a claim writes an ActivationEffect, and {type(effect).__name__} is not one"
@@ -177,6 +196,7 @@ def _claimable_effect(effect: object) -> ActivationEffect:
     if record.outcome is not None or record.reason is not None or record.position is not None:
         msg = f"activation effect {record.id} is claimed before it runs, with no outcome"
         raise PlanningError(msg)
+    _refuse_unwritable_home(record.home, record=f"activation effect {record.id}")
     return record
 
 
@@ -365,8 +385,9 @@ def _written_observation(record: object, expected: object) -> tuple[ObservationR
     reason this module's docstring gives (ADR-0329 §16:9).
 
     Raises:
-        PlanningError: If the record is not a valid ``ObservationRecord``, or the
-            expectation is not a non-negative integer.
+        PlanningError: If the record is not a valid ``ObservationRecord``, its home is
+            one no write may carry (ADR-0386 §6), or the expectation is not a
+            non-negative integer.
     """
     if not isinstance(record, ObservationRecord):
         msg = f"write_observation writes an ObservationRecord, not {type(record).__name__}"
@@ -375,10 +396,12 @@ def _written_observation(record: object, expected: object) -> tuple[ObservationR
         msg = f"expected_revision is 0 or a revision the store issued, not {expected!r}"
         raise PlanningError(msg)
     try:
-        return ObservationRecord.model_validate(record.model_dump()), expected
+        checked = ObservationRecord.model_validate(record.model_dump())
     except ValidationError as exc:
         msg = f"the observation record to write does not validate: {exc}"
         raise PlanningError(msg) from exc
+    _refuse_unwritable_home(checked.home, record=f"the observation record of {checked.episode!r}")
+    return checked, expected
 
 
 def _named_episodes(episode_ids: object) -> tuple[str, ...]:
@@ -416,7 +439,9 @@ class FakePlanStore:
     """A non-persistent ``PlanStore`` test double backed by a set and a dict.
 
     Structurally implements :class:`~ai_assistant.core.protocols.PlanStore`: the stop
-    record, the activation effect records and the data-rights operations.
+    record, the activation effect records and the data-rights operations. Each effect and
+    observation record keeps its home, kind and identifier, as the record carries it, and
+    a home no write may carry is refused before any step (ADR-0386 §5, §6).
     """
 
     def __init__(self, *, now: Clock = _utcnow) -> None:

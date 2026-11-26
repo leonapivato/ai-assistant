@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     Idempotency,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -107,6 +108,7 @@ async def _written(plans: FakePlanStore, request_id: str, *, at: datetime = _AT)
         expires_at=at + _DAY,
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id=f"effect:{request_id}",
         activation_id="act-ask",
         round="round:ask",
