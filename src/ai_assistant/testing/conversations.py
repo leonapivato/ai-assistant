@@ -1452,8 +1452,23 @@ class FakeConversationStore:
             )
         if after_id is not None:
             awaiting = [one for one in awaiting if one.id > after_id]
-        self._counted("conversations_awaiting", (one.home for one in awaiting[:limit]))
+        self._counted(
+            "conversations_awaiting", (self._awaiting_home(one) for one in awaiting[:limit])
+        )
         return [one.id for one in awaiting[:limit]]
+
+    def _awaiting_home(self, conversation: Conversation) -> RecordHome | None:
+        """The home a conversation listed as awaiting is withheld by, as the store counts it.
+
+        Its own where the sight does not see it, else the first message not taken in
+        where the sight sees none of them.
+        """
+        if self._sight is None or not self._sight.sees(conversation.home):
+            return conversation.home
+        homes = [one.home for one in self._untaken(conversation.id)]
+        if not homes or any(self._sight.sees(home) for home in homes):
+            return conversation.home
+        return homes[0]
 
     async def taken_in(
         self, conversation_id: str, *, positions: Sequence[int]

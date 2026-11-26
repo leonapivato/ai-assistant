@@ -3875,6 +3875,31 @@ class ConversationStoreContract:
             assert await bound.delete_message(_A, 1) is True
         assert not [event for event in events if event["event"] == "sight_counted"]
 
+    async def test_a_conversation_awaiting_only_for_messages_not_held_is_counted_withheld(
+        self, sight_store_factory: SightStoreFactory
+    ) -> None:
+        """§11:1: a conversation is listed as awaiting for its messages not taken in.
+
+        A shared conversation whose only such message is the owner's is listed by a store
+        bound to a run over the shared things and counting, and counted as withheld for
+        that message's home; withholding, the same binding lists nothing.
+        """
+        sight = SIGHTS["run-over-the-shared-things"]
+        for mode, listed in ((SightMode.COUNT, ["only"]), (SightMode.WITHHOLD, [])):
+            store = sight_store_factory(mode, now=MovableClock(), new_id=ScriptedIds(["only"]))
+            await store.set_my_devices([_PHONE])
+            await store.start(home=RecordHome.shared())
+            await store.append_message(
+                "only", _homed(MessageAuthor.USER, RecordHome.owners(), "m-1")
+            )
+            with structlog.testing.capture_logs() as events:
+                assert await store.bound(sight).conversations_awaiting() == listed
+            counted = [event for event in events if event["event"] == "sight_counted"]
+            if mode is SightMode.COUNT:
+                assert [(one["given"], one["other_home"]) for one in counted] == [(1, 1)]
+            else:
+                assert counted == []
+
     async def test_every_read_member_writes_one_count_event_when_counting(
         self, sight_store_factory: SightStoreFactory
     ) -> None:
