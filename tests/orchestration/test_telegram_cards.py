@@ -14,6 +14,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Final, Literal
 
 import pytest
+from sight_support import holder, in_a_work
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
@@ -158,7 +159,12 @@ class _Rig:
         self.woken = 0
         self.rests: list[float] = []
         self.cards = self.over(self.fake)
-        self.runner = ApprovalCalls(plans=self.plans, expiry=DAY, now=self.clock, cards=self.cards)
+        self.runner = ApprovalCalls(
+            stores=holder(plans=self.plans, memory=self.memory),
+            expiry=DAY,
+            now=self.clock,
+            cards=self.cards,
+        )
         self._updates = iter(range(1, 1000))
         self._asked = iter(range(1, 1000))
 
@@ -225,7 +231,8 @@ class _Rig:
             requested={f"decision:{n}": RequestedCall(tool=tool, values={"date": date})},
             read_outside=read_outside,
         )
-        with asking(asker):
+        # ADR-0383 §7:7: the runner reads and writes by the asking work's sight.
+        with in_a_work(at=self.clock()), asking(asker):
             answer = await self.runner.run_claiming(
                 ToolCall(request=request, decision=decision),
                 effect,

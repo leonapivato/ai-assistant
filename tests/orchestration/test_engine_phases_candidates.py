@@ -64,7 +64,9 @@ def _phases(
     """The thin path as the composition root builds it."""
 
     def build(harness: Harness) -> PhasePath:
-        looking = LookUps(stores=bound_stores(harness.memory), views=None, search_limit=5)
+        # ADR-0383 §9:1: the one holder, as the composition root builds it.
+        holder = bound_stores(harness.memory, stories, plans=harness.plans)
+        looking = LookUps(stores=holder, views=None, search_limit=5)
         tools = PhaseTools(
             registry=harness.invoker,
             invoker=harness.invoker,
@@ -80,13 +82,11 @@ def _phases(
                 registry=tools,
                 policy=_Policy(),
                 trail=harness.trail,
-                stories=stories,
-                memory=harness.memory,
-                plans=harness.plans,
+                stores=holder,
                 now=lambda: AT,
             ),
             acting=ActingStage(
-                plans=harness.plans,
+                stores=holder,
                 invoker=tools,
                 own_records=OwnRecordsByCapability(
                     {"remember_fact": CandidateCalls(similar=looking, limit=3)}
@@ -95,7 +95,7 @@ def _phases(
                 now=lambda: AT,
             ),
             tools=tools,
-            plans=harness.plans,
+            stores=holder,
             writer=ChatWriter(
                 conversations=harness.conversation_store,
                 stores=bound_stores(harness.memory, conversations=harness.conversation_store),
@@ -108,7 +108,6 @@ def _phases(
             round_wait=timedelta(seconds=5),
             excerpt_chars=2000,
             part_chars=4000,
-            memory=harness.memory,
             recall_cap=6,
             recall_digest_wait=timedelta(seconds=5),
             now=lambda: AT,

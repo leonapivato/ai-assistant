@@ -1012,8 +1012,13 @@ class TelegramCards:
 
     # --- the post (§4:2-§4:4) ---
 
-    async def post(self, request: ApprovalRequest, facts: CardFacts) -> CardPosted:
+    async def post(
+        self, request: ApprovalRequest, facts: CardFacts, *, plans: Bound[PlanStore]
+    ) -> CardPosted:
         """Post ``request``'s card into the line's chat, and say how it went (§2:7, §4:2).
+
+        The card is recorded on its request through ``plans``, the plan store bound to the
+        sight of the work that asked, whose own request it is (ADR-0383 §7:4, §7:5).
 
         Returns:
             Sent, with what it sent; *not done* or *unknown*, as ADR-0323 §6:2-§6:5
@@ -1054,7 +1059,7 @@ class TelegramCards:
             _log.info("approval_card_unsent", stage="writer", reason="unavailable")
             return CardPosted(CardOutcome.NOT_POSTED)
         if failure is None or failure is TelegramFailure.UNKNOWN:
-            await self._recorded(request_id, outcome.message_id, token if buttons else None)
+            await self._recorded(plans, request_id, outcome.message_id, token if buttons else None)
             if outcome.message_id is not None:
                 self._shown[request_id, outcome.message_id] = (text, bool(buttons))
                 self._posted[request_id] = text
@@ -1065,10 +1070,19 @@ class TelegramCards:
         _log.info("approval_card_posted", stage="writer", card=card.value)
         return CardPosted(card, _delivery(text, self._channel, failure))
 
-    async def _recorded(self, request_id: str, position: int | None, token: str | None) -> None:
-        """Record the card on its request, with its token (§4:10); a fault is logged."""
+    async def _recorded(
+        self,
+        plans: Bound[PlanStore],
+        request_id: str,
+        position: int | None,
+        token: str | None,
+    ) -> None:
+        """Record the card on its request, with its token (§4:10); a fault is logged.
+
+        Through ``plans``, bound to the asking work's sight (ADR-0383 §7:5): a work's write.
+        """
         try:
-            await self._plans.record_approval_card(
+            await plans.record_approval_card(
                 request_id, ApprovalCard(place=self._channel, position=position, token=token)
             )
         except PlanningError:

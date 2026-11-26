@@ -78,6 +78,7 @@ if TYPE_CHECKING:
         NewMessage,
         OfferedTool,
         PlanningExchange,
+        Sight,
     )
     from ai_assistant.orchestration.phase_path import PhasePass
 
@@ -323,8 +324,8 @@ def _refusing(texts: frozenset[str]) -> type[AuthorizingStage]:
     """Authorizing that refuses a ``text`` call whose words are one of ``texts``."""
 
     class _Refusing(AuthorizingStage):
-        async def authorize(self, given: RoundToAuthorize) -> RoundAuthorization:
-            decided = await super().authorize(given)
+        async def authorize(self, given: RoundToAuthorize, *, sight: Sight) -> RoundAuthorization:
+            decided = await super().authorize(given, sight=sight)
             held = {one.call_id for one in given.call_messages if one.text in texts}
             return replace(
                 decided,

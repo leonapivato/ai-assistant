@@ -387,7 +387,9 @@ class _Hub:
             searcher=self.searcher,
             search_query="query",
         )
-        similar = LookUps(stores=bound_stores(harness.memory), views=None, search_limit=5)
+        # ADR-0383 §9:1: the one holder, as the composition root builds it.
+        holder = bound_stores(harness.memory, self.stories, plans=harness.plans)
+        similar = LookUps(stores=holder, views=None, search_limit=5)
         return PhasePath(
             planning_prompt=default_prompt(PLANNING_PROMPT),
             completer=self.planner,
@@ -396,13 +398,11 @@ class _Hub:
                 registry=tools,
                 policy=self.policy,
                 trail=harness.trail,
-                stories=self.stories,
-                memory=harness.memory,
-                plans=harness.plans,
+                stores=holder,
                 now=lambda: AT,
             ),
             acting=ActingStage(
-                plans=harness.plans,
+                stores=holder,
                 invoker=tools,
                 own_records=OwnRecordsByCapability(
                     {"remember_fact": CandidateCalls(similar=similar, limit=5)}
@@ -411,7 +411,7 @@ class _Hub:
                 now=lambda: AT,
             ),
             tools=tools,
-            plans=harness.plans,
+            stores=holder,
             writer=writer
             or ChatWriter(
                 conversations=harness.conversation_store,
@@ -423,7 +423,6 @@ class _Hub:
             round_wait=timedelta(seconds=5),
             excerpt_chars=2000,
             part_chars=4000,
-            memory=harness.memory,
             recall_cap=6,
             recall_digest_wait=timedelta(seconds=5),
             now=lambda: AT,

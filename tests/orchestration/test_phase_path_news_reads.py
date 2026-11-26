@@ -22,6 +22,7 @@ from test_planning import _episode
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import ChannelIdentity, Profile
 from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.disclosure import UnboundedAudienceSupply
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.planning import NewsShown, PlanningWork
@@ -54,6 +55,11 @@ class _Memory:
     async def get_history(self, ids: Sequence[str]) -> list[str]:
         return [one for one in ids if one in self.held]
 
+    def bound(self, sight: Sight) -> _Memory:
+        """This store, as the holder binds it to the work's sight (ADR-0383 §7:1)."""
+        del sight
+        return self
+
 
 class _Matters:
     """The engine's running work: none still runs, and none is newly running."""
@@ -76,7 +82,8 @@ class _Supplied:
 
 def _path(memory: _Memory) -> PhasePath:
     path = PhasePath.__new__(PhasePath)
-    path._memory = cast("Any", memory)
+    # ADR-0383 §9:1: the path reads through the holder, by the running work's sight.
+    path._stores = BoundStores(memory=cast("Any", memory))
     path._matters = cast("Any", _Matters())
     path._story_reads = None
     path._person_blocks = None
@@ -94,9 +101,14 @@ async def test_an_ended_work_is_read_as_its_frozen_episode_and_supplied() -> Non
     path = _path(_Memory(held={record.id: record}))
     working = _working(frozenset({"other"}))
 
-    reread = await path._shown_now(
-        working, cast("Any", object()), cast("Any", SimpleNamespace(supply=_SUPPLY))
-    )
+    # The reads are the running work's, by its sight (ADR-0383 §7:7).
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        reread = await path._shown_now(
+            working, cast("Any", object()), cast("Any", SimpleNamespace(supply=_SUPPLY))
+        )
+    finally:
+        CURRENT_ACTIVATION.reset(token)
 
     assert reread.ended == {"other": record}
     assert working.supplied.obtained_records == [record]
@@ -107,9 +119,14 @@ async def test_a_store_that_cannot_be_read_names_no_work_ended() -> None:
     path = _path(_Memory(fails=True))
     working = _working(frozenset({"other"}))
 
-    reread = await path._shown_now(
-        working, cast("Any", object()), cast("Any", SimpleNamespace(supply=_SUPPLY))
-    )
+    # The reads are the running work's, by its sight (ADR-0383 §7:7).
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        reread = await path._shown_now(
+            working, cast("Any", object()), cast("Any", SimpleNamespace(supply=_SUPPLY))
+        )
+    finally:
+        CURRENT_ACTIVATION.reset(token)
 
     assert reread.ended == {}
     assert working.supplied.obtained_records == []
@@ -235,8 +252,13 @@ async def test_an_ended_work_whose_episode_is_not_frozen_is_read_again() -> None
     path = _path(_Memory(held={record.id: still_open}))
     working = _working(frozenset({"other"}))
 
-    reread = await path._shown_now(
-        working, cast("Any", object()), cast("Any", SimpleNamespace(supply=_SUPPLY))
-    )
+    # The reads are the running work's, by its sight (ADR-0383 §7:7).
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        reread = await path._shown_now(
+            working, cast("Any", object()), cast("Any", SimpleNamespace(supply=_SUPPLY))
+        )
+    finally:
+        CURRENT_ACTIVATION.reset(token)
 
     assert reread.ended == {}

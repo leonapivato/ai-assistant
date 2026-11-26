@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 import test_authorizer as plain
 import test_authorizer_approvals as cards
+from sight_support import SIGHT
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -95,7 +96,7 @@ async def test_a_candidate_resting_on_nothing_is_not_done() -> None:
     hub = _hub()
 
     decided = await hub.authorize(
-        plain._round(plain._call("c1", "remember_fact", fact="likes window seats", why="travel"))
+        plain._round(plain._call("c1", "remember_fact", fact="likes window seats", why="travel")),
     )
 
     assert decided.verdicts[0].verdict is Verdict.NOT_DONE
@@ -138,7 +139,7 @@ async def test_a_confirmed_candidate_runs_under_the_ticket(
     request = await cards._approved(hub.plans, call=requested)
 
     decided = await hub.stage.authorize(
-        cards._ticket_round(hub, request, tickets=frozenset({str(request.id)}))
+        cards._ticket_round(hub, request, tickets=frozenset({str(request.id)})), sight=SIGHT
     )
 
     (verdict,) = decided.verdicts

@@ -42,7 +42,8 @@ from ai_assistant.orchestration.person_block import person_zone
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import PersonModelStore
-    from ai_assistant.core.types import ScheduledTask
+    from ai_assistant.core.types import ScheduledTask, Sight
+    from ai_assistant.orchestration.bound_stores import BoundStores
 
 __all__ = [
     "PersonZones",
@@ -218,26 +219,56 @@ def rule_push(rule: DueOnRule, due_at: datetime, zone: ZoneInfo, *, now: datetim
 
 
 class PersonZones:
-    """The person's zone, read for the person a task is for (§3:3, ADR-0338 §3:6)."""
+    """The person's zone, read for the person a task is for (§3:3, ADR-0338 §3:6).
 
-    def __init__(self, *, default: ZoneInfo, people: PersonModelStore | None = None) -> None:
+    Two reads, each its own call, so a work's caller that forgets its sight fails rather
+    than reading unbound: :meth:`of`, a work's, through the person-model store the holder
+    binds to that work's sight (ADR-0383 §7:7); and :meth:`outside_a_work`, read where no
+    work runs, unbound: the Task Scheduler sensor's push of a due occurrence, before its
+    work is admitted, as a sensor's finding of what is due reads (§7:8), and the Task
+    Manager's replace command, an owner's own act (ADR-0385, milestone 22's B10).
+    """
+
+    def __init__(
+        self,
+        *,
+        default: ZoneInfo,
+        people: PersonModelStore | None = None,
+        stores: BoundStores | None = None,
+    ) -> None:
         """Wire the reading.
 
         Args:
             default: ``Settings.timezone``, the zone where a profile sets none.
             people: The person-model store, or ``None`` where the person model is off,
-                so no profile is read and ``default`` governs.
+                so no profile is read and ``default`` governs. Read unbound by
+                :meth:`outside_a_work` alone.
+            stores: The holder that binds stores for a pass (ADR-0383 §9:1), wired with
+                the same person-model store, which :meth:`of` reads bound to a work's
+                sight. Required where ``people`` is given.
+
+        Raises:
+            ValueError: If ``people`` is given and ``stores`` is not.
         """
+        if people is not None and stores is None:
+            msg = "a work's read of a person's zone goes through the holder (ADR-0383 §9:1)"
+            raise ValueError(msg)
         self._default = default
+        self._modelled = people is not None
         self._people = people
+        self._stores = stores
 
     @property
     def default(self) -> ZoneInfo:
         """``Settings.timezone``'s zone."""
         return self._default
 
-    async def of(self, person: str) -> ZoneInfo:
-        """``person``'s zone: their profile's where it sets one, and the hub's otherwise.
+    async def of(self, person: str, *, sight: Sight) -> ZoneInfo:
+        """``person``'s zone, read for a work: their profile's, and the hub's otherwise.
+
+        Through the person-model store bound to ``sight``, the work's (ADR-0383 §7:7): a
+        profile the sight does not see is read as one never written, so the hub's zone
+        governs (§8:2).
 
         A store that cannot be read is no answer that the profile sets none, so nothing
         is guessed: the read raises, and the caller writes or says nothing that rests on
@@ -246,10 +277,30 @@ class PersonZones:
         Raises:
             PersonModelStoreError: If the person-model store cannot be read.
         """
+        if not self._modelled or self._stores is None:
+            return self._default
+        return await self._read(self._stores.people(sight), person)
+
+    async def outside_a_work(self, person: str) -> ZoneInfo:
+        """``person``'s zone, read where no work runs, so by no sight, unbound.
+
+        Two callers. The Task Scheduler sensor's push of a due occurrence (ADR-0383 §7:8),
+        before its work is admitted: the zone its rule's successor and skipped instants
+        are computed and written in, in the push's store step, and its input is told in.
+        And the Task Manager's replace command, an owner's own act and no work's
+        (ADR-0350 §10:5), which milestone 22's B10 binds (ADR-0385).
+
+        Raises:
+            PersonModelStoreError: If the person-model store cannot be read.
+        """
         if self._people is None:
             return self._default
+        return await self._read(self._people, person)
+
+    async def _read(self, people: PersonModelStore, person: str) -> ZoneInfo:
+        """The zone ``people`` holds for ``person``, or the hub's where none is set."""
         try:
-            model = await self._people.read(person)
+            model = await people.read(person)
         except PersonModelStoreError:
             _log.warning("task_zone_unread", stage="task_scheduler", reason="store_fault")
             raise

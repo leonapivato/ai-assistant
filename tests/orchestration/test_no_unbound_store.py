@@ -110,20 +110,18 @@ OWN_TURN_HOLDERS: Final[dict[str, str]] = {
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
-#: B8d the plan store's users, authorizing, acting, tasks and approvals, B9 the observer's
-#: pin pass, B9b the upkeep runs and a tidy-up a work asks for, B10 the owner's own acts
-#: (ADR-0385); B8b's windows, B8c's stories, B8e's look-ups, person block and matters,
-#: B8f's writes of a work's own turn and B9a's observer reads are converted, save the
-#: parts named here for a later lane. A holder more than one lane converts names the
-#: last of them. **Only shrinks.** A holder whose last unbound read is one §7:8, §7:12 or
-#: §7:13 names moves to :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest:
-#: the observer's finding of what is due (§7:12, §7:13), the engine's start and ADR-0384
-#: §2's unchanged jobs (§7:8).
+#: B9 the observer's pin pass, B9b the upkeep runs and a tidy-up a work asks for, B10 the
+#: owner's own acts (ADR-0385); B8b's windows, B8c's stories, B8d's authorizing, acting,
+#: approvals and tasks, B8e's look-ups, person block and matters, B8f's writes of a
+#: work's own turn and B9a's observer reads are converted, save the parts named here for
+#: a later lane. A holder more than one lane converts names the last of them. **Only
+#: shrinks.** A holder whose last unbound read is one §7:8, §7:12 or §7:13 names moves to
+#: :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest: the observer's
+#: finding of what is due (§7:12, §7:13), the engine's start and ADR-0384 §2's unchanged
+#: jobs (§7:8).
 NOT_YET_CONVERTED: Final[dict[str, str]] = {
-    "acting.py:ActingStage": "B8d",
-    "approval_calls.py:ApprovalCalls": "B8d",
-    "authorizer.py:AuthorizingStage": "B8d",
-    # The phases' pending candidates (B8d) and the owner's (B10).
+    # The phases hand it the plan store bound to the work's sight (B8d); the owner's
+    # (B10) an unbound one.
     "candidates.py:pending_candidates": "B10",
     "candidates.py:held_candidates": "B10",
     "candidates.py:_page_candidates": "B10",
@@ -160,11 +158,9 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "observer/stage.py:Observer": "B9",
     # A work's block, pins and person-model reads and writes are bound (B8e); the owner's
     # panel's pins, unpins and walks, and the unbound stores handed to the zone pickers
-    # (`RulingPolicy` B9b, `PersonZones` B8d), are the person panel's (B10).
+    # (`RulingPolicy` B9b, `PersonZones`' reads outside a work), are the person panel's
+    # (B10).
     "person_block.py:PersonBlocks": "B10",
-    # Its four `fetch_held` calls (`_found`, `_searched`, `_digest_recall`, `_digested`)
-    # still pass its unbound memory store to a parameter marked `Bound`: B8d binds them.
-    "phase_path.py:PhasePath": "B8d",
     # A work's story calls and story links hand these a store bound to the work's sight
     # (B8c); the engine's story methods (B10) and the canonical fake engine an unbound one.
     "stories.py:unknown_activation": "B10",
@@ -193,14 +189,20 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "story_standing.py:_member_count": "B10",
     "story_tidy_up.py:StoryTidyUp": "B9b",
     "story_tidy_up.py:ScheduledTidyUp": "B9b",
-    "task_manager.py:TaskManager": "B8d",
-    "task_rules.py:PersonZones": "B8d",
-    # The line's cards: a work's approval (B8d) and the owner's tap (B10); the line's
-    # window reads them through the stores it is handed bound (B8b).
+    # A work's task calls read and write through the holder (B8d); `tidy` and
+    # `parent_ended`, removing finished tasks, are §7:8's (ADR-0384 §2's table), and the
+    # operations from outside (ADR-0350 §10), the owner's own acts, are B10's.
+    "task_manager.py:TaskManager": "B10",
+    # A work's read of a person's zone is bound (`of`, B8d); `outside_a_work` is the task
+    # sensor's push (§7:8) and the owner's replace (B10).
+    "task_rules.py:PersonZones": "B10",
+    # The line's cards: a work's approval card is recorded through the plan store bound to
+    # its sight, handed to `post` (B8d), and the line's window reads them through the
+    # stores it is handed bound (B8b); the owner's tap and the cards' refresh are B10's.
     "telegram.py:TelegramCards": "B10",
 }
 
-_LANES: Final = frozenset({"B8d", "B9", "B9b", "B10"})
+_LANES: Final = frozenset({"B9", "B9b", "B10"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
@@ -403,6 +405,61 @@ def test_the_holders_b8e_converted_hold_no_store() -> None:
     ):
         assert converted not in held
         assert converted not in NOT_YET_CONVERTED
+
+
+def test_the_holders_b8d_converted_hold_no_store() -> None:
+    """A work's authorizing, acting, approval calls and the phases' own reads (milestone
+    22's B8d) read through the holder alone."""
+    held = unbound_holders()
+    for converted in (
+        "acting.py:ActingStage",
+        "approval_calls.py:ApprovalCalls",
+        "authorizer.py:AuthorizingStage",
+        "phase_path.py:PhasePath",
+    ):
+        assert converted not in held
+        assert converted not in NOT_YET_CONVERTED
+
+
+#: The methods of each holder that keeps a store unbound for reads outside a work, which
+#: alone may reach it (B8d): every other method is a work's, and reads through the holder.
+_OUTSIDE_A_WORK: Final[dict[tuple[str, str], tuple[str, frozenset[str]]]] = {
+    # §7:8: removing finished tasks (ADR-0384 §2's table); B10: the owner's replace.
+    ("task_manager.py", "TaskManager"): (
+        "_plans",
+        frozenset({"__init__", "tidy", "parent_ended", "replace"}),
+    ),
+    # §7:8: the task sensor's push; B10: the owner's replace.
+    ("task_rules.py", "PersonZones"): ("_people", frozenset({"__init__", "outside_a_work"})),
+}
+
+
+def test_a_works_task_calls_reach_no_store_unbound() -> None:
+    """§7:7: the Task Manager's and the zones' methods a work reaches read through the
+    holder; the unbound store is reached only by the reads made outside a work (B8d)."""
+    reaches: dict[str, list[str]] = {}
+    for (module, holder), (attribute, outside) in _OUTSIDE_A_WORK.items():
+        tree = _parsed(_ROOT / module)
+        (cls,) = (one for one in tree.body if isinstance(one, ast.ClassDef) and one.name == holder)
+        methods = {
+            node.name: node
+            for node in cls.body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        }
+        assert outside <= set(methods), f"{holder} no longer has {sorted(outside - set(methods))}"
+        reaches[f"{module}:{holder}"] = sorted(
+            name
+            for name, node in methods.items()
+            if name not in outside
+            and any(
+                isinstance(inner, ast.Attribute)
+                and isinstance(inner.value, ast.Name)
+                and inner.value.id == "self"
+                and inner.attr == attribute
+                for inner in ast.walk(node)
+            )
+        )
+    assert reaches == {key: [] for key in reaches}
 
 
 #: The stores a channel's reader holds unbound for its §7:8 reads, by the attribute each

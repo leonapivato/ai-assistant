@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Final, Self, cast
 
 import pytest
 from exchange_support import reported
+from sight_support import SIGHT, holder
 from story_support import episode as story_episode
 from story_support import memory_of as story_memory_of
 from structured_support import structured
@@ -225,7 +226,7 @@ class _NoInvoker:
 
 def _acting(plans: FakePlanStore, calls: StoryCalls) -> ActingStage:
     return ActingStage(
-        plans=plans,
+        stores=holder(plans=plans),
         invoker=_NoInvoker(),
         own_records=OwnRecordsByCapability(dict.fromkeys(STORY_CALL_CAPABILITIES, calls)),
         timeout=timedelta(seconds=5),
@@ -471,6 +472,7 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
             _ACTIVATION, "round:1", (AuthorizedCall(_call(START_STORY, notes, decision="d1")),)
         ),
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
     )
     second = await acting.act(
@@ -478,6 +480,7 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
             _ACTIVATION, "round:2", (AuthorizedCall(_call(START_STORY, notes, decision="d2")),)
         ),
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
     )
 
@@ -499,6 +502,7 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
             ),
         ),
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
     )
     assert [one.outcome for one in third.calls] == [ActedOutcome.DONE]
@@ -575,6 +579,7 @@ async def test_a_start_that_made_its_story_is_never_reported_not_done(
                 (AuthorizedCall(_call(START_STORY, arguments, decision="d1")),),
             ),
             home=RecordHome.owners(),
+            sight=SIGHT,
             held=HeldResults(),
         )
     (claimed,) = await plans.activation_effects([_ACTIVATION])
@@ -584,6 +589,7 @@ async def test_a_start_that_made_its_story_is_never_reported_not_done(
             _ACTIVATION, "round:2", (AuthorizedCall(_call(START_STORY, arguments, decision="d2")),)
         ),
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
     )
 
@@ -615,6 +621,7 @@ async def test_a_note_is_planning_s_written_during_this_activation_and_marked_by
     acted = await acting.act(
         AuthorizedRound(_ACTIVATION, "round:1", (AuthorizedCall(call),)),
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
     )
 
@@ -1035,6 +1042,7 @@ async def test_each_reorganising_call_runs_through_the_own_records_seam(
     acted = await acting.act(
         AuthorizedRound(_ACTIVATION, "round:1", (AuthorizedCall(_call(tool, arguments)),)),
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
     )
 
@@ -1315,6 +1323,7 @@ async def test_a_group_repeated_identically_is_refused_as_already_done() -> None
             _ACTIVATION, "round:1", (AuthorizedCall(_call(GROUP_STORY, arguments, decision="d1")),)
         ),
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
     )
     second = await acting.act(
@@ -1322,6 +1331,7 @@ async def test_a_group_repeated_identically_is_refused_as_already_done() -> None
             _ACTIVATION, "round:2", (AuthorizedCall(_call(GROUP_STORY, arguments, decision="d2")),)
         ),
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
     )
 

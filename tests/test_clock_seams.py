@@ -96,6 +96,7 @@ from ai_assistant.core.types import (
     RecordHome,
     Reversibility,
     RiskLevel,
+    Sight,
     StoryActor,
     StoryMember,
     StoryMemberKind,
@@ -395,13 +396,14 @@ async def _acting_stage(now: Clock) -> None:
             raise AssertionError
 
     await ActingStage(
-        plans=FakePlanStore(),
+        stores=BoundStores(memory=FakeMemoryStore(), plans=FakePlanStore()),
         invoker=_Unreached(),
         own_records=_Unreached(),
         timeout=timedelta(seconds=5),
         now=now,
     ).act(
         home=RecordHome.owners(),
+        sight=_SIGHT,
         held=HeldResults(),
         authorized=AuthorizedRound(
             activation_id="act-1",
@@ -409,6 +411,11 @@ async def _acting_stage(now: Clock) -> None:
             calls=(AuthorizedCall(ToolCall(request=request, decision=decision)),),
         ),
     )
+
+
+#: The sight a stage driven here reads by: the clock is read before any store is (ADR-0383
+#: §6:8's run's sight, over the owner's domain).
+_SIGHT: Final = Sight.of_run(RecordHome.owners())
 
 
 async def _authorizing_stage(now: Clock) -> None:
@@ -426,8 +433,9 @@ async def _authorizing_stage(now: Clock) -> None:
         registry=FakeToolRegistry([REMEMBER_CANDIDATE]),
         policy=FakeActionPolicy(),
         trail=FakeAuditTrail(),
-        stories=FakeStoryStore(),
-        memory=FakeMemoryStore(),
+        stores=BoundStores(
+            memory=FakeMemoryStore(), stories=FakeStoryStore(), plans=FakePlanStore()
+        ),
         now=now,
     ).authorize(
         RoundToAuthorize(
@@ -435,7 +443,8 @@ async def _authorizing_stage(now: Clock) -> None:
             round=PlanningRound(id="r-1", recorded_at=_AWARE, calls=(planned,)),
             working=WorkingRecord(),
             calls=(CallToAuthorize(planned),),
-        )
+        ),
+        sight=_SIGHT,
     )
 
 
@@ -522,14 +531,13 @@ async def _phase_path(now: Clock) -> None:
         authorizing=_Unreached(),  # type: ignore[arg-type]  # never reached
         acting=_Unreached(),  # type: ignore[arg-type]  # never reached
         tools=PhaseTools(registry=FakeToolRegistry([]), invoker=_Unreached()),  # type: ignore[arg-type]  # never reached
-        plans=FakePlanStore(),
+        stores=BoundStores(memory=FakeMemoryStore(), plans=FakePlanStore()),
         writer=_Unreached(),  # type: ignore[arg-type]  # never reached
         capabilities=(),
         round_limit=1,
         round_wait=timedelta(seconds=5),
         excerpt_chars=50,
         part_chars=50,
-        memory=FakeMemoryStore(),
         recall_cap=1,
         recall_digest_wait=timedelta(seconds=5),
         now=now,

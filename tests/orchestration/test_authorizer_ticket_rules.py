@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from sight_support import SIGHT, holder
 from test_tool_descriptions_build import _old_email
 
 from ai_assistant.core.types import (
@@ -224,13 +225,11 @@ class _Hub:
         self.memory = FakeMemoryStore(now=_now)
         self.plans = FakePlanStore(now=_now)
         self.stage = AuthorizingStage(
+            stores=holder(stories=self.stories, memory=self.memory, plans=self.plans),
             registry=self.registry,
             policy=self.policy,
             trail=self.trail,
-            stories=self.stories,
-            memory=self.memory,
             binder=binder,
-            plans=self.plans,
             now=_now,
             new_decision_id=_Ids("decision"),
             new_effect_id=_Ids("effect"),
@@ -271,7 +270,7 @@ class _Hub:
         episode = _episode(given.activation_id)
         if await self.memory.get(episode.id) is None:
             await self.memory.add(episode)
-        return await self.stage.authorize(given)
+        return await self.stage.authorize(given, sight=SIGHT)
 
 
 def _call(call_id: str, name: str, **arguments: Any) -> ProposedCall:
@@ -526,7 +525,7 @@ async def test_a_deliberate_repeat_of_an_unknown_effect_needs_you(
     await _earlier(hub, outcome)
 
     decided = await hub.authorize(
-        _round((_call("c1", "book", q="table for two at 8"), None), deliberate=frozenset({"c1"}))
+        _round((_call("c1", "book", q="table for two at 8"), None), deliberate=frozenset({"c1"})),
     )
 
     (ruled,) = decided.verdicts
@@ -671,7 +670,7 @@ async def test_an_unknown_effect_recorded_under_an_old_name_still_needs_you() ->
         _round(
             (_call("c1", "search_web", q="the invoice to Maren"), None),
             deliberate=frozenset({"c1"}),
-        )
+        ),
     )
 
     (ruled,) = decided.verdicts
@@ -708,14 +707,14 @@ async def test_a_ticket_from_before_the_renames_is_claimed_and_runs() -> None:
     assert allowed.recorded == "spawn"
     ran = _Ran()
     acting_stage = ActingStage(
-        plans=hub.plans,
+        stores=holder(plans=hub.plans),
         invoker=ran,
         own_records=acting.OwnRecordsByCapability({}),
         timeout=timedelta(seconds=5),
         now=_now,
     )
     acted = await acting_stage.act(
-        authorized_round(decided), home=RecordHome.owners(), held=HeldResults()
+        authorized_round(decided), home=RecordHome.owners(), sight=SIGHT, held=HeldResults()
     )
 
     (one,) = acted.calls

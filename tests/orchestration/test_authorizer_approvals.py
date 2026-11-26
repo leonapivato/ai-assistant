@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from sight_support import SIGHT, holder
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -138,12 +139,14 @@ class _Hub:
         self.plans = FakePlanStore()
         self.trail = FakeAuditTrail(now=lambda: self.at)
         self.stage = AuthorizingStage(
+            stores=holder(
+                stories=FakeStoryStore(now=lambda: self.at),
+                memory=FakeMemoryStore(now=lambda: self.at),
+                plans=self.plans,
+            ),
             registry=FakeToolRegistry((_BOOK, _ALLOWED, REQUEST_APPROVAL, *tools)),
             policy=_Policy() if policy is None else policy,
             trail=self.trail,
-            stories=FakeStoryStore(now=lambda: self.at),
-            memory=FakeMemoryStore(now=lambda: self.at),
-            plans=self.plans,
             now=lambda: self.at,
             new_decision_id=_Ids("decision"),
             new_effect_id=_Ids("effect"),
@@ -161,7 +164,8 @@ class _Hub:
                 calls=calls,
                 input_place="conversation:c-1",
                 **round_,
-            )
+            ),
+            sight=SIGHT,
         )
 
 
@@ -276,7 +280,7 @@ async def test_a_held_ticket_runs_its_call_under_the_taps_approval() -> None:
     hub = _Hub()
     request = await _approved(hub.plans)
     decided = await hub.stage.authorize(
-        _ticket_round(hub, request, tickets=frozenset({str(request.id)}))
+        _ticket_round(hub, request, tickets=frozenset({str(request.id)})), sight=SIGHT
     )
 
     (verdict,) = decided.verdicts
@@ -294,7 +298,9 @@ async def test_a_ticket_this_work_does_not_hold_is_refused() -> None:
     """§5:6: only the work holding the approval's input can use its ticket."""
     hub = _Hub()
     request = await _approved(hub.plans)
-    decided = await hub.stage.authorize(_ticket_round(hub, request, tickets=frozenset()))
+    decided = await hub.stage.authorize(
+        _ticket_round(hub, request, tickets=frozenset()), sight=SIGHT
+    )
 
     (verdict,) = decided.verdicts
     assert verdict.verdict is Verdict.NOT_DONE
@@ -309,7 +315,7 @@ async def test_a_ticket_past_its_expiry_is_refused() -> None:
     request = await _approved(hub.plans)
     hub.at = _AT + _DAY
     decided = await hub.stage.authorize(
-        _ticket_round(hub, request, tickets=frozenset({str(request.id)}))
+        _ticket_round(hub, request, tickets=frozenset({str(request.id)})), sight=SIGHT
     )
 
     (verdict,) = decided.verdicts
@@ -324,7 +330,7 @@ async def test_a_ticket_used_or_void_is_refused() -> None:
     request = await _approved(hub.plans)
     await hub.plans.void_approval_ticket(str(request.id))
     decided = await hub.stage.authorize(
-        _ticket_round(hub, request, tickets=frozenset({str(request.id)}))
+        _ticket_round(hub, request, tickets=frozenset({str(request.id)})), sight=SIGHT
     )
 
     (verdict,) = decided.verdicts
@@ -338,7 +344,7 @@ async def test_a_denied_request_or_another_persons_grants_no_ticket() -> None:
     hub = _Hub()
     denied = await _approved(hub.plans, state=ApprovalRequestState.DENIED)
     decided = await hub.stage.authorize(
-        _ticket_round(hub, denied, tickets=frozenset({str(denied.id)}))
+        _ticket_round(hub, denied, tickets=frozenset({str(denied.id)})), sight=SIGHT
     )
     (verdict,) = decided.verdicts
     assert verdict.verdict is Verdict.NOT_DONE
@@ -348,7 +354,7 @@ async def test_a_denied_request_or_another_persons_grants_no_ticket() -> None:
     other = _Hub()
     theirs = await _approved(other.plans, person="someone-else")
     decided = await other.stage.authorize(
-        _ticket_round(other, theirs, tickets=frozenset({str(theirs.id)}))
+        _ticket_round(other, theirs, tickets=frozenset({str(theirs.id)})), sight=SIGHT
     )
     (verdict,) = decided.verdicts
     assert verdict.verdict is Verdict.NOT_DONE
@@ -411,7 +417,8 @@ async def test_a_direct_call_a_pending_request_holds_waits_on_the_card() -> None
             calls=(call,),
             input_place="conversation:c-1",
             person=OWNER_PERSON_ID,
-        )
+        ),
+        sight=SIGHT,
     )
 
     (verdict,) = decided.verdicts
@@ -487,7 +494,8 @@ async def test_a_pending_request_from_before_the_renames_still_holds_its_call() 
             calls=(call,),
             input_place="conversation:c-1",
             person=OWNER_PERSON_ID,
-        )
+        ),
+        sight=SIGHT,
     )
 
     (verdict,) = decided.verdicts

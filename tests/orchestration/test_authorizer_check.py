@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from sight_support import SIGHT, holder
 from structlog.testing import capture_logs
 from test_authorizer import _DIAGNOSED, _call, _diagnosed_clock, _episode, _Ids, _now, _round, _tool
 
@@ -143,13 +144,11 @@ class _Hub:
         self.memory = FakeMemoryStore(now=_now)
         self.plans = FakePlanStore()
         self.stage = AuthorizingStage(
+            stores=holder(stories=FakeStoryStore(now=_now), memory=self.memory, plans=self.plans),
             registry=FakeToolRegistry(tools or (_LOOKUP, _BOOK)),
             policy=FakeActionPolicy() if policy is None else policy,
             trail=self.trail,
-            stories=FakeStoryStore(now=_now),
-            memory=self.memory,
             binder=binder,
-            plans=self.plans,
             lines=lines,
             things=things,
             now=_now,
@@ -162,7 +161,7 @@ class _Hub:
         episode = _episode()
         if await self.memory.get(episode.id) is None:
             await self.memory.add(episode)
-        return await self.stage.authorize(given)
+        return await self.stage.authorize(given, sight=SIGHT)
 
 
 async def _limit(lines: FakePermissionLineStore, action: str, thing: str | None = None) -> str:
@@ -930,7 +929,7 @@ async def test_several_asking_places_each_stay_outside_alike() -> None:
             _ALSO_ASKED,
             asked=AskedFrom(places=(_ASKED, _ALSO_ASKED)),
             listed=(_ASKED, _ALSO_ASKED, _LINE),
-        )
+        ),
     )
 
     assert [(one.check, one.allowed) for one in decided.call_messages] == [
@@ -945,7 +944,7 @@ async def test_an_asking_place_off_the_place_list_stays_refused_by_its_place() -
 
     with capture_logs() as logs:
         decided = await hub.authorize(
-            _approvals_texts(_ALSO_ASKED, asked=AskedFrom(places=(_ASKED, _ALSO_ASKED)))
+            _approvals_texts(_ALSO_ASKED, asked=AskedFrom(places=(_ASKED, _ALSO_ASKED))),
         )
 
     (off,) = decided.call_messages
@@ -1054,12 +1053,12 @@ def _ticket_hub(
 ) -> tuple[AuthorizingStage, FakePlanStore]:
     plans = FakePlanStore()
     stage = AuthorizingStage(
+        stores=holder(
+            stories=FakeStoryStore(now=_now), memory=FakeMemoryStore(now=_now), plans=plans
+        ),
         registry=FakeToolRegistry((_BOOKING, REQUEST_APPROVAL)),
         policy=_Policy(),
         trail=FakeAuditTrail(now=_now, lines=lines),
-        stories=FakeStoryStore(now=_now),
-        memory=FakeMemoryStore(now=_now),
-        plans=plans,
         lines=lines,
         things=things,
         now=_now,
@@ -1092,7 +1091,7 @@ async def test_request_approval_is_checked_as_a_call_of_its_own() -> None:
     """ADR-0379 §3:2: ``request_approval`` gets its own outcome, which its verdict records."""
     stage, _ = _ticket_hub(FakePermissionLineStore(now=_now))
 
-    decided = await stage.authorize(_asking())
+    decided = await stage.authorize(_asking(), sight=SIGHT)
 
     (verdict,) = decided.verdicts
     assert verdict.verdict is Verdict.ALLOWED
@@ -1108,7 +1107,7 @@ async def test_request_approval_resting_on_a_made_grant_names_it() -> None:
     grant = await _grant(lines, "request_approval")
     stage, _ = _ticket_hub(lines)
 
-    decided = await stage.authorize(_asking())
+    decided = await stage.authorize(_asking(), sight=SIGHT)
 
     (asked,) = decided.allowed
     assert asked.call.request.rests_on == grant
@@ -1121,7 +1120,7 @@ async def test_request_approval_a_limit_covers_asks_nothing() -> None:
     await _limit(lines, "request_approval")
     stage, _ = _ticket_hub(lines)
 
-    decided = await stage.authorize(_asking())
+    decided = await stage.authorize(_asking(), sight=SIGHT)
 
     (verdict,) = decided.verdicts
     assert (verdict.verdict, verdict.reason) == (Verdict.NOT_DONE, authorizer._LIMITED)
@@ -1135,7 +1134,7 @@ async def test_the_call_a_limit_refuses_is_not_asked_about() -> None:
     await _limit(lines, "book")
     stage, _ = _ticket_hub(lines)
 
-    decided = await stage.authorize(_asking())
+    decided = await stage.authorize(_asking(), sight=SIGHT)
 
     (verdict,) = decided.verdicts
     assert verdict.verdict is Verdict.NOT_DONE
@@ -1150,7 +1149,7 @@ async def test_a_call_falling_short_is_asked_about() -> None:
     """ADR-0367 §5:3: a shortfall is what a request is for: the request is written."""
     stage, _ = _ticket_hub(FakePermissionLineStore(now=_now))
 
-    decided = await stage.authorize(_asking(_at(Sureness.WEAK)))
+    decided = await stage.authorize(_asking(_at(Sureness.WEAK)), sight=SIGHT)
 
     (verdict,) = decided.verdicts
     assert verdict.verdict is Verdict.ALLOWED
@@ -1212,7 +1211,8 @@ async def _run_ticket(
             tickets=frozenset({str(request.id)}),
             check_for=CheckSubject(),
             asked_from=asked,
-        )
+        ),
+        sight=SIGHT,
     )
 
 
@@ -1361,7 +1361,7 @@ async def test_a_check_made_before_authorizing_fails_is_kept_in_the_sink() -> No
 
     with pytest.raises(RuntimeError, match="the policy failed"):
         await hub.authorize(
-            replace(_round(_call("c1", "lookup", q="x")), check_for=_OWNER, check_sink=sink)
+            replace(_round(_call("c1", "lookup", q="x")), check_for=_OWNER, check_sink=sink),
         )
 
     assert sink == {"c1": _ran((_NORMAL, _NO_LINE))}

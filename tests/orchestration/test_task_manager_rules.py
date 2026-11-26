@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
+from sight_support import holder, in_a_work
 from task_support import CHAT, LIMITS, LINE, activation, spawn_effect
 
 from ai_assistant.core.errors import PlanningError
@@ -94,14 +95,16 @@ class _World:
         self.plans = FakePlanStore(now=lambda: self.now)
         self.memory = FakeMemoryStore(now=lambda: self.now)
         self.manager = TaskManager(
+            # ADR-0383 §9:1: a work's calls read through the holder; the store itself is
+            # for removing finished tasks (§7:8) and the owner's replace.
+            stores=holder(plans=self.plans, memory=self.memory),
             plans=self.plans,
-            memory=self.memory,
             running=lambda: (),
             is_running=lambda _one: False,
             starting=lambda _one: False,
             wake=lambda: None,
             limits=LIMITS,
-            zones=PersonZones(default=HUB, people=people),
+            zones=PersonZones(default=HUB, people=people, stores=holder(people=people)),
             now=lambda: self.now,
         )
         self.calls = ScheduledTaskCalls(manager=self.manager, now=lambda: self.now)
@@ -139,7 +142,7 @@ def _spawner(**changes: object) -> Spawner:
 async def _spawn(world: _World, spawner: Spawner | None = None, **arguments: Any) -> object:
     asker = spawner or _spawner()
     call = _call(SPAWN, {"instruction": "remind them to call Mom", **arguments})
-    with spawning(asker):
+    with in_a_work(at=NOW), spawning(asker):
         return await world.calls.run_claiming(
             call,
             spawn_effect(asker.activation_id, at=world.now),
@@ -443,7 +446,8 @@ async def test_a_skip_of_a_bounded_rules_last_occurrence_is_a_cancel() -> None:
         rule={"repeats": "daily", "time": "20:00", "from": "2026-10-24", "until": "2026-10-23"},
         replaces=daily.id,
     )
-    cancelled = await world.manager.cancel(daily.id, person=OWNER_PERSON_ID)
+    with in_a_work(at=NOW):
+        cancelled = await world.manager.cancel(daily.id, person=OWNER_PERSON_ID)
 
     assert "until is earlier than its from" in _refused(replace)
     assert cancelled.task is not None
@@ -541,10 +545,10 @@ async def test_a_cancel_or_list_whose_zone_cannot_be_read_does_nothing() -> None
     task = await _only_task(world)
 
     people.fail_next()
-    with spawning(_spawner()):
+    with in_a_work(at=NOW), spawning(_spawner()):
         cancelled = await world.calls.run(_call(CANCEL_TASK, {"task": task.id}))
     people.fail_next()
-    with spawning(_spawner()):
+    with in_a_work(at=NOW), spawning(_spawner()):
         listed = await world.calls.run(_call(LIST_TASKS, {}))
 
     assert isinstance(cancelled, NotDone)
@@ -633,9 +637,10 @@ async def test_a_task_the_assistant_set_renders_in_the_persons_zone_everywhere()
     spawned = _spawned(await _spawn(world, _spawner(authority=None), at="2026-10-24T08:00"))
     task = await _assistants_task(world, when=DueAt(at=datetime(2026, 10, 24, 12, 0, tzinfo=UTC)))
 
-    with spawning(_spawner()):
+    with in_a_work(at=NOW), spawning(_spawner()):
         listed = await world.calls.run(_call(LIST_TASKS, {}))
-    scheduled = await world.manager.scheduled(OWNER_PERSON_ID)
+    with in_a_work(at=NOW):
+        scheduled = await world.manager.scheduled(OWNER_PERSON_ID)
 
     assert spawned.author == "assistant"
     assert spawned.falls_due == "at Sat 24 Oct 2026 08:00 (America/New_York)"
@@ -657,7 +662,7 @@ async def test_the_list_pull_shows_a_rules_words_and_its_next_occurrence() -> No
     world = await _world()
     await _rule_task(world, {"repeats": "weekdays", "time": "07:00"})
 
-    with spawning(_spawner()):
+    with in_a_work(at=NOW), spawning(_spawner()):
         listed = await world.calls.run(_call(LIST_TASKS, {}))
 
     assert isinstance(listed, ToolResult)

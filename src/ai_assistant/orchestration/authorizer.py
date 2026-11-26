@@ -232,9 +232,10 @@ if TYPE_CHECKING:
         FrozenJson,
         FrozenJsonMapping,
         PermissionLine,
+        Sight,
         ToolDefinition,
     )
-    from ai_assistant.orchestration.bound_stores import Bound
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
 
 __all__ = [
     "AllowedCall",
@@ -1222,10 +1223,16 @@ class _Round:
     of the standing lines failed, after which no call of the round reads them again;
     ``made`` holds, by call id, the call's capability and what the check made of it,
     which its verdict carries once the round's verdicts are final.
+
+    ``plans`` and ``story_store`` are the plan and story stores bound to the sight of
+    the work whose round this is, every read of the round's checks made through them
+    (ADR-0383 §7:7).
     """
 
     activation_id: str
     read_outside: bool
+    plans: Bound[PlanStore]
+    story_store: Bound[StoryStore]
     rounds: tuple[PlanningRound, ...] = ()
     verdicts: list[CallVerdict] = field(default_factory=list)
     allowed: list[AllowedCall] = field(default_factory=list)
@@ -1373,10 +1380,8 @@ class AuthorizingStage:
         registry: ToolRegistry,
         policy: ActionPolicy,
         trail: AuditTrail,
-        stories: StoryStore,
-        memory: MemoryStore,
+        stores: BoundStores,
         binder: EgressBinder | None = None,
-        plans: PlanStore | None = None,
         lines: PermissionLineStore | None = None,
         things: ThingRecordStore | None = None,
         preference: Preference | None = None,
@@ -1394,15 +1399,14 @@ class AuthorizingStage:
             policy: The permission policy, built without goal authorizations and goal
                 quotes (ADR-0306 §4:11).
             trail: The audit trail every ruling is recorded in and read back from.
-            stories: The story store the backstop's match is collected from (§5:10).
-            memory: The memory store the activation's record is read from.
+            stores: The holder that binds stores for a pass (ADR-0383 §9:1), wired with
+                the story, memory and plan stores, each read bound to the sight of the
+                work whose round is authorized (§7:7): the story store the backstop's
+                match is collected from (§5:10); the memory store the activation's record
+                is read from; and the plan store whose records a ticket's checks and a
+                pending request's are read from (ADR-0361 §2:8, §5:3), with the effects a
+                deliberate repeat's claim would match (ADR-0321 §6:1).
             binder: The egress binding seam, or ``None`` where none is wired.
-            plans: The plan store whose records a ticket's checks and a pending
-                request's are read from (ADR-0361 §2:8, §5:3), and the effects a
-                deliberate repeat's claim would match (ADR-0321 §6:1). ``None`` where
-                none is wired, and then no ticket runs, nothing is found waiting on a
-                card, and a deliberate repeat is left to the claim, which refuses one
-                matching an unknown effect.
             lines: The line store the check reads the standing lines from, for each
                 call's check (ADR-0367 §3:6, §4:1); ``None`` where none is wired, and then
                 no call is checked, which only a stage built to test the other checks is.
@@ -1424,10 +1428,8 @@ class AuthorizingStage:
         self._registry = registry
         self._policy = policy
         self._trail = trail
-        self._stories = stories
-        self._memory = memory
+        self._stores = stores
         self._binder = binder
-        self._plans = plans
         self._lines = lines
         self._things = things
         self._preference = Preference() if preference is None else preference
@@ -1438,7 +1440,7 @@ class AuthorizingStage:
         self._new_effect_id = new_effect_id
         self._diagnostics = diagnostics
 
-    async def authorize(self, given: RoundToAuthorize) -> RoundAuthorization:
+    async def authorize(self, given: RoundToAuthorize, *, sight: Sight) -> RoundAuthorization:
         """Check every call of ``given`` in the round's order, and its message.
 
         The round is revalidated and detached before the first ``await``, so every check
@@ -1446,6 +1448,9 @@ class AuthorizingStage:
 
         Args:
             given: The recorded round, its calls and its message.
+            sight: The sight of the work whose round this is, read by its caller from
+                the pass and never made here (ADR-0383 §9:2): every read the round's
+                checks make of the memory, story and plan stores is bound to it (§7:7).
 
         Returns:
             Each call's verdict, the calls acting may run, the stories' activations
@@ -1464,7 +1469,9 @@ class AuthorizingStage:
         grounds: list[OutsideGround] | None = [] if noting else None
         progress: list[_Round] = []
         try:
-            decided = await self._authorized(snapshot, grounds, noting=noting, progress=progress)
+            decided = await self._authorized(
+                snapshot, grounds, sight=sight, noting=noting, progress=progress
+            )
         except Exception as exc:
             reached = progress[0] if progress else None
             await self._returned(snapshot, grounds, None, state=reached, failure=exc)
@@ -1477,6 +1484,7 @@ class AuthorizingStage:
         snapshot: RoundToAuthorize,
         grounds: list[OutsideGround] | None,
         *,
+        sight: Sight,
         noting: bool,
         progress: list[_Round],
     ) -> RoundAuthorization:
@@ -1487,7 +1495,8 @@ class AuthorizingStage:
         """
         held = snapshot.working
         read_outside = await read_outside_content(
-            self._memory,
+            # ADR-0383 §7:7: the activation's record, read by the work's sight.
+            self._stores.memory(sight),
             snapshot.activation_id,
             working=replace(held, rounds=(*held.rounds, snapshot.round)),
             grounds=grounds,
@@ -1495,6 +1504,8 @@ class AuthorizingStage:
         state = _Round(
             activation_id=snapshot.activation_id,
             read_outside=read_outside,
+            plans=self._stores.plans(sight),
+            story_store=self._stores.stories(sight),
             rounds=(*held.rounds, snapshot.round),
             checks={} if noting else None,
             person=snapshot.person,
@@ -1665,13 +1676,13 @@ class AuthorizingStage:
         The same capability, values and binding, not yet expired. A store that cannot
         be read is no answer that none waits, so the call goes back needing the person.
         """
-        if self._plans is None or state.person is None:
+        if state.person is None:
             return False
         try:
             asked = RequestedCall(
                 tool=request.tool, values=request.parameters, binding=request.egress_binding
             )
-            pending = await self._plans.person_approval_requests(
+            pending = await state.plans.person_approval_requests(
                 state.person, [ApprovalRequestState.PENDING]
             )
         except ValidationError, ValueError:
@@ -2058,10 +2069,8 @@ class AuthorizingStage:
         request_id = one.ticket
         if request_id is None or request_id not in state.tickets:
             return _TICKET_NOT_HELD
-        if self._plans is None:
-            return _TICKET_UNREAD
         try:
-            found = await self._plans.approval_requests([request_id])
+            found = await state.plans.approval_requests([request_id])
         except PlanningError:
             _log.warning("authorizing_ticket_unread", stage="authorizing")
             return _TICKET_UNREAD
@@ -2244,8 +2253,6 @@ class AuthorizingStage:
             PlanningError: If the plan store cannot be read.
             StoryStoreError: If the story store cannot be read.
         """
-        if self._plans is None:
-            return False
         stories = await self._stories_of(state)
         match = tuple(dict.fromkeys((state.activation_id, *stories)))
         digest = values_digest(request)
@@ -2256,13 +2263,13 @@ class AuthorizingStage:
             and current_name(effect.capability) == current_name(request.tool.capability)
             and effect.values_digest == digest
             and effect.outcome in {None, ToolOutcome.INDETERMINATE}
-            for effect in await self._plans.activation_effects(match)
+            for effect in await state.plans.activation_effects(match)
         )
 
     async def _stories_of(self, state: _Round) -> tuple[str, ...]:
         """The activations of this activation's stories, read once per round (§5:10)."""
         if state.stories is None:
-            state.stories = await self._story_activations(state.activation_id)
+            state.stories = await _story_activations(state.story_store, state.activation_id)
         return state.stories
 
     async def _standing_lines(self, state: _Round) -> tuple[PermissionLine, ...] | None:
@@ -2546,35 +2553,34 @@ class AuthorizingStage:
             call_id=message.call_id,
         )
 
-    async def _story_activations(self, activation_id: str) -> tuple[str, ...]:
-        """The activations of the episodes in this activation's stories, as they stand now.
 
-        Each story the activation belongs to directly, read whole, page by page; each
-        activation once, in the order found (ADR-0306 §5:9, §6:3).
+async def _story_activations(stories: Bound[StoryStore], activation_id: str) -> tuple[str, ...]:
+    """The activations of the episodes in this activation's stories, as they stand now.
 
-        Raises:
-            StoryStoreError: If the store cannot be read, or a page's cursor does not
-                move on.
-        """
-        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
-        found: list[str] = []
-        for header in await self._stories.stories_of(member):
-            cursor: int | None = None
-            while True:
-                page = await self._stories.view(
-                    header.story_id, cursor=cursor, limit=MAX_STORY_PAGE
-                )
-                if page is None:
-                    break
-                found.extend(
-                    entry.member.id
-                    for entry in page.entries
-                    if entry.member.kind is StoryMemberKind.ACTIVATION
-                )
-                if page.next_cursor is None:
-                    break
-                if cursor is not None and page.next_cursor <= cursor:
-                    msg = "the story store's cursor did not move on"
-                    raise StoryStoreError(msg)
-                cursor = page.next_cursor
-        return tuple(dict.fromkeys(found))
+    Each story the activation belongs to directly, read whole, page by page; each
+    activation once, in the order found (ADR-0306 §5:9, §6:3).
+
+    Raises:
+        StoryStoreError: If the store cannot be read, or a page's cursor does not
+            move on.
+    """
+    member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
+    found: list[str] = []
+    for header in await stories.stories_of(member):
+        cursor: int | None = None
+        while True:
+            page = await stories.view(header.story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+            if page is None:
+                break
+            found.extend(
+                entry.member.id
+                for entry in page.entries
+                if entry.member.kind is StoryMemberKind.ACTIVATION
+            )
+            if page.next_cursor is None:
+                break
+            if cursor is not None and page.next_cursor <= cursor:
+                msg = "the story store's cursor did not move on"
+                raise StoryStoreError(msg)
+            cursor = page.next_cursor
+    return tuple(dict.fromkeys(found))

@@ -87,6 +87,7 @@ from ai_assistant.core.types import (
     parties_are_assistants,
 )
 from ai_assistant.orchestration.acting import TICKET_CLAIM_TEXT, Unwritten
+from ai_assistant.orchestration.activation_state import work_sight
 from ai_assistant.orchestration.channel_kinds import place_channel, place_of, takes_text
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
@@ -152,12 +153,13 @@ if TYPE_CHECKING:
         ScheduledTask,
         ScheduledTaskCancel,
         ScheduledTaskWrite,
+        Sight,
         TaskWhen,
         ToolCall,
     )
     from ai_assistant.orchestration.acting import ClaimingAnswer, OwnRecordsAnswer
     from ai_assistant.orchestration.activation_state import ActivationState
-    from ai_assistant.orchestration.bound_stores import BoundStores
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = [
@@ -638,15 +640,23 @@ class TaskParent:
 class TaskManager:
     """The Task Manager's queries and commands, with one implementation each (§10:4).
 
-    The engine builds it over the one plan store, the memory store the schedule's episodes
-    are read from, and its own account of what runs; its stop is the engine's.
+    The engine builds it over the holder that binds stores for a pass, the one plan
+    store, and its own account of what runs; its stop is the engine's.
+
+    **Whose sight each read is by** (ADR-0383 §7:7, §7:8). Every query and command a
+    work's task calls reach, and the stop call's read of what it set up, reads and writes
+    through the stores the holder binds to the calling work's sight
+    (:func:`~ai_assistant.orchestration.activation_state.work_sight`), read as each store
+    is reached. Three keep the plan store unbound: :meth:`tidy` and :meth:`parent_ended`,
+    removing finished tasks, which ADR-0384 §2's table leaves unchanged (§7:8), and
+    :meth:`replace`, the owner's own command and no work's (§10:5), milestone 22's B10.
     """
 
-    def __init__(  # noqa: PLR0913 — the two stores, the engine's three seams, the sensor's wake, the bounds, the zones, the clock and the id source
+    def __init__(  # noqa: PLR0913 — the holder, the store, the engine's three seams, the sensor's wake, the bounds, the zones, the clock and the id source
         self,
         *,
+        stores: BoundStores,
         plans: PlanStore,
-        memory: MemoryStore,
         running: Callable[[], Iterable[ActivationState]],
         is_running: Callable[[str], bool],
         starting: Callable[[str], bool],
@@ -659,8 +669,13 @@ class TaskManager:
         """Wire the Task Manager.
 
         Args:
-            plans: The plan store, which holds the Task Scheduler's content.
-            memory: The memory store the schedule's episodes are read from (§7:9).
+            stores: The holder that binds stores for a pass (ADR-0383 §9:1), wired with
+                the plan store and the memory store the schedule's episodes are read
+                from (§7:9): every read and write a work makes through this goes through
+                them, bound to its sight (§7:7).
+            plans: The same plan store, which holds the Task Scheduler's content, read
+                unbound by :meth:`tidy` and :meth:`parent_ended` (§7:8) and by
+                :meth:`replace`, the owner's command, alone.
             running: The activations the engine holds as running.
             is_running: Whether an activation is running, admitted or pushed.
             starting: Whether an occurrence was pushed to an activation that is not yet
@@ -673,8 +688,8 @@ class TaskManager:
             now: The clock a spawn's now is read from.
             new_task_id: Mints a scheduled task's id.
         """
+        self._stores = stores
         self._plans = plans
-        self._memory = memory
         self._running = running
         self._is_running = is_running
         self._starting = starting
@@ -684,11 +699,33 @@ class TaskManager:
         self._now = now
         self._new_task_id = new_task_id or (lambda: f"task:{uuid.uuid4().hex}")
 
+    # --- whose sight (ADR-0383 §7:7) ---
+
+    @staticmethod
+    def _sight() -> Sight:
+        """The calling work's sight, read as a store is reached (§7:7, §9:2).
+
+        Raises:
+            RuntimeError: Where no admitted work is running here.
+        """
+        return work_sight()
+
+    def _work_plans(self) -> Bound[PlanStore]:
+        """The plan store, bound to the calling work's sight."""
+        return self._stores.plans(self._sight())
+
+    def _work_memory(self) -> Bound[MemoryStore]:
+        """The memory store, bound to the calling work's sight."""
+        return self._stores.memory(self._sight())
+
     # --- the queries (§10:2) ---
 
     async def zone_of(self, person: str) -> ZoneInfo:
-        """``person``'s zone, which their tasks' times are read and rendered in (§3:3)."""
-        return await self._zones.of(person)
+        """``person``'s zone, which their tasks' times are read and rendered in (§3:3).
+
+        A work's read, through the person-model store bound to its sight (§7:7).
+        """
+        return await self._zones.of(person, sight=self._sight())
 
     async def listing(self, spawner: Spawner) -> TaskListing:
         """The list pull: the three queries, for the person ``spawner`` is for (§4:6).
@@ -777,7 +814,7 @@ class TaskManager:
         Raises:
             PlanningError: If the plan store cannot be read.
         """
-        held = await self._plans.person_scheduled_tasks(person, [OccurrenceState.PENDING])
+        held = await self._work_plans().person_scheduled_tasks(person, [OccurrenceState.PENDING])
         told = await self.zone_of(person) if zone is None else zone
         shown = held[: self._limits.listing_bound]
         parents = await self.parents(shown)
@@ -888,17 +925,18 @@ class TaskManager:
         Raises:
             PlanningError: If the plan store cannot be read.
         """
+        plans = self._work_plans()
         walked = [activation_id]
         frontier = [activation_id]
         while True:
             while frontier:
-                frontier = _unwalked(await self._plans.spawned_tasks(frontier), walked)
-            ordered = await self._plans.spawned_tasks(walked)
+                frontier = _unwalked(await plans.spawned_tasks(frontier), walked)
+            ordered = await plans.spawned_tasks(walked)
             frontier = _unwalked(ordered, walked)
             if frontier:
                 continue
             activations = live(ordered)
-            again = await self._plans.spawned_tasks(walked)
+            again = await plans.spawned_tasks(walked)
             if _schedule_shape(again) == _schedule_shape(ordered):
                 return _Below(tasks=again, activations=activations)
             frontier = _unwalked(again, walked)
@@ -921,7 +959,7 @@ class TaskManager:
             return found
         try:
             read = without_open_episodes(
-                await self._memory.get_many([f"activation:{one}" for one in rest])
+                await self._work_memory().get_many([f"activation:{one}" for one in rest])
             )
         except MemoryStoreError:
             _log.warning("task_parent_unread", stage="task_scheduler", reason="store_failed")
@@ -954,7 +992,9 @@ class TaskManager:
             MemoryStoreError: If the episodes cannot be read.
         """
         told = await self.zone_of(person) if zone is None else zone
-        page = await self._memory.channel_episodes(SCHEDULE, limit=self._limits.listing_bound)
+        page = await self._work_memory().channel_episodes(
+            SCHEDULE, limit=self._limits.listing_bound
+        )
         shown: list[ActivationEntry] = []
         for row in reversed(page.entries):
             record = row.record
@@ -999,7 +1039,9 @@ class TaskManager:
         if not entries:
             return ()
         try:
-            effects = await self._plans.activation_effects([one.activation_id for one in entries])
+            effects = await self._work_plans().activation_effects(
+                [one.activation_id for one in entries]
+            )
         except PlanningError:
             _log.warning("task_messages_unread", stage="task_scheduler", reason="store_failed")
             return tuple(entries)
@@ -1101,10 +1143,40 @@ class TaskManager:
         ``first_due_at`` is a rule's first occurrence, as :func:`spawn_when` computed it
         in the zone the rule is read in (ADR-0340 §4:5, §9:5).
 
+        A work's write, through the plan store bound to its sight (ADR-0383 §7:5).
+
         Raises:
             ClaimStopped: If the store holds a stop record for the spawner.
             PlanningError: If the spawn does not validate or the store fails.
         """
+        return await self._spawned(
+            self._work_plans(),
+            spawner,
+            instruction=instruction,
+            when=when,
+            places=places,
+            replaces=replaces,
+            effect=effect,
+            match=match,
+            deliberate_repeat=deliberate_repeat,
+            first_due_at=first_due_at,
+        )
+
+    async def _spawned(  # noqa: PLR0913 — the store, the spawner, what it states, the record it is claimed under, and the claim's two
+        self,
+        plans: PlanStore,
+        spawner: Spawner,
+        *,
+        instruction: str,
+        when: TaskWhen,
+        places: tuple[ChannelIdentity, ...],
+        replaces: str | None,
+        effect: ActivationEffect,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool,
+        first_due_at: datetime | None,
+    ) -> ScheduledTaskWrite:
+        """Write a spawn's task through ``plans``: a work's bound store, or the replace's."""
         spawn = TaskSpawn(
             id=self._new_task_id(),
             person=spawner.person,
@@ -1121,7 +1193,7 @@ class TaskManager:
             replaces=replaces,
             first_due_at=first_due_at,
         )
-        written = await self._plans.write_scheduled_task(
+        written = await plans.write_scheduled_task(
             spawn,
             effect,
             match=match,
@@ -1149,7 +1221,7 @@ class TaskManager:
         Raises:
             PlanningError: If the plan store cannot be read.
         """
-        found = await self._plans.approval_requests([request_id])
+        found = await self._work_plans().approval_requests([request_id])
         return found[0].answer if found else None
 
     async def cancel(
@@ -1158,12 +1230,13 @@ class TaskManager:
         """Cancel what is pending of a task (§9:5); it stops nothing running.
 
         ``person`` and ``spawned_by`` are §4:4's checks for planning's cancel; the Task
-        Manager's command gives neither.
+        Manager's command gives neither. A work's write, through the plan store bound to
+        its sight (ADR-0383 §7:5): a task it does not see is cancelled as one never written.
 
         Raises:
             PlanningError: If the store fails.
         """
-        cancelled = await self._plans.cancel_scheduled_task(
+        cancelled = await self._work_plans().cancel_scheduled_task(
             task_id, person=person, spawned_by=spawned_by
         )
         if cancelled.task is not None:
@@ -1181,6 +1254,10 @@ class TaskManager:
         effect record of the command's own, and is the person's act. A rule's first
         occurrence is computed in its own zone or the person's (ADR-0340 §4:5).
 
+        **The owner's own command, and no work's** (§10:5): no work runs, so it has no
+        sight, and it reads and writes the plan store and the person's zone unbound, as
+        the owner's acts do until milestone 22's B10 binds them (ADR-0385).
+
         Raises:
             PlanningError: If the store fails, the task is not held, a rule names a zone
                 ``zoneinfo`` does not resolve (ADR-0340 §3:5), or it yields no occurrence
@@ -1196,7 +1273,7 @@ class TaskManager:
         first = None
         if isinstance(when, DueOnRule):
             if when.zone is None:
-                zone = await self.zone_of(replaced.person)
+                zone = await self._zones.outside_a_work(replaced.person)
             else:
                 named = resolve_zone(when.zone)
                 if named is None:
@@ -1220,7 +1297,8 @@ class TaskManager:
             authority=replaced.person,
             set_in=replaced.set_in,
         )
-        written = await self.spawn(
+        written = await self._spawned(
+            self._plans,
             spawner,
             instruction=instruction,
             when=when,
@@ -1239,6 +1317,10 @@ class TaskManager:
 
     async def tidy(self, task_ids: Iterable[str]) -> None:
         """Remove each named task once nothing of it or below it is live (§7:8).
+
+        **Unbound** (ADR-0383 §7:8): removing finished tasks selects them by a state and
+        reads nothing of their content, a job ADR-0384 §2's table leaves unchanged, so it
+        reads the plan store as it does today, whoever's write or end prompted it.
 
         A task whose parent still runs is kept. Each task removed may let the task above
         it, and the tasks it waited on, go in turn. Never raises but for a cancellation:
@@ -1268,7 +1350,11 @@ class TaskManager:
                 work.extend(task.when.tasks)
 
     async def parent_ended(self, activation_id: str) -> None:
-        """An activation ended: the tasks it spawned may now be removed (§7:8)."""
+        """An activation ended: the tasks it spawned may now be removed (§7:8).
+
+        **Unbound** (ADR-0383 §7:8): removing finished tasks, as :meth:`tidy`, a job
+        ADR-0384 §2's table leaves unchanged.
+        """
         try:
             spawned = await self._plans.spawned_tasks([activation_id])
         except PlanningError:

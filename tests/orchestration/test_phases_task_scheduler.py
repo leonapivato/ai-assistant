@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from exchange_support import Tag, section, tag, tags, text_call
 from phases_support import open_conversation, phases_harness, said, until, working, written
+from sight_support import in_a_work
 from task_support import AT, activation, seams, spawn_effect, write_task
 from telegram_support import CHAT as LINE_CHAT
 from telegram_support import REFERENCE, YieldingTelegram
@@ -956,7 +957,11 @@ async def test_a_step_stopped_after_its_next_steps_write_landed_leaves_it_pendin
         assert kept.pending, "a next step whose write landed first stays"
         manager = harness.engine.task_manager
         assert manager is not None
-        left = await manager.still_live(running, person=OWNER_PERSON_ID, viewer=None, supply=None)
+        # ADR-0383 §7:7: the stop call's read, by the calling work's sight.
+        with in_a_work(at=AT):
+            left = await manager.still_live(
+                running, person=OWNER_PERSON_ID, viewer=None, supply=None
+            )
         assert [one.task_id for one in left.tasks] == [following.id]
     finally:
         await harness.engine.aclose()
