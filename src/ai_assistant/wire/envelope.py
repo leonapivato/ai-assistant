@@ -2913,7 +2913,14 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     does not know the name raises ``ProtocolError`` (``wire/errors.py``), so the bump
 #:     and the error class are the same change (ADR-0219 §6's ground and its reading).
 #:     No frame's encoding, type or member changes, and the method set does not move.
-PROTOCOL_VERSION: Final[int] = 140
+#: 141: ADR-0124 §9:2 advances the version in the change that adds a value to each of
+#:     two wire-carried closed enumerations for ADR-0383 §4:7's refusals in the story
+#:     and conversation stores: ``StoryRefusalReason`` gains ``another_home``, on the
+#:     ``StoryRefusal`` a ``StoryOutcome`` carries, and ``SendOutcome`` gains
+#:     ``another_home``, on the ``MessageReceipt`` ``write_message`` answers. A peer at
+#:     140 cannot decode either value, so a frame carrying one is invalid for it. No
+#:     model gains a field, and the method set does not move.
+PROTOCOL_VERSION: Final[int] = 141
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
