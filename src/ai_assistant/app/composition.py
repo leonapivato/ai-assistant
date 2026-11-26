@@ -1503,7 +1503,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         opened.append(trail.close)
         # The durable plan store: an activation's stop record and acting's effect
         # records (ADR-0297 §1, ADR-0306 §6), which survive a restart.
-        plans = SqlitePlanStore(path=directory / "plans.db")
+        plans = SqlitePlanStore(path=directory / "plans.db", sight_mode=SightMode.COUNT)
         opened.append(plans.close)
         # The conversation index (ADR-0074 §9). Both durations come from settings and
         # are the *user's* configuration, not the contract's: ``episode_retention``

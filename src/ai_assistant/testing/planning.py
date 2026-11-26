@@ -22,11 +22,23 @@ subject for the cancellation clause ``core.protocols`` states (ADR-0060), rather
 than an implementation the obligation cannot reach. The reads are in because
 ``SqlitePlanStore`` answers every one of them from under its connection lock, so
 each is its own place the resource could be handed over early (#397).
+
+**Bound to a sight** (ADR-0383 §7), :class:`FakePlanStore` is a copy sharing its records,
+stop records, revision issuer, clock and modelled resource by reference, with the sight
+set; every write mutates the shared containers in place. Withholding, it holds a record
+its sight sees by its home or, for an effect or an approval request, as made by its
+sight's activation (§7:4), and every read and every decision a write rests on reads the
+held records alone, as the durable store does; a write's own checks read every record
+(§7:11), and no stop record is given back (§3:3). Counting, it answers as unbound and logs
+the homes of the records each read gave back. A test stand-in that subclasses it is bound
+as itself, so its overrides run on the binding too.
 """
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
@@ -37,6 +49,7 @@ from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    ApprovalOutcomePush,
     ApprovalRequest,
     ApprovalRequestWrite,
     ApprovalWriteAnswer,
@@ -46,6 +59,7 @@ from ai_assistant.core.types import (
     QuestionPart,
     RecordHome,
     ScheduledTaskWrite,
+    SightMode,
     TaskWriteAnswer,
     TicketClaim,
     ToolOutcome,
@@ -83,8 +97,10 @@ from ai_assistant.testing._approvals import by_person as requests_by_person
 from ai_assistant.testing._approvals import checked_person as checked_request_person
 from ai_assistant.testing._approvals import due as approvals_due
 from ai_assistant.testing._approvals import pushed as pushed_outcomes
+from ai_assistant.testing._home_count import count_given
 from ai_assistant.testing._scheduled_tasks import (
     Schedule,
+    below,
     by_person,
     checked_id,
     checked_instant,
@@ -108,15 +124,17 @@ from ai_assistant.testing._scheduled_tasks import (
     requested_ids,
     requested_states,
     spawned_by,
+    task_of,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
         ApprovalCard,
         ApprovalDue,
-        ApprovalOutcomePush,
         ApprovalRequestState,
         ApprovalRequestStep,
         ApprovalTap,
@@ -126,9 +144,13 @@ if TYPE_CHECKING:
         ScheduledDue,
         ScheduledTask,
         ScheduledTaskCancel,
+        Sight,
         TaskSpawn,
     )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
+
+#: The store's code in ADR-0383 §11:1's count event, as the durable store writes it.
+_STORE_CODE: Final = "plans"
 
 
 #: Mirror of :data:`ai_assistant.planning.stops._ACTIVATION_ID`; see the module docstring
@@ -435,6 +457,44 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _person_home(person: str) -> RecordHome | None:
+    """The home a task's or a request's person names: that person's domain (ADR-0383 §3).
+
+    Mirror of ``ai_assistant.planning._home_columns.person_home`` for a record the fake
+    holds, which is always valid.
+    """
+    try:
+        return RecordHome.person(person)
+    except ValidationError:
+        return None
+
+
+def _effects_given(
+    effects: Iterable[ActivationEffect],
+) -> Iterator[tuple[RecordHome | None, str | None]]:
+    """Each effect record as §11:1's count reads it: its home, and its activation (§7:4)."""
+    return ((one.home, one.activation_id) for one in effects)
+
+
+def _tasks_given(tasks: Iterable[ScheduledTask]) -> Iterator[tuple[RecordHome | None, str | None]]:
+    """Each task as §11:1's count reads it: its person's domain, made by no activation."""
+    return ((_person_home(one.person), None) for one in tasks)
+
+
+def _requests_given(
+    requests: Iterable[ApprovalRequest],
+) -> Iterator[tuple[RecordHome | None, str | None]]:
+    """Each request as §11:1's count reads it: its person's domain, and who asked (§7:4)."""
+    return ((_person_home(one.person), one.activation_id) for one in requests)
+
+
+@dataclass
+class _Revisions:
+    """The observation revision issuer every binding of one fake shares (ADR-0329 §16:9)."""
+
+    last: int = 0
+
+
 class FakePlanStore:
     """A non-persistent ``PlanStore`` test double backed by a set and a dict.
 
@@ -444,13 +504,15 @@ class FakePlanStore:
     a home no write may carry is refused before any step (ADR-0386 §5, §6).
     """
 
-    def __init__(self, *, now: Clock = _utcnow) -> None:
+    def __init__(self, *, now: Clock = _utcnow, sight_mode: SightMode = SightMode.COUNT) -> None:
         """Create an empty store with an injectable clock.
 
         Args:
             now: Clock for export timestamps; injectable for deterministic tests.
                 Guarded by :func:`~ai_assistant.core.clock.checked_clock`, exactly as
                 ``InMemoryPlanStore`` is (ADR-0026 §7).
+            sight_mode: Whether a fake bound to a sight withholds or only counts
+                (ADR-0383 §7:10), fixed here as the durable store fixes it.
         """
         # ADR-0297 §1: one stop record per activation, carrying the id alone.
         self._stopped: set[str] = set()
@@ -459,13 +521,15 @@ class FakePlanStore:
         # ADR-0329 §16:1: one observation record per episode, and the last revision
         # issued, which `clear` never resets.
         self._observations: dict[str, ObservationRecord] = {}
-        self._issued = 0
+        self._issuer = _Revisions()
         # ADR-0350 §12:3: the Task Scheduler's tasks by id, in the order written.
         self._tasks: dict[str, ScheduledTask] = {}
         # ADR-0361 §8:2: the Approvals channel's requests by id, in the order written.
         self._requests: dict[str, ApprovalRequest] = {}
         self._clock = checked_clock(now, owner="FakePlanStore")
         self._resource = SuspendableResource()
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
 
     def suspend_next_operation(self) -> LoopSuspension:
         """Hold the next call that enters the modelled resource open inside it.
@@ -501,6 +565,76 @@ class FakePlanStore:
             return self._clock()
         except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
+
+    # --- a sight (ADR-0383 §7, §8, §11) ----------------------------------------
+
+    def bound(self, sight: Sight) -> FakePlanStore:
+        """This fake, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy, of the class it is, sharing every container, the issuer, the
+        clock and the modelled resource by reference, with the sight set: the meet of
+        the one it was already bound to, where it was (§6:6).
+
+        Raises:
+            ValueError: If this fake is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _withholding_sight(self) -> Sight | None:
+        """The sight this fake withholds by, or ``None`` where it holds every record."""
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return None
+        return self._sight
+
+    def _held_effects(self) -> dict[str, ActivationEffect]:
+        """The effect records this fake, as bound, holds, in claim order (§7:2, §7:4)."""
+        sight = self._withholding_sight()
+        if sight is None:
+            return self._activation_effects
+        return {
+            key: one
+            for key, one in self._activation_effects.items()
+            if sight.sees(one.home, made_by=one.activation_id)
+        }
+
+    def _held_observations(self) -> dict[str, ObservationRecord]:
+        """The observation records this fake, as bound, holds (§7:2)."""
+        sight = self._withholding_sight()
+        if sight is None:
+            return self._observations
+        return {key: one for key, one in self._observations.items() if sight.sees(one.home)}
+
+    def _held_tasks(self, *, held: bool = True) -> dict[str, ScheduledTask]:
+        """The tasks this fake, as bound, holds, or with ``held`` false those it does not."""
+        sight = self._withholding_sight()
+        if sight is None:
+            return self._tasks if held else {}
+        return {
+            key: one
+            for key, one in self._tasks.items()
+            if sight.sees(_person_home(one.person)) is held
+        }
+
+    def _held_requests(self, *, held: bool = True) -> dict[str, ApprovalRequest]:
+        """The requests this fake, as bound, holds, or with ``held`` false those it does not."""
+        sight = self._withholding_sight()
+        if sight is None:
+            return self._requests if held else {}
+        return {
+            key: one
+            for key, one in self._requests.items()
+            if sight.sees(_person_home(one.person), made_by=one.activation_id) is held
+        }
+
+    def _counted(self, member: str, given: Iterable[tuple[RecordHome | None, str | None]]) -> None:
+        """Write §11:1's count of one read, where this fake is bound and only counts."""
+        if self._sight is not None and self._sight_mode is SightMode.COUNT:
+            count_given(self._sight, store=_STORE_CODE, member=member, given=given)
+
+    # --- stop records and activation effect records ------------------------------
 
     async def record_stop(self, activation_id: str, /) -> None:
         """Write a stop record naming ``activation_id``, idempotently (ADR-0297 §1).
@@ -542,9 +676,17 @@ class FakePlanStore:
             return answer
 
     def _decided_claim(
-        self, record: ActivationEffect, named: tuple[str, ...] | None, *, deliberate_repeat: bool
+        self,
+        record: ActivationEffect,
+        named: tuple[str, ...] | None,
+        *,
+        deliberate_repeat: bool,
     ) -> ActivationEffectClaim:
         """Decide one claim, inside the caller's step: the claim's, or a spawn's (§3:3).
+
+        The stop, the id and the part a call spends are a write's own checks, read over
+        every record (ADR-0383 §7:11); the backstop matches the records this fake, as
+        bound, holds (§7:2).
 
         Raises:
             ClaimStopped: If the store holds a stop record for the activation.
@@ -562,7 +704,7 @@ class FakePlanStore:
             return ActivationEffectClaim.ALREADY_USED
         if named is not None and any(
             _refuses_as_done(held, record, deliberate=deliberate_repeat)
-            for held in self._activation_effects.values()
+            for held in self._held_effects().values()
             if held.activation_id in named
         ):
             return ActivationEffectClaim.ALREADY_DONE
@@ -590,7 +732,7 @@ class FakePlanStore:
             msg = f"an activation effect is named by an identifier, not {effect_id!r}"
             raise PlanningError(msg) from exc
         async with self._resource.held():
-            held = self._activation_effects.get(named)
+            held = self._held_effects().get(named)
             self._activation_effects[named] = _finished_effect(
                 held, named, outcome, reason=reason, position=position
             )
@@ -606,11 +748,13 @@ class FakePlanStore:
         """
         named = set(_read_activations(activation_ids))
         async with self._resource.held():
-            return tuple(
+            found = tuple(
                 held.model_copy(deep=True)
-                for held in self._activation_effects.values()
+                for held in self._held_effects().values()
                 if held.activation_id in named
             )
+        self._counted("activation_effects", _effects_given(found))
+        return found
 
     async def part_effects(self, parts: Sequence[QuestionPart], /) -> tuple[ActivationEffect, ...]:
         """Return the records carrying any of ``parts``, in claim order (ADR-0321 §4:9).
@@ -620,11 +764,13 @@ class FakePlanStore:
         """
         named = set(_named_parts(parts))
         async with self._resource.held():
-            return tuple(
+            found = tuple(
                 held.model_copy(deep=True)
-                for held in self._activation_effects.values()
+                for held in self._held_effects().values()
                 if held.part is not None and held.part in named
             )
+        self._counted("part_effects", _effects_given(found))
+        return found
 
     async def write_observation(
         self, record: ObservationRecord, /, *, expected_revision: int
@@ -636,11 +782,20 @@ class FakePlanStore:
 
         Raises:
             PlanningError: If the record is not valid, the expectation is not a
-                revision, or the held record does not match it.
+                revision, the held record does not match it, or, bound, a record this
+                fake does not hold is held for the episode.
         """
         written, expected = _written_observation(record, expected_revision)
         async with self._resource.held():
             held = self._observations.get(written.episode)
+            if held is not None and written.episode not in self._held_observations():
+                # ADR-0383 §7:5, §7:11: a write that would change a record this binding
+                # does not hold is refused, read over every record.
+                msg = (
+                    f"the plan store holds a record for episode {written.episode!r} this "
+                    f"write may not change; nothing is written"
+                )
+                raise PlanningError(msg)
             if (0 if held is None else held.revision) != expected:
                 found = "no record" if held is None else f"revision {held.revision}"
                 msg = (
@@ -654,11 +809,11 @@ class FakePlanStore:
                     f"no write changes the home of {written.episode!r}'s record; nothing is written"
                 )
                 raise PlanningError(msg)
-            if self._issued + 1 >= _REVISION_BOUND:
+            if self._issuer.last + 1 >= _REVISION_BOUND:
                 msg = "the plan store has issued every observation revision it can"
                 raise PlanningError(msg)
-            self._issued += 1
-            stored = written.model_copy(update={"revision": self._issued})
+            self._issuer.last += 1
+            stored = written.model_copy(update={"revision": self._issuer.last})
             self._observations[stored.episode] = stored
             return stored.model_copy(deep=True)
 
@@ -671,14 +826,16 @@ class FakePlanStore:
         """
         named = _named_episodes(episode_ids)
         async with self._resource.held():
-            return tuple(
-                self._observations[one].model_copy(deep=True)
-                for one in named
-                if one in self._observations
-            )
+            held = self._held_observations()
+            found = tuple(held[one].model_copy(deep=True) for one in named if one in held)
+        self._counted("observations", ((one.home, None) for one in found))
+        return found
 
     async def observer_calls_since(self, since: datetime, /) -> int:
         """Count the model calls the observation records hold at or after ``since``.
+
+        A store-wide figure that counts writes, answered alike bound or not (ADR-0383
+        §8:5).
 
         Raises:
             PlanningError: If ``since`` is not a timezone-aware instant.
@@ -689,13 +846,22 @@ class FakePlanStore:
             msg = f"observer_calls_since counts from a timezone-aware instant, not {since!r}"
             raise PlanningError(msg) from exc
         async with self._resource.held():
-            return sum(record.call_count(start) for record in self._observations.values())
+            calls = sum(record.call_count(start) for record in self._observations.values())
+        self._counted("observer_calls_since", ())
+        return calls
 
     # --- the Task Scheduler's scheduled tasks (ADR-0350 §12:3) -------------
 
     def _schedule(self) -> Schedule:
-        """A copy of the schedule one step decides over, reading the clock once for it."""
-        return Schedule(tasks=dict(self._tasks), now=self._now())
+        """A copy of the tasks this fake, as bound, holds, with the clock read once."""
+        return Schedule(tasks=dict(self._held_tasks()), now=self._now())
+
+    def _kept_schedule(self, schedule: Schedule) -> None:
+        """Write back, in place, the tasks a decision changed and remove those it removed."""
+        for task_id in schedule.removed:
+            self._tasks.pop(task_id, None)
+        for task_id in schedule.changed:
+            self._tasks[task_id] = schedule.tasks[task_id]
 
     async def write_scheduled_task(  # noqa: PLR0913 — the Protocol's signature
         self,
@@ -735,6 +901,10 @@ class FakePlanStore:
                 book, refused = self._ticket_refusal(record, named, deliberate_repeat)
                 if refused is not None:
                     return ticket_refused_write(refused)
+            if asked.id in self._tasks:
+                # ADR-0383 §7:11: whether a task already has the id is read over every task.
+                msg = f"the plan store already holds scheduled task {asked.id} (ADR-0350 §3:3)"
+                raise PlanningError(msg)
             schedule = self._schedule()
             written = decide_task_write(
                 schedule,
@@ -747,8 +917,8 @@ class FakePlanStore:
             if written.answer is TaskWriteAnswer.WRITTEN:
                 if book is not None:
                     spend_ticket(book, record)
-                    self._requests = book.requests
-                self._tasks = schedule.tasks
+                    self._kept_book(book)
+                self._kept_schedule(schedule)
                 self._activation_effects[record.id] = record
             return written.model_copy(deep=True)
 
@@ -766,7 +936,7 @@ class FakePlanStore:
         async with self._resource.held():
             schedule = self._schedule()
             answer = decide_cancel(schedule, named, person=whose, spawned_by=by)
-            self._tasks = schedule.tasks
+            self._kept_schedule(schedule)
             return answer.model_copy(deep=True)
 
     async def scheduled_tasks(self, task_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
@@ -777,9 +947,10 @@ class FakePlanStore:
         """
         named = requested_ids(task_ids, "scheduled tasks")
         async with self._resource.held():
-            return tuple(
-                self._tasks[one].model_copy(deep=True) for one in named if one in self._tasks
-            )
+            held = self._held_tasks()
+            found = tuple(held[one].model_copy(deep=True) for one in named if one in held)
+        self._counted("scheduled_tasks", _tasks_given(found))
+        return found
 
     async def person_scheduled_tasks(
         self, person: str, states: Sequence[OccurrenceState], /
@@ -792,7 +963,11 @@ class FakePlanStore:
         whose = checked_person(person)
         wanted = requested_states(states)
         async with self._resource.held():
-            return tuple(one.model_copy(deep=True) for one in by_person(self._tasks, whose, wanted))
+            found = tuple(
+                one.model_copy(deep=True) for one in by_person(self._held_tasks(), whose, wanted)
+            )
+        self._counted("person_scheduled_tasks", _tasks_given(found))
+        return found
 
     async def spawned_tasks(self, activation_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
         """Return the tasks whose parent is any of the named activations (§12:3).
@@ -802,7 +977,11 @@ class FakePlanStore:
         """
         named = requested_ids(activation_ids, "spawned tasks")
         async with self._resource.held():
-            return tuple(one.model_copy(deep=True) for one in spawned_by(self._tasks, named))
+            found = tuple(
+                one.model_copy(deep=True) for one in spawned_by(self._held_tasks(), named)
+            )
+        self._counted("spawned_tasks", _tasks_given(found))
+        return found
 
     async def scheduled_lineage(self, activation_id: str, /) -> tuple[ScheduledTask, ...]:
         """Return the lineage of the task pushed to ``activation_id`` (§6:5).
@@ -812,7 +991,9 @@ class FakePlanStore:
         """
         named = checked_id(activation_id, "activation")
         async with self._resource.held():
-            return tuple(one.model_copy(deep=True) for one in lineage(self._tasks, named))
+            found = tuple(one.model_copy(deep=True) for one in lineage(self._held_tasks(), named))
+        self._counted("scheduled_lineage", _tasks_given(found))
+        return found
 
     async def live_below(self, task_id: str, /) -> bool:
         """Whether anything below a task is pending, pushed or running (§7:8).
@@ -822,7 +1003,12 @@ class FakePlanStore:
         """
         named = checked_id(task_id, "scheduled task")
         async with self._resource.held():
-            return live_below(self._tasks, named)
+            held = self._held_tasks()
+            answer = live_below(held, named)
+            task = held.get(named)
+            given = () if task is None else (task, *below(held, task))
+        self._counted("live_below", _tasks_given(given))
+        return answer
 
     async def due_occurrences(self, at: datetime, /) -> ScheduledDue:
         """Return the occurrences due at or before ``at``, and the next due after (§7:3).
@@ -832,7 +1018,9 @@ class FakePlanStore:
         """
         instant = checked_instant(at)
         async with self._resource.held():
-            return due(self._tasks, instant).model_copy(deep=True)
+            found = due(self._held_tasks(), instant).model_copy(deep=True)
+        self._counted("due_occurrences", _tasks_given(one.task for one in found.due))
+        return found
 
     async def mark_occurrence_pushed(
         self, task_id: str, number: int, activation_id: str, /, *, rule: RulePush | None = None
@@ -852,9 +1040,14 @@ class FakePlanStore:
         pushed = checked_id(activation_id, "activation")
         instants = checked_rule_push(rule)
         async with self._resource.held():
+            if task_of(self._held_tasks(held=False), pushed) is not None:
+                # ADR-0383 §7:11: an activation an occurrence was pushed to is a key, read
+                # over every task, as the unbound decision reads it first.
+                msg = f"an occurrence was already pushed to activation {pushed} (ADR-0350 §7:5)"
+                raise PlanningError(msg)
             schedule = self._schedule()
             answer = decide_push(schedule, named, which, pushed, rule=instants)
-            self._tasks = schedule.tasks
+            self._kept_schedule(schedule)
             return answer
 
     async def settle_occurrence(
@@ -876,7 +1069,7 @@ class FakePlanStore:
                 second_try=second_try is True,
                 stopped=named in self._stopped,
             )
-            self._tasks = schedule.tasks
+            self._kept_schedule(schedule)
             return task.model_copy(deep=True)
 
     async def stop_pushed_activation(self, activation_id: str, /) -> bool:
@@ -887,7 +1080,7 @@ class FakePlanStore:
         """
         named = _revalidated_activation_id(activation_id)
         async with self._resource.held():
-            if not is_pushed(self._tasks, named):
+            if not is_pushed(self._held_tasks(), named):
                 return False
             self._stopped.add(named)
             return True
@@ -895,12 +1088,19 @@ class FakePlanStore:
     async def stopped_activations(self, activation_ids: Sequence[str], /) -> tuple[str, ...]:
         """Return which of the named activations the store holds a stop record for.
 
+        Bound and withholding, none: a stop record carries no home, and no bound store
+        gives one back (ADR-0383 §3:3).
+
         Raises:
             PlanningError: If ``activation_ids`` is not a sequence of encodable strings.
         """
         named = requested_ids(activation_ids, "stop records")
+        if self._withholding_sight() is not None:
+            return ()
         async with self._resource.held():
-            return tuple(one for one in named if one in self._stopped)
+            found = tuple(one for one in named if one in self._stopped)
+        self._counted("stopped_activations", ((None, None) for _ in found))
+        return found
 
     async def confirm_message_effect(
         self, effect_id: str, /, *, delivered: bool, position: int | None = None
@@ -918,7 +1118,7 @@ class FakePlanStore:
             raise PlanningError(msg) from exc
         async with self._resource.held():
             self._activation_effects[named] = _confirmed_effect(
-                self._activation_effects.get(named), named, delivered=delivered, position=position
+                self._held_effects().get(named), named, delivered=delivered, position=position
             )
 
     async def remove_scheduled_task(self, task_id: str, /) -> bool:
@@ -931,14 +1131,19 @@ class FakePlanStore:
         async with self._resource.held():
             schedule = self._schedule()
             removed = decide_removal(schedule, named)
-            self._tasks = schedule.tasks
+            self._kept_schedule(schedule)
             return removed
 
     # --- the Approvals channel's requests (ADR-0361 §8:2) ------------------
 
     def _book(self) -> Book:
-        """A copy of the requests one step decides over, so a raise leaves those held."""
-        return Book(requests=dict(self._requests))
+        """A copy of the requests this fake, as bound, holds, so a raise leaves them."""
+        return Book(requests=dict(self._held_requests()))
+
+    def _kept_book(self, book: Book) -> None:
+        """Write back, in place, the requests a decision changed, new or rewritten."""
+        for request_id in book.changed:
+            self._requests[request_id] = book.requests[request_id]
 
     def _ticket_refusal(
         self, record: ActivationEffect, named: tuple[str, ...] | None, deliberate_repeat: bool
@@ -948,7 +1153,8 @@ class FakePlanStore:
         In order (ADR-0361 §5:3-§5:5): the stop and the held id, the ticket and its key,
         and the backstop, a call under a ticket counting as one under an approval. It
         answers the book the step decides over, and the refusal, or ``None`` where the
-        caller writes the record and spends the ticket in the same step.
+        caller writes the record and spends the ticket in the same step. The ticket's key
+        is read over every effect record (ADR-0383 §7:11).
         """
         self._decided_claim(record, None, deliberate_repeat=deliberate_repeat)
         book = self._book()
@@ -961,11 +1167,21 @@ class FakePlanStore:
             return book, TicketClaim.ALREADY_DONE
         return book, None
 
-    def _step[T](self, decide: Callable[[Book], T]) -> T:
-        """Run one decision over a copy of the book, and keep what it wrote."""
+    def _step[T](
+        self,
+        decide: Callable[[Book], T],
+        unheld: Callable[[dict[str, ApprovalRequest], T], None] | None = None,
+    ) -> T:
+        """Run one decision over a copy of the held book, and keep what it wrote.
+
+        ``unheld``, where given, is a write's own check over the requests this fake, as
+        bound, does not hold (ADR-0383 §7:11), run before anything is kept.
+        """
         book = self._book()
         answer = decide(book)
-        self._requests = book.requests
+        if unheld is not None:
+            unheld(self._held_requests(held=False), answer)
+        self._kept_book(book)
         return answer
 
     async def write_approval_request(
@@ -988,6 +1204,10 @@ class FakePlanStore:
         named = _named_activations(match)
         async with self._resource.held():
             self._decided_claim(record, None, deliberate_repeat=deliberate_repeat)
+            if asked.id in self._requests:
+                # ADR-0383 §7:11: whether a request already has the id is read over every one.
+                msg = f"the plan store already holds approval request {asked.id}"
+                raise PlanningError(msg)
             book = self._book()
             waiting = decide_request_write(book, asked)
             if waiting is not None:
@@ -996,7 +1216,7 @@ class FakePlanStore:
             if answer is not ActivationEffectClaim.CLAIMED:
                 return ApprovalRequestWrite(answer=ApprovalWriteAnswer.ALREADY_DONE)
             written = write_request(book, asked)
-            self._requests = book.requests
+            self._kept_book(book)
             self._activation_effects[record.id] = record
             return written.model_copy(deep=True)
 
@@ -1008,9 +1228,10 @@ class FakePlanStore:
         """
         named = requested_request_ids(request_ids)
         async with self._resource.held():
-            return tuple(
-                self._requests[one].model_copy(deep=True) for one in named if one in self._requests
-            )
+            held = self._held_requests()
+            found = tuple(held[one].model_copy(deep=True) for one in named if one in held)
+        self._counted("approval_requests", _requests_given(found))
+        return found
 
     async def person_approval_requests(
         self, person: str, states: Sequence[ApprovalRequestState], /
@@ -1023,10 +1244,12 @@ class FakePlanStore:
         whose = checked_request_person(person)
         wanted = requested_request_states(states)
         async with self._resource.held():
-            return tuple(
+            found = tuple(
                 one.model_copy(deep=True)
-                for one in requests_by_person(self._requests, whose, wanted)
+                for one in requests_by_person(self._held_requests(), whose, wanted)
             )
+        self._counted("person_approval_requests", _requests_given(found))
+        return found
 
     async def approval_request_by_token(self, token: str, /) -> ApprovalRequest | None:
         """Return the request one of whose cards carries ``token``, or ``None`` (§4:10).
@@ -1036,8 +1259,12 @@ class FakePlanStore:
         """
         named = checked_token(token)
         async with self._resource.held():
-            found = by_token(self._requests, named)
-            return None if found is None else found.model_copy(deep=True)
+            found = by_token(self._held_requests(), named)
+            given = None if found is None else found.model_copy(deep=True)
+        self._counted(
+            "approval_request_by_token", _requests_given(() if given is None else (given,))
+        )
+        return given
 
     async def record_approval_card(self, request_id: str, card: ApprovalCard, /) -> ApprovalRequest:
         """Record one of a request's cards and its token, in one step (§4:3, §4:10).
@@ -1048,8 +1275,17 @@ class FakePlanStore:
         """
         named = checked_request_id(request_id)
         posted = checked_card(card)
+
+        def untaken(unheld: dict[str, ApprovalRequest], _written: ApprovalRequest) -> None:
+            # ADR-0383 §7:11: a card's token is minted once, read over every request.
+            if posted.token is not None and by_token(unheld, posted.token) is not None:
+                msg = f"a card token is minted once, and approval request {named}'s is not new"
+                raise PlanningError(msg)
+
         async with self._resource.held():
-            return self._step(lambda book: decide_card(book, named, posted)).model_copy(deep=True)
+            return self._step(lambda book: decide_card(book, named, posted), untaken).model_copy(
+                deep=True
+            )
 
     async def answer_approval_request(
         self, request_id: str, state: ApprovalRequestState, tap: ApprovalTap, /
@@ -1098,12 +1334,18 @@ class FakePlanStore:
         """
         instant = checked_at(at)
         async with self._resource.held():
-            return approvals_due(self._requests, instant).model_copy(deep=True)
+            found = approvals_due(self._held_requests(), instant).model_copy(deep=True)
+        self._counted("due_approval_outcomes", _requests_given((*found.outcomes, *found.expiring)))
+        return found
 
     async def pushed_approval_outcomes(self) -> tuple[ApprovalRequest, ...]:
         """Return every request whose outcome is marked pushed, in the order written (§3:7)."""
         async with self._resource.held():
-            return tuple(one.model_copy(deep=True) for one in pushed_outcomes(self._requests))
+            found = tuple(
+                one.model_copy(deep=True) for one in pushed_outcomes(self._held_requests())
+            )
+        self._counted("pushed_approval_outcomes", _requests_given(found))
+        return found
 
     async def mark_approval_outcome_pushed(
         self, request_id: str, activation_id: str, /
@@ -1116,8 +1358,18 @@ class FakePlanStore:
         """
         named = checked_request_id(request_id)
         pushed_to = checked_request_id(activation_id, "activation")
+
+        def untaken(unheld: dict[str, ApprovalRequest], answer: ApprovalOutcomePush) -> None:
+            # ADR-0383 §7:11: an activation an outcome was pushed to is a key, read over
+            # every request.
+            if answer is ApprovalOutcomePush.PUSHED and any(
+                one.pushed_to == pushed_to for one in unheld.values()
+            ):
+                msg = f"an approval's outcome was already pushed to activation {pushed_to}"
+                raise PlanningError(msg)
+
         async with self._resource.held():
-            return self._step(lambda book: decide_outcome_push(book, named, pushed_to))
+            return self._step(lambda book: decide_outcome_push(book, named, pushed_to), untaken)
 
     async def claim_ticket_call(
         self,
@@ -1141,7 +1393,7 @@ class FakePlanStore:
             if refused is not None:
                 return refused
             spend_ticket(book, record)
-            self._requests = book.requests
+            self._kept_book(book)
             self._activation_effects[record.id] = record
             return TicketClaim.CLAIMED
 
@@ -1149,49 +1401,68 @@ class FakePlanStore:
         """Return a portable, internally consistent snapshot — under the resource (#397).
 
         The sections ADR-0309 §5 retired (goals, plans, executions, attempts,
-        questions, evidence and effect rows) left the document with them.
+        questions, evidence and effect rows) left the document with them. Bound and
+        withholding, the records it holds, and no stop record (ADR-0383 §3:3).
         """
         async with self._resource.held():
-            return PlanExport(
+            observed = self._held_observations()
+            document = PlanExport(
                 exported_at=self._now(),
                 # ADR-0297 §1: every stop record, in a deterministic order.
-                stopped_activations=tuple(sorted(self._stopped)),
+                stopped_activations=(
+                    () if self._withholding_sight() is not None else tuple(sorted(self._stopped))
+                ),
                 # ADR-0306 §6: every effect record, in claim order.
                 activation_effects=tuple(
-                    held.model_copy(deep=True) for held in self._activation_effects.values()
+                    held.model_copy(deep=True) for held in self._held_effects().values()
                 ),
                 # ADR-0329 §16:9: every observation record, by episode id.
-                observations=tuple(
-                    self._observations[one].model_copy(deep=True)
-                    for one in sorted(self._observations)
-                ),
+                observations=tuple(observed[one].model_copy(deep=True) for one in sorted(observed)),
                 # ADR-0350 §12:3: every scheduled task, in the order written.
-                scheduled_tasks=tuple(one.model_copy(deep=True) for one in self._tasks.values()),
+                scheduled_tasks=tuple(
+                    one.model_copy(deep=True) for one in self._held_tasks().values()
+                ),
                 # ADR-0361 §8:2: every approval request, in the order written.
                 approval_requests=tuple(
-                    one.model_copy(deep=True) for one in self._requests.values()
+                    one.model_copy(deep=True) for one in self._held_requests().values()
                 ),
             )
+        self._counted(
+            "export",
+            (
+                *((None, None) for _ in document.stopped_activations),
+                *_effects_given(document.activation_effects),
+                *((one.home, None) for one in document.observations),
+                *_tasks_given(document.scheduled_tasks),
+                *_requests_given(document.approval_requests),
+            ),
+        )
+        return document
 
     async def clear(self) -> int:
         """Delete every record, the Task Scheduler's included, returning the number removed.
 
         This store holds no execution, so no step is ever live and nothing refuses
-        the erase. The revision issuer is kept (ADR-0329 §16:9).
+        the erase. The revision issuer is kept (ADR-0329 §16:9). Bound and withholding,
+        it removes and counts the records it holds, and no stop record (ADR-0383 §3:3).
         """
         async with self._resource.held():
-            removed = (
-                len(self._stopped)
-                + len(self._activation_effects)
-                + len(self._observations)
-                + len(self._tasks)
-                + len(self._requests)
-            )
-            self._stopped.clear()
-            self._activation_effects.clear()
-            self._observations.clear()
-            self._tasks.clear()
-            self._requests.clear()
+            removed = 0
+            if self._withholding_sight() is None:
+                removed += len(self._stopped)
+                self._stopped.clear()
+            for key in list(self._held_effects()):
+                del self._activation_effects[key]
+                removed += 1
+            for key in list(self._held_observations()):
+                del self._observations[key]
+                removed += 1
+            for key in list(self._held_tasks()):
+                del self._tasks[key]
+                removed += 1
+            for key in list(self._held_requests()):
+                del self._requests[key]
+                removed += 1
         return removed
 
 

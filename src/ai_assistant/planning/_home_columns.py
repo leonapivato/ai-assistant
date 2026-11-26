@@ -1,0 +1,239 @@
+"""A sight over the plan store's records (ADR-0383 §3, §7, §11).
+
+The plan store keeps two kinds of record whose home is two columns of their own row,
+``home_kind`` and ``home_id`` (ADR-0383 §2:2): an activation's effect records and the
+observation records. It keeps two kinds whose home is the person a column already names
+(§3, §5:2): a scheduled task and an approval request, whose ``person`` is whom each is
+for, and whose domain is its home. A stop record carries none, and no bound store gives
+one back, counts it or names it (§3:3). This module is what a store bound to a sight
+needs of them:
+
+- :func:`stored_home` and :func:`person_home`, **the one reading** of what a row's
+  columns say its home is, which nothing else may re-spell;
+- :func:`seen_sql` and :func:`seen_person_sql`, the sight expressed in the store's own
+  query over those columns, a positive match against the homes the sight sees
+  (:attr:`~ai_assistant.core.types.Sight.homes_seen`), or against the activation the
+  store records as having made the row (§7:4), which answers as
+  :meth:`~ai_assistant.core.types.Sight.withheld` does over the reading above on every
+  row (§7:3);
+- :func:`count_given`, the count event a read through a store bound in the counting mode
+  writes (§11:1 to §11:3).
+
+**Why the reading is strict.** A home is stored exactly as the store wrote it: the kind's
+text and the identifier's text, or ``NULL`` for the shared things' identifier; a person
+as the text the record names. A row whose columns hold anything else was altered outside
+the store, and its home is one the store cannot read: the home of no one, withheld from
+every sight, its own activation's included, and never read as the owner's or anyone
+else's (§5:3). Reading it strictly on both sides, in Python by type and exact value and
+in SQL by ``typeof`` and exact comparison, is what makes the statement and the reading
+agree by construction. For a row altered outside the store the columns are the store's
+record of its home, and every statement decides by them (the coordinator's ruling on
+#3742).
+
+The same small thing for the story and notification stores is
+``ai_assistant.memory._home_columns``, which ``planning`` may not import (golden rule
+1); the two are kept alike by hand. Nothing here decides what a sight sees: that is
+:meth:`~ai_assistant.core.types.Sight.withheld`'s alone.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Final
+
+import structlog
+from pydantic import ValidationError
+
+from ai_assistant.core.types import RecordHome, RecordHomeKind
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from ai_assistant.core.types import Sight
+
+_log = structlog.get_logger(__name__)
+
+#: This store's code in ADR-0383 §11:1's count event.
+STORE_CODE: Final = "plans"
+
+#: The event a read through a store bound in the counting mode writes (ADR-0383 §11:1),
+#: the name every bound store gives it.
+SIGHT_COUNTED: Final = "sight_counted"
+
+
+def stored_home(kind: object, home_id: object) -> RecordHome | None:
+    """The home two stored columns hold, or ``None`` where they hold none it can read.
+
+    **The one reading** of an effect's or an observation's two home columns (ADR-0383
+    §2:2, §5:3): the kind is text naming a :class:`~ai_assistant.core.types.RecordHomeKind`,
+    the identifier text, or ``NULL`` for the shared things, and the two make a valid home
+    **exactly as stored**, with nothing coerced or normalised. Any other pair is a home
+    the store cannot read.
+
+    Args:
+        kind: The ``home_kind`` column's value, as the driver gave it.
+        home_id: The ``home_id`` column's value, as the driver gave it.
+
+    Returns:
+        The home, or ``None`` where the columns hold no home this reading accepts.
+    """
+    if type(kind) is not str or (home_id is not None and type(home_id) is not str):
+        return None
+    try:
+        home = RecordHome.model_validate({"kind": kind, "id": home_id})
+    except ValidationError:
+        return None
+    if home.kind.value != kind or home.id != home_id:
+        return None
+    return home
+
+
+def person_home(person: object) -> RecordHome | None:
+    """The home a scheduled task's or an approval request's stored person names (§3, §5:2).
+
+    **The one reading**: that person's domain, exactly as stored, where the column holds
+    text that names a person; ``None`` otherwise, a home the store cannot read (§5:3).
+
+    Args:
+        person: The ``person`` column's value, as the driver gave it, or the record's.
+
+    Returns:
+        The home, or ``None`` where it names none this reading accepts.
+    """
+    if type(person) is not str:
+        return None
+    try:
+        home = RecordHome.person(person)
+    except ValidationError:
+        return None
+    return home if home.id == person else None
+
+
+def _readable_home_sql(kind_column: str, id_column: str) -> str:
+    """A condition that is ``1`` where the two columns hold a home of a kind a build writes.
+
+    Used only beside a made-by term, so a row of the sight's own activation whose columns
+    name no home is held by no sight (§5:3). It reads the kind exactly and the identifier
+    as text, and does not ask whether that text is blank or encodable, which SQL cannot
+    read as the model does: a row whose identifier is so is one whose columns disagree
+    with its record's valid home, which the store's decoder refuses as corrupt, so it
+    gives no reader its content.
+    """
+    shared = RecordHomeKind.SHARED.value
+    named = ", ".join(
+        f"'{one.value}'" for one in RecordHomeKind if one is not RecordHomeKind.SHARED
+    )
+    return (
+        f"(typeof({kind_column}) = 'text' AND "
+        f"(({kind_column} = '{shared}' AND {id_column} IS NULL) OR "
+        f"({kind_column} IN ({named}) AND typeof({id_column}) = 'text')))"
+    )
+
+
+def seen_sql(
+    sight: Sight,
+    *,
+    kind_column: str = "home_kind",
+    id_column: str = "home_id",
+    made_by: str | None = None,
+) -> tuple[str, list[object]]:
+    """The store's expression of ``sight`` over a row's two home columns (ADR-0383 §7:3).
+
+    **A positive match**: a row is seen where its columns hold, exactly and as text, one of
+    the homes the sight sees, the shared things' identifier being ``NULL``; or, where
+    ``made_by`` is given and the sight is a work's, where the row is that work's own
+    (§7:4) and its columns name a home. A row with no home, or one the store cannot read,
+    matches nothing (§5:3), and an identifier is never normalised.
+
+    The condition is ``0`` or ``1`` on every row and never ``NULL``, so its negation
+    selects exactly the rows it does not. Only placeholders, the enumeration's values and
+    the column expressions given are written into the text; every other value is bound.
+
+    Args:
+        sight: The sight the store is bound to.
+        kind_column: The kind's column.
+        id_column: The identifier's column.
+        made_by: A column holding the activation the store records as having made the
+            row, or ``None`` where it records none.
+
+    Returns:
+        The SQL condition and its parameters, in order.
+    """
+    terms: list[str] = []
+    params: list[object] = []
+    for home in sorted(sight.homes_seen, key=lambda one: (one.kind.value, one.id or "")):
+        if home.id is None:
+            terms.append(f"({kind_column} = ? AND {id_column} IS NULL)")
+            params.append(home.kind.value)
+        else:
+            terms.append(
+                f"({kind_column} = ? AND typeof({id_column}) = 'text' AND {id_column} = ?)"
+            )
+            params.extend([home.kind.value, home.id])
+    if made_by is not None and sight.activation is not None:
+        terms.append(
+            f"(typeof({made_by}) = 'text' AND {made_by} = ? AND "
+            f"{_readable_home_sql(kind_column, id_column)})"
+        )
+        params.append(sight.activation)
+    if not terms:
+        return "0", []
+    matched = " OR ".join(terms)
+    return f"coalesce((typeof({kind_column}) = 'text' AND ({matched})), 0)", params
+
+
+def seen_person_sql(
+    sight: Sight, *, person_column: str = "person", made_by: str | None = None
+) -> tuple[str, list[object]]:
+    """The store's expression of ``sight`` over a row's ``person`` column (ADR-0383 §7:3).
+
+    **A positive match**: a row is seen where its column holds, exactly and as text, a
+    person whose domain is a home the sight sees; or, where ``made_by`` is given and the
+    sight is a work's, where the row is that work's own (§7:4) and its column holds text.
+    A shared or group home names no person, so no task or request is seen by it.
+
+    The condition is ``0`` or ``1`` on every row and never ``NULL``.
+
+    Args:
+        sight: The sight the store is bound to.
+        person_column: The person's column.
+        made_by: An expression giving the activation the store records as having made
+            the row, ``NULL`` where it cannot be read, or ``None`` where it records none.
+
+    Returns:
+        The SQL condition and its parameters, in order.
+    """
+    persons = sorted(
+        str(home.id) for home in sight.homes_seen if home.kind is RecordHomeKind.PERSON
+    )
+    terms: list[str] = []
+    params: list[object] = []
+    if persons:
+        marks = ", ".join("?" for _ in persons)
+        terms.append(f"({person_column} IN ({marks}))")
+        params.extend(persons)
+    if made_by is not None and sight.activation is not None:
+        terms.append(f"({made_by} = ?)")
+        params.append(sight.activation)
+    if not terms:
+        return "0", []
+    matched = " OR ".join(terms)
+    return f"coalesce((typeof({person_column}) = 'text' AND ({matched})), 0)", params
+
+
+def count_given(
+    sight: Sight, *, member: str, given: Iterable[tuple[RecordHome | None, str | None]]
+) -> None:
+    """Write §11:1's event for one read: what it gave back, and what ``sight`` withholds.
+
+    To the hub's log alone, in numbers and codes (§11:3): no record's text and no
+    identifier reach it, since :class:`~ai_assistant.core.types.SightCount` carries none.
+
+    Args:
+        sight: The sight the store is bound to.
+        member: The read member's name.
+        given: Each record the read gave back, as its home (``None`` where it has none
+            the store can read, a stop record's among them) and the activation the
+            store records as having made it.
+    """
+    count = sight.count(store=STORE_CODE, member=member, given=given)
+    _log.info(SIGHT_COUNTED, **count.model_dump(mode="json"))

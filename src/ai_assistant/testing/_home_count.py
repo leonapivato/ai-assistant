@@ -2,7 +2,9 @@
 
 For the story, notification, conversation and person-model fakes, whose records are seen
 by their home alone, as ``ai_assistant.memory._home_columns`` has it for the durable
-stores. Duplicated rather
+stores (:func:`count_homes`); and for the plan fake, some of whose records are its sight's
+activation's own (ADR-0383 §7:4), as ``ai_assistant.planning._home_columns`` has it
+(:func:`count_given`). Duplicated rather
 than shared for the reason every shared piece of a fake is: ``ai_assistant.testing`` may
 not import a subsystem (golden rule 1). Each Protocol's conformance suite runs the same
 count cases against the fake and the durable store, so the copies cannot drift unseen.
@@ -40,4 +42,29 @@ def count_homes(
             a bound store reads (a device row, ADR-0383 §3:3).
     """
     count = sight.count(store=store, member=member, given=((home, None) for home in homes))
+    _log.info(SIGHT_COUNTED, **count.model_dump(mode="json"))
+
+
+def count_given(
+    sight: Sight,
+    *,
+    store: str,
+    member: str,
+    given: Iterable[tuple[RecordHome | None, str | None]],
+) -> None:
+    """Write §11:1's event for one read, each record given with the activation that made it.
+
+    In numbers and codes alone (§11:3). For a store that records some records as made by
+    an activation (ADR-0383 §7:4), which its sight's own activation sees whatever their
+    home.
+
+    Args:
+        sight: The sight the fake is bound to.
+        store: The store's code, as the durable store writes it.
+        member: The read member's name.
+        given: Each record the read gave back, as its home (``None`` for one with no home
+            a bound store reads, a stop record's among them, §3:3) and the activation the
+            store records as having made it, or ``None``.
+    """
+    count = sight.count(store=store, member=member, given=given)
     _log.info(SIGHT_COUNTED, **count.model_dump(mode="json"))

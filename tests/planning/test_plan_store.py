@@ -6,12 +6,15 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from plan_store_contract import PlanStoreContract
+from plan_store_contract import PlanRemoval, PlanStoreContract
 
 from ai_assistant.planning import InMemoryPlanStore
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.protocols import PlanStore
+    from ai_assistant.core.types import SightMode
 
 
 def _fixed_now() -> datetime:
@@ -31,3 +34,25 @@ class TestInMemoryPlanStoreContract(PlanStoreContract):
     @pytest.fixture
     def store(self) -> PlanStore:
         return InMemoryPlanStore(now=_fixed_now)
+
+    @pytest.fixture
+    def sight_store_factory(self) -> Callable[[SightMode], PlanStore]:
+        return lambda mode: InMemoryPlanStore(now=_fixed_now, sight_mode=mode)
+
+    @pytest.fixture
+    def remove_records(self) -> Callable[[PlanStore, PlanRemoval], None]:
+        """Pop the records from the store's own containers; the issuer is untouched."""
+
+        def remove(store: PlanStore, removal: PlanRemoval) -> None:
+            assert isinstance(store, InMemoryPlanStore)
+            for one in removal.effects:
+                del store._activation_effects[one]
+            for one in removal.observations:
+                del store._observations[one]
+            for one in removal.tasks:
+                del store._tasks[one]
+            for one in removal.requests:
+                del store._requests[one]
+            store._stopped.clear()
+
+        return remove
