@@ -67,6 +67,17 @@ another home than the story it mints or writes, and a merge or a move between st
 of two homes, are refused ``another_home``, writing nothing. Since a note takes its
 story's home and no write changes a story's, no write changes a note's either (§4:6).
 
+**A store bound to a sight** (ADR-0383 §7) is a copy of this one sharing its connection,
+lock and clock by reference, with the sight set. A story is held where its two home
+columns hold a home the sight sees (:func:`~ai_assistant.memory._home_columns.seen_sql`,
+read strictly by :func:`~ai_assistant.memory._home_columns.stored_home`, which this
+module's header decoder reads a home by too), and a note, a summary, a version, a log
+line and a member row are held with their story (§3:2). Withholding, every read finds a
+story by id and lists stories only among those held, and every write finds the stories
+it names alike, so a story the sight does not see answers as one never written; a write's
+own check that a minted id is fresh reads every story (§7:11). Counting, every statement
+is the unbound one, and each read logs the homes of the stories it gave back.
+
 The file is created owner-only (ADR-0004 §4). The membership records hold
 identities and instants only (ADR-0289 §2:7); the notes and the summary hold
 the text ADR-0300 §3 gives them, which is a fact about the owner's life as well.
@@ -76,6 +87,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import sqlite3
 import threading
@@ -98,6 +110,7 @@ from ai_assistant.core.types import (
     Identifier,
     RecordHome,
     RecordHomeKind,
+    SightMode,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -134,13 +147,18 @@ from ai_assistant.core.types import (
     story_members,
     story_note_ids,
 )
+from ai_assistant.memory._home_columns import count_homes, seen_sql, stored_home
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
+    from ai_assistant.core.types import Sight
+
+#: This store's code in ADR-0383 §11:1's count event.
+STORE_CODE: Final = "stories"
 
 _OWNER_ONLY = 0o600
 
@@ -769,6 +787,7 @@ class SqliteStoryStore:
         path: Path | str,
         now: Clock = _utcnow,
         new_id: Callable[[], str] = _new_id,
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> None:
         """Open (or create) the story store at ``path``.
 
@@ -778,6 +797,9 @@ class SqliteStoryStore:
                 guarded by :func:`~ai_assistant.core.clock.checked_clock`.
             new_id: The source a minted story id's suffix is drawn from; the id is
                 ``story:`` followed by it.
+            sight_mode: Whether a store bound to a sight withholds or only counts
+                (ADR-0383 §7:10): fixed here, by the composition root, and read from
+                no setting and no running act.
 
         Raises:
             StoryStoreError: If the database cannot be opened or prepared, or carries
@@ -785,6 +807,8 @@ class SqliteStoryStore:
         """
         self._clock = checked_clock(now, owner="SqliteStoryStore")
         self._new_id = new_id
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
         self._path = path if path == ":memory:" else str(Path(path))
         self._lock = asyncio.Lock()
         self._conn = self._setup()
@@ -866,8 +890,78 @@ class SqliteStoryStore:
     def _transaction(self, what: str, *, immediate: bool = True) -> AbstractContextManager[Any]:
         return transaction(self._conn, what, error=StoryStoreError, immediate=immediate)
 
+    # --- a sight (ADR-0383 §7, §8, §11) ----------------------------------------
+
+    def bound(self, sight: Sight) -> SqliteStoryStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing this store's connection, lock and clock by reference,
+        with the sight set: the meet of the one it was already bound to, where it was
+        (§6:6). It opens nothing, and closing either closes both.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _seen(self, *, table: str = "") -> tuple[str, list[object]] | None:
+        """The sight's condition over a ``stories`` row where this store withholds; else ``None``.
+
+        Args:
+            table: The alias the statement gives ``stories``, where it joins.
+        """
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return None
+        prefix = f"{table}." if table else ""
+        return seen_sql(self._sight, kind_column=f"{prefix}home_kind", id_column=f"{prefix}home_id")
+
+    def _counted(self, member: str, homes: Iterable[RecordHome | None]) -> None:
+        """Write §11:1's count of one read, where this store is bound and only counts."""
+        if self._sight is not None and self._sight_mode is SightMode.COUNT:
+            count_homes(self._sight, store=STORE_CODE, member=member, homes=homes)
+
+    def _header(self, conn: sqlite3.Connection, story_id: str) -> StoryHeader | None:
+        """The header of a story this store holds, or ``None`` (ADR-0383 §7:2, §8:2).
+
+        Withholding, a story its sight does not see is one it does not hold, and so is
+        every note, summary, version, log line and member row of it (§3:2).
+        """
+        where, params = self._seen() or ("1", [])
+        row = conn.execute(
+            f"SELECT {_HEADER_COLUMNS} FROM stories WHERE id = ? AND {where}",  # noqa: S608 — module text; values bound
+            (story_id, *params),
+        ).fetchone()
+        if row is None:
+            return None
+        return _decoded(_header_from, row)
+
+    def _holds_story(self, conn: sqlite3.Connection, story_id: str) -> bool:
+        """Whether this store, as bound, holds the story ``story_id`` names, if any.
+
+        Unbound, and bound in the counting mode, every stored row; withholding, a row
+        whose home its sight sees. Read without decoding the row, so a corrupt row is
+        reported by the read that decodes it.
+        """
+        seen = self._seen()
+        if seen is None:
+            return True
+        where, params = seen
+        row = conn.execute(
+            f"SELECT 1 FROM stories WHERE id = ? AND {where}",  # noqa: S608 — module text; values bound
+            (story_id, *params),
+        ).fetchone()
+        return row is not None
+
     @staticmethod
-    def _header(conn: sqlite3.Connection, story_id: str) -> StoryHeader | None:
+    def _stored_header(conn: sqlite3.Connection, story_id: str) -> StoryHeader | None:
+        """The header of any stored story, whatever this store's sight sees.
+
+        For a write's own checks over every record (ADR-0383 §7:11) and for following a
+        held flag's merges, which :meth:`_flag_refusal` has found held.
+        """
         row = conn.execute(
             f"SELECT {_HEADER_COLUMNS} FROM stories WHERE id = ?",  # noqa: S608 — a module constant, no input
             (story_id,),
@@ -903,12 +997,13 @@ class SqliteStoryStore:
         ).fetchall()
         return [row[0] for row in rows]
 
-    @staticmethod
-    def _path_down(conn: sqlite3.Connection, start: str, target: str) -> list[str] | None:
+    def _path_down(self, conn: sqlite3.Connection, start: str, target: str) -> list[str] | None:
         """A chain of stories from ``start`` down to ``target`` through membership.
 
         Breadth-first, so the chain reported is a shortest one. ``None`` where
-        ``target`` is not reachable from ``start``.
+        ``target`` is not reachable from ``start``. Withholding, the walk goes down
+        through stories this store holds alone, as the same store holding only them
+        would: a story it does not hold has no members to follow (ADR-0383 §7:2).
         """
         parents: dict[str, str | None] = {start: None}
         queue = deque([start])
@@ -919,6 +1014,8 @@ class SqliteStoryStore:
                 while (above := parents[chain[-1]]) is not None:
                     chain.append(above)
                 return chain[::-1]
+            if not self._holds_story(conn, current):
+                continue
             rows = conn.execute(
                 "SELECT member_id FROM members WHERE story_id = ? AND kind = ? ORDER BY position",
                 (current, StoryMemberKind.STORY.value),
@@ -991,6 +1088,14 @@ class SqliteStoryStore:
         then gains the target, is to be of the target's home, so a membership across
         homes a store holds from before these refusals is never copied and no story of
         another home is changed. The first that is not is the one reported.
+
+        **Withholding, a story it does not hold is never named** (ADR-0383 §4:8, §7:5,
+        §8:2). Where one the merge would write is a story the bound store does not hold,
+        the merge would change, or name in a membership, a record its sight does not see,
+        so it is refused as a write to a story it does not hold, ``unknown_story`` naming
+        the absorbed story, the one the caller named whose merge reaches it. By §4:7 no
+        story a sight sees holds or is held by a story of another home, so only a file
+        written before these refusals can hold such a membership.
         """
         home = self._home_of(conn, target)
         target_member = StoryMember(kind=StoryMemberKind.STORY, id=target)
@@ -1002,6 +1107,8 @@ class SqliteStoryStore:
             and not self._holds(conn, target, member)
         ]
         changed = [holder for holder in self._holders(conn, absorbed) if holder != target]
+        if not all(self._holds_story(conn, story_id) for story_id in [*gained, *changed]):
+            return StoryRefusal(reason=StoryRefusalReason.UNKNOWN_STORY, story_id=absorbed)
         return self._home_refusal(conn, home, [*gained, *changed])
 
     @staticmethod
@@ -1060,7 +1167,7 @@ class SqliteStoryStore:
         """The story ``story_id`` was merged into, through every merge, or itself."""
         seen = {story_id}
         while True:
-            header = self._header(conn, story_id)
+            header = self._stored_header(conn, story_id)
             if header is None:
                 msg = f"the story store has no story {story_id!r} that its records name"
                 raise StoryStoreError(msg)
@@ -1077,7 +1184,14 @@ class SqliteStoryStore:
         """``unknown_flag``, then ``already_decided``, read off the store's own records.
 
         A flag named by an activation is never held: understanding raises no flag
-        (ADR-0303 §8).
+        (ADR-0303 §8). Withholding, nor is a flag concerning a story this store does not
+        hold, the story that raised it, the story it names, or either as followed through
+        its merges: such a flag is answered as one never raised (ADR-0383 §4:8, §8:2),
+        since no flag naming a story never written could have been recorded, and a
+        decision on it would write a line into a story the sight does not see (§3:2,
+        §7:5). Whether a ``decided`` line already answers it is read over every story, a
+        write's own check that one flag is answered once (§7:11); a line answering a
+        held flag lies on the stories it concerns, which are held.
         """
         if flag.activation is not None:
             held = False
@@ -1087,7 +1201,11 @@ class SqliteStoryStore:
                 "AND story_id = ?",
                 (flag.version, flag.story),
             ).fetchone()
-            held = row is not None and flag.flag in _decoded(_version_from, row).flags
+            held = (
+                row is not None
+                and flag.flag in _decoded(_version_from, row).flags
+                and self._flag_seen(conn, flag)
+            )
         if not held:
             return StoryRefusal(reason=StoryRefusalReason.UNKNOWN_FLAG, flag=flag)
         answered = conn.execute(
@@ -1097,6 +1215,15 @@ class SqliteStoryStore:
         if answered is not None:
             return StoryRefusal(reason=StoryRefusalReason.ALREADY_DECIDED, flag=flag)
         return None
+
+    def _flag_seen(self, conn: sqlite3.Connection, flag: StoryFlagName) -> bool:
+        """Whether every story a recorded flag names or concerns is one this store holds."""
+        if self._seen() is None:
+            return True
+        named = [one for one in (flag.story, flag.flag.story if flag.flag else None) if one]
+        if not all(self._holds_story(conn, story_id) for story_id in named):
+            return False
+        return all(self._holds_story(conn, story_id) for story_id in self._concerned(conn, flag))
 
     def _concerned(self, conn: sqlite3.Connection, flag: StoryFlagName) -> list[str]:
         """The stories a held flag concerns, followed through merges, each once (§2:3)."""
@@ -1200,7 +1327,8 @@ class SqliteStoryStore:
             msg = f"the story id source returned an unusable id: {describe_untrusted(suffix)}"
             raise StoryStoreError(msg)
         story_id = _checked_id(STORY_ID_PREFIX + suffix.strip())
-        if self._header(conn, story_id) is not None:
+        # A write's own check, over every story the store holds (ADR-0383 §7:11).
+        if self._stored_header(conn, story_id) is not None:
             msg = f"the story id source minted {story_id!r}, which the store already holds"
             raise StoryStoreError(msg)
         sequence = self._append(conn, story_id, StoryChange.CREATED, stamp)
@@ -1883,7 +2011,9 @@ class SqliteStoryStore:
     async def header(self, story_id: Identifier) -> StoryHeader | None:
         """Read a story's header (ADR-0289 §3)."""
         target = _checked_id(story_id)
-        return await self._locked(self._header_sync, target)
+        header = await self._locked(self._header_sync, target)
+        self._counted("header", () if header is None else (header.home,))
+        return header
 
     def _header_sync(self, story_id: str) -> StoryHeader | None:
         with self._transaction("read a story", immediate=False) as conn:
@@ -1899,7 +2029,9 @@ class SqliteStoryStore:
         """Read a page of a story's clean view, in link order (ADR-0289 §3)."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
-        return await self._locked(self._view_sync, target, cursor, limit)
+        page = await self._locked(self._view_sync, target, cursor, limit)
+        self._counted("view", () if page is None else (page.story.home,))
+        return page
 
     def _view_sync(self, story_id: str, cursor: int | None, limit: int) -> StoryViewPage | None:
         with self._transaction("read a story's view", immediate=False) as conn:
@@ -1935,7 +2067,9 @@ class SqliteStoryStore:
         """Read a page of a story's change log, in sequence order (ADR-0289 §3)."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
-        return await self._locked(self._log_sync, target, cursor, limit)
+        page = await self._locked(self._log_sync, target, cursor, limit)
+        self._counted("log", () if page is None else (page.story.home,))
+        return page
 
     def _log_sync(self, story_id: str, cursor: int | None, limit: int) -> StoryLogPage | None:
         with self._transaction("read a story's log", immediate=False) as conn:
@@ -1966,21 +2100,27 @@ class SqliteStoryStore:
     ) -> StoryPage:
         """Read a page of every story the store holds, newest first (ADR-0289 §3)."""
         check_story_page(cursor, limit)
-        return await self._locked(self._stories_sync, cursor, limit)
+        page = await self._locked(self._stories_sync, cursor, limit)
+        self._counted("stories", (header.home for header in page.stories))
+        return page
 
     def _stories_sync(self, cursor: int | None, limit: int) -> StoryPage:
+        # Withholding, the sight narrows the rows before the order, the limit and the
+        # cursor, so a page holds ``limit`` stories it holds and a cursor's next page
+        # passes over a story it does not hold without counting it (ADR-0383 §7:2, §8:1).
+        where, params = self._seen() or ("1", [])
         with self._transaction("list stories", immediate=False) as conn:
             if cursor is None:
                 rows = conn.execute(
-                    f"SELECT {_HEADER_COLUMNS}, created_seq FROM stories "  # noqa: S608 — a module constant, no input
-                    "ORDER BY created_seq DESC LIMIT ?",
-                    (limit + 1,),
+                    f"SELECT {_HEADER_COLUMNS}, created_seq FROM stories "  # noqa: S608 — module text; values bound
+                    f"WHERE {where} ORDER BY created_seq DESC LIMIT ?",
+                    (*params, limit + 1),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    f"SELECT {_HEADER_COLUMNS}, created_seq FROM stories "  # noqa: S608 — a module constant, no input
-                    "WHERE created_seq < ? ORDER BY created_seq DESC LIMIT ?",
-                    (cursor, limit + 1),
+                    f"SELECT {_HEADER_COLUMNS}, created_seq FROM stories "  # noqa: S608 — module text; values bound
+                    f"WHERE created_seq < ? AND {where} ORDER BY created_seq DESC LIMIT ?",
+                    (cursor, *params, limit + 1),
                 ).fetchall()
         kept = rows[:limit]
         headers = [_decoded(_header_from, row) for row in kept]
@@ -1992,15 +2132,18 @@ class SqliteStoryStore:
     async def stories_of(self, member: StoryMember) -> tuple[StoryHeader, ...]:
         """Read the stories ``member`` belongs to directly, newest first (ADR-0289 §3)."""
         (named,) = story_members((member,))
-        return await self._locked(self._stories_of_sync, named)
+        headers = await self._locked(self._stories_of_sync, named)
+        self._counted("stories_of", (header.home for header in headers))
+        return headers
 
     def _stories_of_sync(self, member: StoryMember) -> tuple[StoryHeader, ...]:
+        where, params = self._seen(table="s") or ("1", [])
         with self._transaction("read a member's stories", immediate=False) as conn:
             rows = conn.execute(
-                "SELECT s.id, s.created_at, s.merged_into, s.home_kind, s.home_id FROM members m "
+                "SELECT s.id, s.created_at, s.merged_into, s.home_kind, s.home_id FROM members m "  # noqa: S608 — module text; values bound
                 "JOIN stories s ON s.id = m.story_id "
-                "WHERE m.kind = ? AND m.member_id = ? ORDER BY s.created_seq DESC",
-                (member.kind.value, member.id),
+                f"WHERE m.kind = ? AND m.member_id = ? AND {where} ORDER BY s.created_seq DESC",
+                (member.kind.value, member.id, *params),
             ).fetchall()
         return tuple(_decoded(_header_from, row) for row in rows)
 
@@ -2009,7 +2152,9 @@ class SqliteStoryStore:
     async def current_summary(self, story_id: Identifier) -> StorySummaryState | None:
         """Read a story's summary with the notes and episodes pending on it."""
         target = _checked_id(story_id)
-        return await self._locked(self._current_summary_sync, target)
+        state = await self._locked(self._current_summary_sync, target)
+        self._counted("current_summary", () if state is None else (state.story.home,))
+        return state
 
     def _current_summary_sync(self, story_id: str) -> StorySummaryState | None:
         with self._transaction("read a story's summary", immediate=False) as conn:
@@ -2054,7 +2199,9 @@ class SqliteStoryStore:
         """Read a page of the notes a story holds, in the order they were written."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
-        return await self._locked(self._notes_sync, target, cursor, limit)
+        page = await self._locked(self._notes_sync, target, cursor, limit)
+        self._counted("notes", () if page is None else (page.story.home,))
+        return page
 
     def _notes_sync(self, story_id: str, cursor: int | None, limit: int) -> StoryNoteList | None:
         with self._transaction("read a story's notes", immediate=False) as conn:
@@ -2087,7 +2234,9 @@ class SqliteStoryStore:
         """Read a page of a story's version log, oldest first."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
-        return await self._locked(self._versions_sync, target, cursor, limit)
+        page = await self._locked(self._versions_sync, target, cursor, limit)
+        self._counted("summary_versions", () if page is None else (page.story.home,))
+        return page
 
     def _versions_sync(
         self, story_id: str, cursor: int | None, limit: int
@@ -2115,20 +2264,45 @@ class SqliteStoryStore:
         """Read the summary a version of a story wrote, as it was written (ADR-0347 §2:4)."""
         target = _checked_id(story_id)
         wanted = check_story_version(version)
-        return await self._locked(self._summary_at_sync, target, wanted)
+        summary, home = await self._locked(self._summary_at_sync, target, wanted)
+        self._counted("summary_at", () if summary is None else (home,))
+        return summary
 
-    def _summary_at_sync(self, story_id: str, version: int) -> StorySummary | None:
+    def _summary_at_sync(
+        self, story_id: str, version: int
+    ) -> tuple[StorySummary | None, RecordHome | None]:
+        """The kept summary, and its story's home as :func:`stored_home` reads it.
+
+        Withholding, a story this store does not hold has no summary it gives back
+        (ADR-0383 §3:2, §8:2). The home is for the count alone, so a row whose home the
+        store cannot read is counted as having none rather than raised, as the unbound
+        read never reads it.
+        """
         with self._transaction("read a kept summary", immediate=False) as conn:
+            if not self._holds_story(conn, story_id):
+                return None, None
             row = conn.execute(
                 "SELECT version, written_at, lines, outside FROM summaries "
                 "WHERE version = ? AND story_id = ?",
                 (version, story_id),
             ).fetchone()
-        return None if row is None else _decoded(_summary_from, row)
+            if row is None:
+                return None, None
+            homes = conn.execute(
+                "SELECT home_kind, home_id FROM stories WHERE id = ?", (story_id,)
+            ).fetchone()
+        home = None if homes is None else stored_home(homes[0], homes[1])
+        return _decoded(_summary_from, row), home
 
     async def position(self) -> int:
-        """Read where the store's one sequence stands (ADR-0347 §2:5)."""
-        return await self._locked(self._position_sync)
+        """Read where the store's one sequence stands (ADR-0347 §2:5).
+
+        A store-wide figure that counts writes, answered alike bound or not (ADR-0383
+        §8:5); counting, it gives back no record and its event counts none.
+        """
+        position = await self._locked(self._position_sync)
+        self._counted("position", ())
+        return position
 
     def _position_sync(self) -> int:
         with self._transaction("read the story store's position", immediate=False) as conn:
@@ -2157,14 +2331,20 @@ def _line_from(row: Sequence[Any]) -> StoryLogLine:
 def _header_from(row: Sequence[Any]) -> StoryHeader:
     """Decode a stored story row: id, creation instant, merge target, and home.
 
-    A row with no home, or one that does not validate, is not read as anyone's: it
-    raises, as any other corrupt row does (ADR-0383 §5:3).
+    The home is read by :func:`~ai_assistant.memory._home_columns.stored_home`, the one
+    reading a bound store's query matches too. A row with no home, or one that reading
+    does not accept, is not read as anyone's: it raises, as any other corrupt row does
+    (ADR-0383 §5:3).
     """
+    home = stored_home(row[3], row[4])
+    if home is None:
+        msg = "a stored story's home is missing or is not one this store writes"
+        raise ValueError(msg)
     return StoryHeader(
         story_id=row[0],
         created_at=_instant_from(row[1]),
         merged_into=row[2],
-        home=RecordHome(kind=row[3], id=row[4]),
+        home=home,
     )
 
 

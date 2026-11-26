@@ -18,6 +18,12 @@ write naming a story of another home than the story it mints or writes, as a mem
 as the other side of a merge or a move, is refused ``another_home`` and writes nothing
 (ADR-0383 §4:7).
 
+**Bound to a sight** (ADR-0383 §7), a fake is a copy sharing this one's records by
+reference, with the sight set: withholding, a story is held where its sight sees its home,
+with every note, summary, version, log line and member of it (§3:2), and a story it does
+not hold answers every member as one never written; counting, it answers as unbound and
+logs the homes of the stories each read gave back, as the durable store does.
+
 **Atomic by construction.** Every write computes its refusal and applies its changes
 with no ``await`` in between, so on one event loop a write is never interleaved with
 another — the property the durable store buys with one transaction. A merge whose
@@ -49,6 +55,7 @@ from ai_assistant.core.types import (
     STORY_SUMMARY_CAP_CHARS,
     Identifier,
     RecordHome,
+    SightMode,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -84,13 +91,18 @@ from ai_assistant.core.types import (
     story_members,
     story_note_ids,
 )
+from ai_assistant.testing._home_count import count_homes
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from ai_assistant.core.clock import Clock
+    from ai_assistant.core.types import Sight
 
 __all__ = ["FakeStoryStore"]
+
+#: The store's code in ADR-0383 §11:1's count event, as the durable store writes it.
+_STORE_CODE = "stories"
 
 _IDENTIFIER: TypeAdapter[str] = TypeAdapter(Identifier)
 
@@ -292,6 +304,17 @@ class _State:
     versions: list[tuple[str, StorySummaryVersion]] = field(default_factory=list)
 
 
+@dataclass
+class _Shared:
+    """The state every binding of one fake reads and writes, by reference.
+
+    A merge replaces the state whole once it has applied to a copy, so the bindings
+    share this holder rather than the state itself.
+    """
+
+    state: _State
+
+
 def _not_held(state: _State, story_id: str, draft: StorySummaryDraft) -> StorySummaryRefusal | None:
     """The first thing a draft takes in that its story does not hold (ADR-0302 §7).
 
@@ -339,7 +362,11 @@ class FakeStoryStore:
     """
 
     def __init__(
-        self, *, now: Clock = _utcnow, new_id: Callable[[], str] = lambda: uuid4().hex
+        self,
+        *,
+        now: Clock = _utcnow,
+        new_id: Callable[[], str] = lambda: uuid4().hex,
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> None:
         """Build an empty store.
 
@@ -347,10 +374,57 @@ class FakeStoryStore:
             now: The clock every change is stamped with, guarded as the durable
                 store's is.
             new_id: The source a minted story id's suffix is drawn from.
+            sight_mode: Whether a fake bound to a sight withholds or only counts
+                (ADR-0383 §7:10), fixed here as the durable store fixes it.
         """
         self._clock = checked_clock(now, owner="FakeStoryStore")
         self._new_id = new_id
-        self._state = _State()
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
+        self._shared = _Shared(state=_State())
+
+    @property
+    def _state(self) -> _State:
+        return self._shared.state
+
+    @_state.setter
+    def _state(self, state: _State) -> None:
+        self._shared.state = state
+
+    # --- a sight (ADR-0383 §7, §8, §11) ----------------------------------------
+
+    def bound(self, sight: Sight) -> FakeStoryStore:
+        """This fake, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing every piece of this fake's state by reference, with the
+        sight set: the meet of the one it was already bound to, where it was (§6:6).
+
+        Raises:
+            ValueError: If this fake is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _withholds(self) -> bool:
+        return self._sight is not None and self._sight_mode is SightMode.WITHHOLD
+
+    def _holds(self, story: _Story) -> bool:
+        """Whether this fake, as bound, holds ``story`` and every part of it (§7:2, §3:2)."""
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return True
+        return self._sight.sees(story.home)
+
+    def _story(self, state: _State, story_id: str) -> _Story | None:
+        """The story ``story_id`` names where this fake, as bound, holds it; else ``None``."""
+        story = state.stories.get(story_id)
+        return story if story is not None and self._holds(story) else None
+
+    def _counted(self, member: str, homes: Iterable[RecordHome]) -> None:
+        """Write §11:1's count of one read, where this fake is bound and only counts."""
+        if self._sight is not None and self._sight_mode is SightMode.COUNT:
+            count_homes(self._sight, store=_STORE_CODE, member=member, homes=homes)
 
     # --- internals -----------------------------------------------------------
 
@@ -372,9 +446,8 @@ class FakeStoryStore:
             home=story.home,
         )
 
-    @staticmethod
-    def _story_refusal(state: _State, story_id: str) -> StoryRefusal | None:
-        story = state.stories.get(story_id)
+    def _story_refusal(self, state: _State, story_id: str) -> StoryRefusal | None:
+        story = self._story(state, story_id)
         if story is None:
             return StoryRefusal(reason=StoryRefusalReason.UNKNOWN_STORY, story_id=story_id)
         if story.merged_into is not None:
@@ -431,6 +504,10 @@ class FakeStoryStore:
             for holder, story in state.stories.items()
             if absorbed_member in story.entries and holder != target
         ]
+        # A story it does not hold is never named: the merge is refused as a write to a
+        # story it does not hold, naming the absorbed one (ADR-0383 §4:8, §7:5).
+        if not all(self._story(state, story_id) for story_id in [*gained, *changed]):
+            return StoryRefusal(reason=StoryRefusalReason.UNKNOWN_STORY, story_id=absorbed)
         return self._beside_refusal(state, target, [*gained, *changed])
 
     @staticmethod
@@ -442,7 +519,10 @@ class FakeStoryStore:
         ]
 
     def _path_down(self, state: _State, start: str, target: str) -> list[str] | None:
-        """A shortest chain of stories from ``start`` down to ``target``, or ``None``."""
+        """A shortest chain of stories from ``start`` down to ``target``, or ``None``.
+
+        Withholding, down through stories this fake holds alone (ADR-0383 §7:2).
+        """
         parents: dict[str, str | None] = {start: None}
         queue = deque([start])
         while queue:
@@ -452,6 +532,8 @@ class FakeStoryStore:
                 while (above := parents[chain[-1]]) is not None:
                     chain.append(above)
                 return chain[::-1]
+            if self._story(state, current) is None:
+                continue
             for child in self._children(state, current):
                 if child not in parents:
                     parents[child] = current
@@ -515,12 +597,25 @@ class FakeStoryStore:
                 and version.version == flag.version
                 and flag.flag in version.flags
                 for story_id, version in state.versions
-            )
+            ) and self._flag_seen(state, flag)
         if not held:
             return StoryRefusal(reason=StoryRefusalReason.UNKNOWN_FLAG, flag=flag)
         if any(line.change is StoryChange.DECIDED and line.answers == flag for line in state.log):
             return StoryRefusal(reason=StoryRefusalReason.ALREADY_DECIDED, flag=flag)
         return None
+
+    def _flag_seen(self, state: _State, flag: StoryFlagName) -> bool:
+        """Whether every story a recorded flag names or concerns is one this fake holds.
+
+        Withholding, a flag concerning a story it does not hold is one never raised
+        (ADR-0383 §4:8, §8:2), as the durable store answers it.
+        """
+        if not self._withholds():
+            return True
+        named = [one for one in (flag.story, flag.flag.story if flag.flag else None) if one]
+        if not all(self._story(state, story_id) for story_id in named):
+            return False
+        return all(self._story(state, story_id) for story_id in self._concerned(state, flag))
 
     def _concerned(self, state: _State, flag: StoryFlagName) -> list[str]:
         """The stories a held flag concerns, followed through merges, each once (§2:3)."""
@@ -929,7 +1024,7 @@ class FakeStoryStore:
     # --- the notes and the summary: writes (ADR-0300 §3) ----------------------
 
     def _summary_refusal(self, story_id: str) -> StorySummaryRefusal | None:
-        story = self._state.stories.get(story_id)
+        story = self._story(self._state, story_id)
         if story is None:
             return StorySummaryRefusal(
                 reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id=story_id
@@ -993,9 +1088,8 @@ class FakeStoryStore:
         at = self._now()
         return StorySummaryOutcome(version=self._summary_writes(state, target, checked, basis, at))
 
-    @staticmethod
     def _draft_refusal(
-        state: _State, story_id: str, draft: StorySummaryDraft, as_of: int
+        self, state: _State, story_id: str, draft: StorySummaryDraft, as_of: int
     ) -> StorySummaryRefusal | None:
         """The summary's refusals after the story's own, in ADR-0303 §4:4's order."""
         if any(sid == story_id and v.version > as_of for sid, v in state.versions):
@@ -1003,12 +1097,12 @@ class FakeStoryStore:
                 reason=StorySummaryRefusalReason.SUMMARY_MOVED_ON, story_id=story_id
             )
         for flag in draft.flags:
-            if flag.story is not None and flag.story not in state.stories:
+            if flag.story is not None and self._story(state, flag.story) is None:
                 return StorySummaryRefusal(
                     reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id=flag.story
                 )
         for read in draft.read_pages:
-            if read.story not in state.stories:
+            if self._story(state, read.story) is None:
                 return StorySummaryRefusal(
                     reason=StorySummaryRefusalReason.UNKNOWN_STORY, story_id=read.story
                 )
@@ -1067,8 +1161,10 @@ class FakeStoryStore:
     async def header(self, story_id: Identifier) -> StoryHeader | None:
         """Read a story's header (ADR-0289 §3)."""
         target = _checked_id(story_id)
-        story = self._state.stories.get(target)
-        return None if story is None else self._header_of(target, story)
+        story = self._story(self._state, target)
+        header = None if story is None else self._header_of(target, story)
+        self._counted("header", () if story is None else (story.home,))
+        return header
 
     async def view(
         self,
@@ -1080,7 +1176,8 @@ class FakeStoryStore:
         """Read a page of a story's clean view, in link order (ADR-0289 §3)."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
-        story = self._state.stories.get(target)
+        story = self._story(self._state, target)
+        self._counted("view", () if story is None else (story.home,))
         if story is None:
             return None
         after = -1 if cursor is None else cursor
@@ -1104,7 +1201,8 @@ class FakeStoryStore:
         """Read a page of a story's change log, in sequence order (ADR-0289 §3)."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
-        story = self._state.stories.get(target)
+        story = self._story(self._state, target)
+        self._counted("log", () if story is None else (story.home,))
         if story is None:
             return None
         after = -1 if cursor is None else cursor
@@ -1127,10 +1225,17 @@ class FakeStoryStore:
         """Read a page of every story the store holds, newest first (ADR-0289 §3)."""
         check_story_page(cursor, limit)
         ordered = sorted(
-            self._state.stories.items(), key=lambda item: item[1].created_seq, reverse=True
+            (
+                (story_id, story)
+                for story_id, story in self._state.stories.items()
+                if self._holds(story)
+            ),
+            key=lambda item: item[1].created_seq,
+            reverse=True,
         )
         rest = [item for item in ordered if cursor is None or item[1].created_seq < cursor]
         page = rest[:limit]
+        self._counted("stories", (story.home for _, story in page))
         return StoryPage(
             stories=tuple(self._header_of(story_id, story) for story_id, story in page),
             next_cursor=page[-1][1].created_seq if len(rest) > limit else None,
@@ -1143,11 +1248,12 @@ class FakeStoryStore:
             (
                 (story_id, story)
                 for story_id, story in self._state.stories.items()
-                if named in story.entries
+                if named in story.entries and self._holds(story)
             ),
             key=lambda item: item[1].created_seq,
             reverse=True,
         )
+        self._counted("stories_of", (story.home for _, story in holding))
         return tuple(self._header_of(story_id, story) for story_id, story in holding)
 
     # --- the notes and the summary: reads (ADR-0300 §3) -----------------------
@@ -1156,7 +1262,8 @@ class FakeStoryStore:
         """Read a story's summary with the notes and episodes pending on it."""
         target = _checked_id(story_id)
         state = self._state
-        story = state.stories.get(target)
+        story = self._story(state, target)
+        self._counted("current_summary", () if story is None else (story.home,))
         if story is None:
             return None
         notes = sorted(
@@ -1190,7 +1297,8 @@ class FakeStoryStore:
         """Read a page of the notes a story holds, in the order they were written."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
-        story = self._state.stories.get(target)
+        story = self._story(self._state, target)
+        self._counted("notes", () if story is None else (story.home,))
         if story is None:
             return None
         after = -1 if cursor is None else cursor
@@ -1219,7 +1327,8 @@ class FakeStoryStore:
         """Read a page of a story's version log, oldest first."""
         target = _checked_id(story_id)
         check_story_page(cursor, limit)
-        story = self._state.stories.get(target)
+        story = self._story(self._state, target)
+        self._counted("summary_versions", () if story is None else (story.home,))
         if story is None:
             return None
         after = -1 if cursor is None else cursor
@@ -1240,10 +1349,17 @@ class FakeStoryStore:
         target = _checked_id(story_id)
         wanted = check_story_version(version)
         kept = self._state.kept.get(wanted)
-        if kept is None or kept[0] != target:
+        story = self._story(self._state, target)
+        if kept is None or kept[0] != target or story is None:
+            self._counted("summary_at", ())
             return None
+        self._counted("summary_at", (story.home,))
         return kept[1]
 
     async def position(self) -> int:
-        """Read where the store's one sequence stands (ADR-0347 §2:5)."""
+        """Read where the store's one sequence stands (ADR-0347 §2:5).
+
+        A store-wide figure that counts writes, alike bound or not (ADR-0383 §8:5).
+        """
+        self._counted("position", ())
         return self._state.tick

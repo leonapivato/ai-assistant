@@ -82,6 +82,8 @@ from ai_assistant.memory import (
     DefaultNotificationPolicy,
     MemoryIngestor,
     SqliteMemoryStore,
+    SqliteNotificationStore,
+    SqliteStoryStore,
 )
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
@@ -312,6 +314,27 @@ async def test_build_engine_builds_a_memory_store_whose_bindings_only_count(
         assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
         assert memory._sight_mode is SightMode.COUNT
         assert memory._sight is None
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_builds_story_and_notification_stores_whose_bindings_only_count(
+    tmp_path: Path,
+) -> None:
+    """ADR-0383 §7:10, §11:1: each store's mode is fixed at its construction, to counting.
+
+    Nothing in the root binds either store yet, so the engine holds both unbound.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        stories = engine._stories
+        notifications = engine._notifications
+        assert isinstance(stories, SqliteStoryStore)  # narrows the Protocol-typed seam
+        assert isinstance(notifications, SqliteNotificationStore)
+        assert stories._sight_mode is SightMode.COUNT
+        assert notifications._sight_mode is SightMode.COUNT
+        assert stories._sight is None
+        assert notifications._sight is None
     finally:
         await engine.aclose()
 

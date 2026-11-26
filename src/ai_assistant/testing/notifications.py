@@ -29,11 +29,20 @@ the contract would certify consumers a real store rejects.
 write may carry is a ``ValueError`` before the atomic act, as the durable store refuses
 it (§6:2). :class:`FakeNotificationWriter` supplies the home a producer's notification
 takes, the owner's domain unless a test names another (ADR-0383 §4:3).
+
+**Bound to a sight** (ADR-0383 §7), :class:`FakeNotificationStore` is a copy sharing its
+records, settings, spend ledger and lock by reference, with the sight set: withholding, a
+record is held where its sight sees its home, and every read, every write naming a record
+and the duplicate lookup and cap count an admission is ruled against read the held records
+alone, as the durable store does; counting, it answers as unbound and logs the homes of
+the records each read gave back.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from itertools import count
 from secrets import token_hex
@@ -56,17 +65,19 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     RecordHome,
+    SightMode,
     describe_untrusted,
     home_may_be_written,
     minute_of_day,
 )
+from ai_assistant.testing._home_count import count_homes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import NotificationPolicy, NotificationStore
-    from ai_assistant.core.types import NotificationCandidate
+    from ai_assistant.core.types import NotificationCandidate, Sight
 
 #: One past the largest value a paging argument accepts — the signed 64-bit
 #: ceiling a SQLite bind parameter tops out at (ADR-0073 §2). Duplicated rather
@@ -95,8 +106,23 @@ _DEFAULT_PAGE_LIMIT = 50
 _RECORD_PAGE = 200
 
 
+#: The store's code in ADR-0383 §11:1's count event, as the durable store writes it.
+_STORE_CODE = "notifications"
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass
+class _Standing:
+    """What every binding of one fake reads and writes by reference, beside its records.
+
+    The settings in force, and the instants each ``INTERRUPT`` was recorded at.
+    """
+
+    preferences: NotificationPreferences = field(default_factory=NotificationPreferences)
+    spent: list[datetime] = field(default_factory=list)
 
 
 def _checked_home(home: object) -> RecordHome:
@@ -447,6 +473,7 @@ class FakeNotificationStore:
         retention: timedelta | None = _DEFAULT_RETENTION,
         cap: int = _DEFAULT_CAP,
         new_id: Callable[[], str] | None = None,
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> None:
         """Build the store over its injected seams, refusing unusable tuning.
 
@@ -460,6 +487,8 @@ class FakeNotificationStore:
             cap: The most actionable records this store holds.
             new_id: The record-id source; a counter by default, this being an
                 identity rather than a capability.
+            sight_mode: Whether a fake bound to a sight withholds or only counts
+                (ADR-0383 §7:10), fixed here as the durable store fixes it.
 
         Raises:
             ValueError: If ``cap`` is not an exact ``int`` in ``(0, 2**63)``, or
@@ -485,12 +514,63 @@ class FakeNotificationStore:
         self._counter = count(1)
         self._new_id = new_id or (lambda: f"ntf-{next(self._counter)}")
         self._records: dict[str, HeldNotification] = {}
-        #: When each ``INTERRUPT`` disposition was **recorded** (ADR-0130 §5), kept
-        #: apart from the records themselves so that destroying a notification does
-        #: not refund the unit it spent. See :meth:`_budget`.
-        self._spent: list[datetime] = []
-        self._preferences = NotificationPreferences()
+        #: The settings, and when each ``INTERRUPT`` disposition was **recorded**
+        #: (ADR-0130 §5), kept apart from the records themselves so that destroying a
+        #: notification does not refund the unit it spent. See :meth:`_budget`.
+        self._standing = _Standing()
         self._lock = asyncio.Lock()
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
+
+    @property
+    def _preferences(self) -> NotificationPreferences:
+        return self._standing.preferences
+
+    @property
+    def _spent(self) -> list[datetime]:
+        return self._standing.spent
+
+    # --- a sight (ADR-0383 §7, §8, §11) ----------------------------------------
+
+    def bound(self, sight: Sight) -> FakeNotificationStore:
+        """This fake, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing its records, settings, spend ledger, id source and lock by
+        reference, with the sight set: the meet of the one it was already bound to,
+        where it was (§6:6).
+
+        Raises:
+            ValueError: If this fake is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _holds(self, record: HeldNotification) -> bool:
+        """Whether this fake, as bound, holds ``record`` (ADR-0383 §7:2, §7:3)."""
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return True
+        return self._sight.sees(record.home)
+
+    def _held_records(self) -> list[HeldNotification]:
+        """The records this fake, as bound, holds, in insertion order."""
+        return [record for record in self._records.values() if self._holds(record)]
+
+    def _held_one(self, notification_id: str) -> HeldNotification | None:
+        """The record ``notification_id`` names, where this fake, as bound, holds it."""
+        record = self._records.get(notification_id)
+        return record if record is not None and self._holds(record) else None
+
+    def _counted(self, member: str, records: Iterable[HeldNotification]) -> None:
+        """Write §11:1's count of one read, where this fake is bound and only counts."""
+        if self._sight is not None and self._sight_mode is SightMode.COUNT:
+            count_homes(
+                self._sight,
+                store=_STORE_CODE,
+                member=member,
+                homes=(record.home for record in records),
+            )
 
     @property
     def cap(self) -> int:
@@ -594,7 +674,7 @@ class FakeNotificationStore:
         async with self._lock:
             await asyncio.sleep(0)
             now = self._now()
-            record = self._records.get(notification_id)
+            record = self._held_one(notification_id)
             if record is None or not record.is_due_at(now):
                 return None
             spent, frees_at = self._budget(now)
@@ -647,10 +727,12 @@ class FakeNotificationStore:
         _check_page_bound("offset", offset)
         now = self._now()
         ordered = sorted(
-            (record for record in self._records.values() if record.is_due_at(now)),
+            (record for record in self._held_records() if record.is_due_at(now)),
             key=lambda record: (record.reconsider_at or now, record.id),
         )
-        return ordered[offset : offset + limit]
+        page = ordered[offset : offset + limit]
+        self._counted("due", page)
+        return page
 
     async def held(
         self, *, limit: int = _DEFAULT_PAGE_LIMIT, offset: int = 0
@@ -669,7 +751,9 @@ class FakeNotificationStore:
         """
         _check_page_bound("limit", limit)
         _check_page_bound("offset", offset)
-        return self._ordered()[offset : offset + limit]
+        page = self._ordered()[offset : offset + limit]
+        self._counted("held", page)
+        return page
 
     async def get(self, notification_id: str) -> HeldNotification | None:
         """One record by id, or ``None``.
@@ -680,7 +764,9 @@ class FakeNotificationStore:
         Returns:
             The record, or ``None`` where the id names nothing.
         """
-        return self._records.get(notification_id)
+        found = self._held_one(notification_id)
+        self._counted("get", () if found is None else (found,))
+        return found
 
     async def dismiss(self, notification_id: str) -> bool:
         """End one record's actionability, leaving it readable (§7).
@@ -699,7 +785,7 @@ class FakeNotificationStore:
         async with self._lock:
             await asyncio.sleep(0)
             now = self._now()
-            record = self._records.get(notification_id)
+            record = self._held_one(notification_id)
             if record is None or not record.is_actionable_at(now):
                 return False
             self._records[record.id] = record.model_copy(update={"dismissed_at": now})
@@ -711,6 +797,8 @@ class FakeNotificationStore:
         Returns:
             The settings.
         """
+        # A standing setting, not a record of any domain: alike bound or not (§11:1).
+        self._counted("preferences", ())
         return self._preferences
 
     async def set_preferences(self, preferences: NotificationPreferences) -> int:
@@ -730,7 +818,7 @@ class FakeNotificationStore:
             raised = _classes_reaching(previous, preferences, NotificationReach.INTERRUPT)
             silenced = _classes_reaching(previous, preferences, NotificationReach.OFF)
             touched = 0
-            for record in list(self._records.values()):
+            for record in self._held_records():
                 if record.kind is not NotificationDispositionKind.HOLD:
                     continue  # no setting change reaches a record already ruled INTERRUPT
                 if not record.is_actionable_at(now):
@@ -747,7 +835,7 @@ class FakeNotificationStore:
                 if reaches:
                     self._records[record.id] = record.model_copy(update={"reconsider_at": now})
                     touched += 1
-            self._preferences = preferences
+            self._standing.preferences = preferences
             return touched
 
     async def delete(self, notification_id: str) -> bool:
@@ -759,7 +847,10 @@ class FakeNotificationStore:
         Returns:
             Whether a record was removed.
         """
-        return self._records.pop(notification_id, None) is not None
+        if self._held_one(notification_id) is None:
+            return False
+        del self._records[notification_id]
+        return True
 
     async def clear(self) -> int:
         """Destroy every record, leaving the standing settings alone (§9).
@@ -767,9 +858,10 @@ class FakeNotificationStore:
         Returns:
             How many records were destroyed.
         """
-        removed = len(self._records)
-        self._records.clear()
-        return removed
+        doomed = [record.id for record in self._held_records()]
+        for record_id in doomed:
+            del self._records[record_id]
+        return len(doomed)
 
     async def export(self) -> list[HeldNotification]:
         """Every stored record, for the user's own data export (ADR-0004 §6).
@@ -777,7 +869,9 @@ class FakeNotificationStore:
         Returns:
             The records, oldest first.
         """
-        return self._ordered()
+        exported = self._ordered()
+        self._counted("export", exported)
+        return exported
 
     async def purge(self) -> int:
         """Sweep the records retention has released (§7, ADR-0215 §4).
@@ -791,7 +885,7 @@ class FakeNotificationStore:
             How many records were removed.
         """
         now = self._now()
-        doomed = [record.id for record in self._records.values() if record.is_purgeable_at(now)]
+        doomed = [record.id for record in self._held_records() if record.is_purgeable_at(now)]
         for record_id in doomed:
             del self._records[record_id]
         return len(doomed)
@@ -804,7 +898,7 @@ class FakeNotificationStore:
         Returns:
             The records by ``admitted_at`` then ``id``.
         """
-        return sorted(self._records.values(), key=lambda record: (record.admitted_at, record.id))
+        return sorted(self._held_records(), key=lambda record: (record.admitted_at, record.id))
 
     def _actionable(self, now: datetime) -> list[HeldNotification]:
         """The population the cap counts, and no other (§7, ADR-0215 §3).
@@ -821,7 +915,7 @@ class FakeNotificationStore:
         Returns:
             The actionable records.
         """
-        return [record for record in self._records.values() if record.is_actionable_at(now)]
+        return [record for record in self._held_records() if record.is_actionable_at(now)]
 
     def _is_duplicate(self, candidate_key: str, now: datetime) -> bool:
         """Whether a record still **speaking for** this key exists (§8, ADR-0215 §2).
@@ -840,7 +934,7 @@ class FakeNotificationStore:
         """
         return any(
             record.candidate.candidate_key == candidate_key and record.speaks_for_its_key_at(now)
-            for record in self._records.values()
+            for record in self._held_records()
         )
 
     def _fresh_id(self) -> str:
@@ -890,7 +984,7 @@ class FakeNotificationStore:
             ruling: What was just decided.
         """
         if ruling.kind is NotificationDispositionKind.INTERRUPT:
-            self._spent.append(ruling.ruled_at)
+            self._standing.spent.append(ruling.ruled_at)
 
     def _budget(self, now: datetime) -> tuple[int, datetime | None]:
         """The two budget facts §5's conjunctive clause reads (§6).
@@ -925,12 +1019,13 @@ class FakeNotificationStore:
         """
         preferences = self._preferences
         window = preferences.budget_window
-        self._spent = sorted(at for at in self._spent if at > now - window)
+        spent = self._standing.spent
+        spent[:] = sorted(at for at in spent if at > now - window)
         budget = preferences.interruption_budget
         frees_at: datetime | None = None
-        if budget > 0 and len(self._spent) >= budget:
-            frees_at = self._spent[len(self._spent) - budget] + window
-        return len(self._spent), frees_at
+        if budget > 0 and len(spent) >= budget:
+            frees_at = spent[len(spent) - budget] + window
+        return len(spent), frees_at
 
 
 def _classes_reaching(

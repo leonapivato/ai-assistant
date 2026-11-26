@@ -1402,7 +1402,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # together is a fact about the owner's life, so it is owner-only like every
         # other file here. Deploying it adds the file and changes no existing record
         # (§6), and it joins the ordered shutdown below.
-        stories = SqliteStoryStore(path=directory / "stories.db", now=_utcnow)
+        stories = SqliteStoryStore(
+            path=directory / "stories.db", now=_utcnow, sight_mode=SightMode.COUNT
+        )
         opened.append(stories.close)
         # **ADR-0338 §10's person-model store, on its own file, behind the switch.**
         # Where ``person_model`` is off, the default, no store is built or opened and
@@ -1601,6 +1603,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             traces_sink=traces,
             retention=settings.notification_retention,
             cap=settings.notification_queue_limit,
+            sight_mode=SightMode.COUNT,
         )
         opened.append(notifications.close)
         # ADR-0131 §3's delivery outbox: the **ninth** connection-owning store and

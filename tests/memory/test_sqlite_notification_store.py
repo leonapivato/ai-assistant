@@ -23,6 +23,7 @@ import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, time, timedelta
+from itertools import count
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -31,6 +32,7 @@ from notification_contract import (
     MutableClock,
     NotificationPolicyContract,
     NotificationStoreContract,
+    SightStoreFactory,
     StoreFactory,
     candidate,
 )
@@ -45,6 +47,7 @@ from ai_assistant.core.types import (
     NotificationReach,
     QuietWindow,
     RecordHome,
+    SightMode,
 )
 from ai_assistant.memory.notification_policy import DefaultNotificationPolicy
 from ai_assistant.memory.notification_store import (
@@ -54,6 +57,7 @@ from ai_assistant.memory.notification_store import (
 )
 from ai_assistant.testing import FakeTraceSink
 from ai_assistant.testing.cancellation import ThreadSuspension
+from sight_equivalence import SIGHTS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -166,6 +170,32 @@ class TestSqliteNotificationStoreContract(NotificationStoreContract):
                 now=now,
                 retention=retention,
                 cap=cap,
+            )
+            opened.append(realised)
+            return realised
+
+        try:
+            yield build
+        finally:
+            for realised in opened:
+                realised.close()
+
+    @pytest.fixture
+    def sight_factory(self) -> Iterator[SightStoreFactory]:
+        """Build subjects in a mode, in memory, their ids from a counter starting afresh."""
+        opened: list[SqliteNotificationStore] = []
+
+        def build(
+            *, mode: SightMode, now: Callable[[], datetime], cap: int = _CAP
+        ) -> NotificationStore:
+            ids = count(1)
+            realised = SqliteNotificationStore(
+                traces_sink=FakeTraceSink(),
+                path=":memory:",
+                now=now,
+                cap=cap,
+                new_id=lambda: f"ntf-{next(ids)}",
+                sight_mode=mode,
             )
             opened.append(realised)
             return realised
@@ -1132,5 +1162,60 @@ async def test_a_legacy_overlap_suppresses_through_the_more_recently_admitted_re
         assert offered.reason is NotificationCondition.DUPLICATE
         assert offered.notification_id is None
         assert len(await store.held()) == 2  # a DROP writes no record
+    finally:
+        store.close()
+
+
+# --- a store bound to a sight: what the file alone can hold (ADR-0383 §5:3, §7) --------
+
+
+@pytest.mark.parametrize(
+    ("kind", "home_id"),
+    [
+        (None, None),
+        ("person", None),
+        ("person", b"person:owner"),
+        (b"shared", None),
+        ("PERSON", "person:owner"),
+        ("shared", ""),
+    ],
+)
+async def test_a_record_whose_home_the_store_cannot_read_is_held_by_no_sight(
+    kind: object, home_id: object
+) -> None:
+    """§5:3: the home of no one, given back, counted and changed by no binding.
+
+    Withholding, every sight passes over it in a read, a page and an admission's facts,
+    and a write naming it answers as for a record never written; the unbound store,
+    reading it, reports a corrupt record.
+    """
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(),
+        path=":memory:",
+        now=_fixed_now,
+        cap=1,
+        sight_mode=SightMode.WITHHOLD,
+    )
+    policy = DefaultNotificationPolicy()
+    try:
+        ruling = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
+        odd = ruling.notification_id
+        assert odd is not None
+        store._conn.execute(
+            "UPDATE notifications SET home_kind = ?, home_id = ? WHERE id = ?",
+            (kind, home_id, odd),
+        )
+        for sight in SIGHTS.values():
+            bound = store.bound(sight)
+            assert await bound.get(odd) is None
+            assert await bound.held() == []
+            assert await bound.export() == []
+            assert await bound.dismiss(odd) is False
+            assert await bound.delete(odd) is False
+        owners = store.bound(SIGHTS["owners-work"])
+        again = await owners.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
+        assert again.kind is not NotificationDispositionKind.DROP, again
+        with pytest.raises(NotificationStoreError):
+            await store.get(odd)
     finally:
         store.close()
