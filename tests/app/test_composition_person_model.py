@@ -57,6 +57,7 @@ from ai_assistant.orchestration.person_block import (
     PLANNING_SUGGESTIONS,
     PersonBlocks,
 )
+from ai_assistant.orchestration.upkeep import RECONSIDERED, upkeep_run
 from ai_assistant.service.purge import _destroy
 
 if TYPE_CHECKING:
@@ -301,15 +302,20 @@ async def test_both_ruling_paths_pick_from_the_one_store_with_the_one_factory(
         for pick in picks:
             assert pick.default is default, "one hub policy, held twice"
             assert pick._policy_for is _policy_for_zone
+        # The reconsideration's pick holds no store: it reads the zone through the
+        # person-model store the holder binds to its run's sight (ADR-0384 §7:1).
+        assert picks[0]._people is None
         if not on:
-            assert all(pick._people is None for pick in picks)
+            assert picks[1]._people is None
+            assert engine._stores._people is None
             assert [await pick.pick() for pick in picks] == [default, default]
             return
         store = _store(engine)
-        assert all(pick._people is store for pick in picks)
+        assert picks[1]._people is store
+        assert engine._stores._people is store
         await store.set_field(OWNER_PERSON_ID, ProfileField.TIME_ZONE, "Asia/Kolkata", act=_PANEL)
-        for pick in picks:
-            picked = await pick.pick()
+        through = engine._stores.people(upkeep_run(RECONSIDERED).sight)
+        for picked in (await picks[0].pick_through(through), await picks[1].pick()):
             assert isinstance(picked, DefaultNotificationPolicy)
             assert picked._zone == ZoneInfo("Asia/Kolkata")
     finally:
