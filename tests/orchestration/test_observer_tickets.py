@@ -244,12 +244,14 @@ async def _read_by_its_sight(harness: Harness, leaving_id: str) -> tuple[Hint, .
 @pytest.mark.parametrize(
     "asking", ["deleted", "of-another-home"], ids=["asking-deleted", "asking-of-another-home"]
 )
-async def test_an_asking_episode_not_held_confirms_nothing(mode: SightMode, asking: str) -> None:
+async def test_an_asking_episode_not_held_leaves_the_candidate_unconfirmed(
+    mode: SightMode, asking: str
+) -> None:
     """§2:4: the confirmation names the asking activation; where its episode is not held,
     deleted since by a capture failure, retention, a sweep or a forget, the candidate is
-    given no confirmation, as one whose approval's episode is not held is not, so §2:1
-    refuses no memory for it; and where it is of another home, none either (§2:3). In
-    either build, so the counting build lands what a withholding one would."""
+    given no confirmation, so §2:1 refuses no memory for it; and where it is of another
+    home, none either (§2:3). The candidate itself is still shown, its fact and its
+    effect, so the scout accounts for it (ADR-0346 §4:6). In either build alike."""
     harness = Harness(sight_mode=mode)
     request = await _approved(harness)
     run = PlanningRound(
@@ -265,7 +267,10 @@ async def test_an_asking_episode_not_held_confirms_nothing(mode: SightMode, aski
 
     hints = await _read_by_its_sight(harness, "appr")
 
-    assert [one for one in hints if one.confirmation is not None] == []
+    (hint,) = hints
+    assert (hint.fact, hint.effect) == (_FACT, "effect-run")
+    assert hint.confirmation is None
+    assert hint.rests_on == ()
 
 
 @pytest.mark.parametrize("mode", [SightMode.COUNT, SightMode.WITHHOLD], ids=["count", "withhold"])
@@ -296,8 +301,9 @@ async def test_an_asking_episode_held_still_confirms_through_the_bound_store(
 async def test_a_run_whose_asking_episode_is_gone_is_refused_nothing() -> None:
     """§2:4, the Consequences: a ticketed memory whose asking work's episode is gone lands
     without its confirmation. The run over a withholding build reads the approval's
-    episode, is shown no confirmed candidate, and what it commits names no asking
-    activation: nothing is refused and the attempt ends processed."""
+    episode, its input the yes alone; the scout is shown the candidate unconfirmed and
+    accounts for it (ADR-0346 §4:6); what is committed names no asking activation, and
+    the attempt ends processed, refused nothing."""
     harness = Harness(sight_mode=SightMode.WITHHOLD)
     request = await _approved(harness)
     run = PlanningRound(
@@ -306,20 +312,24 @@ async def test_a_run_whose_asking_episode_is_gone_is_refused_nothing() -> None:
         calls=(ProposedCall(call_id="c1", name="run_approved", arguments={"ticket": "A1"}),),
     )
     await harness.hold(
-        episode("appr", at=_TAPPED, rounds=(run,), text="Yes, keep that I prefer aisle seats."),
+        episode("appr", at=_TAPPED, rounds=(run,), text="Yes."),
         episode("one", at=AT - timedelta(minutes=2), text="What time is it?"),
         episode("two", at=AT - timedelta(minutes=1), text="Thanks."),
     )
     await _ran(harness, request, "appr")
-    scout = FakeModelProvider.scripted(scouted(found("The user prefers aisle seats.", "P1")))
-    commit = FakeModelProvider.scripted(framing(framed("The user prefers aisle seats.", "P1")))
+    scout = FakeModelProvider.scripted(scouted(found(_FACT, "P1", candidates=["C1"])))
+    commit = FakeModelProvider.scripted(framing(framed(_FACT, "P1")))
     observer = harness.observer(scout=scout, commit=commit)
 
     outcome = await observer.run()
 
     assert outcome.processed == 1
+    (shown,) = scout.calls
+    assert _FACT in shown.messages[-1].content, "the candidate is shown to the scout"
     (record,) = await harness.plans.observations([address("appr")])
     assert record.state is ObservationState.PROCESSED
+    (finding,) = record.findings
+    assert finding.candidate == "effect-run", "the candidate is accounted for"
     written = [one for one in await harness.memory.export() if isinstance(one, Memory)]
     assert written, "the finding lands"
     assert all(

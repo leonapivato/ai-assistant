@@ -1044,20 +1044,25 @@ class EpisodeReader:
         frozen: the part names it and is placed by when it began, and its text is the
         request's recorded statement, never the episode's, so an approval still freezing
         after its taker confirms all the same. A request whose approval's episode is not
-        held at all confirms nothing, and **nor does one whose asking activation's episode
-        is not** (ADR-0388 §2:4): the confirmation names that activation, which a capture
-        failure, retention, a sweep or a forget may have deleted, and a withholding memory
-        store refuses a write adding a name that resolves to no record it holds (§2:1).
-        Both are read through the memory store bound to the episode's sight, in the one
-        read, open or frozen.
+        held at all confirms nothing.
+
+        **A request whose asking activation's episode is not held gives its candidate no
+        confirmation** (ADR-0388 §2:4): the confirmation names that activation, which a
+        capture failure, retention, a sweep or a forget may have deleted, and a
+        withholding memory store refuses a write adding a name that resolves to no record
+        it holds (§2:1). The candidate is still shown, its fact and its effect with nothing
+        it rests on, so the scout accounts for it as for every candidate the episode
+        records (ADR-0346 §4:6), and what is committed from it lands without the
+        confirmation. So for an asking episode of another home (§2:3). Both episodes are
+        read through the memory store bound to the episode's sight, in the one read, open
+        or frozen.
 
         **Nor does one of another home** (ADR-0383 §4:7). A memory written from the
         leaving episode takes its home, ``home`` (§4:2), and a confirmation is an evidence
         pointer to the request, held in another store file keyed by its person, whose
         domain is its home (§3:1, §5:2), and to the approval's episode. Where either is of
         another home than ``home``, the candidate is given no confirmation, as one whose
-        approval's episode is not held is not, so nothing written names them; and so for
-        an asking episode of another home (§2:3).
+        approval's episode is not held is not, so nothing written names them.
         """
         ticketed = [
             one
@@ -1097,9 +1102,11 @@ class EpisodeReader:
                 continue
             if own.home != home or RecordHome.person(request.person) != home:
                 continue
-            # ADR-0388 §2:4: the asking activation's episode, held and of this home.
+            # ADR-0388 §2:4: the asking activation's episode, held and of this home, or the
+            # candidate is shown with no confirmation, nothing naming that activation.
             asking = held.get(episode_address(request.activation_id))
             if not isinstance(asking, EpisodicMemory) or asking.home != home:
+                hints.append(Hint(handle=labels("C"), effect=effect.id, fact=fact))
                 continue
             confirmation = shown.confirmation(
                 ConfirmationPart(
