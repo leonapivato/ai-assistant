@@ -833,6 +833,37 @@ class StoryStoreContract:
         assert await everything(store) == before
         assert (await versions_of(store, raising))[-1].flags == (flag_raised,)
 
+    async def test_a_flag_whose_raiser_was_merged_across_homes_is_decided_by_no_write(
+        self,
+        store: StoryStore,
+        set_story_home: Callable[[StoryStore, str, RecordHome], None],
+    ) -> None:
+        """§4:7: a ``decided`` line carries the flag, so names the story that raised it.
+
+        In a file written before these refusals, a story of another home that raised a
+        flag can have been merged into one of the owner's: the stories the flag concerns
+        are then the owner's alone, but every ``decided`` line would name the raiser. So
+        ``leave_flag`` and an owner's write answering it are refused ``another_home``
+        naming the raiser, after the stories it concerns, and nothing is written.
+        """
+        raising = await made(store, act("a1"))
+        named = await made(store, act("a2"))
+        into = await made(store, act("a3"))
+        alike = await made(store, act("a4"))
+        flag = await raised(store, raising, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=named))
+        assert (await store.merge(raising, into, actor=_OWNER)).refusal is None
+        set_story_home(store, raising, RecordHome.shared())
+        before = await everything(store)
+
+        left = await store.leave_flag(flag, actor=_PASS)
+        answered = await store.link(into, [sub(alike)], actor=_PASS, answers=flag)
+
+        for outcome in (left, answered):
+            refused(outcome, StoryRefusalReason.ANOTHER_HOME)
+            assert outcome.refusal is not None
+            assert outcome.refusal.story_id == raising
+        assert await everything(store) == before
+
     # --- create (§3) ---------------------------------------------------------
 
     async def test_create_mints_a_story_with_its_members_in_order(self, store: StoryStore) -> None:
