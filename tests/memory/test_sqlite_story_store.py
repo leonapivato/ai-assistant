@@ -132,6 +132,19 @@ class TestSqliteStoryStoreContract(StoryStoreContract):
 
         return remove
 
+    @pytest.fixture
+    def set_story_home(self) -> Callable[[StoryStore, str, RecordHome], None]:
+        """Give a stored story another home in the file, as the suite's test-only door asks."""
+
+        def rehome(store: StoryStore, story_id: str, home: RecordHome) -> None:
+            assert isinstance(store, SqliteStoryStore)
+            store._conn.execute(  # the test-only door the Protocol has none of
+                "UPDATE stories SET home_kind = ?, home_id = ? WHERE id = ?",
+                (home.kind.value, home.id, story_id),
+            )
+
+        return rehome
+
 
 def test_the_file_is_owner_only(tmp_path: Path) -> None:
     path = tmp_path / "stories.db"

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection
 
     from ai_assistant.core.protocols import StoryStore
-    from ai_assistant.core.types import SightMode
+    from ai_assistant.core.types import RecordHome, SightMode
 
 
 class TestFakeStoryStoreContract(StoryStoreContract):
@@ -50,3 +50,13 @@ class TestFakeStoryStoreContract(StoryStoreContract):
             state.versions = [one for one in state.versions if one[0] not in gone]
 
         return remove
+
+    @pytest.fixture
+    def set_story_home(self) -> Callable[[StoryStore, str, RecordHome], None]:
+        """Give a stored story another home in the fake's state, as the suite's door asks."""
+
+        def rehome(store: StoryStore, story_id: str, home: RecordHome) -> None:
+            assert isinstance(store, FakeStoryStore)
+            store._state.stories[story_id].home = home  # the test-only door
+
+        return rehome

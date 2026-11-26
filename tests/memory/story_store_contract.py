@@ -60,7 +60,12 @@ member of another home than the story it mints or writes, and a merge or a move 
 two stories of two homes, are each refused ``another_home``, naming the story of the
 other home, and write nothing, with the same write within one home beside each
 succeeding; the refusal takes its place after the stories are found standing and before
-the operation's own rule and the flag.
+the operation's own rule and the flag. A summary version naming a story of another home,
+by a ``like_another`` flag or a summary version read, is refused ``another_home`` after
+the named stories are found and before ``not_held``; a write answering a flag one of whose
+stories is of another home than its own, ``leave_flag`` on a flag across two homes
+included, is refused ``another_home`` after ``unknown_flag`` and ``already_decided``. Each
+writes nothing; a bound store answers it only between two stories it holds.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
@@ -558,6 +563,275 @@ class StoryStoreContract:
         refused(merged, StoryRefusalReason.MERGED_STORY)
         refused(note_move, StoryRefusalReason.ANOTHER_HOME)
         refused(answering, StoryRefusalReason.ANOTHER_HOME)
+
+    # --- a flag stays in its home (ADR-0383 §3:2, §4:7) --------------------------
+
+    @pytest.fixture
+    def set_story_home(self) -> Callable[[StoryStore, str, RecordHome], None]:
+        """Override in a subclass: give a stored story another home, writing nothing else.
+
+        **A test-only door**, which the Protocol has none of, standing for a file written
+        before the store refused a name across homes: no write changes a story's home
+        (ADR-0383 §4:6), so a flag whose stories span two homes is reached no other way.
+        """
+        raise NotImplementedError
+
+    @pytest.mark.parametrize(("home", "other"), _TWO_HOMES, ids=_TWO_HOMES_IDS)
+    async def test_a_summary_flag_naming_a_story_of_another_home_is_refused(
+        self, store: StoryStore, home: RecordHome, other: RecordHome
+    ) -> None:
+        """§4:7: a version records no ``like_another`` flag naming a story of another home.
+
+        Refused ``another_home``, naming that story, and nothing written: no version, no
+        summary, nothing taken in, the position where it was. Naming a story of its own
+        home, the same write lands.
+        """
+        story_id = await homed(store, home, act("a1"))
+        elsewhere = await homed(store, other, act("a2"))
+        alike = await homed(store, home, act("a3"))
+        read = await state_of(store, story_id)
+        before = await everything(store)
+
+        outcome = await store.write_summary(
+            story_id,
+            draft(
+                line("Line."),
+                took_in_episodes=("a1",),
+                flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=elsewhere),),
+            ),
+            as_of=read.as_of,
+        )
+
+        summary_refused(outcome, StorySummaryRefusalReason.ANOTHER_HOME)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == elsewhere
+        assert outcome.version is None
+        assert await everything(store) == before
+        same = await written(
+            store,
+            story_id,
+            draft(
+                line("Line."),
+                took_in_episodes=("a1",),
+                flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=alike),),
+            ),
+            as_of=read.as_of,
+        )
+        assert same.flags == (StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=alike),)
+
+    @pytest.mark.parametrize(("home", "other"), _TWO_HOMES, ids=_TWO_HOMES_IDS)
+    async def test_a_summary_version_read_of_a_story_of_another_home_is_refused(
+        self, store: StoryStore, home: RecordHome, other: RecordHome
+    ) -> None:
+        """§4:7: a version records no summary version read of a story of another home.
+
+        ADR-0304 §4: nothing writes ``read_pages`` today, but the store's door takes it,
+        so it is judged as a flag's story is. A version read of its own home lands.
+        """
+        story_id = await homed(store, home, act("a1"))
+        elsewhere = await homed(store, other, act("a2"))
+        alike = await homed(store, home, act("a3"))
+        for one in (elsewhere, alike):
+            await written(store, one, draft(line("Its matter.")), as_of=await store.position())
+        elsewhere_read = StorySummaryVersionName(
+            story=elsewhere, version=(await versions_of(store, elsewhere))[0].version
+        )
+        alike_read = StorySummaryVersionName(
+            story=alike, version=(await versions_of(store, alike))[0].version
+        )
+        read = await state_of(store, story_id)
+        before = await everything(store)
+
+        outcome = await store.write_summary(
+            story_id,
+            draft(line("Line."), read_pages=(alike_read, elsewhere_read)),
+            as_of=read.as_of,
+        )
+
+        summary_refused(outcome, StorySummaryRefusalReason.ANOTHER_HOME)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == elsewhere
+        assert await everything(store) == before
+        same = await written(
+            store, story_id, draft(line("Line."), read_pages=(alike_read,)), as_of=read.as_of
+        )
+        assert same.read_pages == (alike_read,)
+
+    async def test_a_summarys_another_home_comes_after_the_stories_are_known_and_before_the_rest(
+        self, store: StoryStore
+    ) -> None:
+        """Its place in ADR-0303 §4's fixed order, which ADR-0302 §7:4 orders around.
+
+        After ``summary_moved_on`` and after every named story's ``unknown_story``, the
+        versions read included; before ``not_held`` and ``over_cap``; and the flags'
+        stories before the versions read.
+        """
+        story_id = await made(store, act("a1"))
+        flagged = await homed(store, RecordHome.shared(), act("a2"))
+        read_one = await homed(store, RecordHome.shared(), act("a3"))
+        await written(store, read_one, draft(line("Its matter.")), as_of=await store.position())
+        across = StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=flagged)
+        read_across = StorySummaryVersionName(
+            story=read_one, version=(await versions_of(store, read_one))[0].version
+        )
+        stale = await state_of(store, story_id)
+        await written(store, story_id, draft(line("Since.")), as_of=stale.as_of)
+        read = await state_of(store, story_id)
+        before = await everything(store)
+
+        moved_on = await store.write_summary(
+            story_id, draft(line("Line."), flags=(across,)), as_of=stale.as_of
+        )
+        unknown = await store.write_summary(
+            story_id,
+            draft(
+                line("Line."),
+                flags=(across,),
+                read_pages=(StorySummaryVersionName(story="story:nowhere", version=1),),
+            ),
+            as_of=read.as_of,
+        )
+        flags_first = await store.write_summary(
+            story_id,
+            draft(line("Line."), flags=(across,), read_pages=(read_across,)),
+            as_of=read.as_of,
+        )
+        not_held = await store.write_summary(
+            story_id,
+            draft(line("Line."), took_in_episodes=("a9",), read_pages=(read_across,)),
+            as_of=read.as_of,
+        )
+        over_cap = await store.write_summary(
+            story_id,
+            draft(
+                *(line("x" * STORY_NOTE_MAX_CHARS) for _ in range(5)),
+                flags=(across,),
+            ),
+            as_of=read.as_of,
+        )
+
+        summary_refused(moved_on, StorySummaryRefusalReason.SUMMARY_MOVED_ON)
+        summary_refused(unknown, StorySummaryRefusalReason.UNKNOWN_STORY)
+        for outcome, named in ((flags_first, flagged), (not_held, read_one), (over_cap, flagged)):
+            summary_refused(outcome, StorySummaryRefusalReason.ANOTHER_HOME)
+            assert outcome.refusal is not None
+            assert outcome.refusal.story_id == named
+        assert await everything(store) == before
+
+    @pytest.mark.parametrize(("home", "other"), _TWO_HOMES, ids=_TWO_HOMES_IDS)
+    @pytest.mark.parametrize("operation", ["create", "link", "merge", "split", "move"])
+    async def test_deciding_a_flag_writes_no_decided_line_into_a_story_of_another_home(
+        self, store: StoryStore, home: RecordHome, other: RecordHome, operation: str
+    ) -> None:
+        """§3:2, §4:7: a write answering a flag of another home than its own is refused.
+
+        The flag was raised by a story of the other home, so its ``decided`` line would be
+        written there: refused ``another_home``, naming that story, and nothing written —
+        no member moved, no line logged, no story minted, the position where it was, a
+        merge's included, whose change is applied and rolled back. A write of the flag's
+        own home then decides it.
+        """
+        flagged = await homed(store, other, act("f1"), act("f2"))
+        flag = await raised(store, flagged, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        first = await homed(store, home, act("a1"), act("a2"))
+        second = await homed(store, home, act("b1"))
+        before = await everything(store)
+        position = await store.position()
+
+        match operation:
+            case "create":
+                outcome = await store.create([sub(first)], home=home, actor=_PASS, answers=flag)
+            case "link":
+                outcome = await store.link(first, [sub(second)], actor=_PASS, answers=flag)
+            case "merge":
+                outcome = await store.merge(second, first, actor=_PASS, answers=flag)
+            case "split":
+                outcome = await store.split(first, [act("a1")], actor=_PASS, answers=flag)
+            case _:
+                outcome = await store.move(first, second, [act("a1")], actor=_PASS, answers=flag)
+
+        refused(outcome, StoryRefusalReason.ANOTHER_HOME)
+        assert outcome.refusal is not None
+        assert outcome.refusal.story_id == flagged
+        assert await held(store, first) == [act("a1"), act("a2")]
+        assert await held(store, second) == [act("b1")]
+        assert await store.position() == position
+        assert await everything(store) == before
+        decided = await store.split(flagged, [act("f1")], actor=_PASS, answers=flag)
+        assert decided.refusal is None, decided
+        assert [line.answers for line in await logged(store, flagged)][-1] == flag
+
+    async def test_a_decisions_another_home_comes_after_the_operations_rule_and_the_flags(
+        self, store: StoryStore
+    ) -> None:
+        """Its place: after the operation's own rule and ``unknown_flag``/``already_decided``.
+
+        A link closing a loop, and a merge closing one, is ``loop``; a flag already
+        decided is ``already_decided``; a flag no record holds ``unknown_flag``. Nothing
+        is written by any of them.
+        """
+        flagged = await homed(store, RecordHome.shared(), act("f1"))
+        flag = await raised(store, flagged, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        decided_flag = await raised(store, flagged, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        assert (await store.leave_flag(decided_flag, actor=_PASS)).refusal is None
+        inner = await made(store, act("c1"))
+        middle = await made(store, sub(inner))
+        outer = await made(store, sub(middle))
+        spare = await made(store, act("c2"))
+        unknown = StoryFlagName(
+            story=flagged, version=999, flag=StoryFlag(kind=StoryFlagKind.TWO_MATTERS)
+        )
+        before = await everything(store)
+
+        link_loop = await store.link(inner, [sub(outer)], actor=_PASS, answers=flag)
+        # ``outer`` merged into ``inner``: ``inner`` gains ``middle``, which holds it.
+        merge_loop = await store.merge(outer, inner, actor=_PASS, answers=flag)
+        already = await store.link(inner, [sub(spare)], actor=_PASS, answers=decided_flag)
+        never = await store.link(inner, [sub(spare)], actor=_PASS, answers=unknown)
+
+        refused(link_loop, StoryRefusalReason.LOOP)
+        refused(merge_loop, StoryRefusalReason.LOOP)
+        refused(already, StoryRefusalReason.ALREADY_DECIDED)
+        refused(never, StoryRefusalReason.UNKNOWN_FLAG)
+        assert await everything(store) == before
+
+    @pytest.mark.parametrize("which", ["named", "raising"])
+    async def test_a_flag_whose_stories_span_two_homes_is_decided_by_no_write(
+        self,
+        store: StoryStore,
+        set_story_home: Callable[[StoryStore, str, RecordHome], None],
+        which: str,
+    ) -> None:
+        """§3:2, §4:7: a flag across two homes in a file written before these refusals.
+
+        A ``like_another`` flag whose two stories are of two homes is read back as it was
+        recorded, and no write decides it: ``leave_flag`` is refused ``another_home``
+        naming the story of another home than the first the flag concerns, and so is a
+        write of either home answering it; nothing is written.
+        """
+        raising = await made(store, act("a1"))
+        named = await made(store, act("a2"))
+        flag_raised = StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=named)
+        flag = await raised(store, raising, flag_raised)
+        moved = named if which == "named" else raising
+        stayed = raising if which == "named" else named
+        set_story_home(store, moved, RecordHome.shared())
+        alike = await made(store, act("a3"))
+        lent = await homed(store, RecordHome.shared(), act("x1"))
+        before = await everything(store)
+
+        left = await store.leave_flag(flag, actor=_PASS, outcome=StoryDecision.NOT_APPLIED)
+        owners_write = await store.create(
+            [sub(alike)], home=RecordHome.owners(), actor=_PASS, answers=flag
+        )
+        shared_write = await store.split(lent, [act("x1")], actor=_PASS, answers=flag)
+
+        for outcome, named_story in ((left, named), (owners_write, moved), (shared_write, stayed)):
+            refused(outcome, StoryRefusalReason.ANOTHER_HOME)
+            assert outcome.refusal is not None
+            assert outcome.refusal.story_id == named_story
+        assert await everything(store) == before
+        assert (await versions_of(store, raising))[-1].flags == (flag_raised,)
 
     # --- create (§3) ---------------------------------------------------------
 
@@ -2984,20 +3258,24 @@ class StoryStoreContract:
         assert hidden.refusal.story_id == shared
 
     async def test_a_flag_concerning_a_story_a_bound_store_does_not_hold_is_one_never_raised(
-        self, sight_store_factory: Callable[[SightMode], StoryStore]
+        self,
+        sight_store_factory: Callable[[SightMode], StoryStore],
+        set_story_home: Callable[[StoryStore, str, RecordHome], None],
     ) -> None:
         """§4:8, §7:5, §8:2: ``unknown_flag``, and no ``decided`` line written anywhere.
 
         A flag a story it holds raised naming a story it does not hold, and a flag a story
         it does not hold raised, are each answered as never raised, by ``leave_flag``
-        and by a write given it as ``answers``. Unbound, the first is decided.
+        and by a write given it as ``answers``, before ``another_home``. The first can be
+        held only in a file written before §4:7's refusals, so the door stands for one;
+        unbound, it is held, and refused ``another_home`` for its two homes.
         """
         store = sight_store_factory(SightMode.WITHHOLD)
         names = await _sight_history(store)
         owners, shared, other = names["owners-one"], names["shared-one"], names["shared-two"]
-        naming = await raised(
-            store, shared, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=owners)
-        )
+        lent = await homed(store, RecordHome.shared(), act("l1"))
+        naming = await raised(store, shared, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=lent))
+        set_story_home(store, lent, RecordHome.owners())
         owners_flag = await raised(store, owners, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
         bound = store.bound(SIGHTS["run-over-the-shared-things"])
         before = await everything(store)
@@ -3008,8 +3286,51 @@ class StoryStoreContract:
                 StoryRefusalReason.UNKNOWN_FLAG,
             )
         assert await everything(store) == before
-        decided = await store.leave_flag(naming, actor=_PASS)
-        assert decided.refusal is None, decided
+        unbound = await store.leave_flag(naming, actor=_PASS)
+        refused(unbound, StoryRefusalReason.ANOTHER_HOME)
+        assert unbound.refusal is not None
+        assert unbound.refusal.story_id == lent
+
+    async def test_a_flag_across_homes_is_another_home_only_between_stories_a_bound_store_holds(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§4:7, §4:8: the owner's work sees both homes, so it is told ``another_home``.
+
+        For a decision on a flag of the shared things written from the owner's domain, and
+        for a summary of the owner's naming a story of the shared things. A run over the
+        owner's domain holds no story of the shared things, so it is told the flag was
+        never raised and the story never written. Nothing is written.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        names = await _sight_history(store)
+        owners, alike, spare = names["owners-one"], names["owners-split"], names["shared-two"]
+        flag = await raised(store, spare, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        across = draft(
+            line("Line."), flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=spare),)
+        )
+        before = await everything(store)
+        as_of = await store.position()
+        cases = (
+            (
+                SIGHTS["owners-work"],
+                StoryRefusalReason.ANOTHER_HOME,
+                StorySummaryRefusalReason.ANOTHER_HOME,
+            ),
+            (
+                SIGHTS["run-over-the-owners-domain"],
+                StoryRefusalReason.UNKNOWN_FLAG,
+                StorySummaryRefusalReason.UNKNOWN_STORY,
+            ),
+        )
+        for sight, decision_reason, summary_reason in cases:
+            bound = store.bound(sight)
+            decision = await bound.link(owners, [sub(alike)], actor=_PASS, answers=flag)
+            refused(decision, decision_reason)
+            summary = await bound.write_summary(owners, across, as_of=as_of)
+            summary_refused(summary, summary_reason)
+            assert summary.refusal is not None
+            assert summary.refusal.story_id == spare
+        assert await everything(store) == before
 
     async def test_a_story_minted_in_a_home_the_sight_does_not_see_is_then_one_it_does_not_hold(
         self, sight_store_factory: Callable[[SightMode], StoryStore]

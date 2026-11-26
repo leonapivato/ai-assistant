@@ -24233,7 +24233,14 @@ class StoryRefusalReason(StrEnum):
     homes, which would put one story's members and notes into a story of another home
     (§3:2, §4:6). Checked once every story the write names is known and not merged,
     before the operation's own rule. The refusal names the story of the other home: the
-    story member, or the story merged or moved into."""
+    story member, or the story merged or moved into.
+
+    A write answering a flag is refused it too where a story the flag concerns is of
+    another home than the write's own, since its ``decided`` line would be written into
+    that story (§3:2, §4:7): the home of the story minted, linked to, split or moved
+    from, or merged into, and for ``leave_flag`` the home of the first story the flag
+    concerns. Checked after ``unknown_flag`` and ``already_decided``, naming the story
+    the flag concerns that is of the other home."""
 
 
 class StoryHeader(BaseModel):
@@ -24883,12 +24890,22 @@ class StorySummaryRefusalReason(StrEnum):
     the write ran (ADR-0302 §7, ADR-0303 §4:4). The refusal names the activation or
     the note."""
 
+    ANOTHER_HOME = "another_home"
+    """A flag the write raises names a story of another home than the story written, or
+    a summary version the run read is of a story of another home (ADR-0383 §4:7), so the
+    version would record a name across two homes. The named story's own home is
+    compared, not that of a story it was merged into. Checked once every story the write
+    names is known, after ``summary_moved_on`` and before ``not_held`` and ``over_cap``,
+    the flags first and then the versions read. The refusal names the story of the other
+    home."""
+
 
 class StorySummaryRefusal(BaseModel):
     """Why a write to a story's summary was refused, and what over (ADR-0300 §3).
 
-    ``story_id`` names the story the refusal is about: the story written to, or the
-    unknown story a flag or a summary version the run read names. ``merged_into`` is set
+    ``story_id`` names the story the refusal is about: the story written to, the
+    unknown story a flag or a summary version the run read names, or the story of
+    another home one names on ``another_home``. ``merged_into`` is set
     exactly on ``merged_story``. ``note`` is set on ``unknown_note`` and on a
     ``not_held`` naming a note, and ``activation`` exactly on a ``not_held`` naming an
     activation; a ``not_held`` names one of the two, never both (ADR-0302 §7:3).
