@@ -98,12 +98,14 @@ asking one answering there". The same ground lets the message be written there.
 > the store makes of its own: a write repeated under an effect is that message (ADR-0350 §12:9),
 > and a conversation absent or stamped deleted refuses the write.
 
-> **Normative.** What such a write gives back reaches the work only as whether it was made and,
-> for a message, the position it was written at. No field of a conversation it returns reaches a
-> stage, a model or a surface.
+> **Normative.** What such a write gives back reaches the work only as whether it was made. A
+> message's position is kept in code's delivery bookkeeping alone, the work's effect record and
+> its confirmation (ADR-0350 §12:9, §8:11), and reaches no model and no surface. No field of a
+> conversation a write returns reaches a stage, a model or a surface.
 
-A message's position comes from a counter shared across the store, which gives the same answer
-bound or not (ADR-0383 §8:5).
+A conversation numbers its own messages, so the gap between a work's input and its reply would
+count the messages the work does not see. ADR-0369 §10:6 forbids that count, and ADR-0383 §8:5's
+store-wide figures do not include a position.
 
 ### 4. Naming its own places
 
