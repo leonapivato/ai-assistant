@@ -1478,6 +1478,32 @@ class MemoryStoreContract:
             await bound.delete("m-later")
         assert not [event for event in events if event["event"] == "sight_counted"]
 
+    async def test_a_read_answered_without_reaching_the_records_is_counted_too(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """§11:1: one event for every read, those a store answers by construction included.
+
+        An empty id list, a zero page, an axis selecting nothing and a query with no
+        terms each answer without reaching a record; each still writes its event, of
+        nothing given back.
+        """
+        store = sight_store_factory(SightMode.COUNT)
+        bound = store.bound(SIGHTS["owners-work"])
+        empty: list[ReadCall[MemoryStore]] = [
+            ReadCall("get_many", _on("get_many", [])),
+            ReadCall("get_history", _on("get_history", [])),
+            ReadCall("list_beliefs", _on("list_beliefs", limit=0)),
+            ReadCall("list_beliefs", _on("list_beliefs", kinds=[])),
+            ReadCall("search", _on("search", "   ", limit=3)),
+            ReadCall("search", _on("search", _ANY, limit=0)),
+            ReadCall("search", _on("search", _ANY, bands=[])),
+        ]
+        for call in empty:
+            with structlog.testing.capture_logs() as events:
+                await call.call(bound)
+            counted = [event for event in events if event["event"] == "sight_counted"]
+            assert [(event["member"], event["given"]) for event in counted] == [(call.name, 0)]
+
     async def test_a_store_bound_twice_is_bound_to_the_meet_of_the_two_sights(
         self, sight_store_factory: Callable[[SightMode], MemoryStore]
     ) -> None:
