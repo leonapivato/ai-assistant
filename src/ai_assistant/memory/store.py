@@ -14,6 +14,8 @@ retrieval and persistence live in ``SqliteMemoryStore`` (ADR-0002/0006).
 
 from __future__ import annotations
 
+import copy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -46,6 +48,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     ProcessingStatus,
     RecordChunk,
+    SightMode,
     home_may_be_written,
     names_person,
     record_band,
@@ -54,6 +57,7 @@ from ai_assistant.core.types import (
 from ai_assistant.memory._channel_reads import channel_of, check_channel_page
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
 from ai_assistant.memory._home_guard import refuse_crossing_names, refuse_home_change
+from ai_assistant.memory._sight import count_records, made_by
 from ai_assistant.memory._walk import (
     check_walk_limit,
     check_walk_name,
@@ -63,7 +67,7 @@ from ai_assistant.memory._walk import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
@@ -71,6 +75,7 @@ if TYPE_CHECKING:
         MemoryRecord,
         MemoryWrite,
         RecordHome,
+        Sight,
         WalkPosition,
     )
 
@@ -158,15 +163,34 @@ def _refuse_home(record: MemoryRecord) -> None:
         raise MemoryStoreError(msg)
 
 
+@dataclass(slots=True)
+class _Issued:
+    """The store's two never-reissued counters, held apart so a bound store shares them.
+
+    A store bound to a sight is a copy of the store sharing every piece of its state by
+    reference (:meth:`InMemoryMemoryStore.bound`); a counter held as a plain ``int`` on
+    the store would be copied by value and issue the same key or revision twice.
+    """
+
+    keys: int = 0
+    revisions: int = 0
+
+
 class InMemoryMemoryStore:
     """A non-persistent ``MemoryStore`` backed by a dict, for dev and tests.
 
     Structurally implements
     :class:`~ai_assistant.core.protocols.MemoryStore`. Records are stored by
     their id; adding a record whose id already exists overwrites it.
+
+    **A store bound to a sight** (ADR-0383 §7) is a copy of this one sharing its
+    records, keys, counters and walk positions by reference, with the sight set:
+    every member reads the same state, and each read and write consults
+    :meth:`_holds` and :meth:`_refuse_unheld`, which answer for the unbound store as
+    they always did.
     """
 
-    def __init__(self, *, now: Clock = _utcnow) -> None:
+    def __init__(self, *, now: Clock = _utcnow, sight_mode: SightMode = SightMode.COUNT) -> None:
         """Create an empty store.
 
         Args:
@@ -176,29 +200,34 @@ class InMemoryMemoryStore:
                 indeterminate reading is a ``MemoryStoreError`` rather than a
                 fabricated UTC instant the expiry comparison then trusts
                 (ADR-0026 §2).
+            sight_mode: Whether a store bound to a sight withholds or only counts
+                (ADR-0383 §7:10), fixed here for every binding of this store.
         """
         self._records: dict[str, MemoryRecord] = {}
         self._clock = checked_clock(now, owner="InMemoryMemoryStore")
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
         # The walk's order key, issued once per stored record and never reissued
         # (ADR-0114 §1). A dict preserves insertion order and re-assigning an
         # existing key keeps its original position, which is the upsert behaviour
         # the persistent store's `rowid` already has — but insertion order is not a
-        # *key*, and a position has to name one. `_sequence` only ever increases:
+        # *key*, and a position has to name one. `_issued.keys` only ever rises:
         # `delete`, `purge_expired` and `clear` drop entries from `_keys` and none
         # of them touches it, so a number a removed record held is never handed to
         # a later one and a walk that has passed it cannot skip that record.
+        #
+        # `_issued.revisions` is the concurrency token's issuer (ADR-0219 §1).
+        # Never-reissued within the store, which for a non-durable one is the life of
+        # this object: `delete`, `purge_expired` and `clear` all drop records and none
+        # of them touches it, so a stamp a destroyed row held is never handed to a
+        # later one and an `IF_UNCHANGED` held across a delete-and-recreate is refused.
+        # Counting is the *mechanism*; §1 forbids any caller reading the order or the
+        # difference.
         self._keys: dict[str, int] = {}
-        self._sequence = 0
-        # The concurrency token's issuer (ADR-0219 §1). Never-reissued within the
-        # store, which for a non-durable one is the life of this object: `delete`,
-        # `purge_expired` and `clear` all drop records and none of them touches it,
-        # so a stamp a destroyed row held is never handed to a later one and an
-        # `IF_UNCHANGED` held across a delete-and-recreate is refused. Counting is
-        # the *mechanism*; §1 forbids any caller reading the order or the difference.
-        self._revisions = 0
-        # Recorded as text, as the persistent store records it, so "a position this
-        # build cannot use" is the same shape in both and ADR-0114 §4's
-        # discard-and-restart is one behaviour rather than two.
+        self._issued = _Issued()
+        # Walk positions are recorded as text, as the persistent store records them,
+        # so "a position this build cannot use" is the same shape in both and
+        # ADR-0114 §4's discard-and-restart is one behaviour rather than two.
         self._walks: dict[str, str] = {}
 
     def _now_utc(self) -> datetime:
@@ -229,6 +258,57 @@ class InMemoryMemoryStore:
         """
         return not self._is_expired(record, now) and record.validity.live_at(now)
 
+    def bound(self, sight: Sight) -> InMemoryMemoryStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing every piece of this store's state by reference — the
+        records, their keys, the two counters and the walk positions — with the sight
+        set: the meet of the one it was already bound to, where it was (§6:6).
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _holds(self, record: MemoryRecord) -> bool:
+        """Whether this store, as bound, holds ``record`` (ADR-0383 §7:2 to §7:4).
+
+        Every record, unbound or bound in the counting mode; otherwise the records its
+        sight sees, by the one predicate (§7:3), its activation's episode included.
+        """
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return True
+        return self._sight.sees(record.home, made_by=made_by(record))
+
+    def _counted(self, member: str, records: Iterable[MemoryRecord]) -> None:
+        """Write §11:1's count of one read, where this store is bound and only counts."""
+        if self._sight is not None and self._sight_mode is SightMode.COUNT:
+            count_records(self._sight, member, records)
+
+    def _refuse_unheld(self, record_id: str, mode: MemoryWriteMode) -> None:
+        """Refuse a write that would change a stored record this store does not hold.
+
+        ADR-0383 §7:5, as a write to one the store does not hold: an ``IF_UNCHANGED``
+        with the refusal a record never written gets, and an upsert as an id already
+        taken. An ``INSERT_IF_ABSENT`` is not judged here: its collision is a write's own
+        check, decided over every record the store holds (§7:11).
+
+        Raises:
+            MemoryStoreStaleError: An ``IF_UNCHANGED`` names a record not held.
+            MemoryStoreConflictError: An upsert names a record not held.
+        """
+        stored = self._records.get(record_id)
+        if stored is None or self._holds(stored) or mode is MemoryWriteMode.INSERT_IF_ABSENT:
+            return
+        if mode is MemoryWriteMode.IF_UNCHANGED:
+            msg = f"cannot write {record_id!r}: no record is stored under that id"
+            raise MemoryStoreStaleError(msg)
+        msg = f"cannot write {record_id!r}: the id names a record this store does not hold"
+        raise MemoryStoreConflictError(msg)
+
     async def add(self, record: MemoryRecord) -> str:
         """Persist a record and return its id.
 
@@ -246,8 +326,11 @@ class InMemoryMemoryStore:
             MemoryStoreError: ``record.id`` names a stored record of a different
                 ``kind`` (ADR-0108 §4), or the record carries a home no write may
                 carry (ADR-0383 §2:3, §4:7). Nothing is written.
+            MemoryStoreConflictError: Bound and withholding, ``record.id`` names a
+                stored record this store does not hold (ADR-0383 §7:5).
         """
         _refuse_home(record)
+        self._refuse_unheld(record.id, MemoryWriteMode.UPSERT)
         self._refuse_cross_kind(record)
         refuse_crossing_names([record], self._home_after({record.id: record}))
         # Deep copy so a caller mutating the record (including nested fields like
@@ -267,8 +350,8 @@ class InMemoryMemoryStore:
         what makes a delete-and-recreate a *changed* record rather than a resumed
         per-id count, which is the ABA hole §1 closes by name.
         """
-        self._revisions += 1
-        return record.model_copy(deep=True, update={"revision": self._revisions})
+        self._issued.revisions += 1
+        return record.model_copy(deep=True, update={"revision": self._issued.revisions})
 
     def _issue_key(self, record_id: str) -> None:
         """Give a newly stored record its walk position, or leave an upsert's alone.
@@ -280,8 +363,8 @@ class InMemoryMemoryStore:
         than one of them quietly re-queueing the record.
         """
         if record_id not in self._keys:
-            self._sequence += 1
-            self._keys[record_id] = self._sequence
+            self._issued.keys += 1
+            self._keys[record_id] = self._issued.keys
 
     def _refuse_cross_kind(self, record: MemoryRecord) -> None:
         """Refuse an upsert landing on a stored record of a different kind.
@@ -369,6 +452,10 @@ class InMemoryMemoryStore:
                 would leave name a record of another home this store holds, as a
                 lineage or an evidence pointer, the batch's own records included (§4:7).
                 Nothing is written.
+
+        Bound and withholding, an ``UPSERT`` or ``IF_UNCHANGED`` element naming a stored
+        record this store does not hold is refused as a write to one it does not hold
+        (ADR-0383 §7:5): ``MemoryStoreConflictError`` and ``MemoryStoreStaleError``.
         """
         self._reject_repeated_ids(writes)
         for write in writes:
@@ -381,6 +468,7 @@ class InMemoryMemoryStore:
             if write.mode is MemoryWriteMode.INSERT_IF_ABSENT and write.record.id in self._records:
                 msg = f"cannot insert {write.record.id!r}: a record with that id is already stored"
                 raise MemoryStoreConflictError(msg)
+            self._refuse_unheld(write.record.id, write.mode)
             if write.mode is MemoryWriteMode.IF_UNCHANGED:
                 self._refuse_stale(write)
             # An INSERT_IF_ABSENT element never reaches here with a collision of
@@ -446,8 +534,18 @@ class InMemoryMemoryStore:
         ``None`` when the record is absent, expired, or not live at now — a closed
         or not-yet-open validity window, both ends (ADR-0045 §6).
         """
+        record = self._live(record_id)
+        self._counted("get", () if record is None else (record,))
+        return record
+
+    def _live(self, record_id: str) -> MemoryRecord | None:
+        """The live record this store holds at ``record_id``, a detached copy; else ``None``."""
         record = self._records.get(record_id)
-        if record is None or not self._is_readable(record, self._now_utc()):
+        if (
+            record is None
+            or not self._is_readable(record, self._now_utc())
+            or not self._holds(record)
+        ):
             return None
         # Deep copy so callers cannot mutate stored state — including nested fields
         # like validity — matching the persistent store.
@@ -474,12 +572,15 @@ class InMemoryMemoryStore:
             # that surfaces a bad clock as ``MemoryStoreError``.
             return {}
         now = self._now_utc()  # one reading for the whole batch, never one per id
-        return {
+        found = {
             record_id: record.model_copy(deep=True)
             for record_id in wanted
             if (record := self._records.get(record_id)) is not None
             and self._is_readable(record, now)
+            and self._holds(record)
         }
+        self._counted("get_many", found.values())
+        return found
 
     async def get_history(self, record_ids: Sequence[str]) -> Mapping[str, Memory]:
         """Return the memories held at ``record_ids``, whatever their status (ADR-0342 §2).
@@ -495,12 +596,15 @@ class InMemoryMemoryStore:
         if not wanted:
             return {}
         now = self._now_utc()  # one reading for the whole batch, never one per id
-        return {
+        found = {
             record_id: record.model_copy(deep=True)
             for record_id in wanted
             if isinstance(record := self._records.get(record_id), Memory)
             and not self._is_expired(record, now)
+            and self._holds(record)
         }
+        self._counted("get_history", found.values())
+        return found
 
     async def search(  # noqa: PLR0913 — one argument per eligibility axis
         self,
@@ -576,13 +680,16 @@ class InMemoryMemoryStore:
             # An open episode never enters the ranking (ADR-0286 §6:1).
             if self._is_readable(record, now)
             and not is_open(record)
+            and self._holds(record)
             and (wanted is None or record.kind in wanted)
             and (wanted_bands is None or record_band(record) in wanted_bands)
             and names_person(record, person, as_subject=as_subject)
             and (score := _relevance(query_terms, record.content)) > 0.0
         ]
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
-        return MemorySearchResult(records=tuple(scored[:limit]))
+        found = MemorySearchResult(records=tuple(scored[:limit]))
+        self._counted("search", found.records)
+        return found
 
     async def episodes(
         self,
@@ -598,7 +705,9 @@ class InMemoryMemoryStore:
         candidates = [
             record
             for record in self._records.values()
-            if isinstance(record, EpisodicMemory) and self._is_readable(record, now)
+            if isinstance(record, EpisodicMemory)
+            and self._is_readable(record, now)
+            and self._holds(record)
         ]
         records = [
             record
@@ -625,6 +734,7 @@ class InMemoryMemoryStore:
         ]
         records.sort(key=lambda record: (record.occurred_at, record.id), reverse=True)
         page = records[:limit]
+        self._counted("episodes", page)
         return EpisodePage(
             items=tuple(summary_of(record) for record in page),
             next_cursor=encode_cursor(
@@ -648,10 +758,13 @@ class InMemoryMemoryStore:
     ) -> EpisodeChunk | None:
         """Reread a live episode and return digest-bound canonical detail bytes."""
         check_detail(episode_id, version, offset, max_bytes)
-        record = await self.get(episode_id)
+        record = self._live(episode_id)
         if not isinstance(record, EpisodicMemory):
+            self._counted("episode_chunk", ())
             return None
-        return detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
+        chunk = detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
+        self._counted("episode_chunk", (record,))
+        return chunk
 
     async def channel_episodes(
         self,
@@ -680,13 +793,14 @@ class InMemoryMemoryStore:
             if channel_of(record := self._records[rid]) == channel
             and self._is_readable(record, now)
             and not is_open(record)
+            and self._holds(record)
         ]
         page = (
             matching[-limit:]
             if after is None
             else [entry for entry in matching if entry[0] > after][:limit]
         )
-        return ChannelEpisodePage(
+        found = ChannelEpisodePage(
             entries=tuple(
                 ChannelEpisode(
                     number=key, record=record.model_copy(deep=True, update={"score": None})
@@ -696,6 +810,8 @@ class InMemoryMemoryStore:
             ),
             total=len(matching),
         )
+        self._counted("channel_episodes", (entry.record for entry in found.entries))
+        return found
 
     async def channel_episode_ids(
         self,
@@ -714,10 +830,12 @@ class InMemoryMemoryStore:
         for rid, key in self._keys.items():
             if after is not None and key <= after:
                 continue
-            if channel_of(self._records[rid]) == channel:
+            record = self._records[rid]
+            if channel_of(record) == channel and self._holds(record):
                 held.append(ChannelEpisodeId(number=key, episode_id=rid))
                 if len(held) == limit:
                     break
+        self._counted("channel_episode_ids", (self._records[one.episode_id] for one in held))
         return tuple(held)
 
     async def open_episodes(
@@ -737,7 +855,7 @@ class InMemoryMemoryStore:
             if after is not None and key <= after:
                 continue
             record = self._records[rid]
-            if isinstance(record, EpisodicMemory) and is_open(record):
+            if isinstance(record, EpisodicMemory) and is_open(record) and self._holds(record):
                 found.append(
                     ChannelEpisode(
                         number=key, record=record.model_copy(deep=True, update={"score": None})
@@ -745,6 +863,7 @@ class InMemoryMemoryStore:
                 )
                 if len(found) == limit:
                     break
+        self._counted("open_episodes", (entry.record for entry in found))
         return tuple(found)
 
     async def list_beliefs(
@@ -800,16 +919,26 @@ class InMemoryMemoryStore:
             if self._is_readable(record, now)
             and (wanted_bands is None or record_band(record) in wanted_bands)
             and record.kind in wanted_kinds
+            and self._holds(record)
         ]
         page = _newest_revision_first(matched)[offset : offset + limit]
+        self._counted("list_beliefs", page)
         # ``score`` is cleared rather than left as stored: a record re-added after a
         # search carries that query's relevance, which means nothing here.
         return [record.model_copy(update={"score": None}, deep=True) for record in page]
 
     async def delete(self, record_id: str) -> bool:
-        """Delete one record, returning whether it existed."""
+        """Delete one record, returning whether it existed.
+
+        Bound and withholding, a record this store does not hold is not deleted and
+        answers ``False``, as one never written does (ADR-0383 §7:5, §8:2).
+        """
+        stored = self._records.get(record_id)
+        if stored is None or not self._holds(stored):
+            return False
+        del self._records[record_id]
         self._keys.pop(record_id, None)
-        return self._records.pop(record_id, None) is not None
+        return True
 
     async def clear(self) -> int:
         """Delete every record, returning the number removed.
@@ -827,11 +956,12 @@ class InMemoryMemoryStore:
         every stamp it had already handed out — the ABA hole the never-reissued
         clause closes, arriving through a different door.
         """
-        count = len(self._records)
-        self._records.clear()
-        self._keys.clear()
+        held = [rid for rid, record in self._records.items() if self._holds(record)]
+        for rid in held:
+            del self._records[rid]
+            self._keys.pop(rid, None)
         self._walks.clear()
-        return count
+        return len(held)
 
     async def export(self) -> list[MemoryRecord]:
         """Return an independent snapshot of every retained (non-expired) record.
@@ -842,16 +972,22 @@ class InMemoryMemoryStore:
         §6, amending ADR-0007 §3).
         """
         now = self._now_utc()
-        return [
+        found = [
             record.model_copy(deep=True)
             for record in self._records.values()
-            if not self._is_expired(record, now)
+            if not self._is_expired(record, now) and self._holds(record)
         ]
+        self._counted("export", found)
+        return found
 
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""
         now = self._now_utc()
-        expired = [rid for rid, record in self._records.items() if self._is_expired(record, now)]
+        expired = [
+            rid
+            for rid, record in self._records.items()
+            if self._is_expired(record, now) and self._holds(record)
+        ]
         for rid in expired:
             del self._records[rid]
             self._keys.pop(rid, None)
@@ -870,7 +1006,7 @@ class InMemoryMemoryStore:
         # Read once per chunk, so one chunk is judged against one reading of the
         # clock — matching every other read here and the persistent store.
         now = self._now_utc()
-        after = resume_key(self._walks.get(walk), walk=walk, issued_through=self._sequence)
+        after = resume_key(self._walks.get(walk), walk=walk, issued_through=self._issued.keys)
         # `limit` bounds records *examined*, not records returned: a scan that ran
         # on until it had `limit` eligible records would be unbounded over a long
         # ineligible run, which is the hazard ADR-0111 §4 forbids.
@@ -888,12 +1024,13 @@ class InMemoryMemoryStore:
         # store holds, an expired one included (ADR-0286 §6:2), so a chunk whose next
         # record is that episode examines nothing and carries no position — the walk
         # waits there, rather than passing a record it could never come back for.
-        stop = min(
-            (key for rid, key in self._keys.items() if is_open(self._records[rid])),
-            default=None,
-        )
+        #
+        # Bound and withholding, the walk examines only records this store holds, and
+        # waits at the oldest open episode among them (ADR-0383 §7:2).
+        held = [(rid, key) for rid, key in self._keys.items() if self._holds(self._records[rid])]
+        stop = min((key for rid, key in held if is_open(self._records[rid])), default=None)
         examined: list[tuple[int, str]] = []
-        for rid, key in self._keys.items():
+        for rid, key in held:
             if after is not None and key <= after:
                 continue
             if stop is not None and key >= stop:
@@ -906,6 +1043,7 @@ class InMemoryMemoryStore:
             for _, rid in examined
             if self._is_readable(self._records[rid], now)
         ]
+        self._counted("walk_records", eligible)
         # Absent exactly when nothing was examined — never merely when nothing was
         # eligible, which is how a walk crosses a dead range instead of stalling on
         # it forever.
@@ -927,6 +1065,6 @@ class InMemoryMemoryStore:
         # rather than an error: a walk is at-least-once, so a resumed run can hold a
         # stale position legitimately, and the worst outcome under this rule is
         # repeated work rather than records skipped forever.
-        current = resume_key(self._walks.get(walk), walk=walk, issued_through=self._sequence)
+        current = resume_key(self._walks.get(walk), walk=walk, issued_through=self._issued.keys)
         if current is None or key > current:
             self._walks[walk] = mint_position(walk, key).token

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import json
 import sqlite3
 import subprocess
@@ -69,6 +70,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     Provenance,
     RecordHome,
+    SightMode,
     SituationLabel,
     Validity,
     band_of,
@@ -236,12 +238,15 @@ def make_store(tmp_path: Path) -> Iterator[Callable[..., SqliteMemoryStore]]:
         embedder: Embedder | None = None,
         dimensions: int = 256,
         now: Callable[[], datetime] = _fixed_now,
+        name: str = "memory.db",
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> SqliteMemoryStore:
         store = SqliteMemoryStore(
             traces_sink=FakeTraceSink(),
-            path=tmp_path / "memory.db",
+            path=tmp_path / name,
             embedder=embedder if embedder is not None else HashingEmbedder(dimensions=dimensions),
             now=now,
+            sight_mode=sight_mode,
         )
         created.append(store)
         return store
@@ -2418,6 +2423,14 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         self, make_store: Callable[..., SqliteMemoryStore]
     ) -> Callable[[Callable[[], datetime]], MemoryStore]:
         return lambda now: make_store(now=now)
+
+    @pytest.fixture
+    def sight_store_factory(
+        self, make_store: Callable[..., SqliteMemoryStore]
+    ) -> Callable[[SightMode], MemoryStore]:
+        """A store on a file of its own per call, so two compared stores share nothing."""
+        made = itertools.count()
+        return lambda mode: make_store(name=f"sight-{next(made)}.db", sight_mode=mode)
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(

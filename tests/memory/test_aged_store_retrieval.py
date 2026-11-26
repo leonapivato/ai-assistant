@@ -86,7 +86,7 @@ from aged_store import (
     served_prediction,
 )
 
-from ai_assistant.core.types import MemoryKind
+from ai_assistant.core.types import MemoryKind, RecordHome, Sight, SightMode
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory.sqlite_store import _VEC_KNN_MAX_K
 from ai_assistant.testing import FakeTraceSink
@@ -94,6 +94,8 @@ from ai_assistant.testing import FakeTraceSink
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
+
+    from ai_assistant.core.protocols import MemoryStore
 
 pytestmark = pytest.mark.integration
 
@@ -160,16 +162,17 @@ def profile(aged_store_scale: str) -> Profile:
 
 
 @pytest.fixture
-def make_store(tmp_path: Path) -> Iterator[Callable[[str], SqliteMemoryStore]]:
+def make_store(tmp_path: Path) -> Iterator[Callable[..., SqliteMemoryStore]]:
     """Build stores on the instrument's fixed clock, closed on teardown."""
     created: list[SqliteMemoryStore] = []
 
-    def _make(name: str) -> SqliteMemoryStore:
+    def _make(name: str, sight_mode: SightMode = SightMode.COUNT) -> SqliteMemoryStore:
         store = SqliteMemoryStore(
             traces_sink=FakeTraceSink(),
             path=tmp_path / f"{name}.db",
             embedder=ClusteredEmbedder(),
             now=lambda: _INSTANTS.now,
+            sight_mode=sight_mode,
         )
         created.append(store)
         return store
@@ -191,7 +194,7 @@ async def _aged(spec: AgedStoreSpec, store: SqliteMemoryStore) -> AgedStore:
 
 
 async def _timed_search(
-    store: SqliteMemoryStore, query: str, *, limit: int, kinds: Sequence[MemoryKind] | None
+    store: MemoryStore, query: str, *, limit: int, kinds: Sequence[MemoryKind] | None
 ) -> tuple[int, float]:
     """Run one search, returning how many rows came back and how long it took, in ms."""
     started = time.perf_counter()
@@ -321,6 +324,49 @@ async def test_retrieval_latency_scales_with_the_live_record_count(
             f"p95 {p95:.1f}ms at live={live} exceeds the {ceiling:.1f}ms trip-wire"
         )
 
+    report(pytestconfig, rows)
+
+
+async def test_a_bound_search_that_withholds_stays_under_the_same_trip_wire(
+    make_store: Callable[..., SqliteMemoryStore],
+    profile: Profile,
+    pytestconfig: pytest.Config,
+) -> None:
+    """ADR-0383 §7:2's cost: the sight binds before the KNN cut, read off each row's JSON.
+
+    A store bound to the owner's domain and withholding carries the sight into the
+    restriction the KNN is bound by, so every candidate row's stored home is read
+    from its JSON: no column or index holds it. Every record the instrument plants is
+    the owner's, so the bound read must serve exactly what the unbound one does, and
+    the figures it reports beside the unbound ones are the price of the filter.
+    """
+    rows = ["", "ADR-0383 §7:2 — search bound to the owner's domain, withholding"]
+    rows.append(f"{'live':>8} {'total':>8} {'p50 ms':>9} {'p95 ms':>9} {'max ms':>9} {'us/rec':>8}")
+    sight = Sight.of_run(RecordHome.owners())
+    for live in profile.latency_volumes:
+        spec = AgedStoreSpec(live=live, topics=max(1, live // 40), closed_fraction=0.3)
+        store = make_store(f"bound-latency-{live}", SightMode.WITHHOLD)
+        aged = await _aged(spec, store)
+        bound = store.bound(sight)
+        latencies: list[float] = []
+        for index in range(profile.queries):
+            query = aged.topic_query(index)
+            count, elapsed = await _timed_search(bound, query, limit=10, kinds=None)
+            latencies.append(elapsed)
+            unbound = await store.search(query, limit=10)
+            assert (await bound.search(query, limit=10)) == unbound
+            assert count == 10
+        latencies.sort()
+        p50 = _percentile(latencies, 0.50)
+        p95 = _percentile(latencies, 0.95)
+        rows.append(
+            f"{spec.live:>8} {spec.total:>8} {p50:>9.2f} {p95:>9.2f} "
+            f"{latencies[-1]:>9.2f} {p50 * 1000 / spec.total:>8.2f}"
+        )
+        ceiling = _LATENCY_FIXED_MS + _LATENCY_PER_RECORD_MS * spec.total
+        assert p95 < ceiling, (
+            f"bound p95 {p95:.1f}ms at live={live} exceeds the {ceiling:.1f}ms trip-wire"
+        )
     report(pytestconfig, rows)
 
 

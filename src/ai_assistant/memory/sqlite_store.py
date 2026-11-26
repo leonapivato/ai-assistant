@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import sqlite3
 import threading
@@ -72,6 +73,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     RecordChunk,
     RecordHome,
+    SightMode,
     TraceKind,
     TraceRecordSet,
     home_may_be_written,
@@ -118,6 +120,7 @@ from ai_assistant.memory._home_guard import (
 from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._parties_upgrade import parties_episode
 from ai_assistant.memory._placed_upgrade import placed_memory
+from ai_assistant.memory._sight import count_given, count_records, made_by_id, seen_sql
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._understanding_upgrade import understood_episode
 from ai_assistant.memory._walk import (
@@ -129,7 +132,7 @@ from ai_assistant.memory._walk import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
@@ -137,6 +140,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         BeliefBand,
         MemoryWrite,
+        Sight,
         WalkPosition,
     )
 
@@ -463,10 +467,31 @@ def _retrieval_reading(retrieved: _Retrieved) -> traces.Reading:
     )
 
 
-class SqliteMemoryStore:
-    """A persistent, semantically-searchable ``MemoryStore``."""
+def _home_or_none(stored: object) -> RecordHome | None:
+    """A stored home read back, or ``None`` where there is none or it cannot be read."""
+    if stored is None:
+        return None
+    try:
+        return RecordHome.model_validate_json(str(stored))
+    except ValidationError:
+        return None
 
-    def __init__(
+
+class SqliteMemoryStore:
+    """A persistent, semantically-searchable ``MemoryStore``.
+
+    **A store bound to a sight** (ADR-0383 §7) is a copy of this one sharing its
+    connection, lock, embedder and trace emitter by reference, with the sight set.
+    Withholding, every read adds the sight's own expression (:func:`seen_sql`) to the
+    statement that selects its rows, before any ``ORDER BY``, ``LIMIT``, ``COUNT``
+    or KNN cut, and every write refuses inside its transaction to change a row the
+    sight does not see. Counting, every statement is the unbound one, and each read
+    logs what the sight would have withheld of the rows it gave back. The sight's
+    expression reads the home from the row's JSON: no column, index or format label
+    is added for it.
+    """
+
+    def __init__(  # noqa: PLR0913 — each is a construction-fixed seam
         self,
         *,
         path: Path | str,
@@ -474,6 +499,7 @@ class SqliteMemoryStore:
         traces_sink: TraceSink,
         traces_now: Clock = _utcnow,
         now: Clock = _utcnow,
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> None:
         """Open (or create) the store at ``path``.
 
@@ -512,6 +538,9 @@ class SqliteMemoryStore:
                 reaches a `core` field validator — the reading becomes an integer
                 microsecond epoch (issue #289) — so the producer is the only place
                 a naive or indeterminate reading can be caught (ADR-0026 §7).
+            sight_mode: Whether a store bound to a sight withholds or only counts
+                (ADR-0383 §7:10), fixed here for every binding of this store. The
+                composition root sets it; nothing at run time reads or changes it.
 
         Raises:
             IncompatibleStateError: If the store was previously built with a
@@ -524,6 +553,8 @@ class SqliteMemoryStore:
         """
         self._embedder = embedder
         self._clock = checked_clock(now, owner="SqliteMemoryStore")
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
         # §3 puts the stamp on the emitter rather than on the trace store, so the
         # instant means the read and not the append. Its own clock, for the reason
         # ``traces_now`` documents.
@@ -2035,6 +2066,71 @@ class SqliteMemoryStore:
             return ()
         return tuple([await self._embed_one(label.text) for label in record.labels])
 
+    def bound(self, sight: Sight) -> SqliteMemoryStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing this store's connection, lock, embedder and trace
+        emitter by reference, with the sight set: the meet of the one it was already
+        bound to, where it was (§6:6). It opens nothing, and closing either closes both.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _seen(self) -> tuple[str, list[object]] | None:
+        """The sight's SQL condition where this store withholds by one; else ``None``.
+
+        Unbound, and bound in the counting mode, no row is held back, so no statement
+        gains a condition (ADR-0383 §7:10, §11:1).
+        """
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return None
+        return seen_sql(self._sight)
+
+    def _counting(self) -> Sight | None:
+        """The sight to count a read by, where this store is bound and only counts."""
+        return self._sight if self._sight_mode is SightMode.COUNT else None
+
+    def _counted(self, member: str, records: Iterable[MemoryRecord]) -> None:
+        """Write §11:1's count of one read, where this store is bound and only counts."""
+        sight = self._counting()
+        if sight is not None:
+            count_records(sight, member, records)
+
+    def _refuse_unheld(
+        self, conn: sqlite3.Connection, record_id: str, mode: MemoryWriteMode
+    ) -> None:
+        """Refuse a write that would change a stored row this store does not hold.
+
+        ADR-0383 §7:5, as a write to one the store does not hold, read inside the
+        write's transaction: an ``IF_UNCHANGED`` with the refusal a row never written
+        gets, and an upsert as an id already taken. An ``INSERT_IF_ABSENT``'s collision
+        is a write's own check, decided over every row (§7:11).
+
+        Raises:
+            MemoryStoreStaleError: An ``IF_UNCHANGED`` names a row not held.
+            MemoryStoreConflictError: An upsert names a row not held.
+        """
+        seen = self._seen()
+        if seen is None or mode is MemoryWriteMode.INSERT_IF_ABSENT:
+            return
+        where, params = seen
+        unheld = conn.execute(
+            f"SELECT 1 FROM records WHERE id = ? AND NOT {where}",  # noqa: S608 — module text; values bound
+            [record_id, *params],
+        ).fetchone()
+        if unheld is None:
+            return
+        if mode is MemoryWriteMode.IF_UNCHANGED:
+            msg = f"cannot write {record_id!r}: no record is stored under that id"
+            raise MemoryStoreStaleError(msg)
+        msg = f"cannot write {record_id!r}: the id names a record this store does not hold"
+        raise MemoryStoreConflictError(msg)
+
     async def add(self, record: MemoryRecord) -> str:
         """Embed the record's content and persist it, returning its id.
 
@@ -2062,6 +2158,8 @@ class SqliteMemoryStore:
                 (ADR-0383 §4:6), or the record names a record of another home this store
                 holds, as a lineage or an evidence pointer (§4:7). Refused in the write's
                 transaction, so nothing is written.
+            MemoryStoreConflictError: Bound and withholding, ``record.id`` names a
+                stored record this store does not hold (ADR-0383 §7:5).
         """
         snapshot = record.model_copy(deep=True)
         _refuse_home(snapshot)
@@ -2079,6 +2177,7 @@ class SqliteMemoryStore:
         # The transaction rolls the partial multi-table write back on any failure,
         # so a later commit cannot persist an inconsistent record/vector pair.
         with self._transaction(f"store memory {record.id!r}") as conn:
+            self._refuse_unheld(conn, record.id, MemoryWriteMode.UPSERT)
             self._persist_record(record, vector, labels)
             self._refuse_crossing_names(conn, [record])
 
@@ -2330,6 +2429,10 @@ class SqliteMemoryStore:
                 would leave name a record of another home this store holds, as a lineage
                 or an evidence pointer, the batch's own records included (§4:7). Nothing
                 is written.
+
+        Bound and withholding, an ``UPSERT`` or ``IF_UNCHANGED`` element naming a stored
+        record this store does not hold is refused as a write to one it does not hold
+        (ADR-0383 §7:5): ``MemoryStoreConflictError`` and ``MemoryStoreStaleError``.
         """
         # Snapshot every record *before the first await*, so a caller aliasing a
         # submitted record and mutating it across the embedding awaits cannot
@@ -2373,6 +2476,7 @@ class SqliteMemoryStore:
                                 f"a record with that id is already stored"
                             )
                             raise MemoryStoreConflictError(msg)
+                    self._refuse_unheld(conn, record.id, mode)
                     if mode is MemoryWriteMode.IF_UNCHANGED:
                         self._refuse_stale(conn, record.id, expected)
                     self._persist_record(record, vector, labels)
@@ -2590,17 +2694,19 @@ class SqliteMemoryStore:
         async with self._lock:
             now = self._now()
             row = await _run_to_completion(self._get_sync, record_id, _to_micros(now))
-        if row is None:
-            return None
-        record = self._decoded_at(*row)
-        return record if record.validity.live_at(now) else None
+        found = None if row is None else self._decoded_at(*row)
+        if found is not None and not found.validity.live_at(now):
+            found = None
+        self._counted("get", () if found is None else (found,))
+        return found
 
     def _get_sync(self, record_id: str, now: int) -> tuple[str, int] | None:
+        where, params = self._seen() or ("1", [])
         row = self._conn.execute(
-            "SELECT data, revision FROM records WHERE id = ? "
+            "SELECT data, revision FROM records WHERE id = ? "  # noqa: S608 — module text; values bound
             "AND (expires_at IS NULL OR expires_at > ?) "
-            "AND (valid_until IS NULL OR valid_until > ?)",
-            (record_id, now, now),
+            f"AND (valid_until IS NULL OR valid_until > ?) AND {where}",
+            (record_id, now, now, *params),
         ).fetchone()
         return None if row is None else _stored_row(row)
 
@@ -2628,11 +2734,13 @@ class SqliteMemoryStore:
         # The `valid_from` end is checked on the decoded record, exactly as `get`
         # checks it, against the same single reading — so no two entries in one
         # result can disagree about when "now" was (ADR-0045 §6, §9).
-        return {
+        found = {
             record.id: record
             for record in (self._decoded_at(data, revision) for data, revision in rows)
             if record.validity.live_at(now)
         }
+        self._counted("get_many", found.values())
+        return found
 
     def _get_many_sync(self, record_ids: Sequence[str], now: int) -> list[tuple[str, int]]:
         """Read every named row, chunked to fit one statement, in one transaction.
@@ -2666,7 +2774,7 @@ class SqliteMemoryStore:
         self,
         record_ids: Sequence[str],
         where: str,
-        params: Sequence[int],
+        params: Sequence[object],
         *,
         what: str,
     ) -> list[tuple[str, int]]:
@@ -2679,6 +2787,11 @@ class SqliteMemoryStore:
         the predicate rather than assumed. ``where`` is this module's own text,
         never a caller's.
         """
+        # Withholding, the sight's condition joins the predicate (ADR-0383 §7:2).
+        seen = self._seen()
+        if seen is not None:
+            where = f"{where} AND {seen[0]}"
+            params = [*params, *seen[1]]
         room = self._conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - len(params)
         chunk = max(room, 1)
         base = f"SELECT data, revision FROM records WHERE {where}"  # noqa: S608 — only this module's own predicate is interpolated
@@ -2714,11 +2827,13 @@ class SqliteMemoryStore:
         async with self._lock:
             now = self._now_micros()
             rows = await _run_to_completion(self._get_history_sync, wanted, now)
-        return {
+        found = {
             record.id: record
             for record in (self._decoded_at(data, revision) for data, revision in rows)
             if isinstance(record, Memory)
         }
+        self._counted("get_history", found.values())
+        return found
 
     def _get_history_sync(self, record_ids: Sequence[str], now: int) -> list[tuple[str, int]]:
         """Read every named row not past its ``expires_at``, in one transaction.
@@ -2837,7 +2952,9 @@ class SqliteMemoryStore:
             _retrieval_reading,
             entry=entry,
         )
-        return MemorySearchResult(records=tuple(retrieved.records), capped=retrieved.capped)
+        found = MemorySearchResult(records=tuple(retrieved.records), capped=retrieved.capped)
+        self._counted("search", found.records)
+        return found
 
     async def _searched(
         self,
@@ -3011,6 +3128,13 @@ class SqliteMemoryStore:
             fields = _NAMED_IN[:1] if as_subject else _NAMED_IN
             eligible.append(f"({' OR '.join(fields)})")
             restriction.extend(person for _ in fields)
+        seen = self._seen()
+        if seen is not None:
+            # Withholding, the sight is one more axis of the restriction the KNN is
+            # bound by, so the candidates and ``capped`` are of seen rows alone
+            # (ADR-0383 §7:2). Last, so the cheaper column predicates decide first.
+            eligible.append(seen[0])
+            restriction.extend(seen[1])
         sql = (
             "SELECT r.data, r.revision, v.distance FROM vec_records v "  # noqa: S608 — bound above
             "JOIN records r ON r.rowid = v.rowid "
@@ -3127,6 +3251,7 @@ class SqliteMemoryStore:
                 raise MemoryStoreError(msg)
             records.append(record)
         page = records[:limit]
+        self._counted("episodes", page)
         return EpisodePage(
             items=tuple(summary_of(record) for record in page),
             next_cursor=encode_cursor(
@@ -3169,6 +3294,10 @@ class SqliteMemoryStore:
         if after is not None:
             eligible.append("(occurred_at, id) < (?, ?)")
             params.extend([_to_micros(after.after.occurred_at), after.after.episode_id])
+        seen = self._seen()
+        if seen is not None:
+            eligible.append(seen[0])
+            params.extend(seen[1])
         params.append(limit + 1)
         sql = (
             f"SELECT data, revision FROM records WHERE {' AND '.join(eligible)} "  # noqa: S608 — bound values
@@ -3190,10 +3319,22 @@ class SqliteMemoryStore:
     ) -> EpisodeChunk | None:
         """Reread a live episode and return digest-bound canonical detail bytes."""
         check_detail(episode_id, version, offset, max_bytes)
-        record = await self.get(episode_id)
+        # Read as `get` reads it, under the sight this store is bound to, and counted
+        # once, as this member (ADR-0383 §11:1).
+        reader = self if self._counting() is None else self._sightless()
+        record = await reader.get(episode_id)
         if not isinstance(record, EpisodicMemory):
+            self._counted("episode_chunk", ())
             return None
-        return detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
+        chunk = detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
+        self._counted("episode_chunk", (record,))
+        return chunk
+
+    def _sightless(self) -> SqliteMemoryStore:
+        """This store with no sight: the unbound reads a counting store answers by."""
+        view = copy.copy(self)
+        view._sight = None
+        return view
 
     async def channel_episodes(
         self,
@@ -3234,6 +3375,7 @@ class SqliteMemoryStore:
             entries.append(
                 ChannelEpisode(number=number, record=record.model_copy(update={"score": None}))
             )
+        self._counted("channel_episodes", (entry.record for entry in entries))
         return ChannelEpisodePage(entries=tuple(entries), total=total)
 
     def _channel_episodes_sync(
@@ -3249,6 +3391,12 @@ class SqliteMemoryStore:
             f"AND {_LIVE}"
         )
         params: list[object] = [channel.channel_type, channel.instance_id, now, now, now]
+        seen = self._seen()
+        if seen is not None:
+            # Before the count and the page, so ``total`` counts seen episodes alone
+            # (ADR-0383 §8:1).
+            where = f"{where} AND {seen[0]}"
+            params.extend(seen[1])
         count_sql = f"SELECT COUNT(*) FROM records WHERE {where}"  # noqa: S608 — module literals; every value is bound
         if after is None:
             # The newest ``limit``, read from the top of the range and put back in
@@ -3296,20 +3444,47 @@ class SqliteMemoryStore:
         check_channel_page(after, limit)
         async with self._lock:
             rows = await _run_to_completion(self._channel_episode_ids_sync, channel, after, limit)
-        return tuple(ChannelEpisodeId(number=number, episode_id=rid) for number, rid in rows)
+        sight = self._counting()
+        if sight is not None:
+            count_given(
+                sight,
+                "channel_episode_ids",
+                ((_home_or_none(home), made_by_id(kind, rid)) for _, rid, kind, home in rows),
+            )
+        return tuple(ChannelEpisodeId(number=number, episode_id=rid) for number, rid, _, _ in rows)
 
     def _channel_episode_ids_sync(
         self, channel: ChannelIdentity, after: int | None, limit: int
-    ) -> list[tuple[int, str]]:
-        sql = "SELECT rowid, id FROM records WHERE channel_type = ? AND channel_instance = ?"
+    ) -> list[tuple[int, str, str, object]]:
+        """The page's rows: number and id, and, where counting, kind and stored home.
+
+        The home is read from the blob only where this store counts for a sight, so
+        an unbound enumeration still reads the channel index alone.
+        """
+        home = (
+            "CASE WHEN json_valid(data) THEN json_extract(data, '$.home') END"
+            if self._counting() is not None
+            else "NULL"
+        )
+        sql = (
+            f"SELECT rowid, id, kind, {home} FROM records "  # noqa: S608 — module text; values bound
+            "WHERE channel_type = ? AND channel_instance = ?"
+        )
         params: list[object] = [channel.channel_type, channel.instance_id]
         if after is not None:
             sql += " AND rowid > ?"
             params.append(min(after, MAX_EPISODE_NUMBER))
+        seen = self._seen()
+        if seen is not None:
+            sql += f" AND {seen[0]}"
+            params.extend(seen[1])
         sql += " ORDER BY rowid LIMIT ?"
         params.append(limit)
         try:
-            return [(int(row[0]), str(row[1])) for row in self._conn.execute(sql, params)]
+            return [
+                (int(row[0]), str(row[1]), str(row[2]), row[3])
+                for row in self._conn.execute(sql, params)
+            ]
         except sqlite3.Error as exc:
             msg = "failed to enumerate a channel's episodes"
             raise MemoryStoreError(msg) from exc
@@ -3343,6 +3518,7 @@ class SqliteMemoryStore:
             entries.append(
                 ChannelEpisode(number=number, record=record.model_copy(update={"score": None}))
             )
+        self._counted("open_episodes", (entry.record for entry in entries))
         return tuple(entries)
 
     def _open_episodes_sync(self, after: int | None, limit: int) -> list[tuple[int, str, int]]:
@@ -3351,6 +3527,10 @@ class SqliteMemoryStore:
         if after is not None:
             sql += " AND rowid > ?"
             params.append(min(after, MAX_EPISODE_NUMBER))
+        seen = self._seen()
+        if seen is not None:
+            sql += f" AND {seen[0]}"
+            params.extend(seen[1])
         sql += " ORDER BY rowid LIMIT ?"
         params.append(limit)
         try:
@@ -3441,6 +3621,7 @@ class SqliteMemoryStore:
             and (wanted_bands is None or record_band(record) in wanted_bands)
         ]
         page = _newest_revision_first(matched)[offset : offset + limit]
+        self._counted("list_beliefs", page)
         # Cleared, not merely absent: a record re-added after a search carries that
         # query's relevance, and nothing was ranked here (ADR-0073 §2).
         return [record.model_copy(update={"score": None}) for record in page]
@@ -3460,6 +3641,10 @@ class SqliteMemoryStore:
             f"AND kind IN ({', '.join('?' * len(kinds))})"
         )
         params: list[object] = [now, now, *sorted(kinds)]
+        seen = self._seen()
+        if seen is not None:
+            sql += f" AND {seen[0]}"
+            params.extend(seen[1])
         try:
             rows = self._conn.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
@@ -3497,6 +3682,7 @@ class SqliteMemoryStore:
         # taken from `rows` rather than from `eligible`: a chunk over a wholly
         # ineligible stretch must still advance, or the walk stalls there for good.
         position = mint_position(walk, rows[-1][0]) if rows else None
+        self._counted("walk_records", eligible)
         return RecordChunk(records=tuple(eligible), position=position)
 
     def _walk_records_sync(self, walk: str, limit: int) -> list[tuple[int, str, int]]:
@@ -3531,9 +3717,17 @@ class SqliteMemoryStore:
             # table holds, an expired one included (ADR-0286 §6:2): read in the same
             # snapshot as the rows, so a chunk whose next record is that episode
             # examines nothing and carries no position.
-            (stop,) = conn.execute("SELECT MIN(rowid) FROM records WHERE is_open = 1").fetchone()
-            bounds: list[str] = []
-            params: list[object] = []
+            # Withholding, both read only the rows the sight sees: the walk examines
+            # those alone, and waits at the oldest open episode among them (ADR-0383
+            # §7:2).
+            seen = self._seen()
+            held, held_params = ("1", []) if seen is None else seen
+            (stop,) = conn.execute(
+                f"SELECT MIN(rowid) FROM records WHERE is_open = 1 AND {held}",  # noqa: S608 — module text; values bound
+                held_params,
+            ).fetchone()
+            bounds: list[str] = [] if seen is None else [held]
+            params: list[object] = list(held_params)
             if after is not None:
                 bounds.append("rowid > ?")
                 params.append(after)
@@ -3625,8 +3819,14 @@ class SqliteMemoryStore:
         # The early return leaves the (empty) transaction to the context manager's
         # ``COMMIT`` rather than to nothing at all: an open transaction abandoned on
         # the shared connection poisons the next ``BEGIN`` for every later caller.
+        where, params = self._seen() or ("1", [])
         with self._transaction(f"delete memory {record_id!r}") as conn:
-            row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record_id,)).fetchone()
+            # Withholding, a row the sight does not see is one this store does not hold,
+            # and its delete answers ``False`` (ADR-0383 §7:5, §8:2).
+            row = conn.execute(
+                f"SELECT rowid FROM records WHERE id = ? AND {where}",  # noqa: S608 — module text; values bound
+                (record_id, *params),
+            ).fetchone()
             if row is None:
                 return False
             rowid = row[0]
@@ -3648,6 +3848,9 @@ class SqliteMemoryStore:
         # The count is read under the write lock, so the number returned is the
         # number this call actually removed rather than one another process
         # changed between the count and the deletion (#526).
+        seen = self._seen()
+        if seen is not None:
+            return self._clear_held_sync(*seen)
         with self._transaction("clear the memory store") as conn:
             (count,) = conn.execute("SELECT COUNT(*) FROM records").fetchone()
             conn.execute("DELETE FROM vec_records")
@@ -3669,6 +3872,27 @@ class SqliteMemoryStore:
             # would sit *above* live records no walk would ever read again.
         return int(count)
 
+    def _clear_held_sync(self, where: str, params: Sequence[object]) -> int:
+        """Clear only the rows a withholding bound store holds (ADR-0383 §7:2).
+
+        The rows its sight sees go, with their vectors and labels, and every walk
+        position goes as an unbound ``clear`` discards them (ADR-0114 §4): positions are
+        the store's, not a sight's. ``sqlite_sequence`` stands, as it always does.
+        """
+        with self._transaction("clear the memory store's held records") as conn:
+            rowids = [
+                int(row[0])
+                for row in conn.execute(
+                    f"SELECT rowid FROM records WHERE {where}",  # noqa: S608 — module text; values bound
+                    list(params),
+                )
+            ]
+            conn.executemany("DELETE FROM vec_records WHERE rowid = ?", [(r,) for r in rowids])
+            self._drop_labels(conn, rowids)
+            conn.executemany("DELETE FROM records WHERE rowid = ?", [(r,) for r in rowids])
+            conn.execute("DELETE FROM walk_positions")
+        return len(rowids)
+
     async def export(self) -> list[MemoryRecord]:
         """Return a snapshot of every retained (non-expired) record.
 
@@ -3682,14 +3906,17 @@ class SqliteMemoryStore:
         """
         async with self._lock:
             rows = await _run_to_completion(self._export_sync, self._now_micros())
-        return [self._decoded_at(data, revision) for data, revision in rows]
+        found = [self._decoded_at(data, revision) for data, revision in rows]
+        self._counted("export", found)
+        return found
 
     def _export_sync(self, now: int) -> list[tuple[str, int]]:
+        where, params = self._seen() or ("1", [])
         try:
             rows = self._conn.execute(
-                "SELECT data, revision FROM records "
-                "WHERE expires_at IS NULL OR expires_at > ? ORDER BY rowid",
-                (now,),
+                "SELECT data, revision FROM records "  # noqa: S608 — module text; values bound
+                f"WHERE (expires_at IS NULL OR expires_at > ?) AND {where} ORDER BY rowid",
+                (now, *params),
             ).fetchall()
         except sqlite3.Error as exc:
             msg = f"failed to export memories: {exc}"
@@ -3702,12 +3929,14 @@ class SqliteMemoryStore:
             return await _run_to_completion(self._purge_expired_sync, self._now_micros())
 
     def _purge_expired_sync(self, now: int) -> int:
+        where, params = self._seen() or ("1", [])
         with self._transaction("purge expired memories") as conn:
             rowids = [
                 row[0]
                 for row in conn.execute(
-                    "SELECT rowid FROM records WHERE expires_at IS NOT NULL AND expires_at <= ?",
-                    (now,),
+                    "SELECT rowid FROM records "  # noqa: S608 — module text; values bound
+                    f"WHERE expires_at IS NOT NULL AND expires_at <= ? AND {where}",
+                    (now, *params),
                 )
             ]
             if not rowids:

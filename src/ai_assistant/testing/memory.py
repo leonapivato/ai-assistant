@@ -29,7 +29,9 @@ proved by a single implementation.
 
 from __future__ import annotations
 
+import copy
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
@@ -66,6 +68,7 @@ from ai_assistant.core.types import (
     NonBlankEncodableText,
     ProcessingStatus,
     RecordChunk,
+    SightMode,
     WalkPosition,
     home_may_be_written,
     names_person,
@@ -73,10 +76,11 @@ from ai_assistant.core.types import (
     record_transaction_time,
 )
 from ai_assistant.testing._home_guard import refuse_crossing_names, refuse_home_change
+from ai_assistant.testing._sight import count_records, made_by
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
@@ -84,6 +88,7 @@ if TYPE_CHECKING:
         MemoryRecord,
         MemoryWrite,
         RecordHome,
+        Sight,
     )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
@@ -317,6 +322,19 @@ def _newest_revision_first(records: list[MemoryRecord]) -> list[MemoryRecord]:
     return sorted(by_id, key=record_transaction_time, reverse=True)
 
 
+@dataclass(slots=True)
+class _Issued:
+    """The fake's two never-reissued counters, held apart so a bound fake shares them.
+
+    A fake bound to a sight is a copy sharing every piece of its state by reference
+    (:meth:`FakeMemoryStore.bound`); a counter held as a plain ``int`` would be copied
+    by value and issue one key or revision twice.
+    """
+
+    keys: int = 0
+    revisions: int = 0
+
+
 class FakeMemoryStore:
     """A non-persistent ``MemoryStore`` test double backed by a dict.
 
@@ -327,9 +345,19 @@ class FakeMemoryStore:
     is testable without hand-rolling a raising subclass (issue #105); only the
     behaviour pinned by the shared ``MemoryStore`` conformance suite is part of the
     contract.
+
+    **A fake bound to a sight** (ADR-0383 §7) is a copy of this one sharing its
+    records, keys, counters, walk positions and modelled resource by reference, with
+    the sight set, as the memory stores' are.
     """
 
-    def __init__(self, *, now: Clock = _utcnow, failure: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        now: Clock = _utcnow,
+        failure: str | None = None,
+        sight_mode: SightMode = SightMode.COUNT,
+    ) -> None:
         """Create an empty store.
 
         Args:
@@ -369,25 +397,28 @@ class FakeMemoryStore:
                 failure that closed the inspection window would make the second half
                 unprovable. It is ADR-0007's data-rights snapshot rather than a retrieval,
                 which is the same distinction from the other side.
+            sight_mode: Whether a fake bound to a sight withholds or only counts
+                (ADR-0383 §7:10), fixed here for every binding of this fake.
         """
         self._records: dict[str, MemoryRecord] = {}
         self._clock = checked_clock(now, owner="FakeMemoryStore")
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
         self._failure = failure
         self._resource = SuspendableResource()
-        # The walk's never-reissued order key (ADR-0114 §1). `_sequence` only ever
+        # The walk's never-reissued order key (ADR-0114 §1). `_issued.keys` only ever
         # rises: `delete`, `purge_expired` and `clear` drop entries from `_keys`
         # and none of them touches it, so a number a removed record held is never
         # handed to a later one and an exhausted walk cannot skip that record.
         # Positions are recorded as text, as the real stores record them, so "a
         # position this build cannot use" is one shape across all three.
         self._keys: dict[str, int] = {}
-        self._sequence = 0
+        self._issued = _Issued()
         # The concurrency token's issuer (ADR-0219 §1), on the same footing: it only
         # ever rises, no removal touches it, and `clear` explicitly leaves it — an
         # issuer reset by a bulk erase would reissue every stamp it had handed out,
         # which is the ABA hole the never-reissued clause closes. Counting is the
         # mechanism; §1 forbids any caller reading order or difference off it.
-        self._revisions = 0
         self._walks: dict[str, str] = {}
 
     def suspend_next_operation(self) -> LoopSuspension:
@@ -463,6 +494,57 @@ class FakeMemoryStore:
         """
         return not self._is_expired(record, now) and record.validity.live_at(now)
 
+    def bound(self, sight: Sight) -> FakeMemoryStore:
+        """This fake, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing every piece of this fake's state by reference — the
+        records, their keys, the two counters, the walk positions and the modelled
+        resource — with the sight set: the meet of the one it was already bound to,
+        where it was (§6:6).
+
+        Raises:
+            ValueError: If this fake is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _holds(self, record: MemoryRecord) -> bool:
+        """Whether this fake, as bound, holds ``record`` (ADR-0383 §7:2 to §7:4).
+
+        Every record, unbound or bound in the counting mode; otherwise the records its
+        sight sees, by the one predicate (§7:3), its activation's episode included.
+        """
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return True
+        return self._sight.sees(record.home, made_by=made_by(record))
+
+    def _counted(self, member: str, records: Iterable[MemoryRecord]) -> None:
+        """Write §11:1's count of one read, where this fake is bound and only counts."""
+        if self._sight is not None and self._sight_mode is SightMode.COUNT:
+            count_records(self._sight, member, records)
+
+    def _refuse_unheld(self, record_id: str, mode: MemoryWriteMode) -> None:
+        """Refuse a write that would change a stored record this fake does not hold.
+
+        ADR-0383 §7:5, as a write to one the fake does not hold: an ``IF_UNCHANGED``
+        with the refusal a record never written gets, and an upsert as an id already
+        taken. An ``INSERT_IF_ABSENT``'s collision is a write's own check (§7:11).
+
+        Raises:
+            MemoryStoreStaleError: An ``IF_UNCHANGED`` names a record not held.
+            MemoryStoreConflictError: An upsert names a record not held.
+        """
+        stored = self._records.get(record_id)
+        if stored is None or self._holds(stored) or mode is MemoryWriteMode.INSERT_IF_ABSENT:
+            return
+        if mode is MemoryWriteMode.IF_UNCHANGED:
+            msg = f"cannot write {record_id!r}: no record is stored under that id"
+            raise MemoryStoreStaleError(msg)
+        msg = f"cannot write {record_id!r}: the id names a record this store does not hold"
+        raise MemoryStoreConflictError(msg)
+
     async def add(self, record: MemoryRecord) -> str:
         """Persist ``record`` (overwriting any existing same id) and return its id.
 
@@ -500,6 +582,7 @@ class FakeMemoryStore:
         snapshot = record.model_copy(deep=True)
         _refuse_home(snapshot)
         async with self._resource.held():
+            self._refuse_unheld(snapshot.id, MemoryWriteMode.UPSERT)
             self._refuse_cross_kind(snapshot)
             refuse_crossing_names([snapshot], self._home_after({snapshot.id: snapshot}))
             self._records[snapshot.id] = self._stamped(snapshot)
@@ -516,8 +599,8 @@ class FakeMemoryStore:
         after a delete would certify a consumer against an ABA hole the shipped
         store does not have (ADR-0026 §7).
         """
-        self._revisions += 1
-        return snapshot.model_copy(update={"revision": self._revisions})
+        self._issued.revisions += 1
+        return snapshot.model_copy(update={"revision": self._issued.revisions})
 
     def _refuse_cross_kind(self, record: MemoryRecord) -> None:
         """Refuse an upsert landing on a stored record of a different kind.
@@ -647,6 +730,7 @@ class FakeMemoryStore:
                 if mode is MemoryWriteMode.INSERT_IF_ABSENT and record.id in self._records:
                     msg = f"cannot insert {record.id!r}: a record with that id is already stored"
                     raise MemoryStoreConflictError(msg)
+                self._refuse_unheld(record.id, mode)
                 if mode is MemoryWriteMode.IF_UNCHANGED:
                     self._refuse_stale(record.id, expected)
                 # Only an UPSERT or an IF_UNCHANGED can reach a collision past the
@@ -701,8 +785,8 @@ class FakeMemoryStore:
         rather than one of them quietly re-queueing the record.
         """
         if record_id not in self._keys:
-            self._sequence += 1
-            self._keys[record_id] = self._sequence
+            self._issued.keys += 1
+            self._keys[record_id] = self._issued.keys
 
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Return the record with ``record_id``, or ``None`` if not readable.
@@ -719,14 +803,26 @@ class FakeMemoryStore:
                 injected clock's reading is not a conforming one.
         """
         async with self._resource.held():
-            self._refuse_read()
-            record = self._records.get(record_id)
-            if record is None or not self._is_readable(record, self._now_utc()):
-                return None
-            # Deep copy so callers cannot mutate stored state — including nested
-            # fields like provenance and validity — matching the persistent store
-            # (ADR-0007).
-            return record.model_copy(deep=True)
+            record = self._live(record_id)
+        self._counted("get", () if record is None else (record,))
+        return record
+
+    def _live(self, record_id: str) -> MemoryRecord | None:
+        """The live record this fake holds at ``record_id``, a detached copy; else ``None``.
+
+        Called inside the modelled resource.
+        """
+        self._refuse_read()
+        record = self._records.get(record_id)
+        if (
+            record is None
+            or not self._is_readable(record, self._now_utc())
+            or not self._holds(record)
+        ):
+            return None
+        # Deep copy so callers cannot mutate stored state — including nested fields
+        # like provenance and validity — matching the persistent store (ADR-0007).
+        return record.model_copy(deep=True)
 
     async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
         """Return the readable records among ``record_ids``, keyed by id (ADR-0086 §6).
@@ -755,12 +851,15 @@ class FakeMemoryStore:
         async with self._resource.held():
             self._refuse_read()
             now = self._now_utc()
-            return {
+            found = {
                 record_id: record.model_copy(deep=True)
                 for record_id in wanted
                 if (record := self._records.get(record_id)) is not None
                 and self._is_readable(record, now)
+                and self._holds(record)
             }
+        self._counted("get_many", found.values())
+        return found
 
     async def get_history(self, record_ids: Sequence[str]) -> Mapping[str, Memory]:
         """Return the memories held at ``record_ids``, whatever their status (ADR-0342 §2).
@@ -788,12 +887,15 @@ class FakeMemoryStore:
         async with self._resource.held():
             self._refuse_read()
             now = self._now_utc()
-            return {
+            found = {
                 record_id: record.model_copy(deep=True)
                 for record_id in wanted
                 if isinstance(record := self._records.get(record_id), Memory)
                 and not self._is_expired(record, now)
+                and self._holds(record)
             }
+        self._counted("get_history", found.values())
+        return found
 
     async def search(  # noqa: PLR0913 — one argument per eligibility axis
         self,
@@ -855,6 +957,7 @@ class FakeMemoryStore:
                 if (
                     not self._is_readable(record, now)
                     or _is_open(record)
+                    or not self._holds(record)
                     or (wanted is not None and record.kind not in wanted)
                 ):
                     continue
@@ -869,7 +972,9 @@ class FakeMemoryStore:
                         record.model_copy(update={"score": hits / len(query_terms)}, deep=True)
                     )
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
-        return MemorySearchResult(records=tuple(scored[:limit]))
+        found = MemorySearchResult(records=tuple(scored[:limit]))
+        self._counted("search", found.records)
+        return found
 
     async def episodes(
         self,
@@ -887,7 +992,9 @@ class FakeMemoryStore:
             candidates = [
                 record
                 for record in self._records.values()
-                if isinstance(record, EpisodicMemory) and self._is_readable(record, now)
+                if isinstance(record, EpisodicMemory)
+                and self._is_readable(record, now)
+                and self._holds(record)
             ]
         records = [
             record
@@ -914,6 +1021,7 @@ class FakeMemoryStore:
         ]
         records.sort(key=lambda record: (record.occurred_at, record.id), reverse=True)
         page = records[:limit]
+        self._counted("episodes", page)
         return EpisodePage(
             items=tuple(summary_of(record) for record in page),
             next_cursor=encode_cursor(
@@ -937,10 +1045,14 @@ class FakeMemoryStore:
     ) -> EpisodeChunk | None:
         """Reread a live episode and return digest-bound canonical detail bytes."""
         check_detail(episode_id, version, offset, max_bytes)
-        record = await self.get(episode_id)
+        async with self._resource.held():
+            record = self._live(episode_id)
         if not isinstance(record, EpisodicMemory):
+            self._counted("episode_chunk", ())
             return None
-        return detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
+        chunk = detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
+        self._counted("episode_chunk", (record,))
+        return chunk
 
     async def channel_episodes(
         self,
@@ -973,13 +1085,14 @@ class FakeMemoryStore:
                 if _channel_of(record := self._records[rid]) == channel
                 and self._is_readable(record, now)
                 and not _is_open(record)
+                and self._holds(record)
             ]
             page = (
                 matching[-limit:]
                 if after is None
                 else [entry for entry in matching if entry[0] > after][:limit]
             )
-            return ChannelEpisodePage(
+            found = ChannelEpisodePage(
                 entries=tuple(
                     ChannelEpisode(
                         number=key, record=record.model_copy(deep=True, update={"score": None})
@@ -989,6 +1102,8 @@ class FakeMemoryStore:
                 ),
                 total=len(matching),
             )
+        self._counted("channel_episodes", (entry.record for entry in found.entries))
+        return found
 
     async def channel_episode_ids(
         self,
@@ -1008,14 +1123,18 @@ class FakeMemoryStore:
         async with self._resource.held():
             self._refuse_read()
             held: list[ChannelEpisodeId] = []
+            given: list[MemoryRecord] = []
             for rid, key in self._keys.items():
                 if after is not None and key <= after:
                     continue
-                if _channel_of(self._records[rid]) == channel:
+                record = self._records[rid]
+                if _channel_of(record) == channel and self._holds(record):
                     held.append(ChannelEpisodeId(number=key, episode_id=rid))
+                    given.append(record)
                     if len(held) == limit:
                         break
-            return tuple(held)
+        self._counted("channel_episode_ids", given)
+        return tuple(held)
 
     async def open_episodes(
         self,
@@ -1038,7 +1157,7 @@ class FakeMemoryStore:
                 if after is not None and key <= after:
                     continue
                 record = self._records[rid]
-                if isinstance(record, EpisodicMemory) and _is_open(record):
+                if isinstance(record, EpisodicMemory) and _is_open(record) and self._holds(record):
                     found.append(
                         ChannelEpisode(
                             number=key, record=record.model_copy(deep=True, update={"score": None})
@@ -1046,7 +1165,8 @@ class FakeMemoryStore:
                     )
                     if len(found) == limit:
                         break
-            return tuple(found)
+        self._counted("open_episodes", (entry.record for entry in found))
+        return tuple(found)
 
     async def list_beliefs(
         self,
@@ -1110,8 +1230,10 @@ class FakeMemoryStore:
                 if self._is_readable(record, now)
                 and (wanted_bands is None or record_band(record) in wanted_bands)
                 and record.kind in wanted_kinds
+                and self._holds(record)
             ]
         page = _newest_revision_first(matched)[offset : offset + limit]
+        self._counted("list_beliefs", page)
         # Cleared, not merely absent: a record re-added after a search carries that
         # query's relevance, and nothing was ranked here (ADR-0073 §2).
         return [record.model_copy(update={"score": None}, deep=True) for record in page]
@@ -1134,7 +1256,7 @@ class FakeMemoryStore:
         async with self._resource.held():
             self._refuse_read()
             now = self._now_utc()
-            after = _resume_key(self._walks.get(walk), walk=walk, issued_through=self._sequence)
+            after = _resume_key(self._walks.get(walk), walk=walk, issued_through=self._issued.keys)
             # `limit` bounds records *examined*, not records returned: a scan that
             # ran on until it had `limit` eligible records would be unbounded over
             # a long ineligible run, which is the hazard ADR-0111 §4 forbids.
@@ -1146,12 +1268,14 @@ class FakeMemoryStore:
             # The walk examines nothing at or past the lowest-keyed open episode the
             # fake holds, an expired one included (ADR-0286 §6:2), so a chunk whose
             # next record is that episode examines nothing and carries no position.
-            stop = min(
-                (key for rid, key in self._keys.items() if _is_open(self._records[rid])),
-                default=None,
-            )
+            # Bound and withholding, the walk examines only records this fake holds,
+            # and waits at the oldest open episode among them (ADR-0383 §7:2).
+            held = [
+                (rid, key) for rid, key in self._keys.items() if self._holds(self._records[rid])
+            ]
+            stop = min((key for rid, key in held if _is_open(self._records[rid])), default=None)
             examined: list[tuple[int, str]] = []
-            for rid, key in self._keys.items():
+            for rid, key in held:
                 if after is not None and key <= after:
                     continue
                 if stop is not None and key >= stop:
@@ -1168,6 +1292,7 @@ class FakeMemoryStore:
             # was eligible, which is how a walk crosses a dead range instead of
             # stalling on it for good.
             position = _mint_position(walk, examined[-1][0]) if examined else None
+        self._counted("walk_records", eligible)
         return RecordChunk(records=tuple(eligible), position=position)
 
     async def advance_walk(self, walk: str, *, position: WalkPosition) -> None:
@@ -1185,21 +1310,31 @@ class FakeMemoryStore:
             # Never backwards, and not an error: a walk is at-least-once, so a
             # resumed run can legitimately hold a stale position. Repeated work is
             # the cost; records skipped forever would be the alternative.
-            current = _resume_key(self._walks.get(walk), walk=walk, issued_through=self._sequence)
+            current = _resume_key(
+                self._walks.get(walk), walk=walk, issued_through=self._issued.keys
+            )
             if current is None or key > current:
                 self._walks[walk] = _mint_position(walk, key).token
 
     async def delete(self, record_id: str) -> bool:
-        """Delete one record, returning whether it existed."""
+        """Delete one record, returning whether it existed.
+
+        Bound and withholding, a record this fake does not hold is not deleted and
+        answers ``False``, as one never written does (ADR-0383 §7:5, §8:2).
+        """
         async with self._resource.held():
+            stored = self._records.get(record_id)
+            if stored is None or not self._holds(stored):
+                return False
+            del self._records[record_id]
             self._keys.pop(record_id, None)
-            return self._records.pop(record_id, None) is not None
+            return True
 
     async def clear(self) -> int:
         """Delete every record, returning the number removed.
 
         Discards every recorded walk position in the same operation (ADR-0114 §4),
-        and deliberately does **not** reset ``_sequence``: a walker can be holding
+        and deliberately does **not** reset ``_issued.keys``: a walker can be holding
         a chunk's position across this call and will then advance to a position
         discarded here, which is harmless only because every record added
         afterwards is issued a key above it.
@@ -1210,11 +1345,12 @@ class FakeMemoryStore:
         reissue every stamp it had already handed out.
         """
         async with self._resource.held():
-            count = len(self._records)
-            self._records.clear()
-            self._keys.clear()
+            held = [rid for rid, record in self._records.items() if self._holds(record)]
+            for rid in held:
+                del self._records[rid]
+                self._keys.pop(rid, None)
             self._walks.clear()
-        return count
+        return len(held)
 
     async def export(self) -> list[MemoryRecord]:
         """Return an independent snapshot of every retained (non-expired) record.
@@ -1228,18 +1364,22 @@ class FakeMemoryStore:
         """
         async with self._resource.held():
             now = self._now_utc()
-            return [
+            found = [
                 r.model_copy(deep=True)
                 for r in self._records.values()
-                if not self._is_expired(r, now)
+                if not self._is_expired(r, now) and self._holds(r)
             ]
+        self._counted("export", found)
+        return found
 
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""
         now = self._now_utc()
         async with self._resource.held():
             expired = [
-                rid for rid, record in self._records.items() if self._is_expired(record, now)
+                rid
+                for rid, record in self._records.items()
+                if self._is_expired(record, now) and self._holds(record)
             ]
             for rid in expired:
                 del self._records[rid]
