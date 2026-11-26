@@ -409,6 +409,32 @@ class FakeStoryStore:
         """:meth:`_home_refusal` against the home of ``story_id``, the story written to."""
         return self._home_refusal(state, state.stories[story_id].home, named)
 
+    def _merge_home_refusal(self, state: _State, absorbed: str, target: str) -> StoryRefusal | None:
+        """Refuse a merge whose writes would name a story of another home (ADR-0383 §4:7).
+
+        Each story member of the absorbed story the target would gain, and each story
+        holding the absorbed one that would gain the target, is to be of the target's
+        home, as the durable store checks.
+        """
+        target_member = StoryMember(kind=StoryMemberKind.STORY, id=target)
+        absorbed_member = StoryMember(kind=StoryMemberKind.STORY, id=absorbed)
+        held = state.stories[target].entries
+        gained = [
+            member.id
+            for member in state.stories[absorbed].entries
+            if member.kind is StoryMemberKind.STORY
+            and member != target_member
+            and member not in held
+        ]
+        gaining = [
+            holder
+            for holder, story in state.stories.items()
+            if absorbed_member in story.entries
+            and holder != target
+            and target_member not in story.entries
+        ]
+        return self._beside_refusal(state, target, [*gained, *gaining])
+
     @staticmethod
     def _children(state: _State, story_id: str) -> list[str]:
         return [
@@ -701,6 +727,7 @@ class FakeStoryStore:
             self._story_refusal(self._state, absorbed)
             or self._story_refusal(self._state, target)
             or self._beside_refusal(self._state, absorbed, [target])
+            or self._merge_home_refusal(self._state, absorbed, target)
         ):
             return StoryOutcome(refusal=refused)
         if absorbed == target:
