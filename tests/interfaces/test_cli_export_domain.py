@@ -16,7 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import OversizedValueError
+from ai_assistant.core.errors import NotificationStoreError, OversizedValueError
 from ai_assistant.core.types import DomainExport, DomainExportResult, RecordHome
 from ai_assistant.interfaces import cli
 from ai_assistant.testing import FakeAssistantEngine
@@ -100,15 +100,24 @@ def test_a_refusal_goes_to_standard_error_with_no_document(
     )
 
 
-def test_an_oversized_export_goes_to_standard_error_with_no_document(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "error",
+    [
+        OversizedValueError("the export exceeds the contract limit", limit=1024, size=9999),
+        NotificationStoreError("the export exceeds the contract limit: a late store failed"),
+    ],
+    ids=["oversized", "a-late-store-failure"],
+)
+def test_a_failed_export_goes_to_standard_error_with_no_document(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
-    """§6:7: whole or refused; the refusal is an error on standard error."""
+    """§6:7, §6:9: whole or refused; an oversized export and a store that cannot be read,
+    the last one included, are each an error on standard error, with no document."""
 
-    def _too_big() -> DomainExportResult:
-        raise OversizedValueError("the export exceeds the contract limit", limit=1024, size=9999)
+    def _failing() -> DomainExportResult:
+        raise error
 
-    _wire(monkeypatch, _Answering(_too_big))
+    _wire(monkeypatch, _Answering(_failing))
 
     result = CliRunner().invoke(cli.app, ["export-domain", "shared"])
 

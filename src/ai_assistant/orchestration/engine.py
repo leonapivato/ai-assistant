@@ -6728,11 +6728,13 @@ class Engine:
             PlanningError: If the plan store cannot be read.
             PersonModelStoreError: If the person-model store cannot be read.
             NotificationStoreError: If the notification store cannot be read.
-            OversizedValueError: If the export exceeds the contract limit.
+            OversizedValueError: If the argument or the export exceeds the contract
+                limit.
             ConfigurationError: If no story store or no notification store is wired.
         """
         self._reject_if_closing()
         named = named_domain(domain)
+        check_arguments("export_domain", max_bytes=self._max_payload_bytes, domain=named)
         return await self._tracked(self._domain_export(named), "export_domain", checked=True)
 
     async def _domain_export(self, domain: RecordHome) -> DomainExportResult:

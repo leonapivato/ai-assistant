@@ -13497,8 +13497,8 @@ class AssistantEngine(Protocol):
             PlanningError: If the plan store cannot be read.
             PersonModelStoreError: If the person-model store cannot be read.
             NotificationStoreError: If the notification store cannot be read.
-            OversizedValueError: If the export's encoding exceeds the contract limit
-                (ADR-0085 §8c).
+            OversizedValueError: If the argument's or the export's encoding exceeds the
+                contract limit (ADR-0085 §8c).
         """
         ...
 

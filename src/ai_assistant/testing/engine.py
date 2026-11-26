@@ -2618,6 +2618,7 @@ class FakeAssistantEngine:
         is known well-formed (§6:9).
         """
         named = named_domain(domain)
+        check_arguments("export_domain", max_bytes=self._max_payload_bytes, domain=named)
         self.calls.append(("export_domain", {"domain": named}))
         if not owners_act_may_name(named):
             return self._checked(DomainExportResult.not_offered(), "export_domain")
