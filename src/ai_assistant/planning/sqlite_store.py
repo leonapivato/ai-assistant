@@ -37,6 +37,13 @@ checks, the stop record, an id or a key already taken and a revision, read every
 (§7:11), and no statement gives back, counts or names a stop record (§3:3). Counting,
 every statement is the unbound one, and each read logs the homes of the records it gave
 back.
+
+**A statement and a decoder never read one record two ways** (§7:3). What a statement
+reads of a row is either a column the decoder reconciles with the record, which governs
+for a row altered outside the store (the ruling on #3742), or a key read through the
+store's own decoder as an SQL function (a request's asker, an effect's part and ticket, a
+task's pushed activations, a request's card tokens and pushed mark). No statement reads a
+record as JSON, and none fetches a column of a row before knowing the binding holds it.
 """
 
 from __future__ import annotations
@@ -51,7 +58,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError
@@ -80,6 +87,7 @@ from ai_assistant.planning._home_columns import (
     register_readers,
     seen_person_sql,
     seen_sql,
+    stored_value,
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.activation_effects import (
@@ -185,28 +193,29 @@ if TYPE_CHECKING:
 
 _OWNER_ONLY = 0o600
 
-#: A task row one of whose occurrences was pushed to the activation bound last, read from
-#: its record alone. A record that is not JSON was pushed to none, and an occurrence that
-#: is not an object holds no activation: no nested value reaches a JSON function unless
-#: ``CASE`` has found it an object, so no shape of a record is an error.
-_PUSHED_TO_TASK: Final = (
-    "CASE WHEN json_valid(data) THEN EXISTS (SELECT 1 FROM json_each(data, '$.occurrences') "
-    "AS occurrence, json_each(CASE WHEN occurrence.type = 'object' THEN occurrence.value "
-    "ELSE '{}' END, '$.activations') AS pushed WHERE pushed.value = ?) ELSE 0 END"
-)
+#: **Every key a statement reads from a record, it reads through the store's own decoder**,
+#: as an SQL function :func:`_register_key_readers` gives the connection: the record
+#: decoded exactly as every read of it decodes it, and ``NULL`` (or ``0``) where it does
+#: not decode. So a statement and a decoder never read one record two ways, a record
+#: altered outside the store (a key named twice, a value of another shape, text that is not
+#: UTF-8) included, and no record is ever an error to the statement. Each takes the row's
+#: ``data`` as its storage class and its bytes (``stored_value``).
+_DATA: Final = "typeof(data), CAST(data AS BLOB)"
 
-#: A request row one of whose cards carries the token bound last, read from its record; a
-#: card that is not an object carries none, read as :data:`_PUSHED_TO_TASK` reads.
-_CARRIED_BY_A_CARD: Final = (
-    "CASE WHEN json_valid(data) THEN EXISTS (SELECT 1 FROM json_each(data, '$.cards') AS card "
-    "WHERE CASE WHEN card.type = 'object' THEN json_extract(card.value, '$.token') END = ?) "
-    "ELSE 0 END"
-)
+#: An effect row's question part, as :func:`_part_key` writes it, or ``NULL``.
+_EFFECT_PART: Final = f"plan_effect_part({_DATA})"
 
-#: A request row whose outcome was pushed to the activation bound last, read from its record.
-_PUSHED_OUTCOME: Final = (
-    "coalesce(CASE WHEN json_valid(data) THEN json_extract(data, '$.pushed_to') END = ?, 0)"
-)
+#: An effect row's ticket, or ``NULL``.
+_EFFECT_TICKET: Final = f"plan_effect_ticket({_DATA})"
+
+#: A task row one of whose occurrences was pushed to the activation bound last.
+_PUSHED_TO_TASK: Final = f"plan_task_pushed_to({_DATA}, ?)"
+
+#: A request row one of whose cards carries the token bound last.
+_CARRIED_BY_A_CARD: Final = f"plan_request_carries_token({_DATA}, ?)"
+
+#: A request row whose outcome was pushed to the activation bound last.
+_PUSHED_OUTCOME: Final = f"coalesce(plan_request_pushed_to({_DATA}) = ?, 0)"
 
 #: A condition true of every row: an unbound store's, and a counting one's (§7:10).
 _EVERY_ROW: Final[tuple[str, list[object]]] = ("1", [])
@@ -487,28 +496,15 @@ _EFFECT_COLUMNS = "id, activation_id, data, part_round, part_number, home_kind, 
 #: (ADR-0321 §4:9). ``{seq}`` is ``"claimed_seq, "`` where the rows of several statements
 #: are merged in claim order, and empty where one statement is the whole read.
 #:
-#: **A row the store, as bound, does not hold reaches no expression of its record**
-#: (ADR-0383 §7:2): ``CASE`` evaluates ``{seen}`` first, and only a held row is matched
-#: by its record, the keys bound twice. A row not held is matched by ``{unheld}``: ``0``
-#: for a read, which gives back none, or :data:`_PART_UNHELD` for a claim's own check,
-#: which reads its record only where it is JSON, the keys bound twice more.
-_PART_MATCH = (
-    "CASE WHEN {seen} THEN ((part_round, part_number) IN (VALUES {keys}) "
-    "OR (json_extract(data, '$.part.round'), json_extract(data, '$.part.part')) "
-    "IN (VALUES {keys})) ELSE {unheld} END"
-)
+#: The record's part is read through the store's decoder (:data:`_EFFECT_PART`), bound as
+#: one :func:`_part_key` a part; ``{marks}`` are those placeholders, after the ``{keys}``.
+_PART_MATCH = "((part_round, part_number) IN (VALUES {keys}) OR " + _EFFECT_PART + " IN ({marks}))"
+
+#: A read's rows, where **a row the store, as bound, does not hold is matched by nothing**
+#: (ADR-0383 §7:2): ``CASE`` evaluates ``{seen}`` first.
 _PART_ROWS = (
     "SELECT {seq}" + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only constants and placeholders are interpolated
-    "WHERE " + _PART_MATCH + " ORDER BY claimed_seq ASC"
-)
-
-#: :data:`_PART_ROWS`' match of a row the store, as bound, does not hold, for a claim's
-#: own check over every record (ADR-0383 §7:11): its columns, or its record where that is
-#: JSON, so a record that is not JSON is never an error.
-_PART_UNHELD = (
-    "((part_round, part_number) IN (VALUES {keys}) OR CASE WHEN json_valid(data) THEN "
-    "(json_extract(data, '$.part.round'), json_extract(data, '$.part.part')) "
-    "IN (VALUES {keys}) ELSE 0 END)"
+    "WHERE CASE WHEN {seen} THEN " + _PART_MATCH + " ELSE 0 END ORDER BY claimed_seq ASC"
 )
 
 _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
@@ -573,6 +569,67 @@ _IN_SLICE = 500
 #: side of its match, so a statement binds :data:`_IN_SLICE` parameters as the other
 #: sliced reads do (issue #3301).
 _PART_SLICE = _IN_SLICE // 4
+
+
+def _part_key(round_id: object, number: object) -> str:
+    """One question part as the part reader writes it: its round and number, as JSON."""
+    return json.dumps([round_id, number])
+
+
+def _decoded[M: BaseModel](model: type[M], storage: object, raw: object) -> M | None:
+    """A stored record's blob decoded exactly as every read decodes it, or ``None``."""
+    text = stored_value(storage, raw)
+    if not isinstance(text, str):
+        return None
+    try:
+        return model.model_validate_json(text)
+    except ValidationError:
+        return None
+
+
+def _effect_part(storage: object, raw: object) -> str | None:
+    record = _decoded(ActivationEffect, storage, raw)
+    if record is None or record.part is None:
+        return None
+    return _part_key(record.part.round, record.part.part)
+
+
+def _effect_ticket(storage: object, raw: object) -> str | None:
+    record = _decoded(ActivationEffect, storage, raw)
+    return None if record is None else record.ticket
+
+
+def _task_pushed_to(storage: object, raw: object, activation_id: object) -> int:
+    task = _decoded(ScheduledTask, storage, raw)
+    return int(task is not None and activation_id in task.activations)
+
+
+def _request_carries_token(storage: object, raw: object, token: object) -> int:
+    request = _decoded(ApprovalRequest, storage, raw)
+    return int(request is not None and any(card.token == token for card in request.cards))
+
+
+def _request_pushed_to(storage: object, raw: object) -> str | None:
+    request = _decoded(ApprovalRequest, storage, raw)
+    return None if request is None else request.pushed_to
+
+
+def _register_key_readers(conn: sqlite3.Connection) -> None:
+    """Give ``conn`` the key readers the statements of :data:`_DATA`'s note ask.
+
+    Each is deterministic, reads nothing but its arguments, and never raises.
+
+    Raises:
+        sqlite3.Error: If the connection refuses a function.
+    """
+    conn.create_function("plan_effect_part", 2, _effect_part, deterministic=True)
+    conn.create_function("plan_effect_ticket", 2, _effect_ticket, deterministic=True)
+    conn.create_function("plan_task_pushed_to", 3, _task_pushed_to, deterministic=True)
+    conn.create_function(
+        "plan_request_carries_token", 3, _request_carries_token, deterministic=True
+    )
+    conn.create_function("plan_request_pushed_to", 2, _request_pushed_to, deterministic=True)
+
 
 #: The column each record table's ``PRIMARY KEY`` is, checked against the key's own
 #: index. A pre-existing table keyed on something else opens a store whose
@@ -743,6 +800,7 @@ class SqlitePlanStore:
             raise PlanningError(msg) from exc
         try:
             register_readers(conn)
+            _register_key_readers(conn)
         except sqlite3.Error as exc:
             conn.close()
             msg = f"failed to open the plan store at {self._path!r}: {exc}"
@@ -1604,15 +1662,13 @@ class SqlitePlanStore:
         ).fetchone()
         # Every row carrying the part, by its promoted columns or by its record, and
         # each reconciled: a column an outside writer changed or cleared would
-        # otherwise hide a spent part and let a second yes run (ADR-0321 §4:9).
-        where, params = self._effects_seen()
+        # otherwise hide a spent part and let a second yes run (ADR-0321 §4:9). The
+        # record is read through the store's decoder, never as JSON (§7:3).
         part = () if record.part is None else (record.part.round, record.part.part)
         spent = record.part is not None and self._any_carries(
             conn,
-            _PART_MATCH.format(
-                keys="(?, ?)", seen=where, unheld=_PART_UNHELD.format(keys="(?, ?)")
-            ),
-            (*params, *part, *part, *part, *part),
+            _PART_MATCH.format(keys="(?, ?)", marks="?"),
+            (*part, _part_key(*part)),
         )
         # Read in slices on this transaction's own connection, so a match past
         # SQLite's bound is still read whole under the write lock (issue #3296).
@@ -1789,19 +1845,24 @@ class SqlitePlanStore:
             # The held row is read whatever the sight, with whether this store, as bound,
             # holds it: its revision is a write's own check (ADR-0383 §7:11), and a write
             # that would change a row it does not hold is refused (§7:5).
+            # Whether it is held is read first, alone, so no column of a row this store
+            # does not hold is fetched.
             where, params = self._observations_seen()
-            row = conn.execute(
-                "SELECT " + _OBSERVATION_COLUMNS + f", {where} FROM observations "  # noqa: S608 — module text and placeholders; values bound
-                "WHERE episode_id = ?",
+            flag = conn.execute(
+                f"SELECT {where} FROM observations WHERE episode_id = ?",  # noqa: S608 — module text and placeholders; values bound
                 (*params, record.episode),
             ).fetchone()
-            if row is not None and not row[-1]:
+            if flag is not None and not flag[0]:
                 msg = (
                     f"the plan store holds a record for episode {record.episode!r} this "
                     f"write may not change; nothing is written"
                 )
                 raise PlanningError(msg)
-            held = None if row is None else _checked_observation(str(self._path), row[:-1])
+            row = conn.execute(
+                "SELECT " + _OBSERVATION_COLUMNS + " FROM observations WHERE episode_id = ?",  # noqa: S608 — only a constant is interpolated
+                (record.episode,),
+            ).fetchone()
+            held = None if row is None else _checked_observation(str(self._path), row)
             decide_observation_write(
                 record.episode, held=None if held is None else held.revision, expected=expected
             )
@@ -2234,7 +2295,7 @@ class SqlitePlanStore:
             ).fetchone():
                 # ADR-0383 §7:11: an activation an occurrence was pushed to is a key, read
                 # over every row, as the unbound decision reads it first; a row this store
-                # does not hold is read for the key alone, from its record, undecoded.
+                # does not hold is read for the key alone, through the store's decoder.
                 msg = (
                     f"an occurrence was already pushed to activation {activation_id} "
                     f"(ADR-0350 §7:5)"
@@ -2474,9 +2535,10 @@ class SqlitePlanStore:
     def _unheld_request_carries(self, conn: sqlite3.Connection, key: str, value: str) -> bool:
         """Whether a request this store, as bound, does not hold carries ``value`` as a key.
 
-        ``key`` is :data:`_CARRIED_BY_A_CARD` or :data:`_PUSHED_OUTCOME`. Read from the record
-        alone, undecoded, so nothing of a request it does not hold is read but that the key
-        is taken (ADR-0383 §7:11); a record that is not JSON carries none.
+        ``key`` is :data:`_CARRIED_BY_A_CARD` or :data:`_PUSHED_OUTCOME`, read through the
+        store's own decoder inside the statement, so nothing of a request it does not hold
+        reaches the caller but that the key is taken (ADR-0383 §7:11); a record that does
+        not decode carries none.
         """
         where, params = self._requests_seen(held=False)
         return (
@@ -2787,16 +2849,9 @@ class SqlitePlanStore:
         book = self._book(conn)
         # Every record carrying the key, read from the record itself and reconciled, so a
         # second claim of one ticket is refused whatever the request says (§5:5).
-        # A row the store, as bound, does not hold is read for the key alone, and only
-        # where its record is JSON (ADR-0383 §7:11).
-        where, params = self._effects_seen()
-        carried = self._any_carries(
-            conn,
-            f"CASE WHEN {where} THEN json_extract(data, '$.ticket') = ? "
-            "ELSE coalesce(CASE WHEN json_valid(data) THEN "
-            "json_extract(data, '$.ticket') END = ?, 0) END",
-            (*params, record.ticket, record.ticket),
-        )
+        # Every row is read for the key alone, through the store's decoder (ADR-0383
+        # §7:3, §7:11); a held one is then decoded and reconciled whole.
+        carried = self._any_carries(conn, f"{_EFFECT_TICKET} = ?", (record.ticket,))
         refused = decide_ticket(book, record, carried=carried)
         if refused is not None:
             return book, refused
@@ -3328,8 +3383,13 @@ def _part_rows(
             for row in (
                 tuple(found)
                 for found in conn.execute(
-                    _PART_ROWS.format(keys=keys, seq="claimed_seq, ", seen=where, unheld="0"),
-                    (*params, *values, *values),
+                    _PART_ROWS.format(
+                        keys=keys,
+                        marks=", ".join("?" for _ in part),
+                        seq="claimed_seq, ",
+                        seen=where,
+                    ),
+                    (*params, *values, *(_part_key(one.round, one.part) for one in part)),
                 ).fetchall()
             )
             if row not in found_rows
